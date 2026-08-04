@@ -740,6 +740,93 @@ def test_stop_holdback_finishes_stream_before_late_surplus_is_reclaimed() -> Non
     loop.close()
 
 
+@pytest.mark.parametrize("terminal_text", ["a", "axz!"])
+async def test_backend_preserves_stable_text_when_terminal_decode_disagrees(
+    monkeypatch,
+    terminal_text: str,
+) -> None:
+    class _DisagreeingDetokenizer:
+        def __init__(self, _tokenizer) -> None:
+            self.stable = ""
+
+        def push(self, token_ids) -> str:
+            self.stable += "".join(
+                chr(ord("a") + token_id % 26) for token_id in token_ids
+            )
+            return self.stable
+
+        def finalize(self) -> str:
+            return terminal_text
+
+    monkeypatch.setattr(
+        engine_loop_module,
+        "IncrementalDetokenizer",
+        _DisagreeingDetokenizer,
+    )
+    backend = KairyuBackend(
+        tokenizer=_CharTokenizer(),
+        runner=_PositionRunner(),
+        pipeline_depth=1,
+    )
+    request = GenerationRequest(
+        request_id="terminal-disagreement",
+        prompt="one two three",
+        sampling_params=SamplingParams(max_tokens=3, ignore_eos=True),
+    )
+
+    try:
+        partials = [partial async for partial in backend.stream(request)]
+    finally:
+        await backend.shutdown()
+
+    texts = [partial.completions[0].text for partial in partials]
+    assembled = ""
+    for text in texts:
+        assert text.startswith(assembled)
+        assembled += text[len(assembled) :]
+
+    assert partials[-1].finished
+    assert partials[-1].completions[0].finish_reason == "length"
+    assert texts[-1] == assembled == "abc"
+
+
+def test_terminal_flush_can_complete_a_held_back_stop_string(monkeypatch) -> None:
+    class _FlushDetokenizer:
+        def __init__(self, _tokenizer) -> None:
+            self.stable = ""
+            self._stable_by_push = iter(("hello", "helloST", "helloST"))
+
+        def push(self, _token_ids) -> str:
+            self.stable = next(self._stable_by_push)
+            return self.stable
+
+        def finalize(self) -> str:
+            return "helloSTOPtail"
+
+    monkeypatch.setattr(
+        engine_loop_module,
+        "IncrementalDetokenizer",
+        _FlushDetokenizer,
+    )
+    loop, _ = _loop(1, _PositionRunner())
+    loop.submit(
+        "terminal-flush-stop",
+        "one two three",
+        SamplingParams(max_tokens=3, stop=("STOP",), ignore_eos=True),
+    )
+
+    updates = [
+        update
+        for request_id, update in _drive(loop)
+        if request_id == "terminal-flush-stop"
+    ]
+
+    assert [update.text for update in updates] == ["he", "hell", "hello"]
+    assert updates[-1].finished
+    assert updates[-1].finish_reason == "stop"
+    loop.close()
+
+
 @pytest.mark.parametrize("depth", [1, 2])
 def test_terminating_stop_token_is_not_visible_but_remains_in_outputs(depth: int) -> None:
     runner = _PositionRunner()

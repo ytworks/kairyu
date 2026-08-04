@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -20,6 +20,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 _TOY_VOCAB = 50_000
 _REPLACEMENT_CHAR = "�"
+_DECODE_STREAM_INVALID_PREFIX = "Invalid prefix encountered"
 # eos candidates probed when tokenizer_config.json is absent, most-specific first
 _COMMON_EOS_TOKENS = ("<|eot_id|>", "<|im_end|>", "<|endoftext|>", "</s>")
 _STANDARD_SPECIAL_TOKEN_FIELDS = (
@@ -118,7 +119,10 @@ class TokenDecodeStream(Protocol):
     Implementations return only the text contributed by ``token_ids`` and must
     retain any decoder state needed across calls. Tokenizers without this
     capability continue through ``IncrementalDetokenizer``'s exact full-prefix
-    fallback.
+    fallback. Streams may additionally implement ``finalize_suffix() -> str`` to
+    return only a terminal suffix that was held back by ``push``. Existing
+    push-only streams retain their guarded historical terminal decode without
+    invoking a potentially unrelated ``finalize()`` method.
     """
 
     def push(self, token_ids: Sequence[int]) -> str: ...
@@ -142,6 +146,10 @@ class _ToyDecodeStream:
             text = f" {text}"
         self._has_tokens = True
         return text
+
+    def finalize_suffix(self) -> str:
+        """Toy decoding never retains a partial terminal token."""
+        return ""
 
 
 class ToyTokenizer:
@@ -230,6 +238,11 @@ class HFTokenizer:
         self._grammar_vocab_type, self._grammar_add_prefix_space = _grammar_metadata(
             json.loads(self._tok.to_str())
         )
+        self._special_token_ids = frozenset(
+            token_id
+            for token_id, token in self._tok.get_added_tokens_decoder().items()
+            if token.special
+        )
         if eos_token is not None and not isinstance(eos_token, str):
             raise TypeError("eos_token must be a string or None")
         if eos_token is None and config is not None:
@@ -283,21 +296,129 @@ class HFTokenizer:
         stream_type = getattr(tokenizers.decoders, "DecodeStream", None)
         if stream_type is None:
             return None
-        return _HFDecodeStream(self._tok, stream_type(skip_special_tokens=True))
+        return _HFDecodeStream(
+            self._tok,
+            lambda: stream_type(skip_special_tokens=True),
+            self.decode,
+            supports_replacement_flush=self._grammar_vocab_type
+            in {"byte_fallback", "byte_level"},
+            special_token_ids=self._special_token_ids,
+        )
 
 
 class _HFDecodeStream:
-    """Adapter from tokenizers.DecodeStream's optional chunks to our contract."""
+    """Adapter that retains only the Rust stream's un-emitted terminal IDs."""
 
-    def __init__(self, tokenizer: object, stream: object) -> None:
+    def __init__(
+        self,
+        tokenizer: object,
+        stream_factory: Callable[[], object],
+        decode: Callable[[Sequence[int]], str],
+        *,
+        supports_replacement_flush: bool,
+        special_token_ids: frozenset[int],
+    ) -> None:
         self._tokenizer = tokenizer
-        self._stream = stream
+        self._stream_factory = stream_factory
+        self._stream = stream_factory()
+        self._decode = decode
+        self._supports_replacement_flush = supports_replacement_flush
+        self._special_token_ids = special_token_ids
+        self._context_ids: list[int] = []
+        self._pending_ids: list[int] = []
+        self._terminal: str | None = None
 
     def push(self, token_ids: Sequence[int]) -> str:
-        if not token_ids:
-            return ""
-        chunk = self._stream.step(self._tokenizer, list(token_ids))
-        return chunk if chunk is not None else ""
+        if self._terminal is not None:
+            raise RuntimeError("cannot push tokens after decode stream finalization")
+
+        # Step one ID at a time. DecodeStream may return None for an entire
+        # batch when only its final ID is an incomplete UTF-8 byte; token-wise
+        # stepping publishes the preceding stable chunks and leaves just the
+        # decoder's terminal look-behind for finalize_suffix().
+        chunks: list[str] = []
+        for token_id in token_ids:
+            if token_id in self._special_token_ids:
+                # DecodeStream(skip_special_tokens=True) filters these before
+                # decoding, but still retains a special-only no-growth run in
+                # its opaque look-behind. Bypass it entirely: special IDs have
+                # no decoder semantics and must not make terminal work grow.
+                continue
+            try:
+                chunk = self._stream.step(self._tokenizer, token_id)
+            except Exception as error:
+                # DecodeStream can reject a malformed byte run when a valid
+                # character from that run has already been emitted: its fresh
+                # full-window decode no longer starts with the emitted prefix.
+                # Preserve the published prefix, flush only the held malformed
+                # bytes, and retry the current token in a fresh native stream.
+                if (
+                    not self._supports_replacement_flush
+                    or not self._pending_ids
+                    or not str(error).startswith(_DECODE_STREAM_INVALID_PREFIX)
+                ):
+                    raise
+                held = self._decode(tuple(self._pending_ids))
+                if not held.endswith(_REPLACEMENT_CHAR):
+                    raise
+                replacement_stream = self._stream_factory()
+                chunk = replacement_stream.step(self._tokenizer, token_id)
+                chunks.append(held)
+                self._stream = replacement_stream
+                self._context_ids.clear()
+                self._pending_ids.clear()
+            track_pending = self._supports_replacement_flush
+            if chunk is None and not self._supports_replacement_flush:
+                # DecodeStream also withholds an ordinary vocabulary token
+                # whose decoded text ends in U+FFFD. Probe only this no-growth
+                # token so generic decoder JSONs do not silently lose it,
+                # while CTC repeats and other context-only None results stay
+                # out of the terminal buffer before a replacement-bearing
+                # suffix begins. Once it begins, retain later no-growth IDs as
+                # contextual separators (for example a CTC pad between two
+                # replacement tokens).
+                track_pending = bool(self._pending_ids) or self._decode(
+                    (token_id,)
+                ).endswith(
+                    _REPLACEMENT_CHAR
+                )
+            if track_pending:
+                self._pending_ids.append(token_id)
+            if chunk is not None:
+                chunks.append(chunk)
+                if self._supports_replacement_flush:
+                    self._context_ids = self._pending_ids.copy()
+                else:
+                    # Generic decoders can add a boundary before a withheld
+                    # replacement token (for example WordPiece's space or
+                    # Metaspace's replacement). Keep one emitted token so the
+                    # terminal suffix can be reconstructed with that context.
+                    self._context_ids = [token_id]
+                self._pending_ids.clear()
+        return "".join(chunks)
+
+    def finalize_suffix(self) -> str:
+        """Flush the un-emitted terminal suffix without decoding all history."""
+        if self._terminal is None:
+            self._terminal = ""
+            if self._pending_ids:
+                # DecodeStream returns None both for incomplete UTF-8 and for
+                # decoder-specific no-growth (special tokens, CTC repeats).
+                # Mirror its bounded context window to distinguish the two:
+                # only U+FFFD-ending windows have bytes that need a terminal
+                # flush. Blindly decoding pending IDs would duplicate CTC text.
+                window = self._decode(tuple(self._context_ids + self._pending_ids))
+                if window.endswith(_REPLACEMENT_CHAR):
+                    # HFTokenizer.decode is captured so skip-special-tokens
+                    # behavior remains identical to the public wrapper.
+                    if self._supports_replacement_flush:
+                        suffix = self._decode(tuple(self._pending_ids))
+                    else:
+                        base = self._decode(tuple(self._context_ids))
+                        suffix = window[len(base) :] if window.startswith(base) else ""
+                    if suffix.endswith(_REPLACEMENT_CHAR):
+                        self._terminal = suffix
+        return self._terminal
 
 
 def _load_json_object(path: Path, *, label: str) -> dict[str, object]:
@@ -568,21 +689,46 @@ class IncrementalDetokenizer:
 
     ``push`` returns the cumulative *stable* text; trailing replacement
     characters (incomplete UTF-8 across byte-level token boundaries) are held
-    back until later tokens complete them. ``finalize`` returns the full
-    decode of everything pushed.
+    back until later tokens complete them. ``finalize`` can only append a
+    terminal suffix to text already returned by ``push``; it never replaces or
+    retracts published text.
     """
 
     def __init__(self, tokenizer: Tokenizer) -> None:
         self._tokenizer = tokenizer
         self._ids: list[int] = []
         self._stable = ""
+        self._final_candidate = ""
+        self._final: str | None = None
         stream_factory = getattr(tokenizer, "new_decode_stream", None)
         self._stream: TokenDecodeStream | None = (
             stream_factory() if callable(stream_factory) else None
         )
+        stream_finalize_suffix = (
+            getattr(self._stream, "finalize_suffix", None)
+            if self._stream is not None
+            else None
+        )
+        self._stream_finalize_suffix = (
+            stream_finalize_suffix if callable(stream_finalize_suffix) else None
+        )
+        # Full-prefix compatibility tokenizers already decode during push;
+        # retain that last candidate so finalize is a side-effect-free read.
+        self._uses_full_prefix_fallback = self._stream is None
+        # A pre-existing push-only custom stream has no suffix hook. Preserve
+        # its historical one-shot terminal decode when that decode safely
+        # extends published text, while guarding decoder disagreement.
+        self._uses_legacy_full_finalize = (
+            self._stream is not None and self._stream_finalize_suffix is None
+        )
 
     def push(self, token_ids: Sequence[int]) -> str:
-        self._ids.extend(token_ids)
+        if self._final is not None:
+            if token_ids:
+                raise RuntimeError("cannot push tokens after detokenizer finalization")
+            return self._final
+        if self._uses_full_prefix_fallback or self._uses_legacy_full_finalize:
+            self._ids.extend(token_ids)
         if self._stream is not None:
             # Native streams own decoder context and withhold incomplete UTF-8,
             # so only the arriving delta is processed. Appending their chunks
@@ -597,12 +743,32 @@ class IncrementalDetokenizer:
         # never retract: only advance when the new stable text extends the old
         if len(stable) > len(self._stable) and stable.startswith(self._stable):
             self._stable = stable
+        self._final_candidate = text if text.startswith(self._stable) else self._stable
         return self._stable
 
     def finalize(self) -> str:
-        # One exact O(n) decode preserves the historical final-output contract
-        # and flushes a genuinely incomplete byte sequence as U+FFFD.
-        return self._tokenizer.decode(tuple(self._ids))
+        if self._final is not None:
+            return self._final
+
+        if self._stream_finalize_suffix is not None:
+            # Native streams return a suffix only. Appending makes the
+            # never-retract invariant structural instead of relying on parity
+            # with a separate full-history decode.
+            self._final = self._stable + self._stream_finalize_suffix()
+            return self._final
+
+        if self._uses_legacy_full_finalize:
+            # Preserve the pre-hook custom-stream contract without invoking a
+            # possibly unrelated ``stream.finalize()`` method. The full decode
+            # can append held terminal text, but never replace stable output.
+            full = self._tokenizer.decode(tuple(self._ids))
+            self._final = full if full.startswith(self._stable) else self._stable
+            return self._final
+
+        # The last push cached a candidate only when it extended all published
+        # text. No tokenizer call or retraction is possible at finalization.
+        self._final = self._final_candidate
+        return self._final
 
     @property
     def uses_native_stream(self) -> bool:

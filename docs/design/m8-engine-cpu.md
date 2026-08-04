@@ -38,8 +38,9 @@ New `kairyu/engine/tokenizer.py`:
   `vocab() -> list[str]`, `eos_token_id: int | None`.
 - `IncrementalDetokenizer`: per-request; emits only text that can no longer change
   (holds back incomplete UTF-8 sequences / partial merges). Invariants pinned:
-  every cumulative stable update is a prefix of full `decode()` and `finalize()`
-  is byte-identical to full decode.
+  every cumulative stable update is a prefix of `finalize()`, and finalization
+  may append a held terminal suffix but can never rewrite text already exposed
+  to a streaming client.
 - `ToyTokenizer` (today's word-hash + `tok<N>`) **remains the default**;
   `HFTokenizer` wraps the `tokenizers` library (deferred import, `structured.py`
   pattern), loads `tokenizer.json`, exposes real `eos_token_id`.
@@ -49,17 +50,44 @@ New `kairyu/engine/tokenizer.py`:
 - `TokenDecodeStream` is an optional per-request capability. `HFTokenizer` uses
   the Rust `tokenizers.decoders.DecodeStream` (including its incomplete-UTF-8
   buffer and special-token policy), and `ToyTokenizer` joins only the arriving
-  token delta. Push work is O(delta); one exact O(n) decode at `finalize()`
-  flushes malformed trailing bytes and preserves the historical final contract.
+  token delta. Push work is O(delta).
 - A tokenizer without that capability, an older `tokenizers` version without
   `DecodeStream`, or a subclass that overrides `decode()` without also defining
   a matching stream uses the original full-prefix safe fallback. Capability is
   never inferred merely from inheritance.
-- Operation-count coverage fixes 4,096 one-token pushes at N incremental work
-  plus N final work. ByteLevel, WordPiece, Metaspace, special-token skipping,
-  multi-token commits, and fallback parity are pinned. On the Qwen3-32B
-  tokenizer, 4,096 random tokens measured 2.038 s full-prefix versus 0.0149 s
-  native streaming (137.25×) while preserving final bytes.
+- Operation-count coverage fixes 4,096 one-token pushes at N incremental work;
+  finalization decodes only an un-emitted terminal window and never re-decodes
+  published history. ByteLevel, WordPiece, Metaspace, special-token skipping,
+  multi-token commits, and fallback parity are pinned. The earlier Qwen3-32B
+  measurement, whose native number still included the former full final pass,
+  measured 2.038 s full-prefix versus 0.0149 s native streaming (137.25×)
+  across 4,096 random tokens while preserving final bytes.
+
+**Terminal-consistency amendment (2026-08-05, issue #361):**
+
+- Incremental output is authoritative once published. A native stream may
+  expose an optional `finalize_suffix()` hook. The HF adapter excludes special
+  IDs, retains only the un-emitted terminal window beginning at a
+  replacement-bearing ID, and flushes it only when the reconstructed window and
+  suffix end in U+FFFD. This preserves WordPiece/Metaspace boundary context,
+  CTC separators, and incomplete ByteLevel/ByteFallback tails without
+  duplicating ordinary CTC or other no-growth decoder output. Toy has no
+  terminal delta. If Rust rejects a later token because malformed held bytes
+  make its reconstructed window disagree with a character already published,
+  the adapter appends only that held replacement suffix and retries the token
+  in a fresh native stream. A legacy custom stream with only `push()` retains
+  its historical final full decode only when that candidate extends stable
+  output; an unrelated custom `finalize()` method is never invoked.
+- The compatibility full-prefix path caches its latest decode during `push()`.
+  Finalization does no additional decode: it accepts the cached candidate only
+  when that candidate extends the already-published stable prefix, otherwise it
+  preserves the stable prefix unchanged. Repeated finalization is idempotent.
+- The engine terminal path independently enforces the same no-retraction rule
+  before incremental stop matching. A decoder disagreement therefore cannot
+  retract SSE text or turn into a stop-matcher request failure. Valid
+  CJK/emoji/multibyte, special-token, and complete byte-fallback sequences retain
+  full-decode parity whenever the full decode extends published text; malformed
+  terminal or interior byte runs append only their held flush and continue.
 
 **Config surface (amended)**: `KairyuBackend(tokenizer: str | Tokenizer = "toy")` —
 `"toy"` → ToyTokenizer; any other string is a filesystem path (a `tokenizer.json`

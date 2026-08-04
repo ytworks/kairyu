@@ -1149,17 +1149,30 @@ class EngineLoop:
         if state.status.value == "finished":
             if track.trace_requested:
                 detokenize_started_ns = perf_counter_ns()
-                full = track.detok.finalize()
+                terminal = track.detok.finalize()
                 track.record_stage(
                     "detokenize",
                     perf_counter_ns() - detokenize_started_ns,
                 )
             else:
-                full = track.detok.finalize()
-            stop_at = track.find_stop(full)
+                terminal = track.detok.finalize()
+            # ``stable`` is the never-retract decoding authority; all but its
+            # configured stop holdback may already have crossed the streaming
+            # boundary. A defensive tokenizer implementation may nevertheless
+            # return a shorter or rewritten full decode here.
+            # Only accept a terminal flush that extends the stable authority;
+            # otherwise keep it intact so cumulative SSE consumers and the
+            # incremental stop matcher's monotonic-input invariant both hold.
+            if terminal.startswith(track.stable):
+                track.stable = terminal
+            stop_at = track.find_stop(track.stable)
             if stop_at is not None:
-                return _update(full[:stop_at], True, "stop")
-            return _update(full, True, self._scheduler.finish_reason(request_id) or "length")
+                return _update(track.stable[:stop_at], True, "stop")
+            return _update(
+                track.stable,
+                True,
+                self._scheduler.finish_reason(request_id) or "length",
+            )
         stop_at = track.find_stop(track.stable)
         if stop_at is not None:
             # between update() and the next schedule(): the safe finish point
