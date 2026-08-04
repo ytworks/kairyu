@@ -218,9 +218,15 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
     assert "if" not in job
     assert "needs" not in job
     assert "pull_request_target" not in text
-    assert job["env"] == {
+    assert "env" not in job
+    report_path = "${{ runner.temp }}/kairyu-cpu-microbench/report.json"
+    run_step = _named_step(
+        job,
+        "Run variance-tolerant CPU microbenchmarks",
+    )
+    assert run_step["env"] == {
         "KAIRYU_CPU_MICROBENCH_REPORT": (
-            "${{ runner.temp }}/kairyu-cpu-microbench/report.json"
+            report_path
         )
     }
     assert (
@@ -240,10 +246,7 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
     assert _named_step(job, "Sync dependencies")["run"] == (
         "uv sync --frozen --dev"
     )
-    command = _named_step(
-        job,
-        "Run variance-tolerant CPU microbenchmarks",
-    )["run"]
+    command = run_step["run"]
     assert "uv run --frozen python scripts/cpu_microbench_gate.py" in command
     assert '--output "$KAIRYU_CPU_MICROBENCH_REPORT"' in command
     assert job["permissions"] == {"contents": "read"}
@@ -261,7 +264,7 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
     assert upload["uses"] == (
         "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
     )
-    assert upload["with"]["path"] == "${{ env.KAIRYU_CPU_MICROBENCH_REPORT }}"
+    assert upload["with"]["path"] == report_path
     assert upload["with"]["if-no-files-found"] == "error"
     assert upload["with"]["retention-days"] == "7"
     assert text.count("scripts/cpu_microbench_gate.py") == 1

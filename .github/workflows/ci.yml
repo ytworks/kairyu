@@ -58,8 +58,6 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    env:
-      KAIRYU_CPU_MICROBENCH_REPORT: ${{ runner.temp }}/kairyu-cpu-microbench/report.json
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -70,6 +68,8 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Run variance-tolerant CPU microbenchmarks
+        env:
+          KAIRYU_CPU_MICROBENCH_REPORT: ${{ runner.temp }}/kairyu-cpu-microbench/report.json
         run: >-
           uv run --frozen python scripts/cpu_microbench_gate.py
           --output "$KAIRYU_CPU_MICROBENCH_REPORT"
@@ -78,7 +78,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cpu-microbench-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.KAIRYU_CPU_MICROBENCH_REPORT }}
+          path: ${{ runner.temp }}/kairyu-cpu-microbench/report.json
           if-no-files-found: error
           retention-days: 7
 
