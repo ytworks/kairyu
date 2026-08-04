@@ -5,9 +5,9 @@ import argparse
 import pytest
 
 from kairyu.bench.cli import add_bench_parser
-from kairyu.bench.config import build_config, parse_target_flag
+from kairyu.bench.config import build_config, build_judge_config, parse_target_flag
 from kairyu.bench.execution import build_execution_runner
-from kairyu.bench.types import ExecutionConfig
+from kairyu.bench.types import ExecutionConfig, JudgeConfig, JudgeEndpointConfig
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -96,6 +96,87 @@ def test_judge_flags_enable_judge():
     config = build_config(args)
     assert config.judge.enabled
     assert config.judge.model == "kairyu-auto"
+
+
+def test_repeated_secondary_judge_flags_build_an_ordered_panel():
+    args = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--judge-base-url",
+            "http://judge:8000",
+            "--judge-model",
+            "primary",
+            "--judge-secondary",
+            "http://judge:8000=second=SECOND_KEY",
+            "--judge-secondary",
+            "http://other:9000/v1=third",
+        ]
+    )
+    config = build_config(args)
+    assert [member.model for member in config.judge.additional_judges] == [
+        "second",
+        "third",
+    ]
+    assert config.judge.additional_judges[0].api_key_env == "SECOND_KEY"
+    assert config.judge.additional_judges[1].base_url == "http://other:9000/v1"
+
+
+def test_judge_panel_rejects_missing_primary_partial_or_duplicate_members():
+    second = JudgeEndpointConfig(base_url="http://judge", model="second")
+    with pytest.raises(ValueError, match="required when additional"):
+        JudgeConfig(additional_judges=(second,))
+    with pytest.raises(ValueError, match="requires both"):
+        JudgeConfig(
+            base_url="http://judge",
+            model="primary",
+            additional_judges=(JudgeEndpointConfig(base_url="http://other"),),
+        )
+    with pytest.raises(ValueError, match="distinct"):
+        JudgeConfig(
+            base_url="http://judge/",
+            model="same",
+            additional_judges=(
+                JudgeEndpointConfig(base_url="http://judge/v1", model="same"),
+            ),
+        )
+    with pytest.raises(ValueError, match="model must be non-empty"):
+        JudgeConfig(base_url="http://judge", model=" ")
+
+
+def test_calibration_subcommand_loads_a_judge_block_without_targets(tmp_path):
+    path = tmp_path / "judge.yaml"
+    path.write_text(
+        "judge:\n"
+        "  base_url: http://primary\n"
+        "  model: primary\n"
+        "  additional_judges:\n"
+        "    - {base_url: http://secondary, model: secondary}\n",
+        encoding="utf-8",
+    )
+    args = _parse(["calibrate-judge", "--config", str(path)])
+    config = build_judge_config(args)
+    assert config.model == "primary"
+    assert config.additional_judges[0].model == "secondary"
+    assert args.min_agreement == 11 / 12
+    assert args.max_position_flip == 0.0
+
+
+def test_calibration_subcommand_accepts_a_bound_benchmark_run():
+    args = _parse(
+        [
+            "calibrate-judge",
+            "--run",
+            "headline-run",
+            "--results-dir",
+            "/results/fugu",
+        ]
+    )
+    assert args.run == "headline-run"
+    assert args.results_dir == "/results/fugu"
 
 
 def test_execution_config_requires_an_immutable_docker_image():

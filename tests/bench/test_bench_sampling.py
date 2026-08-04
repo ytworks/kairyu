@@ -16,7 +16,12 @@ from conftest import make_target
 from kairyu.bench.adapters.base import call_chat
 from kairyu.bench.config import build_config, parse_target_flag
 from kairyu.bench.judge import JudgeClient
-from kairyu.bench.types import BenchTarget, ChatRequestSpec, JudgeConfig
+from kairyu.bench.types import (
+    BenchTarget,
+    ChatRequestSpec,
+    JudgeConfig,
+    JudgeEndpointConfig,
+)
 
 
 def _run_args(**overrides) -> argparse.Namespace:
@@ -266,4 +271,28 @@ def test_sampling_is_part_of_the_run_fingerprint():
     changed = build_config(_run_args(reasoning_effort="high"))
     assert _run_fingerprint(_run_identity(base, [])) != _run_fingerprint(
         _run_identity(changed, [])
+    )
+
+
+def test_judge_panel_is_part_of_the_run_fingerprint():
+    from kairyu.bench.runner import _run_fingerprint, _run_identity
+
+    base = build_config(
+        _run_args(judge_base_url="http://judge/v1", judge_model="primary")
+    )
+    panel = base.model_copy(
+        update={
+            "judge": JudgeConfig(
+                base_url="http://judge/v1",
+                model="primary",
+                additional_judges=(
+                    JudgeEndpointConfig(
+                        base_url="http://judge/v1", model="secondary"
+                    ),
+                ),
+            )
+        }
+    )
+    assert _run_fingerprint(_run_identity(base, [])) != _run_fingerprint(
+        _run_identity(panel, [])
     )

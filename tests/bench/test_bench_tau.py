@@ -13,10 +13,10 @@ from kairyu.bench.adapters.tau_bench import (
     parse_tau_results,
 )
 from kairyu.bench.cache import BenchCache
-from kairyu.bench.judge import JudgeClient
+from kairyu.bench.judge import JudgeClient, build_judge_client
 from kairyu.bench.runner import SuiteRunner
 from kairyu.bench.store import ResultStore
-from kairyu.bench.types import JudgeConfig
+from kairyu.bench.types import JudgeConfig, JudgeEndpointConfig
 
 SAMPLE_RESULTS = {
     "simulations": [
@@ -137,6 +137,47 @@ async def test_harness_invocation_and_translation(tmp_path, monkeypatch):
     assert "openai/judge-m" in seen["command"]
     assert seen["env"]["OPENAI_BASE_URL"] == "http://gw/v1"
     assert pair.methodology["harness"] == "tau3"
+
+
+async def test_tau_user_simulator_uses_only_primary_when_grading_panel_exists(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(tau_bench, "detect_harness", lambda: "tau3")
+    monkeypatch.setattr(tau_bench, "harness_version", lambda flavor: "1.0.1")
+    monkeypatch.setenv("TAU2_DATA_DIR", str(tmp_path / "tau-data"))
+    seen = {}
+
+    def fake_run(command, capture_output, timeout, env, check):
+        seen["command"] = command
+        _write_harness_results(tmp_path, command)
+
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(tau_bench.subprocess, "run", fake_run)
+    config = JudgeConfig(
+        base_url="http://gw/v1",
+        model="primary-simulator",
+        additional_judges=(
+            JudgeEndpointConfig(
+                base_url="http://other/v1", model="grading-only-secondary"
+            ),
+        ),
+    )
+    panel = build_judge_client(
+        config, http_factory=lambda: httpx.AsyncClient()
+    )
+    pair = await TauBenchBankingAdapter().run(
+        make_target(), _ctx(tmp_path, judge=panel)
+    )
+    assert pair.status == "completed"
+    assert "openai/primary-simulator" in seen["command"]
+    assert not any("grading-only-secondary" in part for part in seen["command"])
+    assert pair.methodology["user_simulator"] == "primary-simulator"
 
 
 async def test_official_tau3_v1_keeps_tau2_cli_without_substitute_annotation(

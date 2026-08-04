@@ -14,7 +14,12 @@ from kairyu.bench.adapters.base import (
     utc_now,
 )
 from kairyu.bench.cache import BenchCache
-from kairyu.bench.runner import SuiteRunner
+from kairyu.bench.runner import (
+    SuiteRunner,
+    _adapter_identity,
+    _run_fingerprint,
+    _run_identity,
+)
 from kairyu.bench.store import ResultStore
 from kairyu.bench.types import DownloadReport, ExecutionConfig, PairResult
 
@@ -73,6 +78,101 @@ class _CacheBackedAdapter:
 
 def _runner(config, http_factory, docker=(False, "docker unavailable (test)")):
     return SuiteRunner(config, http_factory=http_factory, probe_docker=lambda: docker)
+
+
+def test_selected_judge_templates_are_content_bound_to_adapter_identity(
+    tmp_path, monkeypatch
+):
+    from kairyu.bench import judge_prompts
+    from kairyu.bench.adapters import all_adapters
+
+    cache = BenchCache(tmp_path / "cache")
+    adapters = all_adapters()
+    hle_identity = _adapter_identity(
+        adapters["hle"], cache, offline_fixtures=True
+    )
+    charxiv_identity = _adapter_identity(
+        adapters["charxiv-reasoning"], cache, offline_fixtures=True
+    )
+    assert hle_identity["judge_template"] == {
+        "name": "hle",
+        "variant": "production",
+        "sha256": "0befab1400eba0c4d4d4e16cc018b4d988d775bbf4ad554fed5fe5f76fede74d",
+    }
+    assert charxiv_identity["judge_template"] == {
+        "name": "charxiv-reasoning",
+        "variant": "production",
+        "sha256": "e8bf1acd527e025da041a43acd729924abc44610194cbf696f8e228c50b2319d",
+    }
+    assert "judge_template" not in _adapter_identity(
+        adapters["gpqa-diamond"], cache, offline_fixtures=True
+    )
+
+    config = make_config(tmp_path, models=("m",), only=("hle",))
+    before = _run_fingerprint(_run_identity(config, [hle_identity]))
+    monkeypatch.setattr(
+        judge_prompts,
+        "HLE_JUDGE_TEMPLATE",
+        judge_prompts.HLE_JUDGE_TEMPLATE + "\n",
+    )
+    changed_identity = _adapter_identity(
+        adapters["hle"], cache, offline_fixtures=True
+    )
+    assert changed_identity["judge_template"] != hle_identity["judge_template"]
+    assert _run_fingerprint(_run_identity(config, [changed_identity])) != before
+
+
+def test_production_judge_template_registry_is_complete():
+    from kairyu.bench import judge_prompts
+
+    declared = {
+        name: value
+        for name, value in vars(judge_prompts).items()
+        if name.endswith("_JUDGE_TEMPLATE") and isinstance(value, str)
+    }
+    registry = judge_prompts.judge_templates()
+    assert len(registry) == len(declared)
+    assert set(registry.values()) == set(declared.values())
+
+    from kairyu.bench.adapters import all_adapters
+
+    selectors = {
+        adapter.info.judge_template_name
+        for adapter in all_adapters().values()
+        if adapter.info.judge_template_name is not None
+    }
+    assert set(registry) == selectors
+
+
+async def test_template_change_refuses_same_run_before_backend_or_artifact_write(
+    tmp_path, http_factory, monkeypatch
+):
+    from kairyu.bench import judge_prompts
+
+    config = make_config(tmp_path, models=("m",), only=("hle",))
+    assert await _runner(config, http_factory).run() == 0
+    store = ResultStore(tmp_path / "results", "test-run")
+    run_path = store.run_dir / "run.json"
+    pair_path = next(store.run_dir.glob("hle*/*.json"))
+    run_before = run_path.read_bytes()
+    pair_before = pair_path.read_bytes()
+    monkeypatch.setattr(
+        judge_prompts,
+        "HLE_JUDGE_TEMPLATE",
+        judge_prompts.HLE_JUDGE_TEMPLATE + "\nchanged",
+    )
+    calls = 0
+
+    def tracked_factory():
+        nonlocal calls
+        calls += 1
+        return http_factory()
+
+    with pytest.raises(ValueError, match="run id 'test-run'.*fingerprint"):
+        await _runner(config, tracked_factory).run()
+    assert calls == 0
+    assert run_path.read_bytes() == run_before
+    assert pair_path.read_bytes() == pair_before
 
 
 def test_direct_run_context_gets_a_local_execution_runner(tmp_path):

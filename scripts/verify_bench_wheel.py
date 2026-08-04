@@ -19,6 +19,7 @@ FIXTURE_FILES = (
     "charxiv-reasoning.jsonl",
     "gpqa-diamond.jsonl",
     "hle.jsonl",
+    "judge-calibration.jsonl",
     "livecodebench-pro.jsonl",
     "livecodebench.jsonl",
     "long-context-reasoning.jsonl",
@@ -26,6 +27,7 @@ FIXTURE_FILES = (
     "scicode.jsonl",
 )
 FIXTURE_PREFIX = "kairyu/bench/fixtures/"
+LLMBAR_LICENSE = f"{FIXTURE_PREFIX}LLMBAR_LICENSE"
 ENTRYPOINT_MANIFEST = "kairyu/bench/entrypoints.toml"
 CONSOLE_TARGET = "kairyu.entrypoints.cli:main"
 EXPECTED_ENTRYPOINTS = 62
@@ -77,6 +79,8 @@ def _inspect_wheel(wheel: Path) -> tuple[str, ...]:
                 "packaged fixtures differ: "
                 f"expected={sorted(expected_fixtures)}, actual={sorted(actual_fixtures)}"
             )
+        if LLMBAR_LICENSE not in names:
+            raise VerificationError(f"wheel omits {LLMBAR_LICENSE}")
         if ENTRYPOINT_MANIFEST not in names:
             raise VerificationError(f"wheel omits {ENTRYPOINT_MANIFEST}")
 
@@ -149,6 +153,8 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         "module=Path(kairyu.__file__).resolve(); "
         "assert module.is_relative_to(root), (module, root); "
         "fixtures=resources.files('kairyu.bench.fixtures'); "
+        "assert 'Princeton Natural Language Processing' in "
+        "fixtures.joinpath('LLMBAR_LICENSE').read_text(encoding='utf-8'); "
         "names=sorted(item.name for item in fixtures.iterdir() "
         "if item.name.endswith('.jsonl')); "
         f"assert names == {expected}, names; "
@@ -198,6 +204,7 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         ("bench", "run", "--help"),
         ("bench", "download", "--help"),
         ("bench", "report", "--help"),
+        ("bench", "calibrate-judge", "--help"),
         ("bench", "list", "--help"),
         ("bench", "entrypoints", "--help"),
     ):

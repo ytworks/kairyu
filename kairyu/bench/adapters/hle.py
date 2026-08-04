@@ -34,6 +34,7 @@ class HleAdapter(GenerativeAdapter):
         hf_dataset="cais/hle",
         gated=True,
         judge_preferred=True,
+        judge_template_name="hle",
     )
 
     def normalize(self, ctx: DownloadContext) -> list[dict]:
@@ -127,12 +128,13 @@ class HleAdapter(GenerativeAdapter):
             question=payload["question"],
             expected=payload["answer"],
             response=response_text,
+            template_name=self.info.required_judge_template_name(),
         )
         if verdict.correct is None:
             return ItemResult(
                 item_id=item.id,
                 status="unjudged",
-                error=f"judge verdict unparseable: {verdict.raw_excerpt!r}",
+                error=f"judge verdict unavailable: {verdict.raw_excerpt!r}",
                 response_excerpt=excerpt(response_text),
                 judge=verdict.as_dict(),
             )

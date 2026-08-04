@@ -106,6 +106,7 @@ def build_scoreboard(
     targets: list[str],
     target_configs: Sequence[BenchTarget] | None = None,
     judge: JudgeConfig | None = None,
+    judge_identity_incomplete: bool = False,
 ) -> dict:
     adapters = all_adapters()
     display_names = {
@@ -127,26 +128,37 @@ def build_scoreboard(
     configured_by_label = {
         target.label(): target for target in (target_configs or ())
     }
-    judge_requested = judge is not None and (
-        judge.base_url is not None or judge.model is not None
+    judge_requested = judge_identity_incomplete or (
+        judge is not None
+        and (judge.base_url is not None or judge.model is not None)
     )
-    judge_identity = (
-        _resolved_identity(judge.base_url, judge.model)
+    judge_identities = (
+        [
+            _resolved_identity(endpoint.base_url, endpoint.model)
+            for endpoint in judge.grading_endpoints()
+            if endpoint.base_url is not None and endpoint.model is not None
+        ]
         if judge is not None and judge.enabled
-        else None
+        else []
     )
     self_judged: list[str] = []
     identity_unknown: list[str] = []
     if judge_requested:
         for label in targets:
             target = configured_by_label.get(label)
-            if judge_identity is None or target is None:
-                identity_unknown.append(label)
-            elif _resolved_identity(target.base_url, target.model) == judge_identity:
+            if target is not None and (
+                _resolved_identity(target.base_url, target.model) in judge_identities
+            ):
                 self_judged.append(label)
+            if judge_identity_incomplete or not judge_identities or target is None:
+                identity_unknown.append(label)
 
     cells: dict[str, dict[str, dict]] = {}
     for benchmark in benchmarks:
+        uses_judge_template = (
+            benchmark in adapters
+            and adapters[benchmark].info.judge_template_name is not None
+        )
         cells[benchmark] = {}
         for target in targets:
             pair = by_key.get((benchmark, target))
@@ -165,14 +177,15 @@ def build_scoreboard(
                 notes.append(footnote(f"{benchmark}/{target}: {pair.status} — {pair.reason}"))
             for reason in pair.incomparable_reasons:
                 notes.append(footnote(f"{benchmark}/{target}: NOT COMPARABLE — {reason}"))
-            if target in self_judged:
+            if uses_judge_template and target in self_judged:
                 notes.append(
                     footnote(
                         f"{target}: self-judged "
-                        "(resolved judge endpoint/model == target)"
+                        "(one or more resolved judge endpoint/model identities "
+                        "== target)"
                     )
                 )
-            if target in identity_unknown:
+            if uses_judge_template and target in identity_unknown:
                 notes.append(
                     footnote(
                         f"{target}: judge independence unknown "

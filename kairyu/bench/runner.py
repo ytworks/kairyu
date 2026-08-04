@@ -92,6 +92,14 @@ def _adapter_identity(adapter, cache: BenchCache, *, offline_fixtures: bool) -> 
         "dataset": info.hf_dataset,
         "revision": info.hf_revision,
     }
+    if info.judge_template_name is not None:
+        from kairyu.bench.judge import judge_protocol_identity
+        from kairyu.bench.judge_prompts import judge_template_identity
+
+        identity["judge_template"] = judge_template_identity(
+            info.judge_template_name
+        )
+        identity["judge_protocol"] = judge_protocol_identity()
     pins = cache_pins(info)
     identity = {**identity, "sources": pins["sources"]}
     if offline_fixtures or not cache.is_ready(info.name, **pins):
@@ -210,9 +218,9 @@ class SuiteRunner:
             docker = docker_available()
         judge = None
         if config.judge.enabled:
-            from kairyu.bench.judge import JudgeClient
+            from kairyu.bench.judge import build_judge_client
 
-            judge = JudgeClient(config.judge, http_factory=self._http_factory)
+            judge = build_judge_client(config.judge, http_factory=self._http_factory)
         return RunContext(
             cache=cache,
             http_factory=self._http_factory,

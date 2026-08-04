@@ -8,7 +8,13 @@ import pytest
 from kairyu.bench.adapters import all_adapters
 from kairyu.bench.aggregate import _wilson_bounds, build_scoreboard, render_markdown
 from kairyu.bench.cli import _handle_report
-from kairyu.bench.types import BenchTarget, ItemResult, JudgeConfig, PairResult
+from kairyu.bench.types import (
+    BenchTarget,
+    ItemResult,
+    JudgeConfig,
+    JudgeEndpointConfig,
+    PairResult,
+)
 
 
 def _pair(benchmark, target, status="completed", score=0.5, reason=None, annotations=()):
@@ -61,7 +67,14 @@ def _binary_pair(
     )
 
 
-def _board(pairs, targets, config=None, target_configs=None, judge=None):
+def _board(
+    pairs,
+    targets,
+    config=None,
+    target_configs=None,
+    judge=None,
+    judge_identity_incomplete=False,
+):
     return build_scoreboard(
         run_id="run-1",
         suite="fugu",
@@ -71,6 +84,7 @@ def _board(pairs, targets, config=None, target_configs=None, judge=None):
         targets=targets,
         target_configs=target_configs,
         judge=judge,
+        judge_identity_incomplete=judge_identity_incomplete,
     )
 
 
@@ -85,15 +99,44 @@ def test_self_judged_target_is_flagged():
         base_url="http://gateway.test/v1", model="shared-model"
     )
     board = _board(
-        [_pair("gpqa-diamond", "friendly-target")],
+        [_pair("hle", "friendly-target")],
         targets=["friendly-target"],
         config={"judge": judge.model_dump()},
         target_configs=[target],
         judge=judge,
     )
     assert board["self_judged_targets"] == ["friendly-target"]
-    cell = board["cells"]["gpqa-diamond"]["friendly-target"]
+    cell = board["cells"]["hle"]["friendly-target"]
     assert any("self-judged" in board["footnotes"][n - 1] for n in cell["footnotes"])
+
+
+def test_target_matching_any_panel_member_is_flagged_as_self_judged():
+    target = BenchTarget(
+        name="candidate",
+        base_url="http://secondary.test/v1",
+        model="secondary-model",
+    )
+    judge = JudgeConfig(
+        base_url="http://primary.test/v1",
+        model="primary-model",
+        additional_judges=(
+            JudgeEndpointConfig(
+                base_url="http://secondary.test", model="secondary-model"
+            ),
+        ),
+    )
+    board = _board(
+        [_pair("hle", "candidate")],
+        ["candidate"],
+        target_configs=[target],
+        judge=judge,
+    )
+    assert board["self_judged_targets"] == ["candidate"]
+    cell = board["cells"]["hle"]["candidate"]
+    assert any(
+        "self-judged" in board["footnotes"][number - 1]
+        for number in cell["footnotes"]
+    )
 
 
 def test_self_judged_target_normalizes_default_openai_v1_path():
@@ -108,7 +151,7 @@ def test_self_judged_target_normalizes_default_openai_v1_path():
     )
 
     board = _board(
-        [_pair("gpqa-diamond", target.label())],
+        [_pair("hle", target.label())],
         targets=[target.label()],
         target_configs=[target],
         judge=judge,
@@ -149,7 +192,7 @@ def test_self_judge_identity_keeps_other_endpoint_parts_strict(
     judge = JudgeConfig(base_url=judge_base_url, model=judge_model)
 
     board = _board(
-        [_pair("gpqa-diamond", target.label())],
+        [_pair("hle", target.label())],
         targets=[target.label()],
         target_configs=[target],
         judge=judge,
@@ -175,7 +218,7 @@ def test_distinct_resolved_judge_identities_are_not_flagged():
     judge = JudgeConfig(base_url="http://judge.test/v1", model="judge-model")
     labels = [target.label() for target in targets]
     board = _board(
-        [_pair("gpqa-diamond", label) for label in labels],
+        [_pair("hle", label) for label in labels],
         labels,
         target_configs=targets,
         judge=judge,
@@ -189,7 +232,7 @@ def test_missing_legacy_target_identity_is_annotated_unknown():
     label = "legacy-alias"
     judge = JudgeConfig(base_url="http://judge.test/v1", model="judge-model")
     board = _board(
-        [_pair("gpqa-diamond", label)],
+        [_pair("hle", label)],
         [label],
         config={"judge": judge.model_dump()},
         target_configs=[],
@@ -198,10 +241,48 @@ def test_missing_legacy_target_identity_is_annotated_unknown():
 
     assert board["self_judged_targets"] == []
     assert board["judge_independence_unknown_targets"] == [label]
-    cell = board["cells"]["gpqa-diamond"][label]
+    cell = board["cells"]["hle"][label]
     assert any(
         "independence unknown" in board["footnotes"][number - 1]
         for number in cell["footnotes"]
+    )
+
+
+def test_judge_identity_notes_only_appear_on_judge_template_rows():
+    label = "candidate"
+    target = BenchTarget(
+        name=label,
+        base_url="http://judge.test/v1",
+        model="judge-model",
+    )
+    judge = JudgeConfig(
+        base_url="http://judge.test/v1",
+        model="judge-model",
+    )
+    board = _board(
+        [_pair("hle", label), _pair("gpqa-diamond", label)],
+        [label],
+        target_configs=[target],
+        judge=judge,
+        judge_identity_incomplete=True,
+    )
+
+    assert board["self_judged_targets"] == [label]
+    assert board["judge_independence_unknown_targets"] == [label]
+    hle_notes = [
+        board["footnotes"][number - 1]
+        for number in board["cells"]["hle"][label]["footnotes"]
+    ]
+    gpqa_notes = [
+        board["footnotes"][number - 1]
+        for number in board["cells"]["gpqa-diamond"][label]["footnotes"]
+    ]
+    assert any("self-judged" in note for note in hle_notes)
+    assert any("independence unknown" in note for note in hle_notes)
+    assert not any(
+        marker in note
+        for note in gpqa_notes
+        for marker in ("self-judged", "independence unknown")
     )
 
 
@@ -209,7 +290,11 @@ _DEFAULT_REPORT_JUDGE = object()
 
 
 def _write_report_fixture(
-    tmp_path, *, target_config, judge_config=_DEFAULT_REPORT_JUDGE
+    tmp_path,
+    *,
+    target_config,
+    judge_config=_DEFAULT_REPORT_JUDGE,
+    benchmark="hle",
 ):
     run_dir = tmp_path / "report-run"
     pair_dir = run_dir / "pair"
@@ -235,7 +320,7 @@ def _write_report_fixture(
     )
     label = target_config["name"]
     (pair_dir / "result.json").write_text(
-        _pair("gpqa-diamond", label).model_dump_json(), encoding="utf-8"
+        _pair(benchmark, label).model_dump_json(), encoding="utf-8"
     )
     args = Namespace(run=str(run_dir), results_dir=str(tmp_path / "unused"))
     assert _handle_report(args) == 0
@@ -315,6 +400,128 @@ def test_legacy_report_without_complete_judge_identity_fails_closed(
 
     assert board["self_judged_targets"] == []
     assert board["judge_independence_unknown_targets"] == ["legacy-target"]
+
+
+@pytest.mark.parametrize(
+    "judge_config",
+    [
+        pytest.param("", id="empty-scalar"),
+        pytest.param("judge-model", id="scalar"),
+        pytest.param([], id="empty-list"),
+        pytest.param(["judge-model"], id="list"),
+    ],
+)
+def test_report_non_mapping_judge_identity_fails_closed(tmp_path, judge_config):
+    board = _write_report_fixture(
+        tmp_path,
+        target_config={
+            "name": "target",
+            "base_url": "http://target.test/v1",
+            "model": "target-model",
+        },
+        judge_config=judge_config,
+    )
+
+    assert board["self_judged_targets"] == []
+    assert board["judge_independence_unknown_targets"] == ["target"]
+    notes = [
+        board["footnotes"][number - 1]
+        for number in board["cells"]["hle"]["target"]["footnotes"]
+    ]
+    assert any("independence unknown" in note for note in notes)
+
+
+def test_report_keeps_known_self_match_when_secondary_identity_is_malformed(
+    tmp_path,
+):
+    board = _write_report_fixture(
+        tmp_path,
+        target_config={
+            "name": "primary-target",
+            "base_url": "http://primary.test/v1",
+            "model": "primary-model",
+        },
+        judge_config={
+            "base_url": "http://primary.test/v1",
+            "model": "primary-model",
+            "additional_judges": [
+                {"base_url": "http://malformed-secondary.test/v1"}
+            ],
+        },
+    )
+
+    assert board["self_judged_targets"] == ["primary-target"]
+    assert board["judge_independence_unknown_targets"] == ["primary-target"]
+    notes = [
+        board["footnotes"][number - 1]
+        for number in board["cells"]["hle"]["primary-target"]["footnotes"]
+    ]
+    assert any("self-judged" in note for note in notes)
+    assert any("independence unknown" in note for note in notes)
+
+
+@pytest.mark.parametrize(
+    "judge_config",
+    [
+        pytest.param(
+            {"base_url": "", "model": "judge-model"}, id="empty-base-url"
+        ),
+        pytest.param(
+            {"base_url": "http://judge.test/v1", "model": " "},
+            id="blank-model",
+        ),
+    ],
+)
+def test_report_malformed_primary_identity_degrades_without_crashing(
+    tmp_path, judge_config
+):
+    board = _write_report_fixture(
+        tmp_path,
+        target_config={
+            "name": "target",
+            "base_url": "http://target.test/v1",
+            "model": "target-model",
+        },
+        judge_config=judge_config,
+    )
+    assert board["self_judged_targets"] == []
+    assert board["judge_independence_unknown_targets"] == ["target"]
+
+
+def test_report_preserves_valid_secondary_self_match_amid_bad_panel_members(
+    tmp_path,
+):
+    board = _write_report_fixture(
+        tmp_path,
+        target_config={
+            "name": "secondary-target",
+            "base_url": "http://secondary.test/v1",
+            "model": "secondary-model",
+        },
+        judge_config={
+            "base_url": "http://primary.test/v1",
+            "model": "primary-model",
+            "additional_judges": [
+                {
+                    "base_url": "http://secondary.test/v1",
+                    "model": "secondary-model",
+                },
+                {
+                    "base_url": "http://primary.test/v1",
+                    "model": "primary-model",
+                },
+                {"base_url": "http://malformed.test/v1"},
+            ],
+        },
+    )
+    assert board["self_judged_targets"] == ["secondary-target"]
+    assert board["judge_independence_unknown_targets"] == ["secondary-target"]
+    notes = [
+        board["footnotes"][number - 1]
+        for number in board["cells"]["hle"]["secondary-target"]["footnotes"]
+    ]
+    assert any("self-judged" in note for note in notes)
+    assert any("independence unknown" in note for note in notes)
 
 
 def test_rows_follow_fugu_order_and_only_present_benchmarks():

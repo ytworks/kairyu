@@ -129,12 +129,8 @@ class BenchTarget(SamplingOptions):
         return self.name or self.model
 
 
-class JudgeConfig(SamplingOptions):
-    """LLM judge endpoint (any OpenAI-compatible server, incl. kairyu itself).
-
-    Also serves as the τ-bench user simulator, which Fugu ran at `low` reasoning
-    effort — hence the shared sampling knobs.
-    """
+class JudgeEndpointConfig(SamplingOptions):
+    """One OpenAI-compatible endpoint participating in LLM grading."""
 
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
@@ -149,6 +145,15 @@ class JudgeConfig(SamplingOptions):
     def _normalize_optional_base_url(cls, value: str | None) -> str | None:
         return normalize_base_url(value) if value is not None else None
 
+    @field_validator("model")
+    @classmethod
+    def _validate_optional_model(cls, value: str | None) -> str | None:
+        if value is not None and (not value.strip() or value != value.strip()):
+            raise ValueError(
+                "judge model must be non-empty and have no surrounding whitespace"
+            )
+        return value
+
     @field_validator("api_key_env")
     @classmethod
     def _validate_api_key_env(cls, value: str) -> str:
@@ -160,6 +165,67 @@ class JudgeConfig(SamplingOptions):
     @property
     def enabled(self) -> bool:
         return self.base_url is not None and self.model is not None
+
+    def resolved_identity(self) -> tuple[str, str] | None:
+        if self.base_url is None or self.model is None:
+            return None
+        return self.base_url, self.model
+
+
+class JudgeConfig(JudgeEndpointConfig):
+    """Primary judge plus optional independent grading-panel members.
+
+    The primary endpoint also serves as the τ-bench user simulator, which
+    remains a single-model role. ``additional_judges`` apply only to the
+    pointwise HLE/CharXiv grading path. With two total judges, strict majority
+    intentionally means unanimity; a disagreement is unjudged, never broken in
+    favour of the primary.
+    """
+
+    aggregation: Literal["strict-majority"] = "strict-majority"
+    additional_judges: tuple[JudgeEndpointConfig, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_panel(self) -> JudgeConfig:
+        if self.additional_judges and not self.enabled:
+            raise ValueError(
+                "judge.base_url and judge.model are required when "
+                "additional_judges are configured"
+            )
+        identities: list[tuple[str, str]] = []
+        primary = self.resolved_identity()
+        if primary is not None:
+            identities.append(primary)
+        for member in self.additional_judges:
+            identity = member.resolved_identity()
+            if identity is None:
+                raise ValueError(
+                    "each additional judge requires both base_url and model"
+                )
+            identities.append(identity)
+        if len(identities) != len(set(identities)):
+            raise ValueError(
+                "judge panel members must use distinct resolved endpoint/model "
+                "identities"
+            )
+        return self
+
+    def grading_endpoints(self) -> tuple[JudgeEndpointConfig, ...]:
+        """Ordered primary-first endpoints used for pointwise grading."""
+        if not self.enabled:
+            return ()
+        primary = JudgeEndpointConfig(
+            base_url=self.base_url,
+            model=self.model,
+            api_key_env=self.api_key_env,
+            concurrency=self.concurrency,
+            max_retries=self.max_retries,
+            reasoning_effort=self.reasoning_effort,
+            top_p=self.top_p,
+            seed=self.seed,
+            extra_body_json=self.extra_body_json,
+        )
+        return (primary, *self.additional_judges)
 
 
 _IMMUTABLE_IMAGE_RE = re.compile(
@@ -292,7 +358,8 @@ class ItemResult(BaseModel):
     score: float | None = None  # 0..1
     response_excerpt: str | None = None  # capped, evidence only
     error: str | None = None
-    judge: dict | None = None  # {model, verdict, raw_excerpt} when judged
+    # Single: {model, correct, raw_excerpt}; panels add aggregation + ordered votes.
+    judge: dict | None = None
     latency_s: float | None = None
 
 
