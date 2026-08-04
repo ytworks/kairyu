@@ -137,7 +137,11 @@ batched D2D copy instead of per-row scalar copies, and defer one batched public
 D2H copy to the late EOS/streaming boundary. The isolated steady-decode
 profiler records zero host-sync events. Destination-aliasing compatibility
 views are staged before the slot update so their original values are preserved.
-Structured xgrammar remains an explicit stateful CPU compatibility path.
+Structured xgrammar remains an explicit stateful CPU compatibility path, but
+its stochastic draw now uses the same stateless Gumbel algorithm and seed map
+as grammar-free CUDA. CPU replay, structured sampling, and CUDA serving
+therefore no longer select different random streams merely because their
+execution paths differ; greedy and the established CUDA sequence are unchanged.
 Speculative target verification now groups every draft position plus the
 bonus/correction position across compatible requests into one flattened
 decode-shaped target call. Paged KV writes, rejection overwrite, scheduler
@@ -935,6 +939,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [amendment] CPU and CUDA sampling share one stateless random draw
+- What: made the existing stateless Gumbel-max tensor sampler canonical for CPU, structured-output, and CUDA execution after one shared filtering implementation. CPU alone materializes the selected scalar, skips normal-path fallback construction, and reuses a bounded immutable offset cache; CUDA retains its branchless device result and established stochastic sequence. The former CPU/structured `torch.multinomial` sequence intentionally changes, while grammar masking and acceptance remain on CPU, greedy behavior is unchanged, and fixed-logit filter, penalty, minimum-token, structured-support, raw-logprob, replay, and CPU/CUDA parity gates cover the boundary.
+- Why: selecting an execution path or enabling a grammar whose current legal set is unchanged must not silently switch RNG algorithms and alter the sampled trajectory. One stateless draw also keeps replay, TP ownership, overlap, and P-D behavior independent of mutable generator offsets without folding the separate seed-quality work into this change.
+- Refs: issue #353; m8 D2; `kairyu/engine/core/sampler.py`; `kairyu/kernels/sampling_gpu.py`; `tests/unit/test_sampler.py`; `tests/gpu/test_sampling_rng_parity_gpu.py`
 
 ### 2026-08-05 — [amendment] Special-token visibility is per request and logprobs expose raw pieces
 - What: threaded `skip_special_tokens` through native in-process and process-split request state, native/fallback detokenization, and the Kairyu upstream capability profile while preserving old custom-tokenizer signatures. Opposite policies are isolated and the actual EOS/stop-terminating ID remains invisible under both. Native selected and top rich-logprob token strings now use a lazily cached sparse-ID-safe raw vocabulary table with pre-allocation amplification bounds, negative-index exclusion, and decoded fallback for valid padded LM-head IDs while remote adapters preserve provider token strings; native bytes remain the flag-sensitive single-ID decode, and legacy completion offsets advance by those decoded contributions rather than raw marker lengths.

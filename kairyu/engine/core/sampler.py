@@ -12,16 +12,16 @@ Order of operations (reviewed convention, m8 §6):
    over committed outputs only (vLLM/HF agreement).
 5. ``temperature == 0`` → argmax on the masked logits; else scale.
 6. min_p, then top-k, then top-p (vLLM v1 order; HF differs — recorded).
-7. softmax → seeded sample.
+7. softmax → stateless seeded Gumbel-max sample.
 
 Determinism: base seed is ``sampling.seed`` or sha256(request_id) (never
 Python ``hash()`` — process-randomized); the per-position seed is a splitmix64
-mix of (base, position). CPU compatibility uses a seeded Generator. CUDA uses
-stateless Gumbel noise derived from (seed, position, vocab index), so TP rank
-runners sample identically given identical logits and replaying a position is
-idempotent without a host-owned RNG offset. Grammar ``accept`` is likewise
-idempotent per position — the matcher advances exactly once per committed
-token.
+mix of (base, position). CPU, structured, and CUDA paths use the same stateless
+Gumbel noise derived from (seed, position, vocab index), so changing execution
+path does not select a different random stream. TP rank runners sample
+identically given identical logits and replaying a position is idempotent
+without a host-owned RNG offset. Grammar ``accept`` is likewise idempotent per
+position — the matcher advances exactly once per committed token.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from kairyu.engine.core.sampling_types import (
 )
 from kairyu.engine.core.structured import XGrammarEnforcer
 from kairyu.engine.tokenizer import GrammarVocabulary
+from kairyu.kernels.sampling_gpu import stateless_gumbel_argmax
 
 
 @dataclass(frozen=True)
@@ -478,7 +479,7 @@ class _RequestSamplerState:
 
 
 class Sampler:
-    """Per-request sampling state: seeded generators + grammar enforcers.
+    """Per-request sampling state: stateless seed identity + grammar enforcers.
 
     ``vocab_provider`` supplies token strings for grammar compilation; required
     only when a request carries ``json_schema``/``json_mode``. State is dropped
@@ -820,49 +821,41 @@ class Sampler:
             sorted_probs = sorted_probs.masked_fill(cut, 0.0)
             probs = torch.zeros_like(probs).scatter(-1, sorted_idx, sorted_probs)
 
-        # Grammar-free filtering always retains one token, but keep the CPU
-        # path's degenerate fallback without branching on a device scalar.
+        # Grammar-free filtering always retains one token. CPU can avoid
+        # constructing the fallback on its normal path; CUDA remains branchless
+        # so sampling never creates a device-to-host control dependency.
         total = probs.sum()
-        argmax = torch.argmax(logits).to(dtype=torch.int64)
-        fallback = torch.zeros_like(probs).scatter(
-            0, argmax.view(1), torch.ones(1, dtype=probs.dtype, device=probs.device)
+        if logits.device.type == "cpu" and bool(total > 0):
+            safe = probs / total
+        else:
+            argmax = torch.argmax(logits).to(dtype=torch.int64)
+            fallback = torch.zeros_like(probs).scatter(
+                0,
+                argmax.view(1),
+                torch.ones(1, dtype=probs.dtype, device=probs.device),
+            )
+            safe = torch.where(total > 0, probs, fallback)
+            safe = safe / safe.sum().clamp(min=1e-12)
+        return stateless_gumbel_argmax(
+            torch.log(safe),
+            mix_seed(base_seed, position),
         )
-        safe = torch.where(total > 0, probs, fallback)
-        safe = safe / safe.sum().clamp(min=1e-12)
-        mixed_seed = mix_seed(base_seed, position)
-        if logits.device.type == "cuda":
-            from kairyu.kernels.sampling_gpu import stateless_gumbel_argmax
-
-            return stateless_gumbel_argmax(torch.log(safe), mixed_seed)
-        generator = torch.Generator(device=logits.device)
-        generator.manual_seed(mixed_seed)
-        return torch.multinomial(safe, 1, generator=generator).squeeze(0)
 
     @staticmethod
     def _sample_scaled(
         logits: torch.Tensor, sampling: EngineSampling, base_seed: int, position: int
     ) -> int:
-        probs = torch.softmax(logits / sampling.temperature, dim=-1)
-        if sampling.min_p > 0.0:
-            probs = torch.where(
-                probs >= sampling.min_p * probs.max(), probs, torch.zeros_like(probs)
-            )
-        if 0 < sampling.top_k < probs.shape[-1]:
-            threshold = torch.topk(probs, sampling.top_k).values[-1]
-            probs = torch.where(probs >= threshold, probs, torch.zeros_like(probs))
-        if sampling.top_p < 1.0:
-            sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-            cumulative = torch.cumsum(sorted_probs, dim=-1)
-            # drop tokens whose exclusive cumulative mass already reaches top_p;
-            # the highest-probability token always survives (keep-1)
-            cut = cumulative - sorted_probs >= sampling.top_p * cumulative[-1].clamp(min=1e-12)
-            sorted_probs[cut] = 0.0
-            probs = torch.zeros_like(probs).scatter(-1, sorted_idx, sorted_probs)
-        total = probs.sum()
-        if total <= 0:  # every candidate filtered (degenerate): fall back to argmax
-            return int(torch.argmax(logits).item())
-        generator = torch.Generator().manual_seed(mix_seed(base_seed, position))
-        return int(torch.multinomial(probs / total, 1, generator=generator).item())
+        # The CPU/structured boundary is the only place that materializes the
+        # canonical tensor draw as a Python integer.  Filtering and RNG remain
+        # exactly the same implementation as the device path.
+        return int(
+            Sampler._sample_scaled_device(
+                logits,
+                sampling,
+                base_seed,
+                position,
+            ).item()
+        )
 
     @staticmethod
     def _report(
