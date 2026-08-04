@@ -235,7 +235,16 @@ issue #333 TP4 HTTP diagnostic operator is CPU-validated and predeclares a
 report-only paired-median process/in-process TTFT-p99 ratio <=0.90 as material;
 its pre/post cell boundary now also requires a launch-bound graceful zero exit,
 non-forced removal, no compute applications, zero GPU utilization, and exact
-restoration to a stable per-GPU run-start idle-memory baseline.
+restoration to a stable per-GPU run-start idle-memory baseline. The first
+fail-closed real trial was discarded because its v1 all-four measurement-output
+parity check was not arm-neutral: same-arm repeats themselves agreed on only
+29/128 and 41/128 hashes. That invalid observation measured a 0.9454156693989547
+paired-median process/in-process TTFT-p99 ratio but supports no classification.
+The pre-rerun v2 contract instead binds strict A6
+completion structure, per-cell uniqueness of all 163 response IDs, and exact
+all-four parity for the four serialized ShareGPT warm-ups; it reports all six
+c128 measurement agreement rates without making them binding. Its next fresh
+full ABBA is the sole v2 rerun and will be retained regardless of direction.
 The real Qwen3-32B ABBA measurement remains the active step before the issue is
 closed.
 Streaming detokenization is now truly incremental on the supported native
@@ -873,6 +882,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [amendment] Issue #333 separates concurrent repeatability from evidence integrity
+- What: retained the first fail-closed four-cell trial strictly as an invalid observation: source `ad11a322b77337547ac34dc1717586c40f76fd8b`, paired-median process/in-process TTFT-p99 ratio 0.9454156693989547 with no classification, raw SHA-256 `6b726d0076f55226b9d50370a27f8f06e486ca9c53088192f003891507b95a13`, and manifest SHA-256 `15526fc3efec8b5a12ae5dba3e7c5c54c9cc3729987e005dd5a838cf8f94d393`. Before any rerun, bumped the operator evidence schema to v2, retained strict A6 HTTP/SSE/prompt/usage/terminal structure and well-formed per-row digest metadata, and added binding per-cell uniqueness for all 163 response IDs plus all-four output parity for each of the four serialized ShareGPT warm-ups. All six c128 measurement-cell output-hash agreement counts and rates are explicit non-binding diagnostics; the predeclared 0.90 report-only TTFT-p99 interpretation is unchanged. The next fresh full ABBA is the sole v2 rerun and is retained regardless of direction; v1 raw rows are never rewritten as v2.
+- Why: the two same-arm repeat pairs in the discarded trial agreed on only 29/128 and 41/128 completion hashes, so exact all-four equality could not distinguish backend semantics from fresh-server concurrent scheduling variation. Serializing the 128-request burst would remove the very contention being diagnosed. TTFT ends at first-token arrival, while the full 128-token continuation hash is downstream of the backend treatment; conditioning the TTFT result on that hash was post-treatment selection. Raw rows retain digest metadata but not decoded bytes, so the contract does not claim independent output-hash recomputation.
+- Refs: issue #333; m8 D6; source commit `ad11a32`; `bench/issue_333_proc_http_bench.py`; `tests/bench/test_issue_333_proc_http_bench.py`; `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-discarded-v1-2026-08-05/`; `docs/{gpu-runbook.md,design/m8-engine-cpu.md}`
 
 ### 2026-08-05 — [amendment] Issue #333 rejects force-cleaned or non-idle GPU cells
 - What: changed the four-cell TP4 diagnostic lifecycle to stop each measured container with a bounded graceful timeout, re-attest its immutable launch ID and zero non-OOM exit, retain shutdown logs, and remove it without force. Pre-start and post-removal evidence now requires no selected-GPU compute applications, zero utilization, and memory exactly equal to a stable per-GPU run-start idle baseline, with bounded retry for transient NVML query failures. Stop or removal failures still trigger best-effort forced recovery but invalidate the cell and prevent a shard from being written.

@@ -1759,7 +1759,7 @@ def test_rehashed_cleanup_failure_cannot_produce_supported_hypothesis(
     assert report["hypothesis_conclusion"] is None
 
 
-def test_tampered_output_parity_is_retained_as_invalid_evidence(
+def test_valid_cross_cell_output_variation_is_nonbinding_and_reported(
     tmp_path: Path,
     trace_bundle: dict[str, object],
 ) -> None:
@@ -1779,11 +1779,126 @@ def test_tampered_output_parity_is_retained_as_invalid_evidence(
         raw_sha256="e" * 64,
     )
 
+    assert manifest["evidence_valid"] is True
+    assert (
+        manifest["checks"][
+            "measurement_output_and_stream_digest_metadata_present_and_well_formed"
+        ]
+        is True
+    )
+    diagnostic_result = manifest["comparisons"][
+        "completion_output_hash_agreement_diagnostic"
+    ]
+    assert diagnostic_result["binding"] is False
+    assert diagnostic_result["pair_count"] == 6
+    assert sorted(pair["matching_sequences"] for pair in diagnostic_result["pairs"]) == [
+        127,
+        127,
+        127,
+        128,
+        128,
+        128,
+    ]
+    assert sorted(pair["relationship"] for pair in diagnostic_result["pairs"]) == [
+        "cross_arm_cross_repeat",
+        "cross_arm_cross_repeat",
+        "paired_backend_comparison",
+        "paired_backend_comparison",
+        "same_arm_repeat",
+        "same_arm_repeat",
+    ]
+    report = manifest["comparisons"]["report_only_material_reduction_classification"]
+    assert report["classification"] != "insufficient_evidence"
+
+
+def test_malformed_output_hash_invalidates_retention_and_request_evidence(
+    tmp_path: Path,
+    trace_bundle: dict[str, object],
+) -> None:
+    rows = diagnostic.assemble_rows(_shards(tmp_path, trace_bundle))
+    rows[0]["session_id"] = "fixture-session"
+    target = next(
+        row
+        for row in rows
+        if row.get("type") == "request"
+        and row.get("arm") == "kairyu-proc"
+        and row.get("phase") == "measurement"
+        and row.get("sequence") == 0
+    )
+    target["output_text_sha256"] = "not-a-sha256"
+    manifest = diagnostic.assemble_manifest(
+        [{**row, "row_index": index} for index, row in enumerate(rows)],
+        raw_sha256="e" * 64,
+    )
+
     assert manifest["evidence_valid"] is False
-    assert manifest["checks"]["completion_output_hash_parity_across_all_four_cells"] is False
+    assert manifest["checks"]["strict_a6_sse_request_evidence_exact"] is False
+    assert (
+        manifest["checks"][
+            "measurement_output_and_stream_digest_metadata_present_and_well_formed"
+        ]
+        is False
+    )
+    diagnostic_result = manifest["comparisons"][
+        "completion_output_hash_agreement_diagnostic"
+    ]
+    assert sum(pair["complete_inputs"] is False for pair in diagnostic_result["pairs"]) == 3
     report = manifest["comparisons"]["report_only_material_reduction_classification"]
     assert report["classification"] == "insufficient_evidence"
     assert report["hypothesis_conclusion"] is None
+
+
+def test_duplicate_response_id_invalidates_cell_identity_evidence(
+    tmp_path: Path,
+    trace_bundle: dict[str, object],
+) -> None:
+    rows = diagnostic.assemble_rows(_shards(tmp_path, trace_bundle))
+    rows[0]["session_id"] = "fixture-session"
+    requests = [
+        row
+        for row in rows
+        if row.get("type") == "request" and row.get("order_index") == 0
+    ]
+    assert len(requests) >= 2
+    requests[1]["response_id"] = requests[0]["response_id"]
+    manifest = diagnostic.assemble_manifest(
+        [{**row, "row_index": index} for index, row in enumerate(rows)],
+        raw_sha256="e" * 64,
+    )
+
+    assert manifest["checks"]["strict_a6_sse_request_evidence_exact"] is True
+    assert manifest["checks"]["every_cell_response_id_unique_across_all_requests"] is False
+    assert manifest["evidence_valid"] is False
+
+
+def test_serialized_warmup_output_parity_remains_binding(
+    tmp_path: Path,
+    trace_bundle: dict[str, object],
+) -> None:
+    rows = diagnostic.assemble_rows(_shards(tmp_path, trace_bundle))
+    rows[0]["session_id"] = "fixture-session"
+    target = next(
+        row
+        for row in rows
+        if row.get("type") == "request"
+        and row.get("order_index") == 0
+        and row.get("phase") == "warmup"
+        and row.get("sequence") == 0
+    )
+    target["output_text_sha256"] = "f" * 64
+    manifest = diagnostic.assemble_manifest(
+        [{**row, "row_index": index} for index, row in enumerate(rows)],
+        raw_sha256="e" * 64,
+    )
+
+    assert manifest["checks"]["strict_a6_sse_request_evidence_exact"] is True
+    assert (
+        manifest["checks"][
+            "serialized_sharegpt_warmup_output_hash_parity_across_all_four_cells"
+        ]
+        is False
+    )
+    assert manifest["evidence_valid"] is False
 
 
 def test_manifest_hash_or_replay_tampering_fails_verification(

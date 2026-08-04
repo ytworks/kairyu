@@ -42,6 +42,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -58,7 +59,7 @@ import yaml  # noqa: E402
 from bench import g2_a6_vllm_bench as a6  # noqa: E402
 from bench import run_g2_a6_formal as formal  # noqa: E402
 
-SCHEMA_VERSION = "kairyu.issue-333.proc-http-diagnostic.v1"
+SCHEMA_VERSION = "kairyu.issue-333.proc-http-diagnostic.v2"
 RUNNER_SCHEMA = "kairyu.issue-333.proc-http-runner.v1"
 RAW_NAME = "issue-333-proc-http-raw.jsonl"
 MANIFEST_NAME = "issue-333-proc-http-manifest.json"
@@ -1769,6 +1770,69 @@ def _median(values: Sequence[Fraction]) -> Fraction | None:
     return (ordered[middle - 1] + ordered[middle]) / 2
 
 
+def _completion_output_hash_agreement_diagnostic(
+    plan: Sequence[Cell],
+    hashes: Mapping[Cell, Mapping[int, tuple[str, str]]],
+) -> dict[str, object]:
+    """Report cross-cell output agreement without making it an integrity gate."""
+
+    expected_sequences = set(range(a6.SHAREGPT_REQUESTS))
+    pairs: list[dict[str, object]] = []
+    for left, right in combinations(plan, 2):
+        left_hashes = hashes.get(left, {})
+        right_hashes = hashes.get(right, {})
+        complete = set(left_hashes) == expected_sequences and set(right_hashes) == (
+            expected_sequences
+        )
+        matching = (
+            sum(
+                left_hashes[sequence][0] == right_hashes[sequence][0]
+                for sequence in range(a6.SHAREGPT_REQUESTS)
+            )
+            if complete
+            else None
+        )
+        relationship = (
+            "same_arm_repeat"
+            if left.arm == right.arm
+            else "paired_backend_comparison"
+            if left.repeat == right.repeat
+            else "cross_arm_cross_repeat"
+        )
+        pairs.append(
+            {
+                "left": left.identity(),
+                "right": right.identity(),
+                "relationship": relationship,
+                "complete_inputs": complete,
+                "request_count": a6.SHAREGPT_REQUESTS,
+                "matching_sequences": matching,
+                "agreement_fraction": (
+                    _fraction_record(Fraction(matching, a6.SHAREGPT_REQUESTS))
+                    if matching is not None
+                    else None
+                ),
+            }
+        )
+    return {
+        "field": "output_text_sha256",
+        "binding": False,
+        "pair_count": len(pairs),
+        "reason": (
+            "the discarded trial observed different hashes between same-arm repeats; "
+            "fresh c128 servers can plausibly admit and batch simultaneous requests in "
+            "different orders, so exact cross-cell equality cannot isolate backend semantics"
+        ),
+        "integrity_scope": (
+            "raw rows retain well-formed output and stream digest metadata, but do not "
+            "retain decoded bytes from which those digests could be recomputed; strict "
+            "completion structure, per-cell response-ID uniqueness, and serialized-warmup "
+            "output parity remain binding"
+        ),
+        "pairs": pairs,
+    }
+
+
 def _mad(values: Sequence[Fraction]) -> Fraction | None:
     center = _median(values)
     if center is None:
@@ -2413,9 +2477,13 @@ def evaluate_rows(
     provenance_exact = exact_plan
     cleanup_exact = exact_plan
     measurement_windows_exact = exact_plan
-    output_hashes: dict[int, set[object]] = {
-        sequence: set() for sequence in range(a6.SHAREGPT_REQUESTS)
+    measurement_hashes: dict[Cell, dict[int, tuple[str, str]]] = {
+        cell: {} for cell in plan
     }
+    measurement_hashes_retained_exact = exact_plan
+    serial_warmup_hashes: dict[Cell, dict[int, str]] = {cell: {} for cell in plan}
+    serial_warmup_output_parity = exact_plan
+    response_ids_unique = exact_plan
     metrics: dict[Cell, dict[str, object]] = {}
     provenance_values: dict[Cell, dict[str, object]] = {}
     for cell in plan:
@@ -2436,6 +2504,26 @@ def evaluate_rows(
             and end.get("graph_warmup_request_count") == a6.GRAPH_WARMUP_REQUESTS
             and end.get("measurement_request_count") == a6.SHAREGPT_REQUESTS
         )
+        response_ids = [row.get("response_id") for row in cell_rows]
+        response_ids_unique &= (
+            len(response_ids)
+            == a6.WARMUP_REQUESTS + a6.GRAPH_WARMUP_REQUESTS + a6.SHAREGPT_REQUESTS
+            and all(isinstance(item, str) and item for item in response_ids)
+            and len(set(response_ids)) == len(response_ids)
+        )
+        for row in warmups:
+            sequence = row.get("sequence")
+            output_hash = row.get("output_text_sha256")
+            if not (
+                type(sequence) is int
+                and 0 <= sequence < a6.WARMUP_REQUESTS
+                and isinstance(output_hash, str)
+                and HEX64.fullmatch(output_hash) is not None
+                and sequence not in serial_warmup_hashes[cell]
+            ):
+                serial_warmup_output_parity = False
+                continue
+            serial_warmup_hashes[cell][sequence] = output_hash
         request_evidence_exact &= (
             isinstance(expected_warmups, list)
             and isinstance(expected_measurements, list)
@@ -2540,8 +2628,20 @@ def evaluate_rows(
         measurement_windows_exact &= end.get("measurement_window_ns") == expected_window
         for row in measurement:
             sequence = row.get("sequence")
-            if type(sequence) is int and sequence in output_hashes:
-                output_hashes[sequence].add(row.get("output_text_sha256"))
+            output_hash = row.get("output_text_sha256")
+            stream_hash = row.get("stream_payload_sha256")
+            if not (
+                type(sequence) is int
+                and 0 <= sequence < a6.SHAREGPT_REQUESTS
+                and isinstance(output_hash, str)
+                and HEX64.fullmatch(output_hash) is not None
+                and isinstance(stream_hash, str)
+                and HEX64.fullmatch(stream_hash) is not None
+                and sequence not in measurement_hashes[cell]
+            ):
+                measurement_hashes_retained_exact = False
+                continue
+            measurement_hashes[cell][sequence] = (output_hash, stream_hash)
         metrics[cell] = a6._scenario_metric(cell_rows)
 
     generations = [value.get("server_generation") for value in provenance_values.values()]
@@ -2572,7 +2672,18 @@ def evaluate_rows(
             common_identity_exact &= isinstance(config_raw, dict) and config_raw.get(
                 "parsed"
             ) == expected_parsed_config(cell.arm)
-    output_parity = all(len(values) == 1 for values in output_hashes.values())
+    expected_sequences = set(range(a6.SHAREGPT_REQUESTS))
+    measurement_hashes_retained_exact &= all(
+        set(cell_hashes) == expected_sequences for cell_hashes in measurement_hashes.values()
+    )
+    expected_warmup_sequences = set(range(a6.WARMUP_REQUESTS))
+    serial_warmup_output_parity &= all(
+        set(cell_hashes) == expected_warmup_sequences
+        for cell_hashes in serial_warmup_hashes.values()
+    ) and all(
+        len({serial_warmup_hashes[cell][sequence] for cell in plan}) == 1
+        for sequence in range(a6.WARMUP_REQUESTS)
+    )
     expected_requests = len(plan) * (
         a6.WARMUP_REQUESTS + a6.GRAPH_WARMUP_REQUESTS + a6.SHAREGPT_REQUESTS
     )
@@ -2582,6 +2693,10 @@ def evaluate_rows(
         "borrowed_a6_benchmark_and_trace_exact": benchmark_exact and trace_exact,
         "all_warmup_and_measurement_rows_retained_exactly_once": counts_exact,
         "strict_a6_sse_request_evidence_exact": request_evidence_exact,
+        "every_cell_response_id_unique_across_all_requests": response_ids_unique,
+        "serialized_sharegpt_warmup_output_hash_parity_across_all_four_cells": (
+            serial_warmup_output_parity
+        ),
         "serialized_graph_and_synchronized_burst_shape_exact": execution_shape_exact,
         "measurement_windows_replay_exact": measurement_windows_exact,
         "three_backend_and_process_attestations_per_cell_exact": attestation_exact,
@@ -2592,7 +2707,9 @@ def evaluate_rows(
         "logs_removal_and_post_cleanup_gpu_quiescence_exact": cleanup_exact,
         "fresh_unique_containers_and_chronological_abba_order_exact": fresh_order_exact,
         "backend_only_configuration_and_common_runtime_identity_exact": (common_identity_exact),
-        "completion_output_hash_parity_across_all_four_cells": output_parity,
+        "measurement_output_and_stream_digest_metadata_present_and_well_formed": (
+            measurement_hashes_retained_exact
+        ),
     }
     evidence_valid = all(checks.values())
 
@@ -2650,6 +2767,9 @@ def evaluate_rows(
             "ttft_p99_ns": _fraction_record(_mad(p99_ratios)),
         },
         "report_only_material_reduction_classification": (report_only_classification),
+        "completion_output_hash_agreement_diagnostic": (
+            _completion_output_hash_agreement_diagnostic(plan, measurement_hashes)
+        ),
     }
     diagnostics = {
         "scenario_metrics": {cell.scenario_id: metrics.get(cell, {}) for cell in plan},

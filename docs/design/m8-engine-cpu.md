@@ -1,6 +1,6 @@
 # M8 Design: Engine CPU Core — Real Tokens, Real Sampling, Multi-Token Commit
 
-Status: **Implemented** (2026-07-03; D1/D2/D6 amended 2026-08-04). Reviewed — APPROVE-WITH-AMENDMENTS
+Status: **Implemented** (2026-07-03; D1/D2/D6 amended 2026-08-05). Reviewed — APPROVE-WITH-AMENDMENTS
 (3-reviewer agent panel, 2026-07-03; all amendments applied inline, see §6).
 All six phases (D1–D6) landed with tests: 328 → 437 tests, 95% coverage.
 The original M8 deliverables remain implemented and CPU-tested. Issue #333's
@@ -520,10 +520,31 @@ baseline. A completed server is stopped with a bounded graceful Docker stop,
 its immutable launch identity and zero exit are re-attested before logs are
 retained and it is removed without force; forced recovery invalidates the cell
 even if it restores the hardware to idle.
+The v2 evidence contract binds the existing strict A6 completion structure,
+requires all 163 response IDs to be unique within each cell, and requires each
+of the four serialized ShareGPT warm-up outputs to match across all four fresh
+servers. Measurement-burst output equality is deliberately non-binding. The
+first fail-closed trial was discarded after its same-arm repeats agreed on
+only 29/128 and 41/128 output hashes, demonstrating that all-four equality was
+not an arm-neutral integrity condition. Concurrent admission and batch
+composition changing the greedy floating-point path is a plausible mechanism,
+not a causal claim. The estimand ends at first-token arrival, whereas the old
+hash condition covered the subsequent 128-token continuation and was itself
+downstream of the backend treatment; conditioning the TTFT interpretation on
+that continuation would be post-treatment selection. The raw rows retain
+well-formed output and complete-stream digest metadata but not the decoded
+bytes needed to recompute those digests;
+all six measurement-cell agreement rates are therefore retained only as an
+explicit diagnostic without serializing or otherwise changing the c128 load.
 Before measurement, a paired-median process/in-process TTFT-p99 ratio at or
 below 0.90 was declared a material report-only movement. This has no A6
 acceptance threshold, and its causal scope is the net process split including
 ZMQ/msgpack/delta/lifecycle overhead rather than pure GIL isolation.
+The discarded v1 run remains an invalid observation rather than a result: its
+paired-median TTFT-p99 ratio was 0.9454156693989547, but failed evidence means
+no classification. Its raw and manifest SHA-256s are recorded in `PROGRESS.md`
+against source commit `ad11a32`. Exactly one fresh full v2 ABBA run is allowed,
+and it is the issue result regardless of its performance direction.
 
 ## 3. What M8 does not include (explicit non-goals)
 

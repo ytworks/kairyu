@@ -406,8 +406,23 @@ GPU-only remainder (design m5 §4.2).
   baseline captured at run start; transient NVML query errors retry only inside
   the fixed quiescence deadline. A forced fallback may recover a
   failed cell physically but can never satisfy its cleanup evidence. Independent
-  raw replay must pass before interpretation. The predeclared report-only
-  material line is paired-median `kairyu-proc/kairyu` TTFT p99 <= 0.90; no valid
+  raw replay must pass before interpretation. The v2 contract also requires
+  every cell's 163 response IDs to be unique and all four serialized ShareGPT
+  warm-up output hashes to agree across all four fresh servers. It retains the
+  well-formed output and complete-stream digest metadata for every measurement
+  row, but decoded bytes are not retained and the digests cannot be independently
+  recomputed. Exact output equality across the c128 measurement bursts is not
+  binding: the discarded v1 trial observed only 29/128 and 41/128 agreement
+  between same-arm repeats, so equality was not arm-neutral. Report all six
+  cell-pair output-hash agreement counts and rates as non-binding diagnostics;
+  do not serialize or reshape the load to improve repeatability. TTFT ends at
+  first-token arrival, while the 128-token output digest is post-treatment
+  continuation data and cannot condition the TTFT interpretation. The invalid
+  v1 observation and its complete work directory remain recorded under
+  `bench/results/`. Execute exactly one full fresh v2 ABBA run and retain it as
+  the issue result regardless of direction; never rewrite v1 raw rows into v2.
+  The predeclared report-only material line is paired-median
+  `kairyu-proc/kairyu` TTFT p99 <= 0.90; no valid
   evidence means no supported/not-supported conclusion, and neither
   classification is a formal A6 PASS/FAIL.
 - Gate A7: run `bench/tp_kv_hit_g2_a7_bench.py` against Qwen3-32B at TP4
