@@ -40,6 +40,7 @@ class LongBenchV2Adapter(GenerativeAdapter):
         name="long-context-reasoning",
         display_name="Long Context Reasoning",
         metric="accuracy",
+        binary_outcomes=True,
         hf_dataset="THUDM/LongBench-v2",
         annotations=(
             "LongBench v2 substitute — Fugu's 'Long Context Reasoning' suite is "

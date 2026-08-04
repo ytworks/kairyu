@@ -140,6 +140,7 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
         name="livecodebench-pro",
         display_name="LiveCodeBench Pro",
         metric="pass@1",
+        binary_outcomes=True,
         hf_dataset="QAQAQAQAQ/LiveCodeBench-Pro",
         hf_revision=_PROBLEM_REVISION,
         # The archives decide the tests, so repinning them must invalidate the

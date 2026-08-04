@@ -121,6 +121,19 @@ not overwrite one another. A run id must be one non-dot path component;
 absolute paths, separators, Windows drive paths, and symlink escapes outside
 the results or run directory are refused. Result writes are atomic.
 
+Every scored `scoreboard.md` cell shows its sample count; partial cells use
+`n=scored/total`. When the retained per-item evidence is entirely binary and
+the adapter explicitly declares Bernoulli outcomes, its successes, scored
+denominator, total item count, and point estimate must all agree before the cell
+shows a two-sided 95% Wilson score interval as `score [lower–upper]`.
+Intervals are limited to completed cells whose scored and total denominators
+match; partial/failed cells still expose both counts and their status caveat.
+Continuous/reward-valued metrics such as MRCR, Terminal-Bench, and τ³ remain
+interval-free even when one run happens to contain only zeroes and ones;
+malformed counts and legacy artifacts without item evidence likewise fail
+closed to point estimate plus `n`. The same interval is retained structurally
+in `scoreboard.json`.
+
 Useful subcommands:
 
 ```bash

@@ -20,6 +20,7 @@ class GpqaDiamondAdapter(GenerativeAdapter):
         name="gpqa-diamond",
         display_name="GPQA Diamond",
         metric="accuracy",
+        binary_outcomes=True,
         hf_dataset="Idavidrein/gpqa",
         gated=True,
     )

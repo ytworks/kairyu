@@ -195,6 +195,7 @@ class LiveCodeBenchAdapter(GenerativeAdapter):
         name="livecodebench",
         display_name="LiveCodeBench",
         metric="pass@1",
+        binary_outcomes=True,
         hf_dataset="livecodebench/code_generation_lite",
         hf_revision=_LCB_REVISION,
         needs_execution=True,

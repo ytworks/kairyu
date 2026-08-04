@@ -78,6 +78,7 @@ class SweBenchProAdapter:
         name="swe-bench-pro",
         display_name="SWE-Bench Pro",
         metric="resolved rate",
+        binary_outcomes=True,
         hf_dataset=_DATASET,
         needs_docker=True,
         agentic=True,
