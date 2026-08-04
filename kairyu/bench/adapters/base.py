@@ -67,6 +67,9 @@ class AdapterInfo:
     # (a substituted dataset). Run-time reasons are added per pair.
     comparable_to_published: bool = True
     incomparable_reason: str = ""
+    # True only when every scored item is contractually a Bernoulli outcome.
+    # Observing only 0/1 values in one continuous/reward run is not enough.
+    binary_outcomes: bool = False
 
 
 @dataclass(frozen=True)

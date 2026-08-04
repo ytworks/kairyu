@@ -609,7 +609,11 @@ with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
 footnoted scoreboard (G6 P-C1). A target call that returns no response content
 is recorded as a failed, unmeasured item with its latency rather than a completed
 zero, so an all-empty slot carries `score: null` and cannot be compared with a
-published accuracy number.
+published accuracy number. Scored cells now always expose their sample count;
+explicitly Bernoulli adapters with internally consistent binary item evidence
+additionally carry a structured two-sided 95% Wilson score interval, while
+continuous/reward metrics and legacy evidence fail closed to point estimate
+plus count.
 LiveCodeBench and SciCode scoring now select one explicit, fingerprinted
 execution runner. The trusted-development local subprocess remains available;
 the unattended path uses a digest-only Docker image, completed create before
@@ -823,6 +827,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [progress] Binary benchmark cells expose Wilson uncertainty
+- What: declared the eight Bernoulli benchmark adapters explicitly and added structured two-sided 95% Wilson score intervals only to completed cells when that metric contract, retained 0/1 item outcomes, successes, equal scored/total denominators, total item count, and point estimate all agree; rendered the interval and sample count in Markdown; showed scored/total counts for partial cells; and kept MRCR/Terminal/τ reward metrics, incomplete or inconsistent counts, and legacy artifacts without item evidence interval-free. Stored-run report regeneration and old scoreboards remain compatible through an additive optional cell field. The complete benchmark suite passes 1,285 tests with no selected skips.
+- Why: a 20-item smoke score and a 500-item full score previously rendered as the same bare percentage, inviting readers to over-interpret small-sample deltas. Inferring binomial trials from an aggregate score alone would instead attach false confidence bounds to continuous and partial-reward metrics.
+- Refs: issue #370; `kairyu/bench/adapters/{base,charxiv,gpqa,hle,livecodebench,livecodebench_pro,longbench_v2,scicode,swebench_pro}.py`; `kairyu/bench/aggregate.py`; `tests/bench/test_bench_aggregate.py`; `docs/benchmarks.md`
 
 ### 2026-08-04 — [amendment] Min-token sampling masks stops before selection
 - What: added a shared min-token logits processor that masks model EOS and deduplicated valid request/model stop IDs through every CPU and device sampling path, including direct-argmax, batched, overlap, P-D, TP, EP, and speculative rows at their logical output positions; retained raw pre-processor logprobs; excluded only an actual terminating stop token from visible incremental detokenization while preserving token IDs, usage, logprobs, scheduler/KV history, and radix accounting; and rejected `min_tokens > max_tokens`. Focused integration, process-wire, and real-CUDA overlap gates pass. The exact portable CI-equivalent run passed 1,259 benchmark plus 3,441 non-benchmark tests with no selected skips and 86.90% combined coverage.

@@ -33,6 +33,7 @@ class CharXivAdapter(GenerativeAdapter):
         name="charxiv-reasoning",
         display_name="CharXiv Reasoning",
         metric="accuracy (judge-graded)",
+        binary_outcomes=True,
         hf_dataset="princeton-nlp/CharXiv",
         needs_vision=True,
         judge_preferred=True,

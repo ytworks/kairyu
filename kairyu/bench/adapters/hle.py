@@ -30,6 +30,7 @@ class HleAdapter(GenerativeAdapter):
         name="hle",
         display_name="Humanity's Last Exam",
         metric="accuracy",
+        binary_outcomes=True,
         hf_dataset="cais/hle",
         gated=True,
         judge_preferred=True,

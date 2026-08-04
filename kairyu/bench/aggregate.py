@@ -7,7 +7,9 @@ partial/skip reasons so a degraded run is still an honest artifact.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
+from statistics import NormalDist
 
 from kairyu.bench.adapters import FUGU_ROW_ORDER, all_adapters
 from kairyu.bench.adapters.base import normalize_base_url
@@ -18,9 +20,80 @@ from kairyu.bench.types import (
     PairResult,
 )
 
+_WILSON_CONFIDENCE = 0.95
+_WILSON_Z = NormalDist().inv_cdf(0.5 + _WILSON_CONFIDENCE / 2)
+
 
 def _resolved_identity(base_url: str, model: str) -> tuple[str, str]:
     return normalize_base_url(base_url), model
+
+
+def _whole_count(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if not isinstance(value, float):
+        return None
+    if not math.isfinite(value) or value < 0 or not value.is_integer():
+        return None
+    return int(value)
+
+
+def _wilson_bounds(successes: int, trials: int) -> tuple[float, float] | None:
+    """Return the two-sided 95% Wilson score interval for binary trials."""
+    if trials <= 0 or successes < 0 or successes > trials:
+        return None
+    proportion = successes / trials
+    z_squared = _WILSON_Z**2
+    denominator = 1 + z_squared / trials
+    center = (proportion + z_squared / (2 * trials)) / denominator
+    margin = (
+        _WILSON_Z
+        * math.sqrt(
+            proportion * (1 - proportion) / trials
+            + z_squared / (4 * trials**2)
+        )
+        / denominator
+    )
+    return max(0.0, center - margin), min(1.0, center + margin)
+
+
+def _binary_confidence_interval(
+    pair: PairResult, *, declared_binary: bool
+) -> dict | None:
+    """Build a Wilson interval only when item evidence proves binomial data."""
+    if not declared_binary or pair.status != "completed":
+        return None
+    score = pair.score
+    if score is None or not math.isfinite(score) or not 0.0 <= score <= 1.0:
+        return None
+    scored = [
+        item.score
+        for item in pair.items
+        if item.status == "completed" and item.score is not None
+    ]
+    if not scored or any(value not in (0.0, 1.0) for value in scored):
+        return None
+    trials = _whole_count(pair.metrics.get("n_scored"))
+    total = _whole_count(pair.metrics.get("n_total"))
+    if trials is None or trials == 0 or trials != len(scored):
+        return None
+    if total is None or total != len(pair.items) or trials != total:
+        return None
+    successes = sum(value == 1.0 for value in scored)
+    if not math.isclose(score, successes / trials, rel_tol=0.0, abs_tol=1e-12):
+        return None
+    bounds = _wilson_bounds(successes, trials)
+    assert bounds is not None
+    return {
+        "method": "wilson",
+        "confidence": _WILSON_CONFIDENCE,
+        "successes": successes,
+        "trials": trials,
+        "lower": bounds[0],
+        "upper": bounds[1],
+    }
 
 
 def build_scoreboard(
@@ -34,8 +107,9 @@ def build_scoreboard(
     target_configs: Sequence[BenchTarget] | None = None,
     judge: JudgeConfig | None = None,
 ) -> dict:
+    adapters = all_adapters()
     display_names = {
-        name: adapter.info.display_name for name, adapter in all_adapters().items()
+        name: adapter.info.display_name for name, adapter in adapters.items()
     }
     by_key = {(pair.benchmark, pair.target): pair for pair in pairs}
     benchmarks = [name for name in FUGU_ROW_ORDER if any(p.benchmark == name for p in pairs)]
@@ -81,6 +155,7 @@ def build_scoreboard(
                     "status": "skipped",
                     "score": None,
                     "n": 0,
+                    "confidence_interval": None,
                     "reason": "not run",
                     "footnotes": [footnote(f"{benchmark}/{target}: not run")],
                 }
@@ -109,6 +184,13 @@ def build_scoreboard(
                 "score": pair.score,
                 "n": pair.metrics.get("n_total"),
                 "n_scored": pair.metrics.get("n_scored"),
+                "confidence_interval": _binary_confidence_interval(
+                    pair,
+                    declared_binary=(
+                        benchmark in adapters
+                        and adapters[benchmark].info.binary_outcomes
+                    ),
+                ),
                 "reason": pair.reason,
                 # structured comparability travels with the cell so the accuracy
                 # report never has to infer it from a benchmark-name allow list
@@ -133,6 +215,55 @@ def build_scoreboard(
     }
 
 
+def _stored_wilson_bounds(
+    value: object, *, expected_trials: int | None, expected_score: object
+) -> tuple[float, float] | None:
+    """Validate stored interval metadata before labelling it Wilson 95%."""
+    if not isinstance(value, dict) or value.get("method") != "wilson":
+        return None
+    confidence = value.get("confidence")
+    lower = value.get("lower")
+    upper = value.get("upper")
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, int | float)
+        or isinstance(lower, bool)
+        or not isinstance(lower, int | float)
+        or isinstance(upper, bool)
+        or not isinstance(upper, int | float)
+        or not all(math.isfinite(number) for number in (confidence, lower, upper))
+        or not math.isclose(
+            float(confidence), _WILSON_CONFIDENCE, rel_tol=0.0, abs_tol=1e-12
+        )
+    ):
+        return None
+    trials = _whole_count(value.get("trials"))
+    successes = _whole_count(value.get("successes"))
+    if (
+        trials is None
+        or trials == 0
+        or trials != expected_trials
+        or successes is None
+        or isinstance(expected_score, bool)
+        or not isinstance(expected_score, int | float)
+        or not math.isfinite(expected_score)
+        or not math.isclose(
+            float(expected_score),
+            successes / trials,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return None
+    calculated = _wilson_bounds(successes, trials)
+    if calculated is None or not all(
+        math.isclose(stored, expected, rel_tol=0.0, abs_tol=1e-12)
+        for stored, expected in zip((float(lower), float(upper)), calculated, strict=True)
+    ):
+        return None
+    return float(lower), float(upper)
+
+
 def _cell_text(cell: dict) -> str:
     marks = "".join(f"[^{n}]" for n in cell["footnotes"])
     if cell["status"] == "skipped":
@@ -142,6 +273,25 @@ def _cell_text(cell: dict) -> str:
     text = f"{cell['score'] * 100:.1f}"
     if cell["status"] in ("partial", "failed"):
         text += "*"
+    total = _whole_count(cell.get("n"))
+    scored = _whole_count(cell.get("n_scored"))
+    interval = (
+        _stored_wilson_bounds(
+            cell.get("confidence_interval"),
+            expected_trials=scored if scored is not None else total,
+            expected_score=cell.get("score"),
+        )
+        if cell["status"] == "completed"
+        else None
+    )
+    if interval is not None:
+        text += f" [{interval[0] * 100:.1f}–{interval[1] * 100:.1f}]"
+    if total is not None and scored is not None and scored != total:
+        text += f" (n={scored}/{total})"
+    elif total is not None:
+        text += f" (n={total})"
+    elif scored is not None:
+        text += f" (n={scored})"
     return f"{text}{marks}"
 
 
@@ -169,7 +319,9 @@ def render_markdown(scoreboard: dict) -> str:
         f"# Fugu benchmark scoreboard — run {scoreboard['run_id']}",
         "",
         *run_banner(scoreboard),
-        "Scores are percentages; — = skipped, * = partial/failed (see footnotes).",
+        "Scores are percentages; brackets are 95% Wilson CIs for binary item "
+        "outcomes; n is scored/total when they differ; — = skipped, "
+        "* = partial/failed (see footnotes).",
         "",
         "| Benchmark | " + " | ".join(targets) + " |",
         "|---" * (len(targets) + 1) + "|",

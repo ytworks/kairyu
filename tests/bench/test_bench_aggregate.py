@@ -5,9 +5,10 @@ from argparse import Namespace
 
 import pytest
 
-from kairyu.bench.aggregate import build_scoreboard, render_markdown
+from kairyu.bench.adapters import all_adapters
+from kairyu.bench.aggregate import _wilson_bounds, build_scoreboard, render_markdown
 from kairyu.bench.cli import _handle_report
-from kairyu.bench.types import BenchTarget, JudgeConfig, PairResult
+from kairyu.bench.types import BenchTarget, ItemResult, JudgeConfig, PairResult
 
 
 def _pair(benchmark, target, status="completed", score=0.5, reason=None, annotations=()):
@@ -19,6 +20,42 @@ def _pair(benchmark, target, status="completed", score=0.5, reason=None, annotat
         reason=reason,
         metrics=metrics,
         annotations=tuple(annotations),
+        started_at="t0",
+        finished_at="t1",
+    )
+
+
+def _binary_pair(
+    benchmark,
+    target,
+    *,
+    successes,
+    trials,
+    total=None,
+    status="completed",
+    reason=None,
+):
+    total = trials if total is None else total
+    scores = [1.0] * successes + [0.0] * (trials - successes)
+    items = [
+        ItemResult(item_id=f"scored-{index}", status="completed", score=score)
+        for index, score in enumerate(scores)
+    ]
+    items.extend(
+        ItemResult(item_id=f"missing-{index}", status="unjudged")
+        for index in range(total - trials)
+    )
+    return PairResult(
+        benchmark=benchmark,
+        target=target,
+        status=status,
+        reason=reason,
+        metrics={
+            "score": successes / trials,
+            "n_total": total,
+            "n_scored": trials,
+        },
+        items=tuple(items),
         started_at="t0",
         finished_at="t1",
     )
@@ -320,6 +357,211 @@ def test_missing_pair_rendered_as_not_run():
     pairs = [_pair("gpqa-diamond", "m")]
     board = _board(pairs, ["m", "other"])
     assert board["cells"]["gpqa-diamond"]["other"]["reason"] == "not run"
+    assert (
+        board["cells"]["gpqa-diamond"]["other"]["confidence_interval"]
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("successes", "trials", "expected"),
+    [
+        (8, 20, (0.2188065324, 0.6134184992)),
+        (200, 500, (0.3579789908, 0.4435458773)),
+        (5000, 10000, (0.4902020618, 0.5097979382)),
+        (0, 1, (0.0, 0.7934506856)),
+        (1, 1, (0.2065493144, 1.0)),
+    ],
+)
+def test_wilson_bounds(successes, trials, expected):
+    assert _wilson_bounds(successes, trials) == pytest.approx(expected, abs=1e-10)
+
+
+@pytest.mark.parametrize(
+    ("successes", "trials"),
+    [(-1, 1), (2, 1), (0, 0)],
+)
+def test_wilson_bounds_reject_invalid_counts(successes, trials):
+    assert _wilson_bounds(successes, trials) is None
+
+
+def test_scoreboard_records_machine_readable_wilson_interval():
+    pair = _binary_pair("gpqa-diamond", "m", successes=8, trials=20)
+
+    cell = _board([pair], ["m"])["cells"]["gpqa-diamond"]["m"]
+    interval = cell["confidence_interval"]
+
+    assert interval["method"] == "wilson"
+    assert {
+        key: value for key, value in interval.items() if key != "method"
+    } == pytest.approx(
+        {
+            "confidence": 0.95,
+            "successes": 8,
+            "trials": 20,
+            "lower": 0.2188065324,
+            "upper": 0.6134184992,
+        },
+        abs=1e-10,
+    )
+
+
+def test_only_contractually_binary_adapters_enable_wilson_intervals():
+    assert {
+        name
+        for name, adapter in all_adapters().items()
+        if adapter.info.binary_outcomes
+    } == {
+        "charxiv-reasoning",
+        "gpqa-diamond",
+        "hle",
+        "livecodebench",
+        "livecodebench-pro",
+        "long-context-reasoning",
+        "scicode",
+        "swe-bench-pro",
+    }
+
+
+@pytest.mark.parametrize(
+    "benchmark",
+    ["mrcr-v2", "tau-bench-banking", "terminal-bench"],
+)
+def test_reward_or_continuous_metric_does_not_become_binary_by_observation(
+    benchmark,
+):
+    pair = _binary_pair(benchmark, "m", successes=1, trials=2)
+
+    cell = _board([pair], ["m"])["cells"][benchmark]["m"]
+
+    assert cell["confidence_interval"] is None
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        {"score": 0.4, "n_total": 500, "n_scored": 20},
+        {"score": 0.4, "n_total": 20, "n_scored": 19},
+        {"score": 0.45, "n_total": 20, "n_scored": 20},
+    ],
+)
+def test_inconsistent_binary_evidence_fails_closed(metrics):
+    pair = _binary_pair("gpqa-diamond", "m", successes=8, trials=20).model_copy(
+        update={"metrics": metrics}
+    )
+
+    cell = _board([pair], ["m"])["cells"]["gpqa-diamond"]["m"]
+
+    assert cell["confidence_interval"] is None
+
+
+def test_markdown_wilson_width_distinguishes_smoke_from_full_sample():
+    pairs = [
+        _binary_pair("gpqa-diamond", "smoke", successes=8, trials=20),
+        _binary_pair("gpqa-diamond", "full", successes=200, trials=500),
+    ]
+
+    text = render_markdown(_board(pairs, ["smoke", "full"]))
+
+    assert "40.0 [21.9–61.3] (n=20)" in text
+    assert "40.0 [35.8–44.4] (n=500)" in text
+    assert "brackets are 95% Wilson CIs for binary item outcomes" in text
+
+
+def test_fractional_and_legacy_scores_show_n_without_binomial_interval():
+    fractional = PairResult(
+        benchmark="gpqa-diamond",
+        target="fractional",
+        status="completed",
+        metrics={"score": 0.5, "n_total": 2, "n_scored": 2},
+        items=(
+            ItemResult(item_id="a", status="completed", score=0.25),
+            ItemResult(item_id="b", status="completed", score=0.75),
+        ),
+        started_at="t0",
+        finished_at="t1",
+    )
+    legacy = _pair("gpqa-diamond", "legacy", score=0.5)
+
+    board = _board([fractional, legacy], ["fractional", "legacy"])
+    cells = board["cells"]["gpqa-diamond"]
+    text = render_markdown(board)
+
+    assert cells["fractional"]["confidence_interval"] is None
+    assert cells["legacy"]["confidence_interval"] is None
+    assert "| GPQA Diamond | 50.0 (n=2) | 50.0 (n=3) |" in text
+
+
+def test_partial_binary_score_withholds_interval_and_keeps_counts_and_markers():
+    pair = _binary_pair(
+        "gpqa-diamond",
+        "partial",
+        successes=1,
+        trials=2,
+        total=4,
+        status="partial",
+        reason="2/4 unjudged",
+    )
+
+    board = _board([pair], ["partial"])
+    text = render_markdown(board)
+    row = next(line for line in text.splitlines() if line.startswith("| GPQA"))
+    header = next(line for line in text.splitlines() if line.startswith("| Benchmark"))
+
+    assert board["cells"]["gpqa-diamond"]["partial"]["confidence_interval"] is None
+    assert "50.0* (n=2/4)[^1]" in row
+    assert len(row.split("|")) == len(header.split("|"))
+    assert "2/4 unjudged" in text
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("method", "jeffreys"),
+        ("confidence", 0.5),
+        ("trials", 19),
+        ("successes", 21),
+        ("lower", 0.1),
+    ],
+)
+def test_renderer_does_not_mislabel_tampered_interval(field, value):
+    pair = _binary_pair("gpqa-diamond", "m", successes=8, trials=20)
+    board = _board([pair], ["m"])
+    cell = board["cells"]["gpqa-diamond"]["m"]
+    cell["confidence_interval"][field] = value
+
+    row = next(
+        line
+        for line in render_markdown(board).splitlines()
+        if line.startswith("| GPQA")
+    )
+
+    assert row == "| GPQA Diamond | 40.0 (n=20) |"
+
+
+def test_renderer_withholds_interval_when_point_estimate_is_tampered():
+    pair = _binary_pair("gpqa-diamond", "m", successes=8, trials=20)
+    board = _board([pair], ["m"])
+    board["cells"]["gpqa-diamond"]["m"]["score"] = 0.5
+
+    row = next(
+        line
+        for line in render_markdown(board).splitlines()
+        if line.startswith("| GPQA")
+    )
+
+    assert row == "| GPQA Diamond | 50.0 (n=20) |"
+
+
+def test_legacy_huge_integer_count_does_not_overflow_renderer():
+    huge = 10**400
+    pair = _pair("gpqa-diamond", "legacy", score=0.5).model_copy(
+        update={"metrics": {"score": 0.5, "n_total": huge}}
+    )
+
+    text = render_markdown(_board([pair], ["legacy"]))
+
+    assert f"50.0 (n={huge})" in text
 
 
 def test_markdown_layout():
@@ -329,7 +571,7 @@ def test_markdown_layout():
     ]
     text = render_markdown(_board(pairs, ["m", "auto"]))
     assert "| Benchmark | m | auto |" in text
-    assert "| GPQA Diamond | 95.5 |" in text
+    assert "| GPQA Diamond | 95.5 (n=3) |" in text
     assert "50.0*" in text  # partial marker
     assert "[^1]:" in text  # footnote body present
 
