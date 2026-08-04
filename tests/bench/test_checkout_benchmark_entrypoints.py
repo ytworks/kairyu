@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import subprocess
 import sys
 import tomllib
@@ -97,11 +98,30 @@ def test_new_argparse_defaults_preserve_no_argument_workloads() -> None:
     orchestration_args = orchestration_mock_bench._build_parser().parse_args([])
 
     assert router_args.routes == router_latency.N_ROUTES
+    assert router_args.json is False
+    assert router_args.assert_gate is False
     assert orchestration_args.concurrency == orchestration_mock_bench.CONCURRENCY
     assert (
         orchestration_args.simulated_engine_latency
         == orchestration_mock_bench.SIMULATED_ENGINE_LATENCY_S
     )
+
+
+def test_router_latency_machine_output_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = {
+        "routes": 1,
+        "p50_seconds": 0.001,
+        "p99_seconds": router_latency.P99_BUDGET_SECONDS,
+        "p99_budget_seconds": router_latency.P99_BUDGET_SECONDS,
+        "passed": False,
+    }
+    monkeypatch.setattr(router_latency, "measure", lambda _routes: result)
+
+    assert router_latency.main(["--routes", "1", "--json", "--assert-gate"]) == 1
+    assert json.loads(capsys.readouterr().out) == result
 
 
 def test_vllm_runtime_dependency_is_lazy_and_actionable(
