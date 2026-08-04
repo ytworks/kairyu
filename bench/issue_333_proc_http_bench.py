@@ -954,12 +954,11 @@ def _container_name(session_id: str, cell: Cell) -> str:
 
 
 def _port_available(port: int) -> bool:
+    """Return false only for a live loopback listener, not stale TIME_WAIT."""
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        try:
-            probe.bind(("127.0.0.1", port))
-        except OSError:
-            return False
-    return True
+        probe.settimeout(0.2)
+        return probe.connect_ex(("127.0.0.1", port)) != 0
 
 
 def _selected_gpu_compute_applications(

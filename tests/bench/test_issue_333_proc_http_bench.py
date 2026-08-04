@@ -1325,6 +1325,31 @@ def test_container_name_is_inside_formal_cleanup_safety_prefix() -> None:
     assert len(name) <= 120
 
 
+def test_port_probe_rejects_listener_but_allows_closed_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Probe:
+        def __init__(self, result: int) -> None:
+            self.result = result
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def settimeout(self, _timeout: float) -> None:
+            return None
+
+        def connect_ex(self, _address: tuple[str, int]) -> int:
+            return self.result
+
+    monkeypatch.setattr(diagnostic.socket, "socket", lambda *_args: Probe(0))
+    assert diagnostic._port_available(18080) is False
+    monkeypatch.setattr(diagnostic.socket, "socket", lambda *_args: Probe(111))
+    assert diagnostic._port_available(18080) is True
+
+
 def test_source_attestation_covers_proc_tp_runtime_plumbing() -> None:
     assert {
         "kairyu/engine/zmq_backend.py",
