@@ -60,6 +60,58 @@ async def test_stop_string_truncates_text_and_sets_reason():
     assert completion.text == text[: text.index(stop)]
 
 
+async def test_stop_token_id_is_hidden_from_text_but_retained_for_accounting():
+    tokenizer = _EchoTokenizer()
+    backend = KairyuBackend(num_pages=256, tokenizer=tokenizer)
+    probe = await backend.generate(_request("p", "hello", max_tokens=8))
+    stop_id = probe.completions[0].token_ids[1]
+
+    partials = [
+        partial
+        async for partial in backend.stream(
+            _request("r", "hello", max_tokens=8, stop_token_ids=(stop_id,))
+        )
+    ]
+    final = partials[-1]
+    completion = final.completions[0]
+
+    assert completion.finish_reason == "stop"
+    assert completion.token_ids == probe.completions[0].token_ids[:2]
+    assert completion.text == tokenizer.decode(completion.token_ids[:-1])
+    assert tokenizer.decode((stop_id,)) not in completion.text
+    assert all(
+        tokenizer.decode((stop_id,)) not in partial.completions[0].text
+        for partial in partials
+    )
+    assert final.usage is not None
+    assert final.usage.completion_tokens == 2
+
+
+async def test_native_incremental_decoder_never_sees_the_stop_token():
+    tokenizer = ToyTokenizer()
+    backend = KairyuBackend(num_pages=256, tokenizer=tokenizer)
+    probe = await backend.generate(_request("native-probe", "hello", max_tokens=6))
+    stop_id = probe.completions[0].token_ids[1]
+
+    partials = [
+        partial
+        async for partial in backend.stream(
+            _request(
+                "native-stop",
+                "hello",
+                max_tokens=6,
+                stop_token_ids=(stop_id,),
+            )
+        )
+    ]
+    final = partials[-1]
+    completion = final.completions[0]
+
+    assert completion.token_ids == probe.completions[0].token_ids[:2]
+    assert completion.text == tokenizer.decode(completion.token_ids[:-1])
+    assert all(f"tok{stop_id}" not in partial.text for partial in partials)
+
+
 async def test_stop_string_never_leaks_partial_prefix_in_stream():
     backend = KairyuBackend(num_pages=256, tokenizer=_EchoTokenizer())
     probe = await backend.generate(_request("p", "hello", max_tokens=8))

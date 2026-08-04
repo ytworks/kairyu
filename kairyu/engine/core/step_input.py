@@ -53,6 +53,11 @@ class RequestSnapshot:
     # sample from a snapshot, never from the EngineRequest, and keying those on
     # `request_id` would put the clone's tokens on a different RNG stream.
     sampling_id: str | None = None
+    # Termination metadata is immutable per request but must cross every
+    # overlap/TP/EP snapshot so selection cannot bypass the min-token mask.
+    stop_token_ids: tuple[int, ...] = ()
+    min_tokens: int = 0
+    ignore_eos: bool = False
 
     @property
     def sampling_identity(self) -> str:
@@ -112,6 +117,9 @@ def _snapshot_state(state: object) -> RequestSnapshot:
         decode_page_ids=tuple(state.decode_pages),  # type: ignore[attr-defined]
         eos_token_id=request.eos_token_id,
         max_new_tokens=request.max_new_tokens,
+        stop_token_ids=tuple(getattr(request, "stop_token_ids", ())),
+        min_tokens=getattr(request, "min_tokens", 0),
+        ignore_eos=getattr(request, "ignore_eos", False),
         num_cached_tokens=allocation.num_cached_tokens if allocation is not None else 0,
         sampling=getattr(request, "sampling", EngineSampling()),
         sampling_id=getattr(request, "sampling_id", None),

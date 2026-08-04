@@ -1,6 +1,6 @@
 # M8 Design: Engine CPU Core — Real Tokens, Real Sampling, Multi-Token Commit
 
-Status: **Implemented** (2026-07-03; D1 amended 2026-08-04, D2 amended 2026-07-28). Reviewed — APPROVE-WITH-AMENDMENTS
+Status: **Implemented** (2026-07-03; D1/D2 amended 2026-08-04). Reviewed — APPROVE-WITH-AMENDMENTS
 (3-reviewer agent panel, 2026-07-03; all amendments applied inline, see §6).
 All six phases (D1–D6) landed with tests: 328 → 437 tests, 95% coverage.
 Local-complete mandate: everything here is implemented and tested on CPU; no
@@ -137,6 +137,14 @@ media bytes.
   constant body-send bound. This does not drop D6 ZMQ v2 wire events: those are
   sequenced deltas rather than cumulative mailbox snapshots and must all reach
   the client accumulator.
+- **Terminal stop-token visibility (2026-08-04, issue #352)**: a token that
+  actually causes EOS/stop-token termination remains in output token IDs,
+  usage, raw-logprob metadata, scheduler/KV history, and the radix commit, but
+  is never fed into visible detokenization. An equal token sampled before the
+  minimum, an ignored EOS, or a length terminal is not suppressed by this rule
+  and retains the tokenizer's ordinary semantics. The decision is made before
+  an incremental decoder sees the
+  terminal token, so native streams never emit text that must be retracted.
 
 Tests: tiny BPE built programmatically (no committed blobs); Japanese multi-byte
 boundaries; WordPiece and Metaspace decoder parity; linear operation count;
@@ -189,13 +197,25 @@ New `kairyu/engine/core/sampler.py`, pure torch functions (device-agnostic):
    after top-k/top-p (NaN → multinomial crash) and distorts the nucleus.
    Mask-first + `min_tokens_to_keep=1` semantics on top-p/min-p guarantees
    non-empty support; penalties cannot resurrect `-inf`.
-3. Penalties — **repetition over prompt + committed outputs; presence/frequency
+3. While the logical output position is below `min_tokens`, mask model EOS and
+   all request/model stop-token IDs to `-inf`.
+4. Penalties — **repetition over prompt + committed outputs; presence/frequency
    over committed outputs only** (matches both vLLM and HF defaults; pinned to
    honor the vLLM-signature promise in `sampling_params.py`).
-4. `temperature == 0` → argmax **on the masked logits**, done; else scale.
-5. **min_p, then top-k, then top-p** (vLLM v1 order; HF differs — divergence
+5. `temperature == 0` → argmax **on the masked logits**, done; else scale.
+6. **min_p, then top-k, then top-p** (vLLM v1 order; HF differs — divergence
    recorded here deliberately, vLLM compat wins).
-6. softmax → seeded sample.
+7. softmax → seeded sample.
+
+**Minimum-token amendment (2026-08-04, issue #352):** CPU, CUDA, batched
+greedy, overlap, P-D, TP/EP, and speculative target sampling all apply the same
+stop mask for every logical position `p < min_tokens`; `p == min_tokens` is the
+first eligible stop position. The scheduled logical position, not a potentially
+lagging committed-history length, is authoritative. `ignore_eos` controls only
+termination: EOS is still masked below the minimum, becomes eligible at/after
+it, and then does not stop when ignored. Raw-logit logprob reporting is captured
+before the processor and remains unchanged. `SamplingParams` rejects an
+explicit `min_tokens > max_tokens`, matching the compatible request contract.
 
 **Determinism (amended)**: per-request base seed = `sampling.seed` or
 **sha256(request_id) → 63-bit int** (never Python `hash()` — randomized per

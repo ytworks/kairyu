@@ -41,6 +41,81 @@ def test_only_plain_greedy_without_logprobs_can_argmax_before_host_copy():
     )
 
 
+def test_min_tokens_mask_blocks_fast_argmax_until_logical_position_is_reached():
+    sampler = Sampler()
+    sampling = EngineSampling()
+
+    assert not sampler.can_argmax_logits(
+        "held",
+        sampling,
+        eos_token_id=7,
+        position=1,
+        stop_token_ids=(8,),
+        min_tokens=2,
+    )
+    assert sampler.can_argmax_logits(
+        "released",
+        sampling,
+        eos_token_id=7,
+        position=2,
+        stop_token_ids=(8,),
+        min_tokens=2,
+    )
+
+
+def test_min_tokens_masks_eos_and_stop_ids_before_selection_but_not_raw_logprobs():
+    logits = torch.zeros(VOCAB)
+    logits[3] = 5.0
+    logits[7] = 10.0  # EOS would win without the processor.
+    logits[8] = 9.0  # An explicit stop ID must be masked too.
+    raw = torch.log_softmax(logits, dim=-1)
+    sampler = Sampler()
+    sampling = EngineSampling(logprobs=0)
+
+    for position in (0, 1):
+        token = sampler.sample(
+            "held",
+            sampling,
+            position,
+            logits,
+            eos_token_id=7,
+            stop_token_ids=(8, 7, 8),
+            min_tokens=2,
+        )
+        assert token.token_id == 3
+        assert token.logprob == pytest.approx(float(raw[3]))
+
+    released = sampler.sample(
+        "released",
+        sampling,
+        2,
+        logits,
+        eos_token_id=7,
+        stop_token_ids=(8,),
+        min_tokens=2,
+    )
+    assert released.token_id == 7
+
+
+def test_seeded_sampling_never_selects_a_masked_stop_id():
+    logits = torch.full((VOCAB,), -20.0)
+    logits[3] = 0.0
+    logits[7] = 100.0
+    logits[8] = 90.0
+
+    token = Sampler().sample(
+        "sampled",
+        EngineSampling(temperature=1.0, seed=3),
+        0,
+        logits,
+        eos_token_id=7,
+        stop_token_ids=(8,),
+        min_tokens=1,
+    )
+
+    assert token.token_id not in (7, 8)
+
+
 def test_same_seed_same_tokens():
     logits = _logits()
     sampling = EngineSampling(temperature=1.0, seed=7)

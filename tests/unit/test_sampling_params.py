@@ -53,6 +53,7 @@ def test_stop_string_normalized_to_tuple():
         {"min_p": -0.5},
         {"repetition_penalty": 0.0},
         {"min_tokens": -1},
+        {"max_tokens": 1, "min_tokens": 2},
     ],
 )
 def test_invalid_values_raise_value_error(kwargs):

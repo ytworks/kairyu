@@ -148,9 +148,9 @@ def test_device_feedback_preserves_eos_stop_and_min_tokens(llama_dir):
         assert eager["r0"] == (stop_id,)
         assert overlap == eager
 
-    # The first stop-valued token must be retained rather than terminating
-    # below min_tokens.  Whatever the model picks next, eager and overlap see
-    # the same committed history and finish no earlier than the second token.
+    # The raw first choice is stop_id, but the sampler must mask it at logical
+    # positions 0 and 1. Eager and overlap use the same position-based mask even
+    # though the overlap snapshot's committed history lags in-flight tokens.
     eager, _ = _generate(
         llama_dir,
         EngineCore,
@@ -166,7 +166,8 @@ def test_device_feedback_preserves_eos_stop_and_min_tokens(llama_dir):
         request_kwargs={"eos_token_id": stop_id, "min_tokens": 2},
     )
     assert overlap == eager
-    assert len(overlap["r0"]) >= 2
+    assert len(overlap["r0"]) >= 3
+    assert stop_id not in overlap["r0"][:2]
 
 
 def test_seeded_device_sample_is_idempotent_and_reports_raw_logprobs():
@@ -203,6 +204,41 @@ def test_seeded_device_sample_is_idempotent_and_reports_raw_logprobs():
         raw.gather(0, first.token_id.view(1)).squeeze(0),
     )
     assert math.isfinite(float(first.logprob.cpu()))
+
+
+def test_device_min_tokens_masks_eos_and_stop_ids_until_threshold():
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.engine.core.sampling_types import EngineSampling
+
+    if not torch.cuda.is_available():  # pragma: no cover - CPU box
+        pytest.skip("device min-token gate needs CUDA")
+    logits = torch.tensor([0.0, 5.0, 10.0, 9.0], device="cuda")
+    sampler = Sampler()
+
+    held = [
+        sampler.sample_device(
+            "held",
+            EngineSampling(),
+            position,
+            logits,
+            eos_token_id=2,
+            stop_token_ids=(3,),
+            min_tokens=2,
+        )
+        for position in (0, 1)
+    ]
+    released = sampler.sample_device(
+        "released",
+        EngineSampling(),
+        2,
+        logits,
+        eos_token_id=2,
+        stop_token_ids=(3,),
+        min_tokens=2,
+    )
+
+    assert [int(sample.token_id.cpu()) for sample in held] == [1, 1]
+    assert int(released.token_id.cpu()) == 2
 
 
 def test_device_penalties_cover_prompt_committed_and_pending_history():

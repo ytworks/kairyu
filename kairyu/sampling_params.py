@@ -186,6 +186,11 @@ class SamplingParams:
             raise ValueError(f"max_tokens must be >= 1, got {self.max_tokens}")
         if self.min_tokens < 0:
             raise ValueError(f"min_tokens must be >= 0, got {self.min_tokens}")
+        if self.max_tokens is not None and self.min_tokens > self.max_tokens:
+            raise ValueError(
+                "min_tokens must be <= max_tokens, "
+                f"got min_tokens={self.min_tokens}, max_tokens={self.max_tokens}"
+            )
 
     def clone(self, **overrides: object) -> SamplingParams:
         """Return a new SamplingParams with the given fields replaced."""

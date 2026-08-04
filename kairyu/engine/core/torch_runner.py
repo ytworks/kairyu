@@ -134,6 +134,8 @@ class TorchPagedRunner:
             outputs=state.outputs,
             history_epoch=getattr(state, "output_epoch", 0),
             eos_token_id=state.request.eos_token_id,
+            stop_token_ids=getattr(state.request, "stop_token_ids", ()),
+            min_tokens=getattr(state.request, "min_tokens", 0),
         )
 
     def execute(

@@ -1054,6 +1054,8 @@ class PagedModelRunner:
             pending_outputs=self._pending_host_outputs(state, position),
             history_epoch=getattr(state, "output_epoch", 0),
             eos_token_id=state.request.eos_token_id,
+            stop_token_ids=getattr(state.request, "stop_token_ids", ()),
+            min_tokens=getattr(state.request, "min_tokens", 0),
         )
 
     def _pending_host_outputs(
@@ -1111,6 +1113,8 @@ class PagedModelRunner:
                 pending_outputs=self._pending_device_outputs(state, position),
                 history_epoch=getattr(state, "output_epoch", 0),
                 eos_token_id=state.request.eos_token_id,
+                stop_token_ids=getattr(state.request, "stop_token_ids", ()),
+                min_tokens=getattr(state.request, "min_tokens", 0),
             )
         request_id = state.request.request_id
         self._remember_device(request_id, position, sample.token_id)
@@ -1156,6 +1160,13 @@ class PagedModelRunner:
                         states[chunk.request_id].request.sampling_identity,
                         states[chunk.request_id].request.sampling,
                         states[chunk.request_id].request.eos_token_id,
+                        position=chunk.position,
+                        stop_token_ids=getattr(
+                            states[chunk.request_id].request, "stop_token_ids", ()
+                        ),
+                        min_tokens=getattr(
+                            states[chunk.request_id].request, "min_tokens", 0
+                        ),
                     )
                     for chunk in chunks
                 )
@@ -1193,6 +1204,13 @@ class PagedModelRunner:
                     states[chunk.request_id].request.sampling_identity,
                     states[chunk.request_id].request.sampling,
                     states[chunk.request_id].request.eos_token_id,
+                    position=chunk.position,
+                    stop_token_ids=getattr(
+                        states[chunk.request_id].request, "stop_token_ids", ()
+                    ),
+                    min_tokens=getattr(
+                        states[chunk.request_id].request, "min_tokens", 0
+                    ),
                 )
                 for chunk in chunks
             )
