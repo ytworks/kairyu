@@ -11,6 +11,7 @@ import time
 
 import pytest
 
+import kairyu.engine.engine_loop as engine_loop_module
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.core.pipeline import PipelinedModelRunner
@@ -155,6 +156,107 @@ def _drive(loop: EngineLoop, limit: int = 200) -> list[tuple[str, StreamUpdate]]
             return updates
         updates.extend(loop.step())
     raise AssertionError("unified loop did not drain")
+
+
+def _stage_map(update: StreamUpdate):
+    return {metric.stage: metric for metric in update.stage_metrics}
+
+
+def test_trace_disabled_never_reads_the_stage_clock(monkeypatch) -> None:
+    def forbidden_clock() -> int:
+        raise AssertionError("trace-disabled engine path read the stage clock")
+
+    monkeypatch.setattr(engine_loop_module, "perf_counter_ns", forbidden_clock)
+    loop, _ = _loop(2, _PositionRunner(), budget=2)
+    loop.submit(
+        "plain",
+        TokensPrompt((1, 2, 3, 4, 5)),
+        SamplingParams(max_tokens=2, ignore_eos=True),
+    )
+
+    final = next(
+        update
+        for request_id, update in _drive(loop)
+        if request_id == "plain" and update.finished
+    )
+
+    assert final.stage_metrics == ()
+    loop.close()
+
+
+def test_trace_metrics_cover_mixed_chunked_prefill_and_decode(monkeypatch) -> None:
+    ticks = iter(range(10, 100_000, 10))
+    monkeypatch.setattr(engine_loop_module, "perf_counter_ns", lambda: next(ticks))
+    loop, _ = _loop(2, _PositionRunner(base=1000), budget=2)
+    loop.submit(
+        "traced",
+        TokensPrompt(tuple(range(1, 10))),
+        SamplingParams(max_tokens=3, ignore_eos=True),
+        trace_requested=True,
+    )
+    loop.submit(
+        "plain",
+        TokensPrompt((20, 21, 22)),
+        SamplingParams(max_tokens=2, ignore_eos=True),
+    )
+
+    updates = _drive(loop)
+    finals = {request_id: update for request_id, update in updates if update.finished}
+    traced = finals["traced"]
+    metrics = _stage_map(traced)
+
+    assert tuple(metric.stage for metric in traced.stage_metrics) == (
+        "tokenize",
+        "queue_wait",
+        "schedule",
+        "prefill",
+        "decode_step",
+        "detokenize",
+    )
+    assert metrics["tokenize"].occurrences == 1
+    assert metrics["queue_wait"].occurrences == 1
+    assert metrics["prefill"].occurrences >= 5
+    assert metrics["decode_step"].occurrences >= 1
+    assert metrics["detokenize"].occurrences >= 2
+    assert all(metric.duration_ns > 0 for metric in traced.stage_metrics)
+    assert finals["plain"].stage_metrics == ()
+    loop.close()
+
+
+def test_early_eos_trace_excludes_unobserved_scheduled_ahead_decode(
+    monkeypatch,
+) -> None:
+    ticks = iter(range(10, 100_000, 10))
+    monkeypatch.setattr(engine_loop_module, "perf_counter_ns", lambda: next(ticks))
+    loop, _ = _loop(2, _PositionRunner())
+    loop._default_eos = 0
+    loop.submit(
+        "early-eos",
+        TokensPrompt((1, 2, 3)),
+        SamplingParams(max_tokens=6),
+        trace_requested=True,
+    )
+
+    updates = _drive(loop)
+    final = next(
+        update
+        for request_id, update in updates
+        if request_id == "early-eos" and update.finished
+    )
+    metrics = _stage_map(final)
+
+    assert final.outputs == (0,)
+    assert final.finish_reason == "stop"
+    assert set(metrics) == {
+        "tokenize",
+        "queue_wait",
+        "schedule",
+        "prefill",
+        "detokenize",
+    }
+    assert metrics["detokenize"].occurrences == 1
+    assert len(metrics) == len(final.stage_metrics)
+    loop.close()
 
 
 def test_loop_resolves_only_model_owned_sampling_omissions_at_submit() -> None:

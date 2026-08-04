@@ -486,7 +486,7 @@ trace/span/parent IDs across distinct gateway and replica services and rejects
 prompt/output canaries; it does not infer success from log order or timing.
 Production/fabric drills remain untouched.**
 
-_Last updated: 2026-08-04_
+_Last updated: 2026-08-05_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -882,6 +882,15 @@ image-bearing requests bypass that renderer and retain upstream
 processor/template ownership. Llama-3 and Qwen fixtures byte- and
 token-ID-match Transformers, including exactly one tokenizer-owned BOS.
 
+Serving latency is now attributable through the existing trace opt-in. Native
+in-process and process-split engines publish cumulative request-observed
+tokenize, queue-wait, schedule, prefill, decode-step, and detokenize durations;
+the chat SSE layer adds write duration, and Kairyu replica hops validate and
+propagate the scalar contract. `serving_bench.py --stage-trace` reports
+nearest-rank p50/p99 plus per-stage observed/missing denominators, distinguishing
+complete, partial, missing, invalid, and unrequested evidence. Trace-disabled
+engine and benchmark paths retain their prior timing hot paths.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -889,6 +898,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [amendment] Direct native stage traces make serving regressions attributable
+- What: extended trace v2 with opt-in, cumulative request-observed `tokenize`, `queue_wait`, `schedule`, `prefill`, `decode_step`, `detokenize`, and `sse_write` scalar events across in-process, process-split, and Kairyu-replica paths. The serving benchmark now explicitly requests the trace, validates terminal SSE/envelope/identity/scalar structure without retaining raw detail, reports nearest-rank stage p50/p99, and preserves complete/partial/missing/invalid plus per-stage coverage denominators. Trace-off avoids clock reads and per-request stage state; older or external targets remain missing/partial rather than zero-valued.
+- Why: TTFT/TPOT alone could identify a regression but could not distinguish prompt preparation, scheduler delay, model execution, detokenization, or HTTP delivery. The measurements are deliberately non-exclusive request observations so batching and overlap are not misrepresented as GPU ownership or additive end-to-end time.
+- Refs: issue #379; `docs/design/observability-trace-contract.md`; `bench/serving_bench.py`; `kairyu/engine/{backend,engine_loop,kairyu_backend,zmq_backend,openai_backend}.py`; `kairyu/entrypoints/server/app.py`
 
 ### 2026-08-05 — [progress] Issue #333 valid v2 diagnostic does not support dominant GIL contention
 - What: completed the sole fresh v2 Qwen3-32B TP4 ABBA diagnostic from clean source `65ba4779c118d534f1e34a1a4dcb1b579cbcfe73`. All 15 binding checks pass independent raw replay, 512/512 synchronized measurement requests succeeded once, all four containers exited gracefully with code zero and were removed without force, and the selected GPUs returned exactly to the run-start idle baseline. Paired process/in-process TTFT-p99 ratios were 0.9189755344057482 and 0.9219867334510442; their 0.9204811339283963 median is above the predeclared ≤0.90 material line, so the report-only classification is `no_material_reduction` and the dominant process/GIL-contention hypothesis is `not_supported`. Median goodput and TTFT-p50 ratios were 1.086201492163829 and 0.9282808350389853. The raw/manifest SHA-256s are `21ba4789cf34fcf4beab5ab5862952574693f80c8b608c2cede002da05088925` and `bd321c32654c0602d6e799167d16a7b375b8edf5dea5bd95faa899acde24286c`.

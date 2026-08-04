@@ -24,6 +24,7 @@ from kairyu.engine.backend import (
     CacheHint,
     EngineBackend,
     GenerationRequest,
+    GenerationStageMetric,
     GenerationUsage,
     UpstreamClientError,
     admission_upper_bound,
@@ -104,6 +105,7 @@ from kairyu.orchestration.orchestrator import (
 )
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.request import OrchestrationRequest
+from kairyu.orchestration.trace import StructuredTrace, TraceEvent, utc_now_iso
 from kairyu.outputs import CompletionOutput
 from kairyu.pricing import InvoiceExportError, PriceSheet, export_invoice_csv
 from kairyu.sampling_params import (
@@ -350,12 +352,114 @@ def _orchestrator_metadata_chunk(
     return f"data: {serialized}\n\n"
 
 
+def _direct_stage_trace(
+    response_id: str,
+    *,
+    started_at: str,
+    stage_metrics: Sequence[GenerationStageMetric],
+) -> StructuredTrace:
+    """Build the privacy-safe v2 envelope for one direct engine request."""
+
+    stage_metrics = _merge_stage_metrics(stage_metrics)
+    events = tuple(
+        TraceEvent(
+            node=metric.stage,
+            kind="stage",
+            operation="stage",
+            status="success",
+            role="engine",
+            metadata={
+                "stage": metric.stage,
+                "duration_ns": metric.duration_ns,
+                "occurrences": metric.occurrences,
+                "aggregation": "sum",
+                "scope": "request-observed",
+            },
+        )
+        for metric in stage_metrics
+    )
+    return StructuredTrace(
+        request_id=response_id,
+        started_at=started_at,
+        completed_at=utc_now_iso(),
+        events=events,
+    )
+
+
+def _merge_stage_metrics(
+    *groups: Sequence[GenerationStageMetric],
+) -> tuple[GenerationStageMetric, ...]:
+    """Combine same-stage observations across nested Kairyu transport hops."""
+
+    order: list[str] = []
+    totals: dict[str, tuple[int, int]] = {}
+    for group in groups:
+        for metric in group:
+            if metric.stage not in totals:
+                order.append(metric.stage)
+                totals[metric.stage] = (0, 0)
+            duration_ns, occurrences = totals[metric.stage]
+            totals[metric.stage] = (
+                duration_ns + metric.duration_ns,
+                occurrences + metric.occurrences,
+            )
+    return tuple(
+        GenerationStageMetric(
+            stage=stage,
+            duration_ns=totals[stage][0],
+            occurrences=totals[stage][1],
+        )
+        for stage in order
+    )
+
+
+def _direct_trace_lines(
+    stage_metrics: Sequence[GenerationStageMetric],
+) -> list[str]:
+    stage_metrics = _merge_stage_metrics(stage_metrics)
+    return [
+        "stage:"
+        f"{metric.stage} duration_ns={metric.duration_ns} "
+        f"occurrences={metric.occurrences}"
+        for metric in stage_metrics
+    ]
+
+
+def _direct_metadata_chunk(
+    response_id: str,
+    created: int,
+    model: str,
+    *,
+    started_at: str,
+    stage_metrics: Sequence[GenerationStageMetric],
+) -> str:
+    trace = _direct_stage_trace(
+        response_id,
+        started_at=started_at,
+        stage_metrics=stage_metrics,
+    ).as_dict()
+    payload = ChatCompletionChunk(
+        id=response_id,
+        created=created,
+        model=model,
+        choices=[],
+        kairyu_trace=_direct_trace_lines(stage_metrics),
+        kairyu_trace_v2=trace,
+    )
+    serialized = escape_json_line_separators(
+        payload.model_dump_json(exclude={"usage", "kairyu_route"})
+    )
+    return f"data: {serialized}\n\n"
+
+
 async def _stream_engine(
     engine: EngineBackend,
     generation_request: GenerationRequest,
     model: str,
     request: ChatCompletionRequest,
     http_request: Request,
+    *,
+    trace_started_at: str | None = None,
 ) -> AsyncIterator[str]:
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
@@ -363,6 +467,27 @@ async def _stream_engine(
     sent: dict[int, int] = {}
     logprobs_sent: dict[int, int] = {}
     last = None
+    sse_write_ns = 0
+    sse_write_count = 0
+    want_trace = generation_request.trace_requested
+    if want_trace and trace_started_at is None:
+        trace_started_at = utc_now_iso()
+
+    def stage_metrics() -> tuple[GenerationStageMetric, ...]:
+        metrics = tuple(last.stage_metrics) if last is not None else ()
+        if sse_write_count:
+            metrics = _merge_stage_metrics(
+                metrics,
+                (
+                    GenerationStageMetric(
+                        stage="sse_write",
+                        duration_ns=sse_write_ns,
+                        occurrences=sse_write_count,
+                    ),
+                ),
+            )
+        return metrics
+
     owner = _stream_usage_owner(http_request, model, generation_request.prompt)
     try:
         try:
@@ -383,6 +508,7 @@ async def _stream_engine(
                         logprobs_sent[completion.index] = len(completion.logprob_content)
                         if fresh:
                             chunk_logprobs = ChoiceLogprobs(content=_logprob_entries(fresh))
+                    write_started_ns = time.perf_counter_ns() if want_trace else None
                     yield _sse_chunk(
                         response_id,
                         created,
@@ -395,8 +521,20 @@ async def _stream_engine(
                         include_usage=include_usage,
                         logprobs=chunk_logprobs,
                     )
+                    if write_started_ns is not None:
+                        sse_write_ns += time.perf_counter_ns() - write_started_ns
+                        sse_write_count += 1
         except Exception as error:  # surface backend failures inside the SSE stream
             logger.exception("upstream backend error")
+            if want_trace:
+                assert trace_started_at is not None
+                yield _direct_metadata_chunk(
+                    response_id,
+                    created,
+                    model,
+                    started_at=trace_started_at,
+                    stage_metrics=stage_metrics(),
+                )
             payload = {  # M3: only the class name, no raw backend message
                 "error": {
                     "message": f"upstream backend error ({type(error).__name__})",
@@ -408,6 +546,7 @@ async def _stream_engine(
             return
         owner.mark_completed()
         for completion in last.completions if last else ():
+            write_started_ns = time.perf_counter_ns() if want_trace else None
             yield _sse_chunk(
                 response_id,
                 created,
@@ -417,7 +556,11 @@ async def _stream_engine(
                 finish_reason=completion.finish_reason or "stop",
                 include_usage=include_usage,
             )
+            if write_started_ns is not None:
+                sse_write_ns += time.perf_counter_ns() - write_started_ns
+                sse_write_count += 1
         if include_usage and last is not None:
+            write_started_ns = time.perf_counter_ns() if want_trace else None
             yield _usage_chunk(
                 response_id,
                 created,
@@ -427,6 +570,18 @@ async def _stream_engine(
                     last.completions,
                     owner.latest_usage,
                 ),
+            )
+            if write_started_ns is not None:
+                sse_write_ns += time.perf_counter_ns() - write_started_ns
+                sse_write_count += 1
+        if want_trace:
+            assert trace_started_at is not None
+            yield _direct_metadata_chunk(
+                response_id,
+                created,
+                model,
+                started_at=trace_started_at,
+                stage_metrics=stage_metrics(),
             )
         yield "data: [DONE]\n\n"
     finally:
@@ -674,12 +829,21 @@ async def _stream_choices(
     usage: Usage | None = None,
     *,
     orchestration_result=None,
+    stage_metrics: Sequence[GenerationStageMetric] = (),
+    trace_started_at: str | None = None,
     want_trace: bool = False,
 ) -> AsyncIterator[str]:
     """Stream already-final choices (orchestrated or tool-call responses)."""
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
     include_usage = usage is not None
+    direct_trace = (
+        want_trace
+        and orchestration_result is None
+        and trace_started_at is not None
+    )
+    sse_write_ns = 0
+    sse_write_count = 0
     for choice in choices:
         tool_calls = None
         if choice.message.tool_calls:
@@ -689,6 +853,7 @@ async def _stream_choices(
                 ChunkToolCall(index=i, id=tc.id, type=tc.type, function=tc.function)
                 for i, tc in enumerate(choice.message.tool_calls)
             ]
+        write_started_ns = time.perf_counter_ns() if direct_trace else None
         yield _sse_chunk(
             response_id,
             created,
@@ -702,6 +867,10 @@ async def _stream_choices(
             include_usage=include_usage,
             logprobs=choice.logprobs,
         )
+        if write_started_ns is not None:
+            sse_write_ns += time.perf_counter_ns() - write_started_ns
+            sse_write_count += 1
+        write_started_ns = time.perf_counter_ns() if direct_trace else None
         yield _sse_chunk(
             response_id,
             created,
@@ -711,8 +880,15 @@ async def _stream_choices(
             finish_reason=choice.finish_reason,
             include_usage=include_usage,
         )
+        if write_started_ns is not None:
+            sse_write_ns += time.perf_counter_ns() - write_started_ns
+            sse_write_count += 1
     if usage is not None:
+        write_started_ns = time.perf_counter_ns() if direct_trace else None
         yield _usage_chunk(response_id, created, model, usage)
+        if write_started_ns is not None:
+            sse_write_ns += time.perf_counter_ns() - write_started_ns
+            sse_write_count += 1
     if orchestration_result is not None and want_trace:
         metadata = _orchestrator_metadata_chunk(
             response_id,
@@ -726,6 +902,27 @@ async def _stream_choices(
         if metadata is not None:
             yield metadata
         yield f": trace {' | '.join(orchestration_result.trace)}\n\n"
+    elif direct_trace:
+        direct_metrics = tuple(stage_metrics)
+        if sse_write_count:
+            direct_metrics = _merge_stage_metrics(
+                direct_metrics,
+                (
+                    GenerationStageMetric(
+                        stage="sse_write",
+                        duration_ns=sse_write_ns,
+                        occurrences=sse_write_count,
+                    ),
+                ),
+            )
+        assert trace_started_at is not None
+        yield _direct_metadata_chunk(
+            response_id,
+            created,
+            model,
+            started_at=trace_started_at,
+            stage_metrics=direct_metrics,
+        )
     yield "data: [DONE]\n\n"
 
 
@@ -1195,6 +1392,8 @@ def create_app(
     @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
     async def chat_completions(request: ChatCompletionRequest, http_request: Request):
         http_request.state.model = request.model  # label for the metrics middleware
+        want_trace = http_request.headers.get("x-kairyu-trace") == "1"
+        trace_started_at = utc_now_iso() if want_trace else None
         if request.model in auto_models:
             try:
                 validated_input = validate_chat_input(
@@ -1230,7 +1429,6 @@ def create_app(
             reservation_error = _reserve_tenant_work(http_request, bound)
             if reservation_error is not None:
                 return reservation_error
-            want_trace = http_request.headers.get("x-kairyu-trace") == "1"
             # Tool choices must be validated across every final choice before
             # any bytes become irrevocable SSE output. Indexed alternatives
             # and logprobs otherwise stay on the low-latency pull-through path.
@@ -1379,6 +1577,7 @@ def create_app(
                 placement_started_ns=getattr(
                     http_request.state, "placement_started_ns", None
                 ),
+                trace_requested=want_trace,
                 legacy_chat_models=legacy_chat_models,
             )
         except ChatRequestError as error:
@@ -1421,6 +1620,7 @@ def create_app(
                     request.model,
                     request,
                     http_request,
+                    trace_started_at=trace_started_at,
                 )
             )
         try:
@@ -1454,9 +1654,23 @@ def create_app(
                     response.choices,
                     request.model,
                     usage=(response.usage if validated.input.include_usage else None),
+                    stage_metrics=executed.result.stage_metrics,
+                    trace_started_at=trace_started_at,
+                    want_trace=want_trace,
                 )
             )
-        return JSONResponse(content=_chat_response_payload(response))
+        payload = _chat_response_payload(response)
+        if want_trace:
+            assert trace_started_at is not None
+            payload["kairyu_trace"] = _direct_trace_lines(
+                executed.result.stage_metrics
+            )
+            payload["kairyu_trace_v2"] = _direct_stage_trace(
+                response.id,
+                started_at=trace_started_at,
+                stage_metrics=executed.result.stage_metrics,
+            ).as_dict()
+        return JSONResponse(content=payload)
 
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest, http_request: Request):

@@ -11,6 +11,8 @@ Datasets:
 Examples:
   uv run python bench/serving_bench.py --base-url http://localhost:8000 \
       --model kairyu-mock --num-requests 128 --concurrency 128
+  uv run python bench/serving_bench.py --base-url http://localhost:8000 \
+      --model kairyu --stage-trace
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import argparse
 import asyncio
 import datetime as _datetime
 import json
+import re
 import statistics
 import sys
 import time
@@ -43,6 +46,73 @@ from kairyu.bench.types import BenchTarget
 _SSE_PREFIX = "data: "
 _DEFAULT_BASE_URL = "http://localhost:8000"
 _DEFAULT_MODEL = "kairyu-mock"
+_TRACE_VERSION = "2.0"
+_TRACE_HEADER = {"X-Kairyu-Trace": "1"}
+_STAGE_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_TRACE_ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,63}\Z")
+_RFC3339_MILLISECONDS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z"
+)
+_ORCHESTRATION_KINDS = frozenset(
+    {"routing", "generation", "verification", "synthesis"}
+)
+_TRACE_STATUSES = frozenset({"success", "skipped", "failed"})
+_NATIVE_STAGE_NAMES = (
+    "tokenize",
+    "queue_wait",
+    "schedule",
+    "prefill",
+    "decode_step",
+    "detokenize",
+    "sse_write",
+)
+_MAX_STAGE_DURATION_NS = (1 << 63) - 1
+_MAX_STAGE_OCCURRENCES = (1 << 31) - 1
+_MAX_TRACE_EVENTS = 256
+_TRACE_DURATION_NAMES = (
+    "duration_ms",
+    "queue_wait_ms",
+    "service_ms",
+    "first_token_ms",
+    "post_first_ms",
+    "total_ms",
+)
+
+
+@dataclass(frozen=True)
+class TraceStageMetrics:
+    """Privacy-minimized timing for one orchestration trace event."""
+
+    stage: str
+    node: str
+    role: str | None
+    kind: str
+    status: str
+    attempt: int
+    duration_ms: float | None = None
+    occurrences: int | None = None
+    queue_wait_ms: float | None = None
+    service_ms: float | None = None
+    first_token_ms: float | None = None
+    post_first_ms: float | None = None
+    total_ms: float | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "stage": self.stage,
+            "node": self.node,
+            "role": self.role,
+            "kind": self.kind,
+            "status": self.status,
+            "attempt": self.attempt,
+            "duration_ms": self.duration_ms,
+            "occurrences": self.occurrences,
+            "queue_wait_ms": self.queue_wait_ms,
+            "service_ms": self.service_ms,
+            "first_token_ms": self.first_token_ms,
+            "post_first_ms": self.post_first_ms,
+            "total_ms": self.total_ms,
+        }
 
 
 @dataclass(frozen=True)
@@ -51,6 +121,9 @@ class RequestMetrics:
     total_s: float
     output_chunks: int
     completion_tokens: int | None = None  # from the include_usage final chunk
+    trace_status: str = "not_requested"
+    trace_version: str | None = None
+    trace_stages: tuple[TraceStageMetrics, ...] = ()
 
     @property
     def tpot_s(self) -> float:
@@ -68,6 +141,199 @@ class RequestMetrics:
     @property
     def token_granular(self) -> bool:
         return self.completion_tokens is not None
+
+
+def _parse_utc_timestamp(value: object, label: str) -> _datetime.datetime:
+    if type(value) is not str or _RFC3339_MILLISECONDS_RE.fullmatch(value) is None:
+        raise ValueError(f"{label} must be an RFC 3339 UTC millisecond string")
+    try:
+        parsed = _datetime.datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError(f"{label} is not RFC 3339") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != _datetime.timedelta(0):
+        raise ValueError(f"{label} must be UTC")
+    return parsed
+
+
+def _trace_text(value: object, label: str, *, optional: bool = False) -> str | None:
+    if value is None and optional:
+        return None
+    if type(value) is not str or not value or len(value) > 128 or not value.isprintable():
+        raise ValueError(f"{label} must be a bounded printable string")
+    return value
+
+
+def _trace_identifier(
+    value: object,
+    label: str,
+    *,
+    optional: bool = False,
+) -> str | None:
+    if value is None and optional:
+        return None
+    if type(value) is not str or _TRACE_ID_RE.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a bounded safe identifier")
+    return value
+
+
+def _duration_ms(start: _datetime.datetime, end: _datetime.datetime) -> float:
+    return (end - start).total_seconds() * 1e3
+
+
+def _parse_trace(
+    trace: object,
+    *,
+    response_id: object,
+) -> tuple[str, tuple[TraceStageMetrics, ...]]:
+    """Validate trace v2 and retain only identity, status and derived durations."""
+
+    if not isinstance(trace, dict) or trace.get("trace_version") != _TRACE_VERSION:
+        raise ValueError("unsupported or malformed trace version")
+    if type(response_id) is not str or not response_id:
+        raise ValueError("terminal SSE metadata has no response id")
+    if trace.get("request_id") != response_id:
+        raise ValueError("trace request id does not match the SSE response id")
+
+    trace_started = _parse_utc_timestamp(trace.get("started_at"), "trace.started_at")
+    trace_completed = _parse_utc_timestamp(trace.get("completed_at"), "trace.completed_at")
+    if trace_completed < trace_started:
+        raise ValueError("trace timestamps are reversed")
+    events = trace.get("events")
+    if not isinstance(events, list) or len(events) > _MAX_TRACE_EVENTS:
+        raise ValueError("trace.events must be a bounded list")
+
+    stages: list[TraceStageMetrics] = []
+    direct_stage_names: set[str] = set()
+    for expected_seq, event in enumerate(events, start=1):
+        if (
+            not isinstance(event, dict)
+            or type(event.get("seq")) is not int
+            or event["seq"] != expected_seq
+        ):
+            raise ValueError("trace event sequence is not contiguous")
+        kind = _trace_text(event.get("kind"), "event.kind")
+        assert kind is not None
+        if kind != "stage" and kind not in _ORCHESTRATION_KINDS:
+            # v2 is additive. Unknown event kinds do not invalidate or enter
+            # artifacts; their detail and identities remain unretained.
+            continue
+        status = _trace_text(event.get("status"), "event.status")
+        assert status is not None
+        if status not in _TRACE_STATUSES:
+            continue
+        try:
+            node = _trace_identifier(event.get("node"), "event.node")
+            role = _trace_identifier(
+                event.get("role"), "event.role", optional=True
+            )
+        except ValueError:
+            # Deployments historically allow free-form orchestration role
+            # labels. Do not persist such values or invalidate the rest of a
+            # valid envelope; omit only the event whose identity is unsafe.
+            continue
+        attempt = event.get("attempt")
+        if type(attempt) is not int or not 0 <= attempt <= _MAX_STAGE_OCCURRENCES:
+            raise ValueError("event.attempt must be a bounded non-negative integer")
+        assert node is not None and kind is not None and status is not None
+        if kind == "stage":
+            detail = event.get("detail")
+            expected_detail = {
+                "stage",
+                "duration_ns",
+                "occurrences",
+                "aggregation",
+                "scope",
+            }
+            if type(detail) is not dict or not expected_detail.issubset(detail):
+                raise ValueError("stage event detail is missing required fields")
+            stage_name = detail["stage"]
+            duration_ns = detail["duration_ns"]
+            occurrences = detail["occurrences"]
+            if (
+                type(stage_name) is not str
+                or _STAGE_NAME_RE.fullmatch(stage_name) is None
+                or node != stage_name
+                or stage_name in direct_stage_names
+            ):
+                raise ValueError("stage event has an unsafe or inconsistent stage name")
+            if (
+                type(duration_ns) is not int
+                or not 0 <= duration_ns <= _MAX_STAGE_DURATION_NS
+            ):
+                raise ValueError("stage duration_ns is outside the supported integer range")
+            if (
+                type(occurrences) is not int
+                or not 1 <= occurrences <= _MAX_STAGE_OCCURRENCES
+            ):
+                raise ValueError("stage occurrences is outside the supported integer range")
+            if detail["aggregation"] != "sum" or detail["scope"] != "request-observed":
+                raise ValueError("stage aggregation or scope is unsupported")
+            if event.get("timing") is not None:
+                raise ValueError("stage events must use scalar durations, not wall timestamps")
+            if role != "engine" or status != "success" or attempt != 0:
+                raise ValueError("stage event identity is unsupported")
+            direct_stage_names.add(stage_name)
+            stages.append(
+                TraceStageMetrics(
+                    stage=stage_name,
+                    node=node,
+                    role=role,
+                    kind=kind,
+                    status=status,
+                    attempt=attempt,
+                    duration_ms=duration_ns / 1e6,
+                    occurrences=occurrences,
+                )
+            )
+            continue
+        timing = event.get("timing")
+        if not isinstance(timing, dict):
+            raise ValueError("event.timing must be an object")
+        started = _parse_utc_timestamp(timing.get("started_at"), "event.started_at")
+        completed = _parse_utc_timestamp(
+            timing.get("completed_at"), "event.completed_at"
+        )
+        queued_raw = timing.get("queued_at")
+        first_raw = timing.get("first_token_at")
+        queued = (
+            None
+            if queued_raw is None
+            else _parse_utc_timestamp(queued_raw, "event.queued_at")
+        )
+        first = (
+            None
+            if first_raw is None
+            else _parse_utc_timestamp(first_raw, "event.first_token_at")
+        )
+        ordered = [value for value in (queued, started, first, completed) if value is not None]
+        if ordered != sorted(ordered):
+            raise ValueError("event timestamps are reversed")
+        if ordered[0] < trace_started or ordered[-1] > trace_completed:
+            raise ValueError("event timestamps are outside the trace envelope")
+
+        stage = "/".join((node, role or "-", kind))
+        stages.append(
+            TraceStageMetrics(
+                stage=stage,
+                node=node,
+                role=role,
+                kind=kind,
+                status=status,
+                attempt=attempt,
+                queue_wait_ms=(
+                    _duration_ms(queued, started) if queued is not None else None
+                ),
+                service_ms=_duration_ms(started, completed),
+                first_token_ms=(
+                    _duration_ms(started, first) if first is not None else None
+                ),
+                post_first_ms=(
+                    _duration_ms(first, completed) if first is not None else None
+                ),
+                total_ms=_duration_ms(queued or started, completed),
+            )
+        )
+    return _TRACE_VERSION, tuple(stages)
 
 
 def load_prompts(dataset: Path | None, num_requests: int) -> tuple[list[str], str]:
@@ -104,6 +370,7 @@ async def run_one(
     seed: int | None = None,
     min_tokens: int | None = None,
     ignore_eos: bool = False,
+    request_trace: bool = False,
 ) -> RequestMetrics:
     body = {
         "model": model,
@@ -125,9 +392,20 @@ async def run_one(
     ttft = None
     chunks = 0
     completion_tokens = None
+    response_id: str | None = None
+    response_id_conflict = False
+    terminal_traces: list[tuple[object, object, int]] = []
+    json_event_count = 0
+    done_count = 0
+    trace_protocol_invalid = False
     # Clients use the shared canonical API root (ending in /v1). Keep the
     # request relative so URL joining cannot produce /v1/v1.
-    async with client.stream("POST", "chat/completions", json=body) as response:
+    async with client.stream(
+        "POST",
+        "chat/completions",
+        headers=_TRACE_HEADER if request_trace else None,
+        json=body,
+    ) as response:
         if response.status_code == 400 and request_usage:
             # target rejects stream_options: retry once without (labeled fallback)
             return await run_one(
@@ -140,14 +418,44 @@ async def run_one(
                 seed=seed,
                 min_tokens=min_tokens,
                 ignore_eos=ignore_eos,
+                request_trace=request_trace,
             )
         response.raise_for_status()
         async for line in response.aiter_lines():
-            if not line.startswith(_SSE_PREFIX) or line == f"{_SSE_PREFIX}[DONE]":
+            if not line.startswith(_SSE_PREFIX):
                 continue
-            chunk = json.loads(line[len(_SSE_PREFIX):])
+            data = line[len(_SSE_PREFIX):]
+            if data == "[DONE]":
+                if request_trace:
+                    done_count += 1
+                    if done_count != 1:
+                        trace_protocol_invalid = True
+                continue
+            if request_trace:
+                if done_count:
+                    trace_protocol_invalid = True
+                json_event_count += 1
+            chunk = json.loads(data)
+            if request_trace:
+                chunk_id = chunk.get("id")
+                if isinstance(chunk_id, str) and chunk_id:
+                    if response_id is None:
+                        response_id = chunk_id
+                    elif chunk_id != response_id:
+                        response_id_conflict = True
             if chunk.get("usage"):  # final usage chunk (empty choices)
                 completion_tokens = chunk["usage"].get("completion_tokens")
+            if request_trace and "kairyu_trace_v2" in chunk:
+                if chunk.get("choices") != []:
+                    trace_protocol_invalid = True
+                else:
+                    terminal_traces.append(
+                        (
+                            chunk.get("id"),
+                            chunk["kairyu_trace_v2"],
+                            json_event_count,
+                        )
+                    )
             if any(
                 (choice.get("delta") or {}).get("content")
                 for choice in chunk.get("choices", [])
@@ -156,11 +464,50 @@ async def run_one(
                 if ttft is None:
                     ttft = time.perf_counter() - start
     total = time.perf_counter() - start
+    trace_status = "missing" if request_trace else "not_requested"
+    trace_version = None
+    trace_stages: tuple[TraceStageMetrics, ...] = ()
+    if request_trace:
+        if done_count != 1:
+            trace_protocol_invalid = True
+        if terminal_traces:
+            trace_status = "invalid"
+        if (
+            len(terminal_traces) == 1
+            and not response_id_conflict
+            and not trace_protocol_invalid
+            and terminal_traces[0][2] == json_event_count
+        ):
+            terminal_id, trace, _event_index = terminal_traces[0]
+            try:
+                trace_version, trace_stages = _parse_trace(
+                    trace,
+                    response_id=terminal_id or response_id,
+                )
+            except ValueError:
+                pass
+            else:
+                native_stages = {
+                    stage.stage for stage in trace_stages if stage.kind == "stage"
+                }
+                if native_stages:
+                    trace_status = (
+                        "valid"
+                        if set(_NATIVE_STAGE_NAMES).issubset(native_stages)
+                        else "partial"
+                    )
+                else:
+                    trace_status = "valid" if trace_stages else "missing"
+        elif trace_protocol_invalid:
+            trace_status = "invalid"
     return RequestMetrics(
         ttft_s=ttft if ttft is not None else total,
         total_s=total,
         output_chunks=chunks,
         completion_tokens=completion_tokens,
+        trace_status=trace_status,
+        trace_version=trace_version,
+        trace_stages=trace_stages,
     )
 
 
@@ -243,6 +590,7 @@ def build_run_config(args: argparse.Namespace) -> dict:
         "seed": args.seed,
         "min_tokens": args.min_tokens,
         "ignore_eos": args.ignore_eos,
+        "stage_trace": getattr(args, "stage_trace", False),
         "ttft_slo_s": args.ttft_slo_s,
         "tensor_parallel": args.tensor_parallel,
         "dp_replicas": args.dp_replicas,
@@ -271,6 +619,98 @@ def summarize_results(
         if token_granular
         else None
     )
+    trace_counts = {
+        status: sum(metric.trace_status == status for metric in results)
+        for status in (
+            "valid",
+            "partial",
+            "missing",
+            "invalid",
+            "not_requested",
+        )
+    }
+    requested_traces = (
+        trace_counts["valid"]
+        + trace_counts["partial"]
+        + trace_counts["missing"]
+        + trace_counts["invalid"]
+    )
+    stage_values: dict[str, dict[str, object]] = {}
+    if requested_traces:
+        for stage_name in _NATIVE_STAGE_NAMES:
+            stage_values[stage_name] = {
+                "node": stage_name,
+                "role": "engine",
+                "kind": "stage",
+                "expected_native": True,
+                "events": 0,
+                "request_indexes": set(),
+                "occurrences_total": None,
+                **{name: [] for name in _TRACE_DURATION_NAMES},
+            }
+    for request_index, metric in enumerate(results):
+        if metric.trace_status not in {"valid", "partial"}:
+            continue
+        for stage in metric.trace_stages:
+            aggregate = stage_values.setdefault(
+                stage.stage,
+                {
+                    "node": stage.node,
+                    "role": stage.role,
+                    "kind": stage.kind,
+                    "expected_native": False,
+                    "events": 0,
+                    "request_indexes": set(),
+                    "occurrences_total": None,
+                    **{name: [] for name in _TRACE_DURATION_NAMES},
+                },
+            )
+            aggregate["events"] = int(aggregate["events"]) + 1
+            request_indexes = aggregate["request_indexes"]
+            assert isinstance(request_indexes, set)
+            request_indexes.add(request_index)
+            if stage.occurrences is not None:
+                aggregate["occurrences_total"] = (
+                    int(aggregate["occurrences_total"] or 0) + stage.occurrences
+                )
+            for name in _TRACE_DURATION_NAMES:
+                value = getattr(stage, name)
+                if value is not None:
+                    values = aggregate[name]
+                    assert isinstance(values, list)
+                    values.append(value)
+
+    stage_latency_ms: dict[str, dict[str, object]] = {}
+    for stage_name, aggregate in sorted(stage_values.items()):
+        request_indexes = aggregate["request_indexes"]
+        assert isinstance(request_indexes, set)
+        requests_observed = len(request_indexes)
+        stage_summary: dict[str, object] = {
+            "node": aggregate["node"],
+            "role": aggregate["role"],
+            "kind": aggregate["kind"],
+            "expected_native": aggregate["expected_native"],
+            "events": aggregate["events"],
+            "requests_observed": requests_observed,
+            "requests_missing": requested_traces - requests_observed,
+            "coverage_fraction": (
+                requests_observed / requested_traces if requested_traces else None
+            ),
+            "occurrences_total": aggregate["occurrences_total"],
+        }
+        for name in _TRACE_DURATION_NAMES:
+            values = sorted(aggregate[name])
+            stage_summary[name.removesuffix("_ms")] = {
+                "samples": len(values),
+                "p50_ms": (
+                    round(nearest_rank_percentile(values, 0.50), 3) if values else None
+                ),
+                "p99_ms": (
+                    round(nearest_rank_percentile(values, 0.99), 3) if values else None
+                ),
+            }
+        stage_latency_ms[stage_name] = stage_summary
+
     samples = [
         {
             "request_index": index,
@@ -279,6 +719,11 @@ def summarize_results(
             "tpot_ms": metric.tpot_s * 1e3,
             "output_chunks": metric.output_chunks,
             "completion_tokens": metric.completion_tokens,
+            "trace": {
+                "status": metric.trace_status,
+                "version": metric.trace_version,
+                "stages": [stage.as_dict() for stage in metric.trace_stages],
+            },
         }
         for index, metric in enumerate(results)
     ]
@@ -300,6 +745,19 @@ def summarize_results(
             if completion_tokens_total is not None
             else None
         ),
+        "trace_coverage": {
+            "total_requests": len(results),
+            "requested": requested_traces,
+            "not_requested": trace_counts["not_requested"],
+            "valid": trace_counts["valid"],
+            "partial": trace_counts["partial"],
+            "missing": trace_counts["missing"],
+            "invalid": trace_counts["invalid"],
+            "fraction": (
+                trace_counts["valid"] / requested_traces if requested_traces else None
+            ),
+        },
+        "stage_latency_ms": stage_latency_ms,
     }
     return summary, samples
 
@@ -337,6 +795,7 @@ async def run_benchmark(args: argparse.Namespace) -> None:
                     seed=args.seed,
                     min_tokens=args.min_tokens,
                     ignore_eos=args.ignore_eos,
+                    request_trace=getattr(args, "stage_trace", False),
                 )
 
         wall_start_ns = time.perf_counter_ns()
@@ -365,6 +824,38 @@ async def run_benchmark(args: argparse.Namespace) -> None:
             f"TPOT mean={summary['tpot_mean_ms']}ms/token "
             f"({summary['tpot_method']}-granularity)"
         )
+    coverage = summary["trace_coverage"]
+    if coverage["requested"]:
+        print(
+            "trace="
+            f"{coverage['valid']}/{coverage['requested']} valid "
+            f"({coverage['partial']} partial, {coverage['missing']} missing, "
+            f"{coverage['invalid']} invalid)"
+        )
+    else:
+        print(f"trace=not requested ({coverage['not_requested']} requests)")
+    for stage_name, stage in summary["stage_latency_ms"].items():
+        rendered = [
+            "coverage="
+            f"{stage['requests_observed']}/"
+            f"{stage['requests_observed'] + stage['requests_missing']}"
+        ]
+        for duration in (
+            "duration",
+            "queue_wait",
+            "service",
+            "first_token",
+            "post_first",
+            "total",
+        ):
+            values = stage[duration]
+            if values["samples"]:
+                rendered.append(
+                    f"{duration}=p50 {values['p50_ms']}ms/p99 {values['p99_ms']}ms"
+                )
+        if stage["occurrences_total"] is not None:
+            rendered.append(f"occurrences={stage['occurrences_total']}")
+        print(f"trace stage={stage_name} " + "; ".join(rendered))
     print(
         f"throughput={summary['throughput_rps']} req/s; "
         f"output={summary['output_tokens_per_s']} token/s; "
@@ -423,6 +914,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ttft-slo-s", type=float, default=1.0)
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--stage-trace",
+        action="store_true",
+        help="request and report Kairyu structured stage timing (opt-in)",
+    )
     auth = parser.add_mutually_exclusive_group()
     auth.add_argument(
         "--api-key-env",

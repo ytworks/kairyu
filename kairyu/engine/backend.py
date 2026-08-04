@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -22,6 +23,10 @@ from kairyu.engine.prompt import (
 )
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams, validate_prompt_owned_extra_args
+
+_GENERATION_STAGE_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_MAX_STAGE_DURATION_NS = (1 << 63) - 1
+_MAX_STAGE_OCCURRENCES = (1 << 31) - 1
 
 
 class Shutdownable(Protocol):
@@ -120,6 +125,36 @@ class CacheHint:
 
 
 @dataclass(frozen=True)
+class GenerationStageMetric:
+    """One cumulative, request-scoped native generation stage observation."""
+
+    stage: str
+    duration_ns: int
+    occurrences: int = 1
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.stage) is not str
+            or _GENERATION_STAGE_NAME_RE.fullmatch(self.stage) is None
+        ):
+            raise ValueError("generation stage must be a bounded safe identifier")
+        if (
+            type(self.duration_ns) is not int
+            or not 0 <= self.duration_ns <= _MAX_STAGE_DURATION_NS
+        ):
+            raise ValueError(
+                "generation stage duration_ns must be a bounded non-negative integer"
+            )
+        if (
+            type(self.occurrences) is not int
+            or not 1 <= self.occurrences <= _MAX_STAGE_OCCURRENCES
+        ):
+            raise ValueError(
+                "generation stage occurrences must be a bounded positive integer"
+            )
+
+
+@dataclass(frozen=True)
 class GenerationRequest:
     request_id: str
     prompt: PromptInput
@@ -138,11 +173,16 @@ class GenerationRequest:
     # present, ReplicaPool records request-ingress-to-selection latency rather
     # than only the pure hash/least-load function cost (G5 F1a).
     placement_started_ns: int | None = None
+    # Explicit diagnostic opt-in. Native engines leave their timing hot path
+    # inert unless the public request asks for the structured stage trace.
+    trace_requested: bool = False
 
     def __post_init__(self) -> None:
         # Defense in depth for callers holding a SamplingParams created by an
         # older process or deliberately altered through low-level reflection.
         validate_prompt_owned_extra_args(self.sampling_params.extra_args)
+        if type(self.trace_requested) is not bool:
+            raise ValueError("trace_requested must be a boolean")
         kind = prompt_kind(self.prompt)
         if (
             kind != "text"
@@ -386,6 +426,9 @@ class GenerationResult:
     # reports the processed prompt. Text-only adapters may leave this empty.
     # Appended after the historical fields to preserve positional compatibility.
     prompt_token_ids: tuple[int, ...] = ()
+    # Cumulative, stage-unique native observations. Empty means tracing was not
+    # requested or the selected backend cannot provide this optional surface.
+    stage_metrics: tuple[GenerationStageMetric, ...] = ()
 
     @property
     def text(self) -> str:

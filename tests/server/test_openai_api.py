@@ -94,6 +94,14 @@ def _assert_sse_response_headers(response: httpx.Response) -> None:
     assert "connection" not in response.headers
 
 
+def _sse_json_payloads(response: httpx.Response) -> list[dict]:
+    return [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ") and line != "data: [DONE]"
+    ]
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("endpoint", ["chat", "completions"])
 async def test_zero_token_prompt_returns_400_before_streaming(endpoint, stream):
@@ -152,6 +160,171 @@ async def test_native_http_text_prompt_is_tokenized_once(endpoint, stream):
     assert response.status_code == 200
     assert tokenizer.encode_calls == 1
     assert backend._prepared_requests == {}
+    await backend.shutdown()
+
+
+async def test_native_chat_stage_trace_is_opt_in_and_terminal():
+    backend = KairyuBackend(tokenizer=ToyTokenizer(), num_pages=64)
+    app = create_legacy_app(engines={"native": backend})
+    body = {
+        "model": "native",
+        "messages": [{"role": "user", "content": "trace this request"}],
+        "max_tokens": 3,
+        "temperature": 0,
+    }
+
+    async with _client(app) as client:
+        plain = await client.post("/v1/chat/completions", json=body)
+        unary = await client.post(
+            "/v1/chat/completions",
+            json=body,
+            headers={"X-Kairyu-Trace": "1"},
+        )
+        streamed = await client.post(
+            "/v1/chat/completions",
+            json=body | {"stream": True},
+            headers={"X-Kairyu-Trace": "1"},
+        )
+
+    assert plain.status_code == 200
+    assert "kairyu_trace" not in plain.json()
+    assert "kairyu_trace_v2" not in plain.json()
+
+    assert unary.status_code == 200
+    unary_payload = unary.json()
+    unary_trace = unary_payload["kairyu_trace_v2"]
+    assert unary_trace["request_id"] == unary_payload["id"]
+    assert {event["detail"]["stage"] for event in unary_trace["events"]} == {
+        "tokenize",
+        "queue_wait",
+        "schedule",
+        "prefill",
+        "decode_step",
+        "detokenize",
+    }
+
+    assert streamed.status_code == 200
+    payloads = _sse_json_payloads(streamed)
+    metadata = [payload for payload in payloads if "kairyu_trace_v2" in payload]
+    assert len(metadata) == 1
+    assert payloads[-1] is metadata[0]
+    assert metadata[0]["choices"] == []
+    trace = metadata[0]["kairyu_trace_v2"]
+    assert trace["request_id"] == metadata[0]["id"]
+    assert [event["seq"] for event in trace["events"]] == list(
+        range(1, len(trace["events"]) + 1)
+    )
+    stages = {event["detail"]["stage"]: event for event in trace["events"]}
+    assert set(stages) == {
+        "tokenize",
+        "queue_wait",
+        "schedule",
+        "prefill",
+        "decode_step",
+        "detokenize",
+        "sse_write",
+    }
+    for stage, event in stages.items():
+        assert event["kind"] == "stage"
+        assert event["timing"] is None
+        assert event["detail"] == {
+            "stage": stage,
+            "duration_ns": event["detail"]["duration_ns"],
+            "occurrences": event["detail"]["occurrences"],
+            "aggregation": "sum",
+            "scope": "request-observed",
+        }
+        assert type(event["detail"]["duration_ns"]) is int
+        assert event["detail"]["duration_ns"] >= 0
+        assert type(event["detail"]["occurrences"]) is int
+        assert event["detail"]["occurrences"] >= 1
+
+    await backend.shutdown()
+
+
+async def test_gateway_retains_replica_stage_trace_before_sanitized_error():
+    replica_trace = {
+        "trace_version": "2.0",
+        "request_id": "chatcmpl-replica",
+        "started_at": "2026-08-05T00:00:00.000Z",
+        "completed_at": "2026-08-05T00:00:00.100Z",
+        "events": [
+            {
+                "seq": 1,
+                "node": "decode_step",
+                "role": "engine",
+                "kind": "stage",
+                "status": "success",
+                "attempt": 0,
+                "timing": None,
+                "detail": {
+                    "stage": "decode_step",
+                    "duration_ns": 303,
+                    "occurrences": 2,
+                    "aggregation": "sum",
+                    "scope": "request-observed",
+                },
+            }
+        ],
+    }
+    metadata = json.dumps(
+        {
+            "id": "chatcmpl-replica",
+            "choices": [],
+            "kairyu_trace_v2": replica_trace,
+        }
+    )
+    replica_body = (
+        b'data: {"id":"chatcmpl-replica","choices":'
+        b'[{"index":0,"delta":{"content":"ok"}}]}\n\n'
+        + f"data: {metadata}\n\n".encode()
+        + b'data: {"error":{"message":"secret replica detail",'
+        b'"type":"upstream_error"}}\n\n'
+        + b"data: [DONE]\n\n"
+    )
+    backend = OpenAICompatBackend(
+        base_url="http://replica:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=replica_body,
+                headers={"content-type": "text/event-stream"},
+            )
+        ),
+        upstream="kairyu",
+    )
+    app = create_legacy_app(engines={"gateway": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            headers={"X-Kairyu-Trace": "1"},
+            json={
+                "model": "gateway",
+                "messages": [{"role": "user", "content": "trace failure"}],
+                "max_tokens": 2,
+                "stream": True,
+            },
+        )
+
+    payloads = _sse_json_payloads(response)
+    trace_payloads = [
+        payload for payload in payloads if "kairyu_trace_v2" in payload
+    ]
+    assert response.status_code == 200
+    assert len(trace_payloads) == 1
+    stages = {
+        event["detail"]["stage"]: event
+        for event in trace_payloads[0]["kairyu_trace_v2"]["events"]
+    }
+    assert stages["decode_step"]["detail"]["duration_ns"] == 303
+    assert stages["decode_step"]["detail"]["occurrences"] == 2
+    assert "sse_write" in stages
+    assert "secret replica detail" not in response.text
+    assert "upstream backend error (RuntimeError)" in response.text
+    assert response.text.rstrip().endswith("data: [DONE]")
     await backend.shutdown()
 
 

@@ -440,6 +440,7 @@ def validate_chat_request(
     priority: int | None = None,
     scheduling_class: str = "interactive",
     placement_started_ns: int | None = None,
+    trace_requested: bool = False,
     legacy_chat_models: AbstractSet[str] | None = None,
 ) -> ValidatedChatRequest:
     engine = engines.get(request.model)
@@ -466,6 +467,7 @@ def validate_chat_request(
         prompt=validated_input.prompt,
         sampling_params=sampling,
         placement_started_ns=placement_started_ns,
+        trace_requested=trace_requested,
         priority=request.priority if priority is None else priority,
         scheduling_class=scheduling_class,
         cache_hint=cache_hint,

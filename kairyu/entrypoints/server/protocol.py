@@ -365,8 +365,9 @@ class ChatCompletionChunk(BaseModel):
     # OpenAI contract (m9 D1): key OMITTED unless stream_options.include_usage,
     # then null on every chunk except the final usage chunk (choices: [])
     usage: Usage | None = None
-    # AUTO-only terminal metadata.  The server omits these fields from ordinary
-    # chunks and emits them only after an explicit X-Kairyu-Trace opt-in.
+    # Opt-in terminal metadata for AUTO and direct native-engine responses. The
+    # server omits these fields from ordinary chunks and emits them only after
+    # an explicit X-Kairyu-Trace opt-in. kairyu_route remains AUTO-only.
     kairyu_trace: list[str] | None = None
     kairyu_trace_v2: KairyuTraceV2 | None = None
     kairyu_route: RouteDecisionPayload | None = None

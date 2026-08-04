@@ -1,6 +1,7 @@
 """m9 D5: serving_bench honesty — token-granularity TPOT via include_usage."""
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -16,15 +17,20 @@ _spec.loader.exec_module(serving_bench)
 
 
 async def test_run_one_reads_usage_chunk_for_token_tpot():
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Header
     from fastapi.responses import StreamingResponse
 
     app = FastAPI()
     calls = []
+    trace_headers = []
 
     @app.post("/v1/chat/completions")
-    async def chat(request: dict):
+    async def chat(
+        request: dict,
+        x_kairyu_trace: str | None = Header(default=None),
+    ):
         calls.append(request)
+        trace_headers.append(x_kairyu_trace)
 
         async def _gen():
             yield 'data: {"choices": [{"index": 0, "delta": {"content": "4"}}]}\n\n'
@@ -52,25 +58,32 @@ async def test_run_one_reads_usage_chunk_for_token_tpot():
             ignore_eos=True,
         )
     assert calls[0]["stream_options"] == {"include_usage": True}
+    assert trace_headers == [None]
     assert calls[0]["temperature"] == 0.0
     assert calls[0]["seed"] == 7
     assert calls[0]["min_tokens"] == 6
     assert calls[0]["ignore_eos"] is True
     assert metrics.completion_tokens == 6  # from the include_usage final chunk
     assert metrics.token_granular is True
+    assert metrics.trace_status == "not_requested"
     assert metrics.tpot_s >= 0.0
 
 
 async def test_run_one_falls_back_when_target_rejects_stream_options():
-    from fastapi import FastAPI
+    from fastapi import FastAPI, Header
     from fastapi.responses import JSONResponse, StreamingResponse
 
     app = FastAPI()
     calls = []
+    trace_headers = []
 
     @app.post("/v1/chat/completions")
-    async def chat(request: dict):
+    async def chat(
+        request: dict,
+        x_kairyu_trace: str | None = Header(default=None),
+    ):
         calls.append(request)
+        trace_headers.append(x_kairyu_trace)
         if "stream_options" in request:
             return JSONResponse(status_code=400, content={"error": "no stream_options"})
 
@@ -93,9 +106,12 @@ async def test_run_one_falls_back_when_target_rejects_stream_options():
             seed=11,
             min_tokens=4,
             ignore_eos=True,
+            request_trace=True,
         )
     assert metrics.token_granular is False  # labeled chunk-granularity fallback
+    assert metrics.trace_status == "missing"
     assert len(calls) == 2  # retried once without stream_options
+    assert trace_headers == ["1", "1"]
     assert "stream_options" not in calls[1]
     for field, value in {
         "temperature": 0.0,
@@ -137,6 +153,17 @@ def test_summary_retains_raw_request_timings_and_token_throughput():
     assert summary["output_tokens_per_s"] == 9.0
     assert summary["tpot_method"] == "token"
     assert summary["goodput_rps"] == 1.0
+    assert summary["trace_coverage"] == {
+        "total_requests": 2,
+        "requested": 0,
+            "not_requested": 2,
+            "valid": 0,
+            "partial": 0,
+            "missing": 0,
+        "invalid": 0,
+        "fraction": None,
+    }
+    assert summary["stage_latency_ms"] == {}
     assert samples == [
         {
             "request_index": 0,
@@ -145,6 +172,7 @@ def test_summary_retains_raw_request_timings_and_token_throughput():
             "tpot_ms": pytest.approx(100.0),
             "output_chunks": 3,
             "completion_tokens": 4,
+            "trace": {"status": "not_requested", "version": None, "stages": []},
         },
         {
             "request_index": 1,
@@ -153,6 +181,7 @@ def test_summary_retains_raw_request_timings_and_token_throughput():
             "tpot_ms": pytest.approx(75.0),
             "output_chunks": 4,
             "completion_tokens": 5,
+            "trace": {"status": "not_requested", "version": None, "stages": []},
         },
     ]
 
@@ -173,7 +202,15 @@ def test_shared_target_form_normalizes_url_and_uses_env_secret(monkeypatch):
     assert serving_bench.resolve_api_key(args, target) == "private-value"
     assert config["api_key_env"] == "SERVING_API_KEY"
     assert config["api_key_source"] == "environment"
+    assert config["stage_trace"] is False
     assert "private-value" not in str(config)
+
+
+def test_stage_trace_is_an_explicit_recorded_opt_in():
+    args = serving_bench.build_parser().parse_args(["--stage-trace"])
+
+    assert args.stage_trace is True
+    assert serving_bench.build_run_config(args)["stage_trace"] is True
 
 
 def test_shared_target_refuses_conflicting_legacy_endpoint_flags():
@@ -215,3 +252,555 @@ def test_legacy_literal_api_key_never_enters_recorded_config():
 
 def test_serving_percentile_uses_nearest_rank_definition():
     assert serving_bench._percentile(list(range(1, 21)), 0.95) == 19
+
+
+def _trace(*, request_id="chatcmpl-traced"):
+    return {
+        "trace_version": "2.0",
+        "request_id": request_id,
+        "started_at": "2026-08-05T00:00:00.000Z",
+        "completed_at": "2026-08-05T00:00:00.100Z",
+        "events": [
+            {
+                "seq": 1,
+                "node": "router",
+                "role": "router",
+                "kind": "routing",
+                "status": "success",
+                "attempt": 0,
+                "timing": {
+                    "queued_at": None,
+                    "started_at": "2026-08-05T00:00:00.000Z",
+                    "first_token_at": None,
+                    "completed_at": "2026-08-05T00:00:00.005Z",
+                },
+                "detail": {"secret": "must-not-be-retained"},
+            },
+            {
+                "seq": 2,
+                "node": "worker",
+                "role": "direct",
+                "kind": "generation",
+                "status": "success",
+                "attempt": 1,
+                "timing": {
+                    "queued_at": "2026-08-05T00:00:00.010Z",
+                    "started_at": "2026-08-05T00:00:00.020Z",
+                    "first_token_at": "2026-08-05T00:00:00.050Z",
+                    "completed_at": "2026-08-05T00:00:00.100Z",
+                },
+                "detail": {"prompt": "also-must-not-be-retained"},
+            },
+        ],
+    }
+
+
+async def test_run_one_extracts_only_sanitized_terminal_trace_and_not_as_output():
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def chat():
+        trace = _trace()
+
+        async def _gen():
+            yield (
+                'data: {"id":"chatcmpl-traced","choices":'
+                '[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+            )
+            yield "data: " + json.dumps(
+                {
+                    "id": "chatcmpl-traced",
+                    "choices": [],
+                    "usage": {"completion_tokens": 3},
+                    "kairyu_trace_v2": trace,
+                }
+            ) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t/v1"
+    ) as client:
+        unrequested = await serving_bench.run_one(client, "m", "prompt", 3)
+        metrics = await serving_bench.run_one(
+            client, "m", "secret prompt", 3, request_trace=True
+        )
+
+    assert unrequested.trace_status == "not_requested"
+    assert unrequested.trace_stages == ()
+    assert metrics.output_chunks == 1
+    assert metrics.completion_tokens == 3
+    assert metrics.trace_status == "valid"
+    assert metrics.trace_version == "2.0"
+    assert [stage.stage for stage in metrics.trace_stages] == [
+        "router/router/routing",
+        "worker/direct/generation",
+    ]
+    worker = metrics.trace_stages[1]
+    assert worker.status == "success"
+    assert worker.attempt == 1
+    assert worker.queue_wait_ms == pytest.approx(10.0)
+    assert worker.service_ms == pytest.approx(80.0)
+    assert worker.first_token_ms == pytest.approx(30.0)
+    assert worker.post_first_ms == pytest.approx(50.0)
+    assert worker.total_ms == pytest.approx(90.0)
+    assert "secret" not in str(worker.as_dict())
+    assert "prompt" not in str(worker.as_dict())
+
+
+async def test_run_one_isolates_invalid_terminal_trace_from_latency_results():
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def chat():
+        trace = _trace(request_id="wrong-id")
+
+        async def _gen():
+            yield (
+                'data: {"id":"chatcmpl-traced","choices":'
+                '[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+            )
+            yield "data: " + json.dumps(
+                {
+                    "id": "chatcmpl-traced",
+                    "choices": [],
+                    "kairyu_trace_v2": trace,
+                }
+            ) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t/v1"
+    ) as client:
+        metrics = await serving_bench.run_one(
+            client, "m", "prompt", 3, request_trace=True
+        )
+
+    assert metrics.output_chunks == 1
+    assert metrics.trace_status == "invalid"
+    assert metrics.trace_version is None
+    assert metrics.trace_stages == ()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_status"),
+    (
+        ("empty", "missing"),
+        ("misplaced", "invalid"),
+        ("after-terminal", "invalid"),
+        ("no-done", "invalid"),
+    ),
+)
+async def test_run_one_requires_nonempty_trace_in_final_event_before_done(
+    mode,
+    expected_status,
+):
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def chat():
+        trace = _trace()
+        if mode == "empty":
+            trace["events"] = []
+
+        async def _gen():
+            content = {
+                "id": "chatcmpl-traced",
+                "choices": [{"index": 0, "delta": {"content": "hi"}}],
+            }
+            if mode == "misplaced":
+                content["kairyu_trace_v2"] = {"untrusted": "not-terminal"}
+            yield f"data: {json.dumps(content)}\n\n"
+            yield "data: " + json.dumps(
+                {
+                    "id": "chatcmpl-traced",
+                    "choices": [],
+                    "kairyu_trace_v2": trace,
+                }
+            ) + "\n\n"
+            if mode == "after-terminal":
+                yield (
+                    'data: {"id":"chatcmpl-traced","choices":[]}\n\n'
+                )
+            if mode != "no-done":
+                yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t/v1"
+    ) as client:
+        metrics = await serving_bench.run_one(
+            client, "m", "prompt", 3, request_trace=True
+        )
+
+    assert metrics.trace_status == expected_status
+    if mode == "empty":
+        assert metrics.trace_version == "2.0"
+    else:
+        assert metrics.trace_version is None
+    assert metrics.trace_stages == ()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda trace: trace.__setitem__("trace_version", "3.0"),
+        lambda trace: trace.__setitem__("request_id", "other"),
+        lambda trace: trace["events"][0].__setitem__("seq", 2),
+        lambda trace: trace.__setitem__("started_at", "2026-08-05T00:00:00"),
+        lambda trace: trace["events"][1]["timing"].__setitem__(
+            "completed_at", "2026-08-05T00:00:00.001Z"
+        ),
+    ],
+    ids=["version", "request-id", "seq", "non-utc", "reversed"],
+)
+def test_trace_validation_rejects_malformed_evidence(mutate):
+    trace = _trace()
+    mutate(trace)
+
+    with pytest.raises(ValueError):
+        serving_bench._parse_trace(trace, response_id="chatcmpl-traced")
+
+
+def test_trace_ignores_unknown_kind_and_status_without_retaining_identities():
+    trace = _trace()
+    trace["events"].append(
+        {
+            "seq": 3,
+            "node": "secret prompt must not persist",
+            "role": "sk-live-secret",
+            "kind": "future_scalar_event",
+            "status": "future",
+            "attempt": 0,
+            "timing": None,
+            "detail": {"secret": "must-not-be-retained"},
+        }
+    )
+    trace["events"][1]["status"] = "future-status"
+
+    _, stages = serving_bench._parse_trace(
+        trace, response_id="chatcmpl-traced"
+    )
+
+    assert [stage.stage for stage in stages] == ["router/router/routing"]
+    assert "secret" not in str([stage.as_dict() for stage in stages])
+
+
+@pytest.mark.parametrize("field", ["node", "role"])
+def test_trace_omits_unsafe_persisted_identity_without_invalidating_envelope(field):
+    trace = _trace()
+    trace["events"][0][field] = "secret prompt canary"
+
+    version, stages = serving_bench._parse_trace(
+        trace, response_id="chatcmpl-traced"
+    )
+
+    assert version == "2.0"
+    assert [stage.stage for stage in stages] == ["worker/direct/generation"]
+    assert "secret prompt canary" not in str(
+        [stage.as_dict() for stage in stages]
+    )
+
+
+def _direct_stage_trace():
+    return {
+        "trace_version": "2.0",
+        "request_id": "chatcmpl-stage",
+        "started_at": "2026-08-05T00:00:00.000Z",
+        "completed_at": "2026-08-05T00:00:00.100Z",
+        "events": [
+            {
+                "seq": 1,
+                "node": "tokenize",
+                "role": "engine",
+                "kind": "stage",
+                "status": "success",
+                "attempt": 0,
+                "timing": None,
+                "detail": {
+                    "stage": "tokenize",
+                    "duration_ns": 1_500_000,
+                    "occurrences": 2,
+                    "aggregation": "sum",
+                    "scope": "request-observed",
+                },
+            }
+        ],
+    }
+
+
+async def test_run_one_classifies_complete_direct_stage_trace_as_valid():
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+
+    trace = _direct_stage_trace()
+    template = trace["events"][0]
+    stage_names = (
+        "tokenize",
+        "queue_wait",
+        "schedule",
+        "prefill",
+        "decode_step",
+        "detokenize",
+        "sse_write",
+        "future_stage",
+    )
+    trace["events"] = [
+        {
+            **template,
+            "seq": index,
+            "node": stage,
+            "detail": {
+                **template["detail"],
+                "stage": stage,
+                "duration_ns": index * 1_000_000,
+            },
+        }
+        for index, stage in enumerate(stage_names, start=1)
+    ]
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def chat():
+        async def _gen():
+            yield (
+                'data: {"id":"chatcmpl-stage","choices":'
+                '[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+            )
+            yield "data: " + json.dumps(
+                {
+                    "id": "chatcmpl-stage",
+                    "choices": [],
+                    "kairyu_trace_v2": trace,
+                }
+            ) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t/v1"
+    ) as client:
+        metrics = await serving_bench.run_one(
+            client, "m", "prompt", 3, request_trace=True
+        )
+
+    assert metrics.trace_status == "valid"
+    assert [stage.stage for stage in metrics.trace_stages] == list(stage_names)
+
+
+def test_direct_stage_trace_uses_scalar_duration_and_discards_raw_detail():
+    version, stages = serving_bench._parse_trace(
+        _direct_stage_trace(), response_id="chatcmpl-stage"
+    )
+
+    assert version == "2.0"
+    assert len(stages) == 1
+    stage = stages[0]
+    assert stage.stage == "tokenize"
+    assert stage.duration_ms == 1.5
+    assert stage.occurrences == 2
+    assert stage.queue_wait_ms is None
+    assert stage.service_ms is None
+    assert set(stage.as_dict()) == {
+        "stage",
+        "node",
+        "role",
+        "kind",
+        "status",
+        "attempt",
+        "duration_ms",
+        "occurrences",
+        "queue_wait_ms",
+        "service_ms",
+        "first_token_ms",
+        "post_first_ms",
+        "total_ms",
+    }
+    assert "aggregation" not in stage.as_dict()
+    assert "scope" not in stage.as_dict()
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda event: event["detail"].__setitem__("duration_ns", True),
+        lambda event: event["detail"].__setitem__("duration_ns", -1),
+        lambda event: event["detail"].__setitem__("duration_ns", 1 << 63),
+        lambda event: event["detail"].__setitem__("occurrences", True),
+        lambda event: event["detail"].__setitem__("occurrences", 0),
+        lambda event: event["detail"].__setitem__("occurrences", 1 << 31),
+        lambda event: event["detail"].__setitem__("stage", "../tokenize"),
+        lambda event: event.__setitem__("node", "other"),
+        lambda event: event["detail"].__setitem__("aggregation", "mean"),
+        lambda event: event["detail"].__setitem__("scope", "global"),
+        lambda event: event.__setitem__("timing", {}),
+    ],
+    ids=[
+        "duration-bool",
+        "duration-negative",
+        "duration-overflow",
+        "occurrences-bool",
+        "occurrences-zero",
+        "occurrences-overflow",
+        "unsafe-stage",
+        "node-mismatch",
+        "aggregation",
+        "scope",
+        "timing",
+    ],
+)
+def test_direct_stage_trace_rejects_untrusted_scalar_detail(mutate):
+    trace = _direct_stage_trace()
+    mutate(trace["events"][0])
+
+    with pytest.raises(ValueError):
+        serving_bench._parse_trace(trace, response_id="chatcmpl-stage")
+
+
+def test_direct_stage_trace_ignores_additive_detail_without_retaining_it():
+    trace = _direct_stage_trace()
+    trace["events"][0]["detail"]["future_field"] = "do-not-retain"
+
+    _, stages = serving_bench._parse_trace(
+        trace, response_id="chatcmpl-stage"
+    )
+
+    assert stages[0].stage == "tokenize"
+    assert "future_field" not in stages[0].as_dict()
+    assert "do-not-retain" not in str(stages[0].as_dict())
+
+
+def test_direct_stage_summary_reports_duration_percentiles_and_occurrence_total():
+    _, first = serving_bench._parse_trace(
+        _direct_stage_trace(), response_id="chatcmpl-stage"
+    )
+    second_trace = _direct_stage_trace()
+    second_trace["events"][0]["detail"]["duration_ns"] = 3_000_000
+    second_trace["events"][0]["detail"]["occurrences"] = 4
+    _, second = serving_bench._parse_trace(
+        second_trace, response_id="chatcmpl-stage"
+    )
+    common = dict(
+        ttft_s=0.1,
+        total_s=0.2,
+        output_chunks=2,
+        completion_tokens=3,
+        trace_status="partial",
+        trace_version="2.0",
+    )
+
+    summary, _ = serving_bench.summarize_results(
+        [
+            serving_bench.RequestMetrics(**common, trace_stages=first),
+            serving_bench.RequestMetrics(**common, trace_stages=second),
+        ],
+        wall_ns=1_000_000_000,
+        dataset_label="stage-trace",
+        ttft_slo_s=1.0,
+    )
+
+    stage = summary["stage_latency_ms"]["tokenize"]
+    assert stage["duration"] == {"samples": 2, "p50_ms": 1.5, "p99_ms": 3.0}
+    assert stage["occurrences_total"] == 6
+    assert stage["expected_native"] is True
+    assert stage["requests_observed"] == 2
+    assert stage["requests_missing"] == 0
+    assert stage["coverage_fraction"] == 1.0
+    assert stage["service"] == {"samples": 0, "p50_ms": None, "p99_ms": None}
+    missing = summary["stage_latency_ms"]["decode_step"]
+    assert missing["requests_observed"] == 0
+    assert missing["requests_missing"] == 2
+    assert missing["coverage_fraction"] == 0.0
+    assert missing["duration"] == {
+        "samples": 0,
+        "p50_ms": None,
+        "p99_ms": None,
+    }
+    assert summary["trace_coverage"]["partial"] == 2
+
+
+def test_summary_aggregates_stage_percentiles_and_keeps_missing_invalid_distinct():
+    _, base_stages = serving_bench._parse_trace(
+        _trace(), response_id="chatcmpl-traced"
+    )
+    slower = tuple(
+        serving_bench.TraceStageMetrics(
+            **{
+                **stage.__dict__,
+                "queue_wait_ms": (
+                    stage.queue_wait_ms * 2 if stage.queue_wait_ms is not None else None
+                ),
+                "service_ms": stage.service_ms * 2,
+                "first_token_ms": (
+                    stage.first_token_ms * 2 if stage.first_token_ms is not None else None
+                ),
+                "post_first_ms": (
+                    stage.post_first_ms * 2 if stage.post_first_ms is not None else None
+                ),
+                "total_ms": stage.total_ms * 2,
+            }
+        )
+        for stage in base_stages
+    )
+    base = dict(ttft_s=0.1, total_s=0.2, output_chunks=2, completion_tokens=3)
+    results = [
+        serving_bench.RequestMetrics(
+            **base,
+            trace_status="valid",
+            trace_version="2.0",
+            trace_stages=base_stages,
+        ),
+        serving_bench.RequestMetrics(
+            **base,
+            trace_status="valid",
+            trace_version="2.0",
+            trace_stages=slower,
+        ),
+        serving_bench.RequestMetrics(**base, trace_status="missing"),
+        serving_bench.RequestMetrics(**base, trace_status="invalid"),
+        serving_bench.RequestMetrics(**base),
+    ]
+
+    summary, samples = serving_bench.summarize_results(
+        results,
+        wall_ns=1_000_000_000,
+        dataset_label="trace-test",
+        ttft_slo_s=1.0,
+    )
+
+    assert summary["trace_coverage"] == {
+        "total_requests": 5,
+        "requested": 4,
+            "not_requested": 1,
+            "valid": 2,
+            "partial": 0,
+            "missing": 1,
+        "invalid": 1,
+        "fraction": 0.5,
+    }
+    worker = summary["stage_latency_ms"]["worker/direct/generation"]
+    assert worker["queue_wait"] == {"samples": 2, "p50_ms": 10.0, "p99_ms": 20.0}
+    assert worker["service"] == {"samples": 2, "p50_ms": 80.0, "p99_ms": 160.0}
+    router = summary["stage_latency_ms"]["router/router/routing"]
+    assert router["queue_wait"] == {"samples": 0, "p50_ms": None, "p99_ms": None}
+    assert samples[2]["trace"] == {"status": "missing", "version": None, "stages": []}
+    assert samples[3]["trace"] == {"status": "invalid", "version": None, "stages": []}
+    assert samples[4]["trace"] == {
+        "status": "not_requested",
+        "version": None,
+        "stages": [],
+    }

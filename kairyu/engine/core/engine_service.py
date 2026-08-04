@@ -9,14 +9,15 @@ the worst-case step time.
 Wire protocol (msgpack maps):
   client → service: {"op": "add", "request_id", "prompt", "sampling": {...},
                      "priority": int, "scheduling_class": str,
-                     "wire_version": 2}
+                     "wire_version": 2, optional "trace_requested": bool}
                     Typed text/token prompts add ``prompt_wire_version: 1`` and
                     a strict tagged ``prompt`` map; legacy strings stay raw.
                     {"op": "abort", "request_id"} | {"op": "ping"} | {"op": "shutdown"}
   service → v2 client: one cumulative ``snapshot`` followed by sequenced
                     ``delta`` events carrying only new token IDs, visible text,
-                    and logprob metadata. The first event carries
-                    ``num_prompt_tokens``.
+                    and logprob metadata. Trace-enabled events additionally
+                    carry one sanitized cumulative ``stage_metrics`` list. The
+                    first event carries ``num_prompt_tokens``.
   service → legacy client: the historical cumulative per-step event.
                     New clients accept both forms, so a rolling upgrade works
                     in either order.
@@ -67,6 +68,7 @@ class WireEventCursor:
     logprob_content_count: int = 0
     has_logprobs: bool = False
     has_logprob_content: bool = False
+    stage_metrics: tuple[tuple[str, int, int], ...] = ()
 
 
 @dataclass
@@ -74,6 +76,7 @@ class _RequestOwner:
     identity: bytes
     wire_version: int
     stream_id: str | None
+    trace_requested: bool
     cursor: WireEventCursor
 
 
@@ -101,6 +104,50 @@ def sampling_params_to_wire(params: SamplingParams) -> dict:
         "ignore_eos": params.ignore_eos,
         "extra_args": params.extra_args or {},
     }
+
+
+def _trace_requested_from_wire(message: dict) -> bool:
+    """Decode the optional add-frame trace flag without truthy coercion."""
+
+    trace_requested = message.get("trace_requested", False)
+    if type(trace_requested) is not bool:
+        raise ValueError("engine add trace_requested must be a boolean")
+    return trace_requested
+
+
+def _stage_metrics_to_wire(metrics: object) -> tuple[
+    tuple[tuple[str, int, int], ...],
+    list[dict[str, str | int]],
+]:
+    """Reduce internal metric values to the reviewed scalar wire schema."""
+
+    if not isinstance(metrics, tuple):
+        raise ValueError("engine stage metrics must be a tuple")
+    rows: list[tuple[str, int, int]] = []
+    payload: list[dict[str, str | int]] = []
+    seen: set[str] = set()
+    for metric in metrics:
+        stage = getattr(metric, "stage", None)
+        duration_ns = getattr(metric, "duration_ns", None)
+        occurrences = getattr(metric, "occurrences", None)
+        if type(stage) is not str or not stage.strip():
+            raise ValueError("engine stage metric stage must be a non-empty string")
+        if type(duration_ns) is not int or duration_ns < 0:
+            raise ValueError("engine stage metric duration_ns must be a non-negative integer")
+        if type(occurrences) is not int or occurrences < 1:
+            raise ValueError("engine stage metric occurrences must be a positive integer")
+        if stage in seen:
+            raise ValueError(f"engine stage metrics contain duplicate stage {stage!r}")
+        seen.add(stage)
+        rows.append((stage, duration_ns, occurrences))
+        payload.append(
+            {
+                "stage": stage,
+                "duration_ns": duration_ns,
+                "occurrences": occurrences,
+            }
+        )
+    return tuple(rows), payload
 
 
 def _legacy_event_from_update(request_id: str, update: StreamUpdate) -> dict:
@@ -136,6 +183,8 @@ def _v2_event_from_update(
     request_id: str,
     update: StreamUpdate,
     cursor: WireEventCursor,
+    *,
+    trace_requested: bool = False,
 ) -> dict | None:
     """Encode one cumulative ``StreamUpdate`` without retransmitting its prefix."""
 
@@ -143,6 +192,12 @@ def _v2_event_from_update(
     text_length = len(update.text)
     logprob_count = len(update.logprobs) if update.logprobs is not None else 0
     content_count = len(update.logprob_content) if update.logprob_content is not None else 0
+    stage_metric_rows: tuple[tuple[str, int, int], ...] = ()
+    stage_metric_payload: list[dict[str, str | int]] | None = None
+    if trace_requested:
+        stage_metric_rows, stage_metric_payload = _stage_metrics_to_wire(
+            getattr(update, "stage_metrics", ())
+        )
     _validate_monotonic_length("token output", output_count, cursor.output_count)
     _validate_monotonic_length("logprobs", logprob_count, cursor.logprob_count)
     _validate_monotonic_length(
@@ -170,6 +225,7 @@ def _v2_event_from_update(
         and content_count == cursor.logprob_content_count
         and (update.logprobs is not None) == cursor.has_logprobs
         and (update.logprob_content is not None) == cursor.has_logprob_content
+        and (not trace_requested or stage_metric_rows == cursor.stage_metrics)
         and not update.finished
     ):
         # A request can receive a cumulative update while another request made
@@ -187,6 +243,8 @@ def _v2_event_from_update(
         "num_cached_tokens": update.num_cached_tokens,
         "cumulative_logprob": update.cumulative_logprob,
     }
+    if stage_metric_payload is not None:
+        common["stage_metrics"] = stage_metric_payload
     if cursor.sequence == 0:
         event = {
             **common,
@@ -244,6 +302,8 @@ def _v2_event_from_update(
     cursor.logprob_content_count = content_count
     cursor.has_logprobs = update.logprobs is not None
     cursor.has_logprob_content = update.logprob_content is not None
+    if trace_requested:
+        cursor.stage_metrics = stage_metric_rows
     return event
 
 
@@ -253,6 +313,7 @@ def event_from_update(
     *,
     wire_version: int = LEGACY_WIRE_VERSION,
     cursor: WireEventCursor | None = None,
+    trace_requested: bool = False,
 ) -> dict | None:
     """Encode one event for a negotiated protocol version.
 
@@ -266,7 +327,12 @@ def event_from_update(
     if wire_version == WIRE_VERSION:
         if cursor is None:
             raise ValueError("wire v2 event encoding requires a cursor")
-        return _v2_event_from_update(request_id, update, cursor)
+        return _v2_event_from_update(
+            request_id,
+            update,
+            cursor,
+            trace_requested=trace_requested,
+        )
     raise ValueError(f"unsupported engine wire version {wire_version}")
 
 
@@ -525,6 +591,7 @@ def run_engine_service(
                             not isinstance(stream_id, str) or not stream_id
                         ):
                             raise ValueError("engine wire v2 add requires a non-empty stream_id")
+                        trace_requested = _trace_requested_from_wire(message)
                         prompt_wire_version = message.get("prompt_wire_version")
                         if prompt_wire_version is None:
                             prompt = message["prompt"]
@@ -547,6 +614,7 @@ def run_engine_service(
                             sampling_params_from_wire(message["sampling"]),
                             priority=message.get("priority", 0),
                             scheduling_class=message.get("scheduling_class", "interactive"),
+                            trace_requested=trace_requested,
                         )
                         # Install ownership only after a clean submit; a rejected
                         # duplicate must not replace the original request's route.
@@ -554,6 +622,7 @@ def run_engine_service(
                             identity=identity,
                             wire_version=wire_version,
                             stream_id=stream_id,
+                            trace_requested=trace_requested,
                             cursor=WireEventCursor(),
                         )
                     elif op == "abort":
@@ -623,6 +692,7 @@ def run_engine_service(
                         update,
                         wire_version=owner.wire_version,
                         cursor=owner.cursor,
+                        trace_requested=owner.trace_requested,
                     )
                     if event is None:
                         continue

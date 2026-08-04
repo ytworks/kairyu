@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Callable, Mapping
+from datetime import UTC, datetime
 
 import httpx
 
@@ -26,6 +28,7 @@ from kairyu.engine.backend import (
     AdmissionUpperBound,
     GenerationRequest,
     GenerationResult,
+    GenerationStageMetric,
     GenerationUsage,
     UpstreamClientError,
 )
@@ -66,6 +69,12 @@ _DEFAULT_TIMEOUT_S = 60.0
 _SSE_DONE = "[DONE]"
 # OpenAI exposes token text and bytes in logprobs, but not tokenizer token IDs.
 _UNKNOWN_TOKEN_ID = -1
+_MAX_TRACE_EVENTS = 256
+_MAX_TRACE_DURATION_NS = (1 << 63) - 1
+_MAX_TRACE_OCCURRENCES = (1 << 31) - 1
+_TRACE_TIMESTAMP_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z"
+)
 
 
 async def _await_task_cancellation_safe(task: asyncio.Task[None]) -> None:
@@ -96,6 +105,109 @@ def _usage_from(data: dict | None) -> GenerationUsage | None:
         completion_tokens=data.get("completion_tokens", 0),
         cached_tokens=details.get("cached_tokens", 0),
     )
+
+
+def _trace_timestamp(raw: object, label: str) -> datetime:
+    if type(raw) is not str or _TRACE_TIMESTAMP_RE.fullmatch(raw) is None:
+        raise RuntimeError(f"Kairyu upstream stage trace has an invalid {label}")
+    try:
+        value = datetime.fromisoformat(raw[:-1] + "+00:00")
+    except ValueError as error:
+        raise RuntimeError(
+            f"Kairyu upstream stage trace has an invalid {label}"
+        ) from error
+    if value.tzinfo is None or value.astimezone(UTC).utcoffset() is None:
+        raise RuntimeError(f"Kairyu upstream stage trace has an invalid {label}")
+    return value
+
+
+def _stage_metrics_from_trace(
+    raw: object,
+    *,
+    response_id: object,
+) -> tuple[GenerationStageMetric, ...]:
+    """Validate and extract the bounded native-stage subset of a v2 trace."""
+
+    if not isinstance(raw, Mapping):
+        raise RuntimeError("Kairyu upstream returned a malformed stage trace envelope")
+    if raw.get("trace_version") != "2.0":
+        raise RuntimeError("Kairyu upstream returned an unsupported stage trace version")
+    if (
+        type(response_id) is not str
+        or not response_id
+        or raw.get("request_id") != response_id
+    ):
+        raise RuntimeError("Kairyu upstream stage trace request id does not match")
+    started_at = _trace_timestamp(raw.get("started_at"), "started_at")
+    completed_at = _trace_timestamp(raw.get("completed_at"), "completed_at")
+    if completed_at < started_at:
+        raise RuntimeError("Kairyu upstream stage trace timestamps are reversed")
+    events = raw.get("events")
+    if not isinstance(events, list) or len(events) > _MAX_TRACE_EVENTS:
+        raise RuntimeError("Kairyu upstream returned a malformed stage trace event list")
+
+    metrics: list[GenerationStageMetric] = []
+    seen: set[str] = set()
+    for expected_seq, event in enumerate(events, start=1):
+        if (
+            not isinstance(event, Mapping)
+            or type(event.get("seq")) is not int
+            or event.get("seq") != expected_seq
+        ):
+            raise RuntimeError("Kairyu upstream returned an invalid stage trace sequence")
+        if event.get("kind") != "stage":
+            continue
+        if event.get("status") != "success":
+            # Trace v2 is additive: unknown statuses are not measurements and
+            # must not invalidate or cross this propagation boundary.
+            continue
+        detail = event.get("detail")
+        if not isinstance(detail, Mapping):
+            raise RuntimeError("Kairyu upstream stage trace event omitted detail")
+        stage = detail.get("stage")
+        duration_ns = detail.get("duration_ns")
+        occurrences = detail.get("occurrences")
+        if (
+            type(stage) is not str
+            or event.get("node") != stage
+            or event.get("role") != "engine"
+            or type(event.get("attempt")) is not int
+            or event.get("attempt") != 0
+            or event.get("timing") is not None
+        ):
+            raise RuntimeError("Kairyu upstream returned an invalid stage trace name")
+        if (
+            type(duration_ns) is not int
+            or duration_ns < 0
+            or duration_ns > _MAX_TRACE_DURATION_NS
+        ):
+            raise RuntimeError("Kairyu upstream returned an invalid stage duration")
+        if (
+            type(occurrences) is not int
+            or occurrences < 1
+            or occurrences > _MAX_TRACE_OCCURRENCES
+        ):
+            raise RuntimeError("Kairyu upstream returned an invalid stage occurrence count")
+        if (
+            detail.get("aggregation") != "sum"
+            or detail.get("scope") != "request-observed"
+        ):
+            raise RuntimeError("Kairyu upstream returned an invalid stage trace scope")
+        try:
+            metric = GenerationStageMetric(
+                stage=stage,
+                duration_ns=duration_ns,
+                occurrences=occurrences,
+            )
+        except ValueError as error:
+            raise RuntimeError(
+                "Kairyu upstream returned an invalid stage trace name"
+            ) from error
+        if metric.stage in seen:
+            raise RuntimeError("Kairyu upstream returned an invalid stage trace name")
+        seen.add(metric.stage)
+        metrics.append(metric)
+    return tuple(metrics)
 
 
 def _token_logprob(raw: dict) -> TokenLogprob:
@@ -565,6 +677,8 @@ class OpenAICompatBackend:
                     f"invalid scheduling class {request.scheduling_class!r}"
                 )
             headers["X-Kairyu-Scheduling-Class"] = request.scheduling_class
+            if request.trace_requested:
+                headers["X-Kairyu-Trace"] = "1"
         # Propagate only W3C traceparent/tracestate. The helper is a deferred
         # no-op when tracing or OpenTelemetry is unavailable and intentionally
         # does not forward baggage, prompts, outputs, or credentials.
@@ -734,11 +848,20 @@ class OpenAICompatBackend:
             raise RuntimeError(f"backend {self._base_url} returned no choices: {data}")
         usage = _usage_from(data.get("usage"))
         self._require_exact_multimodal_usage(request, usage)
+        stage_metrics = (
+            _stage_metrics_from_trace(
+                data["kairyu_trace_v2"],
+                response_id=data.get("id"),
+            )
+            if request.trace_requested and "kairyu_trace_v2" in data
+            else ()
+        )
         return GenerationResult(
             request_id=request.request_id,
             prompt=request.prompt,
             completions=completions,
             usage=usage,
+            stage_metrics=stage_metrics,
         )
 
     def _partial(
@@ -750,6 +873,7 @@ class OpenAICompatBackend:
         logprobs: dict[int, list[TokenLogprob]],
         finished: bool,
         usage: GenerationUsage | None = None,
+        stage_metrics: tuple[GenerationStageMetric, ...] = (),
     ) -> GenerationResult:
         completions = tuple(
             CompletionOutput(
@@ -770,6 +894,7 @@ class OpenAICompatBackend:
             completions=completions,
             finished=finished,
             usage=usage,
+            stage_metrics=stage_metrics,
         )
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
@@ -798,11 +923,62 @@ class OpenAICompatBackend:
             deltas_seen: dict[int, int] = {}
             logprobs: dict[int, list[TokenLogprob]] = {}
             usage: GenerationUsage | None = None
+            stage_metrics: tuple[GenerationStageMetric, ...] = ()
+            trace_seen = False
+            trace_response_id: str | None = None
+            done_seen = False
             async for data_str in iter_sse_data(response):
                 data_str = data_str.strip()
                 if data_str == _SSE_DONE:
+                    done_seen = True
                     break
                 chunk = json.loads(data_str)
+                if trace_seen:
+                    if "error" in chunk:
+                        # Kairyu's failure contract deliberately places its
+                        # known partial trace before the sanitized SSE error.
+                        # Surface the validated metrics now so a gateway can
+                        # retain them, then fail when the consumer resumes.
+                        # Never retain or re-surface the upstream error message.
+                        if stage_metrics:
+                            yield self._partial(
+                                request,
+                                texts,
+                                finish,
+                                deltas_seen,
+                                logprobs,
+                                finished=False,
+                                usage=usage,
+                                stage_metrics=stage_metrics,
+                            )
+                        raise RuntimeError(
+                            "Kairyu upstream reported an error after its stage trace"
+                        )
+                    raise RuntimeError(
+                        "Kairyu upstream stage trace was not terminal"
+                    )
+                chunk_id = chunk.get("id") if request.trace_requested else None
+                if request.trace_requested and isinstance(chunk_id, str) and chunk_id:
+                    if trace_response_id is None:
+                        trace_response_id = chunk_id
+                    elif chunk_id != trace_response_id:
+                        raise RuntimeError(
+                            "Kairyu upstream changed response id while streaming"
+                        )
+                if request.trace_requested and "kairyu_trace_v2" in chunk:
+                    if trace_seen:
+                        raise RuntimeError(
+                            "Kairyu upstream returned more than one stage trace"
+                        )
+                    if chunk.get("choices") != []:
+                        raise RuntimeError(
+                            "Kairyu upstream stage trace metadata was not terminal"
+                        )
+                    stage_metrics = _stage_metrics_from_trace(
+                        chunk["kairyu_trace_v2"],
+                        response_id=chunk_id or trace_response_id,
+                    )
+                    trace_seen = True
                 if chunk.get("usage"):  # final usage chunk has empty choices
                     usage = _usage_from(chunk["usage"])
                 changed = False
@@ -831,6 +1007,8 @@ class OpenAICompatBackend:
                         logprobs,
                         finished=False,
                     )
+            if trace_seen and not done_seen:
+                raise RuntimeError("Kairyu upstream stage trace omitted SSE [DONE]")
         if not texts and not finish:
             raise RuntimeError(f"backend {self._base_url} streamed no choices")
         self._require_exact_multimodal_usage(request, usage)
@@ -842,6 +1020,7 @@ class OpenAICompatBackend:
             logprobs,
             finished=True,
             usage=usage,
+            stage_metrics=stage_metrics,
         )
 
     async def _shutdown_impl(self) -> None:

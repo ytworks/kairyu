@@ -36,6 +36,7 @@ from kairyu.engine.backend import (
     EngineReadiness,
     GenerationRequest,
     GenerationResult,
+    GenerationStageMetric,
     GenerationUsage,
     prompt_with_tool_intent,
     validate_native_request_surface,
@@ -90,6 +91,49 @@ def _decode_token_logprob(raw: list) -> TokenLogprob:
         bytes_=tuple(bytes_) if bytes_ is not None else None,
         top=tuple(_decode_token_logprob(entry) for entry in top),
     )
+
+
+_STAGE_METRIC_WIRE_KEYS = frozenset(
+    {"stage", "duration_ns", "occurrences"}
+)
+
+
+def _decode_stage_metrics(raw: object) -> tuple[GenerationStageMetric, ...]:
+    """Validate the complete child-owned stage metric boundary."""
+
+    if raw is None:
+        return ()
+    if isinstance(raw, tuple) and all(
+        type(metric) is GenerationStageMetric for metric in raw
+    ):
+        return raw
+    if not isinstance(raw, list):
+        raise EngineServiceError("engine wire stage_metrics must be a list")
+    metrics: list[GenerationStageMetric] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict) or set(item) != _STAGE_METRIC_WIRE_KEYS:
+            raise EngineServiceError(
+                "engine wire stage metric must contain stage, duration_ns, "
+                "and occurrences exactly"
+            )
+        try:
+            metric = GenerationStageMetric(
+                stage=item["stage"],
+                duration_ns=item["duration_ns"],
+                occurrences=item["occurrences"],
+            )
+        except (TypeError, ValueError) as error:
+            raise EngineServiceError(
+                "engine wire stage metric is invalid"
+            ) from error
+        if metric.stage in seen:
+            raise EngineServiceError(
+                f"engine wire stage_metrics contain duplicate stage {metric.stage!r}"
+            )
+        seen.add(metric.stage)
+        metrics.append(metric)
+    return tuple(metrics)
 
 
 class EngineServiceError(RuntimeError):
@@ -607,6 +651,7 @@ class _WireAccumulator:
     num_prompt_tokens: int = 0
     num_cached_tokens: int = 0
     cumulative_logprob: float = 0.0
+    stage_metrics: tuple[GenerationStageMetric, ...] = ()
     wire_version: int | None = None
 
     @staticmethod
@@ -743,6 +788,27 @@ class _WireAccumulator:
             "cumulative_logprob",
             self.cumulative_logprob,
         )
+        if "stage_metrics" in event:
+            # Metrics are cumulative snapshots. Omission by an older service
+            # leaves the latest value unchanged; a request that never receives
+            # the optional field therefore remains the required empty tuple.
+            stage_metrics = _decode_stage_metrics(event["stage_metrics"])
+            previous = {metric.stage: metric for metric in self.stage_metrics}
+            current = {metric.stage: metric for metric in stage_metrics}
+            for stage, old in previous.items():
+                new = current.get(stage)
+                if new is None:
+                    raise EngineServiceError(
+                        f"engine wire stage metric {stage!r} disappeared"
+                    )
+                if (
+                    new.duration_ns < old.duration_ns
+                    or new.occurrences < old.occurrences
+                ):
+                    raise EngineServiceError(
+                        f"engine wire stage metric {stage!r} decreased"
+                    )
+            self.stage_metrics = stage_metrics
         if not materialize:
             return {"finished": event["finished"]}
         normalized = {
@@ -754,12 +820,19 @@ class _WireAccumulator:
             "num_prompt_tokens": self.num_prompt_tokens,
             "num_cached_tokens": self.num_cached_tokens,
             "cumulative_logprob": self.cumulative_logprob,
+            "stage_metrics": self.stage_metrics,
         }
         if self.logprobs is not None:
             normalized["logprobs"] = self.logprobs
         if self.logprob_content is not None:
             normalized["logprob_content"] = self.logprob_content
         return normalized
+
+
+@dataclass(frozen=True)
+class _PreparedProcPrompt:
+    prompt: PromptInput
+    tokenize_duration_ns: int | None = None
 
 
 def _import_deps():
@@ -914,6 +987,7 @@ class ZmqEngineBackend:
         self._wire_request_ids: dict[str, str] = {}
         self._public_request_ids: dict[str, str] = {}
         self._queue_generations: dict[str, int] = {}
+        self._parent_tokenize_durations_ns: dict[str, int] = {}
         self._failed_generations: set[int] = set()
         self._generation_counter = 0
         self._live_generation: int | None = None
@@ -986,7 +1060,7 @@ class ZmqEngineBackend:
         # reference reclaim the entry.
         self._prepared_requests: dict[
             int,
-            tuple[weakref.ReferenceType[GenerationRequest], PromptInput],
+            tuple[weakref.ReferenceType[GenerationRequest], _PreparedProcPrompt],
         ] = {}
         self._prepared_requests_lock = threading.Lock()
 
@@ -1589,7 +1663,7 @@ class ZmqEngineBackend:
     def _peek_prepared_request(
         self,
         request: GenerationRequest,
-    ) -> PromptInput | None:
+    ) -> _PreparedProcPrompt | None:
         key = id(request)
         with self._prepared_requests_lock:
             cached = self._prepared_requests.get(key)
@@ -1604,8 +1678,8 @@ class ZmqEngineBackend:
     def _retain_prepared_request(
         self,
         request: GenerationRequest,
-        prompt: PromptInput,
-    ) -> PromptInput:
+        prepared: _PreparedProcPrompt,
+    ) -> _PreparedProcPrompt:
         key = id(request)
         backend_ref = weakref.ref(self)
 
@@ -1623,13 +1697,13 @@ class ZmqEngineBackend:
             cached = self._prepared_requests.get(key)
             if cached is not None and cached[0]() is request:
                 return cached[1]
-            self._prepared_requests[key] = (request_ref, prompt)
-        return prompt
+            self._prepared_requests[key] = (request_ref, prepared)
+        return prepared
 
     def _take_prepared_request(
         self,
         request: GenerationRequest,
-    ) -> PromptInput | None:
+    ) -> _PreparedProcPrompt | None:
         key = id(request)
         with self._prepared_requests_lock:
             cached = self._prepared_requests.get(key)
@@ -1644,10 +1718,13 @@ class ZmqEngineBackend:
         self,
         request: GenerationRequest,
         prompt: PromptInput,
-    ) -> PromptInput:
+    ) -> _PreparedProcPrompt:
         max_model_len = self._max_model_len
         if max_model_len is None:
-            return prompt
+            return _PreparedProcPrompt(prompt)
+        tokenize_started_ns = (
+            time.perf_counter_ns() if request.trace_requested else None
+        )
         tokenizer = self._get_preflight_tokenizer()
 
         prompt_token_ids = supplied_prompt_token_ids(prompt)
@@ -1673,7 +1750,15 @@ class ZmqEngineBackend:
                 f"prompt tokens ({len(prompt_token_ids)}) plus max_tokens "
                 f"({max_new_tokens}) exceed max_model_len ({max_model_len})"
             )
-        return prompt
+        tokenize_duration_ns = (
+            max(0, time.perf_counter_ns() - tokenize_started_ns)
+            if tokenize_started_ns is not None
+            else None
+        )
+        return _PreparedProcPrompt(
+            prompt,
+            tokenize_duration_ns=tokenize_duration_ns,
+        )
 
     def _get_preflight_tokenizer(self) -> Tokenizer:
         tokenizer = self._preflight_tokenizer
@@ -1878,9 +1963,15 @@ class ZmqEngineBackend:
                 # the historical public-ID default seed explicit so process
                 # splitting and request retries remain output-identical.
                 sampling["seed"] = stable_request_seed(request.request_id)
-            prompt = self._take_prepared_request(request)
-            if prompt is None:
+            prepared = self._take_prepared_request(request)
+            if prepared is None:
                 prompt = prompt_with_tool_intent(request)
+            else:
+                prompt = prepared.prompt
+                if prepared.tokenize_duration_ns is not None:
+                    self._parent_tokenize_durations_ns[request.request_id] = (
+                        prepared.tokenize_duration_ns
+                    )
             message = {
                 "op": "add",
                 "request_id": wire_request_id,
@@ -1897,6 +1988,10 @@ class ZmqEngineBackend:
                 # fields; a new service defaults absent fields to v1.
                 message["wire_version"] = WIRE_VERSION
                 message["stream_id"] = stream_id
+                if request.trace_requested:
+                    # Omission keeps trace-off bytes and old-client behavior
+                    # unchanged; an old service ignores this additive key.
+                    message["trace_requested"] = True
             try:
                 await _send_control(self._socket, msgpack.packb(message))
             except BaseException as error:
@@ -1949,6 +2044,7 @@ class ZmqEngineBackend:
         if wire_request_id is not None:
             self._public_request_ids.pop(wire_request_id, None)
         self._stream_ids.pop(request_id, None)
+        self._parent_tokenize_durations_ns.pop(request_id, None)
         generation = self._queue_generations.pop(request_id, None)
         if generation is not None and generation not in self._queue_generations.values():
             self._failed_generations.discard(generation)
@@ -1972,6 +2068,33 @@ class ZmqEngineBackend:
             finish_reason=event.get("finish_reason"),
             logprob_content=content,
         )
+        if request.trace_requested:
+            decoded_stage_metrics = list(
+                _decode_stage_metrics(event.get("stage_metrics"))
+            )
+            parent_tokenize_ns = self._parent_tokenize_durations_ns.get(
+                request.request_id
+            )
+            if parent_tokenize_ns is not None:
+                for index, metric in enumerate(decoded_stage_metrics):
+                    if metric.stage == "tokenize":
+                        decoded_stage_metrics[index] = GenerationStageMetric(
+                            stage="tokenize",
+                            duration_ns=metric.duration_ns + parent_tokenize_ns,
+                            occurrences=metric.occurrences + 1,
+                        )
+                        break
+                else:
+                    decoded_stage_metrics.insert(
+                        0,
+                        GenerationStageMetric(
+                            stage="tokenize",
+                            duration_ns=parent_tokenize_ns,
+                        ),
+                    )
+            stage_metrics = tuple(decoded_stage_metrics)
+        else:
+            stage_metrics = ()
         return GenerationResult(
             request_id=request.request_id,
             prompt=request.prompt,
@@ -1983,6 +2106,7 @@ class ZmqEngineBackend:
                 cached_tokens=event.get("num_cached_tokens", 0),
             ),
             prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
+            stage_metrics=stage_metrics,
         )
 
     @staticmethod
