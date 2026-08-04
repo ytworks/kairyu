@@ -930,8 +930,27 @@ class EngineLoop:
         # discarded (post-terminal) tokens drop with the clear
         track.meta.extend(track.pending[: len(new_ids)])
         track.pending.clear()
-        if new_ids:
-            track.stable = track.detok.push(new_ids)
+        visible_new_ids = new_ids
+        if (
+            new_ids
+            and state.status.value == "finished"
+            and state.finish_reason == "stop"
+        ):
+            terminal_id = new_ids[-1]
+            request = state.request
+            terminal_is_eos = (
+                not request.ignore_eos
+                and request.eos_token_id is not None
+                and terminal_id == request.eos_token_id
+            )
+            if terminal_is_eos or terminal_id in request.stop_token_ids:
+                # Retain the sampled stop token in token IDs, logprobs, usage,
+                # KV/radix history, and scheduler accounting.  It alone is not
+                # visible text, and a native incremental decoder cannot retract
+                # it after it has been pushed.
+                visible_new_ids = new_ids[:-1]
+        if visible_new_ids:
+            track.stable = track.detok.push(visible_new_ids)
         track.num_cached_tokens = max(
             track.num_cached_tokens, self._scheduler.num_cached_tokens(request_id)
         )

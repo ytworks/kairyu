@@ -380,6 +380,30 @@ async def test_stop_string_works_across_process(zmq_backend):
     assert stop not in completion.text
 
 
+async def test_stop_token_text_omission_crosses_delta_wire(zmq_backend):
+    probe = await zmq_backend.generate(
+        _request("token-probe", "stoppable token", max_tokens=8)
+    )
+    stop_id = probe.completions[0].token_ids[1]
+
+    result = await zmq_backend.generate(
+        _request(
+            "token-stop",
+            "stoppable token",
+            max_tokens=8,
+            stop_token_ids=(stop_id,),
+        )
+    )
+    completion = result.completions[0]
+
+    assert completion.finish_reason == "stop"
+    assert completion.token_ids == probe.completions[0].token_ids[:2]
+    assert completion.text == f"tok{completion.token_ids[0]}"
+    assert f"tok{stop_id}" not in completion.text
+    assert result.usage is not None
+    assert result.usage.completion_tokens == 2
+
+
 async def test_concurrent_requests(zmq_backend):
     results = await asyncio.gather(
         zmq_backend.generate(_request("c1", "first concurrent", max_tokens=4)),

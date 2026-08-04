@@ -638,6 +638,86 @@ def test_stop_holdback_finishes_stream_before_late_surplus_is_reclaimed() -> Non
     loop.close()
 
 
+@pytest.mark.parametrize("depth", [1, 2])
+def test_terminating_stop_token_is_not_visible_but_remains_in_outputs(depth: int) -> None:
+    runner = _PositionRunner()
+    loop, scheduler = _loop(depth, runner)
+    loop.submit(
+        "token-stop",
+        "one two three",
+        SamplingParams(max_tokens=6, stop_token_ids=(1,)),
+    )
+
+    updates = [
+        update
+        for request_id, update in _drive(loop)
+        if request_id == "token-stop"
+    ]
+    final = updates[-1]
+
+    assert final.finished
+    assert final.finish_reason == "stop"
+    assert final.outputs == (0, 1)
+    assert final.text == "a"
+    assert all("b" not in update.text for update in updates)
+    assert scheduler.states == {}
+    loop.close()
+
+
+def test_only_the_occurrence_that_actually_stops_is_hidden() -> None:
+    class _RepeatedStopRunner(_PositionRunner):
+        sequence = (0, 2, 0)
+
+        def execute(self, scheduled, states):
+            sampled = super().execute(scheduled, states)
+            return {
+                request_id: tuple(
+                    SampledToken(self.sequence[token.token_id])
+                    for token in tokens
+                )
+                for request_id, tokens in sampled.items()
+            }
+
+    loop, _ = _loop(1, _RepeatedStopRunner())
+    loop.submit(
+        "repeated",
+        "one two three",
+        SamplingParams(max_tokens=4, stop_token_ids=(0,), min_tokens=2),
+    )
+
+    final = next(
+        update
+        for request_id, update in _drive(loop)
+        if request_id == "repeated" and update.finished
+    )
+
+    assert final.outputs == (0, 2, 0)
+    assert final.text == "ac"
+    assert final.finish_reason == "stop"
+    loop.close()
+
+
+def test_ignored_eos_that_finishes_by_length_remains_visible() -> None:
+    loop, _ = _loop(1, _PositionRunner())
+    loop._default_eos = 0
+    loop.submit(
+        "ignored",
+        "one two three",
+        SamplingParams(max_tokens=1, ignore_eos=True),
+    )
+
+    final = next(
+        update
+        for request_id, update in _drive(loop)
+        if request_id == "ignored" and update.finished
+    )
+
+    assert final.outputs == (0,)
+    assert final.text == "a"
+    assert final.finish_reason == "length"
+    loop.close()
+
+
 def test_grammar_termination_trims_scheduled_ahead_token_and_releases_late() -> None:
     class _GrammarRunner(_PositionRunner):
         def execute(self, scheduled, states):

@@ -6,11 +6,13 @@ Order of operations (reviewed convention, m8 §6):
    ``raw_logprobs`` default; temperature-independent, OpenAI-style).
 2. xgrammar mask FIRST (mask-last can leave zero legal tokens after top-k/top-p
    → NaN multinomial; mask-first plus keep-1 filters guarantees support).
-3. Penalties — repetition over prompt + committed outputs; presence/frequency
+3. While ``position < min_tokens``, mask EOS and every stop-token ID.  The
+   logical scheduled position is authoritative under overlap/speculation.
+4. Penalties — repetition over prompt + committed outputs; presence/frequency
    over committed outputs only (vLLM/HF agreement).
-4. ``temperature == 0`` → argmax on the masked logits; else scale.
-5. min_p, then top-k, then top-p (vLLM v1 order; HF differs — recorded).
-6. softmax → seeded sample.
+5. ``temperature == 0`` → argmax on the masked logits; else scale.
+6. min_p, then top-k, then top-p (vLLM v1 order; HF differs — recorded).
+7. softmax → seeded sample.
 
 Determinism: base seed is ``sampling.seed`` or sha256(request_id) (never
 Python ``hash()`` — process-randomized); the per-position seed is a splitmix64
@@ -595,6 +597,10 @@ class Sampler:
         request_id: str,
         sampling: EngineSampling,
         eos_token_id: int | None = None,
+        *,
+        position: int = 0,
+        stop_token_ids: Sequence[int] = (),
+        min_tokens: int = 0,
     ) -> bool:
         """Whether selection can happen on the logits device before host copy.
 
@@ -607,7 +613,47 @@ class Sampler:
         if not sampling.is_greedy_pure or sampling.logprobs is not None:
             return False
         state = self._state_for(request_id, sampling, eos_token_id)
-        return state.enforcer is None
+        if state.enforcer is not None:
+            return False
+        return not (
+            position < min_tokens
+            and (eos_token_id is not None or bool(stop_token_ids))
+        )
+
+    @staticmethod
+    def _apply_min_tokens_mask(
+        logits: torch.Tensor,
+        *,
+        position: int,
+        min_tokens: int,
+        eos_token_id: int | None,
+        stop_token_ids: Sequence[int],
+    ) -> None:
+        """Prevent a stop-valued token from becoming ordinary model context.
+
+        vLLM's min-token processor masks its complete stop set while the number
+        of prior output tokens is below the requested minimum.  ``position`` is
+        that prior-token count even when the scheduler snapshot lags behind
+        in-flight overlap/speculative work.  EOS remains in this mask when
+        ``ignore_eos`` controls termination later; the sampler intentionally
+        does not need that flag.
+        """
+        if position >= min_tokens:
+            return
+        vocab_size = logits.shape[-1]
+        blocked: list[int] = []
+        seen: set[int] = set()
+        for token_id in (*stop_token_ids, eos_token_id):
+            if (
+                token_id is not None
+                and 0 <= token_id < vocab_size
+                and token_id not in seen
+            ):
+                seen.add(token_id)
+                blocked.append(token_id)
+        if blocked:
+            indices = torch.as_tensor(blocked, dtype=torch.long, device=logits.device)
+            logits.index_fill_(0, indices, float("-inf"))
 
     def sample(
         self,
@@ -621,9 +667,18 @@ class Sampler:
         pending_outputs: Sequence[int] = (),
         history_epoch: int | None = None,
         eos_token_id: int | None = None,
+        stop_token_ids: Sequence[int] = (),
+        min_tokens: int = 0,
     ) -> SampledToken:
         state = self._state_for(request_id, sampling, eos_token_id)
-        if self.can_argmax_logits(request_id, sampling, eos_token_id):
+        if self.can_argmax_logits(
+            request_id,
+            sampling,
+            eos_token_id,
+            position=position,
+            stop_token_ids=stop_token_ids,
+            min_tokens=min_tokens,
+        ):
             return SampledToken(int(torch.argmax(logits).item()))
         # CPU and structured-output compatibility path. CUDA grammar-free
         # requests use sample_device(), which keeps the decision and penalty
@@ -637,6 +692,14 @@ class Sampler:
 
         if state.enforcer is not None:
             state.enforcer.mask_logits(logits)
+
+        self._apply_min_tokens_mask(
+            logits,
+            position=position,
+            min_tokens=min_tokens,
+            eos_token_id=eos_token_id,
+            stop_token_ids=stop_token_ids,
+        )
 
         self._apply_incremental_penalties(
             state,
@@ -671,6 +734,8 @@ class Sampler:
         pending_outputs: Sequence[torch.Tensor] = (),
         history_epoch: int | None = None,
         eos_token_id: int | None = None,
+        stop_token_ids: Sequence[int] = (),
+        min_tokens: int = 0,
     ) -> DeviceSample:
         """Sample without reading a device value on the host.
 
@@ -692,6 +757,14 @@ class Sampler:
         raw_logsoftmax: torch.Tensor | None = None
         if sampling.logprobs is not None:
             raw_logsoftmax = torch.log_softmax(work, dim=-1)
+
+        self._apply_min_tokens_mask(
+            work,
+            position=position,
+            min_tokens=min_tokens,
+            eos_token_id=eos_token_id,
+            stop_token_ids=stop_token_ids,
+        )
 
         self._apply_incremental_penalties(
             state,

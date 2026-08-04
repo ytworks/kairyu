@@ -475,7 +475,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M5 — Intra-node multi-GPU (TP, DP replicas, P-D intra-node) | Design reviewed; **CPU half done** (Communicator/StepInput/TPModelRunner, TP plumbing live, ReplicaPool + affinity, PDCoordinator + `resume_with_kv`). GPU phase: `docs/gpu-runbook.md` §6, prereq M2 Gates 1–3. |
 | M6 — Inter-node multi-GPU (2-node DP, KV transfer plane, P-D inter-node, PP) | Design reviewed; **CPU half done** (ClusterSpec, KVTransport + loopback + `bench/kv_transfer_bench.py`, openai_backend replica fixes, async runner contract + `PipelinedModelRunner` consumed by the unified production `EngineLoop`; the old pipelined core is compatibility-only). GPU phase: runbook §7, prereq all M5 gates. |
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
-| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-29, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, incremental sampler penalty state + tokenizer-native xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, and negotiated snapshot/delta ZMQ `kairyu-proc` wire with legacy compatibility and stream-generation isolation. |
+| M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-08-04, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, incremental sampler penalty state + tokenizer-native xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, negotiated snapshot/delta ZMQ `kairyu-proc` wire with legacy compatibility and stream-generation isolation, pre-selection EOS/stop masking below `min_tokens`, and terminal-stop exclusion from visible detokenization without erasing token/accounting truth. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
 | M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete; D5 generation-default contract amended 2026-08-04** (`docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; model-owned sampling defaults preserve request omission while explicit values remain authoritative; pytest gpu/hf_hub/dist markers. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete; FA3/FA4 extension implemented and SM120-validated** (`docs/design/m13-attention-backend.md`): issue #277 adds strict `auto`/torch/FlashInfer/FA3/FA4 choices, canonical TP/P-D decisions, and actual child-process reporting. Retained SM120 FA4/Qwen3-32B evidence keeps `auto` on the objectively faster stable FlashInfer path; FA3 is a strict SM90 path with fake API-contract coverage and no unmeasured default claim. |
@@ -807,6 +807,15 @@ generation metadata for real models instead of applying neutral or stale state;
 official deployments eagerly start process-backed orchestrator workers before
 readiness so their audit record is resolved before traffic.
 
+Native min-token processing now masks the model EOS ID and every request/model
+stop ID at each logical output position below `min_tokens` across CPU, CUDA,
+batched, overlap, P-D, TP, EP, and speculative execution. `ignore_eos` affects
+termination only, so EOS is still unavailable before the threshold. A token
+that actually terminates generation remains in token IDs, usage, logprobs,
+scheduler/KV history, and radix accounting, but never enters visible
+detokenization. Ignored EOS and length-terminal tokens are not specially
+suppressed by this rule and retain the tokenizer's ordinary semantics.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -814,6 +823,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [amendment] Min-token sampling masks stops before selection
+- What: added a shared min-token logits processor that masks model EOS and deduplicated valid request/model stop IDs through every CPU and device sampling path, including direct-argmax, batched, overlap, P-D, TP, EP, and speculative rows at their logical output positions; retained raw pre-processor logprobs; excluded only an actual terminating stop token from visible incremental detokenization while preserving token IDs, usage, logprobs, scheduler/KV history, and radix accounting; and rejected `min_tokens > max_tokens`. Focused integration, process-wire, and real-CUDA overlap gates pass. The exact portable CI-equivalent run passed 1,259 benchmark plus 3,441 non-benchmark tests with no selected skips and 86.90% combined coverage.
+- Why: EOS or a configured stop token could previously become ordinary model context before the minimum length and drive off-distribution repetition because the scheduler discovered termination only after appending the sampled token. A non-special terminating stop token could also leak into user-visible text even though the token must remain part of authoritative engine accounting.
+- Refs: issue #352; m8 D1/D2; `kairyu/engine/core/{sampler,step_input,model_runner,torch_runner}.py`; `kairyu/engine/engine_loop.py`; `kairyu/sampling_params.py`; `tests/{unit,gpu}/`
 
 ### 2026-08-04 — [amendment] Model generation defaults preserve request omission
 - What: extended model generation defaults from EOS-only parsing to validated `temperature`, `top_p`, `top_k`, `min_p`, and `repetition_penalty`; preserved omitted-versus-explicit intent through HTTP, offline, native distributed/process, OpenAI-compatible, and vLLM adapters; added strict `auto`/`vllm`/`none` deployment and CLI policy; made real-model process restarts reject missing or stale policy metadata; eagerly started process-backed orchestrator workers before deployment readiness; and exposed direct, homogeneous-local-pool, sampled-remote, and per-orchestrator-worker audit records through `/backends`. The final portable Python 3.12 gate passed 1,259 benchmark plus 3,428 non-benchmark tests with no selected skips and 86.88% combined coverage.

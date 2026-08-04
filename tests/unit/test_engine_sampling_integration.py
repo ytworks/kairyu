@@ -5,6 +5,7 @@ engine with a char-level vocab + real xgrammar."""
 import json
 
 import pytest
+import torch
 
 from kairyu.engine.core.engine_core import EngineCore
 from kairyu.engine.core.radix_kv import RadixKVCache
@@ -79,6 +80,55 @@ def test_different_seeds_diverge_through_engine():
         )
         outs.append(engine.run_to_completion()["a"])
     assert len(set(outs)) > 1
+
+
+class _EosBiasedLM(TinyAttentionLM):
+    """Always prefers EOS, with one ordinary fallback for min-token masking."""
+
+    def logits_for_last(self, query_token, keys, values):
+        del query_token, keys, values
+        logits = torch.zeros(self.vocab)
+        logits[3] = 5.0
+        logits[7] = 10.0
+        return logits
+
+
+def _run_eos_biased(*, ignore_eos: bool):
+    model = _EosBiasedLM(vocab=16, seed=0)
+    cache = RadixKVCache(num_pages=64, page_size=PAGE)
+    scheduler = Scheduler(cache, max_num_batched_tokens=16, page_size=PAGE)
+    runner = TorchPagedRunner(
+        model,
+        num_pages=64,
+        page_size=PAGE,
+        sampler=Sampler(),
+    )
+    engine = EngineCore(scheduler, runner)
+    engine.add_request(
+        EngineRequest(
+            "a",
+            (1, 2, 4),
+            max_new_tokens=4,
+            eos_token_id=7,
+            min_tokens=2,
+            ignore_eos=ignore_eos,
+        )
+    )
+    return engine.run_to_completion()["a"], scheduler.finish_reason("a")
+
+
+def test_min_tokens_masks_eos_until_threshold_then_allows_stop():
+    outputs, reason = _run_eos_biased(ignore_eos=False)
+
+    assert outputs == (3, 3, 7)
+    assert reason == "stop"
+
+
+def test_ignore_eos_still_masks_below_minimum_then_runs_to_length():
+    outputs, reason = _run_eos_biased(ignore_eos=True)
+
+    assert outputs == (3, 3, 7, 7)
+    assert reason == "length"
 
 
 def test_finished_penalty_request_releases_sampler_state():

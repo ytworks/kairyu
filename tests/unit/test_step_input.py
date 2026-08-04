@@ -21,7 +21,15 @@ def _scheduler(num_pages: int = 64, budget: int = 32, max_seqs: int = 4) -> Sche
 def test_snapshot_copies_request_fields_from_live_state():
     scheduler = _scheduler()
     scheduler.add_request(
-        EngineRequest("a", (1, 2, 3, 4, 5), max_new_tokens=3, eos_token_id=9)
+        EngineRequest(
+            "a",
+            (1, 2, 3, 4, 5),
+            max_new_tokens=3,
+            eos_token_id=9,
+            stop_token_ids=(10, 11),
+            min_tokens=2,
+            ignore_eos=True,
+        )
     )
     plan = scheduler.schedule()
     snapshot = snapshot_step(plan, scheduler.states)
@@ -34,6 +42,9 @@ def test_snapshot_copies_request_fields_from_live_state():
     assert entry.in_flight == 1
     assert entry.eos_token_id == 9
     assert entry.max_new_tokens == 3
+    assert entry.stop_token_ids == (10, 11)
+    assert entry.min_tokens == 2
+    assert entry.ignore_eos is True
     assert isinstance(entry.page_ids, tuple) and len(entry.page_ids) == 2
     assert isinstance(entry.decode_page_ids, tuple)
 
