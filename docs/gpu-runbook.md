@@ -397,11 +397,19 @@ GPU-only remainder (design m5 §4.2).
   is API PID 1 with three direct workers, while the process arm has exactly one
   owned service session with three workers. The process backend's 120-second
   heartbeat allowance must exceed any healthy silent engine step; a reported
-  rank failure or longer silence invalidates the cell. Independent raw replay
-  must pass before interpretation. The predeclared report-only material line is
-  paired-median `kairyu-proc/kairyu` TTFT p99 <= 0.90; no valid evidence means
-  no supported/not-supported conclusion, and neither classification is a
-  formal A6 PASS/FAIL.
+  rank failure or longer silence invalidates the cell. Each completed cell must
+  use `docker stop --timeout 120`, bind the post-stop container ID to the launch
+  ID, prove `Running=false`, `OOMKilled=false`, and `ExitCode=0`, retain logs
+  after that graceful exit, and use a non-forced `docker rm`. Both before launch
+  and after removal, all selected GPUs must have no compute applications, zero
+  `utilization.gpu`, and `memory.used` exactly equal to the stable per-GPU idle
+  baseline captured at run start; transient NVML query errors retry only inside
+  the fixed quiescence deadline. A forced fallback may recover a
+  failed cell physically but can never satisfy its cleanup evidence. Independent
+  raw replay must pass before interpretation. The predeclared report-only
+  material line is paired-median `kairyu-proc/kairyu` TTFT p99 <= 0.90; no valid
+  evidence means no supported/not-supported conclusion, and neither
+  classification is a formal A6 PASS/FAIL.
 - Gate A7: run `bench/tp_kv_hit_g2_a7_bench.py` against Qwen3-32B at TP4
   and TP8, once through each replica's direct endpoint and once through its
   single-replica gateway. Assemble

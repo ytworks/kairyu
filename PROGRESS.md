@@ -233,7 +233,10 @@ normal stop, cancelled startup, rank-0/follower failure, wedged steps, and API
 parent death without allowing a second generation over retained ranks. The
 issue #333 TP4 HTTP diagnostic operator is CPU-validated and predeclares a
 report-only paired-median process/in-process TTFT-p99 ratio <=0.90 as material;
-the real Qwen3-32B ABBA measurement remains the active step before the issue is
+its pre/post cell boundary now also requires a launch-bound graceful zero exit,
+non-forced removal, no compute applications, zero GPU utilization, and exact
+restoration to a stable per-GPU run-start idle-memory baseline.
+The real Qwen3-32B ABBA measurement remains the active step before the issue is
 closed.
 Streaming detokenization is now truly incremental on the supported native
 paths. `HFTokenizer` delegates arriving deltas to the Rust `DecodeStream`, Toy
@@ -870,6 +873,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [amendment] Issue #333 rejects force-cleaned or non-idle GPU cells
+- What: changed the four-cell TP4 diagnostic lifecycle to stop each measured container with a bounded graceful timeout, re-attest its immutable launch ID and zero non-OOM exit, retain shutdown logs, and remove it without force. Pre-start and post-removal evidence now requires no selected-GPU compute applications, zero utilization, and memory exactly equal to a stable per-GPU run-start idle baseline, with bounded retry for transient NVML query failures. Stop or removal failures still trigger best-effort forced recovery but invalidate the cell and prevent a shard from being written.
+- Why: an interrupted trial demonstrated that `docker rm -f` could remove every visible process and allocation while two GPUs continued executing orphaned kernels at 100% utilization. Process-list-only quiescence therefore admitted contaminated subsequent cells, and a successful `docker stop` return code alone could conceal Docker's timeout SIGKILL.
+- Refs: issue #333; m8 D6; `bench/issue_333_proc_http_bench.py`; `tests/bench/test_issue_333_proc_http_bench.py`; `docs/{gpu-runbook.md,design/m8-engine-cpu.md}`
 
 ### 2026-08-04 — [amendment] Process-isolated TP owns and attests its complete rank tree
 - What: enabled real-model tensor parallelism in `kairyu-proc`; delayed public topology until child startup attested the configured degree; placed the non-daemon service and ranks in one private POSIX session with an API-parent lease; made the Linux API a child subreaper that confirms every forced descendant is reaped; added fatal launcher heartbeat/readiness and a 120-second worst-step timeout; bounded add/abort/heartbeat/shutdown sends; and added a fail-closed TP4 fresh-server ABBA diagnostic with exact A6 traffic, imported-source, checkpoint, GPU, backend, config, and process-tree evidence plus a predeclared report-only 0.90 TTFT-p99 ratio interpretation.

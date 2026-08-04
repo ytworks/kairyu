@@ -73,6 +73,14 @@ MATERIAL_TTFT_P99_RATIO_CEILING = Fraction(9, 10)
 PYCACHE_PREFIX = "/tmp/kairyu-issue333-empty-pycache"
 CLEANUP_QUIESCENCE_TIMEOUT_S = 60.0
 CLEANUP_QUIESCENCE_POLL_S = 0.5
+QUIESCENCE_STABLE_SAMPLES = 2
+CONTAINER_STOP_TIMEOUT_S = 120
+DOCKER_STOP_COMMAND_TIMEOUT_S = 135.0
+DOCKER_CONTROL_TIMEOUT_S = 30.0
+DOCKER_LOG_TIMEOUT_S = 30.0
+DOCKER_LAUNCH_TIMEOUT_S = 60.0
+DOCKER_ATTEST_TIMEOUT_S = 60.0
+NVML_QUERY_TIMEOUT_S = 5.0
 
 DEFAULT_REPO = _REPO_ROOT
 DEFAULT_WORK_DIR = Path("/tmp/issue-333-proc-http")
@@ -539,7 +547,8 @@ def process_tree_attestation(name: str, *, arm: str) -> dict[str, object]:
             "/app/.venv/bin/python",
             "-c",
             _PROCESS_PROBE_CODE,
-        )
+        ),
+        timeout_s=DOCKER_CONTROL_TIMEOUT_S,
     )
     try:
         rows = json.loads((result.stdout or "").strip().splitlines()[-1])
@@ -636,7 +645,10 @@ def _container_import_hashes(name: str) -> dict[str, dict[str, str]]:
         "  raise RuntimeError('module imports populated the isolated pycache prefix')\n"
         "print(json.dumps(result,sort_keys=True))"
     )
-    result = formal.run_command(("docker", "exec", name, "/app/.venv/bin/python", "-c", code))
+    result = formal.run_command(
+        ("docker", "exec", name, "/app/.venv/bin/python", "-c", code),
+        timeout_s=DOCKER_ATTEST_TIMEOUT_S,
+    )
     try:
         value = json.loads((result.stdout or "").strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError) as error:
@@ -697,6 +709,7 @@ def runner_source_hashes(repo: Path) -> dict[str, str]:
         cwd=resolved_repo,
         check=False,
         announce=False,
+        timeout_s=DOCKER_CONTROL_TIMEOUT_S,
     )
     if symbolic.returncode == 0:
         branch = (symbolic.stdout or "").strip()
@@ -731,7 +744,10 @@ def container_launch_attestation(
     image_id: str,
     source_hashes: dict[str, str],
 ) -> dict[str, object]:
-    result = formal.run_command(("docker", "inspect", name))
+    result = formal.run_command(
+        ("docker", "inspect", name),
+        timeout_s=DOCKER_CONTROL_TIMEOUT_S,
+    )
     try:
         inspected = json.loads((result.stdout or "").strip())
     except json.JSONDecodeError as error:
@@ -851,7 +867,8 @@ def container_launch_attestation(
                 "print(json.dumps({'sha256':hashlib.sha256(b).hexdigest(),"
                 "'text':b.decode()}))"
             ),
-        )
+        ),
+        timeout_s=DOCKER_CONTROL_TIMEOUT_S,
     )
     try:
         mounted = json.loads((mounted_config.stdout or "").strip().splitlines()[-1])
@@ -963,17 +980,25 @@ def _port_available(port: int) -> bool:
 
 def _selected_gpu_compute_applications(
     inventory: Sequence[formal.GPU],
+    *,
+    timeout_s: float = NVML_QUERY_TIMEOUT_S,
 ) -> list[dict[str, object]]:
     selected = list(inventory[:TP_SIZE])
     selected_uuids = {item.uuid for item in selected}
-    applications = formal.run_command(
-        (
-            "nvidia-smi",
-            "--query-compute-apps=gpu_uuid,pid,process_name",
-            "--format=csv,noheader",
-        ),
-        check=False,
-    )
+    try:
+        applications = formal.run_command(
+            (
+                "nvidia-smi",
+                "--query-compute-apps=gpu_uuid,pid,process_name",
+                "--format=csv,noheader",
+            ),
+            check=False,
+            timeout_s=timeout_s,
+        )
+    except formal.FormalRunError as error:
+        raise DiagnosticRunError(
+            f"cannot query selected-GPU compute applications: {error}"
+        ) from error
     if applications.returncode != 0:
         raise DiagnosticRunError(
             "cannot query selected-GPU compute applications: "
@@ -998,14 +1023,134 @@ def _selected_gpu_compute_applications(
     return rows
 
 
-def _selected_gpu_quiescence(inventory: Sequence[formal.GPU]) -> dict[str, object]:
+def _selected_gpu_runtime_states(
+    inventory: Sequence[formal.GPU],
+    *,
+    timeout_s: float = NVML_QUERY_TIMEOUT_S,
+) -> list[dict[str, object]]:
     selected = list(inventory[:TP_SIZE])
-    rows = _selected_gpu_compute_applications(inventory)
-    if rows:
-        raise DiagnosticRunError(f"selected GPUs are not compute-idle: {rows}")
+    selected_uuids = [item.uuid for item in selected]
+    try:
+        runtime = formal.run_command(
+            (
+                "nvidia-smi",
+                "--query-gpu=uuid,memory.used,utilization.gpu,pstate",
+                "--format=csv,noheader,nounits",
+            ),
+            check=False,
+            timeout_s=timeout_s,
+        )
+    except formal.FormalRunError as error:
+        raise DiagnosticRunError(
+            f"cannot query selected-GPU runtime state: {error}"
+        ) from error
+    if runtime.returncode != 0:
+        raise DiagnosticRunError(
+            "cannot query selected-GPU runtime state: "
+            + (runtime.stderr or "nvidia-smi failed").strip()
+        )
+    observed: dict[str, dict[str, object]] = {}
+    for line in (runtime.stdout or "").splitlines():
+        fields = [field.strip() for field in line.split(",", 3)]
+        if len(fields) != 4 or not all(fields):
+            raise DiagnosticRunError(f"invalid nvidia-smi GPU runtime row: {line!r}")
+        gpu_uuid = fields[0]
+        if gpu_uuid not in selected_uuids:
+            continue
+        if gpu_uuid in observed:
+            raise DiagnosticRunError(f"duplicate nvidia-smi GPU runtime row: {line!r}")
+        try:
+            memory_used_mib = int(fields[1])
+            utilization_percent = int(fields[2])
+        except ValueError as error:
+            raise DiagnosticRunError(
+                f"invalid nvidia-smi GPU runtime counters: {line!r}"
+            ) from error
+        if memory_used_mib < 0 or not 0 <= utilization_percent <= 100:
+            raise DiagnosticRunError(f"invalid nvidia-smi GPU runtime counters: {line!r}")
+        observed[gpu_uuid] = {
+            "gpu_uuid": gpu_uuid,
+            "memory_used_mib": memory_used_mib,
+            "utilization_percent": utilization_percent,
+            "pstate": fields[3],
+        }
+    if set(observed) != set(selected_uuids):
+        missing = [gpu_uuid for gpu_uuid in selected_uuids if gpu_uuid not in observed]
+        raise DiagnosticRunError(f"selected GPUs absent from nvidia-smi runtime state: {missing}")
+    return [observed[gpu_uuid] for gpu_uuid in selected_uuids]
+
+
+def _gpu_memory_baseline(states: Sequence[Mapping[str, object]]) -> dict[str, int]:
+    baseline: dict[str, int] = {}
+    for state in states:
+        gpu_uuid = state.get("gpu_uuid")
+        memory_used_mib = state.get("memory_used_mib")
+        if (
+            not isinstance(gpu_uuid, str)
+            or type(memory_used_mib) is not int
+            or memory_used_mib < 0
+            or gpu_uuid in baseline
+        ):
+            raise DiagnosticRunError("cannot derive selected-GPU idle memory baseline")
+        baseline[gpu_uuid] = memory_used_mib
+    return baseline
+
+
+def _gpu_runtime_is_idle(
+    states: Sequence[Mapping[str, object]],
+    *,
+    memory_baseline_mib: Mapping[str, int] | None,
+) -> bool:
+    if any(
+        type(state.get("utilization_percent")) is not int
+        or state.get("utilization_percent") != 0
+        for state in states
+    ):
+        return False
+    if memory_baseline_mib is None:
+        return True
+    try:
+        return _gpu_memory_baseline(states) == dict(memory_baseline_mib)
+    except DiagnosticRunError:
+        return False
+
+
+def _runtime_state_signature(
+    states: Sequence[Mapping[str, object]],
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        (
+            state.get("gpu_uuid"),
+            state.get("memory_used_mib"),
+            state.get("utilization_percent"),
+            state.get("pstate"),
+        )
+        for state in states
+    )
+
+
+def _selected_gpu_quiescence(
+    inventory: Sequence[formal.GPU],
+    *,
+    memory_baseline_mib: Mapping[str, int] | None = None,
+) -> dict[str, object]:
+    selected = list(inventory[:TP_SIZE])
+    applications = _selected_gpu_compute_applications(inventory)
+    runtime_states = _selected_gpu_runtime_states(inventory)
+    if applications or not _gpu_runtime_is_idle(
+        runtime_states,
+        memory_baseline_mib=memory_baseline_mib,
+    ):
+        raise DiagnosticRunError(
+            "selected GPUs are not compute-idle: "
+            f"applications={applications}, runtime_states={runtime_states}"
+        )
     return {
         "selected_gpu_uuids": [item.uuid for item in selected],
-        "compute_applications": rows,
+        "compute_applications": applications,
+        "gpu_runtime_states": runtime_states,
+        "polls": 1,
+        "stable_samples": 1,
     }
 
 
@@ -1013,24 +1158,64 @@ def _wait_for_selected_gpu_quiescence(
     inventory: Sequence[formal.GPU],
     *,
     timeout_s: float = CLEANUP_QUIESCENCE_TIMEOUT_S,
+    memory_baseline_mib: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     if timeout_s <= 0:
         raise DiagnosticRunError("cleanup quiescence timeout must be positive")
     selected = list(inventory[:TP_SIZE])
     deadline = time.monotonic() + timeout_s
     polls = 0
+    last_error: DiagnosticRunError | None = None
+    consecutive = 0
+    last_signature: tuple[tuple[object, ...], ...] | None = None
     while True:
         polls += 1
-        rows = _selected_gpu_compute_applications(inventory)
-        if not rows:
-            return {
-                "selected_gpu_uuids": [item.uuid for item in selected],
-                "compute_applications": [],
-                "polls": polls,
-            }
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DiagnosticRunError("selected-GPU quiescence deadline expired")
+            applications = _selected_gpu_compute_applications(
+                inventory,
+                timeout_s=min(NVML_QUERY_TIMEOUT_S, remaining),
+            )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DiagnosticRunError("selected-GPU quiescence deadline expired")
+            runtime_states = _selected_gpu_runtime_states(
+                inventory,
+                timeout_s=min(NVML_QUERY_TIMEOUT_S, remaining),
+            )
+            last_error = None
+            if not applications and _gpu_runtime_is_idle(
+                runtime_states,
+                memory_baseline_mib=memory_baseline_mib,
+            ):
+                signature = _runtime_state_signature(runtime_states)
+                consecutive = consecutive + 1 if signature == last_signature else 1
+                last_signature = signature
+                if consecutive >= QUIESCENCE_STABLE_SAMPLES:
+                    return {
+                        "selected_gpu_uuids": [item.uuid for item in selected],
+                        "compute_applications": [],
+                        "gpu_runtime_states": runtime_states,
+                        "polls": polls,
+                        "stable_samples": QUIESCENCE_STABLE_SAMPLES,
+                    }
+            else:
+                consecutive = 0
+                last_signature = None
+            observation = (
+                f"applications={applications}, runtime_states={runtime_states}"
+            )
+        except DiagnosticRunError as error:
+            last_error = error
+            consecutive = 0
+            last_signature = None
+            observation = str(error)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise DiagnosticRunError(f"selected GPUs stayed busy after container removal: {rows}")
+            detail = str(last_error) if last_error is not None else observation
+            raise DiagnosticRunError(f"selected GPUs did not become quiescent: {detail}")
         time.sleep(min(CLEANUP_QUIESCENCE_POLL_S, remaining))
 
 
@@ -1038,6 +1223,7 @@ def _save_container_logs_strict(name: str, path: Path, *, work_dir: Path) -> dic
     result = formal.run_command(
         ("docker", "logs", "--timestamps", name),
         check=False,
+        timeout_s=DOCKER_LOG_TIMEOUT_S,
     )
     content = (result.stdout or "") + (result.stderr or "")
     atomic_write_text(path, content)
@@ -1050,22 +1236,121 @@ def _save_container_logs_strict(name: str, path: Path, *, work_dir: Path) -> dic
     }
 
 
+def _container_absent(identifier: str) -> bool:
+    full_id = HEX64.fullmatch(identifier) is not None
+    filter_value = f"id={identifier}" if full_id else f"name=^/{identifier}$"
+    listed = formal.run_command(
+        ("docker", "ps", "-aq", "--no-trunc", "--filter", filter_value),
+        announce=False,
+        timeout_s=DOCKER_CONTROL_TIMEOUT_S,
+    )
+    rows = [line.strip() for line in (listed.stdout or "").splitlines() if line.strip()]
+    if any(HEX64.fullmatch(row) is None for row in rows):
+        raise DiagnosticRunError("Docker absence query returned a non-container identity")
+    return identifier not in rows if full_id else not rows
+
+
+def _stop_container_strict(
+    identifier: str,
+    *,
+    expected_container_id: str | None = None,
+) -> dict[str, object]:
+    stopped = formal.run_command(
+        (
+            "docker",
+            "stop",
+            "--timeout",
+            str(CONTAINER_STOP_TIMEOUT_S),
+            identifier,
+        ),
+        check=False,
+        timeout_s=DOCKER_STOP_COMMAND_TIMEOUT_S,
+    )
+    if stopped.returncode != 0:
+        raise DiagnosticRunError(
+            f"cannot gracefully stop container {identifier}: "
+            + ((stopped.stderr or stopped.stdout) or "docker stop failed").strip()
+        )
+    inspected = formal.run_command(
+        ("docker", "inspect", identifier),
+        timeout_s=DOCKER_CONTROL_TIMEOUT_S,
+    )
+    try:
+        parsed = json.loads(inspected.stdout)
+        container = parsed[0]
+        state = container["State"]
+    except (IndexError, KeyError, TypeError, json.JSONDecodeError) as error:
+        raise DiagnosticRunError(
+            f"cannot attest post-stop container state for {identifier}"
+        ) from error
+    container_id = container.get("Id") if isinstance(container, dict) else None
+    if (
+        not isinstance(container_id, str)
+        or HEX64.fullmatch(container_id) is None
+        or expected_container_id is not None
+        and container_id != expected_container_id
+    ):
+        raise DiagnosticRunError(
+            f"post-stop container identity differs for {identifier}: {container_id!r}"
+        )
+    post_stop_state = {
+        "running": state.get("Running") if isinstance(state, dict) else None,
+        "oom_killed": state.get("OOMKilled") if isinstance(state, dict) else None,
+        "exit_code": state.get("ExitCode") if isinstance(state, dict) else None,
+        "error": state.get("Error") if isinstance(state, dict) else None,
+    }
+    if not (
+        post_stop_state["running"] is False
+        and post_stop_state["oom_killed"] is False
+        and type(post_stop_state["exit_code"]) is int
+        and post_stop_state["exit_code"] == 0
+        and type(post_stop_state["error"]) is str
+        and post_stop_state["error"] == ""
+    ):
+        raise DiagnosticRunError(
+            f"container {identifier} did not exit gracefully: {post_stop_state}"
+        )
+    return {
+        "docker_stop_returncode": 0,
+        "stop_timeout_s": CONTAINER_STOP_TIMEOUT_S,
+        "post_stop_container_id": container_id,
+        "post_stop_state": post_stop_state,
+    }
+
+
 def _remove_container_strict(name: str) -> dict[str, object]:
-    removed = formal.run_command(("docker", "rm", "-f", name), check=False)
+    removed = formal.run_command(
+        ("docker", "rm", name),
+        check=False,
+        timeout_s=DOCKER_CONTROL_TIMEOUT_S,
+    )
     if removed.returncode != 0:
         raise DiagnosticRunError(
             f"cannot remove container {name}: "
             + ((removed.stderr or removed.stdout) or "docker rm failed").strip()
         )
-    remaining = formal.run_command(
-        ("docker", "ps", "-aq", "--filter", f"name=^/{name}$"),
-    )
-    if (remaining.stdout or "").strip():
-        raise DiagnosticRunError(f"container {name} remains after docker rm -f")
+    if not _container_absent(name):
+        raise DiagnosticRunError(f"container {name} remains after docker rm")
     return {
         "docker_rm_returncode": 0,
+        "forced": False,
         "absent_after_remove": True,
     }
+
+
+def _force_remove_container_for_cleanup(name: str) -> None:
+    removed = formal.run_command(
+        ("docker", "rm", "-f", name),
+        check=False,
+        timeout_s=DOCKER_CONTROL_TIMEOUT_S,
+    )
+    if removed.returncode != 0 and not _container_absent(name):
+        raise DiagnosticRunError(
+            f"cannot force-remove container {name}: "
+            + ((removed.stderr or removed.stdout) or "docker rm -f failed").strip()
+        )
+    if not _container_absent(name):
+        raise DiagnosticRunError(f"container {name} remains after docker rm -f")
 
 
 def _attempt_container_cleanup(
@@ -1074,6 +1359,8 @@ def _attempt_container_cleanup(
     log_path: Path,
     work_dir: Path,
     inventory: Sequence[formal.GPU],
+    expected_container_id: str | None = None,
+    memory_baseline_mib: Mapping[str, int] | None = None,
 ) -> tuple[
     dict[str, object] | None,
     dict[str, object] | None,
@@ -1086,16 +1373,39 @@ def _attempt_container_cleanup(
     log_record: dict[str, object] | None = None
     removal_record: dict[str, object] | None = None
     post_cleanup: dict[str, object] | None = None
+    stop_record: dict[str, object] | None = None
+    target = expected_container_id or name
     try:
-        log_record = _save_container_logs_strict(name, log_path, work_dir=work_dir)
+        stop_record = _stop_container_strict(
+            target,
+            expected_container_id=expected_container_id,
+        )
     except BaseException as error:
         errors.append(error)
     try:
-        removal_record = _remove_container_strict(name)
+        log_record = _save_container_logs_strict(target, log_path, work_dir=work_dir)
     except BaseException as error:
         errors.append(error)
+    if stop_record is not None:
+        try:
+            removed = _remove_container_strict(target)
+            removal_record = {**stop_record, **removed}
+        except BaseException as error:
+            errors.append(error)
+            try:
+                _force_remove_container_for_cleanup(target)
+            except BaseException as fallback_error:
+                errors.append(fallback_error)
+    else:
+        try:
+            _force_remove_container_for_cleanup(target)
+        except BaseException as error:
+            errors.append(error)
     try:
-        post_cleanup = _wait_for_selected_gpu_quiescence(inventory)
+        post_cleanup = _wait_for_selected_gpu_quiescence(
+            inventory,
+            memory_baseline_mib=memory_baseline_mib,
+        )
     except BaseException as error:
         errors.append(error)
     return log_record, removal_record, post_cleanup, errors
@@ -1105,7 +1415,11 @@ def _fetch_container_gpu_attestation(
     name: str,
     selected: Sequence[formal.GPU],
 ) -> dict[str, list[str]]:
-    return formal.container_gpu_attestation(name, selected)
+    return formal.container_gpu_attestation(
+        name,
+        selected,
+        command_timeout_s=DOCKER_CONTROL_TIMEOUT_S,
+    )
 
 
 def _fetch_environment_value(
@@ -1574,6 +1888,108 @@ def cleanup_attestation(
     )
 
 
+def _quiescence_evidence_valid(
+    value: object,
+    *,
+    gpu_uuids: object,
+    memory_baseline_mib: Mapping[str, int] | None = None,
+) -> bool:
+    if not isinstance(value, dict) or not isinstance(gpu_uuids, list):
+        return False
+    runtime_states = value.get("gpu_runtime_states")
+    if (
+        set(value)
+        != {
+            "selected_gpu_uuids",
+            "compute_applications",
+            "gpu_runtime_states",
+            "polls",
+            "stable_samples",
+        }
+        or value.get("selected_gpu_uuids") != gpu_uuids
+        or value.get("compute_applications") != []
+        or type(value.get("polls")) is not int
+        or int(value["polls"]) < QUIESCENCE_STABLE_SAMPLES
+        or type(value.get("stable_samples")) is not int
+        or value.get("stable_samples") != QUIESCENCE_STABLE_SAMPLES
+        or not isinstance(runtime_states, list)
+        or len(runtime_states) != len(gpu_uuids)
+    ):
+        return False
+    for gpu_uuid, state in zip(gpu_uuids, runtime_states, strict=True):
+        if (
+            not isinstance(state, dict)
+            or set(state)
+            != {
+                "gpu_uuid",
+                "memory_used_mib",
+                "utilization_percent",
+                "pstate",
+            }
+            or state.get("gpu_uuid") != gpu_uuid
+            or type(state.get("memory_used_mib")) is not int
+            or int(state["memory_used_mib"]) < 0
+            or type(state.get("utilization_percent")) is not int
+            or state.get("utilization_percent") != 0
+            or not isinstance(state.get("pstate"), str)
+            or not state["pstate"]
+        ):
+            return False
+    if memory_baseline_mib is not None:
+        try:
+            if _gpu_memory_baseline(runtime_states) != dict(memory_baseline_mib):
+                return False
+        except DiagnosticRunError:
+            return False
+    return True
+
+
+def _quiescence_memory_baseline(value: object) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    states = value.get("gpu_runtime_states")
+    if not isinstance(states, list):
+        return None
+    try:
+        return _gpu_memory_baseline(states)
+    except DiagnosticRunError:
+        return None
+
+
+def _removal_evidence_valid(value: object, *, container_id: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "docker_stop_returncode",
+        "stop_timeout_s",
+        "post_stop_container_id",
+        "post_stop_state",
+        "docker_rm_returncode",
+        "forced",
+        "absent_after_remove",
+    }:
+        return False
+    state = value.get("post_stop_state")
+    return (
+        type(value.get("docker_stop_returncode")) is int
+        and value.get("docker_stop_returncode") == 0
+        and type(value.get("stop_timeout_s")) is int
+        and value.get("stop_timeout_s") == CONTAINER_STOP_TIMEOUT_S
+        and isinstance(container_id, str)
+        and value.get("post_stop_container_id") == container_id
+        and isinstance(state, dict)
+        and set(state) == {"running", "oom_killed", "exit_code", "error"}
+        and state.get("running") is False
+        and state.get("oom_killed") is False
+        and type(state.get("exit_code")) is int
+        and state.get("exit_code") == 0
+        and type(state.get("error")) is str
+        and state.get("error") == ""
+        and type(value.get("docker_rm_returncode")) is int
+        and value.get("docker_rm_returncode") == 0
+        and value.get("forced") is False
+        and value.get("absent_after_remove") is True
+    )
+
+
 def validate_cleanup_descriptor(
     value: object,
     *,
@@ -1589,9 +2005,16 @@ def validate_cleanup_descriptor(
     launch = raw_provenance.get("container_launch")
     launch_raw = launch.get("value") if isinstance(launch, dict) else None
     gpu = raw_provenance.get("gpu")
+    host = raw_provenance.get("host")
     session_id = raw_provenance.get("session_id")
-    if not isinstance(launch_raw, dict) or not isinstance(gpu, dict):
+    if (
+        not isinstance(launch_raw, dict)
+        or not isinstance(gpu, dict)
+        or not isinstance(host, dict)
+    ):
         return False
+    baseline = host.get("run_start_gpu_baseline")
+    baseline_memory = _quiescence_memory_baseline(baseline)
     log = raw.get("log")
     removal = raw.get("removal")
     quiescence = raw.get("post_cleanup_gpu_quiescence")
@@ -1606,6 +2029,7 @@ def validate_cleanup_descriptor(
             "removal",
             "post_cleanup_gpu_quiescence",
         }
+        and type(raw.get("schema_version")) is int
         and raw.get("schema_version") == 1
         and raw.get("identity") == cell.identity()
         and isinstance(session_id, str)
@@ -1618,13 +2042,17 @@ def validate_cleanup_descriptor(
         and HEX64.fullmatch(str(log["sha256"])) is not None
         and type(log.get("bytes")) is int
         and int(log["bytes"]) >= 0
-        and removal == {"docker_rm_returncode": 0, "absent_after_remove": True}
-        and isinstance(quiescence, dict)
-        and set(quiescence) == {"selected_gpu_uuids", "compute_applications", "polls"}
-        and quiescence.get("selected_gpu_uuids") == gpu.get("uuids")
-        and quiescence.get("compute_applications") == []
-        and type(quiescence.get("polls")) is int
-        and int(quiescence["polls"]) >= 1
+        and _removal_evidence_valid(
+            removal,
+            container_id=launch_raw.get("container_id"),
+        )
+        and _quiescence_evidence_valid(baseline, gpu_uuids=gpu.get("uuids"))
+        and baseline_memory is not None
+        and _quiescence_evidence_valid(
+            quiescence,
+            gpu_uuids=gpu.get("uuids"),
+            memory_baseline_mib=baseline_memory,
+        )
     )
 
 
@@ -1642,7 +2070,8 @@ def validate_provenance_descriptor(value: object, *, cell: Cell) -> bool:
     configuration = raw.get("configuration_source")
     launch = raw.get("container_launch")
     if not (
-        raw.get("schema_version") == 1
+        type(raw.get("schema_version")) is int
+        and raw.get("schema_version") == 1
         and raw.get("diagnostic_only") is True
         and isinstance(raw.get("session_id"), str)
         and bool(raw["session_id"])
@@ -1688,6 +2117,8 @@ def validate_provenance_descriptor(value: object, *, cell: Cell) -> bool:
     container_uuids = gpu.get("container_visible_uuids")
     container_pci = gpu.get("container_visible_pci_bus_ids")
     quiescence = host.get("pre_start_gpu_quiescence")
+    baseline = host.get("run_start_gpu_baseline")
+    baseline_memory = _quiescence_memory_baseline(baseline)
     if not (
         isinstance(uuids, list)
         and len(uuids) == TP_SIZE
@@ -1703,9 +2134,13 @@ def validate_provenance_descriptor(value: object, *, cell: Cell) -> bool:
         and bool(gpu["product_name"])
         and isinstance(gpu.get("driver_version"), str)
         and bool(gpu["driver_version"])
-        and isinstance(quiescence, dict)
-        and quiescence.get("selected_gpu_uuids") == uuids
-        and quiescence.get("compute_applications") == []
+        and _quiescence_evidence_valid(baseline, gpu_uuids=uuids)
+        and baseline_memory is not None
+        and _quiescence_evidence_valid(
+            quiescence,
+            gpu_uuids=uuids,
+            memory_baseline_mib=baseline_memory,
+        )
     ):
         return False
     environment = host.get("environment")
@@ -1885,6 +2320,30 @@ def _container_id(provenance: object) -> object:
     return launch_raw.get("container_id") if isinstance(launch_raw, dict) else None
 
 
+def _normalized_quiescence_identity(value: object) -> object:
+    if not isinstance(value, dict):
+        return value
+    states = value.get("gpu_runtime_states")
+    normalized_states: object = states
+    if isinstance(states, list):
+        normalized_states = [
+            {
+                "gpu_uuid": state.get("gpu_uuid"),
+                "memory_used_mib": state.get("memory_used_mib"),
+                "utilization_percent": state.get("utilization_percent"),
+            }
+            if isinstance(state, dict)
+            else state
+            for state in states
+        ]
+    return {
+        "selected_gpu_uuids": value.get("selected_gpu_uuids"),
+        "compute_applications": value.get("compute_applications"),
+        "gpu_runtime_states": normalized_states,
+        "stable_samples": value.get("stable_samples"),
+    }
+
+
 def _provenance_static_identity(value: Mapping[str, object]) -> dict[str, object]:
     launch = value.get("container_launch")
     launch_raw = launch.get("value") if isinstance(launch, dict) else None
@@ -1896,9 +2355,14 @@ def _provenance_static_identity(value: Mapping[str, object]) -> dict[str, object
     config_source = value.get("configuration_source")
     source_raw = config_source.get("value") if isinstance(config_source, dict) else None
     parsed = source_raw.get("parsed") if isinstance(source_raw, dict) else None
+    host = copy.deepcopy(value.get("host"))
+    if isinstance(host, dict):
+        host["pre_start_gpu_quiescence"] = _normalized_quiescence_identity(
+            host.get("pre_start_gpu_quiescence")
+        )
     return {
         "source": value.get("source"),
-        "host": value.get("host"),
+        "host": host,
         "gpu": value.get("gpu"),
         "model": value.get("model"),
         "checkpoint": value.get("checkpoint"),
@@ -2391,6 +2855,7 @@ def _make_provenance(
     config_descriptor: dict[str, object],
     launch_descriptor: dict[str, object],
     container_gpus: dict[str, list[str]],
+    gpu_baseline: dict[str, object],
     quiescence: dict[str, object],
 ) -> dict[str, object]:
     selected = list(inventory[:TP_SIZE])
@@ -2414,6 +2879,7 @@ def _make_provenance(
                     path=args.env_artifact,
                     parsed=parsed_env,
                 ),
+                "run_start_gpu_baseline": gpu_baseline,
                 "pre_start_gpu_quiescence": quiescence,
             },
             "gpu": {
@@ -2450,23 +2916,25 @@ def _run_cell(
     image_id: str,
     runtime_versions: dict[str, object],
     rendered_configs: Mapping[str, str],
+    gpu_baseline: dict[str, object],
     previous_started_ns: int,
 ) -> tuple[Path, int]:
     if not _port_available(args.port):
         raise DiagnosticRunError(f"host port {args.port} is already in use")
-    quiescence = _selected_gpu_quiescence(inventory)
+    memory_baseline = _quiescence_memory_baseline(gpu_baseline)
+    if memory_baseline is None:
+        raise DiagnosticRunError("run-start GPU memory baseline is invalid")
+    quiescence = _wait_for_selected_gpu_quiescence(
+        inventory,
+        memory_baseline_mib=memory_baseline,
+    )
     formal.assert_source_identity(args.repo, repo_commit)
     config_text = rendered_configs[cell.arm]
     config_descriptor = configuration_source(config_text, arm=cell.arm)
     config_path = args.work_dir / "configs" / f"{cell.key}.yaml"
     atomic_write_text(config_path, config_text)
     name = _container_name(session_id, cell)
-    existing = formal.run_command(
-        ("docker", "inspect", name),
-        check=False,
-        announce=False,
-    )
-    if existing.returncode == 0:
+    if not _container_absent(name):
         raise DiagnosticRunError(f"refusing to reuse or remove pre-existing container {name!r}")
     server_started_ns = max(time.time_ns(), previous_started_ns + 1)
     server_generation = str(uuid.uuid4())
@@ -2481,20 +2949,27 @@ def _run_cell(
     )
     endpoint = f"http://127.0.0.1:{args.port}"
     started = False
+    launch_attempted = False
     primary_error: BaseException | None = None
     provenance: dict[str, object] | None = None
     backend_ready: dict[str, object] | None = None
     process_ready: dict[str, object] | None = None
     requests: list[dict[str, object]] | None = None
     end_evidence: dict[str, object] | None = None
+    launched_container_id: str | None = None
     try:
-        formal.run_command(command)
+        launch_attempted = True
+        launched = formal.run_command(command, timeout_s=DOCKER_LAUNCH_TIMEOUT_S)
+        launched_container_id = (launched.stdout or "").strip()
+        if HEX64.fullmatch(launched_container_id) is None:
+            raise DiagnosticRunError("docker run did not return a full container identity")
         started = True
         formal.wait_for_health(
             name=name,
             endpoint=endpoint,
             model=a6.MODEL,
             timeout_s=args.startup_timeout_s,
+            command_timeout_s=DOCKER_CONTROL_TIMEOUT_S,
         )
         launch = container_launch_attestation(
             args=args,
@@ -2505,11 +2980,22 @@ def _run_cell(
             image_id=image_id,
             source_hashes=source_hashes,
         )
+        launch_raw = launch.get("value")
+        if not isinstance(launch_raw, dict) or not isinstance(
+            launch_raw.get("container_id"), str
+        ):
+            raise DiagnosticRunError("container launch omitted its immutable identity")
+        if launch_raw["container_id"] != launched_container_id:
+            raise DiagnosticRunError("live launch identity differs from docker run identity")
         container_gpus = _fetch_container_gpu_attestation(
             name,
             inventory[:TP_SIZE],
         )
-        observed_runtime = formal.container_runtime_versions(name, "kairyu")
+        observed_runtime = formal.container_runtime_versions(
+            name,
+            "kairyu",
+            command_timeout_s=DOCKER_ATTEST_TIMEOUT_S,
+        )
         if observed_runtime != runtime_versions:
             raise DiagnosticRunError("container runtime changed between TP4 cells")
         backend_ready = attest_backend(endpoint, arm=cell.arm)
@@ -2531,6 +3017,7 @@ def _run_cell(
             config_descriptor=config_descriptor,
             launch_descriptor=launch,
             container_gpus=container_gpus,
+            gpu_baseline=gpu_baseline,
             quiescence=quiescence,
         )
         requests, end_evidence = asyncio.run(
@@ -2547,23 +3034,17 @@ def _run_cell(
         primary_error = error
 
     cleanup_errors: list[BaseException] = []
-    if not started and primary_error is not None:
-        try:
-            remaining = formal.run_command(
-                ("docker", "ps", "-aq", "--filter", f"name=^/{name}$"),
-            )
-            started = bool((remaining.stdout or "").strip())
-        except BaseException as error:
-            cleanup_errors.append(error)
     log_record: dict[str, object] | None = None
     removal_record: dict[str, object] | None = None
     post_cleanup: dict[str, object] | None = None
-    if started:
+    if launch_attempted:
         log_record, removal_record, post_cleanup, attempted_errors = _attempt_container_cleanup(
             name=name,
             log_path=log_path,
             work_dir=args.work_dir,
             inventory=inventory,
+            expected_container_id=launched_container_id,
+            memory_baseline_mib=memory_baseline,
         )
         cleanup_errors.extend(attempted_errors)
 
@@ -2669,6 +3150,10 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             f"observed={observed_packages}, expected={expected_packages}"
         )
     source_hashes = source_file_hashes(args.repo)
+    gpu_baseline = _wait_for_selected_gpu_quiescence(inventory)
+    memory_baseline = _quiescence_memory_baseline(gpu_baseline)
+    if memory_baseline is None:
+        raise DiagnosticRunError("cannot retain the run-start GPU memory baseline")
     session_id = args.session_id or f"issue333-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
     state = {
         "schema_version": RUNNER_SCHEMA,
@@ -2693,6 +3178,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         "model_volume": args.model_volume,
         "checkpoint": checkpoint,
         "runtime_versions": runtime_versions,
+        "run_start_gpu_baseline": gpu_baseline,
         "source_files": source_hashes,
         "runner_files": runner_hashes,
     }
@@ -2715,6 +3201,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             image_id=image_id,
             runtime_versions=runtime_versions,
             rendered_configs=rendered_configs,
+            gpu_baseline=gpu_baseline,
             previous_started_ns=previous_started_ns,
         )
         raw_paths.append(raw)

@@ -513,6 +513,12 @@ It replays the exact TP4 ShareGPT c128 trace with four fresh servers in
 `kairyu`, `kairyu-proc`, `kairyu-proc`, `kairyu` order, retaining raw strict-SSE
 rows plus clean source, actual imported module, immutable image, full
 checkpoint, GPU, config, `/backends`, and PID/PPID/PGID process-tree evidence.
+Every cell begins and ends with selected-GPU compute-process absence, zero
+utilization, and memory exactly restored to the stable per-GPU run-start idle
+baseline. A completed server is stopped with a bounded graceful Docker stop,
+its immutable launch identity and zero exit are re-attested before logs are
+retained and it is removed without force; forced recovery invalidates the cell
+even if it restores the hardware to idle.
 Before measurement, a paired-median process/in-process TTFT-p99 ratio at or
 below 0.90 was declared a material report-only movement. This has no A6
 acceptance threshold, and its causal scope is the net process split including

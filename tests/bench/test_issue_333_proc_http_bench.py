@@ -6,6 +6,7 @@ import copy
 import importlib
 import json
 import re
+import subprocess
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -61,6 +62,36 @@ def _dataset_payload() -> str:
         for index in range(160)
     ]
     return json.dumps(records)
+
+
+def _idle_gpu_runtime_states(
+    uuids: list[str],
+    *,
+    memory_used_mib: int = 0,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "gpu_uuid": gpu_uuid,
+            "memory_used_mib": memory_used_mib,
+            "utilization_percent": 0,
+            "pstate": "P8",
+        }
+        for gpu_uuid in uuids
+    ]
+
+
+def _graceful_stop_record(container_id: str = "a" * 64) -> dict[str, object]:
+    return {
+        "docker_stop_returncode": 0,
+        "stop_timeout_s": diagnostic.CONTAINER_STOP_TIMEOUT_S,
+        "post_stop_container_id": container_id,
+        "post_stop_state": {
+            "running": False,
+            "oom_killed": False,
+            "exit_code": 0,
+            "error": "",
+        },
+    }
 
 
 @pytest.fixture
@@ -387,6 +418,117 @@ def test_gpu_quiescence_query_failure_is_not_idle(
         )
 
 
+def test_gpu_quiescence_rejects_orphan_runtime_utilization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uuids = [f"GPU-{index}" for index in range(diagnostic.TP_SIZE)]
+    responses = iter(
+        (
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(
+                returncode=0,
+                stdout="\n".join(
+                    f"{gpu_uuid}, 0, {100 if index == 1 else 0}, P8"
+                    for index, gpu_uuid in enumerate(uuids)
+                ),
+                stderr="",
+            ),
+        )
+    )
+    monkeypatch.setattr(formal, "run_command", lambda *_args, **_kwargs: next(responses))
+
+    with pytest.raises(diagnostic.DiagnosticRunError, match="not compute-idle"):
+        diagnostic._selected_gpu_quiescence(
+            [SimpleNamespace(uuid=gpu_uuid) for gpu_uuid in uuids],
+            memory_baseline_mib={gpu_uuid: 0 for gpu_uuid in uuids},
+        )
+
+
+def test_gpu_quiescence_rejects_orphan_runtime_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uuids = [f"GPU-{index}" for index in range(diagnostic.TP_SIZE)]
+    responses = iter(
+        (
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(
+                returncode=0,
+                stdout="\n".join(
+                    f"{gpu_uuid}, {1 if index == 1 else 0}, 0, P8"
+                    for index, gpu_uuid in enumerate(uuids)
+                ),
+                stderr="",
+            ),
+        )
+    )
+    monkeypatch.setattr(formal, "run_command", lambda *_args, **_kwargs: next(responses))
+
+    with pytest.raises(diagnostic.DiagnosticRunError, match="not compute-idle"):
+        diagnostic._selected_gpu_quiescence(
+            [SimpleNamespace(uuid=gpu_uuid) for gpu_uuid in uuids],
+            memory_baseline_mib={gpu_uuid: 0 for gpu_uuid in uuids},
+        )
+
+
+@pytest.mark.parametrize("runtime_rows", ["missing", "duplicate"])
+def test_gpu_quiescence_rejects_incomplete_runtime_identity(
+    runtime_rows: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uuids = [f"GPU-{index}" for index in range(diagnostic.TP_SIZE)]
+    rows = [f"{gpu_uuid}, 0, 0, P8" for gpu_uuid in uuids]
+    rows = rows[:-1] if runtime_rows == "missing" else [*rows, rows[0]]
+    responses = iter(
+        (
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=0, stdout="\n".join(rows), stderr=""),
+        )
+    )
+    monkeypatch.setattr(formal, "run_command", lambda *_args, **_kwargs: next(responses))
+
+    with pytest.raises(diagnostic.DiagnosticRunError):
+        diagnostic._selected_gpu_quiescence(
+            [SimpleNamespace(uuid=gpu_uuid) for gpu_uuid in uuids]
+        )
+
+
+def test_gpu_quiescence_retries_transient_query_and_busy_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uuids = [f"GPU-{index}" for index in range(diagnostic.TP_SIZE)]
+    runtime_busy = "\n".join(
+        f"{gpu_uuid}, 0, {100 if index == 2 else 0}, P8"
+        for index, gpu_uuid in enumerate(uuids)
+    )
+    runtime_idle = "\n".join(f"{gpu_uuid}, 0, 0, P8" for gpu_uuid in uuids)
+    responses = iter(
+        (
+            SimpleNamespace(returncode=1, stdout="", stderr="transient NVML failure"),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=0, stdout=runtime_busy, stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=0, stdout=runtime_idle, stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=0, stdout=runtime_idle, stderr=""),
+        )
+    )
+    monkeypatch.setattr(formal, "run_command", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(diagnostic, "CLEANUP_QUIESCENCE_POLL_S", 0.0)
+
+    quiescence = diagnostic._wait_for_selected_gpu_quiescence(
+        [SimpleNamespace(uuid=gpu_uuid) for gpu_uuid in uuids],
+        timeout_s=1.0,
+    )
+
+    assert quiescence == {
+        "selected_gpu_uuids": uuids,
+        "compute_applications": [],
+        "gpu_runtime_states": _idle_gpu_runtime_states(uuids),
+        "polls": 4,
+        "stable_samples": diagnostic.QUIESCENCE_STABLE_SAMPLES,
+    }
+
+
 def test_runner_source_must_be_same_root_and_detached(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -432,7 +574,145 @@ def test_log_capture_failure_is_retained_and_fails_closed(
     assert path.read_text(encoding="utf-8") == "partial-log\ncapture-error\n"
 
 
-def test_cleanup_attempts_remove_and_gpu_wait_after_log_failure(
+def test_shared_command_timeout_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def expire(*_args, **kwargs):
+        assert kwargs["timeout"] == 0.25
+        raise subprocess.TimeoutExpired(cmd=["fixture"], timeout=0.25)
+
+    monkeypatch.setattr(formal.subprocess, "run", expire)
+
+    with pytest.raises(formal.FormalRunError, match="timed out after 0.25s"):
+        formal.run_command(("fixture",), timeout_s=0.25)
+
+
+def test_container_absence_requires_successful_exact_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container_id = "a" * 64
+    calls: list[tuple[str, ...]] = []
+
+    def listed(command, **_kwargs):
+        calls.append(tuple(command))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(formal, "run_command", listed)
+
+    assert diagnostic._container_absent(container_id) is True
+    assert calls == [
+        (
+            "docker",
+            "ps",
+            "-aq",
+            "--no-trunc",
+            "--filter",
+            f"id={container_id}",
+        )
+    ]
+
+    monkeypatch.setattr(
+        formal,
+        "run_command",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=container_id + "\n",
+            stderr="",
+        ),
+    )
+    assert diagnostic._container_absent(container_id) is False
+
+
+def test_container_absence_does_not_convert_daemon_error_to_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(*_args, **_kwargs):
+        raise formal.FormalRunError("injected Docker daemon failure")
+
+    monkeypatch.setattr(formal, "run_command", unavailable)
+
+    with pytest.raises(formal.FormalRunError, match="daemon failure"):
+        diagnostic._container_absent("g2a6-issue333-fixture")
+
+
+def test_container_stop_requires_graceful_zero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    responses = iter(
+        (
+            SimpleNamespace(returncode=0, stdout="fixture\n", stderr=""),
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Id": "a" * 64,
+                            "State": {
+                                "Running": False,
+                                "OOMKilled": False,
+                                "ExitCode": 0,
+                                "Error": "",
+                            }
+                        }
+                    ]
+                ),
+                stderr="",
+            ),
+        )
+    )
+
+    def run(command, **_kwargs):
+        calls.append(tuple(command))
+        return next(responses)
+
+    monkeypatch.setattr(formal, "run_command", run)
+
+    assert diagnostic._stop_container_strict("fixture") == _graceful_stop_record()
+    assert calls == [
+        (
+            "docker",
+            "stop",
+            "--timeout",
+            str(diagnostic.CONTAINER_STOP_TIMEOUT_S),
+            "fixture",
+        ),
+        ("docker", "inspect", "fixture"),
+    ]
+
+
+def test_container_stop_rejects_timeout_sigkill_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = iter(
+        (
+            SimpleNamespace(returncode=0, stdout="fixture\n", stderr=""),
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Id": "a" * 64,
+                            "State": {
+                                "Running": False,
+                                "OOMKilled": False,
+                                "ExitCode": 137,
+                                "Error": "",
+                            }
+                        }
+                    ]
+                ),
+                stderr="",
+            ),
+        )
+    )
+    monkeypatch.setattr(formal, "run_command", lambda *_args, **_kwargs: next(responses))
+
+    with pytest.raises(diagnostic.DiagnosticRunError, match="did not exit gracefully"):
+        diagnostic._stop_container_strict("fixture")
+
+
+def test_cleanup_attempts_stop_remove_and_gpu_wait_after_log_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -442,18 +722,29 @@ def test_cleanup_attempts_remove_and_gpu_wait_after_log_failure(
         calls.append("log")
         raise diagnostic.DiagnosticRunError("injected log failure")
 
+    def stop(_name: str, **_kwargs) -> dict[str, object]:
+        calls.append("stop")
+        return _graceful_stop_record()
+
     def remove(_name: str) -> dict[str, object]:
         calls.append("remove")
-        return {"docker_rm_returncode": 0, "absent_after_remove": True}
+        return {
+            "docker_rm_returncode": 0,
+            "forced": False,
+            "absent_after_remove": True,
+        }
 
-    def wait(_inventory) -> dict[str, object]:
+    def wait(_inventory, **_kwargs) -> dict[str, object]:
         calls.append("gpu-wait")
         return {
             "selected_gpu_uuids": [],
             "compute_applications": [],
-            "polls": 1,
+            "gpu_runtime_states": [],
+            "polls": 2,
+            "stable_samples": diagnostic.QUIESCENCE_STABLE_SAMPLES,
         }
 
+    monkeypatch.setattr(diagnostic, "_stop_container_strict", stop)
     monkeypatch.setattr(diagnostic, "_save_container_logs_strict", fail_log)
     monkeypatch.setattr(diagnostic, "_remove_container_strict", remove)
     monkeypatch.setattr(diagnostic, "_wait_for_selected_gpu_quiescence", wait)
@@ -465,14 +756,116 @@ def test_cleanup_attempts_remove_and_gpu_wait_after_log_failure(
         inventory=[],
     )
 
-    assert calls == ["log", "remove", "gpu-wait"]
+    assert calls == ["stop", "log", "remove", "gpu-wait"]
     assert log is None
-    assert removal == {"docker_rm_returncode": 0, "absent_after_remove": True}
+    assert removal == {
+        **_graceful_stop_record(),
+        "docker_rm_returncode": 0,
+        "forced": False,
+        "absent_after_remove": True,
+    }
     assert quiescence == {
         "selected_gpu_uuids": [],
         "compute_applications": [],
-        "polls": 1,
+        "gpu_runtime_states": [],
+        "polls": 2,
+        "stable_samples": diagnostic.QUIESCENCE_STABLE_SAMPLES,
     }
+    assert len(errors) == 1
+
+
+def test_cleanup_stop_failure_force_removes_and_still_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fail_stop(_name: str, **_kwargs) -> dict[str, object]:
+        calls.append("stop")
+        raise diagnostic.DiagnosticRunError("injected stop failure")
+
+    def save_log(*_args, **_kwargs) -> dict[str, object]:
+        calls.append("log")
+        return {"path": "logs/cell.log", "sha256": "a" * 64, "bytes": 1}
+
+    def force_remove(_name: str) -> None:
+        calls.append("force-remove")
+
+    def wait(_inventory, **_kwargs) -> dict[str, object]:
+        calls.append("gpu-wait")
+        return {
+            "selected_gpu_uuids": [],
+            "compute_applications": [],
+            "gpu_runtime_states": [],
+            "polls": 2,
+            "stable_samples": diagnostic.QUIESCENCE_STABLE_SAMPLES,
+        }
+
+    monkeypatch.setattr(diagnostic, "_stop_container_strict", fail_stop)
+    monkeypatch.setattr(diagnostic, "_save_container_logs_strict", save_log)
+    monkeypatch.setattr(diagnostic, "_force_remove_container_for_cleanup", force_remove)
+    monkeypatch.setattr(diagnostic, "_wait_for_selected_gpu_quiescence", wait)
+
+    log, removal, quiescence, errors = diagnostic._attempt_container_cleanup(
+        name="g2a6-issue333-fixture",
+        log_path=tmp_path / "logs" / "cell.log",
+        work_dir=tmp_path,
+        inventory=[],
+    )
+
+    assert calls == ["stop", "log", "force-remove", "gpu-wait"]
+    assert log is not None
+    assert removal is None
+    assert quiescence is not None
+    assert len(errors) == 1
+
+
+def test_cleanup_remove_failure_force_removes_and_still_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def stop(_name: str, **_kwargs) -> dict[str, object]:
+        calls.append("stop")
+        return _graceful_stop_record()
+
+    def save_log(*_args, **_kwargs) -> dict[str, object]:
+        calls.append("log")
+        return {"path": "logs/cell.log", "sha256": "a" * 64, "bytes": 1}
+
+    def fail_remove(_name: str) -> dict[str, object]:
+        calls.append("remove")
+        raise diagnostic.DiagnosticRunError("injected remove failure")
+
+    def force_remove(_name: str) -> None:
+        calls.append("force-remove")
+
+    def wait(_inventory, **_kwargs) -> dict[str, object]:
+        calls.append("gpu-wait")
+        return {
+            "selected_gpu_uuids": [],
+            "compute_applications": [],
+            "gpu_runtime_states": [],
+            "polls": 2,
+            "stable_samples": diagnostic.QUIESCENCE_STABLE_SAMPLES,
+        }
+
+    monkeypatch.setattr(diagnostic, "_stop_container_strict", stop)
+    monkeypatch.setattr(diagnostic, "_save_container_logs_strict", save_log)
+    monkeypatch.setattr(diagnostic, "_remove_container_strict", fail_remove)
+    monkeypatch.setattr(diagnostic, "_force_remove_container_for_cleanup", force_remove)
+    monkeypatch.setattr(diagnostic, "_wait_for_selected_gpu_quiescence", wait)
+
+    _log, removal, _quiescence, errors = diagnostic._attempt_container_cleanup(
+        name="g2a6-issue333-fixture",
+        log_path=tmp_path / "logs" / "cell.log",
+        work_dir=tmp_path,
+        inventory=[],
+    )
+
+    assert calls == ["stop", "log", "remove", "force-remove", "gpu-wait"]
+    assert removal is None
     assert len(errors) == 1
 
 
@@ -567,6 +960,14 @@ def _provenance(
     )
     uuids = [f"GPU-{index}" for index in range(4)]
     pci = [f"00000000:{index:02X}:00.0" for index in range(4)]
+    idle_states = _idle_gpu_runtime_states(uuids, memory_used_mib=3)
+    idle_evidence = {
+        "selected_gpu_uuids": uuids,
+        "compute_applications": [],
+        "gpu_runtime_states": idle_states,
+        "polls": 2,
+        "stable_samples": diagnostic.QUIESCENCE_STABLE_SAMPLES,
+    }
     return diagnostic.hashed_descriptor(
         {
             "schema_version": 1,
@@ -597,10 +998,8 @@ def _provenance(
                         "minimum_peer_bandwidth_gbs": 1.0,
                     },
                 },
-                "pre_start_gpu_quiescence": {
-                    "selected_gpu_uuids": uuids,
-                    "compute_applications": [],
-                },
+                "run_start_gpu_baseline": idle_evidence,
+                "pre_start_gpu_quiescence": copy.deepcopy(idle_evidence),
             },
             "gpu": {
                 "uuids": uuids,
@@ -639,6 +1038,8 @@ def _cleanup(
     raw = provenance["value"]
     assert isinstance(raw, dict)
     uuids = raw["gpu"]["uuids"]
+    container_id = raw["container_launch"]["value"]["container_id"]
+    baseline_states = raw["host"]["run_start_gpu_baseline"]["gpu_runtime_states"]
     return diagnostic.cleanup_attestation(
         cell=cell,
         provenance=provenance,
@@ -647,13 +1048,97 @@ def _cleanup(
             "sha256": f"{cell.order_index + 5:x}" * 64,
             "bytes": 10,
         },
-        removal={"docker_rm_returncode": 0, "absent_after_remove": True},
+        removal={
+            **_graceful_stop_record(container_id),
+            "docker_rm_returncode": 0,
+            "forced": False,
+            "absent_after_remove": True,
+        },
         post_cleanup_quiescence={
             "selected_gpu_uuids": uuids,
             "compute_applications": [],
-            "polls": 1,
+            "gpu_runtime_states": copy.deepcopy(baseline_states),
+            "polls": 2,
+            "stable_samples": diagnostic.QUIESCENCE_STABLE_SAMPLES,
         },
     )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "forced-int",
+        "stop-return-bool",
+        "rm-return-bool",
+        "running-int",
+        "exit-code-bool",
+        "memory-used",
+        "utilization",
+        "container-id",
+        "schema-bool",
+    ],
+)
+def test_rehashed_cleanup_requires_exact_graceful_idle_types(tamper: str) -> None:
+    cell = diagnostic.diagnostic_plan()[0]
+    provenance = _provenance(cell, session_id="fixture-session")
+    cleanup_raw = copy.deepcopy(_cleanup(cell, provenance)["value"])
+    assert isinstance(cleanup_raw, dict)
+    removal = cleanup_raw["removal"]
+    quiescence = cleanup_raw["post_cleanup_gpu_quiescence"]
+    if tamper == "forced-int":
+        removal["forced"] = 0
+    elif tamper == "stop-return-bool":
+        removal["docker_stop_returncode"] = False
+    elif tamper == "rm-return-bool":
+        removal["docker_rm_returncode"] = False
+    elif tamper == "running-int":
+        removal["post_stop_state"]["running"] = 0
+    elif tamper == "exit-code-bool":
+        removal["post_stop_state"]["exit_code"] = False
+    elif tamper == "memory-used":
+        quiescence["gpu_runtime_states"][0]["memory_used_mib"] = 1
+    elif tamper == "utilization":
+        quiescence["gpu_runtime_states"][0]["utilization_percent"] = 100
+    elif tamper == "container-id":
+        removal["post_stop_container_id"] = "f" * 64
+    elif tamper == "schema-bool":
+        cleanup_raw["schema_version"] = True
+    tampered = diagnostic.hashed_descriptor(cleanup_raw)
+
+    assert not diagnostic.validate_cleanup_descriptor(
+        tampered,
+        cell=cell,
+        provenance=provenance,
+    )
+
+
+def test_rehashed_provenance_rejects_boolean_schema_version() -> None:
+    cell = diagnostic.diagnostic_plan()[0]
+    raw = copy.deepcopy(_provenance(cell, session_id="fixture-session")["value"])
+    assert isinstance(raw, dict)
+    raw["schema_version"] = True
+
+    assert not diagnostic.validate_provenance_descriptor(
+        diagnostic.hashed_descriptor(raw),
+        cell=cell,
+    )
+
+
+def test_static_identity_normalizes_valid_quiescence_retry_and_pstate() -> None:
+    cell = diagnostic.diagnostic_plan()[0]
+    first = _provenance(cell, session_id="fixture-session")
+    second_raw = copy.deepcopy(first["value"])
+    assert isinstance(second_raw, dict)
+    pre_start = second_raw["host"]["pre_start_gpu_quiescence"]
+    pre_start["polls"] = 7
+    pre_start["gpu_runtime_states"][0]["pstate"] = "P7"
+    second = diagnostic.hashed_descriptor(second_raw)
+
+    assert diagnostic.validate_provenance_descriptor(first, cell=cell)
+    assert diagnostic.validate_provenance_descriptor(second, cell=cell)
+    assert diagnostic._provenance_static_identity(
+        first["value"]
+    ) == diagnostic._provenance_static_identity(second["value"])
 
 
 def _rehash_launch_tamper(
@@ -742,6 +1227,10 @@ def _bind_fixture_logs(work_dir: Path, shards: list[Path]) -> None:
         diagnostic.atomic_write_text(log_path, content)
         provenance = rows[0]["provenance"]
         assert isinstance(provenance, dict)
+        container_id = provenance["value"]["container_launch"]["value"]["container_id"]
+        baseline_states = provenance["value"]["host"]["run_start_gpu_baseline"][
+            "gpu_runtime_states"
+        ]
         rows[-1]["cleanup"] = diagnostic.cleanup_attestation(
             cell=cell,
             provenance=provenance,
@@ -750,11 +1239,18 @@ def _bind_fixture_logs(work_dir: Path, shards: list[Path]) -> None:
                 "sha256": diagnostic.sha256_file(log_path),
                 "bytes": log_path.stat().st_size,
             },
-            removal={"docker_rm_returncode": 0, "absent_after_remove": True},
+            removal={
+                **_graceful_stop_record(container_id),
+                "docker_rm_returncode": 0,
+                "forced": False,
+                "absent_after_remove": True,
+            },
             post_cleanup_quiescence={
                 "selected_gpu_uuids": provenance["value"]["gpu"]["uuids"],
                 "compute_applications": [],
-                "polls": 1,
+                "gpu_runtime_states": copy.deepcopy(baseline_states),
+                "polls": 2,
+                "stable_samples": diagnostic.QUIESCENCE_STABLE_SAMPLES,
             },
         )
         diagnostic._write_jsonl(shard, rows)

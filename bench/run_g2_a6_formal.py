@@ -156,20 +156,27 @@ def run_command(
     check: bool = True,
     capture: bool = True,
     announce: bool = True,
+    timeout_s: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if announce:
         print(
             f"[{time.strftime('%H:%M:%S')}] $ {command_text(command)}",
             flush=True,
         )
-    result = subprocess.run(
-        [str(item) for item in command],
-        cwd=str(cwd) if cwd is not None else None,
-        text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [str(item) for item in command],
+            cwd=str(cwd) if cwd is not None else None,
+            text=True,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            check=False,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise FormalRunError(
+            f"command timed out after {timeout_s}s: {command_text(command)}"
+        ) from error
     if check and result.returncode != 0:
         stdout = (result.stdout or "")[-6000:]
         stderr = (result.stderr or "")[-6000:]
@@ -1126,11 +1133,12 @@ def measure_command(
     ]
 
 
-def container_running(name: str) -> bool:
+def container_running(name: str, *, command_timeout_s: float | None = None) -> bool:
     result = run_command(
         ("docker", "inspect", name, "--format", "{{.State.Running}}"),
         check=False,
         announce=False,
+        timeout_s=command_timeout_s,
     )
     return result.returncode == 0 and (result.stdout or "").strip() == "true"
 
@@ -1156,11 +1164,12 @@ def wait_for_health(
     endpoint: str,
     model: str,
     timeout_s: float,
+    command_timeout_s: float | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_s
     last_error = "not attempted"
     while time.monotonic() < deadline:
-        if not container_running(name):
+        if not container_running(name, command_timeout_s=command_timeout_s):
             raise FormalRunError(
                 f"container {name} exited before /v1/models became healthy"
             )
@@ -1243,10 +1252,16 @@ def parse_runtime_probe(output: str) -> dict[str, object]:
     return normalized
 
 
-def container_runtime_versions(name: str, arm: str) -> dict[str, object]:
+def container_runtime_versions(
+    name: str,
+    arm: str,
+    *,
+    command_timeout_s: float | None = None,
+) -> dict[str, object]:
     python = "/app/.venv/bin/python" if arm == "kairyu" else "python3"
     result = run_command(
-        ("docker", "exec", name, python, "-c", runtime_probe_code(arm))
+        ("docker", "exec", name, python, "-c", runtime_probe_code(arm)),
+        timeout_s=command_timeout_s,
     )
     return parse_runtime_probe(result.stdout or "")
 
@@ -1570,7 +1585,12 @@ def container_launch_attestation(
     return descriptor
 
 
-def container_gpu_attestation(name: str, selected: Sequence[GPU]) -> dict[str, list[str]]:
+def container_gpu_attestation(
+    name: str,
+    selected: Sequence[GPU],
+    *,
+    command_timeout_s: float | None = None,
+) -> dict[str, list[str]]:
     result = run_command(
         (
             "docker",
@@ -1579,7 +1599,8 @@ def container_gpu_attestation(name: str, selected: Sequence[GPU]) -> dict[str, l
             "nvidia-smi",
             "--query-gpu=uuid,pci.bus_id",
             "--format=csv,noheader",
-        )
+        ),
+        timeout_s=command_timeout_s,
     )
     rows = [
         [field.strip() for field in line.split(",", 1)]
