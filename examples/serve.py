@@ -13,7 +13,13 @@ from kairyu.orchestration.orchestrator import Orchestrator
 
 engines = {"kairyu-mock": MockBackend()}
 orchestrator = Orchestrator(engines={"tier1": MockBackend(), "tier2": MockBackend()})
-app = create_app(engines=engines, orchestrator=orchestrator)
+app = create_app(
+    engines=engines,
+    orchestrator=orchestrator,
+    # Direct app construction is strict too. These mock-only served names
+    # explicitly retain the historical role-prefix renderer for this demo.
+    legacy_chat_models={"kairyu-mock", "kairyu-auto"},
+)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)

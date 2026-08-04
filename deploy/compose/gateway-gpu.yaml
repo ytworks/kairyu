@@ -22,3 +22,9 @@ pools:
 orchestrators:
   kairyu-auto:
     spec: routing.yaml
+
+# This gateway fronts a remote Kairyu replica and an orchestrator; neither can
+# preserve a tokenizer-owned pre-rendered prompt through its downstream
+# boundary. The model-scoped compatibility opt-in is explicit so a new served
+# model cannot silently inherit role concatenation.
+legacy_chat_models: [default, kairyu-auto]

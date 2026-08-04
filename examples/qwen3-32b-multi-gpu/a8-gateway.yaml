@@ -22,6 +22,7 @@ pools:
           model: qwen3-32b
           api_key_env: null
           upstream: kairyu
+
       - backend: openai
         health_url: http://replica1:8000/readyz
         options:
@@ -37,6 +38,8 @@ pools:
     # DeploymentSpec constructs the bounded JsonlRouterLog writer.  The Compose
     # stack binds /evidence to the caller-owned, provenance-scoped run directory.
     placement_log_path: /evidence/placements.jsonl
+
+legacy_chat_models: [qwen3-32b]
 
 tenants:
   default_tenant: default

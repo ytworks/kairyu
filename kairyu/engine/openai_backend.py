@@ -38,6 +38,7 @@ from kairyu.engine.openai_capabilities import (
 )
 from kairyu.engine.prompt import (
     MultimodalPrompt,
+    TemplatedPrompt,
     TextPrompt,
     prompt_kind,
     prompt_text,
@@ -445,6 +446,12 @@ class OpenAICompatBackend:
     def validate_request(self, request: GenerationRequest) -> None:
         """Fail unsupported intent before dispatch, metering, or client creation."""
 
+        if isinstance(request.prompt, TemplatedPrompt):
+            raise _client_error(
+                self._capabilities.upstream,
+                "cannot preserve a tokenizer-owned pre-rendered chat prompt through "
+                "an upstream /chat/completions template boundary",
+            )
         _validated_request_payload(request, self._capabilities)
         if isinstance(request.prompt, MultimodalPrompt):
             if type(request.prompt.base) is not str and not isinstance(

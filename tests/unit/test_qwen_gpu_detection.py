@@ -218,7 +218,7 @@ def test_container_startup_command_counts_the_same_way(tmp_path):
     # model artifact, which is as far as this can run outside the image)
     assert "found 3" not in result.stderr, result.stderr
     assert "not GPU indices" not in result.stderr
-    assert "tokenizer_config.json" in result.stderr
+    assert "/etc/kairyu/config.template.yaml" in result.stderr
 
 
 def test_no_site_counts_with_a_digit_anywhere_match():

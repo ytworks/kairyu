@@ -27,6 +27,9 @@ data:
         queue_depth_threshold: 8
         probe_interval_s: 1.0
         placement_log_path: /evidence/placements.jsonl
+    # This dynamic mock pool has no local tokenizer metadata. Preserve the
+    # formal gate's historical framing through an explicit model policy.
+    legacy_chat_models: [f1a]
     batch:
       store: postgres
       store_id: kairyu-f1c

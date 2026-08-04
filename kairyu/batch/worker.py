@@ -17,6 +17,7 @@ import socket
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -41,6 +42,7 @@ from kairyu.entrypoints.server.chat_service import (
     ExecutedChat,
     chat_error_from_upstream_client_error,
     execute_chat,
+    validate_chat_policy,
     validate_chat_request,
 )
 from kairyu.entrypoints.server.errors import (
@@ -91,16 +93,30 @@ class BatchWorker:
         worker_id: str | None = None,
         claim_poll_interval_s: float = 0.5,
         claim_lease_seconds: float = 30.0,
+        legacy_chat_models: AbstractSet[str] | None = None,
     ) -> None:
         if claim_poll_interval_s <= 0:
             raise ValueError("claim_poll_interval_s must be positive")
         if claim_lease_seconds <= 0:
             raise ValueError("claim_lease_seconds must be positive")
+        legacy_chat_models = frozenset(legacy_chat_models or ())
+        validate_chat_policy(chat_templates, legacy_chat_models)
+        missing_chat_policy = (
+            set(engines) - set(chat_templates or {}) - set(legacy_chat_models)
+        )
+        if missing_chat_policy:
+            logger.warning(
+                "batch models have no configured chat rendering policy; chat "
+                "requests will be rejected before dispatch until each model has a "
+                "ChatTemplate or legacy_chat_models membership: %s",
+                sorted(missing_chat_policy),
+            )
         self._store = store
         self._engines = engines
         self._max_concurrency = max_concurrency
         self._metrics = metrics
         self._chat_templates = chat_templates
+        self._legacy_chat_models = legacy_chat_models
         self._usage_ledger = usage_ledger
         self._tenant_limiter = tenant_limiter
         self._tenant_config = tenant_config or TenantConfig()
@@ -283,6 +299,7 @@ class BatchWorker:
                 request_id=f"batch-{uuid.uuid4().hex[:12]}",
                 priority=self._tenant_config.limits_for(tenant).batch_priority,
                 scheduling_class="batch",
+                legacy_chat_models=self._legacy_chat_models,
             )
             admission = None
             acquire = getattr(self._tenant_limiter, "acquire", None)

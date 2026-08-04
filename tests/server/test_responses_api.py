@@ -11,14 +11,14 @@ from fastapi.testclient import TestClient
 
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, UsageLedger
 from kairyu.outputs import CompletionOutput
+from tests.server._legacy_chat import create_legacy_app
 
 
 def _app(tmp_path, backend=None, **kwargs):
-    return create_app(
+    return create_legacy_app(
         {"m": backend or MockBackend({"hello": "streamed hello"})},
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
         **kwargs,
@@ -706,7 +706,7 @@ def test_store_false_and_cross_tenant_stream_ids_are_not_readable(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("KAIRYU_RESPONSES_KEYS", "key-a,key-b")
-    app = create_app(
+    app = create_legacy_app(
         {"m": MockBackend({"hello": "tenant response"})},
         settings=ServerSettings(
             api_keys_env="KAIRYU_RESPONSES_KEYS",

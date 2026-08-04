@@ -13,12 +13,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kairyu.batch.store import BatchStore
-from kairyu.batch.worker import BatchWorker
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.embedding import EmbeddingResult
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.registry import create_backend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.extra_routes import MockEmbeddingBackend
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import (
@@ -29,13 +27,14 @@ from kairyu.entrypoints.server.tenancy import (
 )
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
+from tests.server._legacy_chat import LegacyBatchWorker, create_legacy_app
 
 
 def _auto_app(tmp_path, **kwargs):
     engine = create_backend("mock")
     orchestrator = Orchestrator({"tier1": engine, "tier2": engine})
     deep = Orchestrator({"tier1": engine, "tier2": engine}, moa_samples=2)
-    return create_app(
+    return create_legacy_app(
         {"m": engine},
         orchestrators={"kairyu-auto": orchestrator, "kairyu-auto-max": deep},
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
@@ -59,7 +58,7 @@ def test_mixed_tool_choice_rejection_is_metered_once(tmp_path):
             )
 
     ledger_path = tmp_path / "usage.jsonl"
-    app = create_app(
+    app = create_legacy_app(
         {"m": MixedToolBackend()},
         settings=ServerSettings(usage_ledger_path=str(ledger_path)),
     )
@@ -214,7 +213,7 @@ class TestOrchestratorSurface:
 
         backend = PartialFailureBackend()
         ledger_path = tmp_path / "usage.jsonl"
-        app = create_app(
+        app = create_legacy_app(
             {},
             orchestrators={"kairyu-auto": Orchestrator({"tier1": backend, "tier2": backend})},
             settings=ServerSettings(usage_ledger_path=str(ledger_path)),
@@ -287,7 +286,7 @@ class TestTenancy:
 
         if surface == "batch":
             store = BatchStore(tmp_path / "batch")
-            worker = BatchWorker(
+            worker = LegacyBatchWorker(
                 store,
                 {"m": MockBackend()},
                 max_concurrency=1,
@@ -612,7 +611,7 @@ class TestTenancy:
     def test_admin_only_usage_is_not_mapped_to_default_tenant(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KAIRYU_DATA_KEYS", "data")
         monkeypatch.setenv("KAIRYU_ADMIN_KEYS", "admin")
-        app = create_app(
+        app = create_legacy_app(
             {"m": MockBackend()},
             settings=ServerSettings(
                 api_keys_env="KAIRYU_DATA_KEYS",
@@ -644,7 +643,7 @@ class TestTenancy:
             limits={"tenant-a": TenantLimits(requests_per_minute=2)},
         )
         engine = create_backend("mock")
-        app = create_app(
+        app = create_legacy_app(
             {"m": engine},
             settings=ServerSettings(
                 api_keys_env="KAIRYU_M11_KEYS",
@@ -680,7 +679,7 @@ class TestTenancy:
         # S3: streaming chat and /v1/completions were never written to the
         # ledger (billing bypass). Both must now record usage.
         ledger_path = tmp_path / "usage.jsonl"
-        app = create_app(
+        app = create_legacy_app(
             {"m": create_backend("mock")},
             settings=ServerSettings(usage_ledger_path=str(ledger_path)),
         )
@@ -835,7 +834,7 @@ class TestTenancy:
             + "\n",
             encoding="utf-8",
         )
-        app = create_app(
+        app = create_legacy_app(
             {"m": MockBackend()},
             settings=ServerSettings(usage_ledger_path=str(ledger_path)),
         )
@@ -864,7 +863,7 @@ class TestTenancy:
         assert app.state.usage_ledger.malformed_lines == 1
 
     def test_create_app_closes_and_can_reopen_ledger_after_shutdown(self, tmp_path):
-        app = create_app(
+        app = create_legacy_app(
             {"m": MockBackend()},
             settings=ServerSettings(usage_ledger_path=str(tmp_path / "ledger.jsonl")),
         )
@@ -890,7 +889,7 @@ class TestTenancy:
             yield
             raise RuntimeError("caller shutdown failed")
 
-        app = create_app(
+        app = create_legacy_app(
             {"m": MockBackend()},
             settings=ServerSettings(usage_ledger_path=str(tmp_path / "ledger.jsonl")),
             lifespan=failing_lifespan,
@@ -1186,7 +1185,7 @@ class TestResponsesApi:
 
         monkeypatch.setenv("KAIRYU_EXTRA_ROUTE_KEYS", "key-a")
         ledger_path = tmp_path / "usage.jsonl"
-        app = create_app(
+        app = create_legacy_app(
             {"reported": ReportedUsageBackend(), "derived": DerivedUsageBackend()},
             settings=ServerSettings(
                 api_keys_env="KAIRYU_EXTRA_ROUTE_KEYS",
@@ -1254,7 +1253,7 @@ class TestResponsesApi:
 
         monkeypatch.setenv("KAIRYU_EXTRA_ROUTE_KEYS", "key-a")
         ledger_path = tmp_path / "usage.jsonl"
-        app = create_app(
+        app = create_legacy_app(
             {"m": FailingBackend()},
             settings=ServerSettings(
                 api_keys_env="KAIRYU_EXTRA_ROUTE_KEYS",
@@ -1364,7 +1363,7 @@ class TestEmbeddings:
                 )
             }
         )
-        app = create_app(
+        app = create_legacy_app(
             {"m": MockBackend()},
             tenant_config=config,
             embedding_backends={"embedding-model": backend},
@@ -1394,7 +1393,7 @@ class TestEmbeddings:
                 )
             }
         )
-        app = create_app(
+        app = create_legacy_app(
             {"m": MockBackend()},
             tenant_config=config,
             embedding_backends={
@@ -1438,7 +1437,7 @@ class TestEmbeddings:
                 )
             }
         )
-        app = create_app(
+        app = create_legacy_app(
             {"m": MockBackend()},
             tenant_config=config,
             embedding_backends={

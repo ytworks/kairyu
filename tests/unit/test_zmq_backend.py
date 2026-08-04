@@ -32,6 +32,7 @@ from kairyu.engine.prompt import (
     MultimodalItem,
     MultimodalPrompt,
     PromptInput,
+    TemplatedPrompt,
     TextPrompt,
     TokensPrompt,
 )
@@ -699,6 +700,48 @@ async def test_parent_preflight_tokenizes_tool_prompt_once_and_submits_tokens(
         tokenizer.encoded[0]
     )
     assert backend._prepared_requests == {}
+    assert backend._queues.pop(request.request_id) is queue
+    backend._release_wire_route(request.request_id)
+    backend._socket = None
+    backend._live_generation = None
+    await backend.shutdown()
+
+
+async def test_templated_text_uses_versioned_prompt_wire_without_parent_tokenizer(
+    monkeypatch,
+):
+    import msgpack
+
+    class CapturingSocket:
+        payload = None
+
+        async def send(self, payload):
+            self.payload = payload
+
+    backend = ZmqEngineBackend(num_pages=64)
+    backend.generation_defaults = GenerationDefaults()
+    socket = CapturingSocket()
+    backend._socket = socket
+    backend._live_generation = 1
+
+    async def already_started():
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_started", already_started)
+    request = GenerationRequest(
+        "templated-wire",
+        TemplatedPrompt("<BOS>user hello<ASSISTANT>"),
+        SamplingParams(max_tokens=1),
+    )
+
+    queue = await backend._submit(request)
+
+    message = msgpack.unpackb(socket.payload)
+    assert message["prompt_wire_version"] == 1
+    assert message["prompt"] == {
+        "kind": "templated_text",
+        "prompt": "<BOS>user hello<ASSISTANT>",
+    }
     assert backend._queues.pop(request.request_id) is queue
     backend._release_wire_route(request.request_id)
     backend._socket = None

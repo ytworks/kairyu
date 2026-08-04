@@ -12,19 +12,35 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 _TOY_VOCAB = 50_000
 _REPLACEMENT_CHAR = "�"
 # eos candidates probed when tokenizer_config.json is absent, most-specific first
 _COMMON_EOS_TOKENS = ("<|eot_id|>", "<|im_end|>", "<|endoftext|>", "</s>")
+_STANDARD_SPECIAL_TOKEN_FIELDS = (
+    "bos_token",
+    "eos_token",
+    "unk_token",
+    "sep_token",
+    "pad_token",
+    "cls_token",
+    "mask_token",
+)
+_TOKENIZER_BEHAVIOR_FLAGS = {"add_bos_token", "add_eos_token"}
 GrammarVocabType = Literal["raw", "byte_fallback", "byte_level"]
 
 
-def _normalize_special_token(value: object, *, field: str) -> str | None:
+def _normalize_special_token(
+    value: object,
+    *,
+    field: str,
+    source: str = "tokenizer_config.json",
+) -> str | None:
     """Normalize Hugging Face's string-or-AddedToken config representation."""
     if value is None:
         return None
@@ -34,14 +50,34 @@ def _normalize_special_token(value: object, *, field: str) -> str | None:
         content = value.get("content")
         if isinstance(content, str) and content:
             return content
-        raise ValueError(
-            f"tokenizer_config.json {field!r} AddedToken must contain "
-            "a non-empty string 'content'"
-        )
+        raise ValueError(f"{source} {field!r} AddedToken must contain a non-empty string 'content'")
     raise ValueError(
-        f"tokenizer_config.json {field!r} must be a string, null, or "
+        f"{source} {field!r} must be a string, null, or "
         f"an AddedToken object; got {type(value).__name__}"
     )
+
+
+@dataclass(frozen=True)
+class TokenizerChatMetadata:
+    """Chat templates and named special tokens stored beside a tokenizer.
+
+    A single template is normalized to the ``default`` name, which lets the
+    deployment layer use one selection path for both single- and multi-template
+    tokenizers.  The mapping proxies keep this frozen value immutable beyond
+    the dataclass attributes themselves.
+    """
+
+    templates: Mapping[str, str]
+    special_tokens: Mapping[str, str]
+    template_sources: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "templates", MappingProxyType(dict(self.templates)))
+        object.__setattr__(
+            self,
+            "special_tokens",
+            MappingProxyType(dict(self.special_tokens)),
+        )
 
 
 @dataclass(frozen=True)
@@ -197,12 +233,8 @@ class HFTokenizer:
         if eos_token is not None and not isinstance(eos_token, str):
             raise TypeError("eos_token must be a string or None")
         if eos_token is None and config is not None:
-            payload = json.loads(config.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError("tokenizer_config.json must contain a JSON object")
-            eos_token = _normalize_special_token(
-                payload.get("eos_token"), field="eos_token"
-            )
+            payload = _load_json_object(config, label="tokenizer_config.json")
+            eos_token = _normalize_special_token(payload.get("eos_token"), field="eos_token")
         self.eos_token_id = self._resolve_eos(eos_token)
         self._vocab: list[str] | None = None
 
@@ -266,6 +298,219 @@ class _HFDecodeStream:
             return ""
         chunk = self._stream.step(self._tokenizer, list(token_ids))
         return chunk if chunk is not None else ""
+
+
+def _load_json_object(path: Path, *, label: str) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must contain a JSON object")
+    return payload
+
+
+def _validate_chat_template(name: object, template: object, *, source: str) -> tuple[str, str]:
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"{source} contains an empty or non-string chat template name")
+    if not isinstance(template, str) or not template.strip():
+        raise ValueError(f"{source} chat template {name!r} must be a non-empty string")
+    return name, template
+
+
+def _chat_templates_from_config(
+    config: Mapping[str, object],
+    *,
+    source: str,
+) -> dict[str, str]:
+    if "chat_template" not in config or config["chat_template"] is None:
+        return {}
+
+    raw = config["chat_template"]
+    if isinstance(raw, str):
+        name, template = _validate_chat_template("default", raw, source=source)
+        return {name: template}
+
+    templates: dict[str, str] = {}
+    if isinstance(raw, dict):
+        if not raw:
+            raise ValueError(f"{source} chat_template mapping must not be empty")
+        entries = raw.items()
+    elif isinstance(raw, list):
+        if not raw:
+            raise ValueError(f"{source} chat_template list must not be empty")
+        normalized_entries: list[tuple[object, object]] = []
+        for index, entry in enumerate(raw):
+            if not isinstance(entry, dict) or "name" not in entry or "template" not in entry:
+                raise ValueError(
+                    f"{source} chat_template entry {index} must contain 'name' and 'template'"
+                )
+            normalized_entries.append((entry["name"], entry["template"]))
+        entries = normalized_entries
+    else:
+        raise ValueError(f"{source} chat_template must be a string, mapping, legacy list, or null")
+
+    for raw_name, raw_template in entries:
+        name, template = _validate_chat_template(
+            raw_name,
+            raw_template,
+            source=source,
+        )
+        if name in templates:
+            raise ValueError(f"{source} contains duplicate chat template {name!r}")
+        templates[name] = template
+    return templates
+
+
+def _apply_named_special_tokens(
+    target: dict[str, str],
+    payload: Mapping[str, object],
+    *,
+    source: str,
+    preserve_fields: frozenset[str] = frozenset(),
+) -> None:
+    """Overlay named token values from one HF configuration object."""
+    named_fields = {
+        key
+        for key in payload
+        if key in _STANDARD_SPECIAL_TOKEN_FIELDS
+        or (key.endswith("_token") and key not in _TOKENIZER_BEHAVIOR_FLAGS)
+    }
+    for field in sorted(named_fields):
+        if field in preserve_fields:
+            continue
+        token = _normalize_special_token(payload[field], field=field, source=source)
+        if token is None:
+            target.pop(field, None)
+        else:
+            target[field] = token
+
+    extra = payload.get("extra_special_tokens")
+    if extra is None or isinstance(extra, list):
+        # Lists are valid HF metadata but have no names to expose to Jinja.
+        return
+    if not isinstance(extra, dict):
+        raise ValueError(f"{source} 'extra_special_tokens' must be a mapping, list, or null")
+    for raw_name, raw_token in extra.items():
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            raise ValueError(f"{source} 'extra_special_tokens' contains an empty token name")
+        token = _normalize_special_token(raw_token, field=raw_name, source=source)
+        if token is None:
+            raise ValueError(
+                f"{source} 'extra_special_tokens' value for {raw_name!r} must not be null"
+            )
+        target[raw_name] = token
+
+
+def load_tokenizer_chat_metadata(
+    path: str | Path,
+    *,
+    include_templates: bool = True,
+) -> TokenizerChatMetadata:
+    """Load local Hugging Face chat metadata without importing Transformers.
+
+    Dedicated Jinja files collectively replace the legacy
+    ``tokenizer_config.json`` template value, matching Transformers' loading
+    precedence. Modern configs containing ``added_tokens_decoder`` own their
+    named tokens; for legacy configs, ``special_tokens_map.json`` overlays the
+    config exactly as Transformers 5.12 does. ``include_templates=False`` is
+    used by an explicit deployment override so malformed unused checkpoint
+    templates cannot defeat that higher-precedence policy; special tokens are
+    still loaded for the override's render context.
+    """
+    source_path = Path(path)
+    if source_path.is_dir():
+        tokenizer_root = source_path
+    elif source_path.is_file():
+        tokenizer_root = source_path.parent
+    else:
+        raise ValueError(f"tokenizer metadata path does not exist: {source_path}")
+    config_candidate = tokenizer_root / "tokenizer_config.json"
+    config_file = config_candidate if config_candidate.is_file() else None
+    config: dict[str, object] = (
+        _load_json_object(config_file, label="tokenizer_config.json")
+        if config_file is not None
+        else {}
+    )
+
+    templates: dict[str, str] = {}
+    template_sources: list[str] = []
+    dedicated_files: list[tuple[str, Path]] = []
+    if include_templates:
+        default_file = tokenizer_root / "chat_template.jinja"
+        if default_file.is_file():
+            dedicated_files.append(("default", default_file))
+        # Transformers 5.12 stores non-default named templates in this
+        # directory (``CHAT_TEMPLATE_DIR`` in transformers.utils.hub).
+        template_dir = tokenizer_root / "additional_chat_templates"
+        if template_dir.is_dir():
+            dedicated_files.extend(
+                (template_file.stem, template_file)
+                for template_file in sorted(template_dir.glob("*.jinja"))
+                if template_file.is_file()
+            )
+
+    for raw_name, template_file in dedicated_files:
+        name, template = _validate_chat_template(
+            raw_name,
+            template_file.read_text(encoding="utf-8"),
+            source=str(template_file),
+        )
+        if name in templates:
+            raise ValueError(f"duplicate dedicated chat template {name!r}")
+        templates[name] = template
+        template_sources.append(str(template_file))
+
+    if include_templates and not dedicated_files:
+        templates = _chat_templates_from_config(
+            config,
+            source="tokenizer_config.json",
+        )
+        if templates and config_file is not None:
+            template_sources.append(f"{config_file}:chat_template")
+
+    special_tokens: dict[str, str] = {}
+    _apply_named_special_tokens(
+        special_tokens,
+        config,
+        source="tokenizer_config.json",
+    )
+    special_tokens_map_file = tokenizer_root / "special_tokens_map.json"
+    if (
+        "added_tokens_decoder" not in config
+        and special_tokens_map_file.is_file()
+    ):
+        # Transformers extracts direct model-specific ``*_token`` values from
+        # tokenizer_config before applying the legacy map, so those config
+        # values retain priority. Standard fields and the map's
+        # ``extra_special_tokens`` entries are applied later and do override.
+        config_model_specific_fields = {
+            key
+            for key, value in config.items()
+            if key.endswith("_token")
+            and key not in _STANDARD_SPECIAL_TOKEN_FIELDS
+            and key not in _TOKENIZER_BEHAVIOR_FLAGS
+            # At this point Transformers 5.12 has not recursively converted
+            # serialized AddedToken objects yet. Only direct string values are
+            # extracted early enough to beat a legacy map entry of the same
+            # name; a top-level AddedToken JSON object is overwritten later.
+            and isinstance(value, str)
+        }
+        config_extra = config.get("extra_special_tokens")
+        if isinstance(config_extra, dict):
+            config_model_specific_fields.update(config_extra)
+        _apply_named_special_tokens(
+            special_tokens,
+            _load_json_object(
+                special_tokens_map_file,
+                label="special_tokens_map.json",
+            ),
+            source="special_tokens_map.json",
+            preserve_fields=frozenset(config_model_specific_fields),
+        )
+
+    return TokenizerChatMetadata(
+        templates=templates,
+        special_tokens=special_tokens,
+        template_sources=tuple(template_sources),
+    )
 
 
 def _locate_tokenizer_files(path: Path) -> tuple[Path, Path | None]:

@@ -15,6 +15,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -1180,6 +1181,7 @@ def add_responses_route(
     engines: Mapping,
     *,
     chat_templates=None,
+    legacy_chat_models: AbstractSet[str] | None = None,
 ) -> ResponseStore:
     store = ResponseStore()
     app.state.response_store = store
@@ -1237,6 +1239,7 @@ def add_responses_route(
                 placement_started_ns=getattr(
                     http_request.state, "placement_started_ns", None
                 ),
+                legacy_chat_models=legacy_chat_models,
             )
         except ChatRequestError as error:
             return _chat_error(error)

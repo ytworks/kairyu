@@ -9,8 +9,8 @@ import httpx
 
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server import tenancy as tenancy_module
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.tenancy import UsageLedger
+from tests.server._legacy_chat import create_legacy_app
 
 
 class _SlowFile:
@@ -92,7 +92,7 @@ async def test_slow_ledger_filesystem_does_not_delay_stream_completion(tmp_path)
             release_write,
         )
 
-    app = create_app({"m": MockBackend()})
+    app = create_legacy_app({"m": MockBackend()})
     ledger = UsageLedger(tmp_path / "usage.jsonl", _open_file=slow_open)
     app.state.usage_ledger = ledger
     transport = httpx.ASGITransport(app=app)

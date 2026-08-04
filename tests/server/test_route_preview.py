@@ -1,9 +1,10 @@
 import httpx
+import pytest
 
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.chat_template import ChatTemplate
-from kairyu.entrypoints.server.app import create_app
 from kairyu.orchestration.orchestrator import Orchestrator
+from tests.server._legacy_chat import create_legacy_app
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -23,7 +24,7 @@ def _body(query: str, model: str = "auto") -> dict:
 async def test_preview_uses_rendered_chat_prompt_without_dispatch():
     tier1 = MockBackend()
     tier2 = MockBackend()
-    app = create_app(
+    app = create_legacy_app(
         engines={"direct": MockBackend()},
         orchestrators={"auto": Orchestrator({"tier1": tier1, "tier2": tier2})},
     )
@@ -47,31 +48,19 @@ async def test_preview_uses_rendered_chat_prompt_without_dispatch():
     assert actual.json()["kairyu_route"]["target"] == preview.json()["target"]
 
 
-async def test_preview_uses_the_configured_model_chat_template():
+def test_orchestrated_model_rejects_configured_chat_template_at_startup():
     template = ChatTemplate("PREFIX:{{ messages[0].content }}:ASSISTANT")
-    tier1 = MockBackend()
-    app = create_app(
-        engines={},
-        orchestrators={"auto": Orchestrator({"tier1": tier1})},
-        chat_templates={"auto": template},
-    )
-    async with _client(app) as client:
-        preview = await client.post("/v1/route", json=_body("hello"))
-        actual = await client.post(
-            "/v1/chat/completions",
-            headers={"X-Kairyu-Trace": "1"},
-            json=_body("hello"),
-        )
 
-    expected_prompt = "PREFIX:hello:ASSISTANT"
-    assert preview.status_code == 200
-    assert preview.json()["features"]["char_len"] == len(expected_prompt)
-    assert tier1.prompts_seen == (expected_prompt,)
-    assert actual.json()["kairyu_route"]["features"] == preview.json()["features"]
+    with pytest.raises(ValueError, match="orchestrated models.*pre-rendered"):
+        create_legacy_app(
+            engines={},
+            orchestrators={"auto": Orchestrator({"tier1": MockBackend()})},
+            chat_templates={"auto": template},
+        )
 
 
 async def test_preview_routes_on_rendered_prompt_at_multi_agent_boundary():
-    app = create_app(
+    app = create_legacy_app(
         engines={},
         orchestrators={"auto": Orchestrator({"tier1": MockBackend()})},
     )
@@ -86,7 +75,7 @@ async def test_preview_routes_on_rendered_prompt_at_multi_agent_boundary():
 
 
 async def test_preview_direct_and_unknown_models():
-    app = create_app(
+    app = create_legacy_app(
         engines={"direct": MockBackend()},
         orchestrators={"auto": Orchestrator({"tier1": MockBackend()})},
     )
@@ -114,7 +103,7 @@ async def test_preview_rejects_router_without_non_mutating_contract():
         def route(self, query, context=None):
             raise AssertionError("route must not be called by preview")
 
-    app = create_app(
+    app = create_legacy_app(
         engines={},
         orchestrators={"auto": Orchestrator({"tier1": MockBackend()}, router=RouteOnly())},
     )
@@ -126,7 +115,7 @@ async def test_preview_rejects_router_without_non_mutating_contract():
 
 
 async def test_route_field_is_absent_without_trace_opt_in():
-    app = create_app(
+    app = create_legacy_app(
         engines={},
         orchestrators={"auto": Orchestrator({"tier1": MockBackend()})},
     )

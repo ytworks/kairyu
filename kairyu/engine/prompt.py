@@ -34,6 +34,26 @@ class TextPrompt:
             raise TypeError("TextPrompt.prompt must be a string")
 
 
+class TemplatedPrompt(str):
+    """Text already rendered by a tokenizer-owned chat template.
+
+    Unlike an ordinary completion prompt, the template already owns the
+    model's BOS/EOS and control-token policy, including deliberate omission.
+    A backend that tokenizes it must therefore disable automatic special-token
+    insertion. Keeping that ownership in the prompt value prevents chat and
+    completion paths from silently sharing incompatible tokenizer defaults.
+    """
+
+    def __new__(cls, prompt: str) -> TemplatedPrompt:
+        if type(prompt) is not str:
+            raise TypeError("TemplatedPrompt.prompt must be a string")
+        return super().__new__(cls, prompt)
+
+    @property
+    def prompt(self) -> str:
+        return str(self)
+
+
 @dataclass(frozen=True)
 class TokensPrompt:
     """Caller-tokenized input whose IDs are the source of accounting truth.
@@ -274,14 +294,16 @@ class MultimodalPrompt:
         object.__setattr__(self, "messages", copied_messages)
 
 
-PromptInput: TypeAlias = str | TextPrompt | TokensPrompt | MultimodalPrompt
+PromptInput: TypeAlias = (
+    str | TextPrompt | TemplatedPrompt | TokensPrompt | MultimodalPrompt
+)
 PromptWire: TypeAlias = str | dict[str, object]
 
 
 def prompt_kind(prompt: PromptInput) -> PromptKind:
     """Return the nominal prompt variant without flattening its contents."""
 
-    if type(prompt) is str or isinstance(prompt, TextPrompt):
+    if type(prompt) is str or isinstance(prompt, (TextPrompt, TemplatedPrompt)):
         return "text"
     if isinstance(prompt, TokensPrompt):
         return "tokens"
@@ -297,6 +319,8 @@ def prompt_text(prompt: PromptInput) -> str | None:
         return prompt
     if isinstance(prompt, TextPrompt):
         return prompt.prompt
+    if isinstance(prompt, TemplatedPrompt):
+        return prompt.prompt
     if isinstance(prompt, TokensPrompt):
         return prompt.prompt
     if isinstance(prompt, MultimodalPrompt):
@@ -311,7 +335,10 @@ def supplied_prompt_token_ids(prompt: PromptInput) -> tuple[int, ...] | None:
         return prompt.prompt_token_ids
     if isinstance(prompt, MultimodalPrompt) and isinstance(prompt.base, TokensPrompt):
         return prompt.base.prompt_token_ids
-    if type(prompt) is str or isinstance(prompt, TextPrompt | MultimodalPrompt):
+    if type(prompt) is str or isinstance(
+        prompt,
+        (TextPrompt, TemplatedPrompt, MultimodalPrompt),
+    ):
         return None
     raise TypeError(f"unsupported prompt type: {type(prompt).__name__}")
 
@@ -335,6 +362,8 @@ def prompt_to_wire(prompt: PromptInput) -> PromptWire:
         return prompt
     if isinstance(prompt, TextPrompt):
         return {"kind": "text", "prompt": prompt.prompt}
+    if isinstance(prompt, TemplatedPrompt):
+        return {"kind": "templated_text", "prompt": prompt.prompt}
     if isinstance(prompt, TokensPrompt):
         return {
             "kind": "tokens",
@@ -411,6 +440,13 @@ def prompt_from_wire(value: object) -> PromptInput:
     if kind == "text":
         _require_exact_fields(value, frozenset({"kind", "prompt"}), context="text prompt")
         return TextPrompt(value["prompt"])
+    if kind == "templated_text":
+        _require_exact_fields(
+            value,
+            frozenset({"kind", "prompt"}),
+            context="templated text prompt",
+        )
+        return TemplatedPrompt(value["prompt"])
     if kind == "tokens":
         _require_exact_fields(
             value,
@@ -536,6 +572,7 @@ __all__ = [
     "PromptInput",
     "PromptKind",
     "PromptWire",
+    "TemplatedPrompt",
     "TextPrompt",
     "TokensPrompt",
     "prompt_from_wire",

@@ -1379,7 +1379,7 @@ class ZmqEngineBackend:
                 "priority": request.priority,
                 "scheduling_class": request.scheduling_class,
             }
-            if not isinstance(prompt, str):
+            if type(prompt) is not str:
                 message["prompt_wire_version"] = _PROMPT_WIRE_VERSION
             if self._wire_version == WIRE_VERSION:
                 # Per-request negotiation keeps rolling upgrades

@@ -40,6 +40,11 @@ pools:
     queue_depth_threshold: 8
     probe_interval_s: 2.0
 
+# Image-bearing requests bypass this text renderer and preserve structured
+# roles for the upstream Qwen processor. The opt-in covers this same served
+# model's text-only compatibility path explicitly.
+legacy_chat_models: [qwen3-vl-32b]
+
 # Retain the CPU OpenWebUI stack's local RAG endpoint. The VLM path itself
 # does not require retrieval, but image chat must not regress existing RAG.
 embeddings:

@@ -13,6 +13,7 @@ from kairyu.engine.prompt import (
     MultimodalMessage,
     MultimodalMessagePart,
     MultimodalPrompt,
+    TemplatedPrompt,
     TextPrompt,
     TokensPrompt,
     prompt_from_wire,
@@ -24,14 +25,17 @@ from kairyu.engine.prompt import (
 )
 
 
-@pytest.mark.parametrize("prompt", ["legacy", TextPrompt("typed")])
+@pytest.mark.parametrize(
+    "prompt",
+    ["legacy", TextPrompt("typed"), TemplatedPrompt("templated")],
+)
 def test_text_prompt_round_trip_is_lossless(prompt):
     decoded = prompt_from_wire(prompt_to_wire(prompt))
 
     assert decoded == prompt
     assert type(decoded) is type(prompt)
     assert prompt_kind(decoded) == "text"
-    assert prompt_text(decoded) in {"legacy", "typed"}
+    assert prompt_text(decoded) in {"legacy", "typed", "templated"}
 
 
 def test_tokens_prompt_round_trip_and_defensive_copy():

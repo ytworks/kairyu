@@ -7,7 +7,7 @@ from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.torch_runner import TinyAttentionLM, TorchPagedRunner
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.tokenizer import ToyTokenizer
-from kairyu.entrypoints.server.app import create_app
+from tests.server._legacy_chat import create_legacy_app
 
 
 class _SmallVocabTokenizer(ToyTokenizer):
@@ -26,7 +26,7 @@ def _real_backend(seed: int = 0) -> KairyuBackend:
 
 @pytest.fixture()
 def app():
-    return create_app(engines={"m": _real_backend()})
+    return create_legacy_app(engines={"m": _real_backend()})
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -210,7 +210,7 @@ async def test_zmq_backend_n_rejected_with_400():
         async def shutdown(self):  # pragma: no cover
             return None
 
-    app = create_app(engines={"z": _NoN()})
+    app = create_legacy_app(engines={"z": _NoN()})
     async with _client(app) as client:
         response = await client.post(
             "/v1/chat/completions",

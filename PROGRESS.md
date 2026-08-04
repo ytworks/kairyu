@@ -765,10 +765,11 @@ standalone-cycle goodput. Its draft latency is 1.2171x dense, so quantized draft
 loading is an opt-in memory tradeoff rather than a performance default.
 
 The Qwen3-32B TP8 Fugu example now exercises the request contract it actually
-serves. It extracts the pinned checkpoint's own chat template at container
-startup, carries safeguarded `chat_template_kwargs` through native chat
-rendering, uses Qwen's `enable_thinking` control for target and judge requests,
-and no longer sends unsupported provider-specific reasoning fields. FlashInfer
+serves. Deployment preflight reads the pinned checkpoint's own chat template
+directly from its effective tokenizer, carries safeguarded
+`chat_template_kwargs` through native chat rendering, uses Qwen's
+`enable_thinking` control for target and judge requests, and no longer sends
+unsupported provider-specific reasoning fields. FlashInfer
 prefill and decode modules are planned with the live model/KV geometry before
 readiness, with the active Python environment's sibling `ninja` discoverable
 for a missing-AOT JIT. A post-merge correction run served Qwen3-32B with
@@ -829,6 +830,30 @@ scheduler/KV history, and radix accounting, but never enters visible
 detokenization. Ignored EOS and length-terminal tokens are not specially
 suppressed by this rule and retain the tokenizer's ordinary semantics.
 
+Deployment chat rendering now resolves before any model/backend construction.
+Explicit per-model templates override the effective local tokenizer; otherwise
+the exact `chat_template.jinja`/`additional_chat_templates/*.jinja` set or
+`tokenizer_config.json.chat_template` and its named special-token map are loaded
+from the tokenizer actually used by native Kairyu or direct local vLLM. Static
+pools must agree on one template/token map. Every served chat model must have a
+template or model-scoped `legacy_chat_models` membership; HTTP chat, route
+preview, Responses, and batch reject a missing policy before dispatch, while
+lower-level construction emits an explicit warning so completion-only apps
+remain usable. Only the DeploymentSpec builder automatically maps deterministic
+mock backends to the compatibility renderer. Pre-rendered prompts retain tokenizer ownership in
+a typed marker through in-process/ZMQ transport, and direct vLLM disables its
+completion-only special-token insertion solely for that marker. Remote,
+discovery, and orchestration paths that cannot preserve that ownership reject
+templates at startup and require explicit legacy compatibility. Offline
+`LLM.chat` follows the same local auto-load/explicit-legacy policy while plain
+completion generation remains independent. Explicit templates cannot reference
+unverified tokenizer-owned special-token variables; a non-materialized or
+partially resolved pool fails rather than silently dropping BOS/EOS. VLMs have no preflight exception:
+the checked-in overlay explicitly selects legacy for its text-only path, while
+image-bearing requests bypass that renderer and retain upstream
+processor/template ownership. Llama-3 and Qwen fixtures byte- and
+token-ID-match Transformers, including exactly one tokenizer-owned BOS.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -836,6 +861,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [amendment] Checkpoint chat templates become fail-closed defaults
+- What: added metadata-only loading of dedicated and tokenizer-config HF chat templates plus named special tokens; resolved the effective tokenizer and compiled every deployment renderer before constructing backends; required a template or model-scoped `legacy_chat_models` membership at every production, lower-level chat, and offline-chat boundary; made completion-only low-level construction log an explicit missing-policy warning while rejecting chat before dispatch; rejected unverified special-token variables instead of silently dropping BOS/EOS; preserved rendered-template ownership through an in-process/ZMQ typed prompt marker and disabled vLLM's completion special-token insertion only for that marker; rejected remote/discovery/orchestration and direct Conductor/MoA derivation paths that cannot preserve the marker; limited automatic legacy selection to DeploymentSpec-built deterministic mocks; made the checked-in VLM overlay opt in explicitly while image requests bypass its text renderer; and replaced the Qwen example's temporary template extraction with direct checkpoint auto-loading. Offline validation now reports the same missing/invalid policy, while Llama-3 and Qwen bytes and token IDs match Transformers exactly. The final portable split passed 4,908 tests (1,343 benchmark and 3,565 non-benchmark; 201 deselected).
+- Why: the implicit role-prefix fallback and empty BOS/EOS context could silently serve prompts in a format the model was never trained on, even when its checkpoint already supplied the authoritative template. Preflight resolution prevents quality corruption and fails before allocating GPU/backend resources.
+- Refs: issue #350; m9 D2; `kairyu/engine/{tokenizer,prompt,vllm_backend,zmq_backend}.py`; `kairyu/entrypoints/{chat_template,llm,async_engine}.py`; `kairyu/entrypoints/server/{chat_service,app,responses_service}.py`; `kairyu/orchestration/{orchestrator,conductor,moa}.py`; `kairyu/deploy/{spec,builder,validation}.py`; `kairyu/batch/worker.py`; `deploy/{compose,kind,helm}/`; `examples/serve.py`; `tests/unit/test_{chat_template,tokenizer}.py`; `tests/server/test_chat_template_policy.py`
 
 ### 2026-08-04 — [progress] Judge evidence binds prompts and calibration
 - What: registered and hashed the exact HLE/CharXiv judge templates plus their parser/generation protocol into the run identity; added concurrent strict-majority judge panels with ordered per-member evidence and fail-closed aggregation; packaged 12 paired, published-gold LLMBar Natural calibration prompts (24 labeled responses) with pinned source and MIT notice; measured both response orders and self/non-self behavior; and bound headline eligibility to fixed promotion gates plus the complete canonical identity of the evaluated run. The complete benchmark suite passes 1,343 tests with no selected skips, and an isolated wheel contains all nine fixtures, the LLMBar notice, and the calibration CLI.

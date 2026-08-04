@@ -91,6 +91,18 @@ def _write_tiny_model_checkpoint(
         )
     )
     tokenizer.save(str(path / "tokenizer.json"))
+    (path / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "chat_template": (
+                    "{% for message in messages %}"
+                    "{{ message['role'] ~ ': ' ~ message['content'] ~ '\\n' }}"
+                    "{% endfor %}"
+                )
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_validation_does_not_resolve_or_render_tenant_credentials(
@@ -313,6 +325,7 @@ def test_validation_resolves_links_from_the_config_symlink_location(tmp_path):
 engines:
   local: {backend: mock}
 orchestrator: {spec: auto.yaml}
+legacy_chat_models: [kairyu-auto]
 """,
         encoding="utf-8",
     )
@@ -732,6 +745,161 @@ engines:
     )
 
 
+def test_validation_requires_explicit_chat_policy_for_real_text_model(tmp_path):
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        """
+engines:
+  remote:
+    backend: openai
+    options:
+      base_url: http://replica.test/v1
+      model: upstream-model
+      upstream: openai
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert not report.valid
+    assert [finding.code for finding in report.findings] == [
+        "schema.missing_legacy_chat_policy"
+    ]
+    assert report.findings[0].field == "legacy_chat_models"
+
+
+def test_validation_accepts_local_tokenizer_chat_template(tmp_path):
+    model = tmp_path / "model"
+    _write_tiny_model_checkpoint(model)
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        f"""
+engines:
+  local:
+    backend: kairyu
+    options:
+      model_path: {model}
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert report.valid, report.render_text()
+
+
+def test_validation_reports_invalid_auto_loaded_chat_template(tmp_path):
+    model = tmp_path / "model"
+    _write_tiny_model_checkpoint(model)
+    config_path = model / "tokenizer_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["chat_template"] = "{% if"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        f"""
+engines:
+  local:
+    backend: kairyu
+    options:
+      model_path: {model}
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert not report.valid
+    assert [finding.code for finding in report.findings] == [
+        "schema.invalid_chat_policy"
+    ]
+
+
+def test_validation_accepts_explicit_legacy_chat_policy_without_warning(
+    tmp_path,
+    caplog,
+):
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        """
+engines:
+  remote:
+    backend: openai
+    options:
+      base_url: http://replica.test/v1
+      model: upstream-model
+      upstream: openai
+legacy_chat_models: [remote]
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert report.valid, report.render_text()
+    assert not caplog.records
+
+
+@pytest.mark.parametrize(
+    ("source", "contents", "expected_code"),
+    [
+        ("missing.jinja", None, "filesystem.missing_reference"),
+        ("broken.jinja", "{% if", "schema.invalid_chat_template"),
+    ],
+)
+def test_validation_preserves_precise_explicit_template_finding(
+    tmp_path,
+    source,
+    contents,
+    expected_code,
+):
+    if contents is not None:
+        (tmp_path / source).write_text(contents, encoding="utf-8")
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        f"""
+engines:
+  remote:
+    backend: openai
+    options:
+      base_url: http://replica.test/v1
+      model: upstream-model
+      upstream: openai
+chat_templates:
+  remote: {source}
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert [finding.code for finding in report.findings] == [expected_code]
+
+
+def test_validation_rejects_empty_explicit_chat_template(tmp_path):
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        """
+engines:
+  remote:
+    backend: openai
+    options:
+      base_url: http://replica.test/v1
+      model: upstream-model
+chat_templates:
+  remote: "   "
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert [finding.code for finding in report.findings] == [
+        "schema.invalid_chat_template"
+    ]
+
+
 def test_validation_respects_registered_native_name_override(
     tmp_path,
     monkeypatch,
@@ -752,6 +920,7 @@ engines:
     backend: kairyu
     options:
       model_path: not-a-local-model
+legacy_chat_models: [replacement]
 """,
         encoding="utf-8",
     )

@@ -18,6 +18,8 @@ pools:
           api_key_env: null
           upstream: kairyu
 
+legacy_chat_models: [qwen3-32b]
+
 tenants:
   default_tenant: good
   key_tenants:

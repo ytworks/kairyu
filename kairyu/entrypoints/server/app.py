@@ -13,6 +13,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
@@ -42,6 +43,7 @@ from kairyu.entrypoints.server.chat_service import (
     sampling_params_from,
     tool_choice_is_satisfied,
     validate_chat_input,
+    validate_chat_policy,
     validate_chat_request,
 )
 from kairyu.entrypoints.server.chat_service import (
@@ -889,8 +891,11 @@ def create_app(
     resolved_api_keys: frozenset[str] | None = None,
     resolved_admin_keys: frozenset[str] | None = None,
     price_sheet: PriceSheet | None = None,
+    legacy_chat_models: AbstractSet[str] | None = None,
 ) -> FastAPI:
     settings = settings or ServerSettings()
+    legacy_chat_models = frozenset(legacy_chat_models or ())
+    validate_chat_policy(chat_templates, legacy_chat_models)
     if price_sheet is not None and settings.usage_ledger_path is None:
         raise ValueError("price_sheet requires usage_ledger_path")
     if price_sheet is not None:
@@ -915,6 +920,14 @@ def create_app(
     auto_models: dict[str, Orchestrator] = dict(orchestrators or {})
     if orchestrator is not None:
         auto_models.setdefault(AUTO_MODEL, orchestrator)
+    templated_auto_models = set(auto_models) & set(chat_templates or {})
+    if templated_auto_models:
+        raise ValueError(
+            "orchestrated models cannot safely consume pre-rendered chat prompts "
+            "while deriving planner/worker prompts; explicitly opt in through "
+            "legacy_chat_models instead: "
+            f"{sorted(templated_auto_models)}"
+        )
     served_embedding_backends = dict(embedding_backends or {})
     collisions = (
         (set(auto_models) & set(served_engines))
@@ -925,6 +938,18 @@ def create_app(
         raise ValueError(
             "served model names collide across engines, orchestrators, and embeddings: "
             f"{sorted(collisions)}"
+        )
+    missing_chat_policy = (
+        (set(served_engines) | set(auto_models))
+        - set(chat_templates or {})
+        - set(legacy_chat_models)
+    )
+    if missing_chat_policy:
+        logger.warning(
+            "served models have no configured chat rendering policy; chat "
+            "requests will be rejected before dispatch until each model has a "
+            "ChatTemplate or legacy_chat_models membership: %s",
+            sorted(missing_chat_policy),
         )
 
     metrics = ServerMetrics() if settings.metrics else None
@@ -953,6 +978,7 @@ def create_app(
         served_engines,
         embedding_backends=served_embedding_backends,
         chat_templates=chat_templates,
+        legacy_chat_models=legacy_chat_models,
     )
 
     # add_middleware prepends, so add innermost first: metrics -> concurrency
@@ -1126,7 +1152,11 @@ def create_app(
                 messages=request.messages,
             )
             try:
-                prompt = validate_chat_input(chat_request, chat_templates).prompt
+                prompt = validate_chat_input(
+                    chat_request,
+                    chat_templates,
+                    legacy_chat_models=legacy_chat_models,
+                ).prompt
                 decision = selected.preview_route(prompt)
             except ChatRequestError as error:
                 return JSONResponse(
@@ -1167,7 +1197,11 @@ def create_app(
         http_request.state.model = request.model  # label for the metrics middleware
         if request.model in auto_models:
             try:
-                validated_input = validate_chat_input(request, chat_templates)
+                validated_input = validate_chat_input(
+                    request,
+                    chat_templates,
+                    legacy_chat_models=legacy_chat_models,
+                )
             except ChatRequestError as error:
                 return JSONResponse(
                     status_code=error.status_code, content={"error": error.payload()}
@@ -1345,6 +1379,7 @@ def create_app(
                 placement_started_ns=getattr(
                     http_request.state, "placement_started_ns", None
                 ),
+                legacy_chat_models=legacy_chat_models,
             )
         except ChatRequestError as error:
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})

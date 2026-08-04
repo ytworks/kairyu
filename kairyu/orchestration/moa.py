@@ -19,6 +19,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
 )
+from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
@@ -86,6 +87,15 @@ async def _prepare_moa(
     shared_prefix: str,
     usage_observer: Callable[[GenerationUsage], None] | None,
 ) -> tuple[tuple[str, ...], list[int], GenerationRequest]:
+    if isinstance(query, TemplatedPrompt):
+        raise ValueError(
+            "MoA cannot derive proposal prompts from a tokenizer-owned "
+            "pre-rendered chat prompt"
+        )
+    if isinstance(shared_prefix, TemplatedPrompt):
+        raise ValueError(
+            "MoA shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
+        )
     if n_samples < 1:
         raise ValueError(f"n_samples must be >= 1, got {n_samples}")
     params = sampling_params or SamplingParams(temperature=_PROPOSAL_TEMPERATURE, max_tokens=1024)

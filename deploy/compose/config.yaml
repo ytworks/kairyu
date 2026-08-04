@@ -19,3 +19,5 @@ embeddings:
     max_concurrency: 2
 orchestrator:
   spec: webui-orchestrator.yaml
+
+legacy_chat_models: [kairyu-auto]

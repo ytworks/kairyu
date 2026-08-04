@@ -6,15 +6,14 @@ from fastapi.testclient import TestClient
 
 from kairyu import SamplingParams
 from kairyu.batch.store import BatchStore
-from kairyu.batch.worker import BatchWorker
 from kairyu.engine.backend import GenerationRequest, admission_upper_bound
 from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.replica import ReplicaPool
+from tests.server._legacy_chat import LegacyBatchWorker, create_legacy_app
 
 
 class _RecordingBackend(MockBackend):
@@ -45,7 +44,7 @@ def test_tenant_priority_classes_must_preserve_interactive_precedence() -> None:
 
 def test_tenant_quota_rejects_before_shared_replica_dispatch() -> None:
     replica = _RecordingBackend()
-    app = create_app(
+    app = create_legacy_app(
         {"m": ReplicaPool([replica])},
         tenant_config=TenantConfig(
             key_tenants={
@@ -104,7 +103,7 @@ def test_tenant_quota_rejects_before_shared_replica_dispatch() -> None:
 
 def test_token_reservation_rejects_before_replica_and_leaves_zero_gauges() -> None:
     replica = _RecordingBackend()
-    app = create_app(
+    app = create_legacy_app(
         {"m": ReplicaPool([replica])},
         tenant_config=TenantConfig(
             limits={
@@ -157,7 +156,7 @@ def test_generation_bound_multiplies_prefill_and_decode_candidate_work() -> None
 
 def test_direct_chat_accepts_vllm_priority_without_gateway_policy() -> None:
     backend = _RecordingBackend()
-    app = create_app({"m": backend})
+    app = create_legacy_app({"m": backend})
 
     with TestClient(app) as client:
         response = client.post("/v1/chat/completions", json=_chat_body(priority=-7))
@@ -176,7 +175,7 @@ def test_authenticated_tenant_priority_replaces_untrusted_chat_value() -> None:
             )
         }
     )
-    app = create_app({"m": backend}, tenant_config=tenants)
+    app = create_legacy_app({"m": backend}, tenant_config=tenants)
 
     with TestClient(app) as client:
         response = client.post("/v1/chat/completions", json=_chat_body(priority=-99))
@@ -190,7 +189,7 @@ def test_responses_uses_the_same_trusted_tenant_priority() -> None:
     tenants = TenantConfig(
         limits={"default": TenantLimits(interactive_priority=-4)}
     )
-    app = create_app({"m": backend}, tenant_config=tenants)
+    app = create_legacy_app({"m": backend}, tenant_config=tenants)
 
     with TestClient(app) as client:
         response = client.post(
@@ -210,7 +209,7 @@ def test_responses_uses_the_same_trusted_tenant_priority() -> None:
 
 def test_legacy_completion_preserves_direct_priority() -> None:
     backend = _RecordingBackend()
-    app = create_app({"m": backend})
+    app = create_legacy_app({"m": backend})
 
     with TestClient(app) as client:
         response = client.post(
@@ -230,7 +229,7 @@ async def test_batch_worker_replaces_client_value_with_batch_class(tmp_path) -> 
         limits={"gold": TenantLimits(interactive_priority=-10, batch_priority=-5)}
     )
     metrics = ServerMetrics()
-    worker = BatchWorker(
+    worker = LegacyBatchWorker(
         BatchStore(tmp_path),
         {"m": backend},
         tenant_config=tenants,
@@ -346,7 +345,7 @@ async def test_tenant_gateway_pool_reaches_replica_scheduler_with_explicit_class
         max_num_batched_tokens=16,
         priority_age_s=60.0,
     )
-    replica_app = create_app({"m": replica_engine})
+    replica_app = create_legacy_app({"m": replica_engine})
     remote = OpenAICompatBackend(
         base_url="http://replica.test/v1",
         model="m",
@@ -354,7 +353,7 @@ async def test_tenant_gateway_pool_reaches_replica_scheduler_with_explicit_class
         upstream="kairyu",
         transport=httpx.ASGITransport(app=replica_app),
     )
-    gateway_app = create_app(
+    gateway_app = create_legacy_app(
         {"m": ReplicaPool([remote])},
         tenant_config=TenantConfig(
             limits={

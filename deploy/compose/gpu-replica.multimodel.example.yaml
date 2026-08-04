@@ -15,6 +15,8 @@
 # (roles/kairyu). Each entry places /models/<name>/<version>/ and flips
 # /models/<name>/current; the default: true entry also maintains the
 # /models/checkpoint back-compat symlink.
+# Every effective tokenizer must contain a chat template. A model without one
+# needs an explicit chat_templates entry or legacy_chat_models membership.
 #
 #   # inventories/<env>/group_vars/gpu_nodes.yml
 #   kairyu_models:

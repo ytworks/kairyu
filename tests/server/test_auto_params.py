@@ -4,9 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from kairyu.engine.backend import GenerationResult, GenerationUsage
-from kairyu.entrypoints.server.app import create_app
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput, TokenLogprob
+from tests.server._legacy_chat import create_legacy_app
 
 
 class ParityBackend:
@@ -79,7 +79,7 @@ class ParityBackend:
 
 
 def _app(backend):
-    return create_app(
+    return create_legacy_app(
         {"direct": backend},
         orchestrators={
             "auto": Orchestrator({"tier1": backend, "tier2": backend}),

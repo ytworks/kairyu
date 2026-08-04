@@ -31,6 +31,9 @@ data:
         # withdrawal gate without synchronized four-Hz control-plane bursts.
         probe_interval_s: 1.0
         placement_log_path: /evidence/placements.jsonl
+    # This dynamic mock pool has no local tokenizer metadata. Preserve the
+    # formal gate's historical framing through an explicit model policy.
+    legacy_chat_models: [f1a]
 ---
 apiVersion: apps/v1
 kind: Deployment

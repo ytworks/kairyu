@@ -10,6 +10,7 @@ from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.prompt import (
     MultimodalItem,
     MultimodalPrompt,
+    TemplatedPrompt,
     TextPrompt,
     TokensPrompt,
 )
@@ -83,13 +84,14 @@ class _CapturingEngine:
             get_diff_sampling_param=lambda: dict(default_sampling or {})
         )
 
-    async def generate(self, prompt, params, request_id, *, priority):
+    async def generate(self, prompt, params, request_id, *, priority, **kwargs):
         self.calls.append(
             {
                 "prompt": prompt,
                 "params": params,
                 "request_id": request_id,
                 "priority": priority,
+                **kwargs,
             }
         )
         yield types.SimpleNamespace(
@@ -136,9 +138,15 @@ def test_llm_default_backend_forwards_tensor_parallel_size_to_vllm(monkeypatch):
     monkeypatch.setattr(
         importlib.util, "find_spec", lambda name: object() if name == "vllm" else None
     )
-    backend = llm_module._default_backend("m", None, tensor_parallel_size=8)
+    backend = llm_module._default_backend(
+        "m",
+        None,
+        tensor_parallel_size=8,
+        tokenizer="tokenizer-override",
+    )
     assert isinstance(backend, VLLMBackend)
     assert captured["tensor_parallel_size"] == 8
+    assert captured["tokenizer"] == "tokenizer-override"
 
 
 def test_async_engine_default_backend_forwards_tensor_parallel_size_to_vllm(monkeypatch):
@@ -148,10 +156,15 @@ def test_async_engine_default_backend_forwards_tensor_parallel_size_to_vllm(monk
     monkeypatch.setattr(
         importlib.util, "find_spec", lambda name: object() if name == "vllm" else None
     )
-    args = async_engine.AsyncEngineArgs(model="m", tensor_parallel_size=2)
+    args = async_engine.AsyncEngineArgs(
+        model="m",
+        tokenizer="tokenizer-override",
+        tensor_parallel_size=2,
+    )
     backend = async_engine._default_backend(args)
     assert isinstance(backend, VLLMBackend)
     assert captured["tensor_parallel_size"] == 2
+    assert captured["tokenizer"] == "tokenizer-override"
 
 
 def test_instantiation_without_vllm_raises_clear_error(monkeypatch):
@@ -185,6 +198,27 @@ async def test_vllm_backend_forwards_text_variants_as_strings(monkeypatch, promp
     )
     assert engine.calls[0]["prompt"] == "legacy text"
     assert isinstance(engine.calls[0]["prompt"], str)
+    assert "tokenization_kwargs" not in engine.calls[0]
+
+
+async def test_vllm_backend_disables_special_tokens_only_for_templated_text(
+    monkeypatch,
+):
+    backend, engine = _capturing_backend(monkeypatch)
+
+    await backend.generate(
+        GenerationRequest(
+            request_id="templated",
+            prompt=TemplatedPrompt("<BOS>user hello<ASSISTANT>"),
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+    )
+
+    assert engine.calls[0]["prompt"] == "<BOS>user hello<ASSISTANT>"
+    assert type(engine.calls[0]["prompt"]) is str
+    assert engine.calls[0]["tokenization_kwargs"] == {
+        "add_special_tokens": False,
+    }
 
 
 async def test_vllm_backend_forwards_token_ids_without_using_display_text(monkeypatch):

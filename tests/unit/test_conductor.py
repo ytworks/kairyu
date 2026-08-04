@@ -11,6 +11,7 @@ from kairyu.engine.backend import (
     GenerationUsage,
 )
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, RoleSpec
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
@@ -126,6 +127,34 @@ class PullThroughBackend:
 
     async def shutdown(self) -> None:
         return None
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_conductor_rejects_templated_query_before_derivation(streaming):
+    backend = MockBackend()
+    conductor = Conductor(roles=_linear_roles(), workers={"w": backend})
+    query = TemplatedPrompt("<BOS>user hello<ASSISTANT>")
+
+    with pytest.raises(ValueError, match="cannot derive role prompts.*pre-rendered"):
+        if streaming:
+            _ = [event async for event in conductor.stream(query)]
+        else:
+            await conductor.run(query)
+
+    assert backend.prompts_seen == ()
+
+
+def test_conductor_rejects_templated_role_or_shared_prefix():
+    templated = TemplatedPrompt("<BOS>already rendered")
+
+    with pytest.raises(ValueError, match="role templates.*pre-rendered"):
+        RoleSpec(name="role", worker="w", prompt=templated)
+    with pytest.raises(ValueError, match="shared_prefix.*pre-rendered"):
+        Conductor(
+            roles=_linear_roles(),
+            workers={"w": MockBackend()},
+            shared_prefix=templated,
+        )
 
 
 def _linear_roles() -> tuple[RoleSpec, ...]:

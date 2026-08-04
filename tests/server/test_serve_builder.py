@@ -1,6 +1,7 @@
 """DeploymentSpec -> app builder: pool wiring, affinity over HTTP, lifespan (gate C1)."""
 
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -94,12 +95,494 @@ def _client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
+def _write_tiny_chat_tokenizer(
+    path: Path,
+    *,
+    chat_template: str | None,
+) -> None:
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import WhitespaceSplit
+
+    path.mkdir()
+    tokenizer = Tokenizer(
+        WordLevel(
+            {
+                "[UNK]": 0,
+                "<BOS>": 1,
+                "user": 2,
+                "assistant": 3,
+                "hello": 4,
+            },
+            unk_token="[UNK]",
+        )
+    )
+    tokenizer.pre_tokenizer = WhitespaceSplit()
+    tokenizer.save(str(path / "tokenizer.json"))
+    config: dict[str, object] = {
+        "unk_token": "[UNK]",
+        "bos_token": {"content": "<BOS>"},
+    }
+    if chat_template is not None:
+        config["chat_template"] = chat_template
+    (path / "tokenizer_config.json").write_text(
+        json.dumps(config),
+        encoding="utf-8",
+    )
+
+
 def _chat_body(content: str, model: str = "pooled", **extra) -> dict:
     return {
         "model": model,
         "messages": [{"role": "user", "content": content}],
         **extra,
     }
+
+
+def test_chat_policy_fails_before_backend_construction(tmp_path, monkeypatch):
+    model = tmp_path / "model"
+    _write_tiny_chat_tokenizer(model, chat_template=None)
+    spec = load_deployment_spec(
+        f"""
+engines:
+  unsafe:
+    backend: kairyu
+    options:
+      model_path: {model}
+"""
+    )
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+
+    with pytest.raises(ValueError, match="unsafe.*has no real chat template"):
+        build_app_from_spec(spec)
+
+    assert created == []
+
+
+def test_invalid_auto_loaded_template_fails_before_backend_construction(
+    tmp_path,
+    monkeypatch,
+):
+    model = tmp_path / "model"
+    _write_tiny_chat_tokenizer(model, chat_template="{% if")
+    spec = load_deployment_spec(
+        f"""
+engines:
+  invalid:
+    backend: kairyu
+    options:
+      model_path: {model}
+"""
+    )
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+
+    with pytest.raises(ValueError, match="compile tokenizer chat template.*invalid"):
+        build_app_from_spec(spec)
+
+    assert created == []
+
+
+def test_empty_explicit_template_fails_before_backend_construction(
+    tmp_path,
+    monkeypatch,
+):
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+    spec = load_deployment_spec(
+        """
+engines:
+  invalid:
+    backend: openai
+    options:
+      base_url: http://replica/v1
+      model: upstream
+chat_templates:
+  invalid: "   "
+"""
+    )
+
+    with pytest.raises(ValueError, match="non-empty"):
+        build_app_from_spec(spec, base_dir=tmp_path)
+
+    assert created == []
+
+
+def test_remote_chat_template_fails_before_backend_construction(
+    tmp_path,
+    monkeypatch,
+):
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+    spec = load_deployment_spec(
+        """
+engines:
+  remote:
+    backend: openai
+    options:
+      base_url: http://replica/v1
+      model: upstream
+      api_key_env: null
+chat_templates:
+  remote: "{{ messages[0].content }}"
+"""
+    )
+
+    with pytest.raises(ValueError, match="pre-rendered.*cannot preserve.*legacy_chat_models"):
+        build_app_from_spec(spec, base_dir=tmp_path)
+
+    assert created == []
+
+
+def test_remote_missing_policy_diagnoses_legacy_only_before_construction(monkeypatch):
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+    spec = load_deployment_spec(
+        """
+engines:
+  remote:
+    backend: openai
+    options:
+      base_url: http://replica/v1
+      model: upstream
+"""
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot preserve.*pre-rendered chat prompt.*legacy_chat_models",
+    ):
+        build_app_from_spec(spec)
+
+    assert created == []
+
+
+def test_nonlocal_explicit_template_cannot_silently_drop_bos(monkeypatch):
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+    spec = load_deployment_spec(
+        """
+engines:
+  local-vllm:
+    backend: vllm
+    options:
+      model: meta-llama/Llama-3.1-8B-Instruct
+chat_templates:
+  local-vllm: "{{ bos_token }}USER={{ messages[0].content }}"
+"""
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="special-token variables.*bos_token.*metadata is not available",
+    ):
+        build_app_from_spec(spec)
+
+    assert created == []
+
+
+def test_explicit_template_rejects_missing_local_special_token_value(
+    tmp_path,
+    monkeypatch,
+):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+    spec = load_deployment_spec(
+        f"""
+engines:
+  local:
+    backend: vllm
+    options: {{model: local, tokenizer: {model}}}
+chat_templates:
+  local: "{{{{ bos_token }}}}USER={{{{ messages[0].content }}}}"
+"""
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="special-token variables.*bos_token.*does not define",
+    ):
+        build_app_from_spec(spec)
+
+    assert created == []
+
+
+def test_static_pool_special_token_template_requires_metadata_for_every_replica(
+    tmp_path,
+    monkeypatch,
+):
+    model = tmp_path / "model"
+    _write_tiny_chat_tokenizer(model, chat_template=None)
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+    spec = load_deployment_spec(
+        f"""
+pools:
+  mixed:
+    replicas:
+      - backend: vllm
+        options: {{model: local, tokenizer: {model}}}
+      - backend: vllm
+        options: {{model: org/not-materialized}}
+chat_templates:
+  mixed: "{{{{ bos_token }}}}USER={{{{ messages[0].content }}}}"
+"""
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="special-token variables.*metadata is not available for every",
+    ):
+        build_app_from_spec(spec)
+
+    assert created == []
+
+
+@pytest.mark.parametrize(
+    ("served_section", "template_model", "error"),
+    [
+        (
+            """
+pools:
+  dynamic:
+    discovery:
+      type: kubernetes_endpoints
+      service: replicas
+      port: http
+""",
+            "dynamic",
+            "discovered pool.*cannot prove.*legacy_chat_models",
+        ),
+        (
+            """
+engines:
+  local: {backend: mock}
+orchestrators:
+  auto: {spec: unused.yaml}
+""",
+            "auto",
+            "orchestrated model.*cannot safely consume.*legacy_chat_models",
+        ),
+    ],
+)
+def test_non_preserving_chat_template_routes_fail_before_backend_construction(
+    served_section,
+    template_model,
+    error,
+    monkeypatch,
+):
+    created: list[str] = []
+
+    def record_create(name, **_options):
+        created.append(name)
+        return MockBackend()
+
+    monkeypatch.setattr(builder_module, "create_backend", record_create)
+    spec = load_deployment_spec(
+        served_section
+        + f'\nchat_templates:\n  {template_model}: "{{{{ messages[0].content }}}}"\n'
+    )
+
+    with pytest.raises(ValueError, match=error):
+        build_app_from_spec(spec)
+
+    assert created == []
+
+
+async def test_builder_auto_loads_template_and_special_tokens(tmp_path, monkeypatch):
+    model = tmp_path / "model"
+    _write_tiny_chat_tokenizer(
+        model,
+        chat_template=(
+            "{{ bos_token }}{% for message in messages %}"
+            "{{ message.role }} {{ message.content }} {% endfor %}"
+            "{% if add_generation_prompt %}assistant{% endif %}"
+        ),
+    )
+    backend = MockBackend()
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda _name, **_options: backend,
+    )
+    spec = load_deployment_spec(
+        f"""
+engines:
+  safe:
+    backend: kairyu
+    options:
+      model_path: {model}
+"""
+    )
+
+    app = build_app_from_spec(spec)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("hello", model="safe", max_tokens=1),
+        )
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == ("<BOS>user hello assistant",)
+
+
+async def test_explicit_template_overrides_invalid_checkpoint_template(
+    tmp_path,
+    monkeypatch,
+):
+    model = tmp_path / "model"
+    _write_tiny_chat_tokenizer(model, chat_template="checkpoint")
+    config_path = model / "tokenizer_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["chat_template"] = {"default": 7}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    backend = MockBackend()
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda _name, **_options: backend,
+    )
+    spec = load_deployment_spec(
+        f"""
+engines:
+  safe:
+    backend: kairyu
+    options:
+      model_path: {model}
+chat_templates:
+  safe: "{{{{ bos_token }}}}override {{{{ messages[0].content }}}}"
+"""
+    )
+
+    app = build_app_from_spec(spec)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("hello", model="safe", max_tokens=1),
+        )
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == ("<BOS>override hello",)
+
+
+async def test_builder_legacy_chat_requires_model_opt_in(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    backend = MockBackend()
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda _name, **_options: backend,
+    )
+    spec = load_deployment_spec(
+        """
+engines:
+  remote:
+    backend: openai
+    options:
+      base_url: http://replica/v1
+      model: upstream-model
+      api_key_env: null
+legacy_chat_models: [remote]
+"""
+    )
+
+    with caplog.at_level("WARNING", logger="kairyu.deploy"):
+        app = build_app_from_spec(spec, base_dir=tmp_path)
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("hello", model="remote", max_tokens=1),
+        )
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == ("user: hello\nassistant:",)
+    deploy_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "kairyu.deploy"
+    ]
+    assert deploy_messages == [
+        "model 'remote' explicitly enables the legacy role-concatenation chat "
+        "renderer; use a tokenizer-owned HF template for real models"
+    ]
+
+
+def test_explicit_legacy_policy_ignores_unused_checkpoint_template_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    model = tmp_path / "model"
+    _write_tiny_chat_tokenizer(model, chat_template="unused")
+    config_path = model / "tokenizer_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["chat_template"] = {"default": 7}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda _name, **_options: MockBackend(),
+    )
+    spec = load_deployment_spec(
+        f"""
+engines:
+  old:
+    backend: kairyu
+    options:
+      model_path: {model}
+legacy_chat_models: [old]
+"""
+    )
+
+    app = build_app_from_spec(spec)
+
+    assert app.state.deployment_spec.legacy_chat_models == frozenset({"old"})
 
 
 def _metric_value(
@@ -242,6 +725,7 @@ pools:
       - backend: openai
         options: { base_url: "http://gpu-0:8000/v1", model: "m", api_key_env: null }
     probe_interval_s: 0.05
+legacy_chat_models: [remote]
 """
     app = build_app_from_spec(load_deployment_spec(yaml_text))
     assert len(app.state.probers) == 1
@@ -305,6 +789,7 @@ async def test_lifespan_eagerly_starts_linked_orchestrator_workers(
 engines:
   m: {backend: mock}
 orchestrator: {spec: orchestrator.yaml}
+legacy_chat_models: [kairyu-auto]
 """
         ),
         base_dir=tmp_path,
@@ -451,6 +936,7 @@ pools:
       - backend: openai
         options: { base_url: "http://gpu-1:8000/v1", model: "m", api_key_env: null }
     probe_interval_s: 60
+legacy_chat_models: [remote]
 """
     app = build_app_from_spec(load_deployment_spec(yaml_text))
     prober = app.state.probers[0]
@@ -507,6 +993,7 @@ engines:
   m: { backend: mock }
 orchestrator:
   spec: orchestrator.yaml
+legacy_chat_models: [kairyu-auto]
 """,
         encoding="utf-8",
     )
@@ -534,6 +1021,7 @@ engines:
 orchestrators:
   kairyu-auto: { spec: auto.yaml }
   kairyu-auto-max: { spec: auto_max.yaml }
+legacy_chat_models: [kairyu-auto, kairyu-auto-max]
 """,
         encoding="utf-8",
     )
@@ -559,6 +1047,7 @@ engines:
 orchestrator: { spec: auto.yaml }
 orchestrators:
   kairyu-auto-max: { spec: auto_max.yaml }
+legacy_chat_models: [kairyu-auto, kairyu-auto-max]
 """,
         encoding="utf-8",
     )
@@ -1213,6 +1702,7 @@ server:
 engines:
   bad: {{ backend: mock }}
 orchestrator: {{ spec: auto.yaml }}
+legacy_chat_models: [kairyu-auto]
 """
     )
     app = build_app_from_spec(spec, base_dir=tmp_path)

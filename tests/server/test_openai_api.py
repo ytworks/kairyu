@@ -15,13 +15,13 @@ from kairyu.engine.prompt import TokensPrompt
 from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.engine.vision import ImageInputPolicy
 from kairyu.entrypoints.chat_template import ChatTemplate
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
+from tests.server._legacy_chat import create_legacy_app
 
 TOOL_CALL_TEXT = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
 RED_PNG_DATA_URL = (
@@ -76,7 +76,7 @@ def app():
         "kairyu-mock": MockBackend(responses={"weather": TOOL_CALL_TEXT}),
     }
     orchestrator = Orchestrator(engines={"tier1": MockBackend(), "tier2": MockBackend()})
-    return create_app(engines=engines, orchestrator=orchestrator)
+    return create_legacy_app(engines=engines, orchestrator=orchestrator)
 
 
 def _chat_body(content: str, **extra) -> dict:
@@ -98,7 +98,7 @@ def _assert_sse_response_headers(response: httpx.Response) -> None:
 @pytest.mark.parametrize("endpoint", ["chat", "completions"])
 async def test_zero_token_prompt_returns_400_before_streaming(endpoint, stream):
     backend = KairyuBackend(tokenizer=_EmptyTokenizer())
-    app = create_app(engines={"empty": backend})
+    app = create_legacy_app(engines={"empty": backend})
     if endpoint == "chat":
         path = "/v1/chat/completions"
         body = {
@@ -128,7 +128,7 @@ async def test_zero_token_prompt_returns_400_before_streaming(endpoint, stream):
 async def test_native_http_text_prompt_is_tokenized_once(endpoint, stream):
     tokenizer = _CountingTokenizer()
     backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
-    app = create_app(engines={"native": backend})
+    app = create_legacy_app(engines={"native": backend})
     if endpoint == "chat":
         path = "/v1/chat/completions"
         body = {
@@ -156,7 +156,7 @@ async def test_native_http_text_prompt_is_tokenized_once(endpoint, stream):
 
 
 async def test_backend_without_validate_request_still_serves_requests():
-    app = create_app(engines={"mock": MockBackend()})
+    app = create_legacy_app(engines={"mock": MockBackend()})
     async with _client(app) as client:
         response = await client.post(
             "/v1/completions", json={"model": "mock", "prompt": "hello"}
@@ -267,7 +267,7 @@ async def test_streaming_reassembles_to_full_answer(app):
 
 async def test_native_stream_bounds_queue_and_body_sends_under_asgi_backpressure():
     backend = KairyuBackend(num_pages=256)
-    app = create_app(engines={"native": backend})
+    app = create_legacy_app(engines={"native": backend})
     body = {
         "model": "native",
         "messages": [{"role": "user", "content": "backpressure"}],
@@ -380,7 +380,7 @@ async def test_native_stream_bounds_queue_and_body_sends_under_asgi_backpressure
 
 async def test_streaming_escapes_unicode_line_separators_on_the_wire():
     separators = "before\u0085middle\u2028after\u2029"
-    app = create_app(
+    app = create_legacy_app(
         engines={"mock": MockBackend(responses={"unicode": separators})}
     )
     async with _client(app) as client:
@@ -484,7 +484,7 @@ async def test_chat_body_limit_rejects_declared_and_streamed_oversize_bodies(
     chunked,
 ):
     backend = MockBackend()
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": backend},
         settings=ServerSettings(max_chat_body_bytes=128),
     )
@@ -563,7 +563,7 @@ async def test_completions_invalid_sampling_returns_400(app):
 )
 async def test_invalid_chat_content_parts_are_rejected_before_dispatch(part):
     backend = MockBackend()
-    app = create_app(engines={"parts": backend})
+    app = create_legacy_app(engines={"parts": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -614,7 +614,7 @@ async def test_vlm_chat_preserves_roles_and_content_part_order_through_gateway()
             "max_processed_prompt_tokens": 1024,
         },
     )
-    app = create_app(engines={"vlm": backend})
+    app = create_legacy_app(engines={"vlm": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -715,7 +715,7 @@ async def test_pooled_vlm_decodes_inline_base64_only_once(monkeypatch):
         capabilities={"allow_prompt_kinds": ["multimodal"]},
         image_input_policy={"max_images": 1},
     )
-    app = create_app(engines={"vlm": ReplicaPool([backend])})
+    app = create_legacy_app(engines={"vlm": ReplicaPool([backend])})
 
     async with _client(app) as client:
         response = await client.post(
@@ -765,7 +765,7 @@ async def test_image_input_fails_closed_for_text_model_and_remote_url(pooled):
         if pooled
         else vision_backend
     )
-    app = create_app(engines={"text": text_backend, "vlm": vision_engine})
+    app = create_legacy_app(engines={"text": text_backend, "vlm": vision_engine})
     content = [
         {"type": "text", "text": "describe"},
         {
@@ -806,7 +806,7 @@ async def test_image_input_rejects_blank_role_as_a_controlled_400():
         capabilities={"allow_prompt_kinds": ["multimodal"]},
         image_input_policy={"max_images": 1},
     )
-    app = create_app(engines={"vlm": backend})
+    app = create_legacy_app(engines={"vlm": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -849,7 +849,7 @@ async def test_truncated_image_is_rejected_before_stream_or_token_reservation(st
         capabilities={"allow_prompt_kinds": ["multimodal"]},
         image_input_policy={"max_images": 1},
     )
-    app = create_app(
+    app = create_legacy_app(
         engines={"vlm": backend},
         tenant_config=TenantConfig(
             limits={
@@ -904,7 +904,7 @@ async def test_unexpected_upstream_4xx_is_sanitized_and_not_forwarded():
         ),
         upstream="vllm",
     )
-    app = create_app(engines={"remote": backend})
+    app = create_legacy_app(engines={"remote": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -949,7 +949,7 @@ async def test_vlm_stream_failure_without_usage_closes_sanitized_sse(tmp_path):
             "max_processed_prompt_tokens": 1024,
         },
     )
-    app = create_app(
+    app = create_legacy_app(
         engines={"vlm": backend},
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
         tenant_config=TenantConfig(
@@ -998,7 +998,7 @@ async def test_vlm_stream_failure_without_usage_closes_sanitized_sse(tmp_path):
 async def test_unavailable_pool_admission_is_a_sanitized_upstream_error():
     pool = ReplicaPool([MockBackend()])
     pool.drain("0")
-    app = create_app(engines={"pool": pool})
+    app = create_legacy_app(engines={"pool": pool})
 
     async with _client(app) as client:
         response = await client.post(
@@ -1025,7 +1025,7 @@ async def test_chat_message_alternate_prompt_carriers_are_rejected_before_dispat
     carrier,
 ):
     backend = MockBackend()
-    app = create_app(engines={"chat": backend})
+    app = create_legacy_app(engines={"chat": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -1043,7 +1043,7 @@ async def test_chat_message_alternate_prompt_carriers_are_rejected_before_dispat
 
 async def test_chat_tool_call_transcript_remains_supported():
     backend = MockBackend()
-    app = create_app(engines={"chat": backend})
+    app = create_legacy_app(engines={"chat": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -1084,7 +1084,7 @@ async def test_absent_tool_calls_does_not_change_template_message_shape():
         "{{ 'tool_calls' in messages[0] }}|{{ messages[0].content }}"
     )
     backend = MockBackend()
-    app = create_app(
+    app = create_legacy_app(
         engines={"shape": backend},
         chat_templates={"shape": template},
     )
@@ -1104,7 +1104,7 @@ async def test_absent_tool_calls_does_not_change_template_message_shape():
 
 async def test_chat_template_kwargs_reach_only_a_configured_template():
     templated, plain = MockBackend(), MockBackend()
-    app = create_app(
+    app = create_legacy_app(
         engines={"templated": templated, "plain": plain},
         chat_templates={
             "templated": ChatTemplate(
@@ -1134,7 +1134,7 @@ async def test_chat_template_kwargs_reach_only_a_configured_template():
 
 async def test_chat_template_kwargs_cannot_replace_messages():
     backend = MockBackend()
-    app = create_app(
+    app = create_legacy_app(
         engines={"chat": backend},
         chat_templates={"chat": ChatTemplate("{{ messages[0].content }}")},
     )
@@ -1159,7 +1159,7 @@ async def test_chat_template_kwargs_cannot_replace_messages():
 @pytest.mark.parametrize("stream", [False, True])
 async def test_completion_token_prompt_is_dispatched_losslessly(stream):
     backend = MockBackend()
-    app = create_app(engines={"tokens": backend})
+    app = create_legacy_app(engines={"tokens": backend})
     body = {
         "model": "tokens",
         "prompt": [7, 11, 13],
@@ -1196,7 +1196,7 @@ async def test_completion_sampling_extensions_are_typed_and_preserved_to_engine(
             return await super().generate(request)
 
     engine = CapturingBackend()
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = {
         "model": "stub",
         "prompt": "fixed-length benchmark",
@@ -1226,7 +1226,7 @@ async def test_completion_sampling_extensions_are_typed_and_preserved_to_engine(
 
 async def test_completion_token_batch_preserves_prompt_and_choice_order():
     backend = MockBackend()
-    app = create_app(engines={"tokens": backend})
+    app = create_legacy_app(engines={"tokens": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -1256,7 +1256,7 @@ async def test_completion_token_prompt_missing_usage_uses_exact_id_count():
                 raise ValueError("test backend requires token IDs")
 
     backend = TokenBackend(text="derived completion words", usage=None)
-    app = create_app(engines={"tokens": backend})
+    app = create_legacy_app(engines={"tokens": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -1271,7 +1271,7 @@ async def test_completion_token_prompt_missing_usage_uses_exact_id_count():
 
 async def test_token_prompt_requires_an_explicit_backend_capability():
     backend = StubBackend()
-    app = create_app(engines={"legacy": backend})
+    app = create_legacy_app(engines={"legacy": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -1296,7 +1296,7 @@ async def test_completion_alternate_prompt_carriers_are_never_silently_ignored(
     carrier,
 ):
     backend = StubBackend()
-    app = create_app(engines={"legacy": backend})
+    app = create_legacy_app(engines={"legacy": backend})
     body = {"model": "legacy", "prompt": "text authority", **carrier}
 
     async with _client(app) as client:
@@ -1320,7 +1320,7 @@ async def test_invalid_completion_token_prompts_are_rejected_before_dispatch(
     prompt, expected_status
 ):
     backend = StubBackend()
-    app = create_app(engines={"tokens": backend})
+    app = create_legacy_app(engines={"tokens": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -1334,7 +1334,7 @@ async def test_invalid_completion_token_prompts_are_rejected_before_dispatch(
 
 async def test_completion_text_batch_remains_compatible():
     backend = MockBackend()
-    app = create_app(engines={"text": backend})
+    app = create_legacy_app(engines={"text": backend})
 
     async with _client(app) as client:
         response = await client.post(
@@ -1508,7 +1508,7 @@ class MeteringStreamBackend:
 def _metered_stream_app(kind, backend, ledger_path):
     settings = ServerSettings(usage_ledger_path=str(ledger_path))
     if kind == "orchestrated-chat":
-        app = create_app(
+        app = create_legacy_app(
             engines={},
             orchestrators={"auto": Orchestrator({"tier1": backend})},
             settings=settings,
@@ -1519,7 +1519,7 @@ def _metered_stream_app(kind, backend, ledger_path):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-    app = create_app(engines={"stream": backend}, settings=settings)
+    app = create_legacy_app(engines={"stream": backend}, settings=settings)
     if kind == "engine-chat":
         return app, "/v1/chat/completions", {
             "model": "stream",
@@ -1637,7 +1637,7 @@ async def test_nonpositive_output_token_limits_are_predispatch_400(
     path, field, body, limit
 ):
     engine = StubBackend(text="done", finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
 
     async with _client(app, raise_app_exceptions=False) as client:
         response = await client.post(path, json={**body, field: limit})
@@ -1655,7 +1655,7 @@ async def test_nonpositive_auto_output_limits_are_predispatch_400(
     field, limit, stream
 ):
     orchestrator = DispatchCountingOrchestrator()
-    app = create_app(engines={}, orchestrators={"auto": orchestrator})
+    app = create_legacy_app(engines={}, orchestrators={"auto": orchestrator})
     body = {
         "model": "auto",
         "messages": [{"role": "user", "content": "hello"}],
@@ -1679,7 +1679,7 @@ async def test_nonpositive_auto_output_limits_are_predispatch_400(
 @pytest.mark.parametrize(("path", "field", "body"), _OUTPUT_LIMIT_CASES)
 async def test_positive_output_token_limits_reach_backend(path, field, body):
     engine = StubBackend(text="done", finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
 
     async with _client(app) as client:
         response = await client.post(path, json={**body, field: 7})
@@ -1691,7 +1691,7 @@ async def test_positive_output_token_limits_reach_backend(path, field, body):
 
 async def test_chat_max_tokens_precedes_modern_alias_when_both_are_present():
     engine = StubBackend(text="done", finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = {
         "model": "stub",
         "messages": [{"role": "user", "content": "hello"}],
@@ -1708,7 +1708,7 @@ async def test_chat_max_tokens_precedes_modern_alias_when_both_are_present():
 
 async def test_responses_default_output_token_limit_is_1024():
     engine = StubBackend(text="done", finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
 
     async with _client(app) as client:
         response = await client.post(
@@ -1740,7 +1740,7 @@ async def test_responses_default_output_token_limit_is_1024():
 )
 async def test_coherent_tool_choice_is_accepted(tools, tool_choice):
     engine = StubBackend(text=TOOL_CALL_TEXT, finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body("weather", tools=tools, tool_choice=tool_choice)
     body["model"] = "stub"
 
@@ -1789,7 +1789,7 @@ async def test_invalid_tool_choice_returns_400_before_backend_dispatch(
     tools, tool_choice
 ):
     engine = StubBackend(text=TOOL_CALL_TEXT, finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body("weather", tools=tools, tool_choice=tool_choice)
     body["model"] = "stub"
 
@@ -1844,7 +1844,7 @@ async def test_tool_choice_none_suppresses_calls_and_keeps_content(
     stream, upstream_finish_reason, expected_finish_reason
 ):
     engine = StubBackend(text=TOOL_CALL_TEXT, finish_reason=upstream_finish_reason)
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body(
         "weather", tools=[_WEATHER_TOOL], tool_choice="none", stream=stream
     )
@@ -1871,7 +1871,7 @@ async def test_auto_and_omitted_emit_only_declared_calls(stream, tool_choice):
         )
     )
     engine = StubBackend(text=text, finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body("weather", tools=[_WEATHER_TOOL], stream=stream)
     if tool_choice is not None:
         body["tool_choice"] = tool_choice
@@ -1892,7 +1892,7 @@ async def test_auto_and_omitted_emit_only_declared_calls(stream, tool_choice):
 async def test_auto_suppresses_undeclared_model_function_names(stream):
     text = '<tool_call>{"name":"undeclared","arguments":{}}</tool_call>'
     engine = StubBackend(text=text, finish_reason="tool_calls")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body("weather", tools=[_WEATHER_TOOL], stream=stream)
     body["model"] = "stub"
 
@@ -1906,7 +1906,7 @@ async def test_auto_suppresses_undeclared_model_function_names(stream):
 @pytest.mark.parametrize("stream", [False, True])
 async def test_tool_choice_required_emits_declared_calls(stream):
     engine = StubBackend(text=TOOL_CALL_TEXT, finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body(
         "weather", tools=[_WEATHER_TOOL], tool_choice="required", stream=stream
     )
@@ -1936,7 +1936,7 @@ async def test_named_tool_choice_filters_multi_call_output(stream):
         "function": {"name": "search", "parameters": {"type": "object"}},
     }
     engine = StubBackend(text=text, finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body(
         "weather",
         tools=[_WEATHER_TOOL, search_tool],
@@ -1974,7 +1974,7 @@ async def test_unsatisfied_tool_choice_is_controlled_upstream_failure(
         "function": {"name": "other", "parameters": {"type": "object"}},
     }
     engine = StubBackend(text=text, finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body(
         "weather", tools=[_WEATHER_TOOL, other_tool], tool_choice=tool_choice
     )
@@ -1998,7 +1998,7 @@ async def test_mixed_multi_choice_tool_choice_is_rejected(stream, named):
         "function": {"name": "search", "parameters": {"type": "object"}},
     }
     engine = MultiChoiceToolBackend((TOOL_CALL_TEXT, search_text if named else "plain"))
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     tool_choice = (
         {"type": "function", "function": {"name": "get_weather"}}
         if named
@@ -2024,7 +2024,7 @@ async def test_mixed_multi_choice_tool_choice_is_rejected(stream, named):
 
 async def test_empty_tool_choice_result_is_rejected():
     engine = MultiChoiceToolBackend(())
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body(
         "weather",
         tools=[_WEATHER_TOOL],
@@ -2060,7 +2060,7 @@ async def test_all_valid_multi_choice_tool_choice_is_accepted(stream, named):
         tool_choice = "required"
         expected_names = ["get_weather", "search"]
     engine = MultiChoiceToolBackend(texts)
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body(
         "weather",
         tools=[_WEATHER_TOOL, search_tool],
@@ -2118,7 +2118,7 @@ async def test_malformed_auto_tool_output_records_actual_backend_usage(tmp_path)
         finish_reason="stop",
         usage=GenerationUsage(prompt_tokens=7, completion_tokens=3),
     )
-    app = create_app(
+    app = create_legacy_app(
         engines={"stub": engine},
         settings=ServerSettings(usage_ledger_path=str(ledger_path)),
     )
@@ -2150,7 +2150,7 @@ async def test_cached_usage_is_exported_to_wire_ledger_and_metrics(tmp_path):
             cached_tokens=12,
         ),
     )
-    app = create_app(
+    app = create_legacy_app(
         engines={"stub": engine},
         settings=ServerSettings(usage_ledger_path=str(ledger_path)),
     )
@@ -2189,7 +2189,7 @@ async def test_cached_usage_is_exported_to_wire_ledger_and_metrics(tmp_path):
 async def test_sync_usage_none_records_wire_derived_counts(tmp_path):
     ledger_path = tmp_path / "usage.jsonl"
     engine = StubBackend(text="derived completion words", finish_reason="stop")
-    app = create_app(
+    app = create_legacy_app(
         engines={"stub": engine},
         settings=ServerSettings(usage_ledger_path=str(ledger_path)),
     )
@@ -2217,7 +2217,7 @@ async def test_sync_usage_none_records_wire_derived_counts(tmp_path):
 async def test_sync_orchestrator_zero_usage_derives_wire_and_ledger(tmp_path):
     ledger_path = tmp_path / "usage.jsonl"
     engine = StubBackend(text="derived orchestrated answer", finish_reason="stop")
-    app = create_app(
+    app = create_legacy_app(
         engines={},
         orchestrators={"auto": Orchestrator({"tier1": engine})},
         settings=ServerSettings(usage_ledger_path=str(ledger_path)),
@@ -2283,7 +2283,7 @@ async def test_sync_completions_derives_each_missing_usage(
     tmp_path, prompt, reported_usage, expected
 ):
     ledger_path = tmp_path / "usage.jsonl"
-    app = create_app(
+    app = create_legacy_app(
         engines={"stub": CompletionUsageBackend(reported_usage)},
         settings=ServerSettings(usage_ledger_path=str(ledger_path)),
     )
@@ -2482,7 +2482,7 @@ async def test_generate_fully_tool_stream_keeps_single_sync_metering_owner(tmp_p
         finish_reason="tool_calls",
         usage=GenerationUsage(prompt_tokens=13, completion_tokens=8),
     )
-    app = create_app(
+    app = create_legacy_app(
         engines={"stub": engine},
         settings=ServerSettings(usage_ledger_path=str(ledger_path)),
     )
@@ -2528,7 +2528,7 @@ async def test_unsatisfied_tool_choice_is_metered_once(
         finish_reason="stop",
         usage=GenerationUsage(prompt_tokens=11, completion_tokens=5),
     )
-    app = create_app(
+    app = create_legacy_app(
         engines={"stub": engine},
         settings=ServerSettings(usage_ledger_path=str(ledger_path)),
     )
@@ -2557,7 +2557,7 @@ async def test_unsatisfied_tool_choice_is_metered_once(
 
 async def test_named_tool_stream_includes_per_call_index():
     text = '<tool_call>{"name":"get_weather","arguments":{}}</tool_call>'
-    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    app = create_legacy_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
     body = _chat_body(
         "weather",
         tools=[_WEATHER_TOOL],
@@ -2611,7 +2611,7 @@ async def test_named_tool_stream_includes_per_call_index():
 )
 async def test_malformed_generated_tool_payload_stays_content(payload):
     text = f"before <tool_call>{payload}</tool_call> after"
-    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    app = create_legacy_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
     tools = [
         {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
     ]
@@ -2640,7 +2640,7 @@ async def test_generated_tool_arguments_are_serialized_once(arguments, expected)
         '<tool_call>{"name": "get_weather", "arguments": '
         f"{arguments}}}</tool_call>"
     )
-    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    app = create_legacy_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
     tools = [
         {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
     ]
@@ -2663,7 +2663,7 @@ async def test_generated_tool_calls_keep_order_while_skipping_only_malformed_ent
             '<tool_call>{"name":"second"}</tool_call>',
         )
     )
-    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    app = create_legacy_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
     tools = [
         {"type": "function", "function": {"name": name, "parameters": {}}}
         for name in ("first", "broken", "second")
@@ -2696,7 +2696,7 @@ async def test_zero_token_prompt_array_is_validated_before_any_generation_starts
             return await super().generate(request)
 
     engine = ArrayValidationBackend()
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     async with _client(app) as client:
         response = await client.post(
             "/v1/completions",
@@ -2710,7 +2710,7 @@ async def test_zero_token_prompt_array_is_validated_before_any_generation_starts
 
 async def test_empty_completion_prompt_array_is_rejected_before_reservation():
     backend = MockBackend()
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": backend},
         tenant_config=TenantConfig(
             limits={
@@ -2752,7 +2752,7 @@ async def test_completion_array_failure_waits_for_sibling_cleanup_before_lease_r
             raise RuntimeError("array element failed")
 
     backend = ArrayFailureBackend()
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": backend},
         tenant_config=TenantConfig(
             limits={
@@ -2783,7 +2783,7 @@ async def test_completion_array_failure_waits_for_sibling_cleanup_before_lease_r
 
 
 async def test_runtime_value_error_remains_an_upstream_error():
-    app = create_app(engines={"stub": StubBackend(error=ValueError("runtime failure"))})
+    app = create_legacy_app(engines={"stub": StubBackend(error=ValueError("runtime failure"))})
     async with _client(app) as client:
         response = await client.post(
             "/v1/chat/completions",
@@ -2841,7 +2841,7 @@ async def test_streaming_with_tools_signals_tool_calls(app):
 
 
 async def test_backend_finish_reason_passes_through():
-    app = create_app(engines={"stub": StubBackend(finish_reason="length")})
+    app = create_legacy_app(engines={"stub": StubBackend(finish_reason="length")})
     async with _client(app) as client:
         body = _chat_body("hi")
         body["model"] = "stub"
@@ -2850,7 +2850,7 @@ async def test_backend_finish_reason_passes_through():
 
 
 async def test_backend_error_returns_openai_error_envelope(caplog):
-    app = create_app(
+    app = create_legacy_app(
         engines={"stub": StubBackend(error=RuntimeError("secret://host:5432 key missing"))}
     )
     with caplog.at_level(logging.ERROR, logger="kairyu.entrypoints.server.app"):
@@ -2884,7 +2884,7 @@ async def test_response_format_passes_through_to_engine():
             return await super().generate(request)
 
     engine = CapturingBackend()
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body("give me json")
     body["model"] = "stub"
     body["response_format"] = {"type": "json_object"}
@@ -2907,7 +2907,7 @@ async def test_chat_sampling_extensions_are_typed_and_preserved_to_engine():
             return await super().generate(request)
 
     engine = CapturingBackend()
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body("sample")
     body.update(
         {
@@ -2953,7 +2953,7 @@ async def test_chat_sampling_extensions_are_typed_and_preserved_to_engine():
 )
 async def test_chat_extra_args_cannot_smuggle_an_alternate_prompt_carrier(carrier):
     engine = StubBackend()
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body("text authority", model="stub", extra_args=carrier)
 
     async with _client(app) as client:
@@ -2966,7 +2966,7 @@ async def test_chat_extra_args_cannot_smuggle_an_alternate_prompt_carrier(carrie
 
 async def test_unknown_chat_field_is_clear_predispatch_400():
     engine = StubBackend()
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body("sample", model="stub", misspelled_temprature=0.5)
 
     async with _client(app) as client:
@@ -2990,7 +2990,7 @@ async def test_openai_upstream_capability_mismatch_is_predispatch_400():
         transport=httpx.MockTransport(handler),
         upstream="anthropic",
     )
-    app = create_app(engines={"claude": engine})
+    app = create_legacy_app(engines={"claude": engine})
     body = _chat_body("two", model="claude", n=2)
 
     async with _client(app) as client:
@@ -3019,10 +3019,10 @@ async def test_wrapped_upstream_capability_mismatch_is_predispatch_400(wrapper):
     )
     body = _chat_body("two", n=2)
     if wrapper == "pool":
-        app = create_app(engines={"wrapped": ReplicaPool([upstream])})
+        app = create_legacy_app(engines={"wrapped": ReplicaPool([upstream])})
         body["model"] = "wrapped"
     else:
-        app = create_app(
+        app = create_legacy_app(
             engines={},
             orchestrators={
                 "auto": Orchestrator({"tier1": upstream, "tier2": upstream})
@@ -3076,7 +3076,7 @@ async def test_auto_best_of_is_forwarded_only_to_the_final_engine(
         upstream="generic",
         capabilities={"allow_sampling_fields": ["best_of"]},
     )
-    app = create_app(
+    app = create_legacy_app(
         engines={},
         orchestrators={
             "auto": Orchestrator(

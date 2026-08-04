@@ -8,7 +8,7 @@ import pytest
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.torch_runner import TinyAttentionLM, TorchPagedRunner
 from kairyu.engine.kairyu_backend import KairyuBackend
-from kairyu.entrypoints.server.app import create_app
+from tests.server._legacy_chat import create_legacy_app
 
 # char-level vocab: printable ASCII + designated EOS (grammar terminates by
 # sampling it, m8 D2)
@@ -40,7 +40,7 @@ def _backend() -> KairyuBackend:
 
 @pytest.fixture()
 def app():
-    return create_app(engines={"m": _backend()})
+    return create_legacy_app(engines={"m": _backend()})
 
 
 def _client(app) -> httpx.AsyncClient:

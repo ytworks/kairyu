@@ -18,10 +18,13 @@ pools:
           model: qwen3-32b
           api_key_env: null
           upstream: kairyu
+
     unhealthy_after: 2
     probe_interval_s: 1.0
     queue_depth_threshold: 256
     placement_log_path: /evidence/placements.jsonl
+
+legacy_chat_models: [qwen3-32b]
 
 tenants:
   default_tenant: default

@@ -20,6 +20,9 @@ modelStorage:
   pvcName: ""
   hostPath: /models
   mountPath: /models
+# The mounted checkpoint's effective tokenizer must own a chat template.
+# Otherwise extend config with a per-model chat_templates entry or explicit
+# legacy_chat_models membership before installing this GPU overlay.
 config: |
   engines:
     default:
