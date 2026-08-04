@@ -1,10 +1,10 @@
 # M8 Design: Engine CPU Core — Real Tokens, Real Sampling, Multi-Token Commit
 
-Status: **Implemented** (2026-07-03; D1/D2 amended 2026-08-04). Reviewed — APPROVE-WITH-AMENDMENTS
+Status: **Implemented** (2026-07-03; D1/D2/D6 amended 2026-08-04). Reviewed — APPROVE-WITH-AMENDMENTS
 (3-reviewer agent panel, 2026-07-03; all amendments applied inline, see §6).
 All six phases (D1–D6) landed with tests: 328 → 437 tests, 95% coverage.
-Local-complete mandate: everything here is implemented and tested on CPU; no
-deliverable waits for hardware.
+The original M8 deliverables remain implemented and CPU-tested. Issue #333's
+later D6 diagnostic is an explicitly separate real-TP4 hardware measurement.
 Milestone: M8 (implementation milestone; realizes roadmap Track E1/E2 CPU halves —
 the M8–M19 numbering continues docs/design/m1..m7 and maps to roadmap tracks:
 M8/M9→E1-E2/P-A, M10→F1-F2, M11→P-B/P-C/F5, M12–M18→E-track local halves,
@@ -489,6 +489,35 @@ retained clean-source result is
 31,012,271 legacy bytes versus 356,199 v2 bytes, with empirical growth
 exponents 1.97–1.99 versus 1.01–1.02.
 
+**Distributed process-isolation amendment (2026-08-04, issue #333):**
+`kairyu-proc` now accepts real-model tensor parallelism instead of silently
+remaining a TP1-only seam. The child returns its constructed TP degree only
+after every rank is live; the API advertises no topology until that identity
+matches the configured degree. TP2+ uses a non-daemon service in a private
+POSIX session so the service can spawn workers. A one-way lifetime lease kills
+that complete process group if the API parent disappears. On Linux the API is
+a child subreaper and waits only adopted zombies from the private group, so
+startup cancellation, rank-0 death, follower death, heartbeat timeout, normal
+shutdown, and TERM/KILL escalation finish with every descendant reaped before
+another generation may start. The service checks launcher failure/dead-rank
+state on each ping; the parent sends pings between events and marks the node
+fatally unready when the child reports failure or stays silent for the default
+120-second worst-step allowance. Add, abort, heartbeat, and shutdown DEALER
+writes are bounded so a wedged transport cannot block route release or process
+cleanup. Because Linux subreaper status is process-wide, this backend assumes a
+dedicated serving process; a generic embedding that also supervises unrelated
+child trees needs an external supervisor boundary.
+
+Issue #333's diagnostic is deliberately separate from the formal A6 verdict.
+It replays the exact TP4 ShareGPT c128 trace with four fresh servers in
+`kairyu`, `kairyu-proc`, `kairyu-proc`, `kairyu` order, retaining raw strict-SSE
+rows plus clean source, actual imported module, immutable image, full
+checkpoint, GPU, config, `/backends`, and PID/PPID/PGID process-tree evidence.
+Before measurement, a paired-median process/in-process TTFT-p99 ratio at or
+below 0.90 was declared a material report-only movement. This has no A6
+acceptance threshold, and its causal scope is the net process split including
+ZMQ/msgpack/delta/lifecycle overhead rather than pure GIL isolation.
+
 ## 3. What M8 does not include (explicit non-goals)
 
 - `n > 1` parallel sampling in the kairyu backend (M9, rides D2's seams).
@@ -496,8 +525,10 @@ exponents 1.97–1.99 versus 1.01–1.02.
   stays the oracle.
 - EAGLE/MTP draft sources and sampled-mode (rejection-sampling) or
   grammar-composed speculation (M17/G4) — D3/D4 build the machinery.
-- TP multi-process SPMD (M16); the in-process `TPModelRunner` only gets the D2
-  return-type ripple.
+- The original M8 scope excluded TP multi-process SPMD and gave the in-process
+  `TPModelRunner` only the D2 return-type ripple. M16 later delivered SPMD, and
+  issue #333's D6 amendment above exposes that implementation through
+  `kairyu-proc`.
 - Beam search / `best_of` (fields stay accepted-and-ignored).
 - Per-step streaming out of `OverlapEngineCore` / backend refactor onto the core
   classes (M12, see D6).

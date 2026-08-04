@@ -349,6 +349,59 @@ GPU-only remainder (design m5 §4.2).
 
   The two manifest hashes must be identical. Commit the verified raw JSONL and
   manifest together; do not publish only a summary.
+
+  Issue #333's process-isolation diagnostic is not an A6 rerun or substitute
+  verdict. From one clean committed detached source tree, regenerate the same
+  A6 trace, then run four fresh TP4 Kairyu servers in the fixed
+  `kairyu`, `kairyu-proc`, `kairyu-proc`, `kairyu` order:
+
+  ```bash
+  KAIRYU_ISSUE333_SOURCE=/absolute/path/to/fresh-detached-kairyu
+  KAIRYU_ISSUE333_PYTHON=/absolute/path/to/existing-kairyu-venv/bin/python
+  KAIRYU_ISSUE333_RESULTS=/absolute/path/to/writable-kairyu-checkout
+  "$KAIRYU_ISSUE333_PYTHON" -B \
+    "$KAIRYU_ISSUE333_SOURCE/bench/g2_a6_vllm_bench.py" prepare-traces \
+    --tokenizer /tmp/kairyu-a7-qwen3-32b-tokenizer.json \
+    --dataset /tmp/ShareGPT_V3_unfiltered_cleaned_split.json \
+    --output /tmp/issue-333-traces/g2-a6-traces.json
+  "$KAIRYU_ISSUE333_PYTHON" -B \
+    "$KAIRYU_ISSUE333_SOURCE/bench/issue_333_proc_http_bench.py" run \
+    --repo "$KAIRYU_ISSUE333_SOURCE" \
+    --env-artifact \
+      "$KAIRYU_ISSUE333_SOURCE/bench/results/env-2026-07-30.json" \
+    --kairyu-template \
+      "$KAIRYU_ISSUE333_SOURCE/examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml" \
+    --trace-bundle /tmp/issue-333-traces/g2-a6-traces.json \
+    --work-dir /tmp/issue-333-proc-http \
+    --assert-integrity
+  "$KAIRYU_ISSUE333_PYTHON" -B \
+    "$KAIRYU_ISSUE333_SOURCE/bench/issue_333_proc_http_bench.py" verify \
+    --artifact /tmp/issue-333-proc-http/artifact \
+    --assert-integrity
+  cp -a /tmp/issue-333-proc-http \
+    "$KAIRYU_ISSUE333_RESULTS/bench/results/issue-333-proc-http-qwen3-32b-<gpu>-<date>"
+  "$KAIRYU_ISSUE333_PYTHON" -B \
+    "$KAIRYU_ISSUE333_SOURCE/bench/issue_333_proc_http_bench.py" verify \
+    --artifact \
+      "$KAIRYU_ISSUE333_RESULTS/bench/results/issue-333-proc-http-qwen3-32b-<gpu>-<date>/artifact" \
+    --assert-integrity
+  ```
+
+  Retain the complete work directory, including per-cell server logs and
+  launch/config/state records, rather than copying only the assembled artifact.
+  Every cell must retain the exact four serial plus 31 graph warmups, one
+  retry-free 128-request synchronized ShareGPT burst, three matching
+  `/backends` and live TP4 process-tree attestations, and identical source,
+  image, checkpoint, GPU, runtime, and backend-neutral config identity. The
+  process tree is derived from live PID/PPID/PGID/state rows: in-process rank 0
+  is API PID 1 with three direct workers, while the process arm has exactly one
+  owned service session with three workers. The process backend's 120-second
+  heartbeat allowance must exceed any healthy silent engine step; a reported
+  rank failure or longer silence invalidates the cell. Independent raw replay
+  must pass before interpretation. The predeclared report-only material line is
+  paired-median `kairyu-proc/kairyu` TTFT p99 <= 0.90; no valid evidence means
+  no supported/not-supported conclusion, and neither classification is a
+  formal A6 PASS/FAIL.
 - Gate A7: run `bench/tp_kv_hit_g2_a7_bench.py` against Qwen3-32B at TP4
   and TP8, once through each replica's direct endpoint and once through its
   single-replica gateway. Assemble

@@ -6030,6 +6030,12 @@ class DistTPLauncher:
         from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
         from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
 
+        # Retain the constructed degree for process-boundary startup
+        # attestation.  In the in-process backend the parent already owns this
+        # value; kairyu-proc must receive it back from the child after all ranks
+        # have actually started before it may advertise TP readiness.
+        self.tensor_parallel_size = tp
+
         kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
         if kv_cache_dtype != "auto" and force_cpu:
             raise ValueError(

@@ -20,7 +20,8 @@ Wire protocol (msgpack maps):
   service → legacy client: the historical cumulative per-step event.
                     New clients accept both forms, so a rolling upgrade works
                     in either order.
-                    Control replies remain {"op": "pong"} | {"op": "bye"}.
+                    Control replies are {"op": "pong"} | {"op": "bye"} or a
+                    sanitized {"op": "fatal", "error_type", "dead_ranks"}.
 
 The child entrypoint is a top-level function (spawn pickles it).  The
 multiprocessing Pipe keeps its historical first frame — the raw ephemeral port
@@ -294,11 +295,46 @@ def _attention_backend_decision_to_wire(decision) -> dict | None:
     }
 
 
+def _parallel_failure_frame(engine_loop) -> dict | None:
+    """Return one sanitized fatal frame for an unusable parallel group."""
+
+    launcher = getattr(engine_loop, "parallel_launcher", None)
+    if launcher is None:
+        launcher = getattr(engine_loop, "tp_launcher", None)
+    if launcher is None:
+        return None
+    try:
+        probe_failure = getattr(launcher, "failure_type", None)
+        failure_type = probe_failure() if probe_failure is not None else None
+        dead_ranks = tuple(launcher.dead_ranks())
+    except Exception as error:
+        # A health probe that cannot inspect the group is itself fatal. Only
+        # the exception class crosses the local control channel.
+        failure_type = type(error).__name__
+        dead_ranks = ()
+    if failure_type is None and not dead_ranks:
+        return None
+    return {
+        "op": "fatal",
+        "error_type": failure_type or "RankProcessExited",
+        "dead_ranks": sorted(dead_ranks),
+    }
+
+
 def _startup_ready_frame(engine_loop) -> dict:
     generation = getattr(engine_loop, "generation_defaults", None)
+    parallel_failure = _parallel_failure_frame(engine_loop)
+    if parallel_failure is not None:
+        raise RuntimeError(
+            "parallel ranks failed before startup readiness: "
+            f"{parallel_failure['error_type']} "
+            f"{parallel_failure['dead_ranks']}"
+        )
+    tensor_parallel_size = getattr(engine_loop, "tensor_parallel_size", 1)
     return {
         "startup_wire_version": STARTUP_WIRE_VERSION,
         "status": "ready",
+        "tensor_parallel_size": tensor_parallel_size,
         "attention_backend_decision": _attention_backend_decision_to_wire(
             getattr(engine_loop, "attention_backend_decision", None)
         ),
@@ -354,6 +390,31 @@ def _send_optional_startup_frame(port_pipe, frame: dict) -> bool:
         # reason to take down a successfully constructed engine.
         return False
     return True
+
+
+def _close_engine_service_loop(engine_loop) -> None:
+    """Settle the loop and always release any distributed rank launcher."""
+
+    try:
+        engine_loop.close()
+    finally:
+        launcher = getattr(engine_loop, "parallel_launcher", None)
+        if launcher is None:
+            launcher = getattr(engine_loop, "tp_launcher", None)
+        if launcher is not None:
+            launcher.shutdown()
+
+
+def _cleanup_engine_service(engine_loop, socket, context) -> None:
+    """Always release distributed ranks, transport, and the ZMQ context."""
+
+    try:
+        _close_engine_service_loop(engine_loop)
+    finally:
+        try:
+            socket.close(linger=0)
+        finally:
+            context.term()
 
 
 @contextmanager
@@ -419,7 +480,14 @@ def run_engine_service(
         socket.close(linger=0)
         context.term()
         raise
-    _send_optional_startup_frame(port_pipe, _startup_ready_frame(engine_loop))
+    try:
+        ready_frame = _startup_ready_frame(engine_loop)
+    except BaseException as error:
+        _send_optional_startup_frame(port_pipe, _startup_error_frame(error))
+        port_pipe.close()
+        _cleanup_engine_service(engine_loop, socket, context)
+        raise
+    _send_optional_startup_frame(port_pipe, ready_frame)
     port_pipe.close()
 
     owners: dict[str, _RequestOwner] = {}
@@ -502,10 +570,19 @@ def run_engine_service(
                         # as a duplicate even though the client awaited abort send.
                         break
                     elif op == "ping":
-                        socket.send_multipart([identity, msgpack.packb({"op": "pong"})])
+                        parallel_failure = _parallel_failure_frame(engine_loop)
+                        if parallel_failure is None:
+                            reply = {"op": "pong"}
+                        else:
+                            reply = parallel_failure
+                            running = False
+                        socket.send_multipart([identity, msgpack.packb(reply)])
+                        if not running:
+                            break
                     elif op == "shutdown":
                         socket.send_multipart([identity, msgpack.packb({"op": "bye"})])
                         running = False
+                        break
                 except Exception as error:
                     logging.warning("kairyu engine service rejected a message: %r", error)
                     request_id = message.get("request_id") if isinstance(message, dict) else None
@@ -534,6 +611,8 @@ def run_engine_service(
                             ),
                         ]
                     )
+            if not running:
+                break
             if engine_loop.has_work():
                 for request_id, update in engine_loop.step():
                     owner = owners.get(request_id)
@@ -553,6 +632,4 @@ def run_engine_service(
                     if update.finished:
                         del owners[request_id]
     finally:
-        engine_loop.close()
-        socket.close(linger=0)
-        context.term()
+        _cleanup_engine_service(engine_loop, socket, context)

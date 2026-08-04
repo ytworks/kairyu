@@ -80,6 +80,7 @@ _KAIRYU_PROC_OPTIONS = frozenset(
         "max_num_seqs",
         "max_model_len",
         "priority_age_s",
+        "tensor_parallel_size",
         "tokenizer",
         "speculative",
         "speculative_tokens",
@@ -512,13 +513,28 @@ def _validate_kairyu_proc(options: Mapping[str, object]) -> None:
     tokenizer = options.get("tokenizer")
     if tokenizer is not None and not isinstance(tokenizer, str):
         raise ValueError("kairyu-proc backend tokenizer must be a string or null")
+    tensor_parallel_size = _require_int_at_least(
+        "kairyu-proc",
+        "tensor_parallel_size",
+        options.get("tensor_parallel_size", 1),
+        1,
+    )
     _validate_native_common(
         "kairyu-proc",
         options,
-        tensor_parallel_size=1,
+        tensor_parallel_size=tensor_parallel_size,
         runner=None,
         pd_separation=False,
     )
+    if options.get("model_path") is None:
+        try:
+            from kairyu.engine.core.tp_runner import validate_tp_degree
+
+            validate_tp_degree(tensor_parallel_size)
+        except ValueError:
+            raise ValueError(
+                "kairyu-proc backend tensor_parallel_size is incompatible with KV heads"
+            ) from None
 
 
 def _custom_factory(name: str) -> Callable[..., object] | None:

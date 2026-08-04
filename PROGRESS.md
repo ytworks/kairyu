@@ -226,6 +226,15 @@ msgpack byte-volume gates pass. The retained clean-source artifact
 `bench/results/proc-wire-delta-2026-07-29.json` binds to implementation commit
 `5c634ee` and records 31,012,271 legacy bytes versus 356,199 v2 bytes at
 1,024 tokens, with empirical exponents 1.97–1.99 versus 1.01–1.02.
+The process backend now constructs and startup-attests real-model TP groups.
+Its private process session, API-parent lease, Linux child-subreaper, complete
+group reaping, fatal rank heartbeat/readiness, and bounded DEALER writes cover
+normal stop, cancelled startup, rank-0/follower failure, wedged steps, and API
+parent death without allowing a second generation over retained ranks. The
+issue #333 TP4 HTTP diagnostic operator is CPU-validated and predeclares a
+report-only paired-median process/in-process TTFT-p99 ratio <=0.90 as material;
+the real Qwen3-32B ABBA measurement remains the active step before the issue is
+closed.
 Streaming detokenization is now truly incremental on the supported native
 paths. `HFTokenizer` delegates arriving deltas to the Rust `DecodeStream`, Toy
 joins only new IDs, and unknown/overridden tokenizer implementations retain the
@@ -861,6 +870,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [amendment] Process-isolated TP owns and attests its complete rank tree
+- What: enabled real-model tensor parallelism in `kairyu-proc`; delayed public topology until child startup attested the configured degree; placed the non-daemon service and ranks in one private POSIX session with an API-parent lease; made the Linux API a child subreaper that confirms every forced descendant is reaped; added fatal launcher heartbeat/readiness and a 120-second worst-step timeout; bounded add/abort/heartbeat/shutdown sends; and added a fail-closed TP4 fresh-server ABBA diagnostic with exact A6 traffic, imported-source, checkpoint, GPU, backend, config, and process-tree evidence plus a predeclared report-only 0.90 TTFT-p99 ratio interpretation.
+- Why: the proposed separate-GIL diagnostic could not run at the A6 TP4 topology, and merely spawning a service without positive topology, failure, and ownership contracts could strand GPU ranks or publish a healthy endpoint after a follower died. The diagnostic must also distinguish integrity from performance and prevent a partial run from confirming or denying the hypothesis.
+- Refs: issue #333; m8 D6; `kairyu/engine/{config_validation,kairyu_backend,zmq_backend}.py`; `kairyu/engine/core/{engine_service,worker}.py`; `bench/issue_333_proc_http_bench.py`; `tests/{unit,dist,bench}/`; `docs/gpu-runbook.md`
 
 ### 2026-08-04 — [amendment] Checkpoint chat templates become fail-closed defaults
 - What: added metadata-only loading of dedicated and tokenizer-config HF chat templates plus named special tokens; resolved the effective tokenizer and compiled every deployment renderer before constructing backends; required a template or model-scoped `legacy_chat_models` membership at every production, lower-level chat, and offline-chat boundary; made completion-only low-level construction log an explicit missing-policy warning while rejecting chat before dispatch; rejected unverified special-token variables instead of silently dropping BOS/EOS; preserved rendered-template ownership through an in-process/ZMQ typed prompt marker and disabled vLLM's completion special-token insertion only for that marker; rejected remote/discovery/orchestration and direct Conductor/MoA derivation paths that cannot preserve the marker; limited automatic legacy selection to DeploymentSpec-built deterministic mocks; made the checked-in VLM overlay opt in explicitly while image requests bypass its text renderer; and replaced the Qwen example's temporary template extraction with direct checkpoint auto-loading. Offline validation now reports the same missing/invalid policy, while Llama-3 and Qwen bytes and token IDs match Transformers exactly. The final portable split passed 4,908 tests (1,343 benchmark and 3,565 non-benchmark; 201 deselected).

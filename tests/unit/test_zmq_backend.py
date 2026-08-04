@@ -5,16 +5,20 @@ import); tests end via the clean shutdown op so the child flushes coverage.
 """
 
 import asyncio
+import contextlib
 import gc
 import multiprocessing
 import os
 import signal
+import sys
 import threading
 import time
 import types
 import weakref
+from pathlib import Path
 
 import httpx
+import msgpack
 import pytest
 
 from kairyu import SamplingParams
@@ -24,8 +28,10 @@ from kairyu.engine.core.engine_service import (
     LEGACY_WIRE_VERSION,
     STARTUP_WIRE_VERSION,
     WIRE_VERSION,
+    _close_engine_service_loop,
     _send_optional_startup_frame,
     _startup_ready_frame,
+    run_engine_service,
 )
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.prompt import (
@@ -42,13 +48,26 @@ from kairyu.engine.zmq_backend import (
     EngineServiceError,
     ZmqEngineBackend,
     _decision_from_startup_frame,
+    _ensure_child_subreaper,
     _generation_defaults_from_startup_frame,
+    _kill_and_reap_process,
+    _process_group_member_states,
+    _run_engine_service_in_owned_process_group,
+    _tensor_parallel_size_from_startup_frame,
+    _validate_startup_tensor_parallel_identity,
 )
 from kairyu.entrypoints.server.app import create_app
 from kairyu.models.generation import GenerationDefaults
 from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
+
+
+async def test_constructor_preserves_legacy_tokenizer_positional_slot():
+    backend = ZmqEngineBackend(4096, 16, 2048, 256, 60.0, "toy")
+
+    assert backend._config["tokenizer"] == "toy"
+    assert backend._config["tensor_parallel_size"] == 1
 
 
 _READY_DECISION = {
@@ -165,6 +184,157 @@ def _fake_max_model_len_engine_service(port_pipe, config):
     )
     port_pipe.close()
     time.sleep(60)
+
+
+def _fake_rank_worker(ignore_sigterm=False, ready_pipe=None):
+    if ignore_sigterm:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if ready_pipe is not None:
+        ready_pipe.send_bytes(b"ready")
+        ready_pipe.close()
+    time.sleep(60)
+
+
+def _fake_nested_engine_service(port_pipe, config):
+    spawn = multiprocessing.get_context("spawn")
+    rank_ready_recv, rank_ready_send = spawn.Pipe(duplex=False)
+    rank = spawn.Process(
+        target=_fake_rank_worker,
+        args=(
+            config.get("_test_rank_ignore_sigterm", False),
+            rank_ready_send,
+        ),
+    )
+    rank.start()
+    rank_ready_send.close()
+    if not rank_ready_recv.poll(timeout=5):
+        raise RuntimeError("fake rank did not become ready")
+    rank_ready_recv.recv_bytes()
+    rank_ready_recv.close()
+    config["_test_rank_pid_pipe"].send(rank.pid)
+    config["_test_rank_pid_pipe"].close()
+    port_pipe.send(43216)
+    port_pipe.send(
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "tensor_parallel_size": 2,
+        }
+    )
+    port_pipe.close()
+    time.sleep(60)
+
+
+def _fake_api_parent_with_nested_service(result_pipe):
+    spawn = multiprocessing.get_context("spawn")
+    port_parent, port_child = spawn.Pipe()
+    child_lifetime, parent_lifetime = spawn.Pipe(duplex=False)
+    rank_pid_recv, rank_pid_send = spawn.Pipe(duplex=False)
+    service = spawn.Process(
+        target=_run_engine_service_in_owned_process_group,
+        args=(
+            _fake_nested_engine_service,
+            child_lifetime,
+            port_child,
+            {"_test_rank_pid_pipe": rank_pid_send},
+        ),
+    )
+    service.start()
+    child_lifetime.close()
+    port_child.close()
+    rank_pid_send.close()
+    port_parent.recv()
+    port_parent.recv()
+    if not rank_pid_recv.poll(timeout=5):
+        raise RuntimeError("fake service did not report its rank PID")
+    rank_pid = rank_pid_recv.recv()
+    rank_pid_recv.close()
+    result_pipe.send((service.pid, rank_pid))
+    result_pipe.close()
+    # Keep the send-only lease alive. An external SIGKILL of this process
+    # closes it in the kernel and the service watchdog kills the whole group.
+    time.sleep(60)
+    parent_lifetime.close()
+
+
+class _NeverSendingSocket:
+    def __init__(self) -> None:
+        self.send_started = False
+        self.send_cancelled = False
+        self.closed = False
+
+    async def send(self, _payload):
+        self.send_started = True
+        try:
+            await asyncio.Future()
+        finally:
+            self.send_cancelled = True
+
+    def close(self, *, linger):
+        assert linger == 0
+        self.closed = True
+
+
+class _FakeServicePortPipe:
+    def __init__(self) -> None:
+        self.frames = []
+        self.closed = False
+
+    def send(self, frame):
+        self.frames.append(frame)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeServiceSocket:
+    def __init__(self, message=None) -> None:
+        self.message = message
+        self.sent = []
+        self.closed = False
+
+    def bind_to_random_port(self, endpoint):
+        assert endpoint == "tcp://127.0.0.1"
+        return 43123
+
+    def poll(self, _timeout):
+        if self.message is not None:
+            return True
+        raise AssertionError("engine service continued polling after a fatal frame")
+
+    def recv_multipart(self):
+        assert self.message is not None
+        message = self.message
+        self.message = None
+        return [b"client", msgpack.packb(message)]
+
+    def send_multipart(self, frames):
+        self.sent.append(frames)
+
+    def close(self, *, linger):
+        assert linger == 0
+        self.closed = True
+
+
+class _FakeServiceContext:
+    def __init__(self, service_socket) -> None:
+        self.service_socket = service_socket
+        self.terminated = False
+
+    def socket(self, _kind):
+        return self.service_socket
+
+    def term(self):
+        self.terminated = True
+
+
+def _install_fake_service_zmq(monkeypatch, service_socket):
+    context = _FakeServiceContext(service_socket)
+    fake_zmq = types.ModuleType("zmq")
+    fake_zmq.ROUTER = object()
+    fake_zmq.Context = lambda: context
+    monkeypatch.setitem(sys.modules, "zmq", fake_zmq)
+    return context
 
 
 @pytest.fixture(scope="module")
@@ -451,9 +621,624 @@ async def test_registered_as_kairyu_proc():
     assert isinstance(backend, ZmqEngineBackend)
 
 
+async def test_tensor_parallel_process_service_is_non_daemon_and_attested():
+    backend = create_backend(
+        "kairyu-proc",
+        num_pages=64,
+        tensor_parallel_size=2,
+    )
+    try:
+        result = await backend.generate(
+            _request("proc-tp2", "process split tensor parallel", max_tokens=2)
+        )
+        process = backend._process
+        assert result.finished is True
+        assert backend.tensor_parallel_size == 2
+        assert backend._config["tensor_parallel_size"] == 2
+        assert process is not None and process.is_alive()
+        assert process.daemon is False
+
+        app = create_app(engines={"proc-tp2": backend})
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            payload = (await client.get("/backends")).json()
+        assert payload["engines"][0]["engine_backend"] == "kairyu-proc"
+        assert payload["engines"][0]["tensor_parallel_size"] == 2
+    finally:
+        await backend.shutdown()
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 2.0, "2"])
+async def test_tensor_parallel_startup_metadata_rejects_invalid_values(value):
+    frame = {
+        "startup_wire_version": STARTUP_WIRE_VERSION,
+        "status": "ready",
+        "tensor_parallel_size": value,
+    }
+    with pytest.raises(EngineServiceError, match="positive integer"):
+        _tensor_parallel_size_from_startup_frame(frame)
+
+
+async def test_tensor_parallel_startup_identity_is_fail_closed():
+    _validate_startup_tensor_parallel_identity(1, None)
+    _validate_startup_tensor_parallel_identity(4, 4)
+    with pytest.raises(EngineServiceError, match="did not report"):
+        _validate_startup_tensor_parallel_identity(4, None)
+    with pytest.raises(EngineServiceError, match="mismatch"):
+        _validate_startup_tensor_parallel_identity(4, 2)
+
+
+async def test_engine_service_close_always_shuts_down_parallel_launcher():
+    calls = []
+
+    class Launcher:
+        def shutdown(self):
+            calls.append("launcher")
+
+    class Loop:
+        parallel_launcher = Launcher()
+
+        def close(self):
+            calls.append("loop")
+            raise RuntimeError("loop close failed")
+
+    with pytest.raises(RuntimeError, match="loop close failed"):
+        _close_engine_service_loop(Loop())
+    assert calls == ["loop", "launcher"]
+
+
+@pytest.mark.parametrize(
+    ("reported_failure_type", "reported_dead_ranks", "expected_frame"),
+    [
+        (
+            "CollectiveTimeout",
+            (),
+            {
+                "op": "fatal",
+                "error_type": "CollectiveTimeout",
+                "dead_ranks": [],
+            },
+        ),
+        (
+            None,
+            (1,),
+            {
+                "op": "fatal",
+                "error_type": "RankProcessExited",
+                "dead_ranks": [1],
+            },
+        ),
+    ],
+)
+async def test_engine_service_ping_reports_parallel_failure_and_cleans_up(
+    monkeypatch,
+    reported_failure_type,
+    reported_dead_ranks,
+    expected_frame,
+):
+    class Launcher:
+        def __init__(self) -> None:
+            self.failure_checks = 0
+            self.rank_checks = 0
+            self.shutdown_calls = 0
+
+        def failure_type(self):
+            self.failure_checks += 1
+            if self.failure_checks == 1:
+                return None
+            return reported_failure_type
+
+        def dead_ranks(self):
+            self.rank_checks += 1
+            if self.rank_checks == 1:
+                return ()
+            return reported_dead_ranks
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+    class Loop:
+        tensor_parallel_size = 2
+        generation_defaults = None
+
+        def __init__(self) -> None:
+            self.parallel_launcher = Launcher()
+            self.closed = False
+
+        def has_work(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    loop = Loop()
+    port_pipe = _FakeServicePortPipe()
+    service_socket = _FakeServiceSocket({"op": "ping"})
+    context = _install_fake_service_zmq(monkeypatch, service_socket)
+    monkeypatch.setattr(
+        "kairyu.engine.kairyu_backend.build_engine_loop",
+        lambda **_config: (loop, None, None),
+    )
+
+    run_engine_service(port_pipe, {"tensor_parallel_size": 2})
+
+    assert port_pipe.frames[0] == 43123
+    assert port_pipe.frames[1]["status"] == "ready"
+    assert port_pipe.closed is True
+    assert len(service_socket.sent) == 1
+    assert msgpack.unpackb(service_socket.sent[0][1]) == expected_frame
+    assert loop.closed is True
+    assert loop.parallel_launcher.shutdown_calls == 1
+    assert service_socket.closed is True
+    assert context.terminated is True
+
+
+async def test_startup_rank_attestation_failure_cleans_every_service_resource(
+    monkeypatch,
+):
+    class Launcher:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        def failure_type(self):
+            return None
+
+        def dead_ranks(self):
+            return (1,)
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+    class Loop:
+        tensor_parallel_size = 2
+        generation_defaults = None
+
+        def __init__(self) -> None:
+            self.parallel_launcher = Launcher()
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    loop = Loop()
+    port_pipe = _FakeServicePortPipe()
+    service_socket = _FakeServiceSocket()
+    context = _install_fake_service_zmq(monkeypatch, service_socket)
+    monkeypatch.setattr(
+        "kairyu.engine.kairyu_backend.build_engine_loop",
+        lambda **_config: (loop, None, None),
+    )
+
+    with pytest.raises(RuntimeError, match="failed before startup readiness"):
+        run_engine_service(port_pipe, {"tensor_parallel_size": 2})
+
+    assert port_pipe.frames[0] == 43123
+    assert port_pipe.frames[1]["status"] == "error"
+    assert port_pipe.frames[1]["error_type"] == "RuntimeError"
+    assert port_pipe.closed is True
+    assert loop.closed is True
+    assert loop.parallel_launcher.shutdown_calls == 1
+    assert service_socket.closed is True
+    assert context.terminated is True
+
+
+async def test_forced_cleanup_kills_nested_rank_process_group(monkeypatch):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_nested_engine_service,
+    )
+    spawn = multiprocessing.get_context("spawn")
+    rank_pid_recv, rank_pid_send = spawn.Pipe(duplex=False)
+    backend = ZmqEngineBackend(num_pages=64, tensor_parallel_size=2)
+    backend._config["_test_rank_pid_pipe"] = rank_pid_send
+    process = None
+    rank_pid = None
+    try:
+        assert await asyncio.to_thread(backend._spawn) == 43216
+        rank_pid_send.close()
+        process = backend._process
+        assert await asyncio.to_thread(rank_pid_recv.poll, 5)
+        rank_pid = rank_pid_recv.recv()
+        assert process is not None and process.is_alive()
+        assert isinstance(rank_pid, int) and Path(f"/proc/{rank_pid}").exists()
+
+        assert await asyncio.to_thread(_kill_and_reap_process, process, 3.0)
+        assert not Path(f"/proc/{rank_pid}").exists()
+        assert _process_group_member_states(process) == ()
+    finally:
+        if process is not None:
+            _kill_and_reap_process(process, 1.0)
+        backend._close_transport_locked()
+        backend._process = None
+        rank_pid_recv.close()
+        rank_pid_send.close()
+
+
+async def test_parent_death_lease_kills_service_and_nested_rank():
+    _ensure_child_subreaper()
+    spawn = multiprocessing.get_context("spawn")
+    result_recv, result_send = spawn.Pipe(duplex=False)
+    api_parent = spawn.Process(
+        target=_fake_api_parent_with_nested_service,
+        args=(result_send,),
+    )
+    api_parent.start()
+    result_send.close()
+    service_pid = rank_pid = None
+    try:
+        assert await asyncio.to_thread(result_recv.poll, 10)
+        service_pid, rank_pid = result_recv.recv()
+        assert all(
+            Path(f"/proc/{pid}/stat").read_text().split()[2] != "Z"
+            for pid in (service_pid, rank_pid)
+        )
+        os.kill(api_parent.pid, signal.SIGKILL)
+        await asyncio.to_thread(api_parent.join, 3)
+        assert not api_parent.is_alive()
+        for _ in range(300):
+            present = []
+            for pid in (service_pid, rank_pid):
+                try:
+                    state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                if state == "Z":
+                    with contextlib.suppress(ChildProcessError):
+                        os.waitpid(pid, os.WNOHANG)
+                if Path(f"/proc/{pid}").exists():
+                    present.append(pid)
+            if not present:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail(f"parent death left unreaped service tree: {present}")
+    finally:
+        if api_parent.is_alive():
+            api_parent.kill()
+            api_parent.join(timeout=1)
+        if service_pid is not None and os.name == "posix":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(service_pid, signal.SIGKILL)
+        result_recv.close()
+        result_send.close()
+
+
+async def test_shutdown_kills_sigterm_resistant_nested_rank(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_nested_engine_service,
+    )
+    monkeypatch.setattr("kairyu.engine.zmq_backend._SHUTDOWN_TIMEOUT_S", 0.05)
+    spawn = multiprocessing.get_context("spawn")
+    rank_pid_recv, rank_pid_send = spawn.Pipe(duplex=False)
+    backend = ZmqEngineBackend(num_pages=64, tensor_parallel_size=2)
+    backend._config.update(
+        {
+            "_test_rank_pid_pipe": rank_pid_send,
+            "_test_rank_ignore_sigterm": True,
+        }
+    )
+    rank_pid = None
+    try:
+        assert await asyncio.to_thread(backend._spawn) == 43216
+        rank_pid_send.close()
+        assert await asyncio.to_thread(rank_pid_recv.poll, 5)
+        rank_pid = rank_pid_recv.recv()
+        await backend.shutdown()
+        assert not Path(f"/proc/{rank_pid}").exists()
+    finally:
+        process = backend._process
+        if process is not None:
+            _kill_and_reap_process(process, 1.0)
+        backend._process = None
+        rank_pid_recv.close()
+        rank_pid_send.close()
+
+
+async def test_receiver_reaps_followers_when_service_rank_dies(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_nested_engine_service,
+    )
+    monkeypatch.setattr("kairyu.engine.zmq_backend._RECV_TICK_S", 0.01)
+    spawn = multiprocessing.get_context("spawn")
+    rank_pid_recv, rank_pid_send = spawn.Pipe(duplex=False)
+    backend = ZmqEngineBackend(num_pages=64, tensor_parallel_size=2)
+    backend._config["_test_rank_pid_pipe"] = rank_pid_send
+
+    class BlockingSocket:
+        async def recv(self):
+            await asyncio.Future()
+
+    process = None
+    rank_pid = None
+    try:
+        assert await asyncio.to_thread(backend._spawn) == 43216
+        rank_pid_send.close()
+        process = backend._process
+        assert await asyncio.to_thread(rank_pid_recv.poll, 5)
+        rank_pid = rank_pid_recv.recv()
+        assert process is not None
+        backend._live_generation = 1
+        receiver = asyncio.create_task(
+            backend._receive_loop(1, BlockingSocket(), process)
+        )
+
+        # Kill rank 0 only. Its follower deliberately remains in the owned
+        # process group until the receiver observes death and sweeps the group.
+        os.kill(process.pid, signal.SIGKILL)
+        await asyncio.wait_for(receiver, timeout=3)
+        assert not process.is_alive()
+        assert not Path(f"/proc/{rank_pid}").exists()
+        assert _process_group_member_states(process) == ()
+        assert backend._process is None
+    finally:
+        owned_process = backend._process
+        if owned_process is not None:
+            _kill_and_reap_process(owned_process, 1.0)
+        backend._close_transport_locked()
+        backend._process = None
+        rank_pid_recv.close()
+        rank_pid_send.close()
+
+
+async def test_receiver_transport_failure_marks_readiness_fatal_and_sanitized(
+    monkeypatch,
+):
+    class LiveProcess:
+        pid = None
+
+        def is_alive(self):
+            return True
+
+    class FailingSocket:
+        async def recv(self):
+            raise RuntimeError("secret transport path /srv/private")
+
+    signals = []
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._signal_process_tree",
+        lambda _process, sig: signals.append(sig),
+    )
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._wait_process_tree_exit",
+        lambda _process, _timeout: True,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    process = LiveProcess()
+    queue = asyncio.Queue()
+    backend._process = process
+    backend._live_generation = 3
+    backend._queues["failed"] = queue
+    backend._queue_generations["failed"] = 3
+    receiver = asyncio.create_task(
+        backend._receive_loop(3, FailingSocket(), process)
+    )
+    backend._receiver = receiver
+
+    await asyncio.wait_for(asyncio.shield(receiver), timeout=0.5)
+
+    event = queue.get_nowait()
+    assert "secret transport path" in event["error"]
+    status = backend.readiness()
+    assert status.ready is False
+    assert status.fatal is True
+    assert status.detail == "engine service failed: RuntimeError"
+    assert "private" not in status.detail
+    assert signals == [signal.SIGKILL]
+    assert backend._process is None
+    backend._receiver = None
+
+
+async def test_receiver_heartbeat_timeout_fails_generation_and_readiness(
+    monkeypatch,
+):
+    class LiveProcess:
+        pid = None
+
+        def is_alive(self):
+            return True
+
+    class SilentSocket:
+        def __init__(self) -> None:
+            self.sent = []
+
+        async def recv(self):
+            await asyncio.Future()
+
+        async def send(self, payload):
+            self.sent.append(msgpack.unpackb(payload))
+
+    signals = []
+    monkeypatch.setattr("kairyu.engine.zmq_backend._RECV_TICK_S", 0.005)
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._signal_process_tree",
+        lambda _process, sig: signals.append(sig),
+    )
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._wait_process_tree_exit",
+        lambda _process, _timeout: True,
+    )
+    backend = ZmqEngineBackend(num_pages=64, death_timeout_s=0.03)
+    process = LiveProcess()
+    socket = SilentSocket()
+    queue = asyncio.Queue()
+    backend._process = process
+    backend._live_generation = 5
+    backend._queues["silent"] = queue
+    backend._queue_generations["silent"] = 5
+    receiver = asyncio.create_task(backend._receive_loop(5, socket, process))
+    backend._receiver = receiver
+    try:
+        await asyncio.wait_for(asyncio.shield(receiver), timeout=0.5)
+    finally:
+        if not receiver.done():
+            receiver.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await receiver
+
+    assert socket.sent and all(message == {"op": "ping"} for message in socket.sent)
+    assert "heartbeat timed out" in queue.get_nowait()["error"]
+    status = backend.readiness()
+    assert status.ready is False
+    assert status.fatal is True
+    assert status.detail == "engine service failed: EngineServiceError"
+    assert signals == [signal.SIGKILL]
+    assert backend._process is None
+    backend._receiver = None
+
+
+async def test_receiver_retires_generation_before_blocked_reap(monkeypatch):
+    class LiveProcess:
+        pid = None
+
+        def is_alive(self):
+            return True
+
+    class FailingSocket:
+        async def recv(self):
+            raise RuntimeError("transport failed")
+
+    reap_entered = threading.Event()
+    release_reap = threading.Event()
+    reap_calls = []
+
+    def controlled_reap(process, timeout_s):
+        reap_calls.append((process, timeout_s))
+        reap_entered.set()
+        assert release_reap.wait(timeout=2)
+        return True
+
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._signal_process_tree",
+        lambda _process, _sig: None,
+    )
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._wait_process_tree_exit",
+        controlled_reap,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    process = LiveProcess()
+    queue = asyncio.Queue()
+    backend._process = process
+    backend._live_generation = 17
+    backend._queues["blocked-reap"] = queue
+    backend._queue_generations["blocked-reap"] = 17
+    receiver = asyncio.create_task(
+        backend._receive_loop(17, FailingSocket(), process)
+    )
+    backend._receiver = receiver
+    try:
+        assert await asyncio.to_thread(reap_entered.wait, 1)
+
+        # Reaping is still blocked and the fake process is still alive, yet
+        # admission and readiness must already expose the fatal generation.
+        assert receiver.done() is False
+        assert backend._live_generation is None
+        assert backend._is_healthy() is False
+        status = backend.readiness()
+        assert status.ready is False and status.fatal is True
+        assert status.detail == "engine service failed: RuntimeError"
+        assert "transport failed" in queue.get_nowait()["error"]
+    finally:
+        release_reap.set()
+        await asyncio.wait_for(asyncio.shield(receiver), timeout=1)
+
+    assert reap_calls == [(process, 5.0)]
+    assert backend._process is None
+    backend._receiver = None
+
+
+async def test_cancelled_reset_shares_and_drains_receiver_reap(monkeypatch):
+    class LiveProcess:
+        pid = None
+
+        def is_alive(self):
+            return True
+
+    class FailingSocket:
+        async def recv(self):
+            raise RuntimeError("transport failed")
+
+    reap_entered = threading.Event()
+    release_reap = threading.Event()
+    reap_calls = []
+    signals = []
+
+    def controlled_reap(process, timeout_s):
+        reap_calls.append((process, timeout_s))
+        reap_entered.set()
+        assert release_reap.wait(timeout=2)
+        return True
+
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._signal_process_tree",
+        lambda _process, sig: signals.append(sig),
+    )
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._wait_process_tree_exit",
+        controlled_reap,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    process = LiveProcess()
+    backend._process = process
+    backend._live_generation = 19
+    receiver = asyncio.create_task(
+        backend._receive_loop(19, FailingSocket(), process)
+    )
+    backend._receiver = receiver
+    reset = None
+    try:
+        assert await asyncio.to_thread(reap_entered.wait, 1)
+        reset = asyncio.create_task(backend._reset_dead_locked())
+        for _ in range(100):
+            if backend._receiver is None:
+                break
+            await asyncio.sleep(0)
+        assert backend._receiver is None
+
+        reset.cancel()
+        await asyncio.sleep(0)
+        assert reset.done() is False
+        release_reap.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(reset, timeout=1)
+    finally:
+        release_reap.set()
+        if reset is not None and not reset.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await reset
+        if not receiver.done():
+            receiver.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await receiver
+
+    assert reap_calls == [(process, 5.0)]
+    assert signals == [signal.SIGKILL]
+    assert receiver.done()
+    assert backend._process is None
+
+
 async def test_rejects_non_string_tokenizer():
     with pytest.raises(ValueError, match="string tokenizer"):
         ZmqEngineBackend(tokenizer=ToyTokenizer())  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [0, -1, True, float("nan"), float("inf"), "10"])
+async def test_rejects_invalid_death_timeout(value):
+    with pytest.raises(ValueError, match="death_timeout_s"):
+        ZmqEngineBackend(death_timeout_s=value)
+
+
+async def test_model_less_constructor_rejects_unshardable_tp_degree():
+    with pytest.raises(ValueError, match="does not divide"):
+        ZmqEngineBackend(tensor_parallel_size=3)
 
 
 @pytest.mark.parametrize(
@@ -1334,6 +2119,231 @@ async def test_shutdown_is_clean_and_idempotent():
     assert process is not None and not process.is_alive()
     assert process.exitcode == 0  # clean exit: coverage flushed
     await backend.shutdown()  # idempotent
+
+
+async def test_shutdown_control_send_is_bounded_and_still_closes_transport(
+    monkeypatch,
+):
+    class StoppedProcess:
+        pid = None
+
+        def __init__(self) -> None:
+            self.join_calls = []
+
+        def join(self, timeout=None):
+            self.join_calls.append(timeout)
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._CONTROL_SEND_TIMEOUT_S",
+        0.01,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    socket = _NeverSendingSocket()
+    process = StoppedProcess()
+    backend._socket = socket
+    backend._process = process
+
+    shutdown = asyncio.create_task(backend.shutdown())
+    await asyncio.wait_for(asyncio.shield(shutdown), timeout=0.5)
+
+    assert shutdown.done() and not shutdown.cancelled()
+    assert shutdown.exception() is None
+    assert socket.send_started is True
+    assert socket.send_cancelled is True
+    assert socket.closed is True
+    assert process.join_calls
+    assert backend._process is None
+
+
+async def test_cancelled_shutdown_drains_one_shared_reap_for_all_callers(
+    monkeypatch,
+):
+    class LiveProcess:
+        pid = None
+
+        def is_alive(self):
+            return True
+
+    reap_entered = threading.Event()
+    release_reap = threading.Event()
+    reap_calls = []
+
+    def controlled_reap(process, timeout_s):
+        reap_calls.append((process, timeout_s))
+        reap_entered.set()
+        assert release_reap.wait(timeout=2)
+        return True
+
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._wait_process_tree_exit",
+        controlled_reap,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    process = LiveProcess()
+    backend._process = process
+    first = asyncio.create_task(backend.shutdown())
+    second = None
+    try:
+        assert await asyncio.to_thread(reap_entered.wait, 1)
+        shared_shutdown = backend._shutdown_task
+        assert shared_shutdown is not None
+        second = asyncio.create_task(backend.shutdown())
+        await asyncio.sleep(0)
+
+        first.cancel()
+        await asyncio.sleep(0)
+        assert first.done() is False
+        assert second.done() is False
+        release_reap.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, timeout=1)
+        await asyncio.wait_for(second, timeout=1)
+    finally:
+        release_reap.set()
+        for caller in (first, second):
+            if caller is not None and not caller.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await caller
+
+    assert reap_calls == [(process, 5.0)]
+    assert backend._process is None
+    assert backend._shutdown_task is shared_shutdown
+    assert shared_shutdown.done() and shared_shutdown.exception() is None
+
+    await backend.shutdown()
+    assert backend._shutdown_task is shared_shutdown
+    assert reap_calls == [(process, 5.0)]
+
+
+async def test_failed_shutdown_cleanup_can_be_retried(monkeypatch):
+    class LiveProcess:
+        pid = None
+
+        def is_alive(self):
+            return True
+
+    reap_calls = []
+    signals = []
+
+    def fail_then_succeed(process, timeout_s):
+        reap_calls.append((process, timeout_s))
+        return len(reap_calls) >= 4
+
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._wait_process_tree_exit",
+        fail_then_succeed,
+    )
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._signal_process_tree",
+        lambda _process, sig: signals.append(sig),
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    process = LiveProcess()
+    backend._process = process
+
+    with pytest.raises(EngineServiceError, match="not completely reaped"):
+        await backend.shutdown()
+
+    assert backend._shutdown_task is None
+    assert backend._process is process
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert [timeout for _, timeout in reap_calls] == [5.0, 2.0, 2.0]
+
+    await backend.shutdown()
+    successful_shutdown = backend._shutdown_task
+    assert successful_shutdown is not None and successful_shutdown.done()
+    assert successful_shutdown.exception() is None
+    assert backend._process is None
+    assert [timeout for _, timeout in reap_calls] == [5.0, 2.0, 2.0, 5.0]
+
+    await backend.shutdown()
+    assert backend._shutdown_task is successful_shutdown
+    assert len(reap_calls) == 4
+
+
+async def test_abort_control_send_is_bounded_and_returns_normally(monkeypatch):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._CONTROL_SEND_TIMEOUT_S",
+        0.01,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    socket = _NeverSendingSocket()
+    backend._socket = socket
+    backend._wire_request_ids["bounded-abort"] = "wire-bounded-abort"
+    backend._stream_ids["bounded-abort"] = "stream-bounded-abort"
+
+    abort = asyncio.create_task(backend._abort("bounded-abort"))
+    await asyncio.wait_for(asyncio.shield(abort), timeout=0.5)
+
+    assert abort.done() and not abort.cancelled()
+    assert abort.exception() is None
+    assert socket.send_started is True
+    assert socket.send_cancelled is True
+    backend._socket = None
+
+
+async def test_submit_send_is_bounded_and_releases_its_route(monkeypatch):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend._CONTROL_SEND_TIMEOUT_S",
+        0.01,
+    )
+    backend = ZmqEngineBackend(num_pages=64)
+    socket = _NeverSendingSocket()
+    backend._socket = socket
+    backend._live_generation = 9
+
+    async def already_started():
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_started", already_started)
+    with pytest.raises(EngineServiceError, match="request send timed out"):
+        await asyncio.wait_for(
+            backend._submit(_request("bounded-add", "prompt", max_tokens=2)),
+            timeout=0.5,
+        )
+
+    assert socket.send_started is True
+    assert socket.send_cancelled is True
+    assert "bounded-add" not in backend._queues
+    assert "bounded-add" not in backend._wire_request_ids
+    assert "bounded-add" not in backend._queue_generations
+    assert backend.readiness().fatal is True
+    backend._socket = None
+
+
+async def test_cancelled_submit_send_retires_unknown_delivery_generation(monkeypatch):
+    backend = ZmqEngineBackend(num_pages=64)
+    socket = _NeverSendingSocket()
+    backend._socket = socket
+    backend._live_generation = 10
+
+    async def already_started():
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_started", already_started)
+    submit = asyncio.create_task(
+        backend._submit(_request("cancelled-add", "prompt", max_tokens=2))
+    )
+    for _ in range(100):
+        if socket.send_started:
+            break
+        await asyncio.sleep(0)
+    assert socket.send_started is True
+
+    submit.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await submit
+
+    assert socket.send_cancelled is True
+    assert "cancelled-add" not in backend._queues
+    assert "cancelled-add" not in backend._wire_request_ids
+    assert "cancelled-add" not in backend._queue_generations
+    status = backend.readiness()
+    assert status.ready is False and status.fatal is True
+    backend._socket = None
 
 
 async def test_duplicate_request_id_preserves_original_queue_and_can_be_reused(

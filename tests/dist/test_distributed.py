@@ -458,6 +458,83 @@ def test_build_engine_loop_accepts_speculative_with_real_model_tp(llama_dir, mon
         loop.tp_launcher.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_process_backend_owns_real_model_tp2_service_tree(
+    llama_dir,
+    monkeypatch,
+    tmp_path,
+):
+    """The process split must serve through and clean up real TP workers."""
+
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+
+    from kairyu.engine.backend import GenerationRequest
+    from kairyu.engine.zmq_backend import (
+        ZmqEngineBackend,
+        _live_process_group_members,
+        _process_group_member_states,
+    )
+    from kairyu.sampling_params import SamplingParams
+
+    monkeypatch.setenv("KAIRYU_TP_FORCE_CPU", "1")
+    tokenizer_path = tmp_path / "tokenizer.json"
+    Tokenizer(
+        WordLevel(
+            {token: index for index, token in enumerate(TP_VOCAB)},
+            unk_token=TP_VOCAB[-1],
+        )
+    ).save(str(tokenizer_path))
+    backend = ZmqEngineBackend(
+        model_path=llama_dir,
+        tokenizer=str(tokenizer_path),
+        tensor_parallel_size=2,
+        num_pages=64,
+        page_size=4,
+        max_num_batched_tokens=6,
+        max_num_seqs=4,
+        generation_config="none",
+        death_timeout_s=30.0,
+    )
+    process = None
+    try:
+        await backend.startup()
+        process = backend._process
+        assert process is not None and process.is_alive()
+        assert process.daemon is False
+        assert backend.tensor_parallel_size == 2
+        members = _live_process_group_members(process)
+        assert process.pid in members
+        assert len(members) >= 2, "real TP follower is missing from the owned group"
+
+        updates = [
+            update
+            async for update in backend.stream(
+                GenerationRequest(
+                    request_id="real-tp2-process-stream",
+                    prompt="{",
+                    sampling_params=SamplingParams(
+                        temperature=0.0,
+                        max_tokens=1,
+                    ),
+                )
+            )
+        ]
+        assert len(updates) == 1
+        result = updates[0]
+        assert result.finished is True
+        assert result.usage.completion_tokens == 1
+        assert len(result.completions) == 1
+        assert len(result.completions[0].token_ids) == 1
+        assert result.completions[0].finish_reason == "length"
+    finally:
+        await backend.shutdown()
+
+    assert process is not None and process.exitcode == 0
+    assert _live_process_group_members(process) == ()
+    assert _process_group_member_states(process) == ()
+
+
 def test_in_process_tp_still_rejects_speculative():
     # the toy path shares ONE runner across ranks: drafting there would score
     # against itself, so the guard stays for that case

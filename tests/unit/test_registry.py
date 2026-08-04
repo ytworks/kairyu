@@ -106,6 +106,36 @@ def test_expert_parallelism_is_mutually_exclusive_with_tensor_parallelism():
         )
 
 
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4, 8])
+def test_kairyu_proc_accepts_tensor_parallel_degrees(tensor_parallel_size):
+    validate_backend_options(
+        "kairyu-proc",
+        {
+            "model_path": "/models/qwen3-32b",
+            "tensor_parallel_size": tensor_parallel_size,
+        },
+    )
+
+
+@pytest.mark.parametrize("tensor_parallel_size", [0, -1, True, 1.5, "4"])
+def test_kairyu_proc_rejects_invalid_tensor_parallel_degrees(
+    tensor_parallel_size,
+):
+    with pytest.raises(ValueError, match="tensor_parallel_size"):
+        validate_backend_options(
+            "kairyu-proc",
+            {"tensor_parallel_size": tensor_parallel_size},
+        )
+
+
+def test_kairyu_proc_model_less_tp_must_shard_the_toy_kv_heads():
+    with pytest.raises(ValueError, match="incompatible with KV heads"):
+        validate_backend_options(
+            "kairyu-proc",
+            {"tensor_parallel_size": 3},
+        )
+
+
 @pytest.mark.parametrize(
     "options",
     [
