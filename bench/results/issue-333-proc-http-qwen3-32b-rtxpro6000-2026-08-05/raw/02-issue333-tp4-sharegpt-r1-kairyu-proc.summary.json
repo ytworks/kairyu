@@ -1,0 +1,15 @@
+{
+  "cleanup_sha256": "5f261ddb23af46e0b9ab0573c06aea5c42ba625501e384f60632ca4bc3263f9a",
+  "identity": {
+    "arm": "kairyu-proc",
+    "order_index": 2,
+    "repeat": 1,
+    "scenario_id": "issue333-tp4-sharegpt-r1-kairyu-proc",
+    "tensor_parallel_size": 4,
+    "workload": "sharegpt"
+  },
+  "provenance_stable": true,
+  "requests": 163,
+  "schema_version": "kairyu.issue-333.proc-http-runner.v1",
+  "sha256": "75898b08ed77f28f96b100465c002468182e956003ed8f218e17812149d6f93e"
+}

@@ -545,6 +545,18 @@ paired-median TTFT-p99 ratio was 0.9454156693989547, but failed evidence means
 no classification. Its raw and manifest SHA-256s are recorded in `PROGRESS.md`
 against source commit `ad11a32`. Exactly one fresh full v2 ABBA run is allowed,
 and it is the issue result regardless of its performance direction.
+That sole v2 run is now complete on Qwen3-32B TP4 and 8× RTX PRO 6000. All 15
+binding checks pass independent replay, all 512 measurement requests succeeded
+without retry, and all four containers restored the selected GPUs to their
+run-start idle baseline after graceful zero exit and non-forced removal. The
+paired process/in-process TTFT-p99 ratios were 0.9189755344057482 and
+0.9219867334510442, giving a 0.9204811339283963 median. Because this is above
+the predeclared ≤0.90 material line, the report-only classification is
+`no_material_reduction` and the dominant process/GIL-contention hypothesis is
+`not_supported`. Median goodput and TTFT-p50 ratios were 1.086201492163829 and
+0.9282808350389853. This remains a net-backend diagnostic rather than a pure
+GIL attribution or formal A6 verdict. Complete evidence is retained under
+`bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05/`.
 
 ## 3. What M8 does not include (explicit non-goals)
 

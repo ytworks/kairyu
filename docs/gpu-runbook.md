@@ -425,6 +425,13 @@ GPU-only remainder (design m5 §4.2).
   `kairyu-proc/kairyu` TTFT p99 <= 0.90; no valid
   evidence means no supported/not-supported conclusion, and neither
   classification is a formal A6 PASS/FAIL.
+  Closure evidence:
+  `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05/`
+  (15/15 binding checks, 512/512 measurement successes, paired TTFT-p99
+  ratios 0.9189755344057482/0.9219867334510442, median
+  0.9204811339283963, `no_material_reduction`, hypothesis `not_supported`).
+  The invalid v1 observation remains separately retained as
+  `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-discarded-v1-2026-08-05/`.
 - Gate A7: run `bench/tp_kv_hit_g2_a7_bench.py` against Qwen3-32B at TP4
   and TP8, once through each replica's direct endpoint and once through its
   single-replica gateway. Assemble

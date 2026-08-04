@@ -245,8 +245,15 @@ completion structure, per-cell uniqueness of all 163 response IDs, and exact
 all-four parity for the four serialized ShareGPT warm-ups; it reports all six
 c128 measurement agreement rates without making them binding. Its next fresh
 full ABBA is the sole v2 rerun and will be retained regardless of direction.
-The real Qwen3-32B ABBA measurement remains the active step before the issue is
-closed.
+That v2 run is complete: all 15 binding checks and independent raw replay pass,
+all 512 measurement requests succeeded once, and all four fresh containers
+restored the selected GPUs after graceful zero exit. Paired process/in-process
+TTFT-p99 ratios were 0.9189755344057482/0.9219867334510442, for a
+0.9204811339283963 median above the predeclared ≤0.90 material line. The
+report-only classification is therefore `no_material_reduction` and the
+dominant process/GIL-contention hypothesis is `not_supported`; this is neither
+a pure-GIL attribution nor a formal A6 verdict. Complete evidence is retained
+at `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05/`.
 Streaming detokenization is now truly incremental on the supported native
 paths. `HFTokenizer` delegates arriving deltas to the Rust `DecodeStream`, Toy
 joins only new IDs, and unknown/overridden tokenizer implementations retain the
@@ -882,6 +889,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [progress] Issue #333 valid v2 diagnostic does not support dominant GIL contention
+- What: completed the sole fresh v2 Qwen3-32B TP4 ABBA diagnostic from clean source `65ba4779c118d534f1e34a1a4dcb1b579cbcfe73`. All 15 binding checks pass independent raw replay, 512/512 synchronized measurement requests succeeded once, all four containers exited gracefully with code zero and were removed without force, and the selected GPUs returned exactly to the run-start idle baseline. Paired process/in-process TTFT-p99 ratios were 0.9189755344057482 and 0.9219867334510442; their 0.9204811339283963 median is above the predeclared ≤0.90 material line, so the report-only classification is `no_material_reduction` and the dominant process/GIL-contention hypothesis is `not_supported`. Median goodput and TTFT-p50 ratios were 1.086201492163829 and 0.9282808350389853. The raw/manifest SHA-256s are `21ba4789cf34fcf4beab5ab5862952574693f80c8b608c2cede002da05088925` and `bd321c32654c0602d6e799167d16a7b375b8edf5dea5bd95faa899acde24286c`.
+- Why: the issue requested one real TP4 process-isolation diagnostic to determine whether API/engine GIL contention was the dominant TTFT-p99 cause. The valid net-backend movement was beneficial but smaller than the declared material magnitude, so the evidence does not support that dominant-cause hypothesis. The result does not isolate pure GIL cost and does not claim an A6 verdict.
+- Refs: issue #333; m8 D6; `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05/`; `bench/issue_333_proc_http_bench.py`; `docs/{gpu-runbook.md,design/m8-engine-cpu.md}`
 
 ### 2026-08-05 — [amendment] Issue #333 separates concurrent repeatability from evidence integrity
 - What: retained the first fail-closed four-cell trial strictly as an invalid observation: source `ad11a322b77337547ac34dc1717586c40f76fd8b`, paired-median process/in-process TTFT-p99 ratio 0.9454156693989547 with no classification, raw SHA-256 `6b726d0076f55226b9d50370a27f8f06e486ca9c53088192f003891507b95a13`, and manifest SHA-256 `15526fc3efec8b5a12ae5dba3e7c5c54c9cc3729987e005dd5a838cf8f94d393`. Before any rerun, bumped the operator evidence schema to v2, retained strict A6 HTTP/SSE/prompt/usage/terminal structure and well-formed per-row digest metadata, and added binding per-cell uniqueness for all 163 response IDs plus all-four output parity for each of the four serialized ShareGPT warm-ups. All six c128 measurement-cell output-hash agreement counts and rates are explicit non-binding diagnostics; the predeclared 0.90 report-only TTFT-p99 interpretation is unchanged. The next fresh full ABBA is the sole v2 rerun and is retained regardless of direction; v1 raw rows are never rewritten as v2.

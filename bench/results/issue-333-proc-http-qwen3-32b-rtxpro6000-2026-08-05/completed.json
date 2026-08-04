@@ -1,0 +1,9 @@
+{
+  "completed_at_ns": 1785860370952640305,
+  "diagnostic_only": true,
+  "evidence_valid": true,
+  "manifest_sha256": "bd321c32654c0602d6e799167d16a7b375b8edf5dea5bd95faa899acde24286c",
+  "repo_commit": "65ba4779c118d534f1e34a1a4dcb1b579cbcfe73",
+  "schema_version": "kairyu.issue-333.proc-http-runner.v1",
+  "session_id": "issue333-65ba477-v2-20260805"
+}

@@ -1,0 +1,415 @@
+{
+  "a6_gate_claimed": false,
+  "checks": {
+    "all_warmup_and_measurement_rows_retained_exactly_once": true,
+    "backend_only_configuration_and_common_runtime_identity_exact": true,
+    "borrowed_a6_benchmark_and_trace_exact": true,
+    "diagnostic_marker_and_fresh_server_abba_plan_exact": true,
+    "every_cell_response_id_unique_across_all_requests": true,
+    "fresh_unique_containers_and_chronological_abba_order_exact": true,
+    "logs_removal_and_post_cleanup_gpu_quiescence_exact": true,
+    "measurement_output_and_stream_digest_metadata_present_and_well_formed": true,
+    "measurement_windows_replay_exact": true,
+    "process_tree_generation_identity_stable_across_three_attestations": true,
+    "serialized_graph_and_synchronized_burst_shape_exact": true,
+    "serialized_sharegpt_warmup_output_hash_parity_across_all_four_cells": true,
+    "source_image_model_gpu_config_provenance_exact": true,
+    "strict_a6_sse_request_evidence_exact": true,
+    "three_backend_and_process_attestations_per_cell_exact": true
+  },
+  "comparisons": {
+    "completion_output_hash_agreement_diagnostic": {
+      "binding": false,
+      "field": "output_text_sha256",
+      "integrity_scope": "raw rows retain well-formed output and stream digest metadata, but do not retain decoded bytes from which those digests could be recomputed; strict completion structure, per-cell response-ID uniqueness, and serialized-warmup output parity remain binding",
+      "pair_count": 6,
+      "pairs": [
+        {
+          "agreement_fraction": {
+            "decimal": 0.2109375,
+            "denominator": 128,
+            "numerator": 27
+          },
+          "complete_inputs": true,
+          "left": {
+            "arm": "kairyu",
+            "order_index": 0,
+            "repeat": 0,
+            "scenario_id": "issue333-tp4-sharegpt-r0-kairyu",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          },
+          "matching_sequences": 27,
+          "relationship": "paired_backend_comparison",
+          "request_count": 128,
+          "right": {
+            "arm": "kairyu-proc",
+            "order_index": 1,
+            "repeat": 0,
+            "scenario_id": "issue333-tp4-sharegpt-r0-kairyu-proc",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          }
+        },
+        {
+          "agreement_fraction": {
+            "decimal": 0.1640625,
+            "denominator": 128,
+            "numerator": 21
+          },
+          "complete_inputs": true,
+          "left": {
+            "arm": "kairyu",
+            "order_index": 0,
+            "repeat": 0,
+            "scenario_id": "issue333-tp4-sharegpt-r0-kairyu",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          },
+          "matching_sequences": 21,
+          "relationship": "cross_arm_cross_repeat",
+          "request_count": 128,
+          "right": {
+            "arm": "kairyu-proc",
+            "order_index": 2,
+            "repeat": 1,
+            "scenario_id": "issue333-tp4-sharegpt-r1-kairyu-proc",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          }
+        },
+        {
+          "agreement_fraction": {
+            "decimal": 0.2265625,
+            "denominator": 128,
+            "numerator": 29
+          },
+          "complete_inputs": true,
+          "left": {
+            "arm": "kairyu",
+            "order_index": 0,
+            "repeat": 0,
+            "scenario_id": "issue333-tp4-sharegpt-r0-kairyu",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          },
+          "matching_sequences": 29,
+          "relationship": "same_arm_repeat",
+          "request_count": 128,
+          "right": {
+            "arm": "kairyu",
+            "order_index": 3,
+            "repeat": 1,
+            "scenario_id": "issue333-tp4-sharegpt-r1-kairyu",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          }
+        },
+        {
+          "agreement_fraction": {
+            "decimal": 0.421875,
+            "denominator": 64,
+            "numerator": 27
+          },
+          "complete_inputs": true,
+          "left": {
+            "arm": "kairyu-proc",
+            "order_index": 1,
+            "repeat": 0,
+            "scenario_id": "issue333-tp4-sharegpt-r0-kairyu-proc",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          },
+          "matching_sequences": 54,
+          "relationship": "same_arm_repeat",
+          "request_count": 128,
+          "right": {
+            "arm": "kairyu-proc",
+            "order_index": 2,
+            "repeat": 1,
+            "scenario_id": "issue333-tp4-sharegpt-r1-kairyu-proc",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          }
+        },
+        {
+          "agreement_fraction": {
+            "decimal": 0.265625,
+            "denominator": 64,
+            "numerator": 17
+          },
+          "complete_inputs": true,
+          "left": {
+            "arm": "kairyu-proc",
+            "order_index": 1,
+            "repeat": 0,
+            "scenario_id": "issue333-tp4-sharegpt-r0-kairyu-proc",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          },
+          "matching_sequences": 34,
+          "relationship": "cross_arm_cross_repeat",
+          "request_count": 128,
+          "right": {
+            "arm": "kairyu",
+            "order_index": 3,
+            "repeat": 1,
+            "scenario_id": "issue333-tp4-sharegpt-r1-kairyu",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          }
+        },
+        {
+          "agreement_fraction": {
+            "decimal": 0.25,
+            "denominator": 4,
+            "numerator": 1
+          },
+          "complete_inputs": true,
+          "left": {
+            "arm": "kairyu-proc",
+            "order_index": 2,
+            "repeat": 1,
+            "scenario_id": "issue333-tp4-sharegpt-r1-kairyu-proc",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          },
+          "matching_sequences": 32,
+          "relationship": "paired_backend_comparison",
+          "request_count": 128,
+          "right": {
+            "arm": "kairyu",
+            "order_index": 3,
+            "repeat": 1,
+            "scenario_id": "issue333-tp4-sharegpt-r1-kairyu",
+            "tensor_parallel_size": 4,
+            "workload": "sharegpt"
+          }
+        }
+      ],
+      "reason": "the discarded trial observed different hashes between same-arm repeats; fresh c128 servers can plausibly admit and batch simultaneous requests in different orders, so exact cross-cell equality cannot isolate backend semantics"
+    },
+    "direction": "kairyu-proc divided by kairyu",
+    "paired_mad": {
+      "goodput_rps": {
+        "decimal": 0.001063666790415755,
+        "denominator": 21868168110820217396,
+        "numerator": 23260444186708305
+      },
+      "ttft_p50_ns": {
+        "decimal": 0.009548198054449702,
+        "denominator": 82122443661368927622,
+        "numerator": 784121356794138041
+      },
+      "ttft_p99_ns": {
+        "decimal": 0.0015055995226479907,
+        "denominator": 162339439810706095374,
+        "numerator": 244418183085941315
+      }
+    },
+    "paired_median": {
+      "goodput_rps": {
+        "decimal": 1.086201492163829,
+        "denominator": 21868168110820217396,
+        "numerator": 23753236832862380973
+      },
+      "ttft_p50_ns": {
+        "decimal": 0.9282808350389853,
+        "denominator": 82122443661368927622,
+        "numerator": 76232690577417574145
+      },
+      "ttft_p99_ns": {
+        "decimal": 0.9204811339283963,
+        "denominator": 162339439810706095374,
+        "numerator": 149430391638259374163
+      }
+    },
+    "paired_rounds": [
+      {
+        "kairyu": {
+          "goodput_rps": 1.4937383962894593,
+          "measurement_span_ns": 32134140837,
+          "request_count": 128,
+          "success_count": 128,
+          "ttft_p50_ns": 13074420697,
+          "ttft_p99_ns": 28724071599,
+          "ttft_sample_count": 128,
+          "ttft_slo_successes": 48
+        },
+        "kairyu_proc": {
+          "goodput_rps": 1.6240897148777174,
+          "measurement_span_ns": 29555017534,
+          "request_count": 128,
+          "success_count": 128,
+          "ttft_p50_ns": 12011897004,
+          "ttft_p99_ns": 26396719048,
+          "ttft_sample_count": 128,
+          "ttft_slo_successes": 48
+        },
+        "kairyu_proc_over_kairyu": {
+          "goodput_rps": {
+            "decimal": 1.0872651589542448,
+            "denominator": 29555017534,
+            "numerator": 32134140837
+          },
+          "ttft_p50_ns": {
+            "decimal": 0.9187326369845356,
+            "denominator": 13074420697,
+            "numerator": 12011897004
+          },
+          "ttft_p99_ns": {
+            "decimal": 0.9189755344057482,
+            "denominator": 28724071599,
+            "numerator": 26396719048
+          }
+        },
+        "repeat": 0,
+        "server_order": [
+          "kairyu",
+          "kairyu-proc"
+        ]
+      },
+      {
+        "kairyu": {
+          "goodput_rps": 1.5134847767121755,
+          "measurement_span_ns": 31714887879,
+          "request_count": 128,
+          "success_count": 128,
+          "ttft_p50_ns": 12562307052,
+          "ttft_p99_ns": 28258431130,
+          "ttft_sample_count": 128,
+          "ttft_slo_successes": 48
+        },
+        "kairyu_proc": {
+          "goodput_rps": 1.6423395793372162,
+          "measurement_span_ns": 29226598813,
+          "request_count": 128,
+          "success_count": 128,
+          "ttft_p50_ns": 11781296276,
+          "ttft_p99_ns": 26053898610,
+          "ttft_sample_count": 128,
+          "ttft_slo_successes": 48
+        },
+        "kairyu_proc_over_kairyu": {
+          "goodput_rps": {
+            "decimal": 1.0851378253734132,
+            "denominator": 29226598813,
+            "numerator": 31714887879
+          },
+          "ttft_p50_ns": {
+            "decimal": 0.937829033093435,
+            "denominator": 3140576763,
+            "numerator": 2945324069
+          },
+          "ttft_p99_ns": {
+            "decimal": 0.9219867334510442,
+            "denominator": 2825843113,
+            "numerator": 2605389861
+          }
+        },
+        "repeat": 1,
+        "server_order": [
+          "kairyu-proc",
+          "kairyu"
+        ]
+      }
+    ],
+    "report_only_material_reduction_classification": {
+      "binding": false,
+      "causal_scope": "net backend swap including process/GIL isolation and ZMQ/msgpack/delta/lifecycle overhead",
+      "ceiling": {
+        "decimal": 0.9,
+        "denominator": 10,
+        "numerator": 9
+      },
+      "classification": "no_material_reduction",
+      "criterion": "<= 0.90",
+      "evidence_integrity_valid": true,
+      "hypothesis_conclusion": "not_supported",
+      "interpretation": "dominant process/GIL-contention hypothesis not supported",
+      "material_reduction": false,
+      "metric": "paired median kairyu-proc/kairyu TTFT p99 ratio",
+      "observed": {
+        "decimal": 0.9204811339283963,
+        "denominator": 162339439810706095374,
+        "numerator": 149430391638259374163
+      },
+      "predeclared_before_measurement": true,
+      "report_only": true
+    }
+  },
+  "diagnostic": "issue-333-kairyu-proc-http",
+  "diagnostic_only": true,
+  "diagnostics": {
+    "method": {
+      "causal_scope": "net backend swap: process/GIL isolation plus ZMQ/msgpack/delta and lifecycle overhead; not a pure GIL attribution",
+      "diagnostic_only": true,
+      "formal_g2_a6_gate": false,
+      "goodput_definition": "TTFT<=10s successes / measurement span",
+      "outlier_removal": false,
+      "performance_acceptance_threshold": null,
+      "report_only_material_reduction_classification": {
+        "binding": false,
+        "conditional_on_all_integrity_checks": true,
+        "criterion": "<= 0.90",
+        "material_interpretation": "dominant process/GIL-contention hypothesis supported",
+        "metric": "paired median kairyu-proc/kairyu TTFT p99 ratio",
+        "predeclared_before_measurement": true
+      },
+      "retry": false,
+      "ttft_quantile": "nearest-rank over successful measurement requests",
+      "warmup_excluded_from_metrics": true
+    },
+    "scenario_metrics": {
+      "issue333-tp4-sharegpt-r0-kairyu": {
+        "goodput_rps": 1.4937383962894593,
+        "measurement_span_ns": 32134140837,
+        "request_count": 128,
+        "success_count": 128,
+        "ttft_p50_ns": 13074420697,
+        "ttft_p99_ns": 28724071599,
+        "ttft_sample_count": 128,
+        "ttft_slo_successes": 48
+      },
+      "issue333-tp4-sharegpt-r0-kairyu-proc": {
+        "goodput_rps": 1.6240897148777174,
+        "measurement_span_ns": 29555017534,
+        "request_count": 128,
+        "success_count": 128,
+        "ttft_p50_ns": 12011897004,
+        "ttft_p99_ns": 26396719048,
+        "ttft_sample_count": 128,
+        "ttft_slo_successes": 48
+      },
+      "issue333-tp4-sharegpt-r1-kairyu": {
+        "goodput_rps": 1.5134847767121755,
+        "measurement_span_ns": 31714887879,
+        "request_count": 128,
+        "success_count": 128,
+        "ttft_p50_ns": 12562307052,
+        "ttft_p99_ns": 28258431130,
+        "ttft_sample_count": 128,
+        "ttft_slo_successes": 48
+      },
+      "issue333-tp4-sharegpt-r1-kairyu-proc": {
+        "goodput_rps": 1.6423395793372162,
+        "measurement_span_ns": 29226598813,
+        "request_count": 128,
+        "success_count": 128,
+        "ttft_p50_ns": 11781296276,
+        "ttft_p99_ns": 26053898610,
+        "ttft_sample_count": 128,
+        "ttft_slo_successes": 48
+      }
+    }
+  },
+  "evidence_valid": true,
+  "external_workdir_logs_required": true,
+  "performance_acceptance_threshold": null,
+  "raw": {
+    "name": "issue-333-proc-http-raw.jsonl",
+    "row_count": 662,
+    "sha256": "21ba4789cf34fcf4beab5ab5862952574693f80c8b608c2cede002da05088925"
+  },
+  "schema_version": "kairyu.issue-333.proc-http-diagnostic.v2"
+}
