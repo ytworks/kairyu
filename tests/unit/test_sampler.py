@@ -7,6 +7,8 @@ import torch
 
 from kairyu.engine.core.sampler import Sampler, mix_seed, stable_request_seed
 from kairyu.engine.core.sampling_types import EngineSampling
+from kairyu.kernels import sampling_gpu
+from kairyu.kernels.sampling_gpu import stateless_gumbel_argmax
 
 VOCAB = 32
 
@@ -146,6 +148,112 @@ def test_seed_mixing_not_additive():
     assert stable_request_seed("a") != stable_request_seed("b")
 
 
+def test_stateless_gumbel_cpu_has_fixed_golden_draws():
+    log_weights = torch.tensor([-2.5, -1.0, 0.0, 0.5, -0.25, 1.0, -4.0, 0.25])
+    seeds = (0, 1, 2, 3, 7, 71, 0x12345678, 0x89ABCDEF, 0xFFFFFFFF)
+
+    actual = [
+        int(stateless_gumbel_argmax(log_weights, seed).item()) for seed in seeds
+    ]
+
+    assert actual == [0, 3, 3, 5, 4, 5, 2, 5, 1]
+
+
+@pytest.mark.parametrize(
+    "sampling",
+    [
+        EngineSampling(temperature=0.7),
+        EngineSampling(temperature=0.7, min_p=0.2),
+        EngineSampling(temperature=0.7, top_k=5),
+        EngineSampling(temperature=0.7, top_p=0.65),
+        EngineSampling(temperature=1.3, min_p=0.05, top_k=7, top_p=0.8),
+    ],
+    ids=("plain", "min-p", "top-k", "top-p", "combined"),
+)
+def test_cpu_scaled_wrappers_share_one_draw_across_seed_and_filter_matrix(sampling):
+    logits = torch.tensor(
+        [1.7, -0.4, 0.2, 2.3, -1.8, 0.9, 1.1, -0.7, 0.5, 1.9, -2.2]
+    )
+
+    for base_seed in (0, 1, 71, (1 << 63) - 1):
+        for position in (0, 1, 7, 31):
+            tensor_token = Sampler._sample_scaled_device(
+                logits, sampling, base_seed, position
+            )
+            scalar_token = Sampler._sample_scaled(
+                logits, sampling, base_seed, position
+            )
+
+            assert tensor_token.device.type == "cpu"
+            assert tensor_token.dtype == torch.int64
+            assert scalar_token == int(tensor_token.item())
+
+
+def test_cpu_public_sample_matches_the_canonical_gumbel_helper():
+    logits = torch.tensor([-1.2, 0.3, 1.8, -0.7, 0.9, 1.1, -2.0, 0.1])
+    sampling = EngineSampling(temperature=0.83, seed=353)
+
+    for position in (0, 1, 4, 19):
+        probabilities = torch.softmax(logits / sampling.temperature, dim=-1)
+        expected = stateless_gumbel_argmax(
+            torch.log(probabilities),
+            mix_seed(sampling.seed, position),
+        )
+        actual = Sampler().sample("request", sampling, position, logits)
+
+        assert actual.token_id == int(expected.item())
+
+
+def test_cpu_scaled_sampling_falls_back_deterministically_for_degenerate_weights():
+    sampling = EngineSampling(temperature=0.8, min_p=0.3, top_k=3, top_p=0.5)
+    unfiltered = EngineSampling(temperature=0.8)
+    degenerate = torch.full((8,), float("-inf"))
+    only_one_legal = torch.tensor(
+        [float("-inf"), float("-inf"), 3.0, float("-inf"), float("-inf")]
+    )
+
+    for position in (0, 5, 17):
+        # With no filter, softmax(-inf, ...) leaves a NaN total. The CPU fast
+        # path must reject it and retain the same deterministic fallback.
+        assert Sampler._sample_scaled(degenerate, unfiltered, 71, position) == 0
+        assert Sampler._sample_scaled(degenerate, sampling, 71, position) == 0
+        assert int(
+            Sampler._sample_scaled_device(degenerate, sampling, 71, position).item()
+        ) == 0
+        assert Sampler._sample_scaled(only_one_legal, sampling, 71, position) == 2
+        assert int(
+            Sampler._sample_scaled_device(only_one_legal, sampling, 71, position).item()
+        ) == 2
+
+
+def test_cpu_offset_cache_is_reused_bounded_and_never_mutated(monkeypatch):
+    cache = sampling_gpu._cached_cpu_offsets
+    cache.cache_clear()
+    first = cache(17)
+    pristine = first.clone()
+
+    stateless_gumbel_argmax(torch.zeros(17), 353)
+
+    assert cache(17) is first
+    assert torch.equal(first, pristine)
+    for size in (18, 19, 20, 21):
+        cache(size)
+    info = cache.cache_info()
+    assert info.maxsize == 4
+    assert info.currsize == 4
+
+    calls: list[int] = []
+
+    def recording_cache(size: int) -> torch.Tensor:
+        calls.append(size)
+        return cache(size)
+
+    monkeypatch.setattr(sampling_gpu, "_cached_cpu_offsets", recording_cache)
+    oversized = torch.zeros(sampling_gpu._MAX_CACHED_CPU_OFFSETS + 1)
+    stateless_gumbel_argmax(oversized, 353)
+    assert calls == []
+
+
 def test_top_k_one_is_greedy():
     logits = _logits()
     token = Sampler().sample("r", EngineSampling(temperature=1.0, top_k=1), 0, logits)
@@ -226,12 +334,60 @@ class _FakeEnforcer:
         return len(self.accepted) >= self.terminated_after
 
 
+class _PermissiveEnforcer:
+    """Stateful grammar stand-in whose mask permits the complete vocabulary."""
+
+    def __init__(self) -> None:
+        self.accepted: list[int] = []
+
+    @staticmethod
+    def mask_logits(logits):
+        return logits
+
+    def accept(self, token_id: int) -> bool:
+        self.accepted.append(token_id)
+        return True
+
+    @staticmethod
+    def is_terminated() -> bool:
+        return False
+
+
 def _sampler_with_fake_enforcer() -> tuple[Sampler, _FakeEnforcer]:
     sampler = Sampler(vocab_provider=lambda: [f"t{i}" for i in range(VOCAB)])
     fake = _FakeEnforcer()
     state = sampler._state_for("r", EngineSampling())
     state.enforcer = fake  # swap in the fake behind the same interface
     return sampler, fake
+
+
+def test_permissive_structured_sampling_matches_unstructured_rng_trajectory():
+    logits = torch.tensor(
+        [0.1, 1.7, -0.4, 0.8, 2.1, -1.3, 0.5, 1.2, -0.9, 0.3]
+    )
+    sampling = EngineSampling(
+        temperature=0.73,
+        min_p=0.04,
+        top_k=8,
+        top_p=0.9,
+        seed=353,
+    )
+    structured = Sampler()
+    enforcer = _PermissiveEnforcer()
+    structured._state_for("structured", sampling).enforcer = enforcer
+    unstructured = Sampler()
+
+    structured_tokens = [
+        structured.sample("structured", sampling, position, logits).token_id
+        for position in range(8)
+    ]
+    unstructured_tokens = [
+        unstructured.sample("unstructured", sampling, position, logits).token_id
+        for position in range(8)
+    ]
+
+    assert structured_tokens == unstructured_tokens
+    assert enforcer.accepted == structured_tokens
 
 
 def test_grammar_mask_applies_before_selection():

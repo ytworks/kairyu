@@ -246,9 +246,9 @@ New `kairyu/engine/core/sampler.py`, pure torch functions (device-agnostic):
    `processed_logprobs` is a future opt-in).
 2. **xgrammar `mask_logits()` FIRST** (if enforcer) — matching vLLM, which masks
    raw logits before the sampler. Mask-last can leave zero grammar-legal tokens
-   after top-k/top-p (NaN → multinomial crash) and distorts the nucleus.
-   Mask-first + `min_tokens_to_keep=1` semantics on top-p/min-p guarantees
-   non-empty support; penalties cannot resurrect `-inf`.
+   after top-k/top-p, triggering the degenerate argmax fallback and distorting
+   the nucleus. Mask-first + `min_tokens_to_keep=1` semantics on top-p/min-p
+   guarantees non-empty support; penalties cannot resurrect `-inf`.
 3. While the logical output position is below `min_tokens`, mask model EOS and
    all request/model stop-token IDs to `-inf`.
 4. Penalties — **repetition over prompt + committed outputs; presence/frequency
@@ -257,7 +257,7 @@ New `kairyu/engine/core/sampler.py`, pure torch functions (device-agnostic):
 5. `temperature == 0` → argmax **on the masked logits**, done; else scale.
 6. **min_p, then top-k, then top-p** (vLLM v1 order; HF differs — divergence
    recorded here deliberately, vLLM compat wins).
-7. softmax → seeded sample.
+7. softmax → stateless seeded Gumbel-max sample.
 
 **Minimum-token amendment (2026-08-04, issue #352):** CPU, CUDA, batched
 greedy, overlap, P-D, TP/EP, and speculative target sampling all apply the same
@@ -275,19 +275,29 @@ process, and D6 splits processes); per-position generator seed =
 splitmix64-style mix of (base_seed, position) — plain addition collides across
 adjacent user seeds. Scope of the claim: the sampler *preserves* TP rank
 agreement given bitwise-identical logits per rank (a collectives/runner
-property); it cannot repair divergent logits. torch CPU multinomial with a
-seeded Generator is deterministic per build (stated assumption; cross-platform
-bitwise identity is not claimed).
+property); it cannot repair divergent logits. CPU, structured-output, and CUDA
+paths use one stateless Gumbel-max algorithm:
+each uniform is a pure function of `(base_seed, output_position, vocab_index)`.
+Changing only the sampling execution path therefore does not change the random
+stream, and representative fixed-logit CPU/CUDA parity is a binding regression
+gate. Ordinary fp32 filtering and transcendental operations may differ by a
+few ulps across devices, so candidates at a min-p/top-p/top-k support boundary
+or a near-tied final Gumbel score are not claimed to have a cross-device token
+guarantee.
 
-**GPU amendment (2026-07-27, issue #206):** grammar-free CUDA sampling keeps
-the same reviewed processing order but uses stateless Gumbel-max. Each uniform
-is a pure function of `(base_seed, output_position, vocab_index)`, so replay,
-TP rank execution, and batch reordering need no host-owned generator offset.
-The guarantee remains “same seed/position/logits → same CUDA token”; the exact
-stochastic sequence is not claimed to match torch CPU multinomial. Greedy
+**GPU amendment (2026-07-27, issue #206; amended 2026-08-05, issue #353):**
+grammar-free CUDA sampling keeps the reviewed processing order and the original
+stateless Gumbel-max sequence. CPU and structured-output sampling now use that
+same canonical tensor draw instead of `torch.multinomial`; their prior seeded
+stochastic sequence intentionally changes. Replay, TP rank execution, batch
+reordering, and CPU reproduction need no host-owned generator offset. Greedy
 sampling (and therefore spec ≡ greedy) is unchanged. Device penalties include
 committed host history plus uncommitted device scalars. Logprobs remain raw and
-temperature-independent.
+temperature-independent. The CPU implementation skips degenerate-fallback
+construction on positive finite support and retains at most four immutable
+vocabulary-offset tensors up to 1,048,576 entries; concurrent cold misses may
+construct duplicate temporary tensors. CUDA retains the original branchless
+operations and sequence.
 
 **Incremental penalty-state amendment (2026-07-27, issue #216):** a
 penalty-active request lazily allocates one dense row for its logits
