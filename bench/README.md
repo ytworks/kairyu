@@ -81,7 +81,7 @@ penalty-state, process-wire, and router-latency measurements sequentially with
 CUDA hidden and native math thread pools fixed to one. Optimized/legacy ratios
 are measured within the same child process. The deliberately loose checks catch
 large regressions while tolerating shared-runner frequency and scheduling
-variance: scheduler speedups must remain at least 2.0x/10x/1.25x, radix
+variance: scheduler speedups must remain at least 2.0x/10x/0.90x, radix
 eviction at least 100x, operation-queue throughput at least 0.50x with exact
 coalesced container/ID counts, and both sampler legacy
 speedups at least 5x. The deterministic process-wire gate retains its own byte

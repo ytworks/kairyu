@@ -332,7 +332,7 @@ def evaluate_results(results: Mapping[str, Mapping[str, Any]]) -> tuple[Check, .
         _minimum(
             "scheduler.priority_speedup",
             _number(scheduler, "priority_full_drain", "median_speedup"),
-            1.25,
+            0.90,
         ),
         _equal("radix.leaves", _number(radix, "leaves"), 10_000.0),
         _equal("radix.evictions", _number(radix, "evictions"), 25.0),

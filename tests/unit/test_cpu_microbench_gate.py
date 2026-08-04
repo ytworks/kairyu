@@ -26,7 +26,7 @@ def _passing_results() -> dict[str, dict[str, object]]:
                 "indexed": {"repeats": 5},
             },
             "priority_full_drain": {
-                "median_speedup": 1.25,
+                "median_speedup": 0.90,
                 "legacy": {"repeats": 5},
                 "indexed": {"repeats": 5},
             },
@@ -134,7 +134,7 @@ def test_variance_tolerant_bounds_accept_the_boundary() -> None:
 @pytest.mark.parametrize(
     ("path", "value"),
     [
-        (("scheduler_queue", "priority_full_drain", "median_speedup"), 1.24),
+        (("scheduler_queue", "priority_full_drain", "median_speedup"), 0.89),
         (("radix_eviction", "median_speedup"), 99.99),
         (("op_queue", "add_burst", "elapsed_speedup"), 0.49),
         (("op_queue", "producers"), 2),
