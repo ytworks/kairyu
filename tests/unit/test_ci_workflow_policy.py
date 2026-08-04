@@ -9,6 +9,8 @@ from typing import Any
 
 import yaml
 
+from scripts import cpu_microbench_gate
+
 _ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOWS = _ROOT / ".github" / "workflows"
 
@@ -204,6 +206,65 @@ def test_ci_jobs_are_bounded_and_uv_uses_the_committed_lockfile() -> None:
         "Real Docker runner conformance",
     )["run"]
     assert "--fail-on-skip" in docker_command
+
+
+def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
+    workflow, text = _load_workflow("ci.yml")
+    job = workflow["jobs"]["cpu-microbench"]
+
+    assert job["name"] == "CPU microbenchmark regression gate"
+    assert job["timeout-minutes"] == "10"
+    assert "continue-on-error" not in job
+    assert "if" not in job
+    assert "needs" not in job
+    assert "pull_request_target" not in text
+    assert job["env"] == {
+        "KAIRYU_CPU_MICROBENCH_REPORT": (
+            "${{ runner.temp }}/kairyu-cpu-microbench/report.json"
+        )
+    }
+    assert (
+        cpu_microbench_gate.BENCHMARK_TIMEOUT_SECONDS
+        * len(cpu_microbench_gate.BENCHMARKS)
+        < int(job["timeout-minutes"]) * 60
+    )
+    setup_steps = [
+        step
+        for step in job["steps"]
+        if isinstance(step, dict)
+        and step.get("uses")
+        == "astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86"
+    ]
+    assert len(setup_steps) == 1
+    assert setup_steps[0]["with"]["python-version"] == "3.12"
+    assert _named_step(job, "Sync dependencies")["run"] == (
+        "uv sync --frozen --dev"
+    )
+    command = _named_step(
+        job,
+        "Run variance-tolerant CPU microbenchmarks",
+    )["run"]
+    assert "uv run --frozen python scripts/cpu_microbench_gate.py" in command
+    assert '--output "$KAIRYU_CPU_MICROBENCH_REPORT"' in command
+    assert job["permissions"] == {"contents": "read"}
+    checkout = [
+        step
+        for step in job["steps"]
+        if isinstance(step, dict)
+        and step.get("uses")
+        == "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+    ]
+    assert len(checkout) == 1
+    assert checkout[0]["with"]["persist-credentials"] == "false"
+    upload = _named_step(job, "Retain CPU microbenchmark diagnostics")
+    assert upload["if"] == "always()"
+    assert upload["uses"] == (
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
+    )
+    assert upload["with"]["path"] == "${{ env.KAIRYU_CPU_MICROBENCH_REPORT }}"
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert upload["with"]["retention-days"] == "7"
+    assert text.count("scripts/cpu_microbench_gate.py") == 1
 
 
 def test_kind_job_runs_helm_tests_as_an_applicable_non_skipping_suite() -> None:

@@ -50,6 +50,38 @@ jobs:
             --cov=kairyu --cov-append --cov-report=term-missing \
             --cov-fail-under=80
 
+  cpu-microbench:
+    # Issue #378: a cheap smoke alarm for large CPU hot-path regressions. The
+    # same-run legacy ratios use loose bounds and are not formal perf evidence.
+    name: CPU microbenchmark regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      KAIRYU_CPU_MICROBENCH_REPORT: ${{ runner.temp }}/kairyu-cpu-microbench/report.json
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync --frozen --dev
+      - name: Run variance-tolerant CPU microbenchmarks
+        run: >-
+          uv run --frozen python scripts/cpu_microbench_gate.py
+          --output "$KAIRYU_CPU_MICROBENCH_REPORT"
+      - name: Retain CPU microbenchmark diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpu-microbench-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.KAIRYU_CPU_MICROBENCH_REPORT }}
+          if-no-files-found: error
+          retention-days: 7
+
   compose-smoke:
     # Black-box gate C3 (goal G3): gateway + 3 mock replicas from a cold
     # docker compose up, including the kill/recover test. Outside coverage.

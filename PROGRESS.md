@@ -897,6 +897,12 @@ interpreter running `kairyu serve`, follows process-isolated engines and TP
 ranks, records time-ordered Python stacks or CUDA/OSRT/Python-GIL timelines,
 and deliberately keeps profiled latency/throughput outside formal evidence.
 
+Portable CI now has a dedicated CPU microbenchmark smoke gate for scheduler,
+radix eviction, engine operation queues, sampler penalty state, process-wire
+growth, and routing latency. Fixed short workloads use same-process legacy
+ratios and deliberately loose bounds, retain one diagnostic JSON report, and
+never promote shared-runner absolute timings to formal performance evidence.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -904,6 +910,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [progress] Portable CI catches large CPU hot-path regressions
+- What: added one Python 3.12 CPU-only CI job that sequentially runs the six existing scheduler queue, radix eviction, operation queue, sampler penalty-state, process-wire, and router-latency benchmarks. Fixed short workloads, pinned native thread counts, same-process legacy ratios, structural coalescing checks, deterministic wire growth, and a strict 10 ms router p99 budget feed one fail-closed JSON report with seven-day diagnostic retention. The ratio limits are intentionally loose and absolute shared-runner timings remain non-binding.
+- Why: these hot paths already had fast source-checkout benchmarks but no pull-request coverage, allowing large CPU regressions to land without consuming any GPU budget.
+- Refs: issue #378; `scripts/cpu_microbench_gate.py`; `.github/workflows/ci.yml`; `bench/README.md`
 
 ### 2026-08-05 — [progress] Bounded serving profiles expose Python and CUDA stalls
 - What: added a source-checkout `profile_server.py` launcher for finite, non-overwriting py-spy speedscope and Nsight Systems process-tree captures of `kairyu serve`. It preserves argv boundaries, follows process-isolated engines and TP ranks, separates Nsight load delay from the capture window, discards the recorded environment, and emits an exact dependency-free dry run. The GPU runbook now pins profiler preflight, workload, lifecycle, provenance, privacy, and interpretation rules; profiled runs remain diagnostic rather than formal performance evidence.

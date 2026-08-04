@@ -66,6 +66,32 @@ edges are allowlisted in the manifest's
 `[compatibility_imports]` table; checkout validation fails on any undeclared,
 removed, or redirected edge.
 
+### CPU microbenchmark CI smoke gate
+
+Pull requests run six source-checkout-only CPU benchmarks in one dedicated
+Python 3.12 job:
+
+```bash
+uv run --frozen python scripts/cpu_microbench_gate.py \
+  --output /tmp/kairyu-cpu-microbench.json
+```
+
+The runner executes scheduler queue, radix eviction, operation queue, sampler
+penalty-state, process-wire, and router-latency measurements sequentially with
+CUDA hidden and native math thread pools fixed to one. Optimized/legacy ratios
+are measured within the same child process. The deliberately loose checks catch
+large regressions while tolerating shared-runner frequency and scheduling
+variance: scheduler speedups must remain at least 2.0x/10x/1.25x, radix
+eviction at least 100x, operation-queue throughput at least 0.50x with exact
+coalesced container/ID counts, and both sampler legacy
+speedups at least 5x. The deterministic process-wire gate retains its own byte
+growth contract, and router p99 remains strictly below 10 ms.
+
+The JSON report is a short-lived CI diagnostic, not formal benchmark evidence.
+Absolute timings and the profiled runner must not be used to claim a product
+speedup; reproduce any suspected regression on the owning benchmark before
+changing production behavior or a formal performance gate.
+
 ### Target and credential migration
 
 Every benchmark target now uses one package-owned grammar:
