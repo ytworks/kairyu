@@ -20,7 +20,7 @@ from typing import Literal, Protocol, runtime_checkable
 
 _TOY_VOCAB = 50_000
 _REPLACEMENT_CHAR = "�"
-_DECODE_STREAM_INVALID_PREFIX = "Invalid prefix encountered while decoding stream."
+_DECODE_STREAM_INVALID_PREFIX = "Invalid prefix encountered"
 # eos candidates probed when tokenizer_config.json is absent, most-specific first
 _COMMON_EOS_TOKENS = ("<|eot_id|>", "<|im_end|>", "<|endoftext|>", "</s>")
 _STANDARD_SPECIAL_TOKEN_FIELDS = (

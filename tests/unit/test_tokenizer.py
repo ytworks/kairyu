@@ -875,6 +875,39 @@ class TestIncrementalDetokenizer:
         assert stream.calls == [1, 2]
         assert adapter.finalize_suffix() == "�"
 
+    def test_hf_adapter_recovers_legacy_invalid_prefix_message(self):
+        streams = []
+
+        class _Stream:
+            def __init__(self, generation):
+                self.generation = generation
+
+            def step(self, _tokenizer, token_id):
+                if self.generation == 0:
+                    if token_id == 1:
+                        return "a"
+                    if token_id == 2:
+                        return None
+                    raise Exception("Invalid prefix encountered")
+                return "z"
+
+        def stream_factory():
+            stream = _Stream(len(streams))
+            streams.append(stream)
+            return stream
+
+        adapter = _HFDecodeStream(
+            object(),
+            stream_factory,
+            lambda token_ids: "�" if tuple(token_ids) == (2,) else "",
+            supports_replacement_flush=True,
+            special_token_ids=frozenset(),
+        )
+
+        assert adapter.push((1, 2, 3)) == "a�z"
+        assert len(streams) == 2
+        assert adapter.finalize_suffix() == ""
+
     def test_hf_generic_replacement_token_is_flushed_at_terminal(self, tmp_path):
         from tokenizers import Tokenizer, decoders, models
 
