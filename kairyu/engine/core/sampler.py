@@ -5,7 +5,8 @@ Order of operations (reviewed convention, m8 §6):
 1. raw logits → capture ``log_softmax`` for logprob reporting (vLLM v1
    ``raw_logprobs`` default; temperature-independent, OpenAI-style).
 2. xgrammar mask FIRST (mask-last can leave zero legal tokens after top-k/top-p
-   → NaN multinomial; mask-first plus keep-1 filters guarantees support).
+   → zero-support argmax fallback; mask-first plus keep-1 filters guarantees
+   support).
 3. While ``position < min_tokens``, mask EOS and every stop-token ID.  The
    logical scheduled position is authoritative under overlap/speculation.
 4. Penalties — repetition over prompt + committed outputs; presence/frequency

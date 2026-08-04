@@ -246,9 +246,9 @@ New `kairyu/engine/core/sampler.py`, pure torch functions (device-agnostic):
    `processed_logprobs` is a future opt-in).
 2. **xgrammar `mask_logits()` FIRST** (if enforcer) — matching vLLM, which masks
    raw logits before the sampler. Mask-last can leave zero grammar-legal tokens
-   after top-k/top-p (NaN → multinomial crash) and distorts the nucleus.
-   Mask-first + `min_tokens_to_keep=1` semantics on top-p/min-p guarantees
-   non-empty support; penalties cannot resurrect `-inf`.
+   after top-k/top-p, triggering the degenerate argmax fallback and distorting
+   the nucleus. Mask-first + `min_tokens_to_keep=1` semantics on top-p/min-p
+   guarantees non-empty support; penalties cannot resurrect `-inf`.
 3. While the logical output position is below `min_tokens`, mask model EOS and
    all request/model stop-token IDs to `-inf`.
 4. Penalties — **repetition over prompt + committed outputs; presence/frequency
