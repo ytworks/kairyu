@@ -257,8 +257,17 @@ at `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05/`.
 Streaming detokenization is now truly incremental on the supported native
 paths. `HFTokenizer` delegates arriving deltas to the Rust `DecodeStream`, Toy
 joins only new IDs, and unknown/overridden tokenizer implementations retain the
-exact full-prefix fallback. One final full decode preserves byte-identical
-output. Qwen3-32B tokenizer parity passed 19 multilingual/code/random sequences
+exact full-prefix fallback. Published incremental text is authoritative:
+built-in finalization only appends a replacement-bearing flush decoded from the
+un-emitted terminal window or a safe cached fallback suffix, is idempotent, and
+never re-decodes published history or retracts an SSE prefix. Legacy push-only
+custom streams retain their historical guarded terminal decode for
+compatibility. The engine independently rejects a retracting terminal candidate
+before stop matching. If Rust rejects a later token because malformed held bytes
+make its reconstructed prefix disagree with already-published text, the HF
+adapter appends only that held replacement suffix and resumes in a fresh native
+stream.
+Qwen3-32B tokenizer parity passed 19 multilingual/code/random sequences
 (5,792 tokens); at 4,096 tokens the native path measured 0.0149 s versus
 2.038 s for repeated full-prefix decode (137.25×), with linear operation-count
 coverage and unchanged stop/stream semantics. Stop matching now follows the
@@ -910,6 +919,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [amendment] Final decoding never rewrites streamed text
+- What: made accumulated incremental detokenizer output authoritative at request completion. Native streams may append an optional `finalize_suffix()` delta; the HF adapter excludes special IDs and decodes only its un-emitted replacement-bearing terminal window, while Toy appends nothing. If Rust rejects a later token because malformed held bytes make its reconstructed prefix disagree with published text, the adapter appends only the held replacement suffix and resumes in a fresh native stream. The full-prefix compatibility path reuses its last safe cached candidate without another decode, and legacy push-only custom streams retain a guarded historical terminal decode. Finalization is idempotent, and the engine independently preserves the published prefix before terminal stop matching. Valid multilingual, emoji, contextual replacement-token, CTC, special-token, and byte-fallback sequences retain full-decode parity whenever the full decode extends published text; malformed bytes can only append their held replacement suffix.
+- Why: a final full-history re-decode could disagree with already-delivered incremental chunks, duplicating or dropping SSE text or causing the no-retraction stop matcher to fail the request.
+- Refs: issue #361; D1 in `docs/design/m8-engine-cpu.md`; `kairyu/engine/tokenizer.py`; `kairyu/engine/engine_loop.py`
 
 ### 2026-08-05 — [progress] Portable CI catches large CPU hot-path regressions
 - What: added one Python 3.12 CPU-only CI job that sequentially runs the six existing scheduler queue, radix eviction, operation queue, sampler penalty-state, process-wire, and router-latency benchmarks. Fixed short workloads, pinned native thread counts, same-process legacy ratios, structural coalescing checks, deterministic wire growth, and a strict 10 ms router p99 budget feed one fail-closed JSON report with seven-day diagnostic retention. The ratio limits are intentionally loose and absolute shared-runner timings remain non-binding.

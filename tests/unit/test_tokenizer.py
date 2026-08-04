@@ -1,6 +1,7 @@
 """Tokenizer seam: protocol impls + incremental detokenizer (design m8 D1)."""
 
 import json
+import random
 
 import pytest
 
@@ -9,6 +10,7 @@ from kairyu.engine.tokenizer import (
     IncrementalDetokenizer,
     ToyTokenizer,
     _grammar_metadata,
+    _HFDecodeStream,
     grammar_vocabulary,
     load_tokenizer_chat_metadata,
     resolve_tokenizer,
@@ -47,6 +49,7 @@ def hf_tokenizer_dir(tmp_path_factory):
         "the quick brown fox jumps over the lazy dog",
         "こんにちは世界 推論エンジンのテストです",
         "日本語とenglishの混在テキスト",
+        "絵文字 😀 🐉 と CJK 世界のストリーミング",
     ]
     tok = Tokenizer(models.BPE(unk_token="[UNK]"))
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
@@ -57,6 +60,53 @@ def hf_tokenizer_dir(tmp_path_factory):
     tok.save(str(path / "tokenizer.json"))
     (path / "tokenizer_config.json").write_text('{"eos_token": "</s>"}')
     return path
+
+
+def _write_byte_fallback_tokenizer(path):
+    """Write a deterministic byte-fallback tokenizer with a special token."""
+    from tokenizers import Tokenizer, decoders, models
+
+    tokens = (
+        "[UNK]",
+        "a",
+        "z",
+        "<0xE3>",
+        "<0x81>",
+        "<0x82>",  # あ
+        "<0xE4>",
+        "<0xB8>",
+        "<0x96>",  # 世
+        "<0xE7>",
+        "<0x95>",
+        "<0x8C>",  # 界
+        "<0xF0>",
+        "<0x9F>",
+        "<0x98>",
+        "<0x80>",  # 😀
+        "<0x90>",
+        "<0x89>",  # 🐉
+        "<special>",
+    )
+    raw = Tokenizer(
+        models.WordLevel(
+            vocab={token: token_id for token_id, token in enumerate(tokens)},
+            unk_token="[UNK]",
+        )
+    )
+    raw.decoder = decoders.ByteFallback()
+    raw.add_special_tokens(["<special>"])
+    raw.save(str(path / "tokenizer.json"))
+    return path
+
+
+@pytest.fixture
+def byte_fallback_tokenizer(tmp_path):
+    return HFTokenizer(_write_byte_fallback_tokenizer(tmp_path))
+
+
+def _ids_for_tokens(tokenizer, *tokens):
+    by_token = {token: token_id for token_id, token in enumerate(tokenizer.vocab())}
+    return tuple(by_token[token] for token in tokens)
 
 
 class TestToyTokenizer:
@@ -492,6 +542,170 @@ class TestIncrementalDetokenizer:
             stable = detok.push((token_id,))
         assert detok.finalize().startswith(stable)
 
+    def test_hf_fixed_seed_streaming_matches_full_decode(self, hf_tokenizer_dir):
+        tok = HFTokenizer(hf_tokenizer_dir)
+        rng = random.Random(361)
+        atoms = ("hello", " ", "世界", "こんにちは", "😀", "🐉", "日本語", "kairyu")
+
+        for _ in range(80):
+            text = "".join(rng.choice(atoms) for _ in range(rng.randint(1, 24)))
+            ids = tok.encode(text)
+            detok = IncrementalDetokenizer(tok)
+            previous = ""
+            offset = 0
+            while offset < len(ids):
+                width = rng.randint(1, 7)
+                current = detok.push(ids[offset : offset + width])
+                assert current.startswith(previous)
+                previous = current
+                offset += width
+
+            final = detok.finalize()
+            assert final.startswith(previous)
+            assert final == tok.decode(ids)
+            assert detok.finalize() == final
+
+    def test_toy_fixed_seed_streaming_matches_full_decode(self):
+        tok = ToyTokenizer()
+        rng = random.Random(361)
+
+        for _ in range(80):
+            ids = tuple(rng.randrange(50_000) for _ in range(rng.randint(0, 128)))
+            detok = IncrementalDetokenizer(tok)
+            previous = ""
+            offset = 0
+            while offset < len(ids):
+                width = rng.randint(1, 11)
+                current = detok.push(ids[offset : offset + width])
+                assert current.startswith(previous)
+                previous = current
+                offset += width
+
+            assert detok.finalize() == tok.decode(ids)
+            assert detok.finalize().startswith(previous)
+
+    def test_byte_fallback_valid_cjk_emoji_and_special_match_full_decode(
+        self,
+        byte_fallback_tokenizer,
+    ):
+        tok = byte_fallback_tokenizer
+        ids = _ids_for_tokens(
+            tok,
+            "a",
+            "<0xE3>",
+            "<0x81>",
+            "<0x82>",
+            "<0xE4>",
+            "<0xB8>",
+            "<0x96>",
+            "<0xE7>",
+            "<0x95>",
+            "<0x8C>",
+            "<0xF0>",
+            "<0x9F>",
+            "<0x98>",
+            "<0x80>",
+            "<special>",
+            "<0xF0>",
+            "<0x9F>",
+            "<0x90>",
+            "<0x89>",
+            "z",
+        )
+        rng = random.Random(361)
+
+        for _ in range(40):
+            detok = IncrementalDetokenizer(tok)
+            previous = ""
+            offset = 0
+            while offset < len(ids):
+                width = rng.randint(1, 6)
+                current = detok.push(ids[offset : offset + width])
+                assert current.startswith(previous)
+                previous = current
+                offset += width
+
+            assert detok.finalize() == tok.decode(ids) == "aあ世界😀🐉z"
+
+    @pytest.mark.parametrize(
+        "terminal_tokens",
+        [
+            ("<0xE3>",),
+            ("<0xE3>", "<0x81>"),
+            ("<0xF0>", "<0x9F>", "<0x98>"),
+        ],
+    )
+    def test_byte_fallback_incomplete_terminal_is_flushed_without_retraction(
+        self,
+        byte_fallback_tokenizer,
+        terminal_tokens,
+    ):
+        tok = byte_fallback_tokenizer
+        ids = _ids_for_tokens(tok, "a", *terminal_tokens)
+        detok = IncrementalDetokenizer(tok)
+
+        stable = detok.push(ids)
+        final = detok.finalize()
+
+        assert stable == "a"
+        assert final.startswith(stable)
+        assert final == tok.decode(ids)
+        assert detok.finalize() == final
+
+    def test_byte_fallback_terminal_flush_preserves_published_multibyte_text(
+        self,
+        byte_fallback_tokenizer,
+    ):
+        tok = byte_fallback_tokenizer
+        # U+3041 followed by an incomplete leading byte. tokenizers' separate
+        # full decode replaces the entire contiguous byte run, but the native
+        # stream has already correctly published U+3041 and must not retract it.
+        ids = _ids_for_tokens(tok, "<0xE3>", "<0x81>", "<0x81>", "<0xE3>")
+        detok = IncrementalDetokenizer(tok)
+
+        stable = detok.push(ids)
+        final = detok.finalize()
+        separate_full_decode = tok.decode(ids)
+
+        assert stable == "ぁ"
+        assert final == "ぁ�"
+        assert final.startswith(stable)
+        assert not separate_full_decode.startswith(stable)
+        assert final != separate_full_decode
+
+    def test_byte_fallback_malformed_interior_run_recovers_without_retraction(
+        self,
+        byte_fallback_tokenizer,
+    ):
+        tok = byte_fallback_tokenizer
+        ids = _ids_for_tokens(
+            tok,
+            "<0xE3>",
+            "<0x81>",
+            "<0x81>",  # ぁ, already published by DecodeStream
+            "<0xE3>",  # incomplete next character
+            "a",  # makes DecodeStream's full window disagree with ぁ
+            "<0xE4>",
+            "<0xB8>",
+            "<0x96>",  # 世, verifies the restarted stream remains usable
+            "z",
+        )
+        detok = IncrementalDetokenizer(tok)
+        previous = ""
+
+        for token_id in ids:
+            current = detok.push((token_id,))
+            assert current.startswith(previous)
+            previous = current
+
+        final = detok.finalize()
+        separate_full_decode = tok.decode(ids)
+
+        assert final == "ぁ�a世z"
+        assert final.startswith(previous)
+        assert not separate_full_decode.startswith("ぁ")
+        assert detok.finalize() == final
+
     def test_incomplete_utf8_held_back(self, hf_tokenizer_dir):
         # feeding byte-level tokens one at a time must never emit U+FFFD mid-stream
         tok = HFTokenizer(hf_tokenizer_dir)
@@ -551,6 +765,177 @@ class TestIncrementalDetokenizer:
 
         assert detok.finalize() == tok.decode(ids) == "hellos world"
 
+    def test_hf_ctc_no_growth_pending_token_is_not_duplicated(self, tmp_path):
+        from tokenizers import Tokenizer, decoders, models
+
+        raw = Tokenizer(
+            models.WordLevel(
+                vocab={"[UNK]": 0, "a": 1, "b": 2, "|": 3, "<pad>": 4},
+                unk_token="[UNK]",
+            )
+        )
+        raw.decoder = decoders.CTC(
+            pad_token="<pad>",
+            word_delimiter_token="|",
+            cleanup=True,
+        )
+        raw.save(str(tmp_path / "tokenizer.json"))
+        tok = HFTokenizer(tmp_path)
+        detok = IncrementalDetokenizer(tok)
+
+        stable = detok.push((1, 1))
+
+        assert stable == "a"
+        assert detok.finalize() == tok.decode((1, 1)) == "a"
+
+    @pytest.mark.parametrize(
+        ("ids", "stable", "expected"),
+        [
+            ((3, 4, 3), "", "��"),
+            ((1, 3, 4, 3), "a", "a��"),
+        ],
+    )
+    def test_hf_ctc_terminal_replacements_retain_no_growth_separator(
+        self,
+        tmp_path,
+        ids,
+        stable,
+        expected,
+    ):
+        from tokenizers import Tokenizer, decoders, models
+
+        raw = Tokenizer(
+            models.WordLevel(
+                vocab={"[UNK]": 0, "a": 1, "|": 2, "�": 3, "<pad>": 4},
+                unk_token="[UNK]",
+            )
+        )
+        raw.decoder = decoders.CTC(
+            pad_token="<pad>",
+            word_delimiter_token="|",
+            cleanup=True,
+        )
+        raw.save(str(tmp_path / "tokenizer.json"))
+        tok = HFTokenizer(tmp_path)
+        detok = IncrementalDetokenizer(tok)
+
+        assert detok.push(ids) == stable
+        assert detok.finalize() == tok.decode(ids) == expected
+
+    def test_hf_ctc_preterminal_repeats_do_not_grow_wrapper_flush(self, tmp_path):
+        from tokenizers import Tokenizer, decoders, models
+
+        raw = Tokenizer(
+            models.WordLevel(
+                vocab={"[UNK]": 0, "a": 1, "|": 2, "�": 3, "<pad>": 4},
+                unk_token="[UNK]",
+            )
+        )
+        raw.decoder = decoders.CTC(
+            pad_token="<pad>",
+            word_delimiter_token="|",
+            cleanup=True,
+        )
+        raw.save(str(tmp_path / "tokenizer.json"))
+        tok = HFTokenizer(tmp_path)
+        original_decode = tok.decode
+        decode_calls = []
+
+        def counting_decode(token_ids):
+            decode_calls.append(tuple(token_ids))
+            return original_decode(token_ids)
+
+        tok.decode = counting_decode  # type: ignore[method-assign]
+        detok = IncrementalDetokenizer(tok)
+
+        assert detok.push((1,) * 4096 + (3,)) == "a"
+        decode_calls.clear()
+        assert detok.finalize() == "a�"
+        assert decode_calls == [(1, 3), (1,)]
+
+    def test_hf_adapter_does_not_feed_special_ids_to_native_stream(self):
+        class _RecordingStream:
+            def __init__(self):
+                self.calls = []
+
+            def step(self, _tokenizer, token_id):
+                self.calls.append(token_id)
+                return "a" if token_id == 1 else None
+
+        stream = _RecordingStream()
+        adapter = _HFDecodeStream(
+            object(),
+            lambda: stream,
+            lambda token_ids: "a�" if tuple(token_ids) == (1, 2) else "�",
+            supports_replacement_flush=True,
+            special_token_ids=frozenset({99}),
+        )
+
+        assert adapter.push((1, *(99,) * 4096, 2)) == "a"
+        assert stream.calls == [1, 2]
+        assert adapter.finalize_suffix() == "�"
+
+    def test_hf_generic_replacement_token_is_flushed_at_terminal(self, tmp_path):
+        from tokenizers import Tokenizer, decoders, models
+
+        raw = Tokenizer(
+            models.WordLevel(
+                vocab={"[UNK]": 0, "a": 1, "�": 2},
+                unk_token="[UNK]",
+            )
+        )
+        raw.decoder = decoders.Fuse()
+        raw.save(str(tmp_path / "tokenizer.json"))
+        tok = HFTokenizer(tmp_path)
+        detok = IncrementalDetokenizer(tok)
+
+        stable = detok.push((1, 2))
+
+        assert stable == "a"
+        assert detok.finalize() == tok.decode((1, 2)) == "a�"
+
+    def test_hf_wordpiece_replacement_flush_preserves_contextual_space(self, tmp_path):
+        from tokenizers import Tokenizer, decoders, models
+
+        raw = Tokenizer(
+            models.WordPiece(
+                vocab={"[UNK]": 0, "a": 1, "�": 2},
+                unk_token="[UNK]",
+            )
+        )
+        raw.decoder = decoders.WordPiece(prefix="##", cleanup=True)
+        raw.save(str(tmp_path / "tokenizer.json"))
+        tok = HFTokenizer(tmp_path)
+        detok = IncrementalDetokenizer(tok)
+
+        stable = detok.push((1, 2))
+
+        assert stable == "a"
+        assert detok.finalize() == tok.decode((1, 2)) == "a �"
+
+    def test_hf_metaspace_replacement_flush_preserves_contextual_space(self, tmp_path):
+        from tokenizers import Tokenizer, decoders, models
+
+        raw = Tokenizer(
+            models.WordLevel(
+                vocab={"<unk>": 0, "▁a": 1, "▁�": 2},
+                unk_token="<unk>",
+            )
+        )
+        raw.decoder = decoders.Metaspace(
+            replacement="▁",
+            prepend_scheme="always",
+            split=True,
+        )
+        raw.save(str(tmp_path / "tokenizer.json"))
+        tok = HFTokenizer(tmp_path)
+        detok = IncrementalDetokenizer(tok)
+
+        stable = detok.push((1, 2))
+
+        assert stable == "a"
+        assert detok.finalize() == tok.decode((1, 2)) == "a �"
+
     def test_hf_stream_matches_metaspace_decoder(self, tmp_path):
         from tokenizers import Tokenizer, decoders, models
 
@@ -571,7 +956,78 @@ class TestIncrementalDetokenizer:
 
         assert detok.finalize() == tok.decode(ids) == "hellox world"
 
-    def test_long_native_stream_has_linear_decode_work(self):
+    def test_hf_native_finalize_decodes_only_bounded_terminal_suffix(
+        self,
+        byte_fallback_tokenizer,
+    ):
+        tok = byte_fallback_tokenizer
+        a_id, incomplete_id = _ids_for_tokens(tok, "a", "<0xE3>")
+        original_decode = tok.decode
+        decode_calls = []
+
+        def counting_decode(token_ids):
+            decode_calls.append(tuple(token_ids))
+            return original_decode(token_ids)
+
+        tok.decode = counting_decode  # type: ignore[method-assign]
+        ids = (a_id,) * 4096 + (incomplete_id,)
+        detok = IncrementalDetokenizer(tok)
+
+        stable = detok.push(ids)
+        final = detok.finalize()
+
+        assert stable == "a" * 4096
+        assert final == original_decode(ids)
+        assert decode_calls == [
+            (a_id, incomplete_id),
+            (incomplete_id,),
+        ]
+        assert detok.finalize() == final
+        assert decode_calls == [
+            (a_id, incomplete_id),
+            (incomplete_id,),
+        ]
+
+    def test_hf_terminal_tracking_excludes_long_special_token_runs(
+        self,
+        byte_fallback_tokenizer,
+    ):
+        tok = byte_fallback_tokenizer
+        a_id, special_id, incomplete_id = _ids_for_tokens(
+            tok,
+            "a",
+            "<special>",
+            "<0xE3>",
+        )
+        original_decode = tok.decode
+        decode_calls = []
+
+        def counting_decode(token_ids):
+            decode_calls.append(tuple(token_ids))
+            return original_decode(token_ids)
+
+        tok.decode = counting_decode  # type: ignore[method-assign]
+        special_run = (special_id,) * 4096
+
+        detok = IncrementalDetokenizer(tok)
+        assert detok.push((a_id, *special_run)) == "a"
+        assert detok.finalize() == "a"
+        assert decode_calls == []
+
+        detok = IncrementalDetokenizer(tok)
+        assert detok.push((a_id, *special_run, incomplete_id)) == "a"
+        assert detok.finalize() == "a�"
+        assert decode_calls == [
+            (a_id, incomplete_id),
+            (incomplete_id,),
+        ]
+        assert detok.finalize() == "a�"
+        assert decode_calls == [
+            (a_id, incomplete_id),
+            (incomplete_id,),
+        ]
+
+    def test_push_only_custom_stream_keeps_accumulated_output_compatibility(self):
         class _CountingStream:
             def __init__(self, owner):
                 self._owner = owner
@@ -611,6 +1067,107 @@ class TestIncrementalDetokenizer:
         assert tok.full_decode_work == token_count
         assert tok.incremental_work + tok.full_decode_work == 2 * token_count
 
+    def test_push_only_custom_stream_finalization_never_retracts_and_is_idempotent(self):
+        class _PublishedStream:
+            def push(self, token_ids):
+                return "published" if token_ids else ""
+
+            def finalize(self):
+                raise AssertionError("an unrelated legacy finalize must not be called")
+
+        class _DivergingTokenizer:
+            eos_token_id = None
+
+            def __init__(self):
+                self.decode_calls = 0
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids):
+                self.decode_calls += 1
+                return "different-final-text"
+
+            def vocab(self):
+                return []
+
+            def new_decode_stream(self):
+                return _PublishedStream()
+
+        tok = _DivergingTokenizer()
+        detok = IncrementalDetokenizer(tok)
+
+        stable = detok.push((1,))
+        final = detok.finalize()
+
+        assert stable == "published"
+        assert final == stable
+        assert detok.finalize() == final
+        assert tok.decode_calls == 1
+
+    def test_push_only_custom_stream_can_flush_a_safe_terminal_suffix(self):
+        class _HeldTailStream:
+            def push(self, token_ids):
+                return "".join(str(token_id) for token_id in token_ids[:-1])
+
+        class _Tokenizer:
+            eos_token_id = None
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids):
+                return "".join(str(token_id) for token_id in token_ids)
+
+            def vocab(self):
+                return []
+
+            def new_decode_stream(self):
+                return _HeldTailStream()
+
+        detok = IncrementalDetokenizer(_Tokenizer())
+
+        assert detok.push((1, 2, 3)) == "12"
+        assert detok.finalize() == "123"
+
+    def test_finalizable_custom_stream_uses_suffix_without_full_decode(self):
+        class _FinalizableStream:
+            def __init__(self):
+                self.finalize_calls = 0
+
+            def push(self, token_ids):
+                return "".join(str(token_id) for token_id in token_ids[:-1])
+
+            def finalize_suffix(self):
+                self.finalize_calls += 1
+                return "!"
+
+        class _Tokenizer:
+            eos_token_id = None
+
+            def __init__(self):
+                self.stream = _FinalizableStream()
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids):
+                raise AssertionError("finalizable streams must not decode full history")
+
+            def vocab(self):
+                return []
+
+            def new_decode_stream(self):
+                return self.stream
+
+        tok = _Tokenizer()
+        detok = IncrementalDetokenizer(tok)
+
+        assert detok.push((1, 2, 3)) == "12"
+        assert detok.finalize() == "12!"
+        assert detok.finalize() == "12!"
+        assert tok.stream.finalize_calls == 1
+
     def test_tokenizer_without_stream_uses_exact_safe_fallback(self):
         class _ContextTokenizer:
             eos_token_id = None
@@ -631,6 +1188,32 @@ class TestIncrementalDetokenizer:
         assert detok.push((1,)) == "1"
         assert detok.push((2, 3)) == "1|2|3"
         assert detok.finalize() == "1|2|3"
+
+    def test_fallback_finalize_never_retracts_or_decodes_again(self):
+        class _DivergingTokenizer:
+            eos_token_id = None
+
+            def __init__(self):
+                self.decode_calls = 0
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids):
+                self.decode_calls += 1
+                return "published" if tuple(token_ids) == (1,) else "different"
+
+            def vocab(self):
+                return []
+
+        tok = _DivergingTokenizer()
+        detok = IncrementalDetokenizer(tok)
+
+        assert detok.push((1,)) == "published"
+        assert detok.push((2,)) == "published"
+        assert detok.finalize() == "published"
+        assert detok.finalize() == "published"
+        assert tok.decode_calls == 2
 
     def test_decode_override_does_not_inherit_incompatible_native_stream(self):
         class _CustomToy(ToyTokenizer):
