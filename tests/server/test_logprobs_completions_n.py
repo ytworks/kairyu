@@ -7,6 +7,8 @@ from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.torch_runner import TinyAttentionLM, TorchPagedRunner
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.tokenizer import ToyTokenizer
+from kairyu.entrypoints.server.app import _completion_logprobs
+from kairyu.outputs import CompletionOutput, TokenLogprob
 from tests.server._legacy_chat import create_legacy_app
 
 
@@ -31,6 +33,25 @@ def app():
 
 def _client(app) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t")
+
+
+def test_legacy_offsets_use_decoded_contributions_for_raw_vocab_pieces():
+    completion = CompletionOutput(
+        index=0,
+        text=" x",
+        token_ids=(1, 2, 3),
+        logprob_content=(
+            TokenLogprob("<special>", 1, -0.1, bytes_=()),
+            TokenLogprob("Ġ", 2, -0.2, bytes_=(32,)),
+            TokenLogprob("x", 3, -0.3, bytes_=(120,)),
+        ),
+    )
+
+    logprobs = _completion_logprobs(completion)
+
+    assert logprobs is not None
+    assert logprobs.tokens == ["<special>", "Ġ", "x"]
+    assert logprobs.text_offset == [0, 0, 1]
 
 
 async def test_chat_logprobs_via_openai_sdk(app):

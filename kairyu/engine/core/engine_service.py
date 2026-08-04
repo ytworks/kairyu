@@ -102,6 +102,7 @@ def sampling_params_to_wire(params: SamplingParams) -> dict:
         "min_tokens": params.min_tokens,
         "logprobs": params.logprobs,
         "ignore_eos": params.ignore_eos,
+        "skip_special_tokens": params.skip_special_tokens,
         "extra_args": params.extra_args or {},
     }
 

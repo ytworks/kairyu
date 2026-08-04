@@ -11,6 +11,7 @@ back incomplete UTF-8 sequences so an SSE stream never shows U+FFFD.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -19,6 +20,8 @@ from types import MappingProxyType
 from typing import Literal, Protocol, runtime_checkable
 
 _TOY_VOCAB = 50_000
+_MAX_DENSE_VOCAB_MULTIPLIER = 16
+_MAX_DENSE_VOCAB_SLACK = 4_096
 _REPLACEMENT_CHAR = "�"
 _DECODE_STREAM_INVALID_PREFIX = "Invalid prefix encountered"
 # eos candidates probed when tokenizer_config.json is absent, most-specific first
@@ -128,6 +131,41 @@ class TokenDecodeStream(Protocol):
     def push(self, token_ids: Sequence[int]) -> str: ...
 
 
+def _accepts_keyword(function: Callable[..., object], name: str) -> bool:
+    """Return whether a tokenizer extension explicitly accepts ``name``.
+
+    Custom tokenizers predating the optional keyword remain supported. Signature
+    inspection avoids catching a ``TypeError`` raised *inside* an implementation
+    and incorrectly retrying a stateful decode operation.
+    """
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    parameter = parameters.get(name)
+    return (
+        parameter is not None
+        and parameter.kind
+        in {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+    ) or any(
+        candidate.kind is inspect.Parameter.VAR_KEYWORD
+        for candidate in parameters.values()
+    )
+
+
+def _decode_with_special_token_policy(
+    decode: Callable[..., str],
+    *,
+    skip_special_tokens: bool,
+) -> Callable[[Sequence[int]], str]:
+    if _accepts_keyword(decode, "skip_special_tokens"):
+        return lambda token_ids: decode(
+            token_ids,
+            skip_special_tokens=skip_special_tokens,
+        )
+    return decode
+
+
 def _stable_hash(word: str) -> int:
     return int.from_bytes(hashlib.sha256(word.encode()).digest()[:8], "big")
 
@@ -163,13 +201,24 @@ class ToyTokenizer:
             return (0,)
         return tuple(_stable_hash(word) % _TOY_VOCAB for word in words)
 
-    def decode(self, token_ids: Sequence[int]) -> str:
+    def decode(
+        self,
+        token_ids: Sequence[int],
+        *,
+        skip_special_tokens: bool = True,
+    ) -> str:
+        del skip_special_tokens
         return " ".join(f"tok{token_id}" for token_id in token_ids)
 
     def vocab(self) -> list[str]:
         return [f"tok{i}" for i in range(_TOY_VOCAB)]
 
-    def new_decode_stream(self) -> TokenDecodeStream | None:
+    def new_decode_stream(
+        self,
+        *,
+        skip_special_tokens: bool = True,
+    ) -> TokenDecodeStream | None:
+        del skip_special_tokens
         # A subclass may override decode() while inheriting this factory. The
         # Toy chunk format would then disagree with its public full decode, so
         # capability detection must fall back unless both implementations match.
@@ -262,16 +311,37 @@ class HFTokenizer:
     def encode(self, text: str) -> tuple[int, ...]:
         return tuple(self._tok.encode(text, add_special_tokens=False).ids)
 
-    def decode(self, token_ids: Sequence[int]) -> str:
-        return self._tok.decode(list(token_ids), skip_special_tokens=True)
+    def decode(
+        self,
+        token_ids: Sequence[int],
+        *,
+        skip_special_tokens: bool = True,
+    ) -> str:
+        return self._tok.decode(
+            list(token_ids),
+            skip_special_tokens=skip_special_tokens,
+        )
 
     def vocab(self) -> list[str]:
         if self._vocab is None:
-            size = self._tok.get_vocab_size()
+            vocabulary = self._tok.get_vocab()
+            # ``get_vocab_size()`` is a token count, not necessarily the
+            # greatest token ID plus one. Preserve sparse-but-valid IDs so raw
+            # logprob lookup remains an exact ID-indexed table.
+            size = max(vocabulary.values(), default=-1) + 1
+            dense_limit = max(
+                len(vocabulary) * _MAX_DENSE_VOCAB_MULTIPLIER,
+                len(vocabulary) + _MAX_DENSE_VOCAB_SLACK,
+            )
+            if size > dense_limit:
+                raise ValueError(
+                    "tokenizer vocabulary IDs are too sparse to build the "
+                    f"ID-indexed table safely: {len(vocabulary)} entries, "
+                    f"maximum ID {size - 1}"
+                )
             table = [""] * size
-            for token, token_id in self._tok.get_vocab().items():
-                if token_id < size:
-                    table[token_id] = token
+            for token, token_id in vocabulary.items():
+                table[token_id] = token
             self._vocab = table
         return self._vocab
 
@@ -283,7 +353,11 @@ class HFTokenizer:
             add_prefix_space=self._grammar_add_prefix_space,
         )
 
-    def new_decode_stream(self) -> TokenDecodeStream | None:
+    def new_decode_stream(
+        self,
+        *,
+        skip_special_tokens: bool = True,
+    ) -> TokenDecodeStream | None:
         """Use the Rust tokenizer's stateful decoder when the version supports it.
 
         ``tokenizers`` added ``DecodeStream`` after Kairyu's original minimum
@@ -298,11 +372,16 @@ class HFTokenizer:
             return None
         return _HFDecodeStream(
             self._tok,
-            lambda: stream_type(skip_special_tokens=True),
-            self.decode,
+            lambda: stream_type(skip_special_tokens=skip_special_tokens),
+            _decode_with_special_token_policy(
+                self.decode,
+                skip_special_tokens=skip_special_tokens,
+            ),
             supports_replacement_flush=self._grammar_vocab_type
             in {"byte_fallback", "byte_level"},
-            special_token_ids=self._special_token_ids,
+            special_token_ids=(
+                self._special_token_ids if skip_special_tokens else frozenset()
+            ),
         )
 
 
@@ -694,16 +773,42 @@ class IncrementalDetokenizer:
     retracts published text.
     """
 
-    def __init__(self, tokenizer: Tokenizer) -> None:
+    def __init__(
+        self,
+        tokenizer: Tokenizer,
+        *,
+        skip_special_tokens: bool = True,
+    ) -> None:
         self._tokenizer = tokenizer
+        decode_accepts_policy = _accepts_keyword(
+            tokenizer.decode,
+            "skip_special_tokens",
+        )
+        self._decode = _decode_with_special_token_policy(
+            tokenizer.decode,
+            skip_special_tokens=skip_special_tokens,
+        )
         self._ids: list[int] = []
         self._stable = ""
         self._final_candidate = ""
         self._final: str | None = None
         stream_factory = getattr(tokenizer, "new_decode_stream", None)
-        self._stream: TokenDecodeStream | None = (
-            stream_factory() if callable(stream_factory) else None
-        )
+        self._stream: TokenDecodeStream | None = None
+        if callable(stream_factory):
+            factory_accepts_policy = _accepts_keyword(
+                stream_factory,
+                "skip_special_tokens",
+            )
+            if factory_accepts_policy:
+                self._stream = stream_factory(
+                    skip_special_tokens=skip_special_tokens,
+                )
+            elif skip_special_tokens or not decode_accepts_policy:
+                # A flag-aware decode paired with a legacy no-argument stream
+                # cannot promise false-policy parity. Use its full-prefix
+                # decode instead. Fully legacy custom tokenizers retain their
+                # historical stream and own their special-token semantics.
+                self._stream = stream_factory()
         stream_finalize_suffix = (
             getattr(self._stream, "finalize_suffix", None)
             if self._stream is not None
@@ -738,7 +843,7 @@ class IncrementalDetokenizer:
 
         # Safe compatibility path for arbitrary Tokenizer implementations that
         # cannot promise context-correct incremental chunks.
-        text = self._tokenizer.decode(tuple(self._ids))
+        text = self._decode(tuple(self._ids))
         stable = text.rstrip(_REPLACEMENT_CHAR)
         # never retract: only advance when the new stable text extends the old
         if len(stable) > len(self._stable) and stable.startswith(self._stable):
@@ -761,7 +866,7 @@ class IncrementalDetokenizer:
             # Preserve the pre-hook custom-stream contract without invoking a
             # possibly unrelated ``stream.finalize()`` method. The full decode
             # can append held terminal text, but never replace stable output.
-            full = self._tokenizer.decode(tuple(self._ids))
+            full = self._decode(tuple(self._ids))
             self._final = full if full.startswith(self._stable) else self._stable
             return self._final
 
@@ -774,3 +879,7 @@ class IncrementalDetokenizer:
     def uses_native_stream(self) -> bool:
         """Whether pushes use bounded native incremental work."""
         return self._stream is not None
+
+    def decode(self, token_ids: Sequence[int]) -> str:
+        """Decode one request-local token sequence with the configured policy."""
+        return self._decode(token_ids)

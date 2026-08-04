@@ -290,8 +290,6 @@ def validate_native_request_surface(request: GenerationRequest) -> None:
         unsupported.append("best_of")
     if params.prompt_logprobs is not None:
         unsupported.append("prompt_logprobs")
-    if not params.skip_special_tokens:
-        unsupported.append("skip_special_tokens")
     if not isinstance(params.extra_args, Mapping):
         unsupported.append("extra_args")
     else:

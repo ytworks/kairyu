@@ -16,6 +16,7 @@ loop; there is no alternate production overlap core.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
@@ -161,19 +162,32 @@ def _logprob_fields(
     return tuple(entries), cumulative
 
 
-def _token_logprob(tokenizer: Tokenizer, token_id: int, logprob: float) -> TokenLogprob:
-    token = tokenizer.decode((token_id,))
+def _token_logprob(
+    decode: Callable[[tuple[int, ...]], str],
+    vocabulary: tuple[str, ...],
+    token_id: int,
+    logprob: float,
+) -> TokenLogprob:
+    decoded = decode((token_id,))
+    token = (
+        vocabulary[token_id]
+        if type(token_id) is int and 0 <= token_id < len(vocabulary)
+        else decoded
+    )
     return TokenLogprob(
         token=token,
         token_id=token_id,
         logprob=logprob,
-        # bytes_ is the lossless form: byte-level BPE fragments decode to U+FFFD
-        bytes_=tuple(token.encode("utf-8")),
+        # Preserve the existing decoded bytes contract independently of the
+        # raw vocabulary piece used for the public token string.
+        bytes_=tuple(decoded.encode("utf-8")),
     )
 
 
 def _logprob_content(
-    tokenizer: Tokenizer, meta: list[SampledToken]
+    decode: Callable[[tuple[int, ...]], str],
+    vocabulary: tuple[str, ...],
+    meta: list[SampledToken],
 ) -> tuple[TokenLogprob, ...] | None:
     if not any(token.logprob is not None for token in meta):
         return None
@@ -182,10 +196,15 @@ def _logprob_content(
         if token.logprob is None:
             continue
         top = tuple(
-            _token_logprob(tokenizer, top_id, top_lp)
+            _token_logprob(decode, vocabulary, top_id, top_lp)
             for top_id, top_lp in token.top_logprobs or ()
         )
-        base = _token_logprob(tokenizer, token.token_id, token.logprob)
+        base = _token_logprob(
+            decode,
+            vocabulary,
+            token.token_id,
+            token.logprob,
+        )
         entries.append(
             TokenLogprob(
                 token=base.token,
@@ -357,6 +376,7 @@ class EngineLoop:
         _validate_max_model_len(max_model_len)
         self._tokenizer = tokenizer
         self._prompt_vocab_size: int | None = None
+        self._logprob_vocab: tuple[str, ...] | None = None
         self._scheduler = scheduler
         self._runner = runner
         self._pipeline_depth = pipeline_depth
@@ -555,7 +575,10 @@ class EngineLoop:
             sampling=engine_sampling_from(params),
         )
         track = _RequestTrack(
-            detok=IncrementalDetokenizer(self._tokenizer),
+            detok=IncrementalDetokenizer(
+                self._tokenizer,
+                skip_special_tokens=params.skip_special_tokens,
+            ),
             stops=tuple(params.stop or ()),
             num_prompt_tokens=len(engine_request.prompt_token_ids),
             trace_requested=trace_requested,
@@ -1130,7 +1153,15 @@ class EngineLoop:
             track.num_cached_tokens, self._scheduler.num_cached_tokens(request_id)
         )
         logprobs, cumulative = _logprob_fields(track.meta)
-        content = _logprob_content(self._tokenizer, track.meta)
+        content = None
+        if any(token.logprob is not None for token in track.meta):
+            if self._logprob_vocab is None:
+                self._logprob_vocab = tuple(self._tokenizer.vocab())
+            content = _logprob_content(
+                track.detok.decode,
+                self._logprob_vocab,
+                track.meta,
+            )
 
         def _update(text: str, finished: bool, reason: str | None) -> StreamUpdate:
             return StreamUpdate(

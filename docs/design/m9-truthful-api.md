@@ -1,6 +1,7 @@
 # M9 Design: Truthful API — Usage, Chat Templates, Logprobs, Structured Outputs
 
-Status: **Implemented** (2026-07-03; D2 amended 2026-08-04). Reviewed — APPROVE-WITH-AMENDMENTS
+Status: **Implemented** (2026-07-03; D2 amended 2026-08-04; D3 amended
+2026-08-05). Reviewed — APPROVE-WITH-AMENDMENTS
 (2-reviewer agent panel, 2026-07-03; amendments applied inline, see §6).
 All five phases (D1–D5) landed with tests: 437 → 471 tests, 94% coverage.
 Milestone: M9 (realizes roadmap Track P-A, goal G6 gates P-A1..P-A5)
@@ -137,8 +138,7 @@ token-granularity TPOT, results files).
   module, cycle-free): `token: str`, `token_id: int`, `logprob: float`,
   `bytes_: tuple[int, ...] | None`, `top: tuple[TokenLogprob, ...]`.
   `CompletionOutput.logprob_content: tuple[TokenLogprob, ...] | None`, built
-  in `EngineLoop` (per-id decode; byte-level BPE fragments may render U+FFFD —
-  `bytes_` from `token.encode()` is the lossless fallback, caveat recorded).
+  in `EngineLoop` (the token-string and byte rules are pinned below).
   Id-keyed `logprobs` dicts stay for vLLM compat. Wire: msgpack nested lists
   in `_event_from_update`, tuples rebuilt client-side; new `StreamUpdate`
   fields keyword-defaulted (positional construction exists at
@@ -151,6 +151,33 @@ token-granularity TPOT, results files).
   (`content: list[LogprobEntry]`), chunk deltas likewise.
   `sampling_params_from` maps `logprobs=True` →
   `SamplingParams(logprobs=top_logprobs or 0)`.
+- **Raw-vocabulary token amendment (2026-08-05, issue #362):** native
+  `EngineLoop` selected and `top` `TokenLogprob.token` values use the exact raw
+  piece at `vocab[token_id]` from one lazily cached immutable vocabulary
+  snapshot. HF snapshots span `max(token_id) + 1`, rather than the vocabulary
+  entry count, and retain empty holes so sparse valid IDs remain addressable.
+  Before allocating that dense table, a count-relative multiplier plus bounded
+  slack rejects pathologically sparse IDs fail-loud, preventing a tiny
+  vocabulary map from causing unbounded amplification in Kairyu's own
+  ID-indexed table. Loading checkpoint JSON remains the upstream tokenizer's
+  trusted-local-model boundary.
+  Remote adapters continue to preserve the upstream provider's token
+  representation because they do not own a local vocabulary or stable token
+  ID. The native representation is independent of visible detokenization and
+  `skip_special_tokens`: marker text such as a registered special or a
+  byte-level fragment remains inspectable even when its decoded contribution
+  is empty or U+FFFD. Raw lookup requires a true integer ID with
+  `0 <= token_id < len(vocab)`; negative/non-integer IDs must never wrap into
+  the table, and their decoder validation still propagates as an internal-
+  contract failure. Valid non-negative padded LM-head IDs outside the tokenizer
+  table fall back to the prior flag-aware single-ID decoded string instead of
+  failing raw lookup.
+  `bytes_` deliberately remains the UTF-8 bytes of that request's
+  `skip_special_tokens`-sensitive single-ID decode, not an encoding of the raw
+  vocabulary piece. It therefore describes the API's decoded token bytes but
+  does not claim sequence-level losslessness for incomplete byte-level pieces.
+  The selected entry and every top-logprob entry use the same rule, and the
+  numeric ID-keyed compatibility surface is unchanged.
 - `/v1/completions` (legacy text): `CompletionRequest` (`prompt: str |
   list[str] | list[int] | list[list[int]]`, `max_tokens`, sampling fields,
   `logprobs: int | None` — legacy
@@ -159,7 +186,13 @@ token-granularity TPOT, results files).
   responses AND stream chunks (not delta-shaped). Legacy logprobs is the
   four-parallel-array shape built from the same TokenLogprob tuples:
   `tokens[]`, `token_logprobs[]`, `top_logprobs[] | null`, `text_offset[]`
-  (offsets from 0 within `text` — echo is rejected, origin documented).
+  (starts at 0 — echo is rejected, origin documented).
+  **Issue #362 amendment:** raw vocabulary notation must not move the visible
+  text cursor by marker length. Each offset therefore advances by the decoded
+  UTF-8 contribution retained in `bytes_`; a skipped special contributes zero,
+  while malformed third-party bytes fall back to the returned token-string
+  length. This preserves the pre-amendment Kairyu offset basis. Incomplete
+  byte-fragment single-ID decodes retain the existing sequence-level caveat.
   `echo`, `suffix`, `best_of` → 400 with a clear message.
   **Issue #227 amendment:** one `list[int]` is a single pretokenized prompt,
   while `list[list[int]]` is a batch. Empty, mixed, boolean, negative, and

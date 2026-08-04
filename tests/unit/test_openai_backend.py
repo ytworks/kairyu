@@ -786,6 +786,7 @@ async def test_explicit_neutral_generation_value_is_not_silently_dropped(
                 stop_token_ids=[8],
                 min_tokens=4,
                 ignore_eos=True,
+                skip_special_tokens=False,
             ),
                 {
                     "temperature": 1.0,
@@ -797,6 +798,7 @@ async def test_explicit_neutral_generation_value_is_not_silently_dropped(
                 "stop_token_ids": [8],
                 "min_tokens": 4,
                 "ignore_eos": True,
+                "skip_special_tokens": False,
                 "priority": 0,
             },
         ),

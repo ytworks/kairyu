@@ -1293,7 +1293,6 @@ async def test_model_less_constructor_rejects_unshardable_tp_degree():
     [
         ({"best_of": 2}, (), "best_of"),
         ({"prompt_logprobs": 1}, (), "prompt_logprobs"),
-        ({"skip_special_tokens": False}, (), "skip_special_tokens"),
         ({"extra_args": {"unsupported": True}}, (), "extra_args.unsupported"),
         (
             {},
@@ -1350,6 +1349,24 @@ async def test_native_process_layouts_accept_response_format_extension():
     try:
         in_process.validate_request(request)
         process_split.validate_request(request)
+    finally:
+        await in_process.shutdown()
+        await process_split.shutdown()
+
+
+async def test_native_process_layouts_accept_explicit_special_token_output_policy():
+    request = _request(
+        "special-policy-parity",
+        "surface parity",
+        max_tokens=1,
+        skip_special_tokens=False,
+    )
+    in_process = KairyuBackend(num_pages=64)
+    process_split = ZmqEngineBackend(num_pages=64)
+    try:
+        in_process.validate_request(request)
+        process_split.validate_request(request)
+        assert process_split._process is None
     finally:
         await in_process.shutdown()
         await process_split.shutdown()

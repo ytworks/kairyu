@@ -128,6 +128,23 @@ class TestToyTokenizer:
         toy = ToyTokenizer()
         assert toy.decode((1, 2)) == "tok1 tok2"
 
+    def test_special_token_policy_is_a_noop_for_decode_and_native_stream(self):
+        toy = ToyTokenizer()
+        ids = (1, 2, 3)
+        expected = "tok1 tok2 tok3"
+
+        assert toy.decode(ids, skip_special_tokens=True) == expected
+        assert toy.decode(ids, skip_special_tokens=False) == expected
+        for skip_special_tokens in (True, False):
+            detok = IncrementalDetokenizer(
+                toy,
+                skip_special_tokens=skip_special_tokens,
+            )
+            assert detok.uses_native_stream
+            assert detok.push(ids[:1]) == "tok1"
+            assert detok.push(ids[1:]) == expected
+            assert detok.finalize() == expected
+
     def test_no_eos(self):
         assert ToyTokenizer().eos_token_id is None
 
@@ -224,6 +241,39 @@ class TestHFTokenizer:
         vocab = tok.vocab()
         ids = tok.encode("hello")
         assert all(isinstance(vocab[i], str) for i in ids)
+
+    def test_vocab_preserves_sparse_valid_token_ids(self, tmp_path):
+        from tokenizers import Tokenizer, models
+
+        raw = Tokenizer(
+            models.WordLevel(
+                vocab={"[UNK]": 0, "raw-piece": 5, "<special>": 9},
+                unk_token="[UNK]",
+            )
+        )
+        raw.add_special_tokens(["<special>"])
+        raw.save(str(tmp_path / "tokenizer.json"))
+
+        vocab = HFTokenizer(tmp_path).vocab()
+
+        assert len(vocab) == 10
+        assert vocab[5] == "raw-piece"
+        assert vocab[9] == "<special>"
+        assert vocab[1:5] == [""] * 4
+
+    def test_vocab_rejects_pathological_sparse_id_amplification(self, tmp_path):
+        from tokenizers import Tokenizer, models
+
+        raw = Tokenizer(
+            models.WordLevel(
+                vocab={"[UNK]": 0, "far-away": 100_000},
+                unk_token="[UNK]",
+            )
+        )
+        raw.save(str(tmp_path / "tokenizer.json"))
+
+        with pytest.raises(ValueError, match="IDs are too sparse"):
+            HFTokenizer(tmp_path).vocab()
 
     def test_grammar_vocabulary_preserves_byte_level_metadata(self, hf_tokenizer_dir):
         tok = HFTokenizer(hf_tokenizer_dir)
@@ -626,6 +676,36 @@ class TestIncrementalDetokenizer:
                 offset += width
 
             assert detok.finalize() == tok.decode(ids) == "aあ世界😀🐉z"
+
+    def test_hf_decode_and_native_stream_honor_special_token_policy(
+        self,
+        byte_fallback_tokenizer,
+    ):
+        tok = byte_fallback_tokenizer
+        ids = _ids_for_tokens(tok, "a", "<special>", "<0xE3>", "<0x81>", "<0x82>", "z")
+
+        assert tok.decode(ids, skip_special_tokens=True) == "aあz"
+        assert tok.decode(ids, skip_special_tokens=False) == "a<special>あz"
+
+        for skip_special_tokens, expected in (
+            (True, "aあz"),
+            (False, "a<special>あz"),
+        ):
+            detok = IncrementalDetokenizer(
+                tok,
+                skip_special_tokens=skip_special_tokens,
+            )
+            assert detok.uses_native_stream
+            previous = ""
+            for token_id in ids:
+                current = detok.push((token_id,))
+                assert current.startswith(previous)
+                previous = current
+            assert detok.finalize() == expected
+            assert detok.finalize() == tok.decode(
+                ids,
+                skip_special_tokens=skip_special_tokens,
+            )
 
     @pytest.mark.parametrize(
         "terminal_tokens",
@@ -1100,6 +1180,129 @@ class TestIncrementalDetokenizer:
         assert tok.full_decode_work == token_count
         assert tok.incremental_work + tok.full_decode_work == 2 * token_count
 
+    def test_legacy_custom_signatures_remain_compatible_when_specials_are_requested(self):
+        class _LegacyStream:
+            def push(self, token_ids):
+                return "".join(str(token_id) for token_id in token_ids)
+
+        class _LegacyTokenizer:
+            eos_token_id = None
+
+            def __init__(self):
+                self.decode_calls = []
+                self.stream_calls = 0
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids):
+                self.decode_calls.append(tuple(token_ids))
+                return "".join(str(token_id) for token_id in token_ids)
+
+            def vocab(self):
+                return []
+
+            def new_decode_stream(self):
+                self.stream_calls += 1
+                return _LegacyStream()
+
+        tok = _LegacyTokenizer()
+        detok = IncrementalDetokenizer(tok, skip_special_tokens=False)
+
+        assert detok.push((1, 2, 3)) == "123"
+        assert detok.finalize() == "123"
+        assert tok.stream_calls == 1
+        assert tok.decode_calls == [(1, 2, 3)]
+
+    def test_keyword_aware_custom_tokenizer_receives_false_policy(self):
+        class _PolicyStream:
+            def __init__(self, skip_special_tokens):
+                self._skip_special_tokens = skip_special_tokens
+
+            def push(self, token_ids):
+                return "".join(
+                    "<special>" if token_id == 1 else str(token_id)
+                    for token_id in token_ids
+                    if not (self._skip_special_tokens and token_id == 1)
+                )
+
+        class _PolicyTokenizer:
+            eos_token_id = None
+
+            def __init__(self):
+                self.decode_policies = []
+                self.stream_policies = []
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids, *, skip_special_tokens=True):
+                self.decode_policies.append(skip_special_tokens)
+                return "".join(
+                    "<special>" if token_id == 1 else str(token_id)
+                    for token_id in token_ids
+                    if not (skip_special_tokens and token_id == 1)
+                )
+
+            def vocab(self):
+                return ["0", "<special>", "2"]
+
+            def new_decode_stream(self, *, skip_special_tokens=True):
+                self.stream_policies.append(skip_special_tokens)
+                return _PolicyStream(skip_special_tokens)
+
+        tok = _PolicyTokenizer()
+        detok = IncrementalDetokenizer(tok, skip_special_tokens=False)
+
+        assert detok.push((0, 1, 2)) == "0<special>2"
+        assert detok.finalize() == "0<special>2"
+        assert tok.stream_policies == [False]
+        assert tok.decode_policies == [False]
+
+    def test_false_policy_bypasses_legacy_default_skip_custom_stream(self):
+        class _DefaultSkipStream:
+            def push(self, token_ids):
+                return "".join(
+                    str(token_id)
+                    for token_id in token_ids
+                    if token_id != 1
+                )
+
+        class _MixedTokenizer:
+            eos_token_id = None
+
+            def __init__(self):
+                self.decode_policies = []
+                self.stream_calls = 0
+
+            def encode(self, text):
+                return ()
+
+            def decode(self, token_ids, *, skip_special_tokens=True):
+                self.decode_policies.append(skip_special_tokens)
+                return "".join(
+                    "<special>" if token_id == 1 else str(token_id)
+                    for token_id in token_ids
+                    if not (skip_special_tokens and token_id == 1)
+                )
+
+            def vocab(self):
+                return ["0", "<special>", "2"]
+
+            def new_decode_stream(self):
+                self.stream_calls += 1
+                return _DefaultSkipStream()
+
+        tok = _MixedTokenizer()
+        detok = IncrementalDetokenizer(tok, skip_special_tokens=False)
+
+        assert not detok.uses_native_stream
+        assert detok.push((0, 1)) == "0<special>"
+        assert detok.push((2,)) == "0<special>2"
+        assert detok.finalize() == "0<special>2"
+        assert tok.stream_calls == 0
+        assert tok.decode_policies == [False, False]
+
     def test_push_only_custom_stream_finalization_never_retracts_and_is_idempotent(self):
         class _PublishedStream:
             def push(self, token_ids):
@@ -1272,6 +1475,27 @@ class TestIncrementalDetokenizer:
             stable = detok.push((token_id,))
             assert tok.decode(ids).startswith(stable)
         assert detok.finalize() == tok.decode(ids)
+
+    def test_hf_without_decode_stream_fallback_honors_false_special_policy(
+        self,
+        byte_fallback_tokenizer,
+        monkeypatch,
+    ):
+        from tokenizers import decoders
+
+        monkeypatch.delattr(decoders, "DecodeStream")
+        tok = byte_fallback_tokenizer
+        ids = _ids_for_tokens(tok, "a", "<special>", "<0xE3>", "<0x81>", "<0x82>", "z")
+        detok = IncrementalDetokenizer(tok, skip_special_tokens=False)
+
+        assert not detok.uses_native_stream
+        previous = ""
+        for token_id in ids:
+            current = detok.push((token_id,))
+            assert current.startswith(previous)
+            previous = current
+        assert detok.finalize() == "a<special>あz"
+        assert detok.finalize() == tok.decode(ids, skip_special_tokens=False)
 
     def test_fallback_holds_incomplete_replacement_suffix(self):
         class _SplitUtf8Tokenizer:
