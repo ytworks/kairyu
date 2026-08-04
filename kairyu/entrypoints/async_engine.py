@@ -55,10 +55,14 @@ def _default_backend(args: AsyncEngineArgs) -> EngineBackend:
     if importlib.util.find_spec("vllm") is not None:
         from kairyu.engine.vllm_backend import VLLMBackend
 
+        tokenizer_kwargs = (
+            {} if args.tokenizer is None else {"tokenizer": args.tokenizer}
+        )
         return VLLMBackend(
             model=args.model,
             enable_prefix_caching=args.enable_prefix_caching,
             tensor_parallel_size=args.tensor_parallel_size,
+            **tokenizer_kwargs,
         )
     from kairyu.engine.mock import MockBackend
 

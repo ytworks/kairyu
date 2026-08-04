@@ -20,6 +20,7 @@ from kairyu.engine.backend import (
 from kairyu.engine.prompt import (
     MultimodalPrompt,
     PromptInput,
+    TemplatedPrompt,
     TextPrompt,
     TokensPrompt,
     prompt_text,
@@ -154,7 +155,7 @@ class VLLMBackend:
                 "vLLM backend does not support multimodal prompts through "
                 "Kairyu's typed prompt adapter"
             )
-        if not isinstance(prompt, (str, TextPrompt, TokensPrompt)):
+        if not isinstance(prompt, (str, TextPrompt, TemplatedPrompt, TokensPrompt)):
             raise ValueError(
                 "vLLM backend requires a text or token-ID prompt, "
                 f"got {type(prompt).__name__}"
@@ -213,11 +214,19 @@ class VLLMBackend:
         vllm_params = self._vllm.SamplingParams(
             **to_vllm_sampling_kwargs(resolved_params)
         )
+        generate_kwargs: dict[str, object] = {"priority": request.priority}
+        if isinstance(prompt, TemplatedPrompt):
+            # vLLM completion tokenization defaults to adding special tokens.
+            # HF chat templates already own BOS/EOS/control-token insertion, so
+            # applying that completion default here would duplicate tokens.
+            generate_kwargs["tokenization_kwargs"] = {
+                "add_special_tokens": False,
+            }
         async for output in self._engine.generate(
             vllm_prompt,
             vllm_params,
             request.request_id,
-            priority=request.priority,
+            **generate_kwargs,
         ):
             yield self._to_result(request, output)
 

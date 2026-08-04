@@ -267,14 +267,17 @@ def test_compose_uses_the_hardware_selected_attention_backend_by_default():
 
 
 def test_compose_serves_with_the_checkpoint_owned_qwen_chat_template():
-    compose = (EXAMPLE / "compose.yaml").read_text(encoding="utf-8")
-    config = (EXAMPLE / "kairyu.template.yaml").read_text(encoding="utf-8")
+    import yaml
 
-    assert "/models/qwen3-32b/tokenizer_config.json" in compose
-    assert '.get("chat_template")' in compose
-    assert "has no string chat_template" in compose
-    assert "/tmp/qwen3-chat-template.jinja" in compose
-    assert "qwen3-32b: /tmp/qwen3-chat-template.jinja" in config
+    compose = (EXAMPLE / "compose.yaml").read_text(encoding="utf-8")
+    config = yaml.safe_load((EXAMPLE / "kairyu.template.yaml").read_text())
+
+    assert config["engines"]["qwen3-32b"]["options"]["model_path"] == (
+        "/models/qwen3-32b"
+    )
+    assert "chat_templates" not in config
+    assert "tokenizer_config.json" not in compose
+    assert "/tmp/qwen3-chat-template.jinja" not in compose
 
 
 def test_readme_documents_the_quality_suite():

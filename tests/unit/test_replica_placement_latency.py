@@ -176,7 +176,7 @@ async def test_http_response_request_id_correlates_with_placement_evidence(
     log_path = tmp_path / f"{path.rsplit('/', 1)[-1]}.jsonl"
     log = JsonlRouterLog(log_path)
     pool = ReplicaPool({"replica": MockBackend()}, log=log)
-    app = create_app({"fleet": pool})
+    app = create_app({"fleet": pool}, legacy_chat_models={"fleet"})
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),

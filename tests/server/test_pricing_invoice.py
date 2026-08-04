@@ -11,11 +11,11 @@ from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.engine.backend import GenerationUsage
 from kairyu.engine.mock import MockBackend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.extra_routes import MockEmbeddingBackend
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig
 from kairyu.pricing import PriceRates, PriceSheet
+from tests.server._legacy_chat import create_legacy_app
 
 
 def _sheet() -> PriceSheet:
@@ -133,7 +133,7 @@ async def test_invoice_export_covers_stream_responses_embeddings_and_scope(
     monkeypatch.setenv("KAIRYU_PRICING_KEYS", "key-a,key-b")
     monkeypatch.setenv("KAIRYU_PRICING_ADMIN_KEYS", "admin")
     ledger_path = tmp_path / "usage.jsonl"
-    app = create_app(
+    app = create_legacy_app(
         {"m": CachedBackend()},
         settings=ServerSettings(
             api_keys_env="KAIRYU_PRICING_KEYS",
@@ -246,7 +246,7 @@ async def test_invoice_export_covers_stream_responses_embeddings_and_scope(
 
 async def test_invoice_endpoint_fails_closed_on_corrupt_ledger(tmp_path):
     ledger_path = tmp_path / "usage.jsonl"
-    app = create_app(
+    app = create_legacy_app(
         {"m": MockBackend()},
         settings=ServerSettings(usage_ledger_path=str(ledger_path)),
         price_sheet=_sheet().model_copy(update={"tenant_discounts": {}}),

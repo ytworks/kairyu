@@ -10,6 +10,7 @@ from kairyu.engine.tokenizer import (
     ToyTokenizer,
     _grammar_metadata,
     grammar_vocabulary,
+    load_tokenizer_chat_metadata,
     resolve_tokenizer,
 )
 
@@ -199,6 +200,250 @@ class TestHFTokenizer:
         }
 
         assert _grammar_metadata(backend) == ("byte_fallback", True)
+
+
+class TestTokenizerChatMetadata:
+    @pytest.mark.parametrize(
+        ("chat_template", "expected"),
+        [
+            ("{{ bos_token }}hello", {"default": "{{ bos_token }}hello"}),
+            (
+                {"default": "default-template", "tool_use": "tool-template"},
+                {"default": "default-template", "tool_use": "tool-template"},
+            ),
+            (
+                [
+                    {"name": "default", "template": "legacy-default"},
+                    {"name": "tool_use", "template": "legacy-tool"},
+                ],
+                {"default": "legacy-default", "tool_use": "legacy-tool"},
+            ),
+        ],
+    )
+    def test_loads_all_tokenizer_config_template_formats(
+        self,
+        tmp_path,
+        chat_template,
+        expected,
+    ):
+        path = _write_word_level_tokenizer(
+            tmp_path,
+            {"chat_template": chat_template},
+        )
+
+        metadata = load_tokenizer_chat_metadata(path)
+
+        assert metadata.templates == expected
+        assert metadata.template_sources == (f"{path / 'tokenizer_config.json'}:chat_template",)
+
+    @pytest.mark.parametrize(
+        "chat_template",
+        [
+            "",
+            "   ",
+            {},
+            [],
+            7,
+            {"": "template"},
+            {"default": ""},
+            [{"name": "default"}],
+            [{"name": "default", "template": 7}],
+            [
+                {"name": "default", "template": "first"},
+                {"name": "default", "template": "second"},
+            ],
+        ],
+    )
+    def test_rejects_empty_duplicate_or_malformed_config_templates(
+        self,
+        tmp_path,
+        chat_template,
+    ):
+        path = _write_word_level_tokenizer(
+            tmp_path,
+            {"chat_template": chat_template},
+        )
+
+        with pytest.raises(ValueError, match="chat_template|chat template"):
+            load_tokenizer_chat_metadata(path)
+
+    def test_dedicated_templates_collectively_override_config(self, tmp_path):
+        path = _write_word_level_tokenizer(
+            tmp_path,
+            {"chat_template": "ignored-config-template"},
+        )
+        default_file = path / "chat_template.jinja"
+        default_file.write_text("dedicated-default", encoding="utf-8")
+        template_dir = path / "additional_chat_templates"
+        template_dir.mkdir()
+        tool_file = template_dir / "tool_use.jinja"
+        tool_file.write_text("dedicated-tool", encoding="utf-8")
+
+        metadata = load_tokenizer_chat_metadata(path / "tokenizer.json")
+
+        assert metadata.templates == {
+            "default": "dedicated-default",
+            "tool_use": "dedicated-tool",
+        }
+        assert metadata.template_sources == (str(default_file), str(tool_file))
+
+    def test_named_dedicated_template_alone_still_overrides_config(self, tmp_path):
+        path = _write_word_level_tokenizer(
+            tmp_path,
+            {"chat_template": "ignored-config-template"},
+        )
+        template_dir = path / "additional_chat_templates"
+        template_dir.mkdir()
+        (template_dir / "tool_use.jinja").write_text(
+            "dedicated-tool",
+            encoding="utf-8",
+        )
+
+        metadata = load_tokenizer_chat_metadata(path)
+
+        assert metadata.templates == {"tool_use": "dedicated-tool"}
+
+    def test_rejects_duplicate_dedicated_default(self, tmp_path):
+        path = _write_word_level_tokenizer(tmp_path, {})
+        (path / "chat_template.jinja").write_text("root-default", encoding="utf-8")
+        template_dir = path / "additional_chat_templates"
+        template_dir.mkdir()
+        (template_dir / "default.jinja").write_text(
+            "directory-default",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match="duplicate dedicated"):
+            load_tokenizer_chat_metadata(path)
+
+    def test_rejects_empty_dedicated_template(self, tmp_path):
+        path = _write_word_level_tokenizer(tmp_path, {})
+        (path / "chat_template.jinja").write_text("\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="non-empty"):
+            load_tokenizer_chat_metadata(path)
+
+    @pytest.mark.parametrize("modern", [False, True])
+    def test_special_token_precedence_matches_transformers_5_12(
+        self,
+        tmp_path,
+        modern,
+    ):
+        config = {
+            "bos_token": "<new-bos>",
+            "eos_token": "<new-eos>",
+            "unk_token": None,
+            "sep_token": "<sep>",
+            "pad_token": "<pad>",
+            "cls_token": "<cls>",
+            "mask_token": "<mask>",
+            "image_token": "<new-image>",
+            "object_token": {
+                "__type": "AddedToken",
+                "content": "<new-object>",
+                "lstrip": False,
+                "normalized": False,
+                "rstrip": False,
+                "single_word": False,
+                "special": True,
+            },
+            "extra_special_tokens": {
+                "audio_token": "<new-audio>",
+                "sensor_token": "<new-sensor>",
+                "video_marker": "<video>",
+            },
+            "add_bos_token": False,
+            "add_eos_token": True,
+        }
+        if modern:
+            config["added_tokens_decoder"] = {}
+        path = _write_word_level_tokenizer(
+            tmp_path,
+            config,
+        )
+        (path / "special_tokens_map.json").write_text(
+            json.dumps(
+                {
+                    "bos_token": "<old-bos>",
+                    "eos_token": "<old-eos>",
+                    "unk_token": "<old-unk>",
+                    "image_token": "<old-image>",
+                    "object_token": "<old-object>",
+                    "sensor_token": "<old-sensor>",
+                    "extra_special_tokens": {
+                        "audio_token": "<old-audio>",
+                        "map_only_token": "<map-only>",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        metadata = load_tokenizer_chat_metadata(path)
+        expected = {
+            "audio_token": "<new-audio>" if modern else "<old-audio>",
+            "bos_token": "<new-bos>" if modern else "<old-bos>",
+            "cls_token": "<cls>",
+            "eos_token": "<new-eos>" if modern else "<old-eos>",
+            # Direct model-specific config tokens are extracted before the
+            # legacy map and retain priority in Transformers 5.12.
+            "image_token": "<new-image>",
+            "mask_token": "<mask>",
+            "object_token": "<new-object>" if modern else "<old-object>",
+            "pad_token": "<pad>",
+            "sep_token": "<sep>",
+            "sensor_token": "<new-sensor>",
+            "video_marker": "<video>",
+        }
+        if modern:
+            assert "unk_token" not in expected
+        else:
+            expected["map_only_token"] = "<map-only>"
+            expected["unk_token"] = "<old-unk>"
+        assert metadata.special_tokens == expected
+
+        transformers = pytest.importorskip("transformers")
+        reference = transformers.PreTrainedTokenizerFast.from_pretrained(
+            path,
+            local_files_only=True,
+        )
+        for name, value in expected.items():
+            assert getattr(reference, name) == value
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {"bos_token": 7},
+            {"image_token": {"content": ""}},
+            {"extra_special_tokens": "<image>"},
+            {"extra_special_tokens": {"image_token": None}},
+        ],
+    )
+    def test_rejects_malformed_named_special_tokens(self, tmp_path, config):
+        path = _write_word_level_tokenizer(tmp_path, config)
+
+        with pytest.raises(ValueError, match="token"):
+            load_tokenizer_chat_metadata(path)
+
+    def test_accepts_unnamed_extra_special_token_list(self, tmp_path):
+        path = _write_word_level_tokenizer(
+            tmp_path,
+            {"extra_special_tokens": ["<one>", {"content": "<two>"}]},
+        )
+
+        metadata = load_tokenizer_chat_metadata(path)
+
+        assert metadata.special_tokens == {}
+
+    def test_metadata_does_not_require_fast_tokenizer_json(self, tmp_path):
+        (tmp_path / "tokenizer_config.json").write_text(
+            '{"chat_template": "template"}',
+            encoding="utf-8",
+        )
+
+        metadata = load_tokenizer_chat_metadata(tmp_path)
+
+        assert metadata.templates == {"default": "template"}
 
 
 class TestResolveTokenizer:

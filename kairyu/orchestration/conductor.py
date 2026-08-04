@@ -20,7 +20,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
 )
-from kairyu.engine.prompt import prompt_kind, prompt_text
+from kairyu.engine.prompt import TemplatedPrompt, prompt_kind, prompt_text
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
 from kairyu.orchestration.trace import (
@@ -68,6 +68,11 @@ class RoleSpec:
     verifies: str | None = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.prompt, TemplatedPrompt):
+            raise ValueError(
+                "Conductor role templates cannot be tokenizer-owned pre-rendered "
+                "chat prompts; provide a plain derivation template"
+            )
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
 
 
@@ -166,6 +171,11 @@ class Conductor:
         worker_trace: Mapping[str, WorkerTraceIdentity] | None = None,
         usage_observer: Callable[[GenerationUsage], None] | None = None,
     ) -> None:
+        if isinstance(shared_prefix, TemplatedPrompt):
+            raise ValueError(
+                "Conductor shared_prefix cannot be a tokenizer-owned pre-rendered "
+                "chat prompt"
+            )
         self._roles = tuple(roles)
         self._workers = dict(workers)
         self._shared_prefix = shared_prefix
@@ -798,6 +808,11 @@ class Conductor:
         run.final_completions = last_result.completions
 
     async def run(self, query: str, budget: Budget | None = None) -> ConductorResult:
+        if isinstance(query, TemplatedPrompt):
+            raise ValueError(
+                "Conductor cannot derive role prompts from a tokenizer-owned "
+                "pre-rendered chat prompt"
+            )
         run = _RunState(budget=BudgetState(budget=budget or Budget()))
         session = uuid.uuid4().hex[:12]
         await self._run_pending(run, session, query)
@@ -822,6 +837,11 @@ class Conductor:
         an unverified final worker/synthesizer.
         """
 
+        if isinstance(query, TemplatedPrompt):
+            raise ValueError(
+                "Conductor cannot derive role prompts from a tokenizer-owned "
+                "pre-rendered chat prompt"
+            )
         run = _RunState(budget=BudgetState(budget=budget or Budget()))
         session = uuid.uuid4().hex[:12]
         final = self._stream_final_unit()

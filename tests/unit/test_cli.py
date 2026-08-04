@@ -70,6 +70,7 @@ pools:
       - backend: kairyu-proc
         options: {generation_config: auto}
       - backend: mock
+legacy_chat_models: [local, native-pool]
 """,
         encoding="utf-8",
     )
@@ -167,6 +168,7 @@ workers:
 engines:
   remote: {backend: mock}
 orchestrator: {spec: orchestrator.yaml}
+legacy_chat_models: [kairyu-auto]
 """,
         encoding="utf-8",
     )

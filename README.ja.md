@@ -309,6 +309,13 @@ outputs = llm.generate(["Hello, my name is"], SamplingParams(temperature=0.8))
 print(outputs[0].outputs[0].text)
 ```
 
+`LLM.chat(...)` は初回利用時に、ローカルの `tokenizer` snapshot（なければ
+ローカルの `model` path）からチャットテンプレートと名前付き特殊トークンを
+読み込みます。ローカルメタデータも明示的な `chat_template=` もない場合は dispatch
+前に失敗します。旧 role-prefix renderer は明示的な互換オプション
+`legacy_chat=True` でのみ利用できます。通常の `generate(...)` は completion path の
+ままで、chat metadata を必要としません。
+
 `SamplingParams`、`RequestOutput`、`CompletionOutput`、`AsyncEngineArgs`、
 `AsyncLLMEngine` は vLLM の公開サーフェス(vLLM 自身の例で使われる範囲)を再現し、
 `tests/compat/` のコントラクトテストで検証されています。非同期エンジン:
@@ -549,7 +556,7 @@ DeploymentSpec は、**通常のモデルと並べて任意個の名前付きオ
 
 ```yaml
 engines:
-  m1: {backend: mock}                # 本番では kairyu/vllm/openai に差し替え
+  m1: {backend: mock}                # 本番の local kairyu/vllm は下記 policy を参照
   m2: {backend: mock}
 
 orchestrators:
@@ -557,6 +564,8 @@ orchestrators:
     spec: agent_pool.yaml
   kairyu-auto-max:                   # 深いティア: multi_agent が MoA を通る
     spec: agent_pool_max.yaml
+
+legacy_chat_models: [kairyu-auto, kairyu-auto-max]  # mock デモ用の明示的 framing
 ```
 
 ```bash
@@ -592,6 +601,8 @@ pools:
     unhealthy_after: 3
     queue_depth_threshold: 8
     probe_interval_s: 5.0
+
+legacy_chat_models: [fleet]          # remote pool にはローカル tokenizer metadata がない
 ```
 
 セッション id(`X-Session-ID` ヘッダまたは OpenAI の `user` フィールド)を持つ
@@ -668,8 +679,11 @@ pools:                         # 提供モデル名 -> N レプリカの Replica
     queue_depth_threshold: 8   # セッション親和の負荷バルブ
     probe_interval_s: 5.0      # バックグラウンドヘルスプローバー
 
-chat_templates:                # 提供モデル -> HF Jinja テンプレート (テキストか *.jinja パス)
+chat_templates:                # 任意のローカルモデル別上書き。tokenizer metadata より優先
   qwen: templates/qwen.jinja
+
+legacy_chat_models:            # pre-rendered prompt を保持できない経路の明示的互換設定
+  [remote-a, fleet, kairyu-auto, kairyu-auto-max]
 
 orchestrator:                  # 任意の kairyu-auto (OrchestratorSpec YAML)
   spec: orchestrator.yaml
@@ -682,6 +696,39 @@ batch:                         # 任意の OpenAI 互換 /v1/files + /v1/batches
   data_dir: /var/kairyu/batches
   max_concurrency: 4
 ```
+
+ローカルの `kairyu` / `kairyu-proc` エンジンでは、DeploymentSpec が実際に使う
+トークナイザからチャットテンプレートを読み込みます。明示的な `options.tokenizer`
+ディレクトリを優先し、なければ `options.model_path` を使います。ローカルで直接動かす
+vLLM では `options.tokenizer`、次に `options.model` の順です。トークナイザルートの
+`chat_template.jinja` と `additional_chat_templates/*.jinja` は Transformers と同じく
+`tokenizer_config.json` の `chat_template` より優先され、名前付き特殊トークンも
+Jinja コンテキストに注入されます。DeploymentSpec の `chat_templates` は提供モデルごとの
+明示的な上書きです。effective tokenizer がローカルに materialize されていない場合、
+その上書きは self-contained でなければなりません。`{{ bos_token }}` のような参照は、
+値を検証できないまま空文字へ落とさず preflight で失敗します。
+
+実際のテキストチャットモデルは、バックエンド起動前にポリシーを解決できなければ
+なりません。明示的な `chat_templates` 上書きを使えるのは、生成された pre-rendered prompt
+を end-to-end で保持できるローカル `kairyu` / `kairyu-proc` / vLLM engine、決定的な
+`mock`、および互換な static pool だけです。現在の OpenAI 互換 remote backend、discovery-backed pool、orchestrator は
+upstream の chat template や派生 planner/worker prompt をまたいでその所有権を保持できない
+ため、`legacy_chat_models` に列挙する必要があり、テンプレートを設定すると startup で失敗
+します。この list は旧来の `role: content` 連結を使うための警告付き互換手段であり、
+プロセス全体の fallback ではありません。同じモデルに両方は指定できません。
+DeploymentSpec builder がこの互換経路を自動選択するのは、学習済みモデルではなく
+プロトコルテスト用の代替実装である決定的な `mock` backend だけです。低レベルの
+`create_app`、prompt validation、Responses、`BatchWorker` には mock 例外がなく、すべての
+提供チャットモデルに `ChatTemplate` または `legacy_chat_models` の明示的 membership が
+必要です。両方を省略すると construction 時に明示的な警告を出し、そのモデルへの chat
+request は dispatch 前に拒否します。これにより completion-only のプログラム利用を維持しつつ、
+暗黙の chat fallback は復活させません。
+
+VLM にも deployment preflight の例外はありません。checked-in の image-chat overlay は
+text-only path 用に remote の提供モデルを `legacy_chat_models` へ列挙し、画像付き request
+だけがその renderer を迂回して構造化 message を upstream processor へ渡します。その
+remote backend に pre-rendered な Kairyu `chat_templates` を設定すると、二重 templating を
+防ぐため startup で拒否されます。
 
 上記は単一ゲートウェイ用のファイルシステム既定値です。複数ゲートウェイでは
 `--extra fleet` をインストールし、`store: postgres`、

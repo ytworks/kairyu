@@ -7,7 +7,7 @@ import pytest
 
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.mock import MockBackend
-from kairyu.entrypoints.server.app import create_app
+from tests.server._legacy_chat import create_legacy_app
 
 PROMPT_WORDS = 20
 
@@ -30,7 +30,7 @@ def _chat_body(**overrides) -> dict:
 
 @pytest.fixture()
 def app():
-    return create_app(engines={"kairyu-real": KairyuBackend(num_pages=256)})
+    return create_legacy_app(engines={"kairyu-real": KairyuBackend(num_pages=256)})
 
 
 async def test_usage_counts_are_tokenizer_true(app):
@@ -100,7 +100,7 @@ async def test_stream_options_without_stream_is_400(app):
 
 
 async def test_max_completion_tokens_alias():
-    app = create_app(engines={"kairyu-real": KairyuBackend(num_pages=256)})
+    app = create_legacy_app(engines={"kairyu-real": KairyuBackend(num_pages=256)})
     async with _client(app) as client:
         body = _chat_body()
         del body["max_tokens"]
@@ -110,7 +110,7 @@ async def test_max_completion_tokens_alias():
 
 
 async def test_mock_backend_usage_still_flows():
-    app = create_app(engines={"m": MockBackend()})
+    app = create_legacy_app(engines={"m": MockBackend()})
     async with _client(app) as client:
         response = await client.post(
             "/v1/chat/completions",

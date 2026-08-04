@@ -1,6 +1,6 @@
 # M9 Design: Truthful API — Usage, Chat Templates, Logprobs, Structured Outputs
 
-Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS
+Status: **Implemented** (2026-07-03; D2 amended 2026-08-04). Reviewed — APPROVE-WITH-AMENDMENTS
 (2-reviewer agent panel, 2026-07-03; amendments applied inline, see §6).
 All five phases (D1–D5) landed with tests: 437 → 471 tests, 94% coverage.
 Milestone: M9 (realizes roadmap Track P-A, goal G6 gates P-A1..P-A5)
@@ -56,7 +56,7 @@ token-granularity TPOT, results files).
   empty-choices usage chunk (it iterates `choices` only today and would drop
   it); a config flag tolerates upstreams that 400 on `stream_options`.
 
-### D2 — HF Jinja chat templates; legacy concatenator stays the default
+### D2 — HF Jinja chat templates; role concatenation is explicit-only
 
 - `chat_template.py` rewritten around `ChatTemplate`, matching HF's
   `_compile_jinja_template` exactly (amended — anything less breaks
@@ -66,27 +66,61 @@ token-granularity TPOT, results files).
   (`json.dumps(..., ensure_ascii=False)` — Jinja's builtin html-escapes
   `<>&'`). Render context: `messages`, `tools` (**None, not [], when absent**
   — templates gate on `is not none`), `add_generation_prompt=True`, and the
-  tokenizer's full special-tokens map. Assistant `tool_calls.arguments`
+  tokenizer's named string-valued special-token variables. Assistant
+  `tool_calls.arguments`
   arriving as JSON strings are parsed to dicts before rendering (HF
-  convention; Qwen templates `| tojson` them). The templated prompt is
-  encoded with `add_special_tokens=False` (HFTokenizer already does) —
-  templates emit `bos_token` themselves; double-BOS would corrupt both
-  generation and the "truthful" prompt count.
+  convention; Qwen templates `| tojson` them). The templated prompt carries a
+  tokenizer-owned typed marker. HFTokenizer already encodes with
+  `add_special_tokens=False`; the direct vLLM adapter sets that option only for
+  the marker, while ordinary completion strings retain vLLM's completion
+  default. Templates emit `bos_token` themselves, so this prevents double-BOS
+  without changing completion semantics or truthful prompt counts.
   `ChatCompletionRequest.chat_template_kwargs` carries model-specific JSON
   variables (for example Qwen3's `enable_thinking`) into that Jinja context.
   It is rejected when the resolved model has no Kairyu template, and cannot
   replace trusted `messages`, `tools`, `add_generation_prompt`, or configured
   special-token variables.
-  `render_chat(messages)` (legacy concatenator) keeps its signature and
-  remains the default when no template is configured.
+  `render_chat(messages)` (legacy concatenator) keeps its signature, but as of
+  the 2026-08-04 issue #350 amendment it is no longer the implicit production
+  default. Production DeploymentSpecs select it only for served model names
+  listed in `DeploymentSpec.legacy_chat_models`, with a startup warning.
+  Lower-level app, prompt-validation, Responses, and batch-worker entrypoints
+  enforce the same template-or-model-membership contract; construction logs an
+  explicit warning when both policies are absent and chat then fails before
+  dispatch. Completion-only programmatic apps remain usable, and none of these
+  paths has an unscoped role-concatenation fallback.
 - Per-model config (amended — per-MODEL, not per-replica):
-  `DeploymentSpec.chat_templates: dict[str, str] | None` (model name →
+  `DeploymentSpec.chat_templates: dict[str, str]` (model name →
   inline template or `*.jinja` path) — a single map avoids
   BackendSpec-vs-PoolSpec ambiguity and stays out of `options` (factory
-  kwargs). `builder.py` threads the same mapping into BOTH `create_app` and
-  `BatchWorker` (batch and HTTP must render identical prompts); `app.py`
-  renders AFTER model resolution. Tool schemas render in-template; the
-  `<tool_call>` output-side parse stays.
+  kwargs). An explicit entry has highest precedence. Otherwise `builder.py`
+  auto-loads the effective local tokenizer (`tokenizer` override before the
+  native `model_path` or direct-vLLM `model`). Root `chat_template.jinja` and
+  `additional_chat_templates/*.jinja` files override
+  `tokenizer_config.json`'s `chat_template`, matching Transformers; named
+  special tokens are loaded from tokenizer metadata and injected into the
+  render context. Named template selection follows HF: `tool_use` for tool
+  requests when present, otherwise `default`. A non-materialized tokenizer may
+  use only a self-contained explicit template: tokenizer-owned variables such
+  as `bos_token` fail preflight when their metadata cannot be verified for
+  every concrete replica instead of rendering as empty strings.
+- **Fail-closed amendment (2026-08-04, issue #350):** template resolution runs
+  before backend/GPU construction. Unresolved real local text models fail
+  startup unless they have an explicit template or per-model legacy opt-in.
+  Static local pools must resolve one identical tokenizer/template policy
+  across all replicas. Current OpenAI-compatible remote backends,
+  discovery-backed pools, and orchestrators cannot preserve a pre-rendered
+  prompt through an upstream template or derived planner/worker prompts, so
+  they accept only the explicit legacy policy and reject `chat_templates` at
+  startup. Only the DeploymentSpec builder gives deterministic mock backends an
+  isolated test-double exception. VLMs have no preflight exception: the
+  checked-in remote VLM overlay selects legacy for its text-only path, while
+  image-bearing requests bypass that renderer and remain
+  structured/upstream-owned.
+- `builder.py` threads the same templates and legacy policy into BOTH
+  `create_app` and `BatchWorker` (batch and HTTP must render identical prompts);
+  `app.py` renders AFTER model resolution. Tool schemas render in-template;
+  the `<tool_call>` output-side parse stays.
 - Goldens: Llama-3.x and Qwen2.5 chat-template `.jinja` files committed under
   `tests/fixtures/templates/` with fixed message/tool transcripts; expected
   outputs generated once via `transformers` `apply_chat_template` and
@@ -199,8 +233,9 @@ not overwrite).
 
 - Usage matches the tokenizer exactly (kairyu backend); `cached_tokens > 0` on
   a repeated ≥1-page prefix; `include_usage` final-chunk shape.
-- Template goldens byte-match; live transformers cross-check; legacy default
-  unchanged.
+- Template goldens and rendered token IDs byte-match live Transformers;
+  unresolved production models fail closed and legacy rendering requires an
+  explicit per-model opt-in.
 - OpenAI SDK round-trips chat + completions + logprobs against the ASGI app;
   `n=3` streaming interleaves correct indices; seeded n>1 reproducible.
 - 400 (not 500) on echo/suffix/best_of/malformed response_format.
@@ -233,3 +268,10 @@ inline above:
   rendered after model resolution; TokenLogprob lives in outputs.py
   (cycle-free) with msgpack list encoding; bench must send include_usage and
   timestamp its results filename.
+
+Issue #350 amendment, 2026-08-04 — the old implicit role-concatenation default
+was removed. Local tokenizer templates and named special tokens are now loaded
+with Transformers-compatible precedence. Every production and lower-level chat
+boundary requires a template or model-scoped legacy membership; only the
+DeploymentSpec builder auto-selects legacy for deterministic mocks, and VLM
+deployments have no preflight exception.

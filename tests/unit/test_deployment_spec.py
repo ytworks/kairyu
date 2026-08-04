@@ -178,6 +178,42 @@ def test_defaults():
     assert spec.batch is None
     assert spec.tenants is None
     assert spec.embeddings == {}
+    assert spec.legacy_chat_models == frozenset()
+
+
+def test_legacy_chat_models_are_explicit_per_served_model():
+    spec = load_deployment_spec(
+        """
+engines:
+  old: {backend: mock}
+  current: {backend: mock}
+legacy_chat_models: [old]
+"""
+    )
+
+    assert spec.legacy_chat_models == frozenset({"old"})
+
+
+def test_legacy_chat_models_reject_unknown_and_template_conflicts():
+    with pytest.raises(ValidationError, match="unknown models.*ghost"):
+        load_deployment_spec(
+            """
+engines:
+  current: {backend: mock}
+legacy_chat_models: [ghost]
+"""
+        )
+
+    with pytest.raises(ValidationError, match="both a real chat template"):
+        load_deployment_spec(
+            """
+engines:
+  current: {backend: mock}
+chat_templates:
+  current: "{{ messages }}"
+legacy_chat_models: [current]
+"""
+        )
 
 
 def test_server_section_owns_stable_schema_without_runtime_inheritance():

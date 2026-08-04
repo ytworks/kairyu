@@ -1,0 +1,363 @@
+import json
+import logging
+
+import httpx
+import pytest
+
+from kairyu.batch.store import BatchStore
+from kairyu.batch.worker import BatchWorker
+from kairyu.engine.mock import MockBackend
+from kairyu.engine.prompt import MultimodalPrompt, TemplatedPrompt
+from kairyu.entrypoints.chat_template import ChatTemplate, render_chat
+from kairyu.entrypoints.server.app import create_app
+from kairyu.entrypoints.server.chat_service import (
+    ChatRequestError,
+    render_prompt,
+    validate_chat_input,
+)
+from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.orchestration.orchestrator import Orchestrator
+
+
+def _client(app) -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    )
+
+
+def _chat_body(model: str = "m") -> dict:
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+
+
+def test_low_level_app_rejects_unverified_special_tokens_before_route_startup():
+    template = ChatTemplate("{{ bos_token }}{{ messages[0].content }}")
+
+    with pytest.raises(
+        ValueError,
+        match="without verified values.*bos_token",
+    ):
+        create_app(
+            {"m": MockBackend()},
+            orchestrators={"auto": Orchestrator({"tier": MockBackend()})},
+            chat_templates={"m": template},
+        )
+
+
+def test_batch_worker_rejects_unverified_special_tokens_at_construction(tmp_path):
+    template = ChatTemplate("{{ bos_token }}{{ messages[0].content }}")
+
+    with pytest.raises(
+        ValueError,
+        match="without verified values.*bos_token",
+    ):
+        BatchWorker(
+            BatchStore(tmp_path),
+            {"m": MockBackend()},
+            chat_templates={"m": template},
+        )
+
+
+def test_public_render_prompt_rejects_unverified_special_tokens():
+    template = ChatTemplate("{{ bos_token }}{{ messages[0].content }}")
+    request = ChatCompletionRequest.model_validate(_chat_body())
+
+    with pytest.raises(ChatRequestError, match="without verified values.*bos_token"):
+        render_prompt(request, {"m": template})
+
+
+def test_low_level_app_logs_missing_policy_at_construction(caplog):
+    with caplog.at_level(logging.WARNING, logger="kairyu.entrypoints.server.app"):
+        create_app({"m": MockBackend()})
+
+    assert "no configured chat rendering policy" in caplog.text
+    assert "['m']" in caplog.text
+
+
+def test_batch_worker_logs_missing_policy_at_construction(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="kairyu.batch"):
+        BatchWorker(BatchStore(tmp_path), {"m": MockBackend()})
+
+    assert "no configured chat rendering policy" in caplog.text
+    assert "['m']" in caplog.text
+
+
+def test_low_level_app_rejects_template_and_legacy_policy_overlap():
+    with pytest.raises(ValueError, match="both chat_templates and legacy_chat_models"):
+        create_app(
+            {"m": MockBackend()},
+            chat_templates={"m": ChatTemplate("ok")},
+            legacy_chat_models={"m"},
+        )
+
+
+def test_batch_worker_rejects_template_and_legacy_policy_overlap(tmp_path):
+    with pytest.raises(ValueError, match="both chat_templates and legacy_chat_models"):
+        BatchWorker(
+            BatchStore(tmp_path),
+            {"m": MockBackend()},
+            chat_templates={"m": ChatTemplate("ok")},
+            legacy_chat_models={"m"},
+        )
+
+
+def test_public_render_prompt_rejects_template_and_legacy_policy_overlap():
+    request = ChatCompletionRequest.model_validate(_chat_body())
+
+    with pytest.raises(
+        ChatRequestError,
+        match="both chat_templates and legacy_chat_models",
+    ):
+        render_prompt(
+            request,
+            {"m": ChatTemplate("ok")},
+            legacy_chat_models={"m"},
+        )
+
+
+async def test_checkpoint_authoritative_absent_special_token_keeps_hf_semantics():
+    backend = MockBackend()
+    template = ChatTemplate.from_tokenizer_metadata(
+        "{% if bos_token is defined %}BOS{% else %}NO_BOS{% endif %}:"
+        "{{ messages[0].content }}",
+        {},
+    )
+    app = create_app({"m": backend}, chat_templates={"m": template})
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=_chat_body())
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == ("NO_BOS:hello",)
+    assert isinstance(backend.prompts_seen[0], TemplatedPrompt)
+
+
+async def test_checkpoint_special_token_cannot_be_injected_by_request_kwargs():
+    backend = MockBackend()
+    template = ChatTemplate.from_tokenizer_metadata(
+        "{{ image_token }}{{ messages[0].content }}",
+        {},
+    )
+    app = create_app({"m": backend}, chat_templates={"m": template})
+    body = {
+        **_chat_body(),
+        "chat_template_kwargs": {"image_token": "<untrusted>"},
+    }
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert "reserved template variables" in response.json()["error"]["message"]
+    assert "image_token" in response.json()["error"]["message"]
+    assert backend.prompts_seen == ()
+
+
+async def test_strict_http_policy_requires_template_before_dispatch():
+    backend = MockBackend()
+    app = create_app({"m": backend})
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=_chat_body())
+
+    assert response.status_code == 400
+    assert "chat_templates" in response.json()["error"]["message"]
+    assert "legacy_chat_models" in response.json()["error"]["message"]
+    assert backend.prompts_seen == ()
+
+
+async def test_explicit_legacy_model_keeps_role_concat_under_strict_policy():
+    backend = MockBackend()
+    app = create_app(
+        {"m": backend},
+        legacy_chat_models={"m"},
+    )
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=_chat_body())
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == (render_chat(_chat_body()["messages"]),)
+    assert type(backend.prompts_seen[0]) is str
+
+
+async def test_hf_template_marks_prompt_as_already_templated():
+    backend = MockBackend()
+    app = create_app(
+        {"m": backend},
+        chat_templates={
+            "m": ChatTemplate("<BOS>{{ messages[0].content }}<ASSISTANT>")
+        },
+    )
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=_chat_body())
+
+    assert response.status_code == 200
+    assert backend.prompts_seen == ("<BOS>hello<ASSISTANT>",)
+    assert isinstance(backend.prompts_seen[0], TemplatedPrompt)
+
+
+async def test_strict_policy_reaches_route_preview_and_responses():
+    backend = MockBackend()
+    app = create_app(
+        {"m": backend},
+        orchestrators={"auto": Orchestrator({"tier": MockBackend()})},
+    )
+
+    async with _client(app) as client:
+        preview = await client.post(
+            "/v1/route",
+            json={"model": "auto", "messages": _chat_body()["messages"]},
+        )
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "m", "input": "hello"},
+        )
+
+    for actual in (preview, response):
+        assert actual.status_code == 400
+        assert "chat_templates" in actual.json()["error"]["message"]
+        assert "legacy_chat_models" in actual.json()["error"]["message"]
+    assert backend.prompts_seen == ()
+
+
+async def test_strict_policy_reaches_batch_worker(tmp_path):
+    backend = MockBackend()
+    worker = BatchWorker(
+        BatchStore(tmp_path),
+        {"m": backend},
+    )
+    line = {
+        "custom_id": "strict",
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "body": _chat_body(),
+    }
+
+    output, error, usage = await worker._run_line(
+        json.loads(json.dumps(line)),
+        "/v1/chat/completions",
+        set(),
+    )
+
+    assert output is None
+    assert usage is None
+    assert "chat_templates" in error["error"]["message"]
+    assert "legacy_chat_models" in error["error"]["message"]
+    assert backend.prompts_seen == ()
+
+
+@pytest.mark.parametrize(
+    ("template", "body"),
+    [
+        (
+            ChatTemplate(
+                {
+                    "default": "ok",
+                    "tool_use": "{{ tools[0].function.name }}",
+                }
+            ),
+            {**_chat_body(), "tools": []},
+        ),
+        (
+            ChatTemplate("{{ messages[0].content + 1 }}"),
+            _chat_body(),
+        ),
+    ],
+)
+async def test_runtime_template_error_is_controlled_for_http_and_batch(
+    tmp_path,
+    template,
+    body,
+):
+    backend = MockBackend()
+    app = create_app({"m": backend}, chat_templates={"m": template})
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert backend.prompts_seen == ()
+
+    worker = BatchWorker(
+        BatchStore(tmp_path),
+        {"m": backend},
+        chat_templates={"m": template},
+    )
+    line = {
+        "custom_id": "invalid-template-input",
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "body": body,
+    }
+    output, error, usage = await worker._run_line(
+        json.loads(json.dumps(line)),
+        "/v1/chat/completions",
+        set(),
+    )
+
+    assert output is None
+    assert usage is None
+    assert error["error"]["type"] == "invalid_request_error"
+    assert backend.prompts_seen == ()
+
+
+async def test_multimodal_chat_rejects_unforwarded_template_kwargs_predispatch():
+    backend = MockBackend()
+    app = create_app({"vlm": backend}, legacy_chat_models={"vlm"})
+    body = {
+        "model": "vlm",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.test/image.png"},
+                    },
+                ],
+            }
+        ],
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert "upstream-owned multimodal" in response.json()["error"]["message"]
+    assert backend.prompts_seen == ()
+
+
+def test_multimodal_chat_bypasses_strict_local_text_template_policy():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "vlm",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.test/image.png"},
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    validated = validate_chat_input(
+        request,
+        None,
+        allow_multimodal=True,
+    )
+
+    assert isinstance(validated.prompt, MultimodalPrompt)

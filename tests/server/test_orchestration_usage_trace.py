@@ -4,11 +4,11 @@ import json
 import pytest
 
 from kairyu.engine.backend import GenerationResult, GenerationUsage
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.outputs import CompletionOutput
+from tests.server._legacy_chat import create_legacy_app
 
 COMPLEX = (
     "First research the options and summarize trade-offs. Then design a plan. "
@@ -64,7 +64,7 @@ class AccountingBackend:
 
 
 def _app(tmp_path, backend, *, moa_samples: int = 0):
-    return create_app(
+    return create_legacy_app(
         {"plain": backend},
         orchestrators={
             "auto": Orchestrator(
@@ -275,7 +275,7 @@ def test_conductor_retry_usage_equals_trace_call_sum(tmp_path):
             return self._result(request, self._text(request.prompt))
 
     backend = RetryBackend()
-    app = create_app(
+    app = create_legacy_app(
         {},
         orchestrators={
             "auto": Orchestrator(
@@ -313,7 +313,7 @@ def test_conductor_retry_usage_equals_trace_call_sum(tmp_path):
 
 def test_fallback_engine_usage_and_trace_use_resolved_engine(tmp_path):
     backend = AccountingBackend()
-    app = create_app(
+    app = create_legacy_app(
         {},
         orchestrators={"auto": Orchestrator({"fallback": backend})},
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),

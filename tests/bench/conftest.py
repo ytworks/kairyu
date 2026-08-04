@@ -23,6 +23,7 @@ def gateway_app():
             "kairyu-auto": build_orchestrator(load_spec(ORCHESTRATOR_YAML)),
             "kairyu-auto-max": build_orchestrator(load_spec(ORCHESTRATOR_YAML)),
         },
+        legacy_chat_models={"m", "kairyu-auto", "kairyu-auto-max"},
     )
 
 

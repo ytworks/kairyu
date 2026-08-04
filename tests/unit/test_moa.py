@@ -1,9 +1,40 @@
 import time
 from dataclasses import replace
 
+import pytest
+
 from kairyu.engine.backend import GenerationUsage
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.moa import run_moa, stream_moa
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_moa_rejects_templated_query_before_derivation(streaming):
+    backend = MockBackend()
+    query = TemplatedPrompt("<BOS>user hello<ASSISTANT>")
+
+    with pytest.raises(ValueError, match="cannot derive proposal prompts.*pre-rendered"):
+        if streaming:
+            _ = [event async for event in stream_moa(backend, query)]
+        else:
+            await run_moa(backend, query)
+
+    assert backend.prompts_seen == ()
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_moa_rejects_templated_shared_prefix(streaming):
+    backend = MockBackend()
+    prefix = TemplatedPrompt("<BOS>already rendered")
+
+    with pytest.raises(ValueError, match="shared_prefix.*pre-rendered"):
+        if streaming:
+            _ = [event async for event in stream_moa(backend, "q", shared_prefix=prefix)]
+        else:
+            await run_moa(backend, "q", shared_prefix=prefix)
+
+    assert backend.prompts_seen == ()
 
 
 async def test_moa_collects_n_proposals_and_synthesizes():

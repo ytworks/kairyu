@@ -4,11 +4,10 @@ import httpx
 import pytest
 
 from kairyu.batch.store import BatchStore
-from kairyu.batch.worker import BatchWorker
 from kairyu.engine.backend import GenerationResult
 from kairyu.engine.mock import MockBackend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.outputs import CompletionOutput
+from tests.server._legacy_chat import LegacyBatchWorker, create_legacy_app
 
 
 class RecordingBackend(MockBackend):
@@ -102,7 +101,7 @@ def _backend(scenario: str) -> RecordingBackend:
 
 
 async def _interactive_error(body: dict, backend: RecordingBackend):
-    app = create_app({"m": backend})
+    app = create_legacy_app({"m": backend})
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://test"
@@ -113,7 +112,7 @@ async def _interactive_error(body: dict, backend: RecordingBackend):
 
 async def _batch_error(tmp_path, body: dict, backend: RecordingBackend):
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": backend}, max_concurrency=1)
+    worker = LegacyBatchWorker(store, {"m": backend}, max_concurrency=1)
     line = {
         "custom_id": "parity",
         "method": "POST",

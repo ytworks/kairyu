@@ -1,4 +1,6 @@
-# GPU replica DeploymentSpec: the kairyu engine on a local checkpoint.
+# GPU replica DeploymentSpec: the kairyu engine on a local checkpoint. The
+# checkpoint's effective tokenizer must own a chat template; otherwise add an
+# explicit per-model chat_templates entry or legacy_chat_models membership.
 engines:
   default:
     backend: kairyu

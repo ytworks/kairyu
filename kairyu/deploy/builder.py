@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from ssl import SSLContext
 
 import httpx
 from fastapi import FastAPI
+from jinja2.exceptions import TemplateError
 
 from kairyu.batch.store import BatchStore
 from kairyu.batch.worker import BatchWorker
@@ -34,6 +37,10 @@ from kairyu.engine.embedding import (
     MockEmbeddingBackend,
 )
 from kairyu.engine.registry import create_backend
+from kairyu.engine.tokenizer import (
+    TokenizerChatMetadata,
+    load_tokenizer_chat_metadata,
+)
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
@@ -48,11 +55,300 @@ _EMBEDDING_BACKEND_FACTORIES: dict[str, Callable[..., EmbeddingBackend]] = {
     "mock": MockEmbeddingBackend,
 }
 _SERVICE_ACCOUNT_NAMESPACE_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+logger = logging.getLogger("kairyu.deploy")
 
 
 _DYNAMIC_REPLICA_MAX_KEEPALIVE = 64
 _DYNAMIC_REPLICA_UNBOUNDED_KEEPALIVE = 8
 _DYNAMIC_PROBE_CONCURRENCY = 16
+_TEMPLATED_PROMPT_BACKENDS = frozenset(
+    {"kairyu", "kairyu-proc", "mock", "vllm"}
+)
+
+
+@dataclass(frozen=True)
+class _ResolvedChatPolicy:
+    """One preflighted renderer policy shared by every request transport."""
+
+    templates: dict[str, ChatTemplate]
+    legacy_models: frozenset[str]
+
+
+def _effective_tokenizer_source(entry) -> Path | None:
+    """Return the local tokenizer source the concrete backend will consume.
+
+    Native Kairyu uses an explicit tokenizer override before ``model_path``;
+    direct vLLM follows its tokenizer-before-model contract.  Hub identifiers
+    deliberately stay unresolved here: deployment preflight is offline and
+    must not make an implicit network fetch merely to decide prompt framing.
+    """
+
+    source: object | None
+    if entry.backend in {"kairyu", "kairyu-proc"}:
+        source = entry.options.get("tokenizer")
+        if source is None:
+            source = entry.options.get("model_path")
+    elif entry.backend == "vllm":
+        source = entry.options.get("tokenizer")
+        if source is None:
+            source = entry.options.get("model")
+    else:
+        return None
+    if not isinstance(source, (str, os.PathLike)) or str(source) == "toy":
+        return None
+    path = Path(source)
+    return path if path.exists() else None
+
+
+def _entry_chat_metadata(
+    entry,
+    *,
+    include_templates: bool,
+) -> TokenizerChatMetadata | None:
+    source = _effective_tokenizer_source(entry)
+    if source is None:
+        return None
+    return load_tokenizer_chat_metadata(
+        source,
+        include_templates=include_templates,
+    )
+
+
+def _metadata_identity(metadata: TokenizerChatMetadata) -> tuple[object, ...]:
+    return (
+        tuple(sorted(metadata.templates.items())),
+        tuple(sorted(metadata.special_tokens.items())),
+    )
+
+
+def _resolved_template_path(source: str, base_dir: Path | None) -> str:
+    if not source.endswith(".jinja") or base_dir is None:
+        return source
+    path = Path(source)
+    return str(base_dir / path) if not path.is_absolute() else source
+
+
+def _resolve_chat_policy(
+    spec: DeploymentSpec,
+    base_dir: Path | None,
+    *,
+    emit_warnings: bool = True,
+) -> _ResolvedChatPolicy:
+    """Resolve every served model before constructing a GPU/backend resource.
+
+    Explicit deploy templates win, then an effective local tokenizer's exact
+    checkpoint template.  The old role concatenator is available only through
+    ``legacy_chat_models`` (apart from the non-model ``mock`` test backend).
+    Text-only remote/custom/orchestration models have no trustworthy local
+    tokenizer owner and therefore fail closed instead of guessing.
+    """
+
+    model_entries: dict[str, tuple[object, ...]] = {
+        name: (entry,) for name, entry in spec.engines.items()
+    }
+    model_entries.update(
+        (name, tuple(pool.replicas)) for name, pool in spec.pools.items()
+    )
+    orchestration_names = set(spec.orchestrators)
+    if spec.orchestrator is not None:
+        orchestration_names.add("kairyu-auto")
+    model_entries.update((name, ()) for name in orchestration_names)
+
+    templates: dict[str, ChatTemplate] = {}
+    legacy_models = set(spec.legacy_chat_models)
+    for model_name, entries in model_entries.items():
+        explicit = spec.chat_templates.get(model_name)
+        if model_name in legacy_models:
+            if emit_warnings:
+                logger.warning(
+                    "model %r explicitly enables the legacy role-concatenation chat "
+                    "renderer; use a tokenizer-owned HF template for real models",
+                    model_name,
+                )
+            # Legacy is a complete, model-scoped renderer policy. Do not parse
+            # unused checkpoint chat metadata and accidentally let it override
+            # the operator's explicit compatibility choice.
+            continue
+        try:
+            metadata = tuple(
+                item
+                for item in (
+                    _entry_chat_metadata(
+                        entry,
+                        include_templates=explicit is None,
+                    )
+                    for entry in entries
+                )
+                if item is not None
+            )
+        except (OSError, ValueError) as error:
+            raise ValueError(
+                f"could not resolve chat metadata for model {model_name!r}: {error}"
+            ) from error
+
+        special_token_maps = {
+            tuple(sorted(item.special_tokens.items())) for item in metadata
+        }
+        if len(special_token_maps) > 1:
+            raise ValueError(
+                f"model {model_name!r} resolves different tokenizer special-token "
+                "maps across replicas; configure a coherent pool"
+            )
+        special_tokens = dict(next(iter(special_token_maps), ()))
+
+        if explicit is not None:
+            try:
+                compiled = ChatTemplate.load(
+                    _resolved_template_path(explicit, base_dir),
+                    special_tokens=special_tokens,
+                )
+            except (OSError, ValueError, TemplateError) as error:
+                raise ValueError(
+                    f"could not load chat template for model {model_name!r}: {error}"
+                ) from error
+            if model_name in orchestration_names:
+                raise ValueError(
+                    f"orchestrated model {model_name!r} cannot safely consume a "
+                    "pre-rendered chat prompt while deriving planner/worker prompts; "
+                    "explicitly opt in through legacy_chat_models"
+                )
+            pool = spec.pools.get(model_name)
+            if pool is not None and pool.discovery is not None:
+                raise ValueError(
+                    f"discovered pool {model_name!r} cannot prove that dynamic "
+                    "replicas preserve pre-rendered chat prompts; explicitly opt "
+                    "in through legacy_chat_models"
+                )
+            incompatible = sorted(
+                {
+                    entry.backend
+                    for entry in entries
+                    if entry.backend not in _TEMPLATED_PROMPT_BACKENDS
+                }
+            )
+            if incompatible:
+                raise ValueError(
+                    f"model {model_name!r} chat template produces a pre-rendered "
+                    "prompt that configured backend(s) cannot preserve: "
+                    f"{', '.join(incompatible)}; use a local tokenizer-owning "
+                    "backend or explicitly opt in through legacy_chat_models"
+                )
+            if compiled.unresolved_special_token_variables:
+                if len(metadata) != len(entries):
+                    detail = (
+                        "local tokenizer metadata is not available for every "
+                        "configured backend"
+                    )
+                else:
+                    detail = (
+                        "the effective local tokenizer metadata does not define "
+                        "their values"
+                    )
+                raise ValueError(
+                    f"model {model_name!r} explicit chat template references "
+                    "tokenizer-owned special-token variables "
+                    f"{sorted(compiled.unresolved_special_token_variables)}, but "
+                    f"{detail}; make the template self-contained or explicitly opt "
+                    "in through legacy_chat_models"
+                )
+            if (
+                compiled.referenced_special_token_variables
+                and len(metadata) != len(entries)
+            ):
+                raise ValueError(
+                    f"model {model_name!r} explicit chat template references "
+                    "tokenizer-owned special-token variables "
+                    f"{sorted(compiled.referenced_special_token_variables)}, but "
+                    "local tokenizer metadata is not available for every configured "
+                    "backend; materialize the effective tokenizer locally, make the "
+                    "template self-contained, or explicitly opt in through "
+                    "legacy_chat_models"
+                )
+            templates[model_name] = compiled
+            continue
+
+        # MockBackend is a deterministic protocol test double, not a trained
+        # model with a prompt format.  Preserve builder test/smoke ergonomics
+        # without weakening any real backend's fail-closed policy.
+        if entries and all(entry.backend == "mock" for entry in entries):
+            legacy_models.add(model_name)
+            continue
+
+        # Auto-load is safe only when every concrete replica exposes the same
+        # local tokenizer metadata.  Picking one member of a heterogeneous or
+        # remote pool would silently give requests a replica-dependent format.
+        if entries and len(metadata) == len(entries):
+            identities = {_metadata_identity(item) for item in metadata}
+            if len(identities) != 1:
+                raise ValueError(
+                    f"model {model_name!r} resolves different chat templates "
+                    "across replicas; configure a coherent pool"
+                )
+            resolved = metadata[0]
+            if resolved.templates:
+                if "default" not in resolved.templates:
+                    raise ValueError(
+                        f"model {model_name!r} tokenizer has multiple chat templates "
+                        "but no default template"
+                    )
+                try:
+                    templates[model_name] = ChatTemplate.from_tokenizer_metadata(
+                        resolved.templates,
+                        resolved.special_tokens,
+                    )
+                except (ValueError, TemplateError) as error:
+                    raise ValueError(
+                        "could not compile tokenizer chat template for model "
+                        f"{model_name!r}: {error}"
+                    ) from error
+                if emit_warnings:
+                    logger.info(
+                        "auto-loaded tokenizer chat template for model %r from %s",
+                        model_name,
+                        ", ".join(str(path) for path in resolved.template_sources),
+                    )
+                continue
+
+        if model_name in orchestration_names:
+            raise ValueError(
+                f"orchestrated model {model_name!r} has no supported chat policy: "
+                "it cannot safely consume a pre-rendered chat prompt while "
+                "deriving planner/worker prompts; "
+                "explicitly opt in through legacy_chat_models"
+            )
+        pool = spec.pools.get(model_name)
+        if pool is not None and pool.discovery is not None:
+            raise ValueError(
+                f"discovered pool {model_name!r} has no supported chat policy: it "
+                "cannot prove that dynamic replicas preserve pre-rendered chat "
+                "prompts; explicitly opt in through legacy_chat_models"
+            )
+        incompatible = sorted(
+            {
+                entry.backend
+                for entry in entries
+                if entry.backend not in _TEMPLATED_PROMPT_BACKENDS
+            }
+        )
+        if incompatible:
+            raise ValueError(
+                f"model {model_name!r} has no supported chat policy: configured "
+                "backend(s) cannot preserve a tokenizer-owned pre-rendered chat "
+                "prompt: "
+                f"{', '.join(incompatible)}; explicitly opt in through "
+                "legacy_chat_models"
+            )
+        raise ValueError(
+            f"model {model_name!r} has no real chat template; add a checkpoint "
+            "chat_template.jinja/tokenizer_config.json chat_template, configure "
+            "chat_templates for this template-preserving local model, or explicitly "
+            "opt in through legacy_chat_models"
+        )
+
+    return _ResolvedChatPolicy(
+        templates=templates,
+        legacy_models=frozenset(legacy_models),
+    )
 
 
 def _dynamic_replica_keepalive_limit(
@@ -293,6 +589,10 @@ def build_app_from_spec(
             raise ValueError(
                 f"batch PostgreSQL DSN environment variable {spec.batch.dsn_env!r} is not set"
             )
+    # Chat policy is metadata-only and deliberately resolves before any
+    # embedding/engine constructor can allocate model or GPU resources.
+    chat_policy = _resolve_chat_policy(spec, base_dir)
+    chat_templates = chat_policy.templates
     embedding_backends = {
         name: _create_embedding_backend(section, base_dir)
         for name, section in spec.embeddings.items()
@@ -453,15 +753,6 @@ def build_app_from_spec(
             )
         )
 
-    chat_templates: dict[str, ChatTemplate] = {}
-    for model_name, source in spec.chat_templates.items():
-        template_source = source
-        if source.endswith(".jinja") and base_dir is not None:
-            path = Path(source)
-            if not path.is_absolute():
-                template_source = str(base_dir / path)
-        chat_templates[model_name] = ChatTemplate.load(template_source)
-
     def _load_orchestrator(spec_path: str) -> Orchestrator:
         orchestrator_spec = _read_orchestrator_spec(spec_path)
         if generation_config_override is not None:
@@ -559,6 +850,7 @@ def build_app_from_spec(
         resolved_api_keys=api_keys,
         resolved_admin_keys=admin_keys,
         price_sheet=spec.pricing,
+        legacy_chat_models=chat_policy.legacy_models,
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)
@@ -595,6 +887,7 @@ def build_app_from_spec(
             claim_lease_seconds=spec.batch.lease_seconds,
             metrics=app.state.metrics,
             chat_templates=chat_templates,  # batch and HTTP must render identically
+            legacy_chat_models=chat_policy.legacy_models,
             usage_ledger=getattr(app.state, "usage_ledger", None),
             tenant_limiter=getattr(app.state, "tenant_limiter", None),
             tenant_config=tenant_config,

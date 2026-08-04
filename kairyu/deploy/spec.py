@@ -339,6 +339,13 @@ class DeploymentSpec(BaseModel):
     # per-MODEL, not per-replica — one map avoids engines-vs-pools ambiguity
     # and stays out of BackendSpec.options (factory kwargs). m9 D2.
     chat_templates: dict[str, str] = Field(default_factory=dict)
+    # Explicit escape hatch for deployments that intentionally retain the
+    # pre-M9 role-prefix concatenator. Template-preserving local deployments
+    # should instead use their tokenizer-owned template (auto-loaded by the
+    # builder) or a ``chat_templates`` override. Remote/discovery/orchestration
+    # paths currently require this model-scoped compatibility choice because
+    # they cannot retain pre-rendered tokenizer ownership downstream.
+    legacy_chat_models: frozenset[str] = frozenset()
     orchestrator: OrchestratorSection | None = None
     # served auto-model name -> orchestrator spec; serves ANY number of named
     # orchestrations (e.g. kairyu-auto + kairyu-auto-max) from one YAML. The
@@ -372,6 +379,23 @@ class DeploymentSpec(BaseModel):
             raise ValueError(
                 f"chat_templates for unknown models {sorted(unknown)}; "
                 "keys must match engines:, pools:, or orchestrators: names"
+            )
+        unknown_legacy = (
+            self.legacy_chat_models
+            - self.engines.keys()
+            - self.pools.keys()
+            - orchestration_names
+        )
+        if unknown_legacy:
+            raise ValueError(
+                f"legacy_chat_models contains unknown models {sorted(unknown_legacy)}; "
+                "names must match engines:, pools:, or orchestrators: names"
+            )
+        conflicting_chat_policy = self.legacy_chat_models & self.chat_templates.keys()
+        if conflicting_chat_policy:
+            raise ValueError(
+                "models cannot declare both a real chat template and the legacy "
+                f"chat fallback: {sorted(conflicting_chat_policy)}"
             )
         if any(not name for name in self.orchestrators):
             raise ValueError("orchestrators: names must be non-empty strings")

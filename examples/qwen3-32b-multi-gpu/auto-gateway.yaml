@@ -37,3 +37,5 @@ orchestrators:
     spec: auto-orchestrator.yaml
   kairyu-auto-max:
     spec: auto-max-orchestrator.yaml
+
+legacy_chat_models: [qwen3-32b, kairyu-auto, kairyu-auto-max]

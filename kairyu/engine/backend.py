@@ -14,6 +14,7 @@ from typing import Protocol, runtime_checkable
 
 from kairyu.engine.prompt import (
     PromptInput,
+    TemplatedPrompt,
     TextPrompt,
     prompt_kind,
     prompt_text,
@@ -169,7 +170,11 @@ def validate_backend_request(backend: object, request: GenerationRequest) -> Non
         return
     if type(request.prompt) is not str:
         kind = prompt_kind(request.prompt)
-        variant = "typed text" if isinstance(request.prompt, TextPrompt) else kind
+        variant = (
+            "typed text"
+            if isinstance(request.prompt, (TextPrompt, TemplatedPrompt))
+            else kind
+        )
         raise ValueError(
             f"{type(backend).__name__} does not declare support for {variant} "
             "prompts; backends without validate_request are legacy-string text-only"
@@ -196,6 +201,11 @@ def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
 
     if not request.tools or request.tools_in_prompt or request.tool_choice == "none":
         return request.prompt
+    if isinstance(request.prompt, TemplatedPrompt):
+        raise ValueError(
+            "templated prompts cannot receive an implicit tool-instruction suffix; "
+            "render tools inside the chat template and set tools_in_prompt=true"
+        )
     kind = prompt_kind(request.prompt)
     if kind != "text":
         raise ValueError(

@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.moa import MoAEvent, MoAResult
 from kairyu.orchestration.orchestrator import (
@@ -44,6 +45,11 @@ def _orchestrator(**kwargs) -> Orchestrator:
         {"tier1": MockBackend(), "tier2": MockBackend()},
     )
     return Orchestrator(engines=engines, **kwargs)
+
+
+def test_orchestrator_rejects_templated_shared_prefix_at_construction():
+    with pytest.raises(ValueError, match="shared_prefix.*pre-rendered"):
+        _orchestrator(shared_prefix=TemplatedPrompt("<BOS>already rendered"))
 
 
 def test_preview_route_is_non_dispatching_and_describes_effective_fallback():

@@ -19,6 +19,7 @@ from kairyu.engine.prompt import (
     MultimodalMessagePart,
     MultimodalPrompt,
     PromptInput,
+    TemplatedPrompt,
     TokensPrompt,
 )
 from kairyu.engine.vision import ImageInputPolicy
@@ -86,6 +87,17 @@ def _multimodal_prompt(image_url: str = _RED_PNG_DATA_URL) -> MultimodalPrompt:
             ),
         ),
     )
+
+
+def test_prerendered_chat_prompt_is_rejected_before_upstream_dispatch():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+    )
+
+    with pytest.raises(ValueError, match="pre-rendered chat prompt.*template boundary"):
+        backend.validate_request(_request(TemplatedPrompt("<BOS>hello")))
 
 
 def _ok_transport(captured: dict) -> httpx.MockTransport:

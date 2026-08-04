@@ -6,8 +6,8 @@ import httpx
 import pytest
 
 from kairyu.engine.mock import MockBackend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS
+from tests.server._legacy_chat import create_legacy_app
 
 
 class _RecordingBackend(MockBackend):
@@ -39,7 +39,7 @@ def _client(app) -> httpx.AsyncClient:
 )
 async def test_openai_endpoints_preserve_omitted_and_explicit_sampling(path, base):
     backend = _RecordingBackend()
-    app = create_app({"m": backend})
+    app = create_legacy_app({"m": backend})
     explicit = {
         "temperature": 1.0,
         "top_p": 1.0,
@@ -65,7 +65,7 @@ async def test_openai_endpoints_preserve_omitted_and_explicit_sampling(path, bas
 
 async def test_responses_endpoint_preserves_temperature_and_top_p_omission():
     backend = _RecordingBackend()
-    app = create_app({"m": backend})
+    app = create_legacy_app({"m": backend})
 
     async with _client(app) as client:
         omitted_response = await client.post(
@@ -102,7 +102,7 @@ async def test_responses_endpoint_preserves_temperature_and_top_p_omission():
     ],
 )
 async def test_openai_endpoints_still_reject_explicit_null_sampling(path, body):
-    app = create_app({"m": MockBackend()})
+    app = create_legacy_app({"m": MockBackend()})
 
     async with _client(app) as client:
         response = await client.post(path, json={**body, "temperature": None})

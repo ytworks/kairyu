@@ -5,9 +5,9 @@ import httpx
 from kairyu.deploy.prober import HealthProber
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.mock import MockBackend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.sampling_params import SamplingParams
+from tests.server._legacy_chat import create_legacy_app
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -36,7 +36,7 @@ def _chat_body(content: str, model: str = "m", **extra) -> dict:
 
 
 async def test_health_and_readyz_ok():
-    app = create_app(engines={"m": MockBackend()})
+    app = create_legacy_app(engines={"m": MockBackend()})
     async with _client(app) as client:
         health = await client.get("/health")
         ready = await client.get("/readyz")
@@ -48,7 +48,7 @@ async def test_health_and_readyz_ok():
 
 async def test_readyz_503_when_pool_has_no_healthy_replica():
     pool = ReplicaPool([_FailingBackend()], unhealthy_after=1)
-    app = create_app(engines={"m": pool})
+    app = create_legacy_app(engines={"m": pool})
     request = GenerationRequest(
         request_id="r1", prompt="p", sampling_params=SamplingParams()
     )
@@ -80,7 +80,7 @@ async def test_unvalidated_remote_pool_is_unready_unplaceable_and_reports_zero()
             interval_s=60,
             client=probe_client,
         )
-        app = create_app(engines={"remote": pool})
+        app = create_legacy_app(engines={"remote": pool})
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test"
@@ -108,7 +108,7 @@ async def test_unvalidated_remote_pool_is_unready_unplaceable_and_reports_zero()
 async def test_readyz_explains_healthy_but_draining_pool() -> None:
     pool = ReplicaPool({"replica": MockBackend()})
     pool.drain("replica")
-    app = create_app(engines={"remote": pool})
+    app = create_legacy_app(engines={"remote": pool})
 
     async with _client(app) as client:
         ready = await client.get("/readyz")
@@ -125,7 +125,7 @@ async def test_readyz_explains_healthy_but_draining_pool() -> None:
 
 async def test_metrics_exposes_request_and_pool_series():
     pool = ReplicaPool([MockBackend(), MockBackend()])
-    app = create_app(engines={"pooled": pool})
+    app = create_legacy_app(engines={"pooled": pool})
     async with _client(app) as client:
         ok = await client.post("/v1/chat/completions", json=_chat_body("hi", model="pooled"))
         assert ok.status_code == 200
@@ -146,14 +146,14 @@ async def test_metrics_exposes_request_and_pool_series():
 async def test_metrics_disabled_by_settings():
     from kairyu.entrypoints.server.settings import ServerSettings
 
-    app = create_app(engines={"m": MockBackend()}, settings=ServerSettings(metrics=False))
+    app = create_legacy_app(engines={"m": MockBackend()}, settings=ServerSettings(metrics=False))
     async with _client(app) as client:
         response = await client.get("/metrics")
     assert response.status_code == 404
 
 
 async def test_access_log_adds_request_id_header():
-    app = create_app(engines={"m": MockBackend()})
+    app = create_legacy_app(engines={"m": MockBackend()})
     async with _client(app) as client:
         response = await client.get("/health")
     assert response.headers.get("x-request-id")
@@ -165,11 +165,10 @@ def test_admin_drain_requires_auth_and_flips_readyz(monkeypatch):
     from fastapi.testclient import TestClient
 
     from kairyu.engine.registry import create_backend
-    from kairyu.entrypoints.server.app import create_app
     from kairyu.entrypoints.server.settings import ServerSettings
 
     monkeypatch.setenv("KAIRYU_TEST_KEYS", "sk-secret")
-    app = create_app(
+    app = create_legacy_app(
         {"m": create_backend("mock")},
         settings=ServerSettings(api_keys_env="KAIRYU_TEST_KEYS"),
     )
@@ -189,12 +188,11 @@ def test_admin_drain_requires_admin_key_and_undrain_recovers(monkeypatch):
     from fastapi.testclient import TestClient
 
     from kairyu.engine.registry import create_backend
-    from kairyu.entrypoints.server.app import create_app
     from kairyu.entrypoints.server.settings import ServerSettings
 
     monkeypatch.setenv("KAIRYU_TEST_KEYS", "sk-user,sk-admin")
     monkeypatch.setenv("KAIRYU_TEST_ADMIN", "sk-admin")
-    app = create_app(
+    app = create_legacy_app(
         {"m": create_backend("mock")},
         settings=ServerSettings(
             api_keys_env="KAIRYU_TEST_KEYS", admin_keys_env="KAIRYU_TEST_ADMIN"
@@ -229,7 +227,7 @@ async def test_readyz_503_when_a_local_engine_reports_itself_unable_to_serve():
     # 200, so a benchmark ran 14 minutes against a dead 8-GPU deployment.
     from kairyu.engine.backend import EngineReadiness
 
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": _ReadinessBackend(EngineReadiness(False, "ranks not running: [1, 2]"))}
     )
     async with _client(app) as client:
@@ -244,7 +242,7 @@ async def test_readyz_503_when_a_local_engine_reports_itself_unable_to_serve():
 async def test_readyz_200_when_the_local_engine_reports_ready():
     from kairyu.engine.backend import EngineReadiness
 
-    app = create_app(engines={"m": _ReadinessBackend(EngineReadiness(True))})
+    app = create_legacy_app(engines={"m": _ReadinessBackend(EngineReadiness(True))})
     async with _client(app) as client:
         ready = await client.get("/readyz")
     assert ready.status_code == 200
@@ -258,7 +256,7 @@ async def test_readyz_reports_unready_when_the_readiness_check_itself_raises():
         def readiness(self):
             raise RuntimeError("connect https://internal:8443 failed")
 
-    app = create_app(engines={"m": _Exploding()})
+    app = create_legacy_app(engines={"m": _Exploding()})
     async with _client(app) as client:
         ready = await client.get("/readyz")
     assert ready.status_code == 503
@@ -271,7 +269,7 @@ async def test_readyz_reports_unready_when_the_readiness_check_itself_raises():
 async def test_health_stays_ok_for_a_recoverable_engine_fault():
     from kairyu.engine.backend import EngineReadiness
 
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": _ReadinessBackend(EngineReadiness(False, "degraded"))}
     )
     async with _client(app) as client:
@@ -287,7 +285,7 @@ async def test_health_503s_on_a_fatal_engine_fault():
     # up forever serving nothing, which is exactly what happened on hardware
     from kairyu.engine.backend import EngineReadiness
 
-    app = create_app(
+    app = create_legacy_app(
         engines={
             "m": _ReadinessBackend(
                 EngineReadiness(False, "ranks not running: [1, 2]", fatal=True)
@@ -316,7 +314,7 @@ async def test_embedding_readiness_participates_in_readyz_and_health():
                 fatal=True,
             )
 
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": MockBackend()},
         embedding_backends={"embed": _Embedding()},
     )

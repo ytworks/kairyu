@@ -6,6 +6,7 @@ from kairyu.engine.prompt import (
     MultimodalMessagePart,
     MultimodalPrompt,
     PromptInput,
+    TemplatedPrompt,
     TextPrompt,
     TokensPrompt,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "PromptInput",
     "RequestOutput",
     "SamplingParams",
+    "TemplatedPrompt",
     "TextPrompt",
     "TokensPrompt",
     "__version__",

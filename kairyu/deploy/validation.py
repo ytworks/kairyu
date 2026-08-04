@@ -18,6 +18,7 @@ from typing import Literal
 import yaml
 from pydantic import ValidationError
 
+from kairyu.deploy import builder as deployment_builder
 from kairyu.deploy.spec import (
     DeploymentSpec,
     _DuplicateKeyError,
@@ -1004,6 +1005,57 @@ def _validate_chat_templates(
     return findings
 
 
+def _validate_chat_policy(
+    spec: DeploymentSpec,
+    *,
+    config_path: Path,
+) -> list[ValidationFinding]:
+    """Reuse runtime preflight without constructing a backend or emitting logs."""
+
+    try:
+        # ``_resolve_chat_policy`` is the runtime source of truth and is
+        # metadata-only. Explicit-legacy warnings belong to ``serve`` startup,
+        # not deterministic offline validation.
+        deployment_builder._resolve_chat_policy(
+            spec,
+            config_path.parent,
+            emit_warnings=False,
+        )
+    except ValueError as error:
+        message = str(error)
+        if "has no real chat template" in message:
+            code = "schema.missing_chat_template"
+            field = "chat_templates"
+            safe_message = (
+                "served text models require a tokenizer-owned or configured "
+                "chat template, or an explicit legacy opt-in"
+            )
+        elif "has no supported chat policy" in message:
+            code = "schema.missing_legacy_chat_policy"
+            field = "legacy_chat_models"
+            safe_message = (
+                "non-template-preserving served models require an explicit "
+                "model-scoped legacy chat policy"
+            )
+        else:
+            code = "schema.invalid_chat_policy"
+            field = "chat_templates"
+            safe_message = (
+                "chat template policy is incompatible with the local deployment "
+                "artifacts"
+            )
+        return [
+            _finding(
+                artifact=config_path,
+                field=field,
+                check="schema",
+                code=code,
+                message=safe_message,
+            )
+        ]
+    return []
+
+
 def validate_deployment(config: str | Path) -> ValidationReport:
     """Validate one DeploymentSpec and all safely discoverable local inputs."""
 
@@ -1081,12 +1133,6 @@ def validate_deployment(config: str | Path) -> ValidationReport:
         findings.extend(_pydantic_findings(error, artifact=config_path))
     except (ValueError, yaml.YAMLError, RecursionError) as error:
         findings.append(_yaml_finding(error, config_path))
-    if spec is not None:
-        # Keep the typed load alive as the canonical root-schema verdict. The
-        # raw mapping below is used only to continue independent references
-        # after another field fails validation.
-        del spec
-
     checked_models: set[tuple[str, str, str, str]] = set()
     for field, backend, options in _iter_deployment_backends(raw):
         findings.extend(
@@ -1116,7 +1162,10 @@ def validate_deployment(config: str | Path) -> ValidationReport:
                 checked_models=checked_models,
             )
         )
-    findings.extend(_validate_chat_templates(raw, config_path=config_path))
+    template_findings = _validate_chat_templates(raw, config_path=config_path)
+    findings.extend(template_findings)
+    if spec is not None and not template_findings:
+        findings.extend(_validate_chat_policy(spec, config_path=config_path))
     return _report(
         config_path,
         findings,

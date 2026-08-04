@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from kairyu.engine.backend import (
@@ -25,6 +26,7 @@ from kairyu.engine.prompt import (
     MultimodalMessagePart,
     MultimodalPrompt,
     PromptInput,
+    TemplatedPrompt,
     TextPrompt,
 )
 from kairyu.entrypoints.chat_template import ChatTemplate, flatten_content, render_chat
@@ -208,23 +210,63 @@ def _validate_response_format(response_format: dict | None) -> None:
             )
 
 
+def validate_chat_policy(
+    chat_templates: Mapping[str, ChatTemplate] | None,
+    legacy_chat_models: AbstractSet[str] | None = None,
+) -> None:
+    """Reject ambiguous or unverifiable chat rendering configuration."""
+
+    templates = chat_templates or {}
+    overlap = set(templates) & set(legacy_chat_models or ())
+    if overlap:
+        raise ValueError(
+            "models cannot be configured in both chat_templates and "
+            f"legacy_chat_models: {sorted(overlap)}"
+        )
+
+    invalid = {
+        model: sorted(template.unverified_special_token_variables)
+        for model, template in templates.items()
+        if template.unverified_special_token_variables
+    }
+    if invalid:
+        detail = "; ".join(
+            f"{model}={variables}" for model, variables in sorted(invalid.items())
+        )
+        raise ValueError(
+            "chat_templates reference tokenizer-owned special-token variables "
+            f"without verified values: {detail}; supply special_tokens when "
+            "constructing each explicit ChatTemplate or use checkpoint-owned "
+            "tokenizer metadata"
+        )
+
+
 def render_prompt(
     request: ChatCompletionRequest,
     chat_templates: Mapping[str, ChatTemplate] | None,
-) -> str:
+    *,
+    legacy_chat_models: AbstractSet[str] | None = None,
+) -> str | TemplatedPrompt:
     """Render one prompt identically for HTTP and batch transports."""
+    try:
+        validate_chat_policy(chat_templates, legacy_chat_models)
+    except ValueError as error:
+        raise ChatRequestError(str(error)) from error
     template = (chat_templates or {}).get(request.model)
     messages = []
     for message in request.messages:
-        data = message.model_dump()
-        # Declaring the historically allowed tool_calls extra makes validation
-        # precise, but must not inject a None-valued key into every ordinary
-        # message passed to key-sensitive HF templates.
-        if "tool_calls" not in message.model_fields_set:
-            data.pop("tool_calls", None)
-        messages.append(data)
+        # Preserve the OpenAI wire shape for key-sensitive HF templates:
+        # omitted optional fields stay undefined, while an explicit null stays
+        # present. Pydantic extras remain included as sent.
+        messages.append(message.model_dump(exclude_unset=True))
     tools = None if request.tool_choice == "none" else request.tools
     if template is None:
+        if request.model not in (legacy_chat_models or ()):
+            raise ChatRequestError(
+                f"model {request.model!r} has no Kairyu chat template; "
+                "configure chat_templates or explicitly opt in through "
+                "legacy_chat_models"
+            )
         if request.chat_template_kwargs:
             raise ChatRequestError(
                 f"model {request.model!r} has no Kairyu chat template; "
@@ -232,12 +274,18 @@ def render_prompt(
             )
         return render_chat(messages)
     try:
-        return template.render(
-            messages,
-            tools=tools,
-            template_kwargs=request.chat_template_kwargs,
+        return TemplatedPrompt(
+            template.render(
+                messages,
+                tools=tools,
+                template_kwargs=request.chat_template_kwargs,
+            )
         )
-    except ValueError as error:
+    # Jinja preserves Python exceptions raised by expressions (for example a
+    # TypeError from request-dependent concatenation) instead of wrapping every
+    # failure in TemplateError. Rendering is a request-validation boundary: no
+    # template/input mismatch should escape as an HTTP or batch 500.
+    except Exception as error:
         raise ChatRequestError(str(error)) from error
 
 
@@ -252,6 +300,11 @@ def _render_multimodal_prompt(
     structured image parts and apply the model template twice.
     """
 
+    if request.chat_template_kwargs:
+        raise ChatRequestError(
+            "chat_template_kwargs cannot be applied to an upstream-owned "
+            "multimodal chat template"
+        )
     if (chat_templates or {}).get(request.model) is not None:
         raise ChatRequestError(
             f"model {request.model!r} cannot combine a Kairyu text chat template "
@@ -326,6 +379,7 @@ def validate_chat_input(
     chat_templates: Mapping[str, ChatTemplate] | None,
     *,
     allow_multimodal: bool = False,
+    legacy_chat_models: AbstractSet[str] | None = None,
 ) -> ValidatedChatInput:
     if request.model_extra:
         raise ChatRequestError(
@@ -357,7 +411,11 @@ def validate_chat_input(
     prompt: PromptInput = (
         _render_multimodal_prompt(request, chat_templates)
         if has_images
-        else render_prompt(request, chat_templates)
+        else render_prompt(
+            request,
+            chat_templates,
+            legacy_chat_models=legacy_chat_models,
+        )
     )
     return ValidatedChatInput(
         request=request,
@@ -382,6 +440,7 @@ def validate_chat_request(
     priority: int | None = None,
     scheduling_class: str = "interactive",
     placement_started_ns: int | None = None,
+    legacy_chat_models: AbstractSet[str] | None = None,
 ) -> ValidatedChatRequest:
     engine = engines.get(request.model)
     if engine is None:
@@ -394,6 +453,7 @@ def validate_chat_request(
         request,
         chat_templates,
         allow_multimodal=True,
+        legacy_chat_models=legacy_chat_models,
     )
     if request.n > 1 and getattr(engine, "supports_n", True) is False:
         raise ChatRequestError(f"model {request.model!r} does not support n > 1")

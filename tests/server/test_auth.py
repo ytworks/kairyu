@@ -4,9 +4,9 @@ import httpx
 import pytest
 
 from kairyu.engine.mock import MockBackend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator
+from tests.server._legacy_chat import create_legacy_app
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -21,7 +21,7 @@ def _chat_body(content: str) -> dict:
 @pytest.fixture()
 def app(monkeypatch):
     monkeypatch.setenv("KAIRYU_API_KEYS", "secret-1, secret-2")
-    return create_app(
+    return create_legacy_app(
         engines={"m": MockBackend()},
         settings=ServerSettings(api_keys_env="KAIRYU_API_KEYS"),
     )
@@ -97,7 +97,7 @@ async def test_valid_keys_are_admitted(app):
 
 async def test_route_and_routing_config_require_auth(monkeypatch):
     monkeypatch.setenv("KAIRYU_API_KEYS", "secret")
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": MockBackend()},
         orchestrators={"auto": Orchestrator({"tier1": MockBackend()})},
         settings=ServerSettings(api_keys_env="KAIRYU_API_KEYS"),
@@ -125,7 +125,7 @@ async def test_health_readyz_metrics_stay_open(app):
 
 async def test_protect_metrics_requires_key(monkeypatch):
     monkeypatch.setenv("KAIRYU_API_KEYS", "k")
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": MockBackend()},
         settings=ServerSettings(api_keys_env="KAIRYU_API_KEYS", protect_metrics=True),
     )
@@ -138,7 +138,7 @@ async def test_protect_metrics_requires_key(monkeypatch):
 async def test_empty_key_env_fails_loud(monkeypatch):
     monkeypatch.setenv("KAIRYU_API_KEYS", "  ")
     with pytest.raises(ValueError, match="contains no keys"):
-        create_app(
+        create_legacy_app(
             engines={"m": MockBackend()},
             settings=ServerSettings(api_keys_env="KAIRYU_API_KEYS"),
         )
@@ -147,7 +147,7 @@ async def test_empty_key_env_fails_loud(monkeypatch):
 async def test_admin_and_data_plane_role_matrix(monkeypatch):
     monkeypatch.setenv("KAIRYU_DATA_KEYS", "data,dual")
     monkeypatch.setenv("KAIRYU_ADMIN_KEYS", "admin,dual")
-    app = create_app(
+    app = create_legacy_app(
         {"m": MockBackend()},
         settings=ServerSettings(
             api_keys_env="KAIRYU_DATA_KEYS",
@@ -180,7 +180,7 @@ async def test_admin_and_data_plane_role_matrix(monkeypatch):
 
 async def test_admin_only_configuration_installs_auth(monkeypatch):
     monkeypatch.setenv("KAIRYU_ADMIN_KEYS", "admin")
-    app = create_app(
+    app = create_legacy_app(
         {"m": MockBackend()},
         settings=ServerSettings(admin_keys_env="KAIRYU_ADMIN_KEYS"),
     )

@@ -141,10 +141,12 @@ export HF_TOKEN=hf_...
 
 It starts Qwen3-32B on every visible GPU (reusing an already-running service),
 waits for readiness, verifies that `qwen3-32b` is the model actually served, and
-runs the suite. The serving container extracts the exact checkpoint-owned HF
-chat template from `tokenizer_config.json` into a process-local temporary file;
-it does not use a stale committed copy. Progress is reported per slot and per
-item while it runs.
+runs the suite. During DeploymentSpec preflight, Kairyu loads the exact
+checkpoint-owned HF chat template directly from the local tokenizer directory
+(`chat_template.jinja` / `additional_chat_templates/*.jinja` before
+`tokenizer_config.json`) and injects its named special tokens. Compose neither
+extracts nor materializes a temporary template file, and no stale template copy
+is committed. Progress is reported per slot and per item while it runs.
 
 Two artifacts land under `results/fugu/<run_id>/`:
 
@@ -209,7 +211,7 @@ The local Qwen endpoint does not implement OpenAI's provider-specific
 `reasoning_effort` field. Instead, this example uses Qwen3's native chat-template
 control: target requests set `enable_thinking=true`, while judge and τ user
 simulator requests set it to `false`. Kairyu applies these variables while
-rendering the configured HF template and rejects them when no template exists.
+rendering the auto-loaded HF template and rejects them when no template exists.
 
 **The vision slots skip by design here.** `Qwen/Qwen3-32B` is a text-generation
 causal LM — the vision family is the separate Qwen3-VL — so the target is

@@ -5,8 +5,8 @@ import asyncio
 import httpx
 
 from kairyu.engine.mock import MockBackend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
+from tests.server._legacy_chat import create_legacy_app
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -19,7 +19,7 @@ def _chat_body(content: str) -> dict:
 
 
 async def test_saturation_returns_429_with_retry_after():
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": MockBackend(latency_s=0.2)},
         settings=ServerSettings(max_concurrency=1),
     )
@@ -36,7 +36,7 @@ async def test_saturation_returns_429_with_retry_after():
 
 
 async def test_slot_is_released_after_completion():
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": MockBackend()},
         settings=ServerSettings(max_concurrency=1),
     )
@@ -47,7 +47,7 @@ async def test_slot_is_released_after_completion():
 
 
 async def test_health_is_never_guarded():
-    app = create_app(
+    app = create_legacy_app(
         engines={"m": MockBackend(latency_s=0.2)},
         settings=ServerSettings(max_concurrency=1),
     )

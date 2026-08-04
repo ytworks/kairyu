@@ -328,6 +328,13 @@ outputs = llm.generate(["Hello, my name is"], SamplingParams(temperature=0.8))
 print(outputs[0].outputs[0].text)
 ```
 
+`LLM.chat(...)` loads the chat template and named special tokens from a local
+`tokenizer` snapshot (or the local `model` path) on first use. If neither local
+metadata nor an explicit `chat_template=` is available, chat fails before
+dispatch; the old role-prefix renderer is available only through the explicit
+`legacy_chat=True` compatibility option. Plain `generate(...)` remains a
+completion path and does not require chat metadata.
+
 `SamplingParams`, `RequestOutput`, `CompletionOutput`, `AsyncEngineArgs`, and
 `AsyncLLMEngine` replicate vLLM's public surface (the subset exercised by vLLM's own
 examples), verified by the contract tests in `tests/compat/`. The async engine:
@@ -581,7 +588,7 @@ clients just pick a model name
 
 ```yaml
 engines:
-  m1: {backend: mock}                # swap for kairyu/vllm/openai in production
+  m1: {backend: mock}                # local kairyu/vllm in production; see policy below
   m2: {backend: mock}
 
 orchestrators:
@@ -589,6 +596,8 @@ orchestrators:
     spec: agent_pool.yaml
   kairyu-auto-max:                   # deep tier: multi_agent routes through MoA
     spec: agent_pool_max.yaml
+
+legacy_chat_models: [kairyu-auto, kairyu-auto-max]  # explicit mock-demo framing
 ```
 
 ```bash
@@ -623,6 +632,8 @@ pools:
     unhealthy_after: 3
     queue_depth_threshold: 8
     probe_interval_s: 5.0
+
+legacy_chat_models: [fleet]          # remote pool has no local tokenizer metadata
 ```
 
 Requests carrying a session id (`X-Session-ID` header or the OpenAI `user` field) stick to
@@ -736,8 +747,11 @@ pools:                         # served model name -> ReplicaPool of N replicas
     queue_depth_threshold: 8   # session-affinity load valve
     probe_interval_s: 5.0      # background health prober
 
-chat_templates:                # served model -> HF Jinja template (text or *.jinja path)
+chat_templates:                # optional local-model override; wins over tokenizer metadata
   qwen: templates/qwen.jinja
+
+legacy_chat_models:            # explicit compatibility for non-render-preserving paths
+  [remote-a, fleet, kairyu-auto, kairyu-auto-max]
 
 orchestrator:                  # optional kairyu-auto (OrchestratorSpec YAML)
   spec: orchestrator.yaml
@@ -750,6 +764,44 @@ batch:                         # optional OpenAI-compatible /v1/files + /v1/batc
   data_dir: /var/kairyu/batches
   max_concurrency: 4
 ```
+
+For local `kairyu`/`kairyu-proc` engines, DeploymentSpec loads the chat
+template from the tokenizer actually used by the engine: an explicit
+`options.tokenizer` directory first, otherwise `options.model_path`. Direct
+local vLLM engines use `options.tokenizer` before `options.model`. A tokenizer
+root's `chat_template.jinja` and `additional_chat_templates/*.jinja` files take
+precedence over `tokenizer_config.json`'s `chat_template`, matching
+Transformers; named special tokens from the tokenizer metadata are injected
+into the Jinja context. `chat_templates` remains the explicit per-served-model
+override. If the effective tokenizer is not materialized locally, that
+override must be self-contained: a reference such as `{{ bos_token }}` fails
+preflight because Kairyu cannot verify its value instead of silently rendering
+an empty string.
+
+Every real text-chat model must resolve a policy before backend startup. An
+explicit `chat_templates` override is supported only where Kairyu can preserve
+the resulting pre-rendered prompt end to end: local `kairyu`, `kairyu-proc`,
+vLLM, or deterministic `mock` engines and compatible static pools. Current OpenAI-compatible remote
+backends, discovery-backed pools, and orchestrators cannot preserve that
+ownership through an upstream chat template or derived planner/worker prompts,
+so they must be listed in `legacy_chat_models`; configuring a template for
+them fails startup. That list is a warned compatibility escape hatch for the
+old `role: content` concatenator, not a process-wide fallback, and a model
+cannot select both policies. The DeploymentSpec builder automatically selects
+that compatibility path only for the deterministic `mock` backend, because it
+is a protocol test double rather than a trained model. Lower-level
+`create_app`, prompt-validation, Responses, and `BatchWorker` callers have no
+mock exception. Omitting both policies emits an explicit construction warning,
+and every chat request for that model is rejected before dispatch; this keeps
+completion-only programmatic apps usable without restoring a silent chat
+fallback. Every served chat model must receive a `ChatTemplate` or explicit
+membership in `legacy_chat_models`.
+
+VLMs have no deployment-preflight exception either. The checked-in image-chat
+overlay lists its remote served model in `legacy_chat_models` for the text-only
+path; image-bearing requests bypass that renderer and preserve structured
+messages for the upstream processor. A pre-rendered Kairyu template is rejected
+for that remote backend at startup, preventing double templating.
 
 For distributed tracing, install `--extra otel` and set
 `server.tracing: true`. Kairyu propagates W3C `traceparent`/`tracestate` only,

@@ -37,7 +37,8 @@ engines:
 orchestrators:
   answer: { spec: orchestrator.yaml }
 chat_templates:
-  answer: chat.jinja
+  local: chat.jinja
+legacy_chat_models: [answer]
 """,
         encoding="utf-8",
     )

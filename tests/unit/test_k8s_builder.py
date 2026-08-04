@@ -333,6 +333,7 @@ pools:
       poll_interval_s: 0.001
     probe_interval_s: 0.001
     placement_log_path: evidence/membership.jsonl
+legacy_chat_models: [qwen]
 """
     )
 
@@ -445,6 +446,7 @@ pools:
       namespace: explicit
       port: 9000
       poll_interval_s: 60
+legacy_chat_models: [model]
 """
     )
 

@@ -12,6 +12,7 @@ import base64
 import math
 import struct
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -70,8 +71,14 @@ def add_extra_routes(
     *,
     embedding_backends: Mapping[str, EmbeddingBackend] | None = None,
     chat_templates=None,
+    legacy_chat_models: AbstractSet[str] | None = None,
 ) -> None:
-    add_responses_route(app, engines, chat_templates=chat_templates)
+    add_responses_route(
+        app,
+        engines,
+        chat_templates=chat_templates,
+        legacy_chat_models=legacy_chat_models,
+    )
 
     if embedding_backends:
 

@@ -94,7 +94,8 @@ kairyu validate /etc/kairyu/deployment.yaml
 
 Validation is always deterministic and offline. It checks the DeploymentSpec
 schema and declared local filesystem references: orchestrator specs, `.jinja`
-chat templates, and local `kairyu`/`kairyu-proc` model and tokenizer artifacts.
+chat templates, and local `kairyu`/`kairyu-proc` model and tokenizer artifacts,
+including tokenizer-owned chat metadata.
 Orchestrator and `.jinja` paths resolve from the deployment file's directory;
 native model and tokenizer paths retain the serve process's working-directory
 semantics.
@@ -110,6 +111,52 @@ The current DeploymentSpec has no standalone adapter, grammar, or benchmark
 artifact references, so `validate` does not invent checks for them. Their
 request-, benchmark-, and runtime-owned validation remains unchanged.
 
+Chat-template ownership is resolved before any backend can allocate model or
+GPU resources. For `kairyu` and `kairyu-proc`, the effective local tokenizer is
+`options.tokenizer` when explicitly set and `options.model_path` otherwise;
+direct local vLLM uses `options.tokenizer` before `options.model`. At that
+tokenizer root, a `chat_template.jinja` default and named
+`additional_chat_templates/*.jinja` files collectively take precedence over
+the `chat_template` value in `tokenizer_config.json`, matching Transformers.
+Kairyu also supplies the tokenizer's named special tokens to the Jinja context.
+An explicit per-served-model DeploymentSpec `chat_templates` entry wins over
+the auto-loaded template while retaining those tokenizer-owned token values.
+
+There is no silent production fallback. A real text-chat engine or static pool
+whose effective local tokenizer has no template fails startup. An explicit
+`chat_templates` override is accepted only for local `kairyu`, `kairyu-proc`,
+vLLM, or deterministic `mock` engines and compatible static pools, where the pre-rendered prompt can
+retain tokenizer ownership through dispatch. Current OpenAI-compatible remote
+models, orchestrators, and discovery-backed pools cannot preserve it through
+an upstream chat-template boundary or derived planner/worker prompts. They
+therefore require the explicit per-model compatibility opt-in:
+
+```yaml
+legacy_chat_models: [old-wire-model]
+```
+
+That opt-in logs a warning and uses the pre-M9 `role: content` concatenator
+only for the listed served models; it cannot be combined with a real template
+for the same name. The DeploymentSpec builder automatically selects this path
+only for the built-in deterministic `mock` backend because it is a protocol
+test double, not a model prompt format. Lower-level app, prompt-validation,
+Responses, and batch-worker construction has no mock exception: omitting both
+policies logs an explicit construction warning, and chat requests are rejected
+before dispatch. Completion-only programmatic apps remain valid, but every
+served chat model must provide a `ChatTemplate` or model-scoped legacy
+membership. A local path is required for offline auto-loading; a Hub identifier that has not been
+materialized locally may use only a self-contained explicit template. If that
+template references tokenizer-owned variables such as `bos_token`, preflight
+fails until the effective tokenizer metadata is available locally; static
+pools require it from every replica before sharing those values.
+
+Rendered HF chat prompts carry a typed ownership marker through Kairyu's
+in-process and ZMQ transports. Native tokenization already disables automatic
+special-token insertion; the direct vLLM adapter sets
+`add_special_tokens=False` only for that marker. Ordinary completion strings
+retain vLLM's completion default. Backends that cannot preserve the marker fail
+closed instead of converting it to an ordinary string.
+
 Replica node (GPU):
 
 ```yaml
@@ -118,7 +165,7 @@ engines:
   llama-70b:
     backend: kairyu            # or vllm; mock for CPU smoke
     options:
-      model_path: "meta-llama/Llama-3.3-70B-Instruct"
+      model_path: /models/llama-70b  # local checkpoint + tokenizer metadata
       generation_config: auto  # auto | vllm | none; default auto
       tensor_parallel_size: 4
       max_num_seqs: 16       # bound active sequences
@@ -183,6 +230,7 @@ pools:
     queue_depth_threshold: 8
     probe_interval_s: 5.0
 orchestrator: { spec: agent_pool.yaml }          # optional: kairyu-auto routing
+legacy_chat_models: [llama-70b, kairyu-auto]     # current remote/AUTO compatibility
 embeddings:
   embed-test:
     backend: mock                                # deterministic built-in CPU backend
@@ -292,6 +340,11 @@ engines:
       model: gemini-2.5-flash
       api_key_env: GEMINI_API_KEY
       upstream: gemini
+
+# Hosted providers expose no local tokenizer metadata, and the current remote
+# adapter cannot preserve a Kairyu pre-rendered prompt through their own chat
+# template. This example therefore selects the compatibility renderer explicitly.
+legacy_chat_models: [hosted-openai, hosted-anthropic, hosted-gemini]
 ```
 
 Vendor extensions use `SamplingParams(extra_args=...)`. Each key must be in
@@ -442,13 +495,17 @@ docker compose \
   up -d --build --wait
 ```
 
-Kairyu preserves message roles and content-part order and deliberately does not
-apply a text chat template to image-bearing requests. The stock vLLM replica
-owns the Qwen processor/template. The gateway accepts only inline PNG, JPEG, or
-WebP data URLs and verifies the decoded raster before admission; remote URLs,
-local paths, invalid MIME/magic, malformed or animated images, decompression
-bombs, and configured byte/pixel/dimension/aspect-ratio overages return a
-controlled OpenAI-compatible error without upstream media I/O.
+VLMs have no deployment-preflight exception. The checked-in
+`config-vlm.yaml` explicitly lists `qwen3-vl-32b` in `legacy_chat_models` for
+its text-only compatibility path. Image-bearing requests bypass that renderer:
+Kairyu preserves message roles and content-part order, and the stock vLLM
+replica owns the Qwen processor/template. Configuring a Kairyu
+`chat_templates` entry for that remote backend is rejected at startup rather
+than applying the model template twice. The gateway accepts only inline PNG,
+JPEG, or WebP data URLs and verifies the decoded raster before admission; remote
+URLs, local paths, invalid MIME/magic, malformed or animated images,
+decompression bombs, and configured byte/pixel/dimension/aspect-ratio overages
+return a controlled OpenAI-compatible error without upstream media I/O.
 
 The production overlay permits one image up to 8 MiB and 2,097,152 pixels,
 uses Qwen's matching 65,536–2,097,152-pixel processor range, and reserves the

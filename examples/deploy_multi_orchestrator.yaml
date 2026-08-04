@@ -9,10 +9,12 @@ server:
   port: 8000
 
 engines:
-  m1: { backend: mock }   # swap for kairyu/vllm/openai backends in production
+  m1: { backend: mock }   # local kairyu/vllm in production; remote needs legacy opt-in
   m2: { backend: mock }
 
 # Any number of named orchestrations, each an arbitrary worker/role DAG.
 orchestrators:
   kairyu-auto: { spec: agent_pool.yaml }
   kairyu-auto-max: { spec: agent_pool_max.yaml }
+
+legacy_chat_models: [kairyu-auto, kairyu-auto-max]

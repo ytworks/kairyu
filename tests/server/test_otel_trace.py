@@ -9,7 +9,6 @@ import pytest
 from kairyu.engine.backend import GenerationRequest, GenerationResult
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
-from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.middleware import TracingMiddleware
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.orchestrator import Orchestrator
@@ -17,6 +16,7 @@ from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 from kairyu.telemetry import configure_tracing
+from tests.server._legacy_chat import create_legacy_app
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ async def test_one_request_correlates_gateway_conductor_pool_and_remote_replica(
         "After that implement. Finally verify."
     )
     settings = ServerSettings(tracing=True, access_log=False, metrics=False)
-    replica_app = create_app(
+    replica_app = create_legacy_app(
         engines={"llama": MockBackend()},
         settings=settings,
     )
@@ -78,7 +78,7 @@ async def test_one_request_correlates_gateway_conductor_pool_and_remote_replica(
         upstream="kairyu",
     )
     pool = ReplicaPool({"replica-1": remote})
-    gateway_app = create_app(
+    gateway_app = create_legacy_app(
         engines={},
         orchestrators={
             "auto": Orchestrator(

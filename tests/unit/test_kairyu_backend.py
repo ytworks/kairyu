@@ -1788,7 +1788,10 @@ def test_dist_ep_attention_dp_propagates_cuda_graph_capacity_and_scratch(
 
 
 async def test_full_stack_openai_server_over_engine_core():
-    app = create_app(engines={"kairyu-cpu": KairyuBackend(num_pages=256)})
+    app = create_app(
+        engines={"kairyu-cpu": KairyuBackend(num_pages=256)},
+        legacy_chat_models={"kairyu-cpu"},
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(

@@ -13,7 +13,6 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartParser
 
 from kairyu.batch.store import BatchStore
-from kairyu.batch.worker import BatchWorker
 from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.engine.backend import AdmissionUpperBound, GenerationResult, GenerationUsage
@@ -31,6 +30,7 @@ from kairyu.pricing import (
     PriceSheet,
     export_invoice_csv,
 )
+from tests.server._legacy_chat import LegacyBatchWorker, create_legacy_app
 
 
 def _client(app) -> httpx.AsyncClient:
@@ -133,7 +133,7 @@ async def test_batch_lines_acquire_tenant_admission_before_dispatch(tmp_path):
         }
     )
     limiter = TenantLimiter(tenant_config)
-    worker = BatchWorker(
+    worker = LegacyBatchWorker(
         BatchStore(tmp_path / "batch"),
         {"m": backend},
         max_concurrency=4,
@@ -174,7 +174,7 @@ async def test_batch_line_reserves_tokens_before_dispatch(tmp_path):
         }
     )
     limiter = TenantLimiter(tenant_config)
-    worker = BatchWorker(
+    worker = LegacyBatchWorker(
         BatchStore(tmp_path / "batch"),
         {"m": backend},
         tenant_limiter=limiter,
@@ -217,7 +217,7 @@ async def test_batch_line_uses_backend_specific_admission_bound(tmp_path):
         }
     )
     limiter = TenantLimiter(tenant_config)
-    worker = BatchWorker(
+    worker = LegacyBatchWorker(
         BatchStore(tmp_path / "batch"),
         {"m": backend},
         tenant_limiter=limiter,
@@ -267,7 +267,7 @@ async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
 
     backend = CountingBackend()
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": backend}, max_concurrency=2)
+    worker = LegacyBatchWorker(store, {"m": backend}, max_concurrency=2)
     lines = "\n".join(_batch_line(f"r{i}", f"prompt {i}") for i in range(8))
     file = store.save_file(lines.encode(), "input.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
@@ -287,7 +287,7 @@ async def test_worker_task_count_is_constant_for_large_batches(tmp_path, monkeyp
     max_concurrency = 4
     line_count = 300
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=max_concurrency)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=max_concurrency)
     content = "\n".join(
         _batch_line(f"r{index}", f"prompt {index}") for index in range(line_count)
     )
@@ -340,7 +340,7 @@ async def test_worker_retains_only_bounded_parsed_lines_for_large_batch(
     line_count = 10_000
     max_concurrency = 4
     store = BatchStore(tmp_path)
-    worker = BatchWorker(
+    worker = LegacyBatchWorker(
         store,
         {"m": MockBackend()},
         max_concurrency=max_concurrency,
@@ -400,7 +400,7 @@ async def test_worker_retains_only_bounded_parsed_lines_for_large_batch(
 
 async def test_worker_streams_input_without_bulk_read(tmp_path, monkeypatch):
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=2)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=2)
     content = (
         "\n\n"
         + _batch_line("a", "first")
@@ -426,7 +426,7 @@ async def test_worker_streams_input_without_bulk_read(tmp_path, monkeypatch):
 
 async def test_streaming_parse_error_fails_after_admitted_lines(tmp_path):
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
     content = (
         _batch_line("accepted", "first")
         + "\nnot-json\n"
@@ -483,7 +483,7 @@ async def test_batch_metering_uses_explicit_owner_wire_counts_and_skips_line_err
     store = BatchStore(tmp_path / "batch")
     ledger = UsageLedger(tmp_path / "usage.jsonl")
     limiter = RecordingLimiter()
-    worker = BatchWorker(
+    worker = LegacyBatchWorker(
         store,
         {"reported": CachedUsageBackend(), "derived": MissingUsageBackend()},
         max_concurrency=1,
@@ -590,7 +590,7 @@ async def test_output_append_failure_persists_failed_and_cleans_spool(
 ):
     store = BatchStore(tmp_path)
     ledger = UsageLedger(tmp_path / "usage.jsonl")
-    worker = BatchWorker(
+    worker = LegacyBatchWorker(
         store, {"m": MockBackend()}, max_concurrency=1, usage_ledger=ledger
     )
     file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
@@ -637,7 +637,7 @@ async def test_second_writer_commit_failure_rolls_back_first_publication(
 ):
     store = BatchStore(tmp_path)
     ledger = UsageLedger(tmp_path / "usage.jsonl")
-    worker = BatchWorker(
+    worker = LegacyBatchWorker(
         store, {"m": MockBackend()}, max_concurrency=1, usage_ledger=ledger
     )
     content = "\n".join(
@@ -684,7 +684,7 @@ async def test_unexpected_line_failure_is_terminal_and_next_job_still_runs(
     tmp_path, monkeypatch
 ):
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
     first_file = store.save_file(
         _batch_line("broken", "hello").encode(), "first.jsonl", "batch"
     )
@@ -724,7 +724,7 @@ async def test_explicit_cancellation_wins_over_concurrent_processing_failure(
     tmp_path, monkeypatch
 ):
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
     file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
     started = asyncio.Event()
@@ -756,7 +756,7 @@ async def test_explicit_cancellation_wins_over_concurrent_processing_failure(
 
 async def test_task_cancellation_propagates_after_spool_cleanup(tmp_path, monkeypatch):
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
     file = store.save_file(_batch_line("a", "hello").encode(), "input.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
     started = asyncio.Event()
@@ -800,7 +800,7 @@ async def test_cancel_stops_remaining_lines(tmp_path):
     backend = SlowBackend()
     store = BatchStore(tmp_path)
     ledger = UsageLedger(tmp_path / "usage.jsonl")
-    worker = BatchWorker(
+    worker = LegacyBatchWorker(
         store, {"m": backend}, max_concurrency=1, usage_ledger=ledger
     )
     lines = "\n".join(_batch_line(f"r{i}", f"p{i}") for i in range(10))
@@ -841,7 +841,7 @@ async def test_invalid_input_file_fails_job(tmp_path):
     store = BatchStore(tmp_path)
     file = store.save_file(b"not json\n", "bad.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
-    worker = BatchWorker(store, {"m": MockBackend()})
+    worker = LegacyBatchWorker(store, {"m": MockBackend()})
     await worker.process(job.id)
     failed = store.get_batch(job.id)
     assert failed.status == "failed"
@@ -873,7 +873,6 @@ async def test_unsupported_endpoint_and_missing_file(tmp_path):
 
 async def test_files_and_batches_are_isolated_across_tenants(tmp_path, monkeypatch):
     # C3: a tenant must never read, list, or cancel another tenant's files/batches.
-    from kairyu.entrypoints.server.app import create_app
     from kairyu.entrypoints.server.batch_routes import add_batch_routes
     from kairyu.entrypoints.server.settings import ServerSettings
     from kairyu.entrypoints.server.tenancy import TenantConfig
@@ -881,9 +880,9 @@ async def test_files_and_batches_are_isolated_across_tenants(tmp_path, monkeypat
     monkeypatch.setenv("KAIRYU_TEST_KEYS", "key-a,key-b")
     settings = ServerSettings(api_keys_env="KAIRYU_TEST_KEYS")
     tenants = TenantConfig(key_tenants={"key-a": "tenant-a", "key-b": "tenant-b"})
-    app = create_app({"m": MockBackend()}, settings=settings, tenant_config=tenants)
+    app = create_legacy_app({"m": MockBackend()}, settings=settings, tenant_config=tenants)
     store = BatchStore(tmp_path)
-    add_batch_routes(app, store, BatchWorker(store, {"m": MockBackend()}))
+    add_batch_routes(app, store, LegacyBatchWorker(store, {"m": MockBackend()}))
     a = {"Authorization": "Bearer key-a"}
     b = {"Authorization": "Bearer key-b"}
 
@@ -917,12 +916,11 @@ async def test_oversized_upload_is_rejected(tmp_path, monkeypatch):
     # S7: an upload above the size cap returns 413 instead of buffering
     # unboundedly and risking an OOM.
     import kairyu.entrypoints.server.batch_routes as batch_routes
-    from kairyu.entrypoints.server.app import create_app
 
     monkeypatch.setattr(batch_routes, "_MAX_UPLOAD_BYTES", 16)
-    app = create_app({"m": MockBackend()})
+    app = create_legacy_app({"m": MockBackend()})
     store = BatchStore(tmp_path)
-    batch_routes.add_batch_routes(app, store, BatchWorker(store, {"m": MockBackend()}))
+    batch_routes.add_batch_routes(app, store, LegacyBatchWorker(store, {"m": MockBackend()}))
     async with _client(app) as client:
         resp = await client.post(
             "/v1/files",
@@ -936,7 +934,6 @@ async def test_oversized_upload_is_rejected(tmp_path, monkeypatch):
 
 async def test_concurrent_upload_memory_stays_bounded(tmp_path, monkeypatch):
     import kairyu.entrypoints.server.batch_routes as batch_routes
-    from kairyu.entrypoints.server.app import create_app
 
     max_upload_bytes = 256 * 1024
     chunk_bytes = 8 * 1024
@@ -953,9 +950,9 @@ async def test_concurrent_upload_memory_stays_bounded(tmp_path, monkeypatch):
         return await original_read(self, size)
 
     monkeypatch.setattr(UploadFile, "read", tracking_read)
-    app = create_app({"m": MockBackend()})
+    app = create_legacy_app({"m": MockBackend()})
     store = BatchStore(tmp_path)
-    batch_routes.add_batch_routes(app, store, BatchWorker(store, {"m": MockBackend()}))
+    batch_routes.add_batch_routes(app, store, LegacyBatchWorker(store, {"m": MockBackend()}))
 
     async with _client(app) as client:
         tracemalloc.start()
@@ -995,7 +992,7 @@ async def test_batch_envelope_rejections_and_duplicate_custom_id_do_not_dispatch
 
     backend = CountingBackend()
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": backend}, max_concurrency=2)
+    worker = LegacyBatchWorker(store, {"m": backend}, max_concurrency=2)
     valid = json.loads(_batch_line("ok", "valid"))
     duplicate = json.loads(_batch_line("duplicate", "first"))
     lines = [
@@ -1042,7 +1039,7 @@ async def test_batch_backend_error_is_sanitized(tmp_path):
             raise RuntimeError("http://replica-internal:9000 secret=abc")
 
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": LeakingBackend()}, max_concurrency=1)
+    worker = LegacyBatchWorker(store, {"m": LeakingBackend()}, max_concurrency=1)
     file = store.save_file(_batch_line("leak", "hello").encode(), "input.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
 
@@ -1062,7 +1059,7 @@ async def test_non_object_input_line_does_not_wedge_the_job(tmp_path):
     # S1: a JSON line that is not an object (e.g. `5`) must become a per-line
     # error, not raise out of gather and leave the job stuck in_progress.
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": MockBackend()})
+    worker = LegacyBatchWorker(store, {"m": MockBackend()})
     content = ("5\n" + _batch_line("ok", "hi") + "\n").encode()
     file = store.save_file(content, "i.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
@@ -1090,7 +1087,7 @@ async def test_empty_result_still_completes(tmp_path):
             )
 
     store = BatchStore(tmp_path)
-    worker = BatchWorker(store, {"m": EmptyBackend()})
+    worker = LegacyBatchWorker(store, {"m": EmptyBackend()})
     file = store.save_file(_batch_line("a", "x").encode(), "i.jsonl", "batch")
     job = store.create_batch(file.id, "/v1/chat/completions")
     await worker.process(job.id)

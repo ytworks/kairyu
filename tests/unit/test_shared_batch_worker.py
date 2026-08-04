@@ -142,6 +142,7 @@ async def test_shared_worker_discovers_job_without_process_local_submit(tmp_path
         worker_id="gateway-pod-uid-a",
         claim_poll_interval_s=0.01,
         claim_lease_seconds=1.0,
+        legacy_chat_models={"m"},
     )
 
     task = asyncio.create_task(worker.run())
@@ -169,6 +170,7 @@ async def test_lost_shared_claim_rolls_back_output_and_cannot_publish_terminal(t
         worker_id="old-gateway-uid",
         claim_poll_interval_s=0.01,
         claim_lease_seconds=0.15,
+        legacy_chat_models={"m"},
     )
 
     await worker.process(job.id, claim=claim)
@@ -192,6 +194,7 @@ async def test_cancellation_during_terminal_commit_preserves_published_files(tmp
         worker_id="gateway-pod-uid-a",
         claim_poll_interval_s=0.01,
         claim_lease_seconds=1.0,
+        legacy_chat_models={"m"},
     )
 
     task = asyncio.create_task(worker.process(job.id, claim=claim))

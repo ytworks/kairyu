@@ -18,6 +18,7 @@ from kairyu.engine.backend import (
 from kairyu.engine.backend import (
     admission_upper_bound as generation_admission_upper_bound,
 )
+from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.models.generation import GenerationDefaults
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import (
@@ -156,6 +157,11 @@ class Orchestrator:
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
+        if isinstance(shared_prefix, TemplatedPrompt):
+            raise ValueError(
+                "orchestration shared_prefix cannot be a tokenizer-owned "
+                "pre-rendered chat prompt"
+            )
         self._engines = dict(engines)
         supplied_descriptors = dict(engine_descriptors or {})
         self._engine_descriptors = {
@@ -200,6 +206,11 @@ class Orchestrator:
                 await startup()
 
     def preview_route(self, prompt: str) -> RouteDecision:
+        if isinstance(prompt, TemplatedPrompt):
+            raise ValueError(
+                "orchestration cannot safely derive prompts from an already "
+                "rendered chat template"
+            )
         preview = getattr(self._router, "preview", None)
         if preview is None:
             raise PreviewNotSupportedError(
@@ -275,8 +286,15 @@ class Orchestrator:
 
     def _request(self, request: str | OrchestrationRequest) -> OrchestrationRequest:
         if isinstance(request, OrchestrationRequest):
-            return request
-        return default_orchestration_request(request, self._sampling_params)
+            call = request
+        else:
+            call = default_orchestration_request(request, self._sampling_params)
+        if isinstance(call.prompt, TemplatedPrompt):
+            raise ValueError(
+                "orchestration cannot safely derive prompts from an already "
+                "rendered chat template"
+            )
+        return call
 
     def _internal_sampling_params(
         self,
