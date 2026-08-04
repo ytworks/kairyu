@@ -371,16 +371,18 @@ selected adapters, constructs a canonical JSON identity, and stores its
 SHA-256 fingerprint in `run.json`. The identity contains:
 
 - the selected adapter names and each adapter's pinned dataset id, revision,
-  and validated `data.jsonl` SHA-256 (or an explicit unavailable marker); and
+  and validated `data.jsonl` SHA-256 (or an explicit unavailable marker).
+  HLE and CharXiv additionally carry the logical judge-template name, variant,
+  and SHA-256 of the exact UTF-8 template used for scoring; and
 - the output-affecting `BenchConfig` fields `suite`, `targets`, `judge`, `limit`,
   `smoke`, `offline_fixtures`, `only`, `exclude`, `seed`, `concurrency`,
   `request_timeout_s`, and `retries`. `targets` includes every target's name,
   base URL, model, API-key environment-variable name, context/output limits,
   vision capability, and sampling policy (`reasoning_effort`, `top_p`, `seed`,
-  `extra_body_json`); `judge` likewise includes its endpoint/model, API-key
-  environment-variable name, concurrency, retry limit, and the same sampling
-  policy. Changing the reasoning effort is therefore a different experiment,
-  not a resumable run.
+  `extra_body_json`); `judge` likewise includes every ordered grading-panel
+  endpoint/model, API-key environment-variable name, concurrency, retry limit,
+  and sampling policy. Changing a judge template, panel member, vote policy, or
+  reasoning effort is therefore a different experiment, not a resumable run.
 
 Exactly six execution, location or display controls are excluded: `run_id`,
 `results_dir`, `cache_dir`, `rerun`, `download`, and `progress`. API-key *environment
@@ -494,21 +496,124 @@ so each maps what its harness exposes and annotates what it cannot forward.
 ## Judge configuration
 
 Free-form grading (HLE, CharXiv) and the τ-bench user simulator use a
-configurable OpenAI-compatible judge endpoint:
+configurable OpenAI-compatible primary judge endpoint:
 
 ```bash
 kairyu bench run ... --judge-base-url http://localhost:8000/v1 --judge-model kairyu-auto
 ```
 
-The judge model is disclosed in every pair's methodology. Self-judging is
+Headline runs may add one or more additional pointwise graders. The compact
+CLI form inherits default sampling for each additional member:
+
+```bash
+kairyu bench run ... \
+  --judge-base-url http://judge-a:8000/v1 --judge-model judge-a \
+  --judge-secondary http://judge-b:8000/v1=judge-b=JUDGE_B_API_KEY
+```
+
+Use YAML when members require distinct sampling controls:
+
+```yaml
+judge:
+  base_url: http://judge-a:8000/v1
+  model: judge-a
+  reasoning_effort: high
+  additional_judges:
+    - base_url: http://judge-b:8000/v1
+      model: judge-b
+      api_key_env: JUDGE_B_API_KEY
+      reasoning_effort: high
+```
+
+Panel grading is strict-majority and fail-closed. Every configured member must
+return a parseable `correct: yes|no` vote. A failed/unparseable member or a tie
+makes the item `unjudged`; the primary never breaks a tie. Consequently two
+total judges are deliberately unanimous consensus, while three permit a real
+2-of-3 majority. Ordered per-member votes are retained in item evidence. Exact
+duplicate resolved endpoint/model members are rejected. The τ-bench user
+simulator remains the primary endpoint only—additional graders never become
+simulated users and do not imply that τ rewards were judge-calibrated.
+
+The judge configuration is disclosed in `run.json`, and each judged item keeps
+its verdict evidence. Self-judging is
 detected from the resolved endpoint/model identity used for requests: trailing
 slashes are removed and the standard OpenAI `/v1` path is appended when absent,
 while scheme, host, port, any other path, and the exact model remain significant.
-Display aliases therefore cannot hide the bias. Legacy reports that indicate a
-judge but lack either resolved identity are annotated `judge independence unknown`
-instead of being declared independent; an explicitly disabled judge is not.
+Display aliases therefore cannot hide the bias, and matching any panel member
+is self-judging. Legacy reports that indicate a judge but lack any required
+resolved identity are annotated `judge independence unknown` rather than being
+assumed independent; an explicitly disabled judge is not. These annotations
+appear only on HLE/CharXiv cells that actually use a judge template.
 Without a judge, MCQ items still score exact-match; free-form items are recorded
 `unjudged`. Judge verdicts that fail to parse degrade the item, never the run.
+
+### Judge calibration
+
+Before promoting a headline run, bind calibration directly to its immutable
+`run.json`:
+
+```bash
+kairyu bench calibrate-judge \
+  --run 20260804-headline --results-dir bench/results/fugu \
+  --output bench/results/fugu/20260804-headline/judge-calibration.json
+```
+
+The command recomputes the run fingerprint from its recorded identity, verifies
+that the disclosed target/judge config agrees with the fingerprinted config,
+and requires every selected judge-backed adapter's recorded production-template
+and judge-protocol identities to match the code doing calibration. Missing,
+duplicate, or stale identities and all judge/config overrides are rejected.
+Thus it cannot accidentally calibrate a different judge or prompt from the one
+used by the run. Passing a run directory instead of an id is also supported.
+
+The packaged set contains 12 clear correct/incorrect pairs, split evenly across
+the HLE and CharXiv rubrics (24 responses: six correct and six incorrect per
+rubric). They are selected from the published gold labels in
+[Princeton LLMBar at commit `900616b`](https://github.com/princeton-nlp/LLMBar/tree/900616bff90b6c6c8e1681f7d079250637c55992),
+whose Natural set defines one output as faithfully/correctly following the
+instruction and the other as deviating. Every row records the source path,
+commit, record/output locator, and MIT license; the upstream notice is packaged
+as `kairyu/bench/fixtures/LLMBAR_LICENSE`.
+
+Every response is graded twice (48 aggregate panel decisions): once with the
+production template and once with only the reference/response block order
+counterbalanced. The JSON artifact binds the raw set, both template variants,
+the parser/request protocol, normalized judge config, thresholds, benchmark run
+fingerprint, and target identities into its own SHA-256 fingerprint. It reports
+coverage, confusion matrices, overall/per-template gold-label agreement,
+position flips, ordered member votes, and the complete source provenance.
+
+The default fail-closed gate requires 100% parseable coverage, at least 11/12
+gold-label agreement for each template in each order (and therefore at least
+22/24 overall), and zero order-dependent verdict flips. Headline eligibility
+also requires at least six paired prompts/12 responses per rubric, attested
+label provenance, standard-or-stricter thresholds, and a verified run binding.
+
+The artifact deliberately separates `passed` (the caller-selected exploratory
+thresholds) from `headline_eligible` (the fixed promotion floor). A config-only
+invocation remains useful for exploration but can never be headline-eligible;
+weaker flags can never promote a run. With `--run`, the process exits nonzero
+unless `headline_eligible` is true. Without it, exit status follows `passed`.
+The complete artifact is printed and is written atomically when `--output` is
+supplied.
+
+The built-in rows attest the correctness label but do not claim which endpoint
+generated either response, so they cannot invent self-preference evidence. A
+custom `--calibration-set` may add both `response_base_url` and
+`response_model`. Measurement then requires known producer provenance for every
+row and at least two responses in every rubric × correctness label × self/nonself
+stratum. (`nonself` means a different resolved endpoint/model identity; it does
+not prove different weights.) True- and false-positive gaps are computed in
+both prompt orders, and the worse self-favouring gap is gated at 0.20 by default.
+
+If any bound target matches a panel member, this evidence is required
+automatically and missing/thin provenance makes `headline_eligible` false.
+`--require-self-preference` additionally forces the measurement for members
+that do not match a target. Custom rows with attested labels must set
+`label_provenance` (`published-gold` or `human-reviewed`) plus
+`label_source`, `label_source_revision`, `label_source_record`, and
+`label_source_license`. This is a promotion smoke gate, not a statistical proof
+of general judge reliability.
 
 ## Agentic benchmarks (docker)
 

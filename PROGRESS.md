@@ -614,6 +614,15 @@ explicitly Bernoulli adapters with internally consistent binary item evidence
 additionally carry a structured two-sided 95% Wilson score interval, while
 continuous/reward metrics and legacy evidence fail closed to point estimate
 plus count.
+Judge-backed HLE and CharXiv runs now fingerprint the exact registered prompt
+template and parsing/generation protocol. Optional additional judge endpoints
+vote concurrently under a strict-majority policy, while incomplete, tied, or
+unparseable panels fail closed. A packaged, pinned LLMBar Natural calibration
+set exercises both response orders, measures position and self-preference bias,
+and permits headline evidence only when its frozen promotion gates and the full
+canonical identity of the evaluated run agree. The complete benchmark suite
+passes 1,343 tests with no selected skips; the isolated wheel check includes all
+nine fixtures, the LLMBar license notice, and the calibration CLI.
 LiveCodeBench and SciCode scoring now select one explicit, fingerprinted
 execution runner. The trusted-development local subprocess remains available;
 the unattended path uses a digest-only Docker image, completed create before
@@ -827,6 +836,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [progress] Judge evidence binds prompts and calibration
+- What: registered and hashed the exact HLE/CharXiv judge templates plus their parser/generation protocol into the run identity; added concurrent strict-majority judge panels with ordered per-member evidence and fail-closed aggregation; packaged 12 paired, published-gold LLMBar Natural calibration prompts (24 labeled responses) with pinned source and MIT notice; measured both response orders and self/non-self behavior; and bound headline eligibility to fixed promotion gates plus the complete canonical identity of the evaluated run. The complete benchmark suite passes 1,343 tests with no selected skips, and an isolated wheel contains all nine fixtures, the LLMBar notice, and the calibration CLI.
+- Why: a benchmark could previously retain the same fingerprint after its frozen judge prompt changed, and one uncalibrated judge could silently introduce position or self-preference bias. Exact identity binding and auditable calibration make judge-backed scores reproducible without allowing weaker exploratory thresholds or stale run artifacts to qualify as headline evidence.
+- Refs: issue #376; `kairyu/bench/{calibration,config,judge,judge_prompts,runner,types}.py`; `kairyu/bench/adapters/{base,charxiv,hle}.py`; `kairyu/bench/fixtures/{judge-calibration.jsonl,LLMBAR_LICENSE}`; `tests/bench/test_bench_{aggregate,config,judge,judge_calibration,runner,sampling,tau}.py`; `docs/benchmarks.md`
 
 ### 2026-08-04 — [progress] Binary benchmark cells expose Wilson uncertainty
 - What: declared the eight Bernoulli benchmark adapters explicitly and added structured two-sided 95% Wilson score intervals only to completed cells when that metric contract, retained 0/1 item outcomes, successes, equal scored/total denominators, total item count, and point estimate all agree; rendered the interval and sample count in Markdown; showed scored/total counts for partial cells; and kept MRCR/Terminal/τ reward metrics, incomplete or inconsistent counts, and legacy artifacts without item evidence interval-free. Stored-run report regeneration and old scoreboards remain compatible through an additive optional cell field. The complete benchmark suite passes 1,285 tests with no selected skips.

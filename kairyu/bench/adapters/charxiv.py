@@ -11,7 +11,6 @@ from kairyu.bench.adapters.base import (
     RunContext,
     excerpt,
 )
-from kairyu.bench.judge_prompts import CHARXIV_JUDGE_TEMPLATE
 from kairyu.bench.types import (
     BenchItem,
     BenchTarget,
@@ -37,6 +36,7 @@ class CharXivAdapter(GenerativeAdapter):
         hf_dataset="princeton-nlp/CharXiv",
         needs_vision=True,
         judge_preferred=True,
+        judge_template_name="charxiv-reasoning",
     )
 
     def normalize(self, ctx: DownloadContext) -> list[dict]:
@@ -111,13 +111,13 @@ class CharXivAdapter(GenerativeAdapter):
             question=item.payload["question"],
             expected=item.payload["answer"],
             response=response_text,
-            template=CHARXIV_JUDGE_TEMPLATE,
+            template_name=self.info.required_judge_template_name(),
         )
         if verdict.correct is None:
             return ItemResult(
                 item_id=item.id,
                 status="unjudged",
-                error=f"judge verdict unparseable: {verdict.raw_excerpt!r}",
+                error=f"judge verdict unavailable: {verdict.raw_excerpt!r}",
                 response_excerpt=excerpt(response_text),
                 judge=verdict.as_dict(),
             )

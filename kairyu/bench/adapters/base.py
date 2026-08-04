@@ -36,7 +36,7 @@ from kairyu.bench.types import (
 
 if TYPE_CHECKING:  # judge lands in its own module; adapters only see the protocol
     from kairyu.bench.execution import ExecutionRunner
-    from kairyu.bench.judge import JudgeClient
+    from kairyu.bench.judge import JudgeClient, MajorityJudgeClient
     from kairyu.bench.progress import ProgressReporter
 
 _EXCERPT_CHARS = 2000
@@ -70,6 +70,15 @@ class AdapterInfo:
     # True only when every scored item is contractually a Bernoulli outcome.
     # Observing only 0/1 values in one continuous/reward run is not enough.
     binary_outcomes: bool = False
+    # Logical name in judge_prompts.judge_templates(). This binds the exact
+    # scoring prompt to runs selecting this adapter without invalidating
+    # unrelated benchmark runs.
+    judge_template_name: str | None = None
+
+    def required_judge_template_name(self) -> str:
+        if self.judge_template_name is None:
+            raise RuntimeError(f"adapter {self.name!r} has no judge template")
+        return self.judge_template_name
 
 
 @dataclass(frozen=True)
@@ -92,7 +101,7 @@ class RunContext:
 
     cache: BenchCache
     http_factory: Callable[[], httpx.AsyncClient]
-    judge: JudgeClient | None = None
+    judge: JudgeClient | MajorityJudgeClient | None = None
     limit: int | None = None
     seed: int = 0
     attempts: int = 1  # agentic trials per task (Terminal-Bench -k, tau --num-trials)

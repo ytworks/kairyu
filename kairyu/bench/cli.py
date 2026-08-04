@@ -84,6 +84,16 @@ def add_bench_parser(subparsers) -> None:
         help="reasoning_effort for the judge / tau user simulator (Fugu used low)",
     )
     run.add_argument("--judge-extra-body", default=None, help="JSON object for judge requests")
+    run.add_argument(
+        "--judge-secondary",
+        action="append",
+        default=None,
+        metavar="BASE_URL=MODEL[=API_KEY_ENV]",
+        help=(
+            "Additional pointwise judge (repeatable). Two total judges require "
+            "unanimity; configure per-member sampling in YAML."
+        ),
+    )
     run.add_argument("--concurrency", type=int, default=None)
     run.add_argument("--results-dir", default=None)
     run.add_argument("--run-id", default=None, help="Reuse an id to resume a run")
@@ -149,6 +159,47 @@ def add_bench_parser(subparsers) -> None:
         help="Print only the scoreboard, without the published-score comparison",
     )
 
+    calibrate = commands.add_parser(
+        "calibrate-judge",
+        help="Measure judge agreement on the committed published-gold set.",
+    )
+    calibrate.add_argument(
+        "--run",
+        default=None,
+        help=(
+            "Bind headline calibration to a benchmark run id (under "
+            "--results-dir) or run directory"
+        ),
+    )
+    calibrate.add_argument("--results-dir", default="bench/results/fugu")
+    calibrate.add_argument("--config", default=None, help="bench.yaml judge block")
+    calibrate.add_argument("--judge-base-url", default=None)
+    calibrate.add_argument("--judge-model", default=None)
+    calibrate.add_argument("--judge-api-key-env", default=None)
+    calibrate.add_argument("--judge-reasoning-effort", default=None)
+    calibrate.add_argument("--judge-extra-body", default=None)
+    calibrate.add_argument(
+        "--judge-secondary",
+        action="append",
+        default=None,
+        metavar="BASE_URL=MODEL[=API_KEY_ENV]",
+    )
+    calibrate.add_argument(
+        "--calibration-set",
+        default=None,
+        help="Custom labelled JSONL (default: committed published-gold set)",
+    )
+    calibrate.add_argument("--output", default=None, help="Write the JSON artifact here")
+    calibrate.add_argument("--min-agreement", type=float, default=11 / 12)
+    calibrate.add_argument("--min-coverage", type=float, default=1.0)
+    calibrate.add_argument("--max-position-flip", type=float, default=0.0)
+    calibrate.add_argument("--max-self-preference-gap", type=float, default=0.2)
+    calibrate.add_argument(
+        "--require-self-preference",
+        action="store_true",
+        help="Fail unless every judge has balanced, provenance-backed bias evidence",
+    )
+
     commands.add_parser("list", help="List benchmarks, requirements, and cache status.")
 
     entrypoints = commands.add_parser(
@@ -176,6 +227,8 @@ def handle(args: argparse.Namespace) -> int:
         return _handle_download(args)
     if args.bench_command == "report":
         return _handle_report(args)
+    if args.bench_command == "calibrate-judge":
+        return _handle_calibrate_judge(args)
     if args.bench_command == "list":
         return _handle_list(args)
     if args.bench_command == "entrypoints":
@@ -219,7 +272,12 @@ def _handle_report(args) -> int:
     from kairyu.bench.aggregate import build_scoreboard, render_markdown
     from kairyu.bench.compare import build_comparison, render_comparison_markdown
     from kairyu.bench.store import ResultStore
-    from kairyu.bench.types import BenchTarget, JudgeConfig, PairResult
+    from kairyu.bench.types import (
+        BenchTarget,
+        JudgeConfig,
+        JudgeEndpointConfig,
+        PairResult,
+    )
 
     run_dir = Path(args.run)
     if not run_dir.is_dir():
@@ -254,23 +312,68 @@ def _handle_report(args) -> int:
             continue
     raw_judge = config.get("judge")
     judge = None
+    judge_identity_incomplete = False
     if isinstance(raw_judge, dict):
         explicitly_disabled = (
             "base_url" in raw_judge
             and "model" in raw_judge
             and raw_judge["base_url"] is None
             and raw_judge["model"] is None
+            and not raw_judge.get("additional_judges")
         )
         if raw_judge and not explicitly_disabled:
-            base_url = raw_judge.get("base_url")
-            model = raw_judge.get("model")
-            if not isinstance(base_url, str):
-                base_url = None
-            if not isinstance(model, str):
-                model = None
-            if base_url is None and model is None:
-                model = "identity-unavailable"
-            judge = JudgeConfig(base_url=base_url, model=model)
+            try:
+                candidate = JudgeConfig.model_validate(raw_judge)
+            except ValueError:
+                judge_identity_incomplete = True
+                candidate = None
+
+                def salvage_endpoint(raw):
+                    if not isinstance(raw, dict):
+                        return None
+                    base_url = raw.get("base_url")
+                    model = raw.get("model")
+                    if (
+                        not isinstance(base_url, str)
+                        or not isinstance(model, str)
+                        or not model.strip()
+                    ):
+                        return None
+                    try:
+                        return JudgeEndpointConfig(base_url=base_url, model=model)
+                    except ValueError:
+                        return None
+
+                primary = salvage_endpoint(raw_judge)
+                if primary is not None:
+                    members: list[JudgeEndpointConfig] = []
+                    known = {primary.resolved_identity()}
+                    raw_members = raw_judge.get("additional_judges", [])
+                    if not isinstance(raw_members, list | tuple):
+                        raw_members = []
+                    for raw_member in raw_members:
+                        member = salvage_endpoint(raw_member)
+                        if member is None:
+                            continue
+                        identity = member.resolved_identity()
+                        if identity in known:
+                            continue
+                        known.add(identity)
+                        members.append(member)
+                    candidate = JudgeConfig(
+                        base_url=primary.base_url,
+                        model=primary.model,
+                        additional_judges=tuple(members),
+                    )
+                if candidate is None:
+                    candidate = JudgeConfig(model="identity-unavailable")
+            if not candidate.enabled:
+                judge_identity_incomplete = True
+                candidate = JudgeConfig(model="identity-unavailable")
+            judge = candidate
+    elif raw_judge is not None:
+        judge = JudgeConfig(model="identity-unavailable")
+        judge_identity_incomplete = True
     scoreboard = build_scoreboard(
         run_id=run_meta.get("run_id", run_dir.name),
         suite=config.get("suite", "fugu"),
@@ -280,6 +383,7 @@ def _handle_report(args) -> int:
         targets=configured or targets,
         target_configs=target_configs,
         judge=judge,
+        judge_identity_incomplete=judge_identity_incomplete,
     )
     markdown = render_markdown(scoreboard)
     store = ResultStore(run_dir.parent, run_dir.name)
@@ -292,6 +396,12 @@ def _handle_report(args) -> int:
         store.save_comparison(comparison, comparison_markdown)
         print(comparison_markdown)
     return 0
+
+
+def _handle_calibrate_judge(args) -> int:
+    from kairyu.bench.calibration import run_calibration_cli
+
+    return asyncio.run(run_calibration_cli(args))
 
 
 def _handle_list(args) -> int:  # noqa: ARG001 - argparse handler signature
