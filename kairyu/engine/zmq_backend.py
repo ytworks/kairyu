@@ -19,6 +19,9 @@ import atexit
 import contextlib
 import hashlib
 import logging
+import math
+import os
+import signal
 import threading
 import time
 import uuid
@@ -27,8 +30,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
+from typing import TypeVar
 
 from kairyu.engine.backend import (
+    EngineReadiness,
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
@@ -66,9 +71,14 @@ from kairyu.sampling_params import SamplingParams
 
 _SPAWN_TIMEOUT_S = 30.0
 _SHUTDOWN_TIMEOUT_S = 5.0
+_FORCED_REAP_TIMEOUT_S = 5.0
 _RECV_TICK_S = 1.0
+_CONTROL_SEND_TIMEOUT_S = 1.0
 _PROMPT_WIRE_VERSION = 1
 _SPAWN_POLL_S = 0.05
+_PR_SET_CHILD_SUBREAPER = 36
+_SUBREAPER_PID: int | None = None
+_T = TypeVar("_T")
 
 
 def _decode_token_logprob(raw: list) -> TokenLogprob:
@@ -86,14 +96,163 @@ class EngineServiceError(RuntimeError):
     """The engine service process died or became unreachable."""
 
 
-def _kill_and_reap_process(process, timeout_s: float) -> bool:
-    """Kill one owned child and report whether it was actually reaped."""
+async def _send_control(socket, payload: bytes, *, timeout_s: float | None = None) -> None:
+    """Bound a local DEALER write so failure and cleanup can always progress."""
 
+    timeout = _CONTROL_SEND_TIMEOUT_S if timeout_s is None else timeout_s
+    await asyncio.wait_for(socket.send(payload), timeout=timeout)
+
+
+def _ensure_child_subreaper() -> None:
+    """Make the API process the reaper for forcibly orphaned TP ranks."""
+
+    global _SUBREAPER_PID
+    current_pid = os.getpid()
+    if (
+        _SUBREAPER_PID == current_pid
+        or os.name != "posix"
+        or os.uname().sysname != "Linux"
+        or not Path("/proc").is_dir()
+    ):
+        return
+    # Linux containers commonly run the API as PID 1, but tests and
+    # non-container deployments do not. A subreaper gives both layouts the
+    # same ownership contract when rank 0 must be SIGKILLed. prctl is
+    # idempotent; a PID marker (rather than a bool) also handles a later fork.
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise EngineServiceError(
+            "cannot establish engine-service child reaper: "
+            f"{os.strerror(error_number)}"
+        )
+    _SUBREAPER_PID = current_pid
+
+
+def _watch_parent_lifetime(lifetime_pipe) -> None:
+    """Kill the complete service group when its API parent disappears."""
+
+    try:
+        lifetime_pipe.recv_bytes()
+    except (EOFError, OSError):
+        if os.name == "posix":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgrp(), signal.SIGKILL)
+        else:  # pragma: no cover - production GPU deployments are POSIX
+            os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _run_engine_service_in_owned_process_group(
+    service,
+    lifetime_pipe,
+    *args,
+) -> None:
+    """Make one service and all of its distributed ranks one leased tree."""
+
+    if os.name == "posix":
+        os.setsid()
+    threading.Thread(
+        target=_watch_parent_lifetime,
+        args=(lifetime_pipe,),
+        name="kairyu-proc-parent-lease",
+        daemon=True,
+    ).start()
+    service(*args)
+
+
+def _signal_process_tree(process, sig: signal.Signals) -> None:
+    """Signal the owned service process group, with a pre-setsid fallback."""
+
+    pid = process.pid
+    if os.name == "posix" and type(pid) is int and pid > 0:
+        try:
+            os.killpg(pid, sig)
+            return
+        except ProcessLookupError:
+            # The child may not have reached setsid yet. It cannot have spawned
+            # engine ranks before reporting its port, so PID-only fallback is
+            # complete in that narrow startup window.
+            pass
     if process.is_alive():
         with contextlib.suppress(ProcessLookupError):
-            process.kill()
-    process.join(timeout=timeout_s)
-    return not process.is_alive()
+            if sig == signal.SIGTERM:
+                process.terminate()
+            else:
+                process.kill()
+
+
+def _process_group_member_states(process) -> tuple[tuple[int, str], ...]:
+    """Return every observable member of the owned group, including zombies."""
+
+    pid = process.pid
+    if os.name != "posix" or type(pid) is not int or pid < 1:
+        return ((pid, "?"),) if process.is_alive() and type(pid) is int else ()
+    proc = Path("/proc")
+    if not proc.is_dir():  # pragma: no cover - POSIX without procfs
+        return ((pid, "?"),) if process.is_alive() else ()
+    members: list[tuple[int, str]] = []
+    for stat_path in proc.glob("[0-9]*/stat"):
+        try:
+            raw = stat_path.read_text()
+            suffix = raw[raw.rindex(")") + 2 :].split()
+            state = suffix[0]
+            process_group = int(suffix[2])
+            member_pid = int(stat_path.parent.name)
+        except (FileNotFoundError, IndexError, ProcessLookupError, ValueError):
+            continue
+        if process_group == pid:
+            members.append((member_pid, state))
+    return tuple(sorted(members))
+
+
+def _live_process_group_members(process) -> tuple[int, ...]:
+    """Return non-zombie members of the owned POSIX group when observable."""
+
+    return tuple(
+        pid
+        for pid, state in _process_group_member_states(process)
+        if state not in {"Z", "X"}
+    )
+
+
+def _reap_adopted_process_group_zombies(process) -> None:
+    """Reap only orphaned descendants from this backend's private group."""
+
+    service_pid = process.pid
+    if os.name != "posix" or type(service_pid) is not int:
+        return
+    for member_pid, state in _process_group_member_states(process):
+        if member_pid == service_pid or state != "Z":
+            continue
+        try:
+            os.waitpid(member_pid, os.WNOHANG)
+        except ChildProcessError:
+            # Reparenting may still be racing the group signal. The bounded
+            # caller retries and fails closed if the zombie never becomes ours.
+            continue
+
+
+def _wait_process_tree_exit(process, timeout_s: float) -> bool:
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    while True:
+        process.join(timeout=0)
+        _reap_adopted_process_group_zombies(process)
+        if not process.is_alive() and not _process_group_member_states(process):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        process.join(timeout=min(remaining, 0.05))
+
+
+def _kill_and_reap_process(process, timeout_s: float) -> bool:
+    """Kill one owned service tree and confirm every descendant is reaped."""
+
+    _signal_process_tree(process, signal.SIGKILL)
+    return _wait_process_tree_exit(process, timeout_s)
 
 
 def _is_startup_value(value) -> bool:
@@ -196,6 +355,42 @@ def _kv_cache_dtype_from_startup_frame(
             f"{error}"
         ) from error
     return requested, resolved
+
+
+def _tensor_parallel_size_from_startup_frame(frame) -> int | None:
+    """Read the optional runtime TP identity added compatibly to startup v1."""
+
+    value = frame.get("tensor_parallel_size")
+    if value is None:
+        return None
+    if type(value) is not int or value < 1:
+        raise EngineServiceError(
+            "engine startup tensor_parallel_size must be a positive integer"
+        )
+    return value
+
+
+def _validate_startup_tensor_parallel_identity(
+    configured: int,
+    actual: int | None,
+) -> None:
+    """Fail closed before advertising a process-split distributed topology."""
+
+    if actual is None:
+        # A rolling-upgrade child predating this optional startup field can
+        # only be trusted for the historical TP1 contract.  TP>1 must be
+        # positively attested by the child that constructed the ranks.
+        if configured != 1:
+            raise EngineServiceError(
+                "engine service did not report tensor-parallel startup metadata "
+                f"for configured tensor_parallel_size={configured}"
+            )
+        return
+    if actual != configured:
+        raise EngineServiceError(
+            "engine startup tensor-parallel request mismatch: "
+            f"parent={configured}, child={actual}"
+        )
 
 
 def _generation_defaults_from_startup_frame(
@@ -370,6 +565,7 @@ def _recv_optional_startup_frame(
     str | None,
     dict[str, object] | None,
     GenerationDefaults | None,
+    int | None,
 ]:
     """Receive a new child's second frame; EOF from a live child means legacy."""
 
@@ -378,7 +574,7 @@ def _recv_optional_startup_frame(
     except EOFError:
         if process.is_alive():
             # Old services close the Pipe immediately after the integer port.
-            return None, None, None, None, None
+            return None, None, None, None, None, None
         raise EngineServiceError(
             "engine service exited before reporting startup metadata"
         ) from None
@@ -386,7 +582,15 @@ def _recv_optional_startup_frame(
     requested, resolved = _kv_cache_dtype_from_startup_frame(frame)
     dram_kv_tier = _dram_kv_tier_from_startup_frame(frame)
     generation_defaults = _generation_defaults_from_startup_frame(frame)
-    return decision, requested, resolved, dram_kv_tier, generation_defaults
+    tensor_parallel_size = _tensor_parallel_size_from_startup_frame(frame)
+    return (
+        decision,
+        requested,
+        resolved,
+        dram_kv_tier,
+        generation_defaults,
+        tensor_parallel_size,
+    )
 
 
 @dataclass
@@ -593,7 +797,7 @@ class ZmqEngineBackend:
         tokenizer: str | None = None,
         speculative: str | None = None,
         speculative_tokens: int = 4,
-        death_timeout_s: float = 10.0,
+        death_timeout_s: float = 120.0,
         model_path: str | None = None,
         pipeline_depth: int = 1,
         decode_mode: str = "eager",
@@ -605,9 +809,23 @@ class ZmqEngineBackend:
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | PathLike[str] | None = None,
         generation_config: GenerationConfigMode = "auto",
+        tensor_parallel_size: int = 1,
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
+        if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
+            raise ValueError("tensor_parallel_size must be a positive integer")
+        if model_path is None:
+            from kairyu.engine.core.tp_runner import validate_tp_degree
+
+            validate_tp_degree(tensor_parallel_size)
+        if (
+            isinstance(death_timeout_s, bool)
+            or not isinstance(death_timeout_s, (int, float))
+            or not math.isfinite(death_timeout_s)
+            or death_timeout_s <= 0
+        ):
+            raise ValueError("death_timeout_s must be a positive finite number")
         _validate_max_model_len(max_model_len)
         generation_config = validate_generation_config_mode(generation_config)
         kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
@@ -662,6 +880,7 @@ class ZmqEngineBackend:
             "max_num_seqs": max_num_seqs,
             "max_model_len": max_model_len,
             "priority_age_s": priority_age_s,
+            "tensor_parallel_size": tensor_parallel_size,
             "tokenizer": tokenizer,
             "speculative": speculative,
             "speculative_tokens": speculative_tokens,
@@ -681,7 +900,12 @@ class ZmqEngineBackend:
             "generation_config": generation_config,
         }
         self._death_timeout_s = death_timeout_s
+        self._configured_tensor_parallel_size = tensor_parallel_size
+        # Public topology is populated only after the child reports a matching
+        # runtime identity. A configured value alone is not an attestation.
+        self.tensor_parallel_size: int | None = None
         self._process = None
+        self._lifetime_pipe = None
         self._socket = None
         self._context = None
         self._receiver: asyncio.Task | None = None
@@ -693,6 +917,7 @@ class ZmqEngineBackend:
         self._failed_generations: set[int] = set()
         self._generation_counter = 0
         self._live_generation: int | None = None
+        self._service_failure_type: str | None = None
         self._wire_version = WIRE_VERSION
         self._active_request_ids: set[str] = set()
         self.attention_backend_decision: AttentionBackendDecision | None = None
@@ -734,6 +959,9 @@ class ZmqEngineBackend:
         self._start_lock = asyncio.Lock()
         self._startup_task: asyncio.Task[int] | None = None
         self._startup_abandoned: threading.Event | None = None
+        self._process_reap_owner = None
+        self._process_reap_task: asyncio.Task[bool] | None = None
+        self._shutdown_task: asyncio.Task[None] | None = None
         self._closed = False
         self._atexit_registered = False
         self._max_model_len = max_model_len
@@ -795,20 +1023,44 @@ class ZmqEngineBackend:
         # prior process. A versioned startup record replaces this placeholder
         # before the new generation becomes live.
         self.generation_defaults = self._configured_generation_defaults
+        if self._configured_tensor_parallel_size > 1:
+            _ensure_child_subreaper()
         spawn = multiprocessing.get_context("spawn")
         parent_pipe, child_pipe = spawn.Pipe()
+        child_lifetime_pipe, parent_lifetime_pipe = spawn.Pipe(duplex=False)
         service_args = (child_pipe, self._config)
         if self._dram_kv_tier_profile_bytes is not None:
             service_args = (*service_args, self._dram_kv_tier_profile_bytes)
         process = spawn.Process(
-            target=run_engine_service, args=service_args, daemon=True
+            target=_run_engine_service_in_owned_process_group,
+            args=(run_engine_service, child_lifetime_pipe, *service_args),
+            # A real TP service is itself the parent of rank workers. Python
+            # forbids a daemon process from creating children, so distributed
+            # process isolation must use an explicitly owned non-daemon
+            # service. TP1 retains the historical daemon behavior.
+            daemon=self._configured_tensor_parallel_size == 1,
         )
-        process.start()
+        try:
+            process.start()
+        except BaseException:
+            child_lifetime_pipe.close()
+            parent_lifetime_pipe.close()
+            parent_pipe.close()
+            child_pipe.close()
+            raise
         # Register ownership before either Pipe wait.  If the coroutine awaiting
         # this worker thread is cancelled, its cleanup can now find and kill the
         # child instead of leaving an unowned model load behind.
         self._process = process
+        self._lifetime_pipe = parent_lifetime_pipe
+        if not self._atexit_registered:
+            # Register as soon as the PID/group is owned. Model loading and TP
+            # startup happen after this point and may outlive the initiating
+            # coroutine or interpreter shutdown.
+            atexit.register(self._kill_process)
+            self._atexit_registered = True
         child_pipe.close()
+        child_lifetime_pipe.close()
         try:
             port_deadline = time.monotonic() + _SPAWN_TIMEOUT_S
             while not parent_pipe.poll(_SPAWN_POLL_S):
@@ -842,8 +1094,13 @@ class ZmqEngineBackend:
                 resolved_kv_dtype,
                 dram_kv_tier,
                 generation_defaults,
+                actual_tensor_parallel_size,
             ) = (
                 _recv_optional_startup_frame(parent_pipe, process)
+            )
+            _validate_startup_tensor_parallel_identity(
+                self._configured_tensor_parallel_size,
+                actual_tensor_parallel_size,
             )
             _validate_startup_kv_cache_dtype_identity(
                 self.kv_cache_dtype_requested,
@@ -883,10 +1140,17 @@ class ZmqEngineBackend:
                 raise EngineServiceError("engine service startup ownership was lost")
         except BaseException as error:
             self.attention_backend_decision = None
+            self.tensor_parallel_size = None
             self.kv_cache_dtype_resolved = None
             self.dram_kv_tier_profile_sha256 = None
             self.dram_kv_tier_min_restore_tokens = None
-            reaped = _kill_and_reap_process(process, timeout_s=1.0)
+            if self._lifetime_pipe is parent_lifetime_pipe:
+                self._lifetime_pipe.close()
+                self._lifetime_pipe = None
+            reaped = _kill_and_reap_process(
+                process,
+                timeout_s=_FORCED_REAP_TIMEOUT_S,
+            )
             if self._process is process and reaped:
                 self._process = None
             if not reaped:
@@ -898,6 +1162,11 @@ class ZmqEngineBackend:
         finally:
             parent_pipe.close()
         self.attention_backend_decision = decision
+        self.tensor_parallel_size = (
+            actual_tensor_parallel_size
+            if actual_tensor_parallel_size is not None
+            else self._configured_tensor_parallel_size
+        )
         if generation_defaults is not None:
             self.generation_defaults = generation_defaults
         if requested_kv_dtype is not None:
@@ -912,20 +1181,58 @@ class ZmqEngineBackend:
             self.dram_kv_tier_min_restore_tokens = (
                 threshold if type(threshold) is int else None
             )
-        if not self._atexit_registered:
-            atexit.register(self._kill_process)
-            self._atexit_registered = True
         return port
 
     def _is_healthy(self) -> bool:
         return (
-            self._socket is not None
+            self._service_failure_type is None
+            and not self._closed
+            and self._socket is not None
             and self._receiver is not None
             and not self._receiver.done()
             and self._process is not None
             and self._process.is_alive()
             and self._live_generation is not None
         )
+
+    def _retire_unreliable_transport(self) -> None:
+        """Stop a generation after a data-plane send has unknown delivery."""
+
+        if self._closed:
+            return
+        self._service_failure_type = "EngineServiceError"
+        process = self._process
+        if process is not None:
+            _signal_process_tree(process, signal.SIGKILL)
+
+    def readiness(self) -> EngineReadiness:
+        """Report a known-dead service generation without running a probe."""
+
+        if self._closed:
+            return EngineReadiness(False, "engine service is shut down")
+        if self._service_failure_type is not None:
+            return EngineReadiness(
+                False,
+                f"engine service failed: {self._service_failure_type}",
+                fatal=True,
+            )
+        process = self._process
+        if process is not None and not process.is_alive():
+            return EngineReadiness(
+                False,
+                "engine service process is not running",
+                fatal=True,
+            )
+        receiver = self._receiver
+        if self._live_generation is not None and (
+            receiver is None or receiver.done()
+        ):
+            return EngineReadiness(
+                False,
+                "engine service receiver is not running",
+                fatal=True,
+            )
+        return EngineReadiness(True)
 
     def _fail_generation_once(
         self,
@@ -950,15 +1257,104 @@ class ZmqEngineBackend:
         for queue in targets:
             queue.put_nowait(dict(event))
 
-    async def _cancel_receiver_locked(self) -> None:
+    @staticmethod
+    async def _drain_owned_task(
+        task: asyncio.Task[_T],
+    ) -> tuple[_T, asyncio.CancelledError | None]:
+        """Wait through caller cancellation and return it after owned cleanup."""
+
+        if task.done():
+            return task.result(), None
+        cancelled: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if cancelled is None:
+                    cancelled = error
+                continue
+            except BaseException:
+                # ``result()`` below preserves the cleanup exception and chains
+                # it behind caller cancellation when both happened.
+                break
+        try:
+            result = task.result()
+        except BaseException as cleanup_error:
+            if cancelled is not None:
+                raise cancelled from cleanup_error
+            raise
+        return result, cancelled
+
+    @classmethod
+    async def _await_owned_task(cls, task: asyncio.Task[_T]) -> _T:
+        result, cancelled = await cls._drain_owned_task(task)
+        if cancelled is not None:
+            raise cancelled
+        return result
+
+    async def _run_process_reap(self, process, timeout_s: float) -> bool:
+        reaped = await asyncio.to_thread(
+            _wait_process_tree_exit,
+            process,
+            timeout_s,
+        )
+        if reaped and self._process is process:
+            # Clear ownership in the task that actually proved the complete
+            # group gone. Callers can be cancelled without leaving a stale PID
+            # handle that a later reset might signal after PID/PGID reuse.
+            self._process = None
+        return reaped
+
+    def _shared_process_reap_task(
+        self,
+        process,
+        timeout_s: float,
+    ) -> asyncio.Task[bool]:
+        task = self._process_reap_task
+        owner = self._process_reap_owner
+        if task is not None and not task.done():
+            if owner is not process:
+                raise EngineServiceError(
+                    "cannot reap a new engine service while prior cleanup is active"
+                )
+            return task
+        task = asyncio.create_task(self._run_process_reap(process, timeout_s))
+        self._process_reap_owner = process
+        self._process_reap_task = task
+        return task
+
+    async def _wait_for_process_reap(
+        self,
+        process,
+        timeout_s: float,
+    ) -> bool:
+        return await self._await_owned_task(
+            self._shared_process_reap_task(process, timeout_s)
+        )
+
+    async def _cancel_receiver_locked(self) -> asyncio.CancelledError | None:
+        """Cancel one receiver, but drain its owned cleanup before returning."""
+
         receiver = self._receiver
         self._receiver = None
         if receiver is None:
-            return
+            return None
         if not receiver.done():
             receiver.cancel()
+        caller = asyncio.current_task()
+        cancelled: asyncio.CancelledError | None = None
+        while not receiver.done():
+            try:
+                await asyncio.shield(receiver)
+            except asyncio.CancelledError as error:
+                if caller is not None and caller.cancelling() and cancelled is None:
+                    cancelled = error
+                continue
+            except Exception:
+                break
         with contextlib.suppress(asyncio.CancelledError, Exception):
-            await receiver
+            receiver.result()
+        return cancelled
 
     def _close_transport_locked(self) -> None:
         if self._socket is not None:
@@ -967,6 +1363,9 @@ class ZmqEngineBackend:
         if self._context is not None:
             self._context.term()
             self._context = None
+        if self._lifetime_pipe is not None:
+            self._lifetime_pipe.close()
+            self._lifetime_pipe = None
 
     async def _reset_dead_locked(self) -> None:
         """Tear down a crashed child's stale socket/context/process (E1).
@@ -979,6 +1378,7 @@ class ZmqEngineBackend:
         generation = self._live_generation
         self._live_generation = None
         self.attention_backend_decision = None
+        self.tensor_parallel_size = None
         self.kv_cache_dtype_resolved = None
         self.dram_kv_tier_profile_sha256 = None
         self.dram_kv_tier_min_restore_tokens = None
@@ -988,23 +1388,29 @@ class ZmqEngineBackend:
                 "engine service became unavailable and was reset before completing the request"
             ),
         )
-        await self._cancel_receiver_locked()
+        cancelled = await self._cancel_receiver_locked()
         self._close_transport_locked()
         process = self._process
         if process is not None:
-            reaped = await asyncio.to_thread(
-                _kill_and_reap_process,
+            _signal_process_tree(process, signal.SIGKILL)
+            task = self._shared_process_reap_task(
                 process,
-                1.0,
+                _FORCED_REAP_TIMEOUT_S,
             )
+            reaped, reap_cancelled = await self._drain_owned_task(task)
+            if cancelled is None:
+                cancelled = reap_cancelled
             if not reaped:
                 # Retaining the handle prevents a second GPU-owning child from
                 # being spawned over an uninterruptible old process.
-                raise EngineServiceError(
+                cleanup_error = EngineServiceError(
                     "engine service child did not exit after kill; refusing to respawn"
                 )
-            if self._process is process:
-                self._process = None
+                if cancelled is not None:
+                    raise cancelled from cleanup_error
+                raise cleanup_error
+        if cancelled is not None:
+            raise cancelled
 
     async def _ensure_started(self) -> None:
         if self._closed:
@@ -1065,10 +1471,13 @@ class ZmqEngineBackend:
                 self._live_generation = generation
                 process = self._process
                 assert process is not None
+                self._service_failure_type = None
                 self._receiver = asyncio.get_running_loop().create_task(
                     self._receive_loop(generation, socket, process)
                 )
-            except BaseException:
+            except BaseException as error:
+                if not self._closed and not isinstance(error, asyncio.CancelledError):
+                    self._service_failure_type = type(error).__name__
                 await self._reset_dead_locked()
                 raise
 
@@ -1079,24 +1488,18 @@ class ZmqEngineBackend:
 
     def _kill_process(self) -> None:
         process = self._process
-        if process is not None and process.is_alive():  # pragma: no cover - crash path
-            process.kill()
+        if process is not None:  # pragma: no cover - interpreter crash path
+            if self._lifetime_pipe is not None:
+                self._lifetime_pipe.close()
+            _signal_process_tree(process, signal.SIGKILL)
+            _wait_process_tree_exit(process, _FORCED_REAP_TIMEOUT_S)
 
-    async def shutdown(self) -> None:
-        # Close admission before waiting for the start lock. If a model load is
-        # in flight, its 50 ms Pipe poll observes this event; _ensure_started
-        # drains the worker before releasing the same lock to us.
-        self._closed = True
-        with self._prepared_requests_lock:
-            self._prepared_requests.clear()
-        abandoned = self._startup_abandoned
-        if abandoned is not None:
-            abandoned.set()
-
+    async def _shutdown_impl(self) -> None:
         async with self._start_lock:
             generation = self._live_generation
             self._live_generation = None
             self.attention_backend_decision = None
+            self.tensor_parallel_size = None
             self.kv_cache_dtype_resolved = None
             self.dram_kv_tier_profile_sha256 = None
             self.dram_kv_tier_min_restore_tokens = None
@@ -1104,7 +1507,7 @@ class ZmqEngineBackend:
                 generation,
                 EngineServiceError("engine service shut down before completing the request"),
             )
-            await self._cancel_receiver_locked()
+            receiver_cancelled = await self._cancel_receiver_locked()
 
             process = self._process
             cleanup_error: EngineServiceError | None = None
@@ -1112,35 +1515,74 @@ class ZmqEngineBackend:
                 if process is not None and self._socket is not None:
                     _, msgpack = _import_deps()
                     try:
-                        await self._socket.send(msgpack.packb({"op": "shutdown"}))
-                    except Exception:  # pragma: no cover - socket already dead
+                        await _send_control(
+                            self._socket,
+                            msgpack.packb({"op": "shutdown"}),
+                        )
+                    except Exception:
+                        # A wedged ROUTER must not prevent process-group
+                        # escalation below.
                         pass
                 if process is not None:
-                    await asyncio.to_thread(process.join, _SHUTDOWN_TIMEOUT_S)
-                    if process.is_alive():  # pragma: no cover - hung child
-                        with contextlib.suppress(ProcessLookupError):
-                            process.terminate()
-                        await asyncio.to_thread(process.join, 2.0)
-                    if process.is_alive():  # pragma: no cover - wedged child
-                        with contextlib.suppress(ProcessLookupError):
-                            process.kill()
-                        await asyncio.to_thread(process.join, 2.0)
-                    if process.is_alive():
-                        cleanup_error = EngineServiceError(
-                            "engine service child remained alive after shutdown escalation"
+                    tree_exited = await self._wait_for_process_reap(
+                        process,
+                        _SHUTDOWN_TIMEOUT_S,
+                    )
+                    if not tree_exited:
+                        _signal_process_tree(process, signal.SIGTERM)
+                        tree_exited = await self._wait_for_process_reap(
+                            process,
+                            2.0,
                         )
-                    elif self._process is process:
-                        self._process = None
+                    if not tree_exited:
+                        _signal_process_tree(process, signal.SIGKILL)
+                        tree_exited = await self._wait_for_process_reap(
+                            process,
+                            2.0,
+                        )
+                    if not tree_exited:
+                        cleanup_error = EngineServiceError(
+                            "engine service process group was not completely "
+                            "reaped after shutdown escalation"
+                        )
             finally:
                 self._close_transport_locked()
                 self.attention_backend_decision = None
+                self.tensor_parallel_size = None
                 self.kv_cache_dtype_resolved = None
                 self.dram_kv_tier_profile_sha256 = None
                 self.dram_kv_tier_min_restore_tokens = None
             if cleanup_error is not None:
-                # Keep the Process object so a later shutdown attempt can reap
-                # it and no future code can mistake the backend for child-free.
                 raise cleanup_error
+            if receiver_cancelled is not None:
+                raise receiver_cancelled
+
+    async def shutdown(self) -> None:
+        # Terminal before the first await. If a model load is in flight, its
+        # Pipe poll sees ``abandoned`` while every caller shares one cleanup.
+        self._closed = True
+        with self._prepared_requests_lock:
+            self._prepared_requests.clear()
+        abandoned = self._startup_abandoned
+        if abandoned is not None:
+            abandoned.set()
+        task = self._shutdown_task
+        if task is None:
+            task = asyncio.create_task(self._shutdown_impl())
+            self._shutdown_task = task
+        try:
+            await self._await_owned_task(task)
+        except BaseException:
+            # A successful cleanup is the permanent idempotency record. A
+            # failed/cancelled cleanup must not poison shutdown forever: the
+            # retained process handle is precisely what a later call needs in
+            # order to retry escalation and reap the service tree.
+            failed = task.done() and (
+                task.cancelled() or task.exception() is not None
+            )
+            if failed and self._shutdown_task is task:
+                self._shutdown_task = None
+            raise
 
     # -- request plumbing ----------------------------------------------------
 
@@ -1266,34 +1708,102 @@ class ZmqEngineBackend:
 
     async def _receive_loop(self, generation: int, socket, process) -> None:
         _, msgpack = _import_deps()
+        loop = asyncio.get_running_loop()
+        last_activity = loop.time()
+        last_ping = last_activity
+        receive_tick = min(_RECV_TICK_S, self._death_timeout_s / 3.0)
         try:
             while True:
                 try:
-                    raw = await asyncio.wait_for(socket.recv(), timeout=_RECV_TICK_S)
+                    raw = await asyncio.wait_for(socket.recv(), timeout=receive_tick)
                 except TimeoutError:
                     if not process.is_alive():
                         raise EngineServiceError("engine service process died") from None
+                    now = loop.time()
+                    silent_for = now - last_activity
+                    if silent_for >= self._death_timeout_s:
+                        raise EngineServiceError(
+                            "engine service heartbeat timed out"
+                        ) from None
+                    if now - last_ping >= receive_tick:
+                        remaining = self._death_timeout_s - silent_for
+                        try:
+                            await _send_control(
+                                socket,
+                                msgpack.packb({"op": "ping"}),
+                                timeout_s=min(_CONTROL_SEND_TIMEOUT_S, remaining),
+                            )
+                        except Exception:
+                            # Silence is judged by the single monotonic deadline;
+                            # a blocked control send cannot extend it.
+                            pass
+                        last_ping = loop.time()
                     continue
                 try:
                     event = msgpack.unpackb(raw)
-                    if event.get("op") in ("pong", "bye"):
-                        continue
-                    self._deliver_event(event)
+                    if not isinstance(event, dict):
+                        raise TypeError("engine event must be a map")
                 except Exception as error:
                     # a single corrupt/malformed frame must not kill the receiver
                     # and hang every request (E1); drop it and keep reading
                     logging.warning("kairyu-proc dropped a malformed engine event: %r", error)
                     continue
+                last_activity = loop.time()
+                op = event.get("op")
+                if op in ("pong", "bye"):
+                    continue
+                if op == "fatal":
+                    error_type = event.get("error_type")
+                    dead_ranks = event.get("dead_ranks")
+                    if not isinstance(error_type, str) or not error_type:
+                        error_type = "EngineServiceError"
+                    ranks = (
+                        sorted(rank for rank in dead_ranks if type(rank) is int)
+                        if isinstance(dead_ranks, (list, tuple))
+                        else []
+                    )
+                    detail = (
+                        f"engine service reported fatal {error_type}"
+                        f" for ranks {ranks}"
+                    )
+                    raise EngineServiceError(detail)
+                try:
+                    self._deliver_event(event)
+                except Exception as error:
+                    # a malformed request event is isolated exactly like a bad
+                    # msgpack frame; heartbeats remain able to retire the child.
+                    logging.warning("kairyu-proc dropped a malformed engine event: %r", error)
         except asyncio.CancelledError:  # pragma: no cover - clean shutdown
             raise
-        except Exception as error:
-            if self._live_generation == generation:
+        except Exception as caught:
+            failure: BaseException = caught
+            owns_generation = self._live_generation == generation
+            if owns_generation:
+                # Close admission before the first cleanup await. The process
+                # can remain observable/alive while group reaping blocks, but
+                # no new request may be routed into this failed generation.
                 self._live_generation = None
+                self._service_failure_type = type(failure).__name__
                 self.attention_backend_decision = None
+                self.tensor_parallel_size = None
                 self.kv_cache_dtype_resolved = None
                 self.dram_kv_tier_profile_sha256 = None
                 self.dram_kv_tier_min_restore_tokens = None
-            self._fail_generation_once(generation, error)
+            self._fail_generation_once(generation, failure)
+            # Rank 0 can die from OOM/SIGKILL while its distributed followers
+            # remain alive. Clean the owned process group immediately; waiting
+            # for a later request/reset would strand their GPU allocations.
+            _signal_process_tree(process, signal.SIGKILL)
+            reaped = await self._wait_for_process_reap(
+                process,
+                _FORCED_REAP_TIMEOUT_S,
+            )
+            if not reaped:
+                failure = EngineServiceError(
+                    "engine service died and its process group did not exit"
+                )
+            if owns_generation:
+                self._service_failure_type = type(failure).__name__
 
     def _deliver_event(self, event: dict) -> None:
         """Route one decoded event without crossing request generations."""
@@ -1387,7 +1897,18 @@ class ZmqEngineBackend:
                 # fields; a new service defaults absent fields to v1.
                 message["wire_version"] = WIRE_VERSION
                 message["stream_id"] = stream_id
-            await self._socket.send(msgpack.packb(message))
+            try:
+                await _send_control(self._socket, msgpack.packb(message))
+            except BaseException as error:
+                # Cancellation of a ZMQ send cannot prove whether the add
+                # reached the child. Retire the generation so an unowned ghost
+                # request cannot keep consuming GPU work.
+                self._retire_unreliable_transport()
+                if isinstance(error, TimeoutError):
+                    raise EngineServiceError(
+                        "engine service request send timed out"
+                    ) from None
+                raise
         except BaseException:
             if self._queues.get(request.request_id) is queue:
                 self._queues.pop(request.request_id, None)
@@ -1403,16 +1924,24 @@ class ZmqEngineBackend:
             return
         _, msgpack = _import_deps()
         try:
-            await self._socket.send(
+            await _send_control(
+                self._socket,
                 msgpack.packb(
                     {
                         "op": "abort",
                         "request_id": wire_request_id,
                         "stream_id": self._stream_ids.get(request_id),
                     }
-                )
+                ),
             )
-        except Exception:  # pragma: no cover - shutdown race
+        except asyncio.CancelledError:
+            self._retire_unreliable_transport()
+            raise
+        except Exception:
+            # Stream finalization must release its route even when the service
+            # transport is wedged. Abort delivery is then unknown, so retire
+            # the generation instead of leaving an unowned request running.
+            self._retire_unreliable_transport()
             pass
 
     def _release_wire_route(self, request_id: str) -> None:

@@ -1,0 +1,9 @@
+2026-08-04T15:42:45.468066561Z {"ts": "2026-08-04T15:42:45+0000", "level": "INFO", "logger": "kairyu.deploy", "message": "auto-loaded tokenizer chat template for model 'qwen3-32b' from /models/qwen3-32b/tokenizer_config.json:chat_template"}
+2026-08-04T15:42:45.631641562Z {"ts": "2026-08-04T15:42:45+0000", "level": "INFO", "logger": "uvicorn.error", "message": "Started server process [1]", "color_message": "Started server process [\u001b[36m%d\u001b[0m]"}
+2026-08-04T15:42:45.631689144Z {"ts": "2026-08-04T15:42:45+0000", "level": "INFO", "logger": "uvicorn.error", "message": "Waiting for application startup."}
+2026-08-04T15:44:08.496956379Z {"ts": "2026-08-04T15:44:08+0000", "level": "INFO", "logger": "uvicorn.error", "message": "Application startup complete."}
+2026-08-04T15:44:08.503154021Z {"ts": "2026-08-04T15:44:08+0000", "level": "INFO", "logger": "uvicorn.error", "message": "Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)", "color_message": "Uvicorn running on \u001b[1m%s://%s:%d\u001b[0m (Press CTRL+C to quit)"}
+2026-08-04T15:45:02.627039612Z {"ts": "2026-08-04T15:45:02+0000", "level": "INFO", "logger": "uvicorn.error", "message": "Shutting down"}
+2026-08-04T15:45:02.727465555Z {"ts": "2026-08-04T15:45:02+0000", "level": "INFO", "logger": "uvicorn.error", "message": "Waiting for application shutdown."}
+2026-08-04T15:45:04.955280056Z {"ts": "2026-08-04T15:45:04+0000", "level": "INFO", "logger": "uvicorn.error", "message": "Application shutdown complete."}
+2026-08-04T15:45:04.955651498Z {"ts": "2026-08-04T15:45:04+0000", "level": "INFO", "logger": "uvicorn.error", "message": "Finished server process [1]", "color_message": "Finished server process [\u001b[36m%d\u001b[0m]"}

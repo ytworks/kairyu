@@ -720,6 +720,7 @@ def build_engine_loop(
     )
     loop.parallel_launcher = None  # single-process: nothing to tear down
     loop.tp_launcher = None  # compatibility alias for TP-specific callers
+    loop.tensor_parallel_size = tensor_parallel_size
     loop.attention_backend_decision = attention_backend_decision
     loop.kv_cache_dtype_requested = kv_cache_dtype
     loop.kv_cache_dtype_resolved = (
@@ -1022,6 +1023,7 @@ def _build_dist_tp_loop(
     )
     loop.parallel_launcher = launcher
     loop.tp_launcher = launcher  # compatibility alias for TP-specific callers
+    loop.tensor_parallel_size = launcher.tensor_parallel_size
     loop.attention_backend_decision = launcher.attention_backend_decision
     loop.kv_cache_dtype_requested = launcher.kv_cache_dtype_requested
     loop.kv_cache_dtype_resolved = launcher.kv_cache_dtype_resolved

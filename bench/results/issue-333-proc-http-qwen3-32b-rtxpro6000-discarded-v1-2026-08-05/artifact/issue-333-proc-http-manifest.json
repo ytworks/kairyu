@@ -1,0 +1,242 @@
+{
+  "a6_gate_claimed": false,
+  "checks": {
+    "all_warmup_and_measurement_rows_retained_exactly_once": true,
+    "backend_only_configuration_and_common_runtime_identity_exact": true,
+    "borrowed_a6_benchmark_and_trace_exact": true,
+    "completion_output_hash_parity_across_all_four_cells": false,
+    "diagnostic_marker_and_fresh_server_abba_plan_exact": true,
+    "fresh_unique_containers_and_chronological_abba_order_exact": true,
+    "logs_removal_and_post_cleanup_gpu_quiescence_exact": true,
+    "measurement_windows_replay_exact": true,
+    "process_tree_generation_identity_stable_across_three_attestations": true,
+    "serialized_graph_and_synchronized_burst_shape_exact": true,
+    "source_image_model_gpu_config_provenance_exact": true,
+    "strict_a6_sse_request_evidence_exact": true,
+    "three_backend_and_process_attestations_per_cell_exact": true
+  },
+  "comparisons": {
+    "direction": "kairyu-proc divided by kairyu",
+    "paired_mad": {
+      "goodput_rps": {
+        "decimal": 0.0061297574659250455,
+        "denominator": 9134585459497946799,
+        "numerator": 55992793418487901
+      },
+      "ttft_p50_ns": {
+        "decimal": 0.014820048023449777,
+        "denominator": 40556009285939104685,
+        "numerator": 601042005257092674
+      },
+      "ttft_p99_ns": {
+        "decimal": 0.006296024235622977,
+        "denominator": 142119995285993659692,
+        "numerator": 894790934687239285
+      }
+    },
+    "paired_median": {
+      "goodput_rps": {
+        "decimal": 1.0544115087765646,
+        "denominator": 18269170918995893598,
+        "numerator": 19263224072795399305
+      },
+      "ttft_p50_ns": {
+        "decimal": 0.9394139423038225,
+        "denominator": 40556009285939104685,
+        "numerator": 38098880567414485271
+      },
+      "ttft_p99_ns": {
+        "decimal": 0.9454156693989547,
+        "denominator": 142119995285993659692,
+        "numerator": 134362470478283983195
+      }
+    },
+    "paired_rounds": [
+      {
+        "kairyu": {
+          "goodput_rps": 1.5451787963319839,
+          "measurement_span_ns": 31064366217,
+          "request_count": 128,
+          "success_count": 128,
+          "ttft_p50_ns": 12574890844,
+          "ttft_p99_ns": 27810017043,
+          "ttft_sample_count": 128,
+          "ttft_slo_successes": 48
+        },
+        "kairyu_proc": {
+          "goodput_rps": 1.6197827347069582,
+          "measurement_span_ns": 29633603922,
+          "request_count": 128,
+          "success_count": 128,
+          "ttft_p50_ns": 11999388268,
+          "ttft_p99_ns": 26467118420,
+          "ttft_sample_count": 128,
+          "ttft_slo_successes": 48
+        },
+        "kairyu_proc_over_kairyu": {
+          "goodput_rps": {
+            "decimal": 1.0482817513106397,
+            "denominator": 9877867974,
+            "numerator": 10354788739
+          },
+          "ttft_p50_ns": {
+            "decimal": 0.9542339903272722,
+            "denominator": 3143722711,
+            "numerator": 2999847067
+          },
+          "ttft_p99_ns": {
+            "decimal": 0.9517116936345776,
+            "denominator": 27810017043,
+            "numerator": 26467118420
+          }
+        },
+        "repeat": 0,
+        "server_order": [
+          "kairyu",
+          "kairyu-proc"
+        ]
+      },
+      {
+        "kairyu": {
+          "goodput_rps": 1.529459780956108,
+          "measurement_span_ns": 31383630088,
+          "request_count": 128,
+          "success_count": 128,
+          "ttft_p50_ns": 12900631835,
+          "ttft_p99_ns": 28107137542,
+          "ttft_sample_count": 128,
+          "ttft_slo_successes": 48
+        },
+        "kairyu_proc": {
+          "goodput_rps": 1.6220552127621517,
+          "measurement_span_ns": 29592087632,
+          "request_count": 128,
+          "success_count": 128,
+          "ttft_p50_ns": 11927845427,
+          "ttft_p99_ns": 26395965035,
+          "ttft_sample_count": 128,
+          "ttft_slo_successes": 48
+        },
+        "kairyu_proc_over_kairyu": {
+          "goodput_rps": {
+            "decimal": 1.0605412662424898,
+            "denominator": 3699010954,
+            "numerator": 3922953761
+          },
+          "ttft_p50_ns": {
+            "decimal": 0.9245938942803726,
+            "denominator": 12900631835,
+            "numerator": 11927845427
+          },
+          "ttft_p99_ns": {
+            "decimal": 0.9391196451633317,
+            "denominator": 2555194322,
+            "numerator": 2399633185
+          }
+        },
+        "repeat": 1,
+        "server_order": [
+          "kairyu-proc",
+          "kairyu"
+        ]
+      }
+    ],
+    "report_only_material_reduction_classification": {
+      "binding": false,
+      "causal_scope": "net backend swap including process/GIL isolation and ZMQ/msgpack/delta/lifecycle overhead",
+      "ceiling": {
+        "decimal": 0.9,
+        "denominator": 10,
+        "numerator": 9
+      },
+      "classification": "insufficient_evidence",
+      "criterion": "<= 0.90",
+      "evidence_integrity_valid": false,
+      "hypothesis_conclusion": null,
+      "interpretation": "evidence integrity checks failed; no hypothesis conclusion",
+      "material_reduction": false,
+      "metric": "paired median kairyu-proc/kairyu TTFT p99 ratio",
+      "observed": {
+        "decimal": 0.9454156693989547,
+        "denominator": 142119995285993659692,
+        "numerator": 134362470478283983195
+      },
+      "predeclared_before_measurement": true,
+      "report_only": true
+    }
+  },
+  "diagnostic": "issue-333-kairyu-proc-http",
+  "diagnostic_only": true,
+  "diagnostics": {
+    "method": {
+      "causal_scope": "net backend swap: process/GIL isolation plus ZMQ/msgpack/delta and lifecycle overhead; not a pure GIL attribution",
+      "diagnostic_only": true,
+      "formal_g2_a6_gate": false,
+      "goodput_definition": "TTFT<=10s successes / measurement span",
+      "outlier_removal": false,
+      "performance_acceptance_threshold": null,
+      "report_only_material_reduction_classification": {
+        "binding": false,
+        "conditional_on_all_integrity_checks": true,
+        "criterion": "<= 0.90",
+        "material_interpretation": "dominant process/GIL-contention hypothesis supported",
+        "metric": "paired median kairyu-proc/kairyu TTFT p99 ratio",
+        "predeclared_before_measurement": true
+      },
+      "retry": false,
+      "ttft_quantile": "nearest-rank over successful measurement requests",
+      "warmup_excluded_from_metrics": true
+    },
+    "scenario_metrics": {
+      "issue333-tp4-sharegpt-r0-kairyu": {
+        "goodput_rps": 1.5451787963319839,
+        "measurement_span_ns": 31064366217,
+        "request_count": 128,
+        "success_count": 128,
+        "ttft_p50_ns": 12574890844,
+        "ttft_p99_ns": 27810017043,
+        "ttft_sample_count": 128,
+        "ttft_slo_successes": 48
+      },
+      "issue333-tp4-sharegpt-r0-kairyu-proc": {
+        "goodput_rps": 1.6197827347069582,
+        "measurement_span_ns": 29633603922,
+        "request_count": 128,
+        "success_count": 128,
+        "ttft_p50_ns": 11999388268,
+        "ttft_p99_ns": 26467118420,
+        "ttft_sample_count": 128,
+        "ttft_slo_successes": 48
+      },
+      "issue333-tp4-sharegpt-r1-kairyu": {
+        "goodput_rps": 1.529459780956108,
+        "measurement_span_ns": 31383630088,
+        "request_count": 128,
+        "success_count": 128,
+        "ttft_p50_ns": 12900631835,
+        "ttft_p99_ns": 28107137542,
+        "ttft_sample_count": 128,
+        "ttft_slo_successes": 48
+      },
+      "issue333-tp4-sharegpt-r1-kairyu-proc": {
+        "goodput_rps": 1.6220552127621517,
+        "measurement_span_ns": 29592087632,
+        "request_count": 128,
+        "success_count": 128,
+        "ttft_p50_ns": 11927845427,
+        "ttft_p99_ns": 26395965035,
+        "ttft_sample_count": 128,
+        "ttft_slo_successes": 48
+      }
+    }
+  },
+  "evidence_valid": false,
+  "external_workdir_logs_required": true,
+  "performance_acceptance_threshold": null,
+  "raw": {
+    "name": "issue-333-proc-http-raw.jsonl",
+    "row_count": 662,
+    "sha256": "6b726d0076f55226b9d50370a27f8f06e486ca9c53088192f003891507b95a13"
+  },
+  "schema_version": "kairyu.issue-333.proc-http-diagnostic.v1"
+}

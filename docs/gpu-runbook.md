@@ -349,6 +349,89 @@ GPU-only remainder (design m5 §4.2).
 
   The two manifest hashes must be identical. Commit the verified raw JSONL and
   manifest together; do not publish only a summary.
+
+  Issue #333's process-isolation diagnostic is not an A6 rerun or substitute
+  verdict. From one clean committed detached source tree, regenerate the same
+  A6 trace, then run four fresh TP4 Kairyu servers in the fixed
+  `kairyu`, `kairyu-proc`, `kairyu-proc`, `kairyu` order:
+
+  ```bash
+  KAIRYU_ISSUE333_SOURCE=/absolute/path/to/fresh-detached-kairyu
+  KAIRYU_ISSUE333_PYTHON=/absolute/path/to/existing-kairyu-venv/bin/python
+  KAIRYU_ISSUE333_RESULTS=/absolute/path/to/writable-kairyu-checkout
+  "$KAIRYU_ISSUE333_PYTHON" -B \
+    "$KAIRYU_ISSUE333_SOURCE/bench/g2_a6_vllm_bench.py" prepare-traces \
+    --tokenizer /tmp/kairyu-a7-qwen3-32b-tokenizer.json \
+    --dataset /tmp/ShareGPT_V3_unfiltered_cleaned_split.json \
+    --output /tmp/issue-333-traces/g2-a6-traces.json
+  "$KAIRYU_ISSUE333_PYTHON" -B \
+    "$KAIRYU_ISSUE333_SOURCE/bench/issue_333_proc_http_bench.py" run \
+    --repo "$KAIRYU_ISSUE333_SOURCE" \
+    --env-artifact \
+      "$KAIRYU_ISSUE333_SOURCE/bench/results/env-2026-07-30.json" \
+    --kairyu-template \
+      "$KAIRYU_ISSUE333_SOURCE/examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml" \
+    --trace-bundle /tmp/issue-333-traces/g2-a6-traces.json \
+    --work-dir /tmp/issue-333-proc-http \
+    --assert-integrity
+  "$KAIRYU_ISSUE333_PYTHON" -B \
+    "$KAIRYU_ISSUE333_SOURCE/bench/issue_333_proc_http_bench.py" verify \
+    --artifact /tmp/issue-333-proc-http/artifact \
+    --assert-integrity
+  cp -a /tmp/issue-333-proc-http \
+    "$KAIRYU_ISSUE333_RESULTS/bench/results/issue-333-proc-http-qwen3-32b-<gpu>-<date>"
+  "$KAIRYU_ISSUE333_PYTHON" -B \
+    "$KAIRYU_ISSUE333_SOURCE/bench/issue_333_proc_http_bench.py" verify \
+    --artifact \
+      "$KAIRYU_ISSUE333_RESULTS/bench/results/issue-333-proc-http-qwen3-32b-<gpu>-<date>/artifact" \
+    --assert-integrity
+  ```
+
+  Retain the complete work directory, including per-cell server logs and
+  launch/config/state records, rather than copying only the assembled artifact.
+  Every cell must retain the exact four serial plus 31 graph warmups, one
+  retry-free 128-request synchronized ShareGPT burst, three matching
+  `/backends` and live TP4 process-tree attestations, and identical source,
+  image, checkpoint, GPU, runtime, and backend-neutral config identity. The
+  process tree is derived from live PID/PPID/PGID/state rows: in-process rank 0
+  is API PID 1 with three direct workers, while the process arm has exactly one
+  owned service session with three workers. The process backend's 120-second
+  heartbeat allowance must exceed any healthy silent engine step; a reported
+  rank failure or longer silence invalidates the cell. Each completed cell must
+  use `docker stop --timeout 120`, bind the post-stop container ID to the launch
+  ID, prove `Running=false`, `OOMKilled=false`, and `ExitCode=0`, retain logs
+  after that graceful exit, and use a non-forced `docker rm`. Both before launch
+  and after removal, all selected GPUs must have no compute applications, zero
+  `utilization.gpu`, and `memory.used` exactly equal to the stable per-GPU idle
+  baseline captured at run start; transient NVML query errors retry only inside
+  the fixed quiescence deadline. A forced fallback may recover a
+  failed cell physically but can never satisfy its cleanup evidence. Independent
+  raw replay must pass before interpretation. The v2 contract also requires
+  every cell's 163 response IDs to be unique and all four serialized ShareGPT
+  warm-up output hashes to agree across all four fresh servers. It retains the
+  well-formed output and complete-stream digest metadata for every measurement
+  row, but decoded bytes are not retained and the digests cannot be independently
+  recomputed. Exact output equality across the c128 measurement bursts is not
+  binding: the discarded v1 trial observed only 29/128 and 41/128 agreement
+  between same-arm repeats, so equality was not arm-neutral. Report all six
+  cell-pair output-hash agreement counts and rates as non-binding diagnostics;
+  do not serialize or reshape the load to improve repeatability. TTFT ends at
+  first-token arrival, while the 128-token output digest is post-treatment
+  continuation data and cannot condition the TTFT interpretation. The invalid
+  v1 observation and its complete work directory remain recorded under
+  `bench/results/`. Execute exactly one full fresh v2 ABBA run and retain it as
+  the issue result regardless of direction; never rewrite v1 raw rows into v2.
+  The predeclared report-only material line is paired-median
+  `kairyu-proc/kairyu` TTFT p99 <= 0.90; no valid
+  evidence means no supported/not-supported conclusion, and neither
+  classification is a formal A6 PASS/FAIL.
+  Closure evidence:
+  `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05/`
+  (15/15 binding checks, 512/512 measurement successes, paired TTFT-p99
+  ratios 0.9189755344057482/0.9219867334510442, median
+  0.9204811339283963, `no_material_reduction`, hypothesis `not_supported`).
+  The invalid v1 observation remains separately retained as
+  `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-discarded-v1-2026-08-05/`.
 - Gate A7: run `bench/tp_kv_hit_g2_a7_bench.py` against Qwen3-32B at TP4
   and TP8, once through each replica's direct endpoint and once through its
   single-replica gateway. Assemble

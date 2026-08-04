@@ -226,6 +226,34 @@ msgpack byte-volume gates pass. The retained clean-source artifact
 `bench/results/proc-wire-delta-2026-07-29.json` binds to implementation commit
 `5c634ee` and records 31,012,271 legacy bytes versus 356,199 v2 bytes at
 1,024 tokens, with empirical exponents 1.97–1.99 versus 1.01–1.02.
+The process backend now constructs and startup-attests real-model TP groups.
+Its private process session, API-parent lease, Linux child-subreaper, complete
+group reaping, fatal rank heartbeat/readiness, and bounded DEALER writes cover
+normal stop, cancelled startup, rank-0/follower failure, wedged steps, and API
+parent death without allowing a second generation over retained ranks. The
+issue #333 TP4 HTTP diagnostic operator is CPU-validated and predeclares a
+report-only paired-median process/in-process TTFT-p99 ratio <=0.90 as material;
+its pre/post cell boundary now also requires a launch-bound graceful zero exit,
+non-forced removal, no compute applications, zero GPU utilization, and exact
+restoration to a stable per-GPU run-start idle-memory baseline. The first
+fail-closed real trial was discarded because its v1 all-four measurement-output
+parity check was not arm-neutral: same-arm repeats themselves agreed on only
+29/128 and 41/128 hashes. That invalid observation measured a 0.9454156693989547
+paired-median process/in-process TTFT-p99 ratio but supports no classification.
+The pre-rerun v2 contract instead binds strict A6
+completion structure, per-cell uniqueness of all 163 response IDs, and exact
+all-four parity for the four serialized ShareGPT warm-ups; it reports all six
+c128 measurement agreement rates without making them binding. Its next fresh
+full ABBA is the sole v2 rerun and will be retained regardless of direction.
+That v2 run is complete: all 15 binding checks and independent raw replay pass,
+all 512 measurement requests succeeded once, and all four fresh containers
+restored the selected GPUs after graceful zero exit. Paired process/in-process
+TTFT-p99 ratios were 0.9189755344057482/0.9219867334510442, for a
+0.9204811339283963 median above the predeclared ≤0.90 material line. The
+report-only classification is therefore `no_material_reduction` and the
+dominant process/GIL-contention hypothesis is `not_supported`; this is neither
+a pure-GIL attribution nor a formal A6 verdict. Complete evidence is retained
+at `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05/`.
 Streaming detokenization is now truly incremental on the supported native
 paths. `HFTokenizer` delegates arriving deltas to the Rust `DecodeStream`, Toy
 joins only new IDs, and unknown/overridden tokenizer implementations retain the
@@ -861,6 +889,26 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [progress] Issue #333 valid v2 diagnostic does not support dominant GIL contention
+- What: completed the sole fresh v2 Qwen3-32B TP4 ABBA diagnostic from clean source `65ba4779c118d534f1e34a1a4dcb1b579cbcfe73`. All 15 binding checks pass independent raw replay, 512/512 synchronized measurement requests succeeded once, all four containers exited gracefully with code zero and were removed without force, and the selected GPUs returned exactly to the run-start idle baseline. Paired process/in-process TTFT-p99 ratios were 0.9189755344057482 and 0.9219867334510442; their 0.9204811339283963 median is above the predeclared ≤0.90 material line, so the report-only classification is `no_material_reduction` and the dominant process/GIL-contention hypothesis is `not_supported`. Median goodput and TTFT-p50 ratios were 1.086201492163829 and 0.9282808350389853. The raw/manifest SHA-256s are `21ba4789cf34fcf4beab5ab5862952574693f80c8b608c2cede002da05088925` and `bd321c32654c0602d6e799167d16a7b375b8edf5dea5bd95faa899acde24286c`.
+- Why: the issue requested one real TP4 process-isolation diagnostic to determine whether API/engine GIL contention was the dominant TTFT-p99 cause. The valid net-backend movement was beneficial but smaller than the declared material magnitude, so the evidence does not support that dominant-cause hypothesis. The result does not isolate pure GIL cost and does not claim an A6 verdict.
+- Refs: issue #333; m8 D6; `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05/`; `bench/issue_333_proc_http_bench.py`; `docs/{gpu-runbook.md,design/m8-engine-cpu.md}`
+
+### 2026-08-05 — [amendment] Issue #333 separates concurrent repeatability from evidence integrity
+- What: retained the first fail-closed four-cell trial strictly as an invalid observation: source `ad11a322b77337547ac34dc1717586c40f76fd8b`, paired-median process/in-process TTFT-p99 ratio 0.9454156693989547 with no classification, raw SHA-256 `6b726d0076f55226b9d50370a27f8f06e486ca9c53088192f003891507b95a13`, and manifest SHA-256 `15526fc3efec8b5a12ae5dba3e7c5c54c9cc3729987e005dd5a838cf8f94d393`. Before any rerun, bumped the operator evidence schema to v2, retained strict A6 HTTP/SSE/prompt/usage/terminal structure and well-formed per-row digest metadata, and added binding per-cell uniqueness for all 163 response IDs plus all-four output parity for each of the four serialized ShareGPT warm-ups. All six c128 measurement-cell output-hash agreement counts and rates are explicit non-binding diagnostics; the predeclared 0.90 report-only TTFT-p99 interpretation is unchanged. The next fresh full ABBA is the sole v2 rerun and is retained regardless of direction; v1 raw rows are never rewritten as v2.
+- Why: the two same-arm repeat pairs in the discarded trial agreed on only 29/128 and 41/128 completion hashes, so exact all-four equality could not distinguish backend semantics from fresh-server concurrent scheduling variation. Serializing the 128-request burst would remove the very contention being diagnosed. TTFT ends at first-token arrival, while the full 128-token continuation hash is downstream of the backend treatment; conditioning the TTFT result on that hash was post-treatment selection. Raw rows retain digest metadata but not decoded bytes, so the contract does not claim independent output-hash recomputation.
+- Refs: issue #333; m8 D6; source commit `ad11a32`; `bench/issue_333_proc_http_bench.py`; `tests/bench/test_issue_333_proc_http_bench.py`; `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-discarded-v1-2026-08-05/`; `docs/{gpu-runbook.md,design/m8-engine-cpu.md}`
+
+### 2026-08-05 — [amendment] Issue #333 rejects force-cleaned or non-idle GPU cells
+- What: changed the four-cell TP4 diagnostic lifecycle to stop each measured container with a bounded graceful timeout, re-attest its immutable launch ID and zero non-OOM exit, retain shutdown logs, and remove it without force. Pre-start and post-removal evidence now requires no selected-GPU compute applications, zero utilization, and memory exactly equal to a stable per-GPU run-start idle baseline, with bounded retry for transient NVML query failures. Stop or removal failures still trigger best-effort forced recovery but invalidate the cell and prevent a shard from being written.
+- Why: an interrupted trial demonstrated that `docker rm -f` could remove every visible process and allocation while two GPUs continued executing orphaned kernels at 100% utilization. Process-list-only quiescence therefore admitted contaminated subsequent cells, and a successful `docker stop` return code alone could conceal Docker's timeout SIGKILL.
+- Refs: issue #333; m8 D6; `bench/issue_333_proc_http_bench.py`; `tests/bench/test_issue_333_proc_http_bench.py`; `docs/{gpu-runbook.md,design/m8-engine-cpu.md}`
+
+### 2026-08-04 — [amendment] Process-isolated TP owns and attests its complete rank tree
+- What: enabled real-model tensor parallelism in `kairyu-proc`; delayed public topology until child startup attested the configured degree; placed the non-daemon service and ranks in one private POSIX session with an API-parent lease; made the Linux API a child subreaper that confirms every forced descendant is reaped; added fatal launcher heartbeat/readiness and a 120-second worst-step timeout; bounded add/abort/heartbeat/shutdown sends; and added a fail-closed TP4 fresh-server ABBA diagnostic with exact A6 traffic, imported-source, checkpoint, GPU, backend, config, and process-tree evidence plus a predeclared report-only 0.90 TTFT-p99 ratio interpretation.
+- Why: the proposed separate-GIL diagnostic could not run at the A6 TP4 topology, and merely spawning a service without positive topology, failure, and ownership contracts could strand GPU ranks or publish a healthy endpoint after a follower died. The diagnostic must also distinguish integrity from performance and prevent a partial run from confirming or denying the hypothesis.
+- Refs: issue #333; m8 D6; `kairyu/engine/{config_validation,kairyu_backend,zmq_backend}.py`; `kairyu/engine/core/{engine_service,worker}.py`; `bench/issue_333_proc_http_bench.py`; `tests/{unit,dist,bench}/`; `docs/gpu-runbook.md`
 
 ### 2026-08-04 — [amendment] Checkpoint chat templates become fail-closed defaults
 - What: added metadata-only loading of dedicated and tokenizer-config HF chat templates plus named special tokens; resolved the effective tokenizer and compiled every deployment renderer before constructing backends; required a template or model-scoped `legacy_chat_models` membership at every production, lower-level chat, and offline-chat boundary; made completion-only low-level construction log an explicit missing-policy warning while rejecting chat before dispatch; rejected unverified special-token variables instead of silently dropping BOS/EOS; preserved rendered-template ownership through an in-process/ZMQ typed prompt marker and disabled vLLM's completion special-token insertion only for that marker; rejected remote/discovery/orchestration and direct Conductor/MoA derivation paths that cannot preserve the marker; limited automatic legacy selection to DeploymentSpec-built deterministic mocks; made the checked-in VLM overlay opt in explicitly while image requests bypass its text renderer; and replaced the Qwen example's temporary template extraction with direct checkpoint auto-loading. Offline validation now reports the same missing/invalid policy, while Llama-3 and Qwen bytes and token IDs match Transformers exactly. The final portable split passed 4,908 tests (1,343 benchmark and 3,565 non-benchmark; 201 deselected).
