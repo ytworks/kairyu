@@ -14,6 +14,7 @@ from kairyu.engine.prompt import (
     TokensPrompt,
 )
 from kairyu.engine.vllm_backend import VLLMBackend, to_vllm_sampling_kwargs
+from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS
 
 
 def test_module_imports_without_vllm():
@@ -76,8 +77,11 @@ def _install_fake_vllm(monkeypatch) -> dict:
 
 
 class _CapturingEngine:
-    def __init__(self) -> None:
+    def __init__(self, default_sampling: dict | None = None) -> None:
         self.calls: list[dict] = []
+        self.model_config = types.SimpleNamespace(
+            get_diff_sampling_param=lambda: dict(default_sampling or {})
+        )
 
     async def generate(self, prompt, params, request_id, *, priority):
         self.calls.append(
@@ -225,6 +229,58 @@ async def test_vllm_backend_forwards_token_ids_without_using_display_text(monkey
         prompt="display text must not be tokenized or forwarded",
     )
     assert result.prompt_token_ids == (11, 17, 23)
+
+
+async def test_vllm_backend_resolves_omissions_but_preserves_explicit_neutrals(
+    monkeypatch,
+):
+    _install_fake_vllm(monkeypatch)
+    backend = VLLMBackend(model="m")
+    engine = _CapturingEngine(
+        {
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+            "min_p": 0.05,
+            "repetition_penalty": 1.1,
+        }
+    )
+    backend._engine = engine
+    omitted = SamplingParams(max_tokens=1).with_generation_config_omitted(
+        GENERATION_CONFIG_SAMPLING_FIELDS
+    )
+
+    await backend.generate(
+        GenerationRequest("omitted", "hello", omitted)
+    )
+    await backend.generate(
+        GenerationRequest("explicit", "hello", SamplingParams(max_tokens=1))
+    )
+
+    assert backend.generation_defaults is not None
+    assert backend.generation_defaults.source == "vllm-model-config"
+    assert backend.generation_defaults.temperature == 0.6
+
+    assert {
+        field: engine.calls[0]["params"][field]
+        for field in GENERATION_CONFIG_SAMPLING_FIELDS
+    } == {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.05,
+        "repetition_penalty": 1.1,
+    }
+    assert {
+        field: engine.calls[1]["params"][field]
+        for field in GENERATION_CONFIG_SAMPLING_FIELDS
+    } == {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+    }
 
 
 async def test_vllm_backend_rejects_multimodal_before_engine_dispatch(monkeypatch):

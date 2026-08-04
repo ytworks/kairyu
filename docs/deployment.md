@@ -119,6 +119,7 @@ engines:
     backend: kairyu            # or vllm; mock for CPU smoke
     options:
       model_path: "meta-llama/Llama-3.3-70B-Instruct"
+      generation_config: auto  # auto | vllm | none; default auto
       tensor_parallel_size: 4
       max_num_seqs: 16       # bound active sequences
       priority_age_s: 60.0   # null = FIFO; 0 = strict priority; >0 = aging
@@ -136,6 +137,32 @@ to the configured batch and page-table limits. Oversized decode steps fall back
 to eager execution. Invalid modes, CPU placement, unsupported attention/model
 paths, or a page limit that leaves no scratch page fail during startup rather
 than after traffic arrives.
+
+For native `kairyu` and `kairyu-proc` engines, `generation_config: auto`
+loads `temperature`, `top_p`, `top_k`, `min_p`, and `repetition_penalty` from
+the checkpoint's `generation_config.json`. Each value is applied only when the
+public request omits that field; an explicit value, including a neutral one,
+has precedence. `vllm` retains generation-file stop-token metadata but uses
+neutral sampling defaults. `none` ignores the generation file, including its
+stop-token override, and uses `config.json` plus neutral sampling defaults.
+Malformed or out-of-range defaults fail startup in `auto`; `none` does not read
+the file.
+
+The serve-time override applies to every local native engine, native static-pool
+replica, and native worker in a linked orchestrator spec:
+
+```bash
+kairyu serve /etc/kairyu/deployment.yaml --generation-config vllm
+```
+
+It fails when the deployment has no local native target instead of implying
+that a remote OpenAI-compatible endpoint was reconfigured. `/backends` exposes
+`generation_config`, `generation_config_source`, and the complete resolved
+`generation_defaults` map. Local pools publish one top-level record only when
+every member agrees. A gateway keeps its single remote audit sample under
+`via_replica`, because one reachable replica cannot prove fleet-wide
+homogeneity. Orchestrated models report per-worker policies and collapse a
+top-level record only when every worker supplies the same complete value.
 
 Gateway:
 

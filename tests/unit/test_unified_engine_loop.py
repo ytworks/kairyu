@@ -22,6 +22,8 @@ from kairyu.engine.core.step_input import RequestSnapshot
 from kairyu.engine.engine_loop import EngineLoop, StreamUpdate
 from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
 from kairyu.engine.prompt import TokensPrompt
+from kairyu.models.generation import GenerationDefaults
+from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS
 
 
 class _CharTokenizer:
@@ -153,6 +155,36 @@ def _drive(loop: EngineLoop, limit: int = 200) -> list[tuple[str, StreamUpdate]]
             return updates
         updates.extend(loop.step())
     raise AssertionError("unified loop did not drain")
+
+
+def test_loop_resolves_only_model_owned_sampling_omissions_at_submit() -> None:
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    scheduler = Scheduler(cache, max_num_batched_tokens=8, page_size=4)
+    loop = EngineLoop(
+        _CharTokenizer(),
+        scheduler,
+        _PositionRunner(),
+        generation_defaults=GenerationDefaults(
+            temperature=0.6,
+            top_p=0.95,
+            top_k=20,
+            min_p=0.05,
+            repetition_penalty=1.1,
+        ),
+    )
+    params = SamplingParams(top_p=0.8).with_generation_config_omitted(
+        GENERATION_CONFIG_SAMPLING_FIELDS - {"top_p"}
+    )
+
+    loop.submit("defaults", "hello", params)
+
+    sampling = loop._ops[-1].requests[0].sampling
+    assert sampling.temperature == 0.6
+    assert sampling.top_p == 0.8
+    assert sampling.top_k == 20
+    assert sampling.min_p == 0.05
+    assert sampling.repetition_penalty == 1.1
+    loop.close()
 
 
 @pytest.mark.parametrize("depth", [1, 2, 4])

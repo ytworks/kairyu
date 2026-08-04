@@ -45,7 +45,10 @@ from kairyu.engine.prompt import (
 from kairyu.engine.registry import register_backend
 from kairyu.engine.vision import ImageInputPolicy, InvalidImageInput
 from kairyu.outputs import CompletionOutput, TokenLogprob
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import (
+    GENERATION_CONFIG_SAMPLING_FIELDS,
+    SamplingParams,
+)
 from kairyu.sse import iter_sse_data
 
 
@@ -173,7 +176,10 @@ def _active_sampling_fields(params: SamplingParams) -> set[str]:
         "top_p": (params.top_p, 1.0),
     }
     for field, (value, neutral) in values_and_neutral.items():
-        if value != neutral:
+        if field in GENERATION_CONFIG_SAMPLING_FIELDS:
+            if field not in params.generation_config_omitted:
+                active.add(field)
+        elif value != neutral:
             active.add(field)
     return active
 
@@ -222,6 +228,7 @@ def _sampling_payload(
         )
 
     payload: dict[str, object] = {}
+    omitted = params.generation_config_omitted
     always = {
         "temperature": params.temperature,
         "top_p": params.top_p,
@@ -232,29 +239,34 @@ def _sampling_payload(
     payload.update(
         (field, value)
         for field, value in always.items()
-        if field in capabilities.sampling_fields
-        and (field in active or field in capabilities.forward_neutral_fields)
+        if field not in omitted
+        and field in capabilities.sampling_fields
+        and (
+            field in active
+            or field in capabilities.forward_neutral_fields
+            or field in GENERATION_CONFIG_SAMPLING_FIELDS
+        )
     )
 
     optional = {
         "best_of": params.best_of,
         "ignore_eos": params.ignore_eos if params.ignore_eos else None,
-        "min_p": params.min_p if params.min_p != 0.0 else None,
+        "min_p": params.min_p,
         "min_tokens": params.min_tokens if params.min_tokens != 0 else None,
         "prompt_logprobs": params.prompt_logprobs,
-        "repetition_penalty": (
-            params.repetition_penalty if params.repetition_penalty != 1.0 else None
-        ),
+        "repetition_penalty": params.repetition_penalty,
         "seed": params.seed,
         "skip_special_tokens": False if not params.skip_special_tokens else None,
         "stop": list(params.stop) if params.stop else None,
         "stop_token_ids": list(params.stop_token_ids) if params.stop_token_ids else None,
-        "top_k": params.top_k if params.top_k != -1 else None,
+        "top_k": params.top_k,
     }
     payload.update(
         (field, value)
         for field, value in optional.items()
-        if value is not None and field in capabilities.sampling_fields
+        if field not in omitted
+        and value is not None
+        and field in capabilities.sampling_fields
     )
     if params.max_tokens is not None and "max_tokens" in capabilities.sampling_fields:
         payload[capabilities.max_tokens_wire_name] = params.max_tokens

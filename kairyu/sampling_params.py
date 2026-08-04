@@ -10,6 +10,16 @@ import dataclasses
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+GENERATION_CONFIG_SAMPLING_FIELDS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repetition_penalty",
+    }
+)
+
 
 class _FrozenDict(dict):
     """JSON/msgpack-compatible dictionary with no public mutation methods."""
@@ -120,8 +130,26 @@ class SamplingParams:
     ignore_eos: bool = False
     skip_special_tokens: bool = True
     extra_args: dict = field(default_factory=dict, compare=False)
+    # HTTP/Responses requests must preserve which model-owned sampling values
+    # were omitted until the final backend is known.  Concrete Python
+    # SamplingParams remain fully explicit by default.  The field is private
+    # transport intent, excluded from equality/repr, and consumed before a
+    # native engine samples.
+    _generation_config_omitted: frozenset[str] = field(
+        default_factory=frozenset,
+        compare=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
+        omitted = frozenset(self._generation_config_omitted)
+        unknown = omitted - GENERATION_CONFIG_SAMPLING_FIELDS
+        if unknown:
+            raise ValueError(
+                "unknown generation-config sampling fields: "
+                + ", ".join(sorted(unknown))
+            )
+        object.__setattr__(self, "_generation_config_omitted", omitted)
         object.__setattr__(self, "stop", _normalize_stop(self.stop))
         object.__setattr__(
             self, "stop_token_ids", tuple(self.stop_token_ids) if self.stop_token_ids else ()
@@ -161,4 +189,28 @@ class SamplingParams:
 
     def clone(self, **overrides: object) -> SamplingParams:
         """Return a new SamplingParams with the given fields replaced."""
+        if "_generation_config_omitted" not in overrides:
+            explicitly_overridden = GENERATION_CONFIG_SAMPLING_FIELDS.intersection(
+                overrides
+            )
+            overrides["_generation_config_omitted"] = (
+                self._generation_config_omitted - explicitly_overridden
+            )
         return dataclasses.replace(self, **overrides)  # type: ignore[arg-type]
+
+    @property
+    def generation_config_omitted(self) -> frozenset[str]:
+        """Model-owned sampling fields omitted at the public request boundary."""
+
+        return self._generation_config_omitted
+
+    def with_generation_config_omitted(
+        self,
+        fields: Sequence[str],
+    ) -> SamplingParams:
+        """Retain request omission until a concrete backend resolves defaults."""
+
+        return dataclasses.replace(
+            self,
+            _generation_config_omitted=frozenset(fields),
+        )

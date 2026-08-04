@@ -9,8 +9,11 @@ from kairyu.engine.core.attention_selector import AttentionBackendDecision
 from kairyu.engine.core.hw_profile import HardwareProfile
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.engine.zmq_backend import ZmqEngineBackend
 from kairyu.entrypoints.server import health as health_module
 from kairyu.entrypoints.server.app import create_app
+from kairyu.models.generation import GenerationDefaults
+from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
 
 
@@ -133,6 +136,140 @@ async def test_backends_reports_the_local_engine_actual_auto_fallback(monkeypatc
     assert body["engines"][0]["decision_status"] == "actual"
     assert body["engines"][0]["requested_kv_cache_dtype"] == "bfloat16"
     assert body["engines"][0]["kv_cache_dtype"] == "bfloat16"
+
+
+async def test_backends_reports_resolved_generation_defaults_for_native_engine(
+    monkeypatch,
+):
+    monkeypatch.setattr(health_module, "probe", lambda: HardwareProfile(arch="cpu"))
+
+    class KairyuBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.generation_defaults = GenerationDefaults(
+                temperature=0.6,
+                top_p=0.95,
+                top_k=20,
+                min_p=0.05,
+                repetition_penalty=1.1,
+                mode="auto",
+                source="generation_config.json",
+            )
+
+    app = create_app({"native": KairyuBackend()})
+    async with _client(app) as client:
+        response = await client.get("/backends")
+
+    entry = response.json()["engines"][0]
+    assert entry["generation_config"] == "auto"
+    assert entry["generation_config_source"] == "generation_config.json"
+    assert entry["generation_defaults"] == {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.05,
+        "repetition_penalty": 1.1,
+    }
+
+
+async def test_backends_reports_only_homogeneous_local_pool_generation_defaults(
+    monkeypatch,
+):
+    monkeypatch.setattr(health_module, "probe", lambda: HardwareProfile(arch="cpu"))
+
+    class KairyuBackend(MockBackend):
+        def __init__(self, temperature):
+            super().__init__()
+            self.generation_defaults = GenerationDefaults(
+                temperature=temperature,
+                mode="auto",
+                source="generation_config.json",
+            )
+
+    app = create_app(
+        {
+            "same": ReplicaPool(
+                [KairyuBackend(0.6), KairyuBackend(0.6)]
+            ),
+            "mixed": ReplicaPool(
+                [KairyuBackend(0.6), KairyuBackend(0.7)]
+            ),
+        }
+    )
+    async with _client(app) as client:
+        response = await client.get("/backends")
+
+    entries = {entry["model"]: entry for entry in response.json()["engines"]}
+    assert entries["same"]["generation_config"] == "auto"
+    assert entries["same"]["generation_defaults"]["temperature"] == 0.6
+    assert "generation_config" not in entries["mixed"]
+    assert "generation_defaults" not in entries["mixed"]
+
+
+async def test_backends_reports_orchestrator_defaults_per_worker_and_only_collapses_complete_policy(
+    monkeypatch,
+):
+    monkeypatch.setattr(health_module, "probe", lambda: HardwareProfile(arch="cpu"))
+
+    class KairyuBackend(MockBackend):
+        def __init__(self, temperature):
+            super().__init__()
+            self.generation_defaults = GenerationDefaults(
+                temperature=temperature,
+                mode="auto",
+                source="generation_config.json",
+            )
+
+    app = create_app(
+        {},
+        orchestrators={
+            "uniform": Orchestrator(
+                {"tier1": KairyuBackend(0.6), "tier2": KairyuBackend(0.6)}
+            ),
+            "mixed": Orchestrator(
+                {"tier1": KairyuBackend(0.6), "tier2": MockBackend()}
+            ),
+        },
+    )
+    async with _client(app) as client:
+        response = await client.get("/backends")
+
+    entries = {entry["model"]: entry for entry in response.json()["engines"]}
+    assert entries["uniform"]["engine_backend"] == "orchestrator"
+    assert entries["uniform"]["generation_defaults"]["temperature"] == 0.6
+    assert set(entries["uniform"]["generation_defaults_by_worker"]) == {
+        "tier1",
+        "tier2",
+    }
+    tier1 = entries["mixed"]["generation_defaults_by_worker"]["tier1"]
+    assert tier1["generation_defaults"]["temperature"] == 0.6
+    assert entries["mixed"]["generation_defaults_by_worker"]["tier2"] is None
+    assert "generation_config" not in entries["mixed"]
+    assert "generation_defaults" not in entries["mixed"]
+
+
+async def test_backends_does_not_report_unstarted_process_worker_placeholder(
+    monkeypatch,
+):
+    monkeypatch.setattr(health_module, "probe", lambda: HardwareProfile(arch="cpu"))
+    process_worker = ZmqEngineBackend(
+        model_path="/models/not-loaded-yet",
+        num_pages=64,
+    )
+    app = create_app(
+        {},
+        orchestrators={
+            "auto": Orchestrator({"native": process_worker}),
+        },
+    )
+
+    async with _client(app) as client:
+        response = await client.get("/backends")
+
+    entry = response.json()["engines"][0]
+    assert entry["generation_defaults_by_worker"] == {"native": None}
+    assert "generation_config" not in entry
+    assert "generation_defaults" not in entry
 
 
 async def test_backends_reports_ep_topology_locally_and_through_gateway(
@@ -460,6 +597,13 @@ async def test_backends_gateway_aggregates_replica_through_pool(monkeypatch):
             super().__init__()
             self.kv_cache_dtype_requested = "auto"
             self.kv_cache_dtype_resolved = "bfloat16"
+            self.generation_defaults = GenerationDefaults(
+                temperature=0.6,
+                top_p=0.95,
+                top_k=20,
+                mode="auto",
+                source="generation_config.json",
+            )
 
     replica_app = create_app(engines={"default": KairyuBackend()})
     replica_backend = OpenAICompatBackend(
@@ -494,6 +638,24 @@ async def test_backends_gateway_aggregates_replica_through_pool(monkeypatch):
     assert pool["kv_cache_dtype"] == "bfloat16"
     assert pool["via_replica"]["requested_kv_cache_dtype"] == "auto"
     assert pool["via_replica"]["kv_cache_dtype"] == "bfloat16"
+    expected_generation = {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+    }
+    # One remote replica is an audit sample, not proof that the whole pool is
+    # homogeneous. Keep it under via_replica instead of promoting it.
+    assert "generation_config" not in pool
+    assert "generation_config_source" not in pool
+    assert "generation_defaults" not in pool
+    assert pool["via_replica"]["generation_config"] == "auto"
+    assert (
+        pool["via_replica"]["generation_config_source"]
+        == "generation_config.json"
+    )
+    assert pool["via_replica"]["generation_defaults"] == expected_generation
 
 
 async def test_backends_gateway_pool_without_backends_endpoint_degrades():
@@ -508,6 +670,44 @@ async def test_backends_gateway_pool_without_backends_endpoint_degrades():
     assert pool["engine_backend"] == "replica-pool"
     assert pool["attention_backend"] is None
     assert "via_replica" not in pool
+
+
+async def test_backends_does_not_adopt_mixed_or_malformed_replica_defaults():
+    valid = {
+        "generation_config": "auto",
+        "generation_config_source": "generation_config.json",
+        "generation_defaults": {
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "top_k": 20,
+            "min_p": 0.0,
+            "repetition_penalty": 1.0,
+        },
+    }
+
+    class ProbePool(ReplicaPool):
+        async def probe_backends(self):
+            return {
+                "attention_backend": "torch",
+                "engines": [
+                    valid,
+                    {
+                        **valid,
+                        "generation_defaults": "malformed",
+                    },
+                ],
+            }
+
+    app = create_app({"pool": ProbePool([MockBackend()])})
+    async with _client(app) as client:
+        response = await client.get("/backends")
+
+    entry = response.json()["engines"][0]
+    assert "generation_config" not in entry
+    assert "generation_config_source" not in entry
+    assert "generation_defaults" not in entry
+    assert "generation_config" not in entry["via_replica"]
+    assert "generation_defaults" not in entry["via_replica"]
 
 
 async def test_backends_does_not_hide_mixed_local_engine_decisions(monkeypatch):

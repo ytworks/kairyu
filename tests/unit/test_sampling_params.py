@@ -1,7 +1,10 @@
 import pytest
 
 from kairyu import SamplingParams
-from kairyu.sampling_params import PROMPT_OWNED_EXTRA_ARGS
+from kairyu.sampling_params import (
+    GENERATION_CONFIG_SAMPLING_FIELDS,
+    PROMPT_OWNED_EXTRA_ARGS,
+)
 
 
 def test_defaults_match_vllm():
@@ -70,6 +73,25 @@ def test_clone_returns_new_object_and_leaves_original_unchanged():
     assert changed.max_tokens == 64
     assert original.temperature == 0.5
     assert original.max_tokens == 16
+
+
+def test_generation_config_omissions_survive_clone_until_explicit_override():
+    original = SamplingParams().with_generation_config_omitted(
+        GENERATION_CONFIG_SAMPLING_FIELDS
+    )
+
+    cloned = original.clone(max_tokens=64)
+    explicit = cloned.clone(temperature=1.0)
+
+    assert cloned.generation_config_omitted == GENERATION_CONFIG_SAMPLING_FIELDS
+    assert explicit.generation_config_omitted == (
+        GENERATION_CONFIG_SAMPLING_FIELDS - {"temperature"}
+    )
+
+
+def test_unknown_generation_config_omission_is_rejected():
+    with pytest.raises(ValueError, match="unknown generation-config"):
+        SamplingParams().with_generation_config_omitted({"max_tokens"})
 
 
 def test_params_are_immutable():

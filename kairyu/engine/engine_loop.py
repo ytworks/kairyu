@@ -32,6 +32,7 @@ from kairyu.engine.prompt import (
     supplied_prompt_token_ids,
 )
 from kairyu.engine.tokenizer import IncrementalDetokenizer, Tokenizer
+from kairyu.models.generation import GenerationDefaults
 from kairyu.outputs import TokenLogprob
 from kairyu.sampling_params import SamplingParams
 
@@ -288,6 +289,7 @@ class EngineLoop:
         default_stop_token_ids: tuple[int, ...] = (),
         pipeline_depth: int = _DEFAULT_PIPELINE_DEPTH,
         max_model_len: int | None = None,
+        generation_defaults: GenerationDefaults | None = None,
     ) -> None:
         if pipeline_depth < 1:
             raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
@@ -298,6 +300,10 @@ class EngineLoop:
         self._runner = runner
         self._pipeline_depth = pipeline_depth
         self._max_model_len = max_model_len
+        self.generation_defaults = generation_defaults or GenerationDefaults(
+            mode="none",
+            source="disabled",
+        )
         self._prepared_prompt_owner = object()
         self._step_lock = Lock()
         self._step_index = 0
@@ -421,6 +427,7 @@ class EngineLoop:
         scheduling_class: str = "interactive",
         prepared_prompt: PreparedPrompt | None = None,
     ) -> None:
+        params = self.generation_defaults.apply(params)
         # Advisory fast rejection avoids tokenization and lock traffic for the
         # common duplicate case. The lock-protected check below remains the
         # authority when producers race.

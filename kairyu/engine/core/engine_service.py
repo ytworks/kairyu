@@ -295,6 +295,7 @@ def _attention_backend_decision_to_wire(decision) -> dict | None:
 
 
 def _startup_ready_frame(engine_loop) -> dict:
+    generation = getattr(engine_loop, "generation_defaults", None)
     return {
         "startup_wire_version": STARTUP_WIRE_VERSION,
         "status": "ready",
@@ -319,6 +320,17 @@ def _startup_ready_frame(engine_loop) -> dict:
                 engine_loop, "dram_kv_tier_min_restore_tokens", None
             ),
         },
+        "generation_defaults": (
+            {
+                "eos_token_id": generation.eos_token_id,
+                "stop_token_ids": list(generation.stop_token_ids),
+                "sampling": generation.sampling_defaults(),
+                "mode": generation.mode,
+                "source": generation.source,
+            }
+            if generation is not None
+            else None
+        ),
     }
 
 

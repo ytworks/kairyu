@@ -56,7 +56,13 @@ from kairyu.engine.prompt import (
 )
 from kairyu.engine.registry import register_backend
 from kairyu.engine.tokenizer import Tokenizer, resolve_tokenizer
+from kairyu.models.generation import (
+    GenerationConfigMode,
+    GenerationDefaults,
+    validate_generation_config_mode,
+)
 from kairyu.outputs import CompletionOutput, TokenLogprob
+from kairyu.sampling_params import SamplingParams
 
 _SPAWN_TIMEOUT_S = 30.0
 _SHUTDOWN_TIMEOUT_S = 5.0
@@ -192,6 +198,62 @@ def _kv_cache_dtype_from_startup_frame(
     return requested, resolved
 
 
+def _generation_defaults_from_startup_frame(
+    frame,
+) -> GenerationDefaults | None:
+    raw = frame.get("generation_defaults")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise EngineServiceError(
+            "engine startup generation_defaults must be a map or null"
+        )
+    sampling = raw.get("sampling")
+    stop_token_ids = raw.get("stop_token_ids")
+    if not isinstance(sampling, dict) or set(sampling) != {
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repetition_penalty",
+    }:
+        raise EngineServiceError(
+            "engine startup generation sampling defaults are malformed"
+        )
+    if not isinstance(stop_token_ids, list) or any(
+        type(token_id) is not int for token_id in stop_token_ids
+    ):
+        raise EngineServiceError(
+            "engine startup generation stop_token_ids must be an integer list"
+        )
+    eos_token_id = raw.get("eos_token_id")
+    if eos_token_id is not None and type(eos_token_id) is not int:
+        raise EngineServiceError(
+            "engine startup generation eos_token_id must be an integer or null"
+        )
+    try:
+        mode = validate_generation_config_mode(raw.get("mode"))
+        source = raw.get("source")
+        if not isinstance(source, str) or not source:
+            raise ValueError("generation source must be a non-empty string")
+        defaults = GenerationDefaults(
+            eos_token_id=eos_token_id,
+            stop_token_ids=tuple(stop_token_ids),
+            mode=mode,
+            source=source,
+            **sampling,
+        )
+        # Reuse the SamplingParams validation reached through apply.
+        defaults.apply(
+            SamplingParams().with_generation_config_omitted(sampling)
+        )
+    except (TypeError, ValueError) as error:
+        raise EngineServiceError(
+            "engine startup generation defaults are invalid"
+        ) from error
+    return defaults
+
+
 def _validate_startup_kv_cache_dtype_identity(
     configured: str,
     requested: str | None,
@@ -307,6 +369,7 @@ def _recv_optional_startup_frame(
     str | None,
     str | None,
     dict[str, object] | None,
+    GenerationDefaults | None,
 ]:
     """Receive a new child's second frame; EOF from a live child means legacy."""
 
@@ -315,14 +378,15 @@ def _recv_optional_startup_frame(
     except EOFError:
         if process.is_alive():
             # Old services close the Pipe immediately after the integer port.
-            return None, None, None, None
+            return None, None, None, None, None
         raise EngineServiceError(
             "engine service exited before reporting startup metadata"
         ) from None
     decision = _decision_from_startup_frame(frame)
     requested, resolved = _kv_cache_dtype_from_startup_frame(frame)
     dram_kv_tier = _dram_kv_tier_from_startup_frame(frame)
-    return decision, requested, resolved, dram_kv_tier
+    generation_defaults = _generation_defaults_from_startup_frame(frame)
+    return decision, requested, resolved, dram_kv_tier, generation_defaults
 
 
 @dataclass
@@ -540,10 +604,12 @@ class ZmqEngineBackend:
         kv_cache_dtype: str = "auto",
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | PathLike[str] | None = None,
+        generation_config: GenerationConfigMode = "auto",
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
         _validate_max_model_len(max_model_len)
+        generation_config = validate_generation_config_mode(generation_config)
         kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
         if kv_cache_dtype != "auto" and model_path is None:
             raise ValueError(
@@ -612,6 +678,7 @@ class ZmqEngineBackend:
                 if dram_kv_tier_profile is not None
                 else None
             ),
+            "generation_config": generation_config,
         }
         self._death_timeout_s = death_timeout_s
         self._process = None
@@ -629,6 +696,23 @@ class ZmqEngineBackend:
         self._wire_version = WIRE_VERSION
         self._active_request_ids: set[str] = set()
         self.attention_backend_decision: AttentionBackendDecision | None = None
+        self._configured_generation_defaults: GenerationDefaults | None = (
+            GenerationDefaults(
+                mode=generation_config,
+                source=(
+                    "builtin"
+                    if generation_config == "auto"
+                    else "disabled"
+                    if generation_config == "none"
+                    else "vllm"
+                ),
+            )
+            if model_path is None
+            else None
+        )
+        self.generation_defaults: GenerationDefaults | None = (
+            self._configured_generation_defaults
+        )
         self.kv_cache_dtype_requested = kv_cache_dtype
         self.kv_cache_dtype_resolved: str | None = None
         self.dram_kv_tier_enabled = dram_kv_tier_capacity_pages > 0
@@ -707,6 +791,10 @@ class ZmqEngineBackend:
         if abandoned is not None and abandoned.is_set():
             raise EngineServiceError("engine service startup was cancelled")
         self._validate_dram_kv_profile_unchanged()
+        # Never let a replacement child inherit sampling/audit state from the
+        # prior process. A versioned startup record replaces this placeholder
+        # before the new generation becomes live.
+        self.generation_defaults = self._configured_generation_defaults
         spawn = multiprocessing.get_context("spawn")
         parent_pipe, child_pipe = spawn.Pipe()
         service_args = (child_pipe, self._config)
@@ -753,6 +841,7 @@ class ZmqEngineBackend:
                 requested_kv_dtype,
                 resolved_kv_dtype,
                 dram_kv_tier,
+                generation_defaults,
             ) = (
                 _recv_optional_startup_frame(parent_pipe, process)
             )
@@ -766,6 +855,21 @@ class ZmqEngineBackend:
                 dram_kv_tier,
                 self._dram_kv_tier_expected_profile_sha256,
             )
+            if (
+                generation_defaults is not None
+                and generation_defaults.mode
+                != self._config["generation_config"]
+            ):
+                raise EngineServiceError(
+                    "engine startup generation_config request mismatch"
+                )
+            if (
+                generation_defaults is None
+                and self._config.get("model_path") is not None
+            ):
+                raise EngineServiceError(
+                    "engine startup omitted generation defaults for a configured model"
+                )
             # Catch an operator rewrite that raced this respawn.  The child
             # still consumed the pinned bytes, so this is detection rather
             # than a data race; rejecting readiness makes the config change
@@ -794,6 +898,8 @@ class ZmqEngineBackend:
         finally:
             parent_pipe.close()
         self.attention_backend_decision = decision
+        if generation_defaults is not None:
+            self.generation_defaults = generation_defaults
         if requested_kv_dtype is not None:
             self.kv_cache_dtype_requested = requested_kv_dtype
         self.kv_cache_dtype_resolved = resolved_kv_dtype
@@ -1249,7 +1355,14 @@ class ZmqEngineBackend:
         if stream_id is not None:
             self._stream_ids[request.request_id] = stream_id
         try:
-            sampling = sampling_params_to_wire(request.sampling_params)
+            generation_defaults = self.generation_defaults
+            if not isinstance(generation_defaults, GenerationDefaults):
+                raise EngineServiceError(
+                    "engine generation defaults are unavailable after startup"
+                )
+            sampling = sampling_params_to_wire(
+                generation_defaults.apply(request.sampling_params)
+            )
             if sampling["seed"] is None:
                 # The child schedules by the generation-unique wire ID. Make
                 # the historical public-ID default seed explicit so process

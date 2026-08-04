@@ -235,6 +235,11 @@ def test_single_rank_passes_resolved_dtype_to_pool(monkeypatch):
         "load_model",
         lambda *args, **kwargs: (FakeModel(), config, generation),
     )
+    monkeypatch.setattr(
+        loader,
+        "load_generation_defaults",
+        lambda *args, **kwargs: generation,
+    )
     monkeypatch.setattr(kv_pool, "PagedKVPool", FakePool)
     monkeypatch.setattr(model_runner, "PagedModelRunner", FakeRunner)
     monkeypatch.setattr(sampler, "Sampler", lambda **kwargs: object())

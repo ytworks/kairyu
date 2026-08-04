@@ -17,6 +17,7 @@ from os import PathLike
 from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
 from kairyu.engine.openai_capabilities import resolve_openai_capabilities
 from kairyu.engine.vision import ImageInputPolicy
+from kairyu.models.generation import validate_generation_config_mode
 
 _MOCK_OPTIONS = frozenset(
     {
@@ -68,6 +69,7 @@ _KAIRYU_OPTIONS = frozenset(
         "kv_cache_dtype",
         "dram_kv_tier_capacity_pages",
         "dram_kv_tier_profile",
+        "generation_config",
     }
 )
 _KAIRYU_PROC_OPTIONS = frozenset(
@@ -91,6 +93,7 @@ _KAIRYU_PROC_OPTIONS = frozenset(
         "kv_cache_dtype",
         "dram_kv_tier_capacity_pages",
         "dram_kv_tier_profile",
+        "generation_config",
     }
 )
 _DECODE_MODES = frozenset({"eager", "cuda_graph"})
@@ -243,6 +246,7 @@ def _validate_native_common(
     runner: object | None,
     pd_separation: bool,
 ) -> None:
+    validate_generation_config_mode(options.get("generation_config", "auto"))
     num_pages = _require_int_at_least(
         backend,
         "num_pages",

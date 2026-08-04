@@ -413,6 +413,33 @@ def test_the_coordinator_assembles_and_generates(model_dir):
     assert not coordinator.failed_requests
 
 
+def test_generation_config_mode_reaches_both_pd_model_loads(
+    model_dir,
+    monkeypatch,
+):
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+    from kairyu.models import loader as loader_module
+
+    original = loader_module.load_model
+    modes = []
+
+    def recording_load_model(*args, **kwargs):
+        modes.append(kwargs.get("generation_config"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(loader_module, "load_model", recording_load_model)
+
+    build_pd_coordinator(
+        model_path=model_dir,
+        num_pages=64,
+        page_size=16,
+        generation_config="vllm",
+        **_cpu_placement(),
+    )
+
+    assert modes == ["vllm", "vllm"]
+
+
 def test_the_deferred_handoff_records_an_event_instead_of_blocking():
     """The ordering contract, on the recording provider."""
     from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
@@ -1394,8 +1421,12 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
         for name, parameter in parameters.items()
         if parameter.kind is inspect.Parameter.KEYWORD_ONLY
     )
-    assert keyword_only == ("expert_parallel_attention_dp",)
+    assert keyword_only == (
+        "expert_parallel_attention_dp",
+        "generation_config",
+    )
     assert parameters["expert_parallel_attention_dp"].default is False
+    assert parameters["generation_config"].default == "auto"
 
 
 def test_pd_rejects_a_mixed_cpu_cuda_role_pair(model_dir):

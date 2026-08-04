@@ -22,6 +22,7 @@ from kairyu.engine.core.quant_config import (
 from kairyu.engine.core.weights import CheckpointReader
 from kairyu.models.config import ModelConfig, parse_model_config
 from kairyu.models.generation import (
+    GenerationConfigMode,
     GenerationDefaults,
     parse_generation_defaults,
 )
@@ -36,12 +37,15 @@ _SUPPORTED_BUILDERS = (
 )
 
 
-def load_generation_defaults(model_dir: str) -> GenerationDefaults:
+def load_generation_defaults(
+    model_dir: str,
+    generation_config: GenerationConfigMode = "auto",
+) -> GenerationDefaults:
     """Public: eos/stop-token defaults from a checkpoint dir (used by the TP
     serve path, which shards the model but still needs the stop config)."""
     directory = Path(model_dir)
     config = json.loads((directory / "config.json").read_text())
-    return parse_generation_defaults(directory, config)
+    return parse_generation_defaults(directory, config, generation_config)
 
 
 def build_model(
@@ -70,6 +74,7 @@ def load_model(
     target_device: str | torch.device = "cpu",
     linear_capabilities=None,
     linear_selection_policy=None,
+    generation_config: GenerationConfigMode = "auto",
 ) -> tuple[DenseDecoder, ModelConfig, GenerationDefaults]:
     from kairyu.quant.linear import linear_factory
 
@@ -78,6 +83,11 @@ def load_model(
     if not config_file.is_file():
         raise ValueError(f"no config.json at {path}")
     raw_config = json.loads(config_file.read_text())
+    generation = parse_generation_defaults(
+        directory,
+        raw_config,
+        generation_config,
+    )
     quant = load_checkpoint_quantization(directory, raw_config).weights
     config = parse_model_config(raw_config)
     validate_model_quantization(
@@ -146,4 +156,4 @@ def load_model(
         # assign=True replaces the embedding tensor; restore the tie
         model.lm_head.weight = model.model.embed_tokens.weight
     model.eval()
-    return model, config, parse_generation_defaults(directory, raw_config)
+    return model, config, generation

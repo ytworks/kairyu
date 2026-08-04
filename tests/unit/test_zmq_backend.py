@@ -11,6 +11,7 @@ import os
 import signal
 import threading
 import time
+import types
 import weakref
 
 import httpx
@@ -24,6 +25,7 @@ from kairyu.engine.core.engine_service import (
     STARTUP_WIRE_VERSION,
     WIRE_VERSION,
     _send_optional_startup_frame,
+    _startup_ready_frame,
 )
 from kairyu.engine.kairyu_backend import KairyuBackend
 from kairyu.engine.prompt import (
@@ -39,8 +41,11 @@ from kairyu.engine.zmq_backend import (
     EngineServiceError,
     ZmqEngineBackend,
     _decision_from_startup_frame,
+    _generation_defaults_from_startup_frame,
 )
 from kairyu.entrypoints.server.app import create_app
+from kairyu.models.generation import GenerationDefaults
+from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS
 
 pytestmark = pytest.mark.asyncio(loop_scope="module")
 
@@ -63,6 +68,20 @@ _READY_DECISION = {
     },
 }
 
+_READY_GENERATION_DEFAULTS = {
+    "eos_token_id": 151645,
+    "stop_token_ids": [151643],
+    "sampling": {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.05,
+        "repetition_penalty": 1.1,
+    },
+    "mode": "auto",
+    "source": "generation_config.json",
+}
+
 
 def _fake_ready_engine_service(port_pipe, _config):
     port_pipe.send(43210)
@@ -73,6 +92,7 @@ def _fake_ready_engine_service(port_pipe, _config):
             "attention_backend_decision": _READY_DECISION,
             "kv_cache_dtype_requested": "auto",
             "kv_cache_dtype_resolved": "not-applicable",
+            "generation_defaults": _READY_GENERATION_DEFAULTS,
         }
     )
     port_pipe.close()
@@ -81,6 +101,24 @@ def _fake_ready_engine_service(port_pipe, _config):
 
 def _fake_legacy_engine_service(port_pipe, _config):
     port_pipe.send(43211)
+    port_pipe.close()
+    time.sleep(60)
+
+
+def _fake_generation_mode_mismatch_engine_service(port_pipe, _config):
+    port_pipe.send(43215)
+    port_pipe.send(
+        {
+            "startup_wire_version": STARTUP_WIRE_VERSION,
+            "status": "ready",
+            "attention_backend_decision": None,
+            "generation_defaults": {
+                **_READY_GENERATION_DEFAULTS,
+                "mode": "vllm",
+                "source": "vllm",
+            },
+        }
+    )
     port_pipe.close()
     time.sleep(60)
 
@@ -689,8 +727,136 @@ async def test_versioned_startup_frame_propagates_the_child_actual_decision(
         )
         assert backend.kv_cache_dtype_requested == "auto"
         assert backend.kv_cache_dtype_resolved == "not-applicable"
+        assert backend.generation_defaults.eos_token_id == 151645
+        assert backend.generation_defaults.stop_token_ids == (151643,)
+        assert backend.generation_defaults.sampling_defaults() == (
+            _READY_GENERATION_DEFAULTS["sampling"]
+        )
+        assert backend.generation_defaults.mode == "auto"
+        assert backend.generation_defaults.source == "generation_config.json"
     finally:
         await backend._reset_dead_locked()
+
+
+async def test_startup_rejects_generation_mode_different_from_parent_request(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_generation_mode_mismatch_engine_service,
+    )
+    backend = ZmqEngineBackend(num_pages=64, generation_config="auto")
+
+    with pytest.raises(EngineServiceError, match="generation_config request mismatch"):
+        await asyncio.to_thread(backend._spawn)
+
+    assert backend._process is None
+
+
+@pytest.mark.parametrize(
+    "sampling",
+    [
+        {**_READY_GENERATION_DEFAULTS["sampling"], "temperature": True},
+        {**_READY_GENERATION_DEFAULTS["sampling"], "top_p": float("nan")},
+        {**_READY_GENERATION_DEFAULTS["sampling"], "top_k": True},
+        {"temperature": 0.6},
+    ],
+)
+async def test_generation_startup_metadata_is_strictly_validated(sampling):
+    frame = {
+        "startup_wire_version": STARTUP_WIRE_VERSION,
+        "status": "ready",
+        "generation_defaults": {
+            **_READY_GENERATION_DEFAULTS,
+            "sampling": sampling,
+        },
+    }
+
+    with pytest.raises(EngineServiceError):
+        _generation_defaults_from_startup_frame(frame)
+
+
+async def test_startup_ready_frame_round_trips_generation_defaults():
+    expected = GenerationDefaults(
+        eos_token_id=151645,
+        stop_token_ids=(151643,),
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.05,
+        repetition_penalty=1.1,
+        mode="auto",
+        source="generation_config.json",
+    )
+    frame = _startup_ready_frame(
+        types.SimpleNamespace(generation_defaults=expected)
+    )
+
+    assert _generation_defaults_from_startup_frame(frame) == expected
+
+
+async def test_submit_resolves_omissions_but_preserves_explicit_neutrals(
+    monkeypatch,
+):
+    import msgpack
+
+    class Socket:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, payload):
+            self.messages.append(msgpack.unpackb(payload))
+
+    backend = ZmqEngineBackend(num_pages=64)
+    backend.generation_defaults = GenerationDefaults(
+        temperature=0.6,
+        top_p=0.95,
+        top_k=20,
+        min_p=0.05,
+        repetition_penalty=1.1,
+    )
+    socket = Socket()
+    backend._socket = socket
+    backend._live_generation = 1
+
+    async def already_started():
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_started", already_started)
+    omitted = SamplingParams(max_tokens=1).with_generation_config_omitted(
+        GENERATION_CONFIG_SAMPLING_FIELDS
+    )
+
+    await backend._submit(
+        GenerationRequest("omitted", "hello", omitted)
+    )
+    await backend._submit(
+        GenerationRequest("explicit", "hello", SamplingParams(max_tokens=1))
+    )
+
+    omitted_wire, explicit_wire = (
+        message["sampling"] for message in socket.messages
+    )
+    assert {
+        field: omitted_wire[field]
+        for field in GENERATION_CONFIG_SAMPLING_FIELDS
+    } == {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.05,
+        "repetition_penalty": 1.1,
+    }
+    assert {
+        field: explicit_wire[field]
+        for field in GENERATION_CONFIG_SAMPLING_FIELDS
+    } == {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+    }
 
 
 async def test_new_parent_accepts_a_legacy_child_with_only_the_port_frame(
@@ -708,12 +874,35 @@ async def test_new_parent_accepts_a_legacy_child_with_only_the_port_frame(
         components={"prefill": "torch", "decode": "torch"},
         rationale="stale",
     )
+    backend.generation_defaults = GenerationDefaults(
+        temperature=0.6,
+        source="stale-child",
+    )
     try:
         port = await asyncio.to_thread(backend._spawn)
         assert port == 43211
         assert backend.attention_backend_decision is None
+        assert backend.generation_defaults == backend._configured_generation_defaults
     finally:
         await backend._reset_dead_locked()
+
+
+async def test_real_model_rejects_a_child_without_generation_metadata(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.run_engine_service",
+        _fake_legacy_engine_service,
+    )
+    backend = ZmqEngineBackend(
+        num_pages=64,
+        model_path="/models/real",
+    )
+
+    with pytest.raises(EngineServiceError, match="omitted generation defaults"):
+        await asyncio.to_thread(backend._spawn)
+
+    assert backend._process is None
 
 
 async def test_new_child_tolerates_a_legacy_parent_closing_after_the_port():

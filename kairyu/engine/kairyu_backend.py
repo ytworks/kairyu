@@ -54,6 +54,11 @@ from kairyu.engine.tokenizer import (
     grammar_vocabulary,
     resolve_tokenizer,
 )
+from kairyu.models.generation import (
+    GenerationConfigMode,
+    GenerationDefaults,
+    validate_generation_config_mode,
+)
 from kairyu.outputs import CompletionOutput
 
 _VOCAB_SIZE = 50_000
@@ -329,6 +334,7 @@ def build_engine_loop(
     kv_cache_dtype: str = "auto",
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
+    generation_config: GenerationConfigMode = "auto",
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler | PDLoopAdapter]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
@@ -341,6 +347,7 @@ def build_engine_loop(
     requires both distributed sizes to remain 1.
     """
     _validate_max_model_len(max_model_len)
+    generation_config = validate_generation_config_mode(generation_config)
     if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
         raise ValueError(
             "tensor_parallel_size must be a positive integer; "
@@ -482,6 +489,7 @@ def build_engine_loop(
             cuda_graph_max_pages=cuda_graph_max_pages,
             cuda_graph_warmup_iters=cuda_graph_warmup_iters,
             kv_cache_dtype=kv_cache_dtype,
+            generation_config=generation_config,
         )
     if pd_separation:
         if model_path is None:
@@ -507,6 +515,7 @@ def build_engine_loop(
             prefill_device=pd_prefill_device,
             decode_device=pd_decode_device,
             defer_handoff=pd_defer_handoff,
+            generation_config=generation_config,
         )
 
     if model_path is not None and tensor_parallel_size > 1:
@@ -530,6 +539,7 @@ def build_engine_loop(
             kv_cache_dtype=kv_cache_dtype,
             dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
             dram_kv_tier_profile=dram_kv_tier_profile,
+            generation_config=generation_config,
         )
     if speculative is not None and tensor_parallel_size > 1:
         # The FakeCommunicator TP path has rank-local toy runners but no
@@ -541,6 +551,16 @@ def build_engine_loop(
             "speculative scorers"
         )
 
+    generation = GenerationDefaults(
+        mode=generation_config,
+        source=(
+            "builtin"
+            if generation_config == "auto"
+            else "disabled"
+            if generation_config == "none"
+            else "vllm"
+        ),
+    )
     default_eos: int | None = None
     default_stop_ids: tuple[int, ...] = ()
     num_kv_heads_for_tp = None
@@ -557,7 +577,11 @@ def build_engine_loop(
         from kairyu.engine.core.kv_pool import PagedKVPool
         from kairyu.engine.core.model_runner import PagedModelRunner
         from kairyu.engine.core.sampler import Sampler
-        from kairyu.models.loader import load_model
+        from kairyu.models.loader import load_generation_defaults, load_model
+
+        # Reject malformed model-owned request defaults before attention
+        # construction or checkpoint tensor loading can claim GPU resources.
+        generation = load_generation_defaults(model_path, generation_config)
 
         # deploy day is config-free: the probed profile picks the kernel AND the
         # compute placement. GPU runs bf16 on-device (what the FlashInfer / FA2
@@ -571,12 +595,15 @@ def build_engine_loop(
         compute_dtype = torch.bfloat16 if gpu else torch.float32
         attention_backend = select_backend(profile, device=compute_device)
         attention_backend_decision = attention_backend.selection_decision
-        model, model_config, generation = load_model(
+        model, model_config, loaded_generation = load_model(
             model_path,
             dtype=compute_dtype,
             attention_backend=attention_backend,
             target_device=compute_device,
+            generation_config=generation_config,
         )
+        if loaded_generation != generation:
+            raise RuntimeError("generation defaults changed during model loading")
         resolved_kv_cache_dtype = resolve_kv_cache_dtype(
             kv_cache_dtype,
             compute_dtype,
@@ -689,6 +716,7 @@ def build_engine_loop(
         default_stop_token_ids=default_stop_ids,
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
+        generation_defaults=generation,
     )
     loop.parallel_launcher = None  # single-process: nothing to tear down
     loop.tp_launcher = None  # compatibility alias for TP-specific callers
@@ -732,6 +760,7 @@ def _build_pd_loop(
     prefill_device: str | None,
     decode_device: str | None,
     defer_handoff: bool,
+    generation_config: GenerationConfigMode,
 ) -> tuple[EngineLoop, RadixKVCache, PDLoopAdapter]:
     """Serve through a prefill/decode pair (m18 D3, G2 stage 5.3).
 
@@ -756,6 +785,7 @@ def _build_pd_loop(
     from kairyu.engine.core.pd_factory import build_pd_coordinator
     from kairyu.models.loader import load_generation_defaults
 
+    generation = load_generation_defaults(model_path, generation_config)
     resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
     coordinator = build_pd_coordinator(
         model_path=model_path,
@@ -768,8 +798,8 @@ def _build_pd_loop(
         prefill_device=prefill_device,
         decode_device=decode_device,
         defer_handoff=defer_handoff,
+        generation_config=generation_config,
     )
-    generation = load_generation_defaults(model_path)
     adapter = PDLoopAdapter(coordinator)
     loop = EngineLoop(
         resolved,
@@ -779,6 +809,7 @@ def _build_pd_loop(
         default_stop_token_ids=generation.stop_token_ids,
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
+        generation_defaults=generation,
     )
     loop.parallel_launcher = None
     loop.tp_launcher = None
@@ -815,12 +846,14 @@ def _build_dist_ep_loop(
     cuda_graph_max_pages: int = 512,
     cuda_graph_warmup_iters: int = 3,
     kv_cache_dtype: str = "bfloat16",
+    generation_config: GenerationConfigMode = "auto",
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Build the production replicated-attention or attention-DP EP loop."""
 
     from kairyu.engine.core.worker import DistEPLauncher
     from kairyu.models.loader import load_generation_defaults
 
+    generation = load_generation_defaults(model_path, generation_config)
     resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
     raw_config = json.loads((Path(model_path) / "config.json").read_text())
     model_vocab_size = int(raw_config["vocab_size"])
@@ -828,7 +861,6 @@ def _build_dist_ep_loop(
         resolved,
         model_vocab_size=model_vocab_size,
     )
-    generation = load_generation_defaults(model_path)
     cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
     scheduler = Scheduler(
         cache,
@@ -879,6 +911,7 @@ def _build_dist_ep_loop(
             default_stop_token_ids=generation.stop_token_ids,
             pipeline_depth=pipeline_depth,
             max_model_len=max_model_len,
+            generation_defaults=generation,
         )
     except BaseException:
         launcher.shutdown()
@@ -918,6 +951,7 @@ def _build_dist_tp_loop(
     kv_cache_dtype: str = "auto",
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
+    generation_config: GenerationConfigMode = "auto",
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
     drive them through DistTPModelRunner, and expose the launcher on the loop so
@@ -925,6 +959,7 @@ def _build_dist_tp_loop(
     from kairyu.engine.core.worker import DistTPLauncher
     from kairyu.models.loader import load_generation_defaults
 
+    generation = load_generation_defaults(model_path, generation_config)
     resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
     raw_config = json.loads((Path(model_path) / "config.json").read_text())
     model_vocab_size = int(raw_config["vocab_size"])
@@ -967,7 +1002,6 @@ def _build_dist_tp_loop(
                 launcher.dram_kv_binding.policy.min_restore_tokens
             ),
         )
-    generation = load_generation_defaults(model_path)
     # SpeculativeRunner composes over any ModelRunner, and DistTPModelRunner is
     # one: each scoring pass it issues is broadcast like any other step, so every
     # rank replays the identical draft and the m5 D1 agreement invariant holds
@@ -984,6 +1018,7 @@ def _build_dist_tp_loop(
         default_stop_token_ids=generation.stop_token_ids,
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
+        generation_defaults=generation,
     )
     loop.parallel_launcher = launcher
     loop.tp_launcher = launcher  # compatibility alias for TP-specific callers
@@ -1039,6 +1074,7 @@ class KairyuBackend:
         expert_parallel_size: int = 1,
         *,
         expert_parallel_attention_dp: bool = False,
+        generation_config: GenerationConfigMode = "auto",
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self.expert_parallel_size = expert_parallel_size
@@ -1070,7 +1106,9 @@ class KairyuBackend:
             kv_cache_dtype=kv_cache_dtype,
             dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
             dram_kv_tier_profile=dram_kv_tier_profile,
+            generation_config=generation_config,
         )
+        self.generation_defaults = self._loop.generation_defaults
         self.attention_backend_decision = getattr(
             self._loop, "attention_backend_decision", None
         )

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from kairyu.bench.cli import add_bench_parser
+from kairyu.models.generation import GENERATION_CONFIG_MODES
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -22,6 +23,15 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("config", type=Path, help="Path to a DeploymentSpec YAML")
     serve.add_argument("--host", default=None, help="Override server.host")
     serve.add_argument("--port", type=int, default=None, help="Override server.port")
+    serve.add_argument(
+        "--generation-config",
+        choices=sorted(GENERATION_CONFIG_MODES),
+        default=None,
+        help=(
+            "Override model generation defaults for every local native backend "
+            "(auto, vllm, or none)"
+        ),
+    )
     validate = subparsers.add_parser(
         "validate",
         help="Validate a DeploymentSpec and its local linked artifacts without "
@@ -37,13 +47,17 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "serve":
         import uvicorn
 
-        from kairyu.deploy.builder import build_app_from_config
+        from kairyu.deploy.builder import build_app_from_spec
         from kairyu.deploy.spec import load_deployment_spec
         from kairyu.entrypoints.server.middleware import configure_json_logging
 
         configure_json_logging()
         spec = load_deployment_spec(args.config)
-        app = build_app_from_config(args.config)
+        app = build_app_from_spec(
+            spec,
+            base_dir=args.config.parent,
+            generation_config_override=args.generation_config,
+        )
         uvicorn.run(
             app,
             host=args.host or spec.server.host,

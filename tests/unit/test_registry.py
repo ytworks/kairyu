@@ -52,6 +52,22 @@ def test_native_cuda_graph_without_model_is_rejected_before_import():
         validate_backend_options("kairyu", {"decode_mode": "cuda_graph"})
 
 
+@pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
+@pytest.mark.parametrize("mode", ["auto", "vllm", "none"])
+def test_native_generation_config_modes_pass_static_preflight(backend, mode):
+    validate_backend_options(backend, {"generation_config": mode})
+
+
+@pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
+@pytest.mark.parametrize("mode", ["model", "", None, True])
+def test_invalid_native_generation_config_mode_fails_static_preflight(
+    backend,
+    mode,
+):
+    with pytest.raises(ValueError, match="generation_config"):
+        validate_backend_options(backend, {"generation_config": mode})
+
+
 @pytest.mark.parametrize("expert_parallel_size", [2, 4])
 def test_expert_parallel_options_pass_preflight_without_runtime_import(
     expert_parallel_size,

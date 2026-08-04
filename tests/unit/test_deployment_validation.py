@@ -582,6 +582,44 @@ engines:
     assert report.valid, report.render_text()
 
 
+@pytest.mark.parametrize(
+    ("mode", "expected_valid"),
+    [("auto", False), ("vllm", False), ("none", True)],
+)
+def test_generation_config_mode_controls_deployment_sidecar_validation(
+    tmp_path,
+    mode,
+    expected_valid,
+):
+    model = tmp_path / "model"
+    _write_tiny_model_checkpoint(model)
+    (model / "generation_config.json").write_text("{bad", encoding="utf-8")
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        f"""
+engines:
+  local:
+    backend: kairyu
+    options:
+      model_path: {model}
+      generation_config: {mode}
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    generation_codes = {
+        finding.code
+        for finding in report.findings
+        if finding.artifact.endswith("generation_config.json")
+    }
+    assert report.valid is expected_valid
+    assert generation_codes == (
+        {"schema.invalid_json"} if not expected_valid else set()
+    )
+
+
 def test_validation_accepts_deepseek_router_correction_buffer(tmp_path):
     model = tmp_path / "deepseek"
     _write_tiny_model_checkpoint(

@@ -18,6 +18,7 @@ from kairyu.engine.backend import (
 from kairyu.engine.backend import (
     admission_upper_bound as generation_admission_upper_bound,
 )
+from kairyu.models.generation import GenerationDefaults
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import (
     Conductor,
@@ -172,6 +173,31 @@ class Orchestrator:
         self._cost_model = cost_model
         # m11 A4: >0 routes multi_agent through MoA (the deep kairyu-auto-max tier)
         self._moa_samples = moa_samples
+
+    def generation_defaults_snapshot(
+        self,
+    ) -> dict[str, GenerationDefaults | None]:
+        """Return immutable worker policies without exposing backend ownership."""
+
+        return {
+            name: (
+                defaults
+                if isinstance(
+                    defaults := getattr(engine, "generation_defaults", None),
+                    GenerationDefaults,
+                )
+                else None
+            )
+            for name, engine in self._engines.items()
+        }
+
+    async def startup(self) -> None:
+        """Eagerly start owned process resources before serving auto models."""
+
+        for engine in {id(engine): engine for engine in self._engines.values()}.values():
+            startup = getattr(engine, "startup", None)
+            if callable(startup):
+                await startup()
 
     def preview_route(self, prompt: str) -> RouteDecision:
         preview = getattr(self._router, "preview", None)

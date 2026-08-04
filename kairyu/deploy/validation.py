@@ -568,6 +568,7 @@ def _validate_model(
     tokenizer: object | None,
     tensor_parallel_size: object,
     reference_artifact: Path,
+    generation_config: object = "auto",
 ) -> list[ValidationFinding]:
     if not isinstance(model_path, str):
         return [
@@ -626,22 +627,29 @@ def _validate_model(
                     message="model metadata is incompatible",
                 )
             )
-    _generation, generation_findings = _read_json_mapping(
-        model_dir / "generation_config.json",
-        field=field,
-        required=False,
-    )
-    findings.extend(generation_findings)
+    generation_findings: list[ValidationFinding] = []
+    if generation_config != "none":
+        _generation, generation_findings = _read_json_mapping(
+            model_dir / "generation_config.json",
+            field=field,
+            required=False,
+        )
+        findings.extend(generation_findings)
     if config is not None and not generation_findings:
         try:
-            parse_generation_defaults(model_dir, config)
+            parse_generation_defaults(
+                model_dir,
+                config,
+                generation_config,
+            )
         except Exception:
             generation_path = model_dir / "generation_config.json"
             findings.append(
                 _finding(
                     artifact=(
                         generation_path
-                        if generation_path.is_file()
+                        if generation_config != "none"
+                        and generation_path.is_file()
                         else model_dir / "config.json"
                     ),
                     field=field,
@@ -741,7 +749,7 @@ def _validate_backend(
     options: Mapping[object, object],
     field: str,
     artifact: Path,
-    checked_models: set[tuple[str, str, str]],
+    checked_models: set[tuple[str, str, str, str]],
 ) -> list[ValidationFinding]:
     findings: list[ValidationFinding] = []
     if backend not in known_backends():
@@ -784,6 +792,10 @@ def _validate_backend(
                     f"{type(options.get('tensor_parallel_size', 1)).__qualname__}:"
                     f"{options.get('tensor_parallel_size', 1)!r}"
                 ),
+                (
+                    f"{type(options.get('generation_config', 'auto')).__qualname__}:"
+                    f"{options.get('generation_config', 'auto')!r}"
+                ),
             )
             if identity not in checked_models:
                 checked_models.add(identity)
@@ -797,6 +809,10 @@ def _validate_backend(
                             1,
                         ),
                         reference_artifact=artifact,
+                        generation_config=options.get(
+                            "generation_config",
+                            "auto",
+                        ),
                     )
                 )
         elif tokenizer is not None:
@@ -864,7 +880,7 @@ def _validate_orchestrator(
     path: Path,
     *,
     reference_field: str,
-    checked_models: set[tuple[str, str, str]],
+    checked_models: set[tuple[str, str, str, str]],
 ) -> list[ValidationFinding]:
     if not path.is_file():
         return [
@@ -1071,7 +1087,7 @@ def validate_deployment(config: str | Path) -> ValidationReport:
         # after another field fails validation.
         del spec
 
-    checked_models: set[tuple[str, str, str]] = set()
+    checked_models: set[tuple[str, str, str, str]] = set()
     for field, backend, options in _iter_deployment_backends(raw):
         findings.extend(
             _validate_backend(

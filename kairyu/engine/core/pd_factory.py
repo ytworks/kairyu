@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
 from kairyu.engine.core.kv_pool import PagedKVPool
+from kairyu.models.generation import GenerationConfigMode
 
 if TYPE_CHECKING:  # pragma: no cover
     import torch
@@ -108,6 +109,7 @@ def build_pd_coordinator(
     attention_backend=None,
     prefill_attention_backend=None,
     decode_attention_backend=None,
+    generation_config: GenerationConfigMode = "auto",
 ):
     """Assemble a prefill/decode pair from a checkpoint (G2 stage 5.3 entry).
 
@@ -252,6 +254,7 @@ def build_pd_coordinator(
             dtype=dtype,
             attention_backend=role_attention_backend,
             target_device=role_device,
+            generation_config=generation_config,
         )
         cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
         scheduler = Scheduler(
