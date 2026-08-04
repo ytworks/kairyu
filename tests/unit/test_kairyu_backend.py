@@ -480,7 +480,6 @@ def test_token_id_outside_backend_vocabulary_rejects_before_state():
     [
         ("best_of", SamplingParams(best_of=2)),
         ("prompt_logprobs", SamplingParams(prompt_logprobs=1)),
-        ("skip_special_tokens", SamplingParams(skip_special_tokens=False)),
         ("extra_args.vendor", SamplingParams(extra_args={"vendor": True})),
     ],
 )
@@ -494,6 +493,22 @@ def test_validate_request_rejects_native_unsupported_intent(field, params):
 
     with pytest.raises(ValueError, match=field):
         backend.validate_request(request)
+
+
+def test_validate_request_accepts_explicit_special_token_output_policy():
+    backend = KairyuBackend()
+    request = GenerationRequest(
+        request_id="keep-special-tokens",
+        prompt="hello",
+        sampling_params=SamplingParams(skip_special_tokens=False),
+    )
+
+    backend.validate_request(request)
+
+    assert backend._peek_prepared_request(request) is not None
+    assert backend._active_request_ids == set()
+    assert backend._loop._active_request_ids == set()
+    assert backend._scheduler.states == {}
 
 
 def test_validate_request_rejects_native_strict_tool_semantics():

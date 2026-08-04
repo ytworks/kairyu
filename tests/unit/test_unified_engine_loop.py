@@ -40,6 +40,39 @@ class _CharTokenizer:
         return [chr(ord("a") + index % 26) for index in range(2048)]
 
 
+class _RawSpecialTokenizer:
+    """Tiny tokenizer whose raw pieces intentionally differ from decoded text."""
+
+    eos_token_id = 1
+    _pieces = ("[UNK]", "<eos>", "<tool>", "<0xE3>", "x")
+    _decoded = {
+        0: "?",
+        1: "<eos>",
+        2: "<tool>",
+        3: "�",
+        4: "x",
+    }
+    _special_ids = frozenset({1, 2})
+
+    def __init__(self) -> None:
+        self.vocab_calls = 0
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        return (0,) if text.startswith("skip") else (4,)
+
+    def decode(self, token_ids, *, skip_special_tokens: bool = True) -> str:
+        return "".join(
+            ""
+            if skip_special_tokens and token_id in self._special_ids
+            else self._decoded.get(token_id, f"fallback{token_id}")
+            for token_id in token_ids
+        )
+
+    def vocab(self) -> list[str]:
+        self.vocab_calls += 1
+        return list(self._pieces)
+
+
 class _PositionRunner:
     """Snapshot-only runner whose output is determined by scheduled position."""
 
@@ -77,6 +110,41 @@ class _PositionRunner:
 
     def release(self, request_id: str) -> None:
         self.released.append(request_id)
+
+
+class _ScriptedTokenRunner:
+    """Return request-specific IDs so opposite decode policies can interleave."""
+
+    def __init__(
+        self,
+        scripts: dict[str, tuple[int, ...]],
+        *,
+        with_logprobs: bool = False,
+    ) -> None:
+        self.scripts = scripts
+        self.with_logprobs = with_logprobs
+
+    def execute(self, scheduled, states):
+        sampled = {}
+        for chunk in scheduled:
+            if chunk.is_prefill and not states[chunk.request_id].prefill_done:
+                continue
+            tokens = []
+            for offset in range(chunk.num_tokens):
+                position = chunk.position + offset
+                token_id = self.scripts[chunk.request_id][position]
+                if self.with_logprobs:
+                    tokens.append(
+                        SampledToken(
+                            token_id,
+                            logprob=-0.1 * (position + 1),
+                            top_logprobs=((1, -1.0), (99, -2.0), (-1, -3.0)),
+                        )
+                    )
+                else:
+                    tokens.append(SampledToken(token_id))
+            sampled[chunk.request_id] = tuple(tokens)
+        return sampled
 
 
 class _DeferredPositionHandle:
@@ -147,6 +215,29 @@ def _loop(
             page_size=4,
         )
     return EngineLoop(_CharTokenizer(), scheduler, runner, pipeline_depth=depth), scheduler
+
+
+def _raw_special_loop(
+    scripts: dict[str, tuple[int, ...]],
+    *,
+    with_logprobs: bool = False,
+) -> tuple[EngineLoop, _RawSpecialTokenizer]:
+    tokenizer = _RawSpecialTokenizer()
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=4,
+        max_num_seqs=8,
+        page_size=4,
+    )
+    return (
+        EngineLoop(
+            tokenizer,
+            scheduler,
+            _ScriptedTokenRunner(scripts, with_logprobs=with_logprobs),
+        ),
+        tokenizer,
+    )
 
 
 def _drive(loop: EngineLoop, limit: int = 200) -> list[tuple[str, StreamUpdate]]:
@@ -746,7 +837,13 @@ async def test_backend_preserves_stable_text_when_terminal_decode_disagrees(
     terminal_text: str,
 ) -> None:
     class _DisagreeingDetokenizer:
-        def __init__(self, _tokenizer) -> None:
+        def __init__(
+            self,
+            _tokenizer,
+            *,
+            skip_special_tokens: bool = True,
+        ) -> None:
+            del skip_special_tokens
             self.stable = ""
 
         def push(self, token_ids) -> str:
@@ -792,7 +889,13 @@ async def test_backend_preserves_stable_text_when_terminal_decode_disagrees(
 
 def test_terminal_flush_can_complete_a_held_back_stop_string(monkeypatch) -> None:
     class _FlushDetokenizer:
-        def __init__(self, _tokenizer) -> None:
+        def __init__(
+            self,
+            _tokenizer,
+            *,
+            skip_special_tokens: bool = True,
+        ) -> None:
+            del skip_special_tokens
             self.stable = ""
             self._stable_by_push = iter(("hello", "helloST", "helloST"))
 
@@ -824,6 +927,86 @@ def test_terminal_flush_can_complete_a_held_back_stop_string(monkeypatch) -> Non
     assert [update.text for update in updates] == ["he", "hell", "hello"]
     assert updates[-1].finished
     assert updates[-1].finish_reason == "stop"
+    loop.close()
+
+
+def test_interleaved_special_policy_and_raw_logprob_metadata_are_request_scoped() -> None:
+    scripts = {
+        "skip-special": (2, 3),
+        "keep-special": (2, 3),
+    }
+    loop, tokenizer = _raw_special_loop(scripts, with_logprobs=True)
+    loop.submit(
+        "skip-special",
+        "skip prompt",
+        SamplingParams(
+            max_tokens=2,
+            ignore_eos=True,
+            logprobs=3,
+            skip_special_tokens=True,
+        ),
+    )
+    loop.submit(
+        "keep-special",
+        "keep prompt",
+        SamplingParams(
+            max_tokens=2,
+            ignore_eos=True,
+            logprobs=3,
+            skip_special_tokens=False,
+        ),
+    )
+
+    final = {
+        request_id: update
+        for request_id, update in _drive(loop)
+        if update.finished
+    }
+
+    skipped = final["skip-special"]
+    kept = final["keep-special"]
+    assert skipped.outputs == kept.outputs == (2, 3)
+    assert skipped.text == "�"
+    assert kept.text == "<tool>�"
+
+    assert skipped.logprob_content is not None
+    assert kept.logprob_content is not None
+    assert [entry.token for entry in skipped.logprob_content] == [
+        "<tool>",
+        "<0xE3>",
+    ]
+    assert [entry.token for entry in kept.logprob_content] == [
+        "<tool>",
+        "<0xE3>",
+    ]
+    assert skipped.logprob_content[0].bytes_ == ()
+    assert kept.logprob_content[0].bytes_ == tuple(b"<tool>")
+    replacement_bytes = tuple("�".encode())
+    assert skipped.logprob_content[1].bytes_ == replacement_bytes
+    assert kept.logprob_content[1].bytes_ == replacement_bytes
+
+    skipped_top = skipped.logprob_content[0].top
+    kept_top = kept.logprob_content[0].top
+    assert [entry.token for entry in skipped_top] == [
+        "<eos>",
+        "fallback99",
+        "fallback-1",
+    ]
+    assert [entry.token for entry in kept_top] == [
+        "<eos>",
+        "fallback99",
+        "fallback-1",
+    ]
+    assert skipped_top[0].bytes_ == ()
+    assert kept_top[0].bytes_ == tuple(b"<eos>")
+    assert skipped_top[1].bytes_ == kept_top[1].bytes_ == tuple(b"fallback99")
+    # This custom decoder accepts a negative sentinel; prove raw lookup does
+    # not alias vocabulary[-1]. Native HF validation for invalid signed/u32
+    # IDs remains fail-loud.
+    assert skipped_top[2].bytes_ == kept_top[2].bytes_ == tuple(b"fallback-1")
+    # Cumulative logprob snapshots are rebuilt every step, but the potentially
+    # large raw vocabulary table is materialized only once per engine loop.
+    assert tokenizer.vocab_calls == 1
     loop.close()
 
 
@@ -903,6 +1086,58 @@ def test_ignored_eos_that_finishes_by_length_remains_visible() -> None:
 
     assert final.outputs == (0,)
     assert final.text == "a"
+    assert final.finish_reason == "length"
+    loop.close()
+
+
+def test_terminal_special_token_stays_hidden_even_when_specials_are_requested() -> None:
+    loop, _ = _raw_special_loop({"terminal-special": (4, 1)})
+    loop.submit(
+        "terminal-special",
+        "keep prompt",
+        SamplingParams(max_tokens=3, skip_special_tokens=False),
+    )
+
+    final = next(
+        update
+        for request_id, update in _drive(loop)
+        if request_id == "terminal-special" and update.finished
+    )
+
+    assert final.outputs == (4, 1)
+    assert final.text == "x"
+    assert final.finish_reason == "stop"
+    loop.close()
+
+
+@pytest.mark.parametrize(
+    ("skip_special_tokens", "expected_text"),
+    [(True, ""), (False, "<eos>")],
+)
+def test_ignored_eos_visibility_obeys_special_token_policy(
+    skip_special_tokens: bool,
+    expected_text: str,
+) -> None:
+    request_id = f"ignored-special-{skip_special_tokens}"
+    loop, _ = _raw_special_loop({request_id: (1,)})
+    loop.submit(
+        request_id,
+        "keep prompt",
+        SamplingParams(
+            max_tokens=1,
+            ignore_eos=True,
+            skip_special_tokens=skip_special_tokens,
+        ),
+    )
+
+    final = next(
+        update
+        for update_request_id, update in _drive(loop)
+        if update_request_id == request_id and update.finished
+    )
+
+    assert final.outputs == (1,)
+    assert final.text == expected_text
     assert final.finish_reason == "length"
     loop.close()
 

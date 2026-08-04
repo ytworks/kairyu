@@ -867,6 +867,22 @@ scheduler/KV history, and radix accounting, but never enters visible
 detokenization. Ignored EOS and length-terminal tokens are not specially
 suppressed by this rule and retain the tokenizer's ordinary semantics.
 
+Special-token visibility is now request-owned across native in-process and
+process-split execution. `skip_special_tokens` defaults to true, opposite
+policies remain isolated, native and full-prefix decoding agree, and legacy
+custom tokenizer signatures retain their established behavior. The ID that
+actually terminates on EOS or a stop token remains invisible under both
+policies. Native rich selected/top logprob entries expose lazily cached raw
+vocabulary pieces from a sparse-ID-safe table, with non-negative bounds and
+decoded fallback for valid padded LM-head IDs; pathological sparsity fails
+before Kairyu's dense allocation rather than amplifying that table, while
+remote adapters
+preserve provider token strings. Native bytes remain the flag-sensitive
+single-ID decoded bytes, and legacy completion offsets advance by those
+decoded contributions rather than raw marker lengths. The Kairyu upstream
+capability profile now advertises this support instead of rejecting explicit
+false intent.
+
 Deployment chat rendering now resolves before any model/backend construction.
 Explicit per-model templates override the effective local tokenizer; otherwise
 the exact `chat_template.jinja`/`additional_chat_templates/*.jinja` set or
@@ -919,6 +935,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [amendment] Special-token visibility is per request and logprobs expose raw pieces
+- What: threaded `skip_special_tokens` through native in-process and process-split request state, native/fallback detokenization, and the Kairyu upstream capability profile while preserving old custom-tokenizer signatures. Opposite policies are isolated and the actual EOS/stop-terminating ID remains invisible under both. Native selected and top rich-logprob token strings now use a lazily cached sparse-ID-safe raw vocabulary table with pre-allocation amplification bounds, negative-index exclusion, and decoded fallback for valid padded LM-head IDs while remote adapters preserve provider token strings; native bytes remain the flag-sensitive single-ID decode, and legacy completion offsets advance by those decoded contributions rather than raw marker lengths.
+- Why: callers explicitly requesting special-token text must not lose it through native admission, shared tokenizer state, a default-policy stream, or process transport, while logprob labels must retain exact vocabulary markers without weakening terminal no-retraction semantics or crashing on padded output-head IDs.
+- Refs: issue #362; D1 in `docs/design/m8-engine-cpu.md`; D3 in `docs/design/m9-truthful-api.md`; `docs/deployment.md`; `kairyu/engine/tokenizer.py`; `kairyu/engine/engine_loop.py`; `kairyu/engine/openai_capabilities.py`; `kairyu/engine/core/engine_service.py`
 
 ### 2026-08-05 — [amendment] Final decoding never rewrites streamed text
 - What: made accumulated incremental detokenizer output authoritative at request completion. Native streams may append an optional `finalize_suffix()` delta; the HF adapter excludes special IDs and decodes only its un-emitted replacement-bearing terminal window, while Toy appends nothing. If Rust rejects a later token because malformed held bytes make its reconstructed prefix disagree with published text, the adapter appends only the held replacement suffix and resumes in a fresh native stream. The full-prefix compatibility path reuses its last safe cached candidate without another decode, and legacy push-only custom streams retain a guarded historical terminal decode. Finalization is idempotent, and the engine independently preserves the published prefix before terminal stop matching. Valid multilingual, emoji, contextual replacement-token, CTC, special-token, and byte-fallback sequences retain full-decode parity whenever the full decode extends published text; malformed bytes can only append their held replacement suffix.

@@ -168,9 +168,9 @@ _PROFILES = {
         priority=True,
     ),
     # Kairyu's typed HTTP boundary exposes the vLLM-style sampling controls
-    # that its native engines execute. ``best_of``, ``prompt_logprobs``, and
-    # ``skip_special_tokens`` remain excluded until their complete semantics
-    # are represented by the API response/native decode path.
+    # that its native engines execute. ``best_of`` and ``prompt_logprobs``
+    # remain excluded until their complete semantics are represented by the
+    # API response/native execution path.
     "kairyu": OpenAIRequestCapabilities(
         upstream="kairyu",
         sampling_fields=_OPENAI_CORE
@@ -179,6 +179,7 @@ _PROFILES = {
             "min_p",
             "min_tokens",
             "repetition_penalty",
+            "skip_special_tokens",
             "stop_token_ids",
             "top_k",
         },

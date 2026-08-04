@@ -11,10 +11,13 @@ from kairyu.engine.core.engine_service import (
     WireEventCursor,
     _trace_requested_from_wire,
     event_from_update,
+    sampling_params_from_wire,
+    sampling_params_to_wire,
 )
 from kairyu.engine.engine_loop import StreamUpdate
 from kairyu.engine.zmq_backend import EngineServiceError, _WireAccumulator
 from kairyu.outputs import TokenLogprob
+from kairyu.sampling_params import SamplingParams
 
 
 def _content(token_id: int, token: str) -> TokenLogprob:
@@ -73,6 +76,28 @@ def _encode(
     assert event is not None
     event["stream_id"] = "stream"
     return event
+
+
+@pytest.mark.parametrize("skip_special_tokens", [True, False])
+def test_sampling_wire_roundtrips_special_token_policy(
+    skip_special_tokens: bool,
+) -> None:
+    payload = sampling_params_to_wire(
+        SamplingParams(skip_special_tokens=skip_special_tokens)
+    )
+
+    assert payload["skip_special_tokens"] is skip_special_tokens
+    assert (
+        sampling_params_from_wire(payload).skip_special_tokens
+        is skip_special_tokens
+    )
+
+
+def test_legacy_sampling_wire_defaults_to_skipping_special_tokens() -> None:
+    payload = sampling_params_to_wire(SamplingParams(skip_special_tokens=False))
+    payload.pop("skip_special_tokens")
+
+    assert sampling_params_from_wire(payload).skip_special_tokens is True
 
 
 def test_v2_snapshot_and_deltas_reconstruct_every_cumulative_field():

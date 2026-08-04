@@ -927,7 +927,7 @@ async def _stream_choices(
 
 
 def _completion_logprobs(completion: CompletionOutput) -> CompletionLogprobs | None:
-    """Legacy four-parallel-array shape (m9 D3); offsets from 0 within text."""
+    """Legacy four-array shape; offsets follow decoded token contributions."""
     if completion.logprob_content is None:
         return None
     tokens: list[str] = []
@@ -942,7 +942,19 @@ def _completion_logprobs(completion: CompletionOutput) -> CompletionLogprobs | N
         top_logprobs.append({top.token: top.logprob for top in entry.top})
         has_top = has_top or bool(entry.top)
         text_offset.append(offset)
-        offset += len(entry.token)
+        # ``entry.token`` is the raw vocabulary piece and can contain decoder
+        # notation (``##``, ``<0xNN>``) or a skipped special-token literal.
+        # Retain the pre-#362 offset basis using the decoded UTF-8 contribution
+        # when it is available; malformed third-party bytes fall back safely.
+        try:
+            contribution = (
+                bytes(entry.bytes_).decode("utf-8")
+                if entry.bytes_ is not None
+                else entry.token
+            )
+        except (TypeError, UnicodeDecodeError, ValueError):
+            contribution = entry.token
+        offset += len(contribution)
     return CompletionLogprobs(
         tokens=tokens,
         token_logprobs=token_logprobs,

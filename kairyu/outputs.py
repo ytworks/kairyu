@@ -10,8 +10,10 @@ from typing import Any
 class TokenLogprob:
     """Rich per-token logprob (m9 D3): OpenAI needs token strings + bytes.
 
-    ``bytes_`` is the lossless form — byte-level BPE fragments may decode to
-    U+FFFD in ``token``. ``top`` entries carry no nested ``top`` of their own.
+    Native Kairyu entries use the tokenizer's raw vocabulary piece, so byte
+    fragments and special tokens remain identifiable; remote adapters preserve
+    the upstream token representation. ``bytes_`` is backend-defined decoded
+    byte metadata. ``top`` entries carry no nested ``top``.
     """
 
     token: str

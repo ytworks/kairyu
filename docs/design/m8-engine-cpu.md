@@ -89,6 +89,30 @@ New `kairyu/engine/tokenizer.py`:
   full-decode parity whenever the full decode extends published text; malformed
   terminal or interior byte runs append only their held flush and continue.
 
+**Per-request special-token policy amendment (2026-08-05, issue #362):**
+
+- `SamplingParams.skip_special_tokens` is request-owned, defaults to `True`,
+  and is captured by each `IncrementalDetokenizer`; it never mutates shared
+  tokenizer state. HF full-prefix decoding and its per-request native
+  `DecodeStream` receive the same value, so concurrent requests with opposite
+  policies remain isolated. If the native stream capability is absent or
+  unusable for the requested policy, the matching full-prefix path remains the
+  correctness fallback.
+- Existing custom tokenizers keep their historical `decode(ids)` and
+  `new_decode_stream()` contracts. Flag support is detected once from the
+  callable signature, including `**kwargs`; an operational `TypeError` is not
+  reinterpreted as an old signature. If a custom `decode` accepts the flag but
+  its stream factory does not, a `False` request uses the flag-aware full-prefix
+  decoder instead of silently retaining that stream's default policy. A custom
+  tokenizer with neither capability keeps its prior authoritative semantics.
+- `False` exposes registered special-token text when that token is otherwise
+  visible, including ignored EOS, an EOS/stop ID masked below `min_tokens`, and
+  length termination; `True` retains the established skip behavior. The #352
+  terminal rule has precedence: an ID that actually causes EOS or stop-token
+  termination is never passed to visible detokenization under either policy,
+  while its token ID, usage, logprobs, scheduler/KV state, and radix history are
+  still retained.
+
 **Config surface (amended)**: `KairyuBackend(tokenizer: str | Tokenizer = "toy")` —
 `"toy"` → ToyTokenizer; any other string is a filesystem path (a `tokenizer.json`
 file or a directory containing one) → HFTokenizer; a `Tokenizer` instance is
