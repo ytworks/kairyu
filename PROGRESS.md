@@ -891,6 +891,12 @@ nearest-rank p50/p99 plus per-stage observed/missing denominators, distinguishin
 complete, partial, missing, invalid, and unrequested evidence. Trace-disabled
 engine and benchmark paths retain their prior timing hot paths.
 
+External serving diagnosis now has one bounded, non-overwriting process-tree
+launcher for py-spy and Nsight Systems. It profiles the exact locked Python
+interpreter running `kairyu serve`, follows process-isolated engines and TP
+ranks, records time-ordered Python stacks or CUDA/OSRT/Python-GIL timelines,
+and deliberately keeps profiled latency/throughput outside formal evidence.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -898,6 +904,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [progress] Bounded serving profiles expose Python and CUDA stalls
+- What: added a source-checkout `profile_server.py` launcher for finite, non-overwriting py-spy speedscope and Nsight Systems process-tree captures of `kairyu serve`. It preserves argv boundaries, follows process-isolated engines and TP ranks, separates Nsight load delay from the capture window, discards the recorded environment, and emits an exact dependency-free dry run. The GPU runbook now pins profiler preflight, workload, lifecycle, provenance, privacy, and interpretation rules; profiled runs remain diagnostic rather than formal performance evidence.
+- Why: serving regressions could be attributed to high-level stages after #379, but there was still no reproducible way to inspect Python/GIL scheduling or correlate host gaps with CUDA work without ad hoc commands and unsafe attachment/overwrite behavior.
+- Refs: issue #381; `scripts/profile_server.py`; `tests/unit/test_profile_server.py`; `docs/gpu-runbook.md` §0.1
 
 ### 2026-08-05 — [amendment] Direct native stage traces make serving regressions attributable
 - What: extended trace v2 with opt-in, cumulative request-observed `tokenize`, `queue_wait`, `schedule`, `prefill`, `decode_step`, `detokenize`, and `sse_write` scalar events across in-process, process-split, and Kairyu-replica paths. The serving benchmark now explicitly requests the trace, validates terminal SSE/envelope/identity/scalar structure without retaining raw detail, reports nearest-rank stage p50/p99, and preserves complete/partial/missing/invalid plus per-stage coverage denominators. Trace-off avoids clock reads and per-request stage state; older or external targets remain missing/partial rather than zero-valued.
