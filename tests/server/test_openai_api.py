@@ -2973,6 +2973,120 @@ async def test_llama_json_tool_call_requires_one_complete_object(text):
     assert choice["message"]["tool_calls"] is None
 
 
+async def test_qwen3_coder_xml_tool_call_is_parsed():
+    text = (
+        "<tool_call>\n"
+        "<function=read_file>\n"
+        "<parameter=path>\nREADME.md\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    body = _chat_body("read", tools=tools, tool_choice="required")
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    call = choice["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "read_file"
+    assert json.loads(call["function"]["arguments"]) == {"path": "README.md"}
+
+
+async def test_qwen3_coder_xml_parameters_follow_tool_schema_types():
+    text = (
+        "<tool_call>\n"
+        "<function=run>\n"
+        "<parameter=count>\n3\n</parameter>\n"
+        "<parameter=ratio>\n0.5\n</parameter>\n"
+        "<parameter=dry_run>\ntrue\n</parameter>\n"
+        '<parameter=paths>\n["a", "b"]\n</parameter>\n'
+        '<parameter=options>\n{"force": false}\n</parameter>\n'
+        "</function>\n"
+        "</tool_call>"
+    )
+    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "count": {"type": "integer"},
+                        "ratio": {"type": "number"},
+                        "dry_run": {"type": "boolean"},
+                        "paths": {"type": "array"},
+                        "options": {"type": "object"},
+                    },
+                },
+            },
+        }
+    ]
+    body = _chat_body("run", tools=tools, tool_choice="required")
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {
+        "count": 3,
+        "ratio": 0.5,
+        "dry_run": True,
+        "paths": ["a", "b"],
+        "options": {"force": False},
+    }
+
+
+async def test_qwen3_coder_xml_invalid_typed_parameter_fails_closed():
+    text = (
+        "<tool_call>\n"
+        "<function=run>\n"
+        "<parameter=count>\nnot-an-integer\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                },
+            },
+        }
+    ]
+    body = _chat_body("run", tools=tools, tool_choice="required")
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
+
+
 async def test_generated_tool_calls_keep_order_while_skipping_only_malformed_entries():
     text = "".join(
         (

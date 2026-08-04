@@ -72,6 +72,20 @@ to impersonate an allow-listed family. For higher agent quality, Cline's local
 model guide recommends Qwen3 Coder 30B; validate the checkpoint and its own
 tokenizer template before making it the production default.
 
+That Qwen path was validated on gpu02 on 2026-08-04. The 16-shard
+`Qwen3-Coder-30B-A3B-Instruct` checkpoint was downloaded directly to
+`/models`, avoiding a second local copy or tar archive, and passed Kairyu's
+checkpoint validation. The isolated TP1 replica uses
+`examples/ide-client/qwen3-coder-gpu-replica.yaml` on GPU 2 / host port 8003.
+Qwen3-Coder emits its native
+`<function=name><parameter=name>...</parameter></function>` XML inside
+`<tool_call>` rather than JSON; Kairyu parses that form and converts parameter
+values according to the declared tool JSON Schema. A live required-tool API
+test completed the two-request `read_file` → `attempt_completion` loop through
+an SSH local forward. A fresh Cline extension task remains pending a VS Code
+reload, so this result establishes the model/API protocol path but does not yet
+claim a completed Qwen Cline UI loop.
+
 For a native local model deployment, keep the checkpoint's tokenizer artifacts
 beside the model and let Kairyu resolve them from `model_path` instead of
 selecting the legacy role-prefix renderer:

@@ -51,6 +51,12 @@ from kairyu.sampling_params import (
 )
 
 _TOOL_CALL_PATTERN = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_QWEN_FUNCTION_PATTERN = re.compile(
+    r"<function=([^>\n]+)>(.*?)</function>", re.DOTALL
+)
+_QWEN_PARAMETER_PATTERN = re.compile(
+    r"<parameter=([^>\n]+)>(.*?)</parameter>", re.DOTALL
+)
 _LLAMA_TOOL_PREFIX = "<|python_tag|>"
 logger = logging.getLogger(__name__)
 
@@ -582,12 +588,92 @@ def _tool_call_from_payload(payload: object) -> ToolCall | None:
     )
 
 
-def _parse_tool_calls(text: str) -> list[ToolCall]:
+def _tool_parameter_schemas(
+    tools: Sequence[Mapping[str, object]],
+    function_name: str,
+) -> Mapping[str, object]:
+    for tool in tools:
+        function = tool.get("function")
+        if tool.get("type") != "function" or not isinstance(function, Mapping):
+            continue
+        if function.get("name") != function_name:
+            continue
+        parameters = function.get("parameters")
+        if not isinstance(parameters, Mapping):
+            return {}
+        properties = parameters.get("properties")
+        return properties if isinstance(properties, Mapping) else {}
+    return {}
+
+
+def _qwen_parameter_value(value: str, schema: object) -> object:
+    # Qwen3-Coder puts one formatting newline on each side of parameter values.
+    # Remove only those protocol newlines so intentional spaces/newlines survive.
+    if value.startswith("\n"):
+        value = value[1:]
+    if value.endswith("\n"):
+        value = value[:-1]
+    if value.lower() == "null":
+        return None
+    if not isinstance(schema, Mapping):
+        return value
+    kind = schema.get("type")
+    if kind == "integer":
+        return int(value)
+    if kind == "number":
+        return float(value)
+    if kind == "boolean":
+        normalized = value.lower()
+        if normalized not in {"true", "false"}:
+            raise ValueError("invalid boolean tool parameter")
+        return normalized == "true"
+    if kind in {"array", "object"}:
+        parsed = json.loads(value)
+        if kind == "array" and not isinstance(parsed, list):
+            raise ValueError("tool parameter does not match array schema")
+        if kind == "object" and not isinstance(parsed, dict):
+            raise ValueError("tool parameter does not match object schema")
+        return parsed
+    return value
+
+
+def _qwen_tool_calls(
+    payload: str,
+    tools: Sequence[Mapping[str, object]],
+) -> list[ToolCall]:
+    calls = []
+    for function_match in _QWEN_FUNCTION_PATTERN.finditer(payload):
+        name = function_match.group(1).strip()
+        schemas = _tool_parameter_schemas(tools, name)
+        arguments: dict[str, object] = {}
+        try:
+            for parameter_match in _QWEN_PARAMETER_PATTERN.finditer(
+                function_match.group(2)
+            ):
+                parameter_name = parameter_match.group(1).strip()
+                if not parameter_name:
+                    raise ValueError("empty tool parameter name")
+                arguments[parameter_name] = _qwen_parameter_value(
+                    parameter_match.group(2), schemas.get(parameter_name)
+                )
+        except (TypeError, ValueError, RecursionError):
+            continue
+        call = _tool_call_from_payload({"name": name, "arguments": arguments})
+        if call is not None:
+            calls.append(call)
+    return calls
+
+
+def _parse_tool_calls(
+    text: str,
+    tools: Sequence[Mapping[str, object]] = (),
+) -> list[ToolCall]:
     calls = []
     for match in _TOOL_CALL_PATTERN.finditer(text):
         try:
             payload = json.loads(match.group(1))
         except (ValueError, RecursionError):
+            calls.extend(_qwen_tool_calls(match.group(1), tools))
             continue
         call = _tool_call_from_payload(payload)
         if call is not None:
@@ -640,12 +726,13 @@ def _build_choice(
     tool_choice: NormalizedToolChoice,
     finish_reason: str | None,
     logprobs: ChoiceLogprobs | None = None,
+    tools: Sequence[Mapping[str, object]] = (),
 ) -> Choice:
     tool_calls = []
     if tool_choice.mode != "none":
         tool_calls = [
             call
-            for call in _parse_tool_calls(text)
+            for call in _parse_tool_calls(text, tools)
             if call.function.name in tool_choice.allowed_names
             and (tool_choice.named is None or call.function.name == tool_choice.named)
         ]
@@ -704,6 +791,7 @@ def completion_response(
             normalized_tool_choice,
             completion.finish_reason,
             _choice_logprobs(completion),
+            request.tools or (),
         )
         for completion in completions
     ]
