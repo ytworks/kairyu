@@ -82,9 +82,11 @@ Qwen3-Coder emits its native
 `<tool_call>` rather than JSON; Kairyu parses that form and converts parameter
 values according to the declared tool JSON Schema. A live required-tool API
 test completed the two-request `read_file` → `attempt_completion` loop through
-an SSH local forward. A fresh Cline extension task remains pending a VS Code
-reload, so this result establishes the model/API protocol path but does not yet
-claim a completed Qwen Cline UI loop.
+an SSH local forward. After setting a 65,536-token context window and 4,096
+output tokens, a fresh Cline 4.1.3 Act-mode task also read `README.md` once and
+reached `Task Completed` with the exact first line. The two corresponding
+chat-completions requests returned 200, establishing the Qwen Cline UI loop as
+well as the direct model/API protocol path.
 
 For a native local model deployment, keep the checkpoint's tokenizer artifacts
 beside the model and let Kairyu resolve them from `model_path` instead of
