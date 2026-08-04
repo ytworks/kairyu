@@ -19,12 +19,14 @@ import logging
 import threading
 import weakref
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 
 from kairyu.engine.backend import (
     EngineReadiness,
     GenerationRequest,
     GenerationResult,
+    GenerationStageMetric,
     GenerationUsage,
     prompt_with_tool_intent,
     validate_native_request_surface,
@@ -1221,6 +1223,7 @@ class KairyuBackend:
         return self._loop.prepare_prompt(
             prompt_with_tool_intent(request),
             request.sampling_params,
+            trace_requested=request.trace_requested,
         )
 
     def _take_or_prepare_request(
@@ -1524,6 +1527,7 @@ class KairyuBackend:
                 priority=request.priority,
                 scheduling_class=request.scheduling_class,
                 prepared_prompt=prepared_prompt,
+                trace_requested=request.trace_requested,
             )
             submitted = True
             queue = _StreamUpdateQueue()
@@ -1562,6 +1566,7 @@ class KairyuBackend:
                 cached_tokens=update.num_cached_tokens,
             ),
             prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
+            stage_metrics=update.stage_metrics,
         )
 
     def _sub_requests(self, request: GenerationRequest) -> list[GenerationRequest]:
@@ -1586,9 +1591,47 @@ class KairyuBackend:
                     tools=request.tools,
                     tool_choice=request.tool_choice,
                     tools_in_prompt=request.tools_in_prompt,
+                    trace_requested=request.trace_requested,
                 )
             )
         return subs
+
+    @staticmethod
+    def _prepared_for_candidate(
+        prepared: PreparedPrompt,
+        index: int,
+    ) -> PreparedPrompt:
+        """Attribute one shared tokenization observation exactly once for n>1."""
+
+        if index == 0 or prepared.tokenize_duration_ns is None:
+            return prepared
+        return replace(prepared, tokenize_duration_ns=None)
+
+    @staticmethod
+    def _merge_stage_metrics(
+        latest: dict[int, StreamUpdate],
+    ) -> tuple[GenerationStageMetric, ...]:
+        if not any(update.stage_metrics for update in latest.values()):
+            return ()
+        durations: dict[str, int] = {}
+        occurrences: dict[str, int] = {}
+        order: list[str] = []
+        for update in latest.values():
+            for metric in update.stage_metrics:
+                if metric.stage not in durations:
+                    durations[metric.stage] = 0
+                    occurrences[metric.stage] = 0
+                    order.append(metric.stage)
+                durations[metric.stage] += metric.duration_ns
+                occurrences[metric.stage] += metric.occurrences
+        return tuple(
+            GenerationStageMetric(
+                stage=stage,
+                duration_ns=durations[stage],
+                occurrences=occurrences[stage],
+            )
+            for stage in order
+        )
 
     def _merged(
         self,
@@ -1624,6 +1667,7 @@ class KairyuBackend:
             finished=finished,
             usage=usage,
             prompt_token_ids=supplied_prompt_token_ids(request.prompt) or (),
+            stage_metrics=self._merge_stage_metrics(latest),
         )
 
     async def _generate_one(
@@ -1670,10 +1714,13 @@ class KairyuBackend:
                     self._generate_one(
                         sub,
                         pre_reserved=True,
-                        prepared_prompt=prepared_prompt,
+                        prepared_prompt=self._prepared_for_candidate(
+                            prepared_prompt,
+                            index,
+                        ),
                     )
                 )
-                for sub in subs
+                for index, sub in enumerate(subs)
             ]
             results = await asyncio.gather(*tasks)
         except BaseException:
@@ -1695,6 +1742,7 @@ class KairyuBackend:
                 num_prompt_tokens=result.usage.prompt_tokens if result.usage else 0,
                 num_cached_tokens=result.usage.cached_tokens if result.usage else 0,
                 logprob_content=result.completions[0].logprob_content,
+                stage_metrics=result.stage_metrics,
             )
             for index, result in enumerate(results)
         }
@@ -1757,7 +1805,10 @@ class KairyuBackend:
                 queues[index] = self._submit(
                     sub,
                     pre_reserved=True,
-                    prepared_prompt=prepared_prompt,
+                    prepared_prompt=self._prepared_for_candidate(
+                        prepared_prompt,
+                        index,
+                    ),
                 )
             pending = {index: asyncio.ensure_future(queue.get()) for index, queue in queues.items()}
             while len(finished) < len(subs):

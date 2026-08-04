@@ -22,7 +22,7 @@ import msgpack
 import pytest
 
 from kairyu import SamplingParams
-from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.backend import GenerationRequest, GenerationStageMetric
 from kairyu.engine.core.attention_selector import AttentionBackendDecision
 from kairyu.engine.core.engine_service import (
     LEGACY_WIRE_VERSION,
@@ -344,11 +344,18 @@ def zmq_backend():
     asyncio.run(backend.shutdown())
 
 
-def _request(request_id: str, prompt: PromptInput, **sampling) -> GenerationRequest:
+def _request(
+    request_id: str,
+    prompt: PromptInput,
+    *,
+    trace_requested: bool = False,
+    **sampling,
+) -> GenerationRequest:
     return GenerationRequest(
         request_id=request_id,
         prompt=prompt,
         sampling_params=SamplingParams(**sampling),
+        trace_requested=trace_requested,
     )
 
 
@@ -373,6 +380,39 @@ async def test_generate_parity_with_in_process(zmq_backend):
     assert got.token_ids == ref.token_ids  # sha256 tokenizer: process-stable
     assert got.text == ref.text
     assert got.finish_reason == ref.finish_reason == "length"
+    assert reference.stage_metrics == result.stage_metrics == ()
+
+
+async def test_trace_stage_metric_schema_matches_in_process(zmq_backend):
+    reference = await KairyuBackend(num_pages=256).generate(
+        _request(
+            "trace-inproc",
+            "trace schema parity",
+            max_tokens=4,
+            trace_requested=True,
+        )
+    )
+    result = await zmq_backend.generate(
+        _request(
+            "trace-proc",
+            "trace schema parity",
+            max_tokens=4,
+            trace_requested=True,
+        )
+    )
+
+    assert reference.stage_metrics
+    assert result.stage_metrics
+    for metrics in (reference.stage_metrics, result.stage_metrics):
+        assert type(metrics) is tuple
+        assert all(type(metric) is GenerationStageMetric for metric in metrics)
+        assert len({metric.stage for metric in metrics}) == len(metrics)
+        assert all(metric.stage.strip() for metric in metrics)
+        assert all(metric.duration_ns >= 0 for metric in metrics)
+        assert all(metric.occurrences >= 1 for metric in metrics)
+    assert {metric.stage for metric in result.stage_metrics} == {
+        metric.stage for metric in reference.stage_metrics
+    }
 
 
 async def test_token_prompt_crosses_process_without_retokenization(zmq_backend):
@@ -476,6 +516,7 @@ async def test_raw_v2_events_are_one_snapshot_then_sequenced_deltas(zmq_backend)
     assert all(
         {"outputs", "text", "logprobs", "logprob_content"}.isdisjoint(event) for event in events[1:]
     )
+    assert all("stage_metrics" not in event for event in events)
 
 
 async def test_v2_delivery_fails_bad_stream_id_and_drops_retired_wire_generation():
@@ -520,7 +561,12 @@ async def test_v2_delivery_fails_bad_stream_id_and_drops_retired_wire_generation
 
 async def test_new_service_keeps_legacy_client_cumulative_wire():
     backend = ZmqEngineBackend(num_pages=64)
-    request = _request("legacy-client", "rolling upgrade", max_tokens=4)
+    request = _request(
+        "legacy-client",
+        "rolling upgrade",
+        max_tokens=4,
+        trace_requested=True,
+    )
     backend._wire_version = LEGACY_WIRE_VERSION
     try:
         queue = await backend._submit(request)
@@ -531,6 +577,7 @@ async def test_new_service_keeps_legacy_client_cumulative_wire():
             if event.get("finished"):
                 break
         assert all("wire_version" not in event for event in events)
+        assert all("stage_metrics" not in event for event in events)
         assert all("outputs" in event and "text" in event for event in events)
         assert [len(event["outputs"]) for event in events] == sorted(
             len(event["outputs"]) for event in events
@@ -1450,6 +1497,7 @@ async def test_parent_preflight_tokenizes_tool_prompt_once_and_submits_tokens(
         request_id="prepared-tool",
         prompt=TextPrompt("use a tool"),
         sampling_params=SamplingParams(max_tokens=2),
+        trace_requested=True,
         tools=(
             {
                 "type": "function",
@@ -1462,6 +1510,11 @@ async def test_parent_preflight_tokenizes_tool_prompt_once_and_submits_tokens(
         tool_choice="required",
     )
     socket = CapturingSocket()
+    clock = iter((100, 175))
+    monkeypatch.setattr(
+        "kairyu.engine.zmq_backend.time.perf_counter_ns",
+        lambda: next(clock),
+    )
 
     async def already_started():
         return None
@@ -1484,9 +1537,25 @@ async def test_parent_preflight_tokenizes_tool_prompt_once_and_submits_tokens(
     assert tuple(message["prompt"]["prompt_token_ids"]) == ToyTokenizer().encode(
         tokenizer.encoded[0]
     )
+    assert message["trace_requested"] is True
+    assert backend._parent_tokenize_durations_ns[request.request_id] == 75
+    result = backend._result(
+        request,
+        {
+            "text": "",
+            "outputs": (),
+            "finished": True,
+            "stage_metrics": (GenerationStageMetric("tokenize", 25),),
+        },
+    )
+    tokenize = result.stage_metrics[0]
+    assert tokenize.stage == "tokenize"
+    assert tokenize.duration_ns == 100
+    assert tokenize.occurrences == 2
     assert backend._prepared_requests == {}
     assert backend._queues.pop(request.request_id) is queue
     backend._release_wire_route(request.request_id)
+    assert request.request_id not in backend._parent_tokenize_durations_ns
     backend._socket = None
     backend._live_generation = None
     await backend.shutdown()
@@ -1529,6 +1598,60 @@ async def test_templated_text_uses_versioned_prompt_wire_without_parent_tokenize
     }
     assert backend._queues.pop(request.request_id) is queue
     backend._release_wire_route(request.request_id)
+    backend._socket = None
+    backend._live_generation = None
+    await backend.shutdown()
+
+
+async def test_submit_negotiates_trace_only_for_opted_in_v2_requests(monkeypatch):
+    class CapturingSocket:
+        def __init__(self):
+            self.messages = []
+
+        async def send(self, payload):
+            self.messages.append(msgpack.unpackb(payload))
+
+    backend = ZmqEngineBackend(num_pages=64)
+    backend.generation_defaults = GenerationDefaults()
+    socket = CapturingSocket()
+    backend._socket = socket
+    backend._live_generation = 1
+
+    async def already_started():
+        return None
+
+    monkeypatch.setattr(backend, "_ensure_started", already_started)
+    requests = (
+        _request("trace-wire-off", "hello", max_tokens=1),
+        _request(
+            "trace-wire-on",
+            "hello",
+            max_tokens=1,
+            trace_requested=True,
+        ),
+    )
+    queues = [await backend._submit(request) for request in requests]
+    backend._wire_version = LEGACY_WIRE_VERSION
+    legacy_request = _request(
+        "trace-wire-legacy",
+        "hello",
+        max_tokens=1,
+        trace_requested=True,
+    )
+    legacy_queue = await backend._submit(legacy_request)
+
+    trace_off, trace_on, legacy = socket.messages
+    assert trace_off["wire_version"] == WIRE_VERSION
+    assert "trace_requested" not in trace_off
+    assert trace_on["wire_version"] == WIRE_VERSION
+    assert trace_on["trace_requested"] is True
+    assert {"wire_version", "stream_id", "trace_requested"}.isdisjoint(legacy)
+
+    for request, queue in zip(requests, queues, strict=True):
+        assert backend._queues.pop(request.request_id) is queue
+        backend._release_wire_route(request.request_id)
+    assert backend._queues.pop(legacy_request.request_id) is legacy_queue
+    backend._release_wire_route(legacy_request.request_id)
     backend._socket = None
     backend._live_generation = None
     await backend.shutdown()

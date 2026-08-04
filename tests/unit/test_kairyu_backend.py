@@ -10,7 +10,12 @@ import pytest
 
 import kairyu.engine.kairyu_backend as kairyu_backend_module
 from kairyu import SamplingParams
-from kairyu.engine.backend import GenerationRequest
+from kairyu.engine.backend import (
+    GenerationRequest,
+    GenerationResult,
+    GenerationStageMetric,
+    GenerationUsage,
+)
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.engine_loop import StreamUpdate
@@ -19,7 +24,7 @@ from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt, TokensPrompt
 from kairyu.engine.registry import create_backend
 from kairyu.engine.tokenizer import ToyTokenizer
 from kairyu.entrypoints.server.app import create_app
-from kairyu.outputs import TokenLogprob
+from kairyu.outputs import CompletionOutput, TokenLogprob
 
 
 def _request(request_id: str, prompt: str, max_tokens: int = 4) -> GenerationRequest:
@@ -28,6 +33,58 @@ def _request(request_id: str, prompt: str, max_tokens: int = 4) -> GenerationReq
         prompt=prompt,
         sampling_params=SamplingParams(max_tokens=max_tokens),
     )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    (
+        ({"stage": "", "duration_ns": 0}, "safe identifier"),
+        ({"stage": "../prefill", "duration_ns": 0}, "safe identifier"),
+        ({"stage": "x" * 65, "duration_ns": 0}, "safe identifier"),
+        ({"stage": "prefill", "duration_ns": -1}, "non-negative integer"),
+        ({"stage": "prefill", "duration_ns": True}, "non-negative integer"),
+        (
+            {"stage": "prefill", "duration_ns": 1 << 63},
+            "non-negative integer",
+        ),
+        (
+            {"stage": "prefill", "duration_ns": 0, "occurrences": 0},
+            "positive integer",
+        ),
+        (
+            {"stage": "prefill", "duration_ns": 0, "occurrences": True},
+            "positive integer",
+        ),
+        (
+            {"stage": "prefill", "duration_ns": 0, "occurrences": 1 << 31},
+            "positive integer",
+        ),
+    ),
+)
+def test_generation_stage_metric_validates_strict_scalar_contract(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        GenerationStageMetric(**kwargs)
+
+
+def test_generation_trace_fields_preserve_historical_constructor_order() -> None:
+    params = SamplingParams(max_tokens=1)
+    request = GenerationRequest("request", "prompt", params)
+    completion = CompletionOutput(index=0, text="done", token_ids=(7,))
+    usage = GenerationUsage(prompt_tokens=1, completion_tokens=1)
+    result = GenerationResult(
+        "request",
+        "prompt",
+        (completion,),
+        True,
+        usage,
+        (1,),
+    )
+
+    assert request.trace_requested is False
+    assert result.prompt_token_ids == (1,)
+    assert result.stage_metrics == ()
+    with pytest.raises(ValueError, match="trace_requested must be a boolean"):
+        GenerationRequest("bad", "prompt", params, trace_requested=1)  # type: ignore[arg-type]
 
 
 class _SlowRunner:
@@ -170,6 +227,94 @@ class _CountingTokenizer(ToyTokenizer):
     def encode(self, text: str) -> tuple[int, ...]:
         self.encoded_texts.append(text)
         return super().encode(text)
+
+
+async def test_trace_metrics_survive_preflight_and_backend_result_boundary():
+    tokenizer = _CountingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    request = GenerationRequest(
+        request_id="traced-result",
+        prompt="one two three",
+        sampling_params=SamplingParams(max_tokens=3, ignore_eos=True),
+        trace_requested=True,
+    )
+
+    backend.validate_request(request)
+    result = await backend.generate(request)
+    metrics = {metric.stage: metric for metric in result.stage_metrics}
+
+    assert tokenizer.encoded_texts == ["one two three"]
+    assert tuple(metric.stage for metric in result.stage_metrics) == (
+        "tokenize",
+        "queue_wait",
+        "schedule",
+        "prefill",
+        "decode_step",
+        "detokenize",
+    )
+    assert metrics["tokenize"].occurrences == 1
+    assert metrics["queue_wait"].occurrences == 1
+    assert all(metric.duration_ns >= 0 for metric in result.stage_metrics)
+    assert all(metric.occurrences >= 1 for metric in result.stage_metrics)
+
+    untraced = await backend.generate(_request("untraced-result", "plain", 1))
+    assert untraced.stage_metrics == ()
+    await backend.shutdown()
+
+
+async def test_stream_stage_metrics_are_cumulative_and_stage_unique():
+    backend = KairyuBackend(num_pages=64)
+    request = GenerationRequest(
+        request_id="traced-stream",
+        prompt="one two three",
+        sampling_params=SamplingParams(max_tokens=4, ignore_eos=True),
+        trace_requested=True,
+    )
+
+    partials = [partial async for partial in backend.stream(request)]
+
+    previous: dict[str, GenerationStageMetric] = {}
+    for partial in partials:
+        current = {metric.stage: metric for metric in partial.stage_metrics}
+        assert len(current) == len(partial.stage_metrics)
+        for stage, metric in current.items():
+            if stage in previous:
+                assert metric.duration_ns >= previous[stage].duration_ns
+                assert metric.occurrences >= previous[stage].occurrences
+        previous = current
+    assert partials[-1].finished
+    assert "decode_step" in previous
+    await backend.shutdown()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_n_candidates_attribute_shared_tokenization_once(stream):
+    tokenizer = _CountingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=128)
+    request = GenerationRequest(
+        request_id=f"traced-n-{'stream' if stream else 'generate'}",
+        prompt="one shared prompt",
+        sampling_params=SamplingParams(
+            max_tokens=2,
+            n=2,
+            temperature=0,
+            ignore_eos=True,
+        ),
+        trace_requested=True,
+    )
+
+    backend.validate_request(request)
+    if stream:
+        result = [partial async for partial in backend.stream(request)][-1]
+    else:
+        result = await backend.generate(request)
+
+    tokenize = next(
+        metric for metric in result.stage_metrics if metric.stage == "tokenize"
+    )
+    assert tokenizer.encoded_texts == ["one shared prompt"]
+    assert tokenize.occurrences == 1
+    await backend.shutdown()
 
 
 async def test_token_prompt_bypasses_encode_and_reports_exact_input_ids():
@@ -1300,6 +1445,7 @@ async def test_multi_stream_partial_submit_failure_rolls_back_all_sub_ids():
         priority=0,
         scheduling_class="interactive",
         prepared_prompt=None,
+        trace_requested=False,
     ):
         nonlocal submit_count
         submit_count += 1
@@ -1312,6 +1458,7 @@ async def test_multi_stream_partial_submit_failure_rolls_back_all_sub_ids():
             priority=priority,
             scheduling_class=scheduling_class,
             prepared_prompt=prepared_prompt,
+            trace_requested=trace_requested,
         )
 
     backend._loop.submit = fail_second_submit
@@ -1350,6 +1497,7 @@ async def test_single_submit_failure_rolls_back_public_id_reservation():
         priority=0,
         scheduling_class="interactive",
         prepared_prompt=None,
+        trace_requested=False,
     ):
         raise RuntimeError("injected submit failure")
 

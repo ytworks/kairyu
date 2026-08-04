@@ -7,8 +7,12 @@ import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine import vision as vision_module
-from kairyu.engine.backend import GenerationRequest, UpstreamClientError
-from kairyu.engine.openai_backend import OpenAICompatBackend
+from kairyu.engine.backend import (
+    GenerationRequest,
+    GenerationStageMetric,
+    UpstreamClientError,
+)
+from kairyu.engine.openai_backend import OpenAICompatBackend, _stage_metrics_from_trace
 from kairyu.engine.openai_capabilities import (
     OpenAIRequestCapabilities,
     known_openai_upstreams,
@@ -47,6 +51,7 @@ def _request(
     sampling_params: SamplingParams | None = None,
     *,
     explicit_generation_neutrals: bool = False,
+    trace_requested: bool = False,
 ) -> GenerationRequest:
     params = sampling_params or SamplingParams(temperature=0.2, max_tokens=64)
     if not explicit_generation_neutrals:
@@ -61,7 +66,38 @@ def _request(
         request_id="r1",
         prompt=prompt,
         sampling_params=params,
+        trace_requested=trace_requested,
     )
+
+
+def _stage_trace(*metrics: tuple[str, int, int]) -> dict[str, object]:
+    return {
+        "trace_version": "2.0",
+        "request_id": "chatcmpl-upstream",
+        "started_at": "2026-08-05T00:00:00.000Z",
+        "completed_at": "2026-08-05T00:00:00.001Z",
+        "events": [
+            {
+                "seq": seq,
+                "node": stage,
+                "role": "engine",
+                "kind": "stage",
+                "status": "success",
+                "attempt": 0,
+                "timing": None,
+                "detail": {
+                    "stage": stage,
+                    "duration_ns": duration_ns,
+                    "occurrences": occurrences,
+                    "aggregation": "sum",
+                    "scope": "request-observed",
+                },
+            }
+            for seq, (stage, duration_ns, occurrences) in enumerate(
+                metrics, start=1
+            )
+        ],
+    }
 
 
 def _multimodal_prompt(image_url: str = _RED_PNG_DATA_URL) -> MultimodalPrompt:
@@ -140,6 +176,141 @@ async def test_generate_maps_openai_response(monkeypatch):
     assert captured["body"]["temperature"] == 0.2
     assert captured["body"]["max_tokens"] == 64
     assert captured["body"]["messages"][-1]["content"] == "say hello"
+
+
+async def test_generate_propagates_and_parses_kairyu_stage_trace():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["trace_header"] = request.headers.get("x-kairyu-trace")
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-upstream",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "kairyu_trace_v2": _stage_trace(
+                    ("tokenize", 101, 1),
+                    ("decode_step", 303, 3),
+                ),
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://replica:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="kairyu",
+    )
+
+    result = await backend.generate(_request(trace_requested=True))
+
+    assert captured["trace_header"] == "1"
+    assert [
+        (metric.stage, metric.duration_ns, metric.occurrences)
+        for metric in result.stage_metrics
+    ] == [("tokenize", 101, 1), ("decode_step", 303, 3)]
+
+
+async def test_generate_allows_missing_opted_in_trace_during_rolling_upgrade():
+    captured: dict[str, object] = {}
+    backend = OpenAICompatBackend(
+        base_url="http://replica:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        upstream="kairyu",
+    )
+
+    result = await backend.generate(_request(trace_requested=True))
+
+    assert result.stage_metrics == ()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    (
+        (
+            lambda trace: trace["events"][0]["detail"].__setitem__(
+                "duration_ns", True
+            ),
+            "invalid stage duration",
+        ),
+        (
+            lambda trace: trace.__setitem__("request_id", "chatcmpl-stale"),
+            "request id does not match",
+        ),
+        (
+            lambda trace: trace["events"][0].__setitem__("node", "wrong"),
+            "invalid stage trace name",
+        ),
+        (
+            lambda trace: trace.__setitem__(
+                "started_at", "2026-08-05T00:00:00Z"
+            ),
+            "invalid started_at",
+        ),
+        (
+            lambda trace: trace["events"][0].__setitem__("timing", {}),
+            "invalid stage trace name",
+        ),
+        (
+            lambda trace: trace["events"][0].__setitem__("seq", True),
+            "invalid stage trace sequence",
+        ),
+    ),
+)
+async def test_generate_rejects_malformed_kairyu_stage_trace(mutate, match):
+    trace = _stage_trace(("tokenize", 101, 1))
+    mutate(trace)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-upstream",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "kairyu_trace_v2": trace,
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://replica:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="kairyu",
+    )
+
+    with pytest.raises(RuntimeError, match=match):
+        await backend.generate(_request(trace_requested=True))
+
+
+def test_kairyu_stage_trace_accepts_future_stage_and_ignores_unknown_status():
+    trace = _stage_trace(
+        ("future_stage", 101, 1),
+        ("tokenize", 202, 1),
+    )
+    trace["events"][1]["status"] = "future-status"
+
+    metrics = _stage_metrics_from_trace(
+        trace,
+        response_id="chatcmpl-upstream",
+    )
+
+    assert metrics == (GenerationStageMetric("future_stage", 101),)
 
 
 async def test_generate_maps_upstream_logprobs():
@@ -1332,6 +1503,151 @@ async def test_stream_parses_sse_into_cumulative_partials(monkeypatch):
     assert [result.finished for result in results] == [False, False, True]
     assert results[-1].completions[0].finish_reason == "stop"
     await backend.shutdown()
+
+
+async def test_stream_propagates_and_parses_terminal_kairyu_stage_trace():
+    captured: dict[str, object] = {}
+    trace = _stage_trace(
+        ("queue_wait", 202, 1),
+        ("sse_write", 404, 4),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["trace_header"] = request.headers.get("x-kairyu-trace")
+        metadata = json.dumps(
+            {
+                "id": "chatcmpl-upstream",
+                "choices": [],
+                "kairyu_trace_v2": trace,
+            }
+        )
+        body = (
+            b'data: {"id":"chatcmpl-upstream","choices":'
+            b'[{"index":0,"delta":{"content":"ok"}}]}\n\n'
+            b'data: {"id":"chatcmpl-upstream","choices":'
+            b'[{"index":0,"delta":{},'
+            b'"finish_reason":"stop"}]}\n\n'
+            + f"data: {metadata}\n\n".encode()
+            + b"data: [DONE]\n\n"
+        )
+        return httpx.Response(
+            200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://replica:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="kairyu",
+    )
+
+    results = [
+        result
+        async for result in backend.stream(_request(trace_requested=True))
+    ]
+
+    assert captured["trace_header"] == "1"
+    assert len(results) == 2
+    assert results[0].stage_metrics == ()
+    assert [
+        (metric.stage, metric.duration_ns, metric.occurrences)
+        for metric in results[-1].stage_metrics
+    ] == [("queue_wait", 202, 1), ("sse_write", 404, 4)]
+
+
+@pytest.mark.parametrize(
+    ("trailer", "match"),
+    (
+        (
+            b'data: {"id":"chatcmpl-upstream","choices":[]}\n\n'
+            b"data: [DONE]\n\n",
+            "not terminal",
+        ),
+        (b"", "omitted SSE"),
+    ),
+)
+async def test_stream_rejects_nonterminal_or_unfinished_kairyu_stage_trace(
+    trailer,
+    match,
+):
+    trace = _stage_trace(("tokenize", 101, 1))
+    metadata = json.dumps(
+        {
+            "id": "chatcmpl-upstream",
+            "choices": [],
+            "kairyu_trace_v2": trace,
+        }
+    )
+    body = (
+        b'data: {"id":"chatcmpl-upstream","choices":'
+        b'[{"index":0,"delta":{"content":"ok"}}]}\n\n'
+        + f"data: {metadata}\n\n".encode()
+        + trailer
+    )
+    backend = OpenAICompatBackend(
+        base_url="http://replica:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=body,
+                headers={"content-type": "text/event-stream"},
+            )
+        ),
+        upstream="kairyu",
+    )
+
+    with pytest.raises(RuntimeError, match=match):
+        _ = [
+            result
+            async for result in backend.stream(_request(trace_requested=True))
+        ]
+
+
+async def test_stream_preserves_kairyu_stage_metrics_before_sanitized_error():
+    trace = _stage_trace(("decode_step", 303, 2))
+    metadata = json.dumps(
+        {
+            "id": "chatcmpl-upstream",
+            "choices": [],
+            "kairyu_trace_v2": trace,
+        }
+    )
+    body = (
+        b'data: {"id":"chatcmpl-upstream","choices":'
+        b'[{"index":0,"delta":{"content":"ok"}}]}\n\n'
+        + f"data: {metadata}\n\n".encode()
+        + b'data: {"error":{"message":"secret upstream detail",'
+        b'"type":"upstream_error"}}\n\n'
+        + b"data: [DONE]\n\n"
+    )
+    backend = OpenAICompatBackend(
+        base_url="http://replica:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=body,
+                headers={"content-type": "text/event-stream"},
+            )
+        ),
+        upstream="kairyu",
+    )
+    yielded = []
+
+    with pytest.raises(RuntimeError, match="reported an error") as caught:
+        async for result in backend.stream(_request(trace_requested=True)):
+            yielded.append(result)
+
+    assert "secret upstream detail" not in str(caught.value)
+    assert yielded[-1].stage_metrics == (
+        GenerationStageMetric("decode_step", 303, 2),
+    )
 
 
 async def test_stream_preserves_unicode_line_separators_inside_json():

@@ -64,6 +64,17 @@ frontier's floor-index calculation and serving's median p50/floor-index p99.
 Versioned formal-gate artifact schemas remain source-bound compatibility
 contracts rather than generic reporting implementations.
 
+`bench/serving_bench.py --stage-trace` opts Kairyu requests into the structured
+trace contract and reports native `tokenize`, `queue_wait`, `schedule`,
+`prefill`, `decode_step`, `detokenize`, and `sse_write` p50/p99 durations beside
+TTFT/TPOT. Artifacts distinguish valid, partial, missing, invalid, and
+not-requested coverage, and every expected native stage records its observed
+and missing request denominator. Unsupported targets are missing rather than
+zero-valued. Unsafe free-form orchestration producer labels are omitted from
+retained events without invalidating the rest of an otherwise valid envelope.
+The flag is off by default so diagnostic instrumentation does not contaminate
+ordinary Kairyu/vLLM/SGLang comparisons.
+
 `bench/proc_wire_bench.py` is a deterministic process-boundary complexity
 gate. It encodes the same cumulative generation trace through the legacy and
 versioned-delta `kairyu-proc` msgpack paths, retains every frame size, and

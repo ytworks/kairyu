@@ -1,29 +1,39 @@
-# Structured orchestration trace contract
+# Structured trace contract
 
-Status: implemented for unary and streaming AUTO responses
+Status: implemented for unary and streaming AUTO and direct native-engine responses
 
 ## Goal
 
 Expose enough orchestration state for evaluation tools to render the selected
 route, actual DAG path, attempts, timings, usage, budget consumption, and safe
-failures. The trace must not retain prompts or generated text and must not
-break clients that use the existing string trace.
+failures. For direct native generation, expose request-observed engine and SSE
+stage durations so client latency regressions can be attributed. The trace must
+not retain prompts or generated text and must not break clients that use the
+existing string trace.
 
 ## Compatibility
 
 - Clients opt in with `X-Kairyu-Trace: 1`.
-- `kairyu_trace: string[]` remains unchanged.
+- Existing AUTO `kairyu_trace: string[]` values remain unchanged. Direct native
+  responses use the same field for bounded human-readable stage summaries.
 - `kairyu_trace_v2` is an additive response field.
 - `kairyu_route` and both trace fields are declared in the OpenAPI response
-  model for generated-client and capability discovery.
+  model for generated-client and capability discovery. `kairyu_route` remains
+  AUTO-only; direct responses contain the two trace fields without a route.
 - The schema is versioned independently with `trace_version: "2.0"`.
 - Without the header, route and trace extension fields are omitted rather than
   serialized as null.
-- Streaming preserves the legacy SSE trace comment and also returns
-  `kairyu_trace_v2`, `kairyu_route`, and `kairyu_trace` together on one
-  terminal `choices: []` metadata chunk. Stage events are not emitted live, so
-  clients see one stable trace envelope after execution rather than having to
-  assemble mutable fragments.
+- Streaming returns the opted-in trace fields together on one terminal
+  `choices: []` metadata chunk. AUTO also includes `kairyu_route` and preserves
+  its legacy SSE trace comment. Events are not emitted live, so clients see one
+  stable trace envelope after execution rather than having to assemble mutable
+  fragments.
+- `bench/serving_bench.py --stage-trace` sends the opt-in header, records
+  valid/partial/missing/invalid coverage, reports an observed/missing request
+  denominator for every native stage, and computes nearest-rank p50/p99 stage
+  durations. Producer labels that are not safe artifact identifiers cause only
+  that event to be omitted; they do not invalidate the rest of the envelope.
+  The default benchmark path sends no trace header.
 
 ## Envelope
 
@@ -42,9 +52,9 @@ and reflect the stable response order. Concurrent role events may overlap in
 time; consumers must use their timestamps rather than infer serialization from
 `seq`.
 
-## Event
+## Orchestration event
 
-Every event includes:
+Every orchestration event includes:
 
 - `seq`, `node`, `role`
 - `kind`: `routing`, `generation`, `verification`, or `synthesis`
@@ -63,6 +73,55 @@ a router event and one aggregate synthesis event because the current MoA result
 does not expose per-proposal timing. The aggregate event resolves the proposal
 and synthesizer engines separately; `engine` / `model` contain the distinct
 actual identifiers and `detail` preserves each logical role-to-engine mapping.
+
+## Direct native stage event
+
+A direct native-engine trace uses one cumulative event per observed stage. It
+keeps trace version 2 and uses the existing additive event surface:
+
+```json
+{
+  "seq": 1,
+  "node": "tokenize",
+  "role": "engine",
+  "kind": "stage",
+  "status": "success",
+  "attempt": 0,
+  "timing": null,
+  "detail": {
+    "stage": "tokenize",
+    "duration_ns": 125000,
+    "occurrences": 1,
+    "aggregation": "sum",
+    "scope": "request-observed"
+  }
+}
+```
+
+`duration_ns` is a cumulative monotonic-clock duration and `occurrences` is the
+number of observations in that sum. Stage names are unique within an envelope.
+The currently produced stages are:
+
+- `tokenize`: native prompt token-ID resolution and context validation. For
+  `kairyu-proc` with parent preflight enabled, the sum includes both the real
+  parent tokenizer encode/validation and the child's token-ID validation.
+- `queue_wait`: native request submission until the start of the first
+  scheduler call that admits work for the request.
+- `schedule`: cumulative wall duration of scheduler calls whose returned plan
+  contains the request.
+- `prefill`: cumulative submit-to-result-observation duration of native step
+  handles containing the request's prefill work.
+- `decode_step`: the equivalent cumulative duration for decode step handles.
+- `detokenize`: cumulative incremental-detokenizer push and finalize duration.
+- `sse_write`: cumulative application-side encode/yield-to-ASGI-resume duration
+  for content, finish, and optional usage chunks. It excludes the terminal
+  trace chunk, `[DONE]`, network RTT, and client-side parsing. A gateway sums
+  its own observation with any propagated Kairyu-replica observation.
+
+These are request-observed wall durations, not exclusive CPU/GPU ownership
+times. Batched requests can each observe the same schedule or device interval;
+pipeline overlap means the stage values can overlap and must not be added to
+reconstruct end-to-end latency.
 
 ## Data minimization
 
@@ -90,6 +149,20 @@ Timestamps are UTC RFC 3339 strings with millisecond precision.
 For a streamed final worker/synthesizer, `first_token_at` is the time Kairyu
 observes its first non-empty cumulative backend result. Unary calls leave it
 null.
+
+Direct native stage events do not use RFC 3339 event timestamps: `timing` is
+null and their bounded monotonic measurements live in `detail.duration_ns`.
+The envelope timestamps still delimit the HTTP request observation.
+
+Stage measurement is diagnostic and strictly opt-in. With no trace header, the
+native tokenizer, scheduler, runner, and detokenizer timing branches and their
+per-request accumulators remain inactive. Kairyu-to-Kairyu OpenAI-compatible
+replica calls propagate the opt-in and validate the returned scalar metrics.
+An older replica or a selected external vLLM/SGLang/OpenAI-compatible backend
+may return no engine-owned stages. A Kairyu gateway can still publish its local
+`sse_write`, making the envelope partial; consumers report every absent native
+stage as missing coverage, never as zero latency. A target that returns no
+trace envelope at all is overall missing.
 
 ## Usage and failure finalization
 

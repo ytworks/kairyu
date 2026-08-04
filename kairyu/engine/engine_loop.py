@@ -19,8 +19,10 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
+from time import perf_counter_ns
 from typing import Protocol
 
+from kairyu.engine.backend import GenerationStageMetric
 from kairyu.engine.core.engine_core import grammar_finished, token_ids
 from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
@@ -38,6 +40,14 @@ from kairyu.sampling_params import SamplingParams
 
 _DEFAULT_MAX_NEW_TOKENS = 16
 _DEFAULT_PIPELINE_DEPTH = 1
+_TRACE_STAGE_ORDER = (
+    "tokenize",
+    "queue_wait",
+    "schedule",
+    "prefill",
+    "decode_step",
+    "detokenize",
+)
 
 
 def _validate_max_model_len(max_model_len: int | None) -> None:
@@ -69,6 +79,9 @@ class _PendingStep:
     handle: _StepHandle
     request_ids: tuple[str, ...]
     contains_prefill: bool
+    trace_started_ns: int | None = None
+    traced_prefill_ids: tuple[str, ...] = ()
+    traced_decode_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,6 +98,7 @@ class StreamUpdate:
     num_prompt_tokens: int = 0
     num_cached_tokens: int = 0
     logprob_content: tuple[TokenLogprob, ...] | None = None
+    stage_metrics: tuple[GenerationStageMetric, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -101,6 +115,7 @@ class PreparedPrompt:
     prompt_token_ids: tuple[int, ...]
     max_new_tokens: int
     _owner: object
+    tokenize_duration_ns: int | None = None
 
 
 def engine_sampling_from(params: SamplingParams) -> EngineSampling:
@@ -244,10 +259,22 @@ class _RequestTrack:
         "pending",
         "num_prompt_tokens",
         "num_cached_tokens",
+        "trace_requested",
+        "submitted_ns",
+        "first_schedule_observed",
+        "stage_durations_ns",
+        "stage_occurrences",
     )
 
     def __init__(
-        self, detok: IncrementalDetokenizer, stops: tuple[str, ...], num_prompt_tokens: int
+        self,
+        detok: IncrementalDetokenizer,
+        stops: tuple[str, ...],
+        num_prompt_tokens: int,
+        *,
+        trace_requested: bool = False,
+        tokenize_duration_ns: int | None = None,
+        submitted_ns: int | None = None,
     ) -> None:
         self.detok = detok
         self.stop_matcher = _IncrementalStopMatcher(stops)
@@ -258,9 +285,43 @@ class _RequestTrack:
         self.pending: list[SampledToken] = []
         self.num_prompt_tokens = num_prompt_tokens
         self.num_cached_tokens = 0
+        self.trace_requested = trace_requested
+        self.submitted_ns = submitted_ns
+        self.first_schedule_observed = False
+        self.stage_durations_ns: dict[str, int] | None = (
+            {} if trace_requested else None
+        )
+        self.stage_occurrences: dict[str, int] | None = (
+            {} if trace_requested else None
+        )
+        if tokenize_duration_ns is not None:
+            self.record_stage("tokenize", tokenize_duration_ns)
 
     def find_stop(self, text: str) -> int | None:
         return self.stop_matcher.find(text)
+
+    def record_stage(self, stage: str, duration_ns: int) -> None:
+        durations = self.stage_durations_ns
+        occurrences = self.stage_occurrences
+        if durations is None or occurrences is None:
+            return
+        durations[stage] = durations.get(stage, 0) + max(0, duration_ns)
+        occurrences[stage] = occurrences.get(stage, 0) + 1
+
+    def metrics(self) -> tuple[GenerationStageMetric, ...]:
+        durations = self.stage_durations_ns
+        occurrences = self.stage_occurrences
+        if durations is None or occurrences is None:
+            return ()
+        return tuple(
+            GenerationStageMetric(
+                stage=stage,
+                duration_ns=durations[stage],
+                occurrences=occurrences[stage],
+            )
+            for stage in _TRACE_STAGE_ORDER
+            if stage in durations
+        )
 
 
 @dataclass
@@ -334,7 +395,19 @@ class EngineLoop:
         self._abort_requested: set[str] = set()
         self._closed = False
         self._tracked: dict[str, _RequestTrack] = {}  # step-side only
+        self._traced_requests = 0
         self._active_request_ids: set[str] = set()
+
+    def _activate_track(self, request_id: str, track: _RequestTrack) -> None:
+        self._tracked[request_id] = track
+        if track.trace_requested:
+            self._traced_requests += 1
+
+    def _remove_track(self, request_id: str) -> _RequestTrack | None:
+        track = self._tracked.pop(request_id, None)
+        if track is not None and track.trace_requested:
+            self._traced_requests -= 1
+        return track
 
     def tokenize_prompt(self, prompt: str) -> tuple[int, ...]:
         prompt_token_ids = self._tokenizer.encode(prompt)
@@ -396,17 +469,28 @@ class EngineLoop:
         self,
         prompt: PromptInput,
         params: SamplingParams,
+        *,
+        trace_requested: bool = False,
     ) -> PreparedPrompt:
         """Resolve and validate a prompt once without reserving a request ID."""
 
+        if type(trace_requested) is not bool:
+            raise ValueError("trace_requested must be a boolean")
+        tokenize_started_ns = perf_counter_ns() if trace_requested else None
         prompt_token_ids = self.resolve_prompt_token_ids(prompt)
         max_new_tokens = self._max_new_tokens(params)
         self._validate_context_length(prompt_token_ids, max_new_tokens)
+        tokenize_duration_ns = (
+            max(0, perf_counter_ns() - tokenize_started_ns)
+            if tokenize_started_ns is not None
+            else None
+        )
         return PreparedPrompt(
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
             max_new_tokens=max_new_tokens,
             _owner=self._prepared_prompt_owner,
+            tokenize_duration_ns=tokenize_duration_ns,
         )
 
     def validate_prompt_length(
@@ -426,7 +510,10 @@ class EngineLoop:
         priority: int = 0,
         scheduling_class: str = "interactive",
         prepared_prompt: PreparedPrompt | None = None,
+        trace_requested: bool = False,
     ) -> None:
+        if type(trace_requested) is not bool:
+            raise ValueError("trace_requested must be a boolean")
         params = self.generation_defaults.apply(params)
         # Advisory fast rejection avoids tokenization and lock traffic for the
         # common duplicate case. The lock-protected check below remains the
@@ -434,7 +521,11 @@ class EngineLoop:
         if request_id in self._active_request_ids:
             raise ValueError(f"duplicate request_id {request_id!r}")
         if prepared_prompt is None:
-            prepared_prompt = self.prepare_prompt(prompt, params)
+            prepared_prompt = self.prepare_prompt(
+                prompt,
+                params,
+                trace_requested=trace_requested,
+            )
         else:
             if prepared_prompt._owner is not self._prepared_prompt_owner:
                 raise ValueError("prepared prompt belongs to a different engine loop")
@@ -467,6 +558,11 @@ class EngineLoop:
             detok=IncrementalDetokenizer(self._tokenizer),
             stops=tuple(params.stop or ()),
             num_prompt_tokens=len(engine_request.prompt_token_ids),
+            trace_requested=trace_requested,
+            tokenize_duration_ns=(
+                prepared_prompt.tokenize_duration_ns if trace_requested else None
+            ),
+            submitted_ns=(perf_counter_ns() if trace_requested else None),
         )
         with self._ops_lock:
             if self._closed:
@@ -555,7 +651,7 @@ class EngineLoop:
             active = tuple(ids & self._active_request_ids)
         for request_id in active:
             self._scheduler.abort(request_id)
-            self._tracked.pop(request_id, None)
+            self._remove_track(request_id)
             self._forget(request_id)
 
     def has_work(self) -> bool:
@@ -611,7 +707,7 @@ class EngineLoop:
                         for request, track in zip(
                             batch.requests, batch.tracks, strict=True
                         ):
-                            self._tracked[request.request_id] = track
+                            self._activate_track(request.request_id, track)
                         continue
 
                 for request_index, (engine_request, track) in enumerate(
@@ -636,7 +732,7 @@ class EngineLoop:
                         remaining.extend(batches[batch_index + 1 :])
                         self._restore_ops(remaining)
                         raise
-                    self._tracked[engine_request.request_id] = track
+                    self._activate_track(engine_request.request_id, track)
                 continue
 
             for abort_index, request_id in enumerate(batch.request_ids):
@@ -695,7 +791,32 @@ class EngineLoop:
                 # partially empty sequence window, then re-evaluate admission
                 # with the newly released slots on the next public step.
                 break
+            schedule_started_ns = (
+                perf_counter_ns() if self._traced_requests else None
+            )
             plan = self._scheduler.schedule()
+            if schedule_started_ns is not None:
+                schedule_duration_ns = max(
+                    0,
+                    perf_counter_ns() - schedule_started_ns,
+                )
+                traced_participants: set[str] = set()
+                for chunk in plan.scheduled:
+                    track = self._tracked.get(chunk.request_id)
+                    if track is None or not track.trace_requested:
+                        continue
+                    traced_participants.add(chunk.request_id)
+                for request_id in traced_participants:
+                    track = self._tracked[request_id]
+                    if not track.first_schedule_observed:
+                        submitted_ns = track.submitted_ns
+                        if submitted_ns is not None:
+                            track.record_stage(
+                                "queue_wait",
+                                schedule_started_ns - submitted_ns,
+                            )
+                        track.first_schedule_observed = True
+                    track.record_stage("schedule", schedule_duration_ns)
             # prompts too large to ever fit are rejected in schedule() (C2);
             # their tracks surface as finished via _track_update below
             self._scheduler.drain_rejected()
@@ -755,7 +876,7 @@ class EngineLoop:
                 continue
             updates.append((request_id, update))
             if update.finished:
-                del self._tracked[request_id]
+                self._remove_track(request_id)
                 if self._pending_by_request.get(request_id, 0):
                     # A later scheduled-ahead step can still return this id.
                     # Keep scheduler + runner state until its surplus token is
@@ -768,6 +889,32 @@ class EngineLoop:
     def _submit_step(self, scheduled: tuple) -> None:
         """Freeze and submit one scheduler plan to the common handle contract."""
         step = snapshot_step(scheduled, self._scheduler.states)
+        traced_prefill_ids: tuple[str, ...] = ()
+        traced_decode_ids: tuple[str, ...] = ()
+        if self._traced_requests:
+            traced_prefill_ids = tuple(
+                dict.fromkeys(
+                    chunk.request_id
+                    for chunk in step.chunks
+                    if chunk.is_prefill
+                    and (track := self._tracked.get(chunk.request_id)) is not None
+                    and track.trace_requested
+                )
+            )
+            traced_decode_ids = tuple(
+                dict.fromkeys(
+                    chunk.request_id
+                    for chunk in step.chunks
+                    if not chunk.is_prefill
+                    and (track := self._tracked.get(chunk.request_id)) is not None
+                    and track.trace_requested
+                )
+            )
+        trace_started_ns = (
+            perf_counter_ns()
+            if traced_prefill_ids or traced_decode_ids
+            else None
+        )
         submit = getattr(self._runner, "submit", None)
         if callable(submit):
             handle = submit(self._step_index, step.chunks, step.states_view())
@@ -785,6 +932,9 @@ class EngineLoop:
                 handle,
                 request_ids,
                 contains_prefill=any(chunk.is_prefill for chunk in step.chunks),
+                trace_started_ns=trace_started_ns,
+                traced_prefill_ids=traced_prefill_ids,
+                traced_decode_ids=traced_decode_ids,
             )
         )
         for request_id in request_ids:
@@ -835,7 +985,10 @@ class EngineLoop:
     def _commit_oldest(self) -> None:
         pending = self._pending_steps.popleft()
         try:
-            sampled = pending.handle.result()
+            try:
+                sampled = pending.handle.result()
+            finally:
+                self._record_pending_observation(pending)
             if sampled:
                 finished = self._scheduler.update(token_ids(sampled))
                 for request_id in grammar_finished(sampled, finished):
@@ -847,6 +1000,20 @@ class EngineLoop:
                         track.pending.extend(tokens)
         finally:
             self._release_pending_counts(pending.request_ids)
+
+    def _record_pending_observation(self, pending: _PendingStep) -> None:
+        started_ns = pending.trace_started_ns
+        if started_ns is None:
+            return
+        duration_ns = max(0, perf_counter_ns() - started_ns)
+        for request_id in pending.traced_prefill_ids:
+            track = self._tracked.get(request_id)
+            if track is not None:
+                track.record_stage("prefill", duration_ns)
+        for request_id in pending.traced_decode_ids:
+            track = self._tracked.get(request_id)
+            if track is not None:
+                track.record_stage("decode_step", duration_ns)
 
     def _release_pending_counts(self, request_ids: tuple[str, ...]) -> None:
         for request_id in request_ids:
@@ -889,7 +1056,7 @@ class EngineLoop:
                 self._abort_requested.clear()
             for request_id in active:
                 self._scheduler.abort(request_id)
-                self._tracked.pop(request_id, None)
+                self._remove_track(request_id)
                 self._forget(request_id)
             self._deferred_forget.clear()
             if self._device_executor is not None:
@@ -950,7 +1117,15 @@ class EngineLoop:
                 # it after it has been pushed.
                 visible_new_ids = new_ids[:-1]
         if visible_new_ids:
-            track.stable = track.detok.push(visible_new_ids)
+            if track.trace_requested:
+                detokenize_started_ns = perf_counter_ns()
+                track.stable = track.detok.push(visible_new_ids)
+                track.record_stage(
+                    "detokenize",
+                    perf_counter_ns() - detokenize_started_ns,
+                )
+            else:
+                track.stable = track.detok.push(visible_new_ids)
         track.num_cached_tokens = max(
             track.num_cached_tokens, self._scheduler.num_cached_tokens(request_id)
         )
@@ -968,10 +1143,19 @@ class EngineLoop:
                 num_prompt_tokens=track.num_prompt_tokens,
                 num_cached_tokens=track.num_cached_tokens,
                 logprob_content=content,
+                stage_metrics=track.metrics(),
             )
 
         if state.status.value == "finished":
-            full = track.detok.finalize()
+            if track.trace_requested:
+                detokenize_started_ns = perf_counter_ns()
+                full = track.detok.finalize()
+                track.record_stage(
+                    "detokenize",
+                    perf_counter_ns() - detokenize_started_ns,
+                )
+            else:
+                full = track.detok.finalize()
             stop_at = track.find_stop(full)
             if stop_at is not None:
                 return _update(full[:stop_at], True, "stop")
