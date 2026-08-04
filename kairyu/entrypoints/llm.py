@@ -27,9 +27,14 @@ from kairyu.engine.prompt import (
 )
 from kairyu.entrypoints.chat_template import render_chat
 from kairyu.outputs import RequestOutput
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import (
+    GENERATION_CONFIG_SAMPLING_FIELDS,
+    SamplingParams,
+)
 
-_DEFAULT_PARAMS = SamplingParams()
+_DEFAULT_PARAMS = SamplingParams().with_generation_config_omitted(
+    GENERATION_CONFIG_SAMPLING_FIELDS
+)
 
 
 def _default_backend(

@@ -477,7 +477,7 @@ plane, G6/P: product surface). Next actions: **E1** (single-GPU real engine — 
 | M7 — Productionization (serve CLI, gateway wiring, batch, observability) | **CPU half done** (design m7 D1–D8, goal G3): health/readyz/metrics/auth/concurrency guard, `kairyu serve` + DeploymentSpec, ReplicaPool gateway wiring + prober, HTTP session affinity, batch API, Dockerfile + compose + CI smoke drill, `docs/deployment.md`. GPU bring-up: runbook §9. |
 | M8 — Engine CPU core (real tokens/sampling/multi-token commit/spec decode/quant基盤/process split) | **Complete** (2026-07-03, amended 2026-07-29, `docs/design/m8-engine-cpu.md`): native incremental HF/Toy detokenization with exact fallback, bounded-overlap SSE-safe stop matching, lock-safe/coalesced producer op batches, incremental sampler penalty state + tokenizer-native xgrammar in-path, scheduler spec reservation, n-gram SpeculativeRunner (spec ≡ greedy pinned), NVFP4/HardwareProfile/safetensors reader, and negotiated snapshot/delta ZMQ `kairyu-proc` wire with legacy compatibility and stream-generation isolation. |
 | M9 — Truthful API (usage/templates/logprobs/completions/n>1) | **Complete** (2026-07-03, `docs/design/m9-truthful-api.md`): G6 P-A gates CPU-green — real usage + cached_tokens + include_usage, HF Jinja templates (transformers byte-match), logprobs + /v1/completions, n>1 fan-out, response_format validation, bench token-TPOT. 471 tests. |
-| M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete** (2026-07-03, `docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; pytest gpu/hf_hub/dist markers. 501 tests. |
+| M12 — Real model zoo dense (Llama/Qwen, PagedKVPool, PagedModelRunner) | **Complete; D5 generation-default contract amended 2026-08-04** (`docs/design/m12-model-zoo.md`): full-engine greedy == transformers generate (3 archs); loader + model_path wiring; model-owned sampling defaults preserve request omission while explicit values remain authoritative; pytest gpu/hf_hub/dist markers. |
 | M13 — AttentionBackend seam (torch/MLA reference/FlashInfer adapter/selector) | **Complete; FA3/FA4 extension implemented and SM120-validated** (`docs/design/m13-attention-backend.md`): issue #277 adds strict `auto`/torch/FlashInfer/FA3/FA4 choices, canonical TP/P-D decisions, and actual child-process reporting. Retained SM120 FA4/Qwen3-32B evidence keeps `auto` on the objectively faster stable FlashInfer path; FA3 is a strict SM90 path with fake API-contract coverage and no unmeasured default claim. |
 | M14 — Quant compute (FP8/INT8/AWQ/GPTQ/NVFP4 CPU oracles + fused/native GPU kernels) | **GPU-validated** (2026-07-30, `docs/design/m14-quant-compute.md`): all five schemes production-dispatch on CUDA without a full dequantized weight, pass per-kernel and full-engine GPU gates, and fail loudly outside their supported capability/layout. Construction now binds canonical projection identity, role/scope, target device/dtype, TP placement, and probed kernel capabilities while retaining checkpoint names and explicit exclusions. CPU format proofs remain pinned vs live Hub checkpoints. |
 | M15 — MoE + MLA archs (Qwen3-MoE, DeepSeek-V3 incl. yarn) | **Complete** (2026-07-03, `docs/design/m15-moe-mla.md`): full-engine greedy == hf.generate; latent MLA pool (M18-ready). 547 tests. |
@@ -794,6 +794,19 @@ first/latest/error), while any getter-held snapshot remains one additional
 constant slot. Text, tokens, logprobs, usage, finish reasons, and error ordering
 remain exact. The sequenced-delta ZMQ path is intentionally unchanged.
 
+Model-owned generation sampling defaults now preserve omission across chat,
+completions, Responses, offline LLM, native TP/EP/P-D, process-split, remote
+OpenAI-compatible, and local vLLM paths. Native `auto` applies five validated
+`generation_config.json` fields, `vllm` selects neutral sampling while retaining
+sidecar stop metadata, and `none` ignores the sidecar. Explicit request values
+always win. The serve CLI can override all local native targets, and
+`/backends` reports direct and per-orchestrator-worker policy, promotes only
+homogeneous local-pool policy, and labels remote pool evidence as one sampled
+replica rather than a fleet-wide default. Process restarts reject missing
+generation metadata for real models instead of applying neutral or stale state;
+official deployments eagerly start process-backed orchestrator workers before
+readiness so their audit record is resolved before traffic.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -801,6 +814,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-04 — [amendment] Model generation defaults preserve request omission
+- What: extended model generation defaults from EOS-only parsing to validated `temperature`, `top_p`, `top_k`, `min_p`, and `repetition_penalty`; preserved omitted-versus-explicit intent through HTTP, offline, native distributed/process, OpenAI-compatible, and vLLM adapters; added strict `auto`/`vllm`/`none` deployment and CLI policy; made real-model process restarts reject missing or stale policy metadata; eagerly started process-backed orchestrator workers before deployment readiness; and exposed direct, homogeneous-local-pool, sampled-remote, and per-orchestrator-worker audit records through `/backends`. The final portable Python 3.12 gate passed 1,259 benchmark plus 3,428 non-benchmark tests with no selected skips and 86.88% combined coverage.
+- Why: modern instruction checkpoints rely on `generation_config.json`, but concrete API defaults previously erased whether callers omitted a field and native Kairyu therefore diverged from checkpoint and compatible-engine generation behavior. Model defaults must apply only to genuine omissions, while explicit values—including neutral values—remain authoritative and invalid or heterogeneous policy must fail closed.
+- Refs: issue #351; m12 D5; `kairyu/models/generation.py`; `kairyu/sampling_params.py`; `kairyu/engine/{kairyu_backend,vllm_backend,zmq_backend}.py`; `kairyu/entrypoints/{cli,llm}.py`; `kairyu/entrypoints/server/{app,chat_service,responses_service,health}.py`; `tests/{unit,compat,server}/`
 
 ### 2026-08-04 — [amendment] Native streams bound and coalesce backpressured snapshots
 - What: replaced each in-process request's unbounded cumulative-update queue with a terminal-sealed conflating mailbox, retained the first token-bearing snapshot per choice, and drained consecutive non-terminal backlog before later public yields. Physical mailbox backlog is bounded to two snapshots and the pre-consumer error edge to three; successful terminals replace cumulative state, while payload-free errors follow the latest state. Single and `n > 1` tests bind 128-update backlog, TTFT cadence, full text/token/logprob/usage preservation, terminal ordering, and sibling error propagation. A direct ASGI gate blocks the first body send through engine completion and binds one queued terminal, two content chunks, exact usage/finish/DONE, and a constant body-send bound. ZMQ v2 remains unchanged because its wire events are sequenced deltas. The final portable Python 3.12 two-phase run passed all 4,595 selected tests in 10m20s with zero selected skips and 86.77% combined coverage.

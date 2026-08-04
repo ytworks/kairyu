@@ -216,6 +216,18 @@ class ReplicaPool:
         # attention backend is constant for its lifetime); None stays uncached.
         self._backends_cache: dict | None = None
 
+    @property
+    def generation_defaults(self):
+        """Expose one resolved policy only when every local replica agrees."""
+
+        values = tuple(
+            getattr(entry.backend, "generation_defaults", None)
+            for entry in self._entries.values()
+        )
+        if not values or values[0] is None:
+            return None
+        return values[0] if all(value == values[0] for value in values[1:]) else None
+
     # -- membership (m10a D1) -------------------------------------------------
 
     @property

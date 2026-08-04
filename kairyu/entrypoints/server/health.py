@@ -16,6 +16,7 @@ from kairyu.engine.core.attention_selector import (
 )
 from kairyu.engine.core.hw_profile import probe
 from kairyu.entrypoints.server.metrics import ServerMetrics
+from kairyu.models.generation import GenerationDefaults
 from kairyu.orchestration.replica import ReplicaPool
 
 # type(engine).__name__ -> engine-registry backend name. Kept local (not a class
@@ -188,6 +189,37 @@ def _expert_parallel_metadata(value: object) -> dict[str, object] | None:
     }
 
 
+def _generation_metadata(value: object) -> dict[str, object] | None:
+    """Return one complete, validated generation-default audit record."""
+
+    if not isinstance(value, Mapping):
+        return None
+    mode = value.get("generation_config")
+    source = value.get("generation_config_source")
+    sampling = value.get("generation_defaults")
+    if not isinstance(sampling, Mapping) or set(sampling) != {
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repetition_penalty",
+    }:
+        return None
+    try:
+        defaults = GenerationDefaults(
+            mode=mode,
+            source=source,
+            **sampling,
+        )
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return {
+        "generation_config": defaults.mode,
+        "generation_config_source": defaults.source,
+        "generation_defaults": defaults.sampling_defaults(),
+    }
+
+
 def add_health_routes(
     app: FastAPI,
     engines: Mapping[str, EngineBackend],
@@ -195,9 +227,11 @@ def add_health_routes(
     admin_keys: Iterable[str] = (),
     *,
     embedding_backends: Mapping[str, object] | None = None,
+    orchestrators: Mapping[str, object] | None = None,
 ) -> None:
     admin_key_set = frozenset(admin_keys)
     embedding_resources = dict(embedding_backends or {})
+    orchestrator_resources = dict(orchestrators or {})
 
     def _forbidden_if_not_admin(request: Request) -> JSONResponse | None:
         # when admin keys are configured, /admin/* state changes require one, so
@@ -549,6 +583,21 @@ def add_health_routes(
                 entry["requested_kv_cache_dtype"] = requested_kv_dtype
             if isinstance(resolved_kv_dtype, str) and resolved_kv_dtype:
                 entry["kv_cache_dtype"] = resolved_kv_dtype
+            generation_defaults = getattr(
+                engine,
+                "generation_defaults",
+                None,
+            )
+            if isinstance(generation_defaults, GenerationDefaults):
+                entry.update(
+                    {
+                        "generation_config": generation_defaults.mode,
+                        "generation_config_source": generation_defaults.source,
+                        "generation_defaults": (
+                            generation_defaults.sampling_defaults()
+                        ),
+                    }
+                )
             dram_enabled = getattr(engine, "dram_kv_tier_enabled", None)
             if type(dram_enabled) is bool:
                 entry["dram_kv_tier_enabled"] = dram_enabled
@@ -635,11 +684,69 @@ def add_health_routes(
                             value = values[0]
                             entry[field] = value
                             entry["via_replica"][field] = value
+                    generation_metadata = [
+                        _generation_metadata(item) for item in replica_engines
+                    ]
+                    if (
+                        generation_metadata
+                        and generation_metadata[0] is not None
+                        and all(
+                            metadata == generation_metadata[0]
+                            for metadata in generation_metadata[1:]
+                        )
+                    ):
+                        entry["via_replica"].update(generation_metadata[0])
             engine_list.append(entry)
 
+        for name, orchestrator in orchestrator_resources.items():
+            snapshot = getattr(orchestrator, "generation_defaults_snapshot", None)
+            raw_defaults = snapshot() if callable(snapshot) else {}
+            if not isinstance(raw_defaults, Mapping):
+                raw_defaults = {}
+            worker_metadata = {
+                str(worker): (
+                    {
+                        "generation_config": defaults.mode,
+                        "generation_config_source": defaults.source,
+                        "generation_defaults": defaults.sampling_defaults(),
+                    }
+                    if isinstance(defaults, GenerationDefaults)
+                    else None
+                )
+                for worker, defaults in raw_defaults.items()
+            }
+            entry = {
+                "model": name,
+                "engine_backend": "orchestrator",
+                "attention_backend": None,
+                "attention_components": None,
+                "generation_defaults_by_worker": worker_metadata,
+            }
+            complete = [
+                metadata
+                for metadata in worker_metadata.values()
+                if metadata is not None
+            ]
+            if (
+                complete
+                and len(complete) == len(worker_metadata)
+                and all(metadata == complete[0] for metadata in complete[1:])
+            ):
+                entry.update(complete[0])
+            engine_list.append(entry)
+
+        role_entries = [
+            entry
+            for entry in engine_list
+            if entry["engine_backend"] != "orchestrator"
+        ]
         role = (
             "gateway"
-            if engine_list and all(e["engine_backend"] == "replica-pool" for e in engine_list)
+            if role_entries
+            and all(
+                entry["engine_backend"] == "replica-pool"
+                for entry in role_entries
+            )
             else "engine-host"
         )
 

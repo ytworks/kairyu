@@ -50,6 +50,147 @@ def test_serve_flags_override_spec(monkeypatch, config):
     assert captured["port"] == 9000
 
 
+def test_generation_config_flag_overrides_every_static_native_backend(
+    monkeypatch,
+    tmp_path,
+):
+    from kairyu.engine.mock import MockBackend
+
+    config = tmp_path / "native.yaml"
+    config.write_text(
+        """
+engines:
+  local:
+    backend: kairyu
+    options: {generation_config: none}
+  unchanged: {backend: mock}
+pools:
+  native-pool:
+    replicas:
+      - backend: kairyu-proc
+        options: {generation_config: auto}
+      - backend: mock
+""",
+        encoding="utf-8",
+    )
+    captured = []
+
+    def fake_create_backend(backend, **options):
+        captured.append((backend, options))
+        return MockBackend()
+
+    monkeypatch.setattr(
+        "kairyu.deploy.builder.create_backend",
+        fake_create_backend,
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, **_kwargs: None)
+
+    cli.main(["serve", str(config), "--generation-config", "vllm"])
+
+    assert captured == [
+        ("kairyu", {"generation_config": "vllm"}),
+        ("mock", {}),
+        ("kairyu-proc", {"generation_config": "vllm"}),
+        ("mock", {}),
+    ]
+
+
+def test_serve_without_generation_config_flag_preserves_yaml_mode(
+    monkeypatch,
+    tmp_path,
+):
+    config = tmp_path / "native.yaml"
+    config.write_text(
+        """
+engines:
+  local:
+    backend: kairyu
+    options: {generation_config: none}
+""",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_build(spec, **kwargs):
+        captured["spec"] = spec
+        captured.update(kwargs)
+        return spec
+
+    monkeypatch.setattr(
+        "kairyu.deploy.builder.build_app_from_spec",
+        fake_build,
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, **_kwargs: None)
+
+    cli.main(["serve", str(config)])
+
+    assert captured["spec"].engines["local"].options["generation_config"] == "none"
+    assert captured["generation_config_override"] is None
+
+
+def test_generation_config_flag_rejects_a_remote_only_deployment(
+    monkeypatch,
+    config,
+):
+    def fail_if_constructed(*_args, **_kwargs):
+        raise AssertionError("remote-only override must fail before backend construction")
+
+    monkeypatch.setattr(
+        "kairyu.deploy.builder.create_backend",
+        fail_if_constructed,
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, **_kwargs: None)
+
+    with pytest.raises(ValueError, match="local kairyu"):
+        cli.main(["serve", str(config), "--generation-config", "auto"])
+
+
+def test_generation_config_flag_reaches_local_orchestrator_workers(
+    monkeypatch,
+    tmp_path,
+):
+    from kairyu.engine.mock import MockBackend
+
+    orchestrator = tmp_path / "orchestrator.yaml"
+    orchestrator.write_text(
+        """
+workers:
+  - name: native
+    backend: kairyu-proc
+    options: {generation_config: none}
+""",
+        encoding="utf-8",
+    )
+    config = tmp_path / "deploy.yaml"
+    config.write_text(
+        """
+engines:
+  remote: {backend: mock}
+orchestrator: {spec: orchestrator.yaml}
+""",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def fake_create_backend(backend, **options):
+        captured["backend"] = backend
+        captured["options"] = options
+        return MockBackend()
+
+    monkeypatch.setattr(
+        "kairyu.dsl.loader.create_backend",
+        fake_create_backend,
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, **_kwargs: None)
+
+    cli.main(["serve", str(config), "--generation-config", "vllm"])
+
+    assert captured == {
+        "backend": "kairyu-proc",
+        "options": {"generation_config": "vllm"},
+    }
+
+
 def test_command_is_required():
     with pytest.raises(SystemExit):
         cli.main([])

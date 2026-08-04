@@ -23,6 +23,7 @@ from kairyu.engine.prompt import (
 )
 from kairyu.engine.vision import ImageInputPolicy
 from kairyu.outputs import TokenLogprob
+from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS
 
 _RED_PNG_DATA_URL = (
     "data:image/png;base64,"
@@ -31,13 +32,34 @@ _RED_PNG_DATA_URL = (
 )
 
 
+_GENERATION_NEUTRALS = {
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": -1,
+    "min_p": 0.0,
+    "repetition_penalty": 1.0,
+}
+
+
 def _request(
-    prompt: PromptInput = "hi", sampling_params: SamplingParams | None = None
+    prompt: PromptInput = "hi",
+    sampling_params: SamplingParams | None = None,
+    *,
+    explicit_generation_neutrals: bool = False,
 ) -> GenerationRequest:
+    params = sampling_params or SamplingParams(temperature=0.2, max_tokens=64)
+    if not explicit_generation_neutrals:
+        params = params.with_generation_config_omitted(
+            {
+                field
+                for field, neutral in _GENERATION_NEUTRALS.items()
+                if getattr(params, field) == neutral
+            }
+        )
     return GenerationRequest(
         request_id="r1",
         prompt=prompt,
-        sampling_params=sampling_params or SamplingParams(temperature=0.2, max_tokens=64),
+        sampling_params=params,
     )
 
 
@@ -319,7 +341,9 @@ async def test_generate_forwards_and_preserves_native_tool_calls():
     request = GenerationRequest(
         request_id="tools",
         prompt="weather",
-        sampling_params=SamplingParams(),
+        sampling_params=SamplingParams().with_generation_config_omitted(
+            GENERATION_CONFIG_SAMPLING_FIELDS
+        ),
         tools=tools,
         tool_choice="required",
     )
@@ -378,7 +402,7 @@ async def test_generate_forwards_logprobs_zero():
     await backend.shutdown()
 
 
-async def test_generate_default_payload_omits_unrequested_controls():
+async def test_generate_marked_generation_omissions_stay_absent_upstream():
     captured: dict = {}
     backend = OpenAICompatBackend(
         base_url="https://api.example.com/v1",
@@ -387,18 +411,55 @@ async def test_generate_default_payload_omits_unrequested_controls():
         transport=_ok_transport(captured),
     )
 
-    await backend.generate(_request(sampling_params=SamplingParams()))
+    params = SamplingParams().with_generation_config_omitted(
+        GENERATION_CONFIG_SAMPLING_FIELDS
+    )
+    await backend.generate(_request(sampling_params=params))
 
     assert captured["body"]["presence_penalty"] == 0.0
     assert captured["body"]["frequency_penalty"] == 0.0
     for field in (
         "top_k",
         "min_p",
+        "repetition_penalty",
+        "temperature",
+        "top_p",
         "logprobs",
         "top_logprobs",
         "response_format",
     ):
         assert field not in captured["body"]
+    await backend.shutdown()
+
+
+@pytest.mark.parametrize("upstream", ["vllm", "kairyu"])
+async def test_generate_forwards_explicit_neutral_generation_values(upstream):
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        upstream=upstream,
+    )
+
+    await backend.generate(
+        _request(
+            sampling_params=SamplingParams(),
+            explicit_generation_neutrals=True,
+        )
+    )
+
+    assert {
+        field: captured["body"][field]
+        for field in GENERATION_CONFIG_SAMPLING_FIELDS
+    } == {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+    }
     await backend.shutdown()
 
 
@@ -441,6 +502,34 @@ async def test_generate_rejects_unsupported_intent_before_client_or_transport(fi
     assert field in str(exc_info.value)
     assert transport_calls == []
     assert backend._client is None
+
+
+@pytest.mark.parametrize(
+    ("upstream", "field", "params"),
+    [
+        ("openai", "top_k", SamplingParams(top_k=-1)),
+        ("gemini", "temperature", SamplingParams(temperature=1.0)),
+    ],
+)
+async def test_explicit_neutral_generation_value_is_not_silently_dropped(
+    upstream,
+    field,
+    params,
+):
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        upstream=upstream,
+        api_key_env=None,
+    )
+
+    with pytest.raises(UpstreamClientError, match=field):
+        await backend.generate(
+            _request(
+                sampling_params=params,
+                explicit_generation_neutrals=True,
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -490,8 +579,10 @@ async def test_generate_rejects_unsupported_intent_before_client_or_transport(fi
                 ignore_eos=True,
                 skip_special_tokens=False,
             ),
-            {
-                "max_tokens": 23,
+                {
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "max_tokens": 23,
                 "top_k": 7,
                 "min_p": 0.2,
                 "repetition_penalty": 1.1,
@@ -513,8 +604,10 @@ async def test_generate_rejects_unsupported_intent_before_client_or_transport(fi
                 min_tokens=4,
                 ignore_eos=True,
             ),
-            {
-                "max_completion_tokens": 19,
+                {
+                    "temperature": 1.0,
+                    "top_p": 1.0,
+                    "max_completion_tokens": 19,
                 "top_k": 5,
                 "min_p": 0.1,
                 "repetition_penalty": 1.2,
@@ -570,7 +663,12 @@ async def test_upstream_profiles_forward_exact_supported_body(upstream, params, 
         upstream=upstream,
     )
 
-    await backend.generate(_request(sampling_params=params))
+    await backend.generate(
+        _request(
+            sampling_params=params,
+            explicit_generation_neutrals=upstream in {"vllm", "kairyu"},
+        )
+    )
 
     body = captured["body"]
     assert {key: body[key] for key in expected} == expected

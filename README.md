@@ -416,6 +416,7 @@ engines:
     backend: kairyu              # or: kairyu-proc | vllm | openai | mock
     options:
       model_path: /models/qwen2.5-0.5b-instruct
+      generation_config: auto    # auto | vllm | none; default auto
       pipeline_depth: 2        # 1 preserves synchronous behavior
       decode_mode: cuda_graph   # explicit opt-in; eager remains the default
       cuda_graph_max_batch: 8
@@ -431,6 +432,18 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 Tensor parallelism is configured per engine in the YAML
 (`options: {tensor_parallel_size: 2}`) — the serve process spawns a multi-process TP
 worker group (gloo on CPU, NCCL on GPU). There is no CLI flag for it.
+
+Native `kairyu` and `kairyu-proc` engines use `generation_config: auto` to
+apply `temperature`, `top_p`, `top_k`, `min_p`, and `repetition_penalty` from
+the model's `generation_config.json` only when the request omits that field.
+An explicit request value, including a neutral value such as
+`temperature: 1.0`, always wins. `vllm` keeps the model's stop-token metadata
+but uses neutral sampling defaults, while `none` ignores the generation file
+entirely. `kairyu serve CONFIG --generation-config MODE` overrides the YAML
+mode for every locally constructed native engine, pool replica, and linked
+orchestrator worker. `/backends` reports the resolved mode, source, and five
+effective sampling defaults, including per-worker records for orchestrated
+models.
 
 Prefill/decode separation is also configured per engine. This example places
 the roles on a peer-accessible CUDA pair:
@@ -758,6 +771,7 @@ gateways, install `--extra fleet` and select `store: postgres`,
 | backend | option | default | meaning |
 |---|---|---|---|
 | `kairyu` | `model_path` | — | safetensors checkpoint dir (Llama-3.x / Qwen2 / Qwen3 / Qwen3-MoE / DeepSeek-V3; FP8/INT8/AWQ/GPTQ/NVFP4 quantized checkpoints auto-detected) |
+| | `generation_config` | `"auto"` | model sampling-default policy: `auto` applies the model file for omitted request fields, `vllm` uses neutral sampling defaults, and `none` ignores the file |
 | | `tokenizer` | model dir | HF tokenizer dir override (`tokenizer.json`) |
 | | `num_pages` | 4096 | KV pool pages |
 | | `page_size` | 16 | tokens per KV page |
@@ -816,10 +830,17 @@ vision content-parts wire format), `/v1/completions`, `/v1/embeddings`
 flat and namespaced function tools, `function_call_output`, tenant-scoped
 `previous_response_id`), `/v1/models`, `/v1/files` + `/v1/batches`, `/health`,
 `/v1/route`, `/routing`,
-`/readyz`, `/metrics`, `POST /admin/drain` / `POST /admin/undrain` (auth-protected;
+`/readyz`, `/backends`, `/metrics`, `POST /admin/drain` / `POST /admin/undrain` (auth-protected;
 drain flips readyz to 503), `GET /admin/usage?tenant=` (when the ledger is enabled).
 With `pricing:` configured, `GET /admin/usage.csv?tenant=&start_ts=&end_ts=`
 exports a caller-scoped invoice CSV.
+
+For native engines, `/backends` includes the generation-config mode, resolved
+source, and all five effective sampling defaults. A local pool promotes that
+record only when every member supplies the same complete policy. A gateway's
+single remote audit sample remains explicitly nested under `via_replica` and is
+never presented as a fleet-wide default. Orchestrated models expose every
+worker record and collapse one top-level policy only when all workers agree.
 
 Request extras: `X-Session-ID` (or the OpenAI `user` field) pins a session to the
 replica holding its warm KV prefix; `X-Kairyu-Trace: 1` adds the legacy

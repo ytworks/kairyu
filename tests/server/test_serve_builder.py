@@ -286,6 +286,38 @@ pools:
     assert direct.shutdown_count == replica.shutdown_count == 1
 
 
+async def test_lifespan_eagerly_starts_linked_orchestrator_workers(
+    monkeypatch,
+    tmp_path,
+):
+    worker = _StartupBackend()
+    (tmp_path / "orchestrator.yaml").write_text(
+        "workers:\n  - {name: native, backend: mock}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "kairyu.dsl.loader.create_backend",
+        lambda *_args, **_kwargs: worker,
+    )
+    app = build_app_from_spec(
+        load_deployment_spec(
+            """
+engines:
+  m: {backend: mock}
+orchestrator: {spec: orchestrator.yaml}
+"""
+        ),
+        base_dir=tmp_path,
+    )
+
+    assert worker.startup_count == 0
+    async with app.router.lifespan_context(app):
+        assert worker.startup_count == 1
+        assert worker.shutdown_count == 0
+
+    assert worker.shutdown_count == 1
+
+
 async def test_lifespan_startup_failure_prevents_serving_and_shuts_down_all_owned_resources(
     monkeypatch,
 ):

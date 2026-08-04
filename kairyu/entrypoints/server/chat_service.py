@@ -43,7 +43,10 @@ from kairyu.entrypoints.server.protocol import (
     Usage,
 )
 from kairyu.outputs import CompletionOutput, TokenLogprob
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import (
+    GENERATION_CONFIG_SAMPLING_FIELDS,
+    SamplingParams,
+)
 
 _TOOL_CALL_PATTERN = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 logger = logging.getLogger(__name__)
@@ -123,7 +126,7 @@ def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
     # remote OpenAI-compatible backends cannot substitute an unbounded default.
     if max_tokens is None:
         max_tokens = 16
-    return SamplingParams(
+    params = SamplingParams(
         temperature=request.temperature,
         top_p=request.top_p,
         top_k=request.top_k,
@@ -144,6 +147,12 @@ def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
         skip_special_tokens=request.skip_special_tokens,
         extra_args=extra_args,
     )
+    omitted = {
+        name
+        for name in GENERATION_CONFIG_SAMPLING_FIELDS
+        if name not in request.model_fields_set
+    }
+    return params.with_generation_config_omitted(omitted)
 
 
 def _normalize_tool_choice(request: ChatCompletionRequest) -> NormalizedToolChoice:

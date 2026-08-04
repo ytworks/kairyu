@@ -9,6 +9,7 @@ import pytest
 
 from kairyu import LLM, RequestOutput, SamplingParams, TextPrompt, TokensPrompt
 from kairyu.engine.mock import MockBackend
+from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS
 
 
 @pytest.fixture()
@@ -37,6 +38,28 @@ def test_generate_accepts_single_string(llm):
     outputs = llm.generate("just one prompt")
     assert len(outputs) == 1
     assert outputs[0].prompt == "just one prompt"
+
+
+def test_omitted_offline_params_use_model_defaults_but_supplied_params_are_explicit():
+    class RecordingBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.params = []
+
+        async def generate(self, request):
+            self.params.append(request.sampling_params)
+            return await super().generate(request)
+
+    backend = RecordingBackend()
+    local_llm = LLM(model="mock-model", backend=backend)
+
+    local_llm.generate("omitted")
+    local_llm.generate("explicit", SamplingParams())
+
+    assert backend.params[0].generation_config_omitted == (
+        GENERATION_CONFIG_SAMPLING_FIELDS
+    )
+    assert backend.params[1].generation_config_omitted == frozenset()
 
 
 def test_generate_accepts_one_token_prompt_without_treating_it_as_a_batch(llm):

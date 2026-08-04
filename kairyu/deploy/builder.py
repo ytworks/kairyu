@@ -23,6 +23,7 @@ from kairyu.deploy.registry import (
 )
 from kairyu.deploy.spec import DeploymentSpec, load_deployment_spec
 from kairyu.dsl.loader import build_orchestrator, load_spec
+from kairyu.dsl.spec import OrchestratorSpec
 from kairyu.engine.backend import (
     EngineBackend,
     shutdown_all,
@@ -37,6 +38,7 @@ from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
+from kairyu.models.generation import validate_generation_config_mode
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.router import JsonlRouterLog
@@ -198,8 +200,91 @@ def _preflight_server(
     return settings, tenant_config, api_keys, admin_keys
 
 
-def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> FastAPI:
+def build_app_from_spec(
+    spec: DeploymentSpec,
+    base_dir: Path | None = None,
+    *,
+    generation_config_override: str | None = None,
+) -> FastAPI:
     """Construct engines, pools, orchestrator, and the app with a prober lifespan."""
+    if generation_config_override is not None:
+        generation_config_override = validate_generation_config_mode(
+            generation_config_override
+        )
+        spec = spec.model_copy(
+            update={
+                "engines": {
+                    name: (
+                        entry.model_copy(
+                            update={
+                                "options": {
+                                    **entry.options,
+                                    "generation_config": generation_config_override,
+                                }
+                            }
+                        )
+                        if entry.backend in {"kairyu", "kairyu-proc"}
+                        else entry
+                    )
+                    for name, entry in spec.engines.items()
+                },
+                "pools": {
+                    name: pool.model_copy(
+                        update={
+                            "replicas": tuple(
+                                entry.model_copy(
+                                    update={
+                                        "options": {
+                                            **entry.options,
+                                            "generation_config": generation_config_override,
+                                        }
+                                    }
+                                )
+                                if entry.backend in {"kairyu", "kairyu-proc"}
+                                else entry
+                                for entry in pool.replicas
+                            )
+                        }
+                    )
+                    for name, pool in spec.pools.items()
+                },
+            }
+        )
+    native_generation_target = any(
+        entry.backend in {"kairyu", "kairyu-proc"}
+        for entry in spec.engines.values()
+    ) or any(
+        entry.backend in {"kairyu", "kairyu-proc"}
+        for pool in spec.pools.values()
+        for entry in pool.replicas
+    )
+    orchestrator_spec_cache: dict[Path, OrchestratorSpec] = {}
+
+    def _read_orchestrator_spec(spec_path: str) -> OrchestratorSpec:
+        path = Path(spec_path)
+        if base_dir is not None and not path.is_absolute():
+            path = base_dir / path
+        loaded = orchestrator_spec_cache.get(path)
+        if loaded is None:
+            loaded = load_spec(path)
+            orchestrator_spec_cache[path] = loaded
+        return loaded
+
+    if generation_config_override is not None and not native_generation_target:
+        linked_sections = [
+            section
+            for section in (spec.orchestrator, *spec.orchestrators.values())
+            if section is not None
+        ]
+        native_generation_target = any(
+            worker.backend in {"kairyu", "kairyu-proc"}
+            for section in linked_sections
+            for worker in _read_orchestrator_spec(section.spec).workers
+        )
+        if not native_generation_target:
+            raise ValueError(
+                "--generation-config requires a local kairyu or kairyu-proc backend"
+            )
     server_settings, tenant_config, api_keys, admin_keys = _preflight_server(spec)
     batch_postgres_dsn: str | None = None
     if spec.batch is not None and spec.batch.store == "postgres":
@@ -378,10 +463,24 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
         chat_templates[model_name] = ChatTemplate.load(template_source)
 
     def _load_orchestrator(spec_path: str) -> Orchestrator:
-        path = Path(spec_path)
-        if base_dir is not None and not path.is_absolute():
-            path = base_dir / path
-        return build_orchestrator(load_spec(path))
+        orchestrator_spec = _read_orchestrator_spec(spec_path)
+        if generation_config_override is not None:
+            workers = []
+            for worker in orchestrator_spec.workers:
+                if worker.backend in {"kairyu", "kairyu-proc"}:
+                    worker = worker.model_copy(
+                        update={
+                            "options": {
+                                **worker.options,
+                                "generation_config": generation_config_override,
+                            }
+                        }
+                    )
+                workers.append(worker)
+            orchestrator_spec = orchestrator_spec.model_copy(
+                update={"workers": tuple(workers)}
+            )
+        return build_orchestrator(orchestrator_spec)
 
     orchestrator: Orchestrator | None = None
     if spec.orchestrator is not None:
@@ -389,6 +488,9 @@ def build_app_from_spec(spec: DeploymentSpec, base_dir: Path | None = None) -> F
     orchestrators: dict[str, Orchestrator] = {
         name: _load_orchestrator(section.spec) for name, section in spec.orchestrators.items()
     }
+    if orchestrator is not None:
+        startup_resources.append(orchestrator)
+    startup_resources.extend(orchestrators.values())
 
     workers: list[BatchWorker] = []  # filled after create_app (worker needs app metrics)
     batch_stores: list[object] = []

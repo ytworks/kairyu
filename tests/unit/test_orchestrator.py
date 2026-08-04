@@ -29,6 +29,15 @@ class _ShutdownBackend(MockBackend):
         self.shutdown_count += 1
 
 
+class _StartupBackend(MockBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.startup_count = 0
+
+    async def startup(self) -> None:
+        self.startup_count += 1
+
+
 def _orchestrator(**kwargs) -> Orchestrator:
     engines = kwargs.pop(
         "engines",
@@ -572,6 +581,15 @@ async def test_shutdown_closes_each_owned_engine_once():
     orchestrator = Orchestrator(engines={"tier1": shared, "tier2": shared})
     await orchestrator.shutdown()
     assert shared.shutdown_count == 1
+
+
+async def test_startup_eagerly_starts_each_owned_engine_once():
+    shared = _StartupBackend()
+    orchestrator = Orchestrator(engines={"tier1": shared, "tier2": shared})
+
+    await orchestrator.startup()
+
+    assert shared.startup_count == 1
 
 
 def test_run_sync_wrapper():

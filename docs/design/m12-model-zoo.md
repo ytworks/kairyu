@@ -1,6 +1,6 @@
 # M12 Design: Real Model Zoo (Dense) — Llama/Qwen, Multi-Layer Paged KV, Parity
 
-Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS (2-reviewer agent panel with
+Status: **Implemented** (2026-07-03; D5 amended 2026-08-04). Reviewed — APPROVE-WITH-AMENDMENTS (2-reviewer agent panel with
 empirical verification against transformers 5.12.1 / torch 2.12.1, 2026-07-03;
 amendments applied — §6 is the binding record for items not rewritten inline).
 All five phases landed: 471 → 501 tests, 95% coverage; flagship gate green —
@@ -157,8 +157,18 @@ sharding hook stays unused until M16.
 is given, else `"toy"` (an explicit tokenizer alongside model_path is allowed
 — tests need it; fixture dirs carry no tokenizer.json); `runner=` and
 `model_path=` are mutually exclusive; `validate_tp_degree` uses the config's
-real `num_key_value_heads` (not the hardcoded 8); EOS may be a LIST in
-generation_config.json (Llama-3 Instruct) — first entry becomes
+real `num_key_value_heads` (not the hardcoded 8). Generation defaults have one
+request-omission contract (D5 amended 2026-08-04, issue #351):
+`generation_config.json` may supply `temperature`, `top_p`, `top_k`, `min_p`,
+and `repetition_penalty` in addition to EOS metadata, and each value applies
+only when that request field was omitted. Explicit request values, including
+neutral values, always win. `generation_config="auto"` reads both sampling and
+EOS defaults; `"vllm"` retains sidecar EOS/stop metadata but uses the neutral
+sampling tuple `(1.0, 1.0, -1, 0.0, 1.0)`; `"none"` does not read the sidecar
+and falls back to `config.json` EOS plus neutral sampling. Hugging Face
+`top_k=0` is normalized to Kairyu's disabled value `-1`; malformed or
+out-of-range sampling defaults fail before model/resource construction in
+`auto`. EOS may be a LIST (Llama-3 Instruct) — first entry becomes
 `eos_token_id`, the rest `stop_token_ids`; tokenizer vocab larger than the
 model's `vocab_size` fails fast. The `kairyu-proc` service gains `model_path`
 (picklable str) and reports its port BEFORE building the loop so model-load

@@ -104,7 +104,10 @@ from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.outputs import CompletionOutput
 from kairyu.pricing import InvoiceExportError, PriceSheet, export_invoice_csv
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import (
+    GENERATION_CONFIG_SAMPLING_FIELDS,
+    SamplingParams,
+)
 from kairyu.sse import escape_json_line_separators
 
 if TYPE_CHECKING:
@@ -941,6 +944,7 @@ def create_app(
         metrics,
         admin_keys=admin_keys,
         embedding_backends=served_embedding_backends,
+        orchestrators=auto_models,
     )
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
 
@@ -1488,6 +1492,12 @@ def create_app(
                 repetition_penalty=request.repetition_penalty,
                 logprobs=request.logprobs,
                 skip_special_tokens=request.skip_special_tokens,
+            ).with_generation_config_omitted(
+                {
+                    name
+                    for name in GENERATION_CONFIG_SAMPLING_FIELDS
+                    if name not in request.model_fields_set
+                }
             )
         except ValueError as error:
             return invalid_request(str(error))

@@ -9,7 +9,8 @@ KV hits on the vLLM backend (design doc D5).
 from __future__ import annotations
 
 import importlib
-from collections.abc import AsyncIterator
+import inspect
+from collections.abc import AsyncIterator, Mapping
 
 from kairyu.engine.backend import (
     GenerationRequest,
@@ -25,6 +26,7 @@ from kairyu.engine.prompt import (
     supplied_prompt_token_ids,
 )
 from kairyu.engine.registry import register_backend
+from kairyu.models.generation import GenerationDefaults
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
@@ -60,6 +62,34 @@ def _import_vllm():
         ) from error
 
 
+def _generation_defaults_from_model_config(model_config: object) -> GenerationDefaults:
+    get_sampling = getattr(model_config, "get_diff_sampling_param", None)
+    if not callable(get_sampling):
+        raise RuntimeError("vLLM backend cannot resolve model generation defaults")
+    raw = get_sampling()
+    if not isinstance(raw, Mapping):
+        raise RuntimeError("vLLM model generation defaults must be a mapping")
+    values: dict[str, float | int] = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": -1,
+        "min_p": 0.0,
+        "repetition_penalty": 1.0,
+    }
+    for name in values:
+        if raw.get(name) is not None:
+            values[name] = raw[name]
+    if values["top_k"] == 0:
+        values["top_k"] = -1
+    try:
+        return GenerationDefaults(
+            **values,
+            source="vllm-model-config",
+        )
+    except (OverflowError, TypeError, ValueError) as error:
+        raise RuntimeError("vLLM model generation defaults are invalid") from error
+
+
 class VLLMBackend:
     def __init__(
         self,
@@ -82,6 +112,39 @@ class VLLMBackend:
         )
         self._vllm = vllm
         self._engine = vllm.AsyncLLMEngine.from_engine_args(args)
+        model_config = getattr(self._engine, "model_config", None)
+        self._generation_defaults: GenerationDefaults | None = (
+            _generation_defaults_from_model_config(model_config)
+            if model_config is not None
+            else None
+        )
+
+    @property
+    def generation_defaults(self) -> GenerationDefaults | None:
+        """Resolved vLLM model policy, available for `/backends` auditing."""
+
+        return self._generation_defaults
+
+    async def _resolve_generation_defaults(
+        self,
+        params: SamplingParams,
+    ) -> SamplingParams:
+        """Mirror vLLM ``LLM.generate(None)`` over the raw async engine seam."""
+
+        if not params.generation_config_omitted:
+            return params
+        defaults = self._generation_defaults
+        if defaults is None:
+            model_config = getattr(self._engine, "model_config", None)
+            if model_config is None:
+                get_model_config = getattr(self._engine, "get_model_config", None)
+                if callable(get_model_config):
+                    model_config = get_model_config()
+                    if inspect.isawaitable(model_config):
+                        model_config = await model_config
+            defaults = _generation_defaults_from_model_config(model_config)
+            self._generation_defaults = defaults
+        return defaults.apply(params)
 
     @staticmethod
     def _validated_prompt(request: GenerationRequest) -> PromptInput:
@@ -144,7 +207,12 @@ class VLLMBackend:
             if text is None:  # Defensive: multimodal prompts were rejected above.
                 raise ValueError("vLLM backend requires a text or token-ID prompt")
             vllm_prompt = text
-        vllm_params = self._vllm.SamplingParams(**to_vllm_sampling_kwargs(request.sampling_params))
+        resolved_params = await self._resolve_generation_defaults(
+            request.sampling_params
+        )
+        vllm_params = self._vllm.SamplingParams(
+            **to_vllm_sampling_kwargs(resolved_params)
+        )
         async for output in self._engine.generate(
             vllm_prompt,
             vllm_params,

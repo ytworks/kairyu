@@ -613,11 +613,14 @@ def _to_chat_request(
         )
     if not messages:
         messages.append({"role": "user", "content": ""})
+    values: dict[str, object] = {}
+    if request.temperature is not None:
+        values["temperature"] = request.temperature
+    if request.top_p is not None:
+        values["top_p"] = request.top_p
     return ChatCompletionRequest(
         model=request.model,
         messages=messages,
-        temperature=1.0 if request.temperature is None else request.temperature,
-        top_p=1.0 if request.top_p is None else request.top_p,
         max_completion_tokens=(
             request.max_output_tokens if request.max_output_tokens is not None else 1024
         ),
@@ -627,6 +630,7 @@ def _to_chat_request(
         response_format=_response_format(request.text),
         user=request.user,
         priority=request.priority,
+        **values,
     )
 
 
