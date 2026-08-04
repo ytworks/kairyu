@@ -45,6 +45,175 @@ uv sync --extra bench                  # baselines (vllm/sglang installed alongs
 
 Record: GPU model, driver, CUDA, flashinfer/vllm/sglang versions → `bench/results/env-<date>.json`.
 
+### 0.1 Reproducible API and CUDA profiling hooks
+
+`scripts/profile_server.py` launches the real `kairyu serve` entrypoint under
+py-spy or Nsight Systems. It never attaches to an unrelated PID, always follows
+the complete engine/TP process tree, requires a bounded collection duration,
+and refuses to overwrite either a report or Nsight's companion SQLite file.
+Use `--dry-run` to audit the exact low-level profiler argv without requiring the
+profiler to be installed.
+
+These are diagnostic hooks. Sampling, tracing, and symbolization perturb the
+server, so profiled TTFT, TPOT, throughput, and goodput are not formal
+performance evidence. Reproduce any proposed improvement without a profiler
+using the unchanged owning gate. The helper is also not a substitute for the
+separate per-Torch-operator profiler workflow.
+
+The commands were checked with py-spy 0.4.2 and Nsight Systems 2026.1.3. Keep
+py-spy outside the project environment so profiling does not change `uv.lock`:
+
+```bash
+uv tool install py-spy==0.4.2
+py-spy --version
+nsys --version
+nsys status --environment
+.venv/bin/python scripts/profile_server.py --help
+```
+
+Do not lower a shared host's `perf_event_paranoid` setting merely to remove an
+Nsight warning. Current Nsight releases warn and disable unavailable CPU
+sampling while CUDA, Python-GIL, and OS-runtime tracing continue; retain that
+warning and use py-spy as the primary host-Python profile. If the real wrapper
+returns nonzero or fails to write a report, do not silently remove its fixed
+flags: invalidate the Nsight capture and use py-spy.
+
+Prepare one private, unique output directory per profiler run. Replace the
+DeploymentSpec and served model, but keep their content and the load shape
+identical across compared captures. Plain `mkdir` deliberately fails on a
+collision, and the helper independently rejects an existing output:
+
+```bash
+set -euo pipefail
+git diff --quiet
+git diff --cached --quiet
+
+export KAIRYU_PROFILE_CONFIG=/absolute/path/to/deployment.yaml
+export KAIRYU_PROFILE_MODEL=kairyu
+export KAIRYU_PROFILE_RUN_ID="$(date -u +%Y%m%dT%H%M%S%N)-$(git rev-parse --short=12 HEAD)"
+export KAIRYU_PROFILE_DIR="$PWD/bench/results/profiles/$KAIRYU_PROFILE_RUN_ID"
+
+umask 077
+mkdir -p "$PWD/bench/results/profiles"
+mkdir "$KAIRYU_PROFILE_DIR"
+.venv/bin/kairyu validate "$KAIRYU_PROFILE_CONFIG"
+sha256sum "$KAIRYU_PROFILE_CONFIG" > "$KAIRYU_PROFILE_DIR/deployment.sha256"
+{
+  git rev-parse HEAD
+  .venv/bin/python --version
+  py-spy --version
+  nsys --version
+  nsys status --environment || printf 'nsys_status_exit=%s\n' "$?"
+  nvidia-smi --query-gpu=index,name,uuid,driver_version --format=csv,noheader
+} > "$KAIRYU_PROFILE_DIR/environment.txt" 2>&1
+```
+
+For API parsing, Uvicorn/FastAPI, SSE, scheduler, tokenizer, or detokenizer host
+cost, launch the py-spy wrapper in terminal 1. It emits a time-ordered
+speedscope profile with process and thread labels. With `backend: kairyu`, the
+native host path is in the API parent; with `backend: kairyu-proc` or TP, select
+the API, engine-service, or rank process explicitly in the viewer rather than
+combining their sample percentages. The helper writes
+`server.speedscope.json.target-started.json`; its `pid` is the actual API
+process. Use that PID to select the API profile and ignore the short-lived
+`profile_server.py _supervise` profile, which exists only to isolate py-spy's
+duration-end signal from the server.
+
+```bash
+.venv/bin/python scripts/profile_server.py py-spy \
+  --output "$KAIRYU_PROFILE_DIR/server.speedscope.json" \
+  --duration 900 \
+  --dry-run \
+  -- "$KAIRYU_PROFILE_CONFIG" --host 127.0.0.1 --port 8000
+
+# Remove only --dry-run after checking the printed argv.
+date -u +%s > "$KAIRYU_PROFILE_DIR/capture-not-before-epoch.txt"
+.venv/bin/python scripts/profile_server.py py-spy \
+  --output "$KAIRYU_PROFILE_DIR/server.speedscope.json" \
+  --duration 900 \
+  -- "$KAIRYU_PROFILE_CONFIG" --host 127.0.0.1 --port 8000
+```
+
+For CUDA launches, graph replay, NCCL, CPU scheduling gaps, OS-runtime calls,
+and Python-GIL intervals, create a different run directory and launch Nsight
+instead. `--delay` is explicit and duration counts collection time after it.
+The canonical example uses delay zero because readiness alone cannot prove
+that an arbitrary delayed collection has started; startup and warm-up are
+excluded with the measurement timestamps below. Use a nonzero delay only when
+the operator has a separate collection-start synchronization signal. The dry
+run shows the fixed process-tree, 99 Hz Python-sampling, SIGTERM, wait-all,
+stats, environment-redaction, and no-overwrite options.
+
+```bash
+.venv/bin/python scripts/profile_server.py nsys \
+  --output "$KAIRYU_PROFILE_DIR/server.nsys-rep" \
+  --delay 0 --duration 600 \
+  --dry-run \
+  -- "$KAIRYU_PROFILE_CONFIG" --host 127.0.0.1 --port 8000
+
+# Remove only --dry-run after checking the printed argv.
+date -u +%s > "$KAIRYU_PROFILE_DIR/capture-not-before-epoch.txt"
+.venv/bin/python scripts/profile_server.py nsys \
+  --output "$KAIRYU_PROFILE_DIR/server.nsys-rep" \
+  --delay 0 --duration 600 \
+  -- "$KAIRYU_PROFILE_CONFIG" --host 127.0.0.1 --port 8000
+```
+
+Do not nest the profilers. After either real wrapper is running, use terminal 2
+to wait for readiness, warm the same shape without retaining a benchmark file,
+then bracket the diagnostic load with UTC timestamps. Export the same
+`KAIRYU_PROFILE_DIR` and `KAIRYU_PROFILE_MODEL` values in that terminal. Keep
+`--stage-trace` off unless trace serialization itself is the experiment.
+
+```bash
+set -euo pipefail
+for KAIRYU_PROFILE_READY_ATTEMPT in $(seq 1 300); do
+  if curl -fsS http://127.0.0.1:8000/readyz >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+curl -fsS http://127.0.0.1:8000/readyz >/dev/null
+
+.venv/bin/python bench/serving_bench.py \
+  --base-url http://127.0.0.1:8000 --model "$KAIRYU_PROFILE_MODEL" \
+  --num-requests 32 --concurrency 32 --max-tokens 128 \
+  --temperature 0 --seed 0 --ignore-eos --results-dir ''
+
+KAIRYU_PROFILE_CAPTURE_NOT_BEFORE=$(head -n 1 \
+  "$KAIRYU_PROFILE_DIR/capture-not-before-epoch.txt")
+while (( $(date -u +%s) < KAIRYU_PROFILE_CAPTURE_NOT_BEFORE )); do
+  sleep 1
+done
+date -u +%Y-%m-%dT%H:%M:%S.%3NZ \
+  > "$KAIRYU_PROFILE_DIR/measurement-start-utc.txt"
+.venv/bin/python bench/serving_bench.py \
+  --base-url http://127.0.0.1:8000 --model "$KAIRYU_PROFILE_MODEL" \
+  --num-requests 256 --concurrency 32 --max-tokens 128 \
+  --temperature 0 --seed 0 --ignore-eos \
+  --results-dir "$KAIRYU_PROFILE_DIR"
+date -u +%Y-%m-%dT%H:%M:%S.%3NZ \
+  > "$KAIRYU_PROFILE_DIR/measurement-end-utc.txt"
+```
+
+Wait for the wrapper to exit and finish its report. A timeout, interrupted
+load, profiler error, missing end timestamp, measurement outside an Nsight
+delay/duration window, or server that remains ready invalidates the capture.
+Before another GPU cell, require `/readyz` to fail, verify that no Kairyu rank
+remains, and recheck the selected GPUs' idle process/memory baseline. Do not
+force-kill a rank and then reuse the contaminated cell.
+
+Launching through the helper normally avoids Linux's root-only attach case;
+`py-spy --pid` is not equivalent because it can miss existing engine/TP
+children. The canonical workflow is the host checkout shown above. A dedicated
+Docker/Kubernetes profiling container additionally needs `SYS_PTRACE`, a PID
+namespace containing the launched tree, and a seccomp policy that permits the
+required process-memory/ptrace calls. Grant those narrowly and never use
+`--privileged` just for profiling. Nsight reports discard environment values,
+but both report formats can retain paths, symbols, and subprocess command
+lines. Use `serving_bench.py --api-key-env`, never a literal key, inspect files
+before sharing, and do not commit large raw profiles by default.
+
 ## 1. FlashInfer ModelRunner (day 1)
 
 Enable the FlashInfer paged-attention path behind the delivered `AttentionBackend`
