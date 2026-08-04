@@ -509,7 +509,8 @@ dedicated serving process; a generic embedding that also supervises unrelated
 child trees needs an external supervisor boundary.
 
 Issue #333's diagnostic is deliberately separate from the formal A6 verdict.
-It replays the exact TP4 ShareGPT c128 trace with four fresh servers in
+`bench/issue_333_proc_http_bench.py` replays the exact TP4 ShareGPT c128 trace
+with four fresh servers in
 `kairyu`, `kairyu-proc`, `kairyu-proc`, `kairyu` order, retaining raw strict-SSE
 rows plus clean source, actual imported module, immutable image, full
 checkpoint, GPU, config, `/backends`, and PID/PPID/PGID process-tree evidence.
