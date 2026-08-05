@@ -1,0 +1,23 @@
+# Judge-free deterministic quality regressions: GSM8K, MMLU, and IFEval.
+# Install/download once, then run with:
+#
+#   uv sync --extra bench
+#   kairyu bench run --config examples/bench_core.yaml
+#
+# A full run sends 15,902 requests. Add `--smoke` for the 20-item-per-slot
+# development preset; subset artifacts remain explicitly non-comparable.
+suite: core
+
+targets:
+  - name: local-model
+    base_url: http://localhost:8000/v1
+    model: m1
+
+# The seed controls deterministic item selection for --limit/--smoke. Endpoint
+# sampling remains temperature zero; set a target sampling seed only when the
+# endpoint supports and requires it.
+seed: 0
+concurrency: 8
+
+# results_dir: bench/results/core
+# cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE

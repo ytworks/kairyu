@@ -647,26 +647,33 @@ Runtime architecture/dependency guards still fail unsupported explicit choices
 before serving.
 CI now schema-lints and template-renders both the CPU defaults and GPU overlay
 before the kind CPU deployment/HTTP drill; it does not schedule the GPU pod.
-`kairyu bench run` executes the 11-slot Fugu-release quality suite against any
-deployed gateway (single models and named orchestrations as scoreboard columns)
-with dataset downloaders, LLM-judge/vision/docker degradation, and a dated
-footnoted scoreboard (G6 P-C1). A target call that returns no response content
-is recorded as a failed, unmeasured item with its latency rather than a completed
-zero, so an all-empty slot carries `score: null` and cannot be compared with a
-published accuracy number. Scored cells now always expose their sample count;
-explicitly Bernoulli adapters with internally consistent binary item evidence
-additionally carry a structured two-sided 95% Wilson score interval, while
-continuous/reward metrics and legacy evidence fail closed to point estimate
-plus count.
+`kairyu bench run` defaults to the 11-slot Fugu-release quality suite against
+any deployed gateway (single models and named orchestrations as scoreboard
+columns), while `--suite core` selects a separate deterministic GSM8K, MMLU,
+and IFEval regression suite. Fugu retains its row order, published comparison,
+and result path; core writes its own three-row scoreboard without a Fugu
+comparison. Core pins 1,319 GSM8K test rows, 14,042 MMLU test rows across the
+exact 57 subjects, and 541 IFEval prompts/834 instructions/all 25 checker IDs.
+IFEval retains all four strict/loose prompt/instruction metrics and documents a
+two-row exact-character amendment for keys 1122 (`#`) and 1129 (`!`) that
+removes upstream's random ASCII fallback. Dataset and Punkt cache readiness is
+unified across download, list, run, resume, and identity; every core adapter's
+score-bearing package source enters the run fingerprint, including all vendored
+IFEval checker modules. A target call that returns no response content is
+recorded as a failed, unmeasured item with its latency rather than a completed
+zero, so an all-empty slot carries `score: null`. Scored cells expose their
+sample count; explicitly Bernoulli adapters with internally consistent binary
+item evidence additionally carry a structured two-sided 95% Wilson interval.
 Judge-backed HLE and CharXiv runs now fingerprint the exact registered prompt
 template and parsing/generation protocol. Optional additional judge endpoints
 vote concurrently under a strict-majority policy, while incomplete, tied, or
 unparseable panels fail closed. A packaged, pinned LLMBar Natural calibration
 set exercises both response orders, measures position and self-preference bias,
 and permits headline evidence only when its frozen promotion gates and the full
-canonical identity of the evaluated run agree. The complete benchmark suite
-passes 1,343 tests with no selected skips; the isolated wheel check includes all
-nine fixtures, the LLMBar license notice, and the calibration CLI.
+canonical identity of the evaluated run agree. The complete portable suite
+passes 5,301 selected tests with no selected skips and 83.75% combined coverage;
+the isolated wheel contains all 11 benchmark fixtures plus the judge-calibration
+fixture, the LLMBar and IFEval attribution files, and the installed CLI.
 LiveCodeBench and SciCode scoring now select one explicit, fingerprinted
 execution runner. The trusted-development local subprocess remains available;
 the unattended path uses a digest-only Docker image, completed create before
@@ -773,10 +780,11 @@ global store remain rejected. The retained decision artifact SHA-256 is
 
 Benchmark ownership is now package-enforced. The installed `kairyu.bench`
 surface owns reusable target/auth/statistics/reporting contracts, the public
-CLI, eight fixtures, and a packaged registry for all 53 checkout-only
-wrappers. Exact existing wrapper-composition edges are frozen; new reusable
-dependencies, missing docs/main guards, or path/module CLI regressions fail
-validation. Historical `bench/*.py` and `bench/results/**` provenance paths
+CLI, 11 benchmark fixtures plus the judge-calibration fixture, and a packaged
+registry for all 64 checkout-only wrappers. Exact existing wrapper-composition
+edges are frozen; new reusable dependencies, missing docs/main guards, or
+path/module CLI regressions fail validation. Historical `bench/*.py` and
+`bench/results/**` provenance paths
 remain unchanged, while a real-wheel CI gate proves that neither is shipped.
 Target construction now canonicalizes `/v1`, validates environment-variable
 credential names, fails closed when configured credentials are absent, and
@@ -953,6 +961,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [design] Deterministic core suite adds GSM8K, MMLU, and IFEval
+- What: added a separate `core` benchmark suite with the immutable full GSM8K test set, the full 57-subject MMLU test set, and all 541 IFEval prompts/834 instructions/25 checker IDs. Fugu remains the unchanged default 11-row suite and alone receives its published comparison. Core uses deterministic exact-match or programmatic scoring, retains IFEval's four strict/loose aggregates, pins the Google checker and English Punkt resources, repairs missing Punkt assets without rewriting valid normalized data, and records per-instruction evidence. Pinned IFEval keys 1122 (`#`) and 1129 (`!`) receive one documented dataset-consistency amendment because upstream replaces their punctuation with independently random ASCII letters; Kairyu scores the exact requested character. Dataset/resource readiness is unified across every cache consumer, and package-resource SHA-256 identities bind each core prompt/parser/scorer plus every vendored IFEval module before resume. Real pinned downloads yielded exactly 1,319/14,042/541 rows, all 834 IFEval instructions replayed with random fallbacks disabled, 64 checkout-only entrypoints and 12 wheel fixtures verified, and the 5,301-test portable CI sequence passed with 83.75% coverage.
+- Why: frequent quality regression checks need a cheap, judge-free, Docker-free, vision-free suite without changing Fugu methodology or presenting zero-shot generated-letter MMLU as canonical. Exact data, scorer, dependency, auxiliary-resource, and implementation identities prevent silent drift or reuse of evidence scored under different semantics.
+- Refs: issue #367; `docs/design/issue-367-core-evals.md`; `docs/benchmarks.md`; `kairyu/bench/adapters/{gsm8k,mmlu,ifeval}.py`; `kairyu/bench/_vendor/ifeval/`; `examples/bench_core.yaml`
 
 ### 2026-08-05 — [amendment] Issue #364 withdraws FP32 final logits after the paired A1/A2 result
 - What: completed the clean-commit `ac589fb` paired experiment. A1 passed for both `model` and `float32`; A2 failed for both against the immutable 1004/1024 shared-reference floor, with `model` TP2/4/8 agreement of 1009/1004/999 and `float32` agreement of 1008/1003/1002. All cells retain zero substantive disagreements and zero missing observations. A `main@6cff10f` TP8 control has raw tokens, logprobs, and reference rows exactly equal to the `model` arm. The retained conclusion is `evidence_valid=true`, `feature_ready=false`, and `quality_classification=mixed`; the public `logits_dtype` construction/deployment option is withdrawn and is not shipped, while the evidence operator and negative result remain.

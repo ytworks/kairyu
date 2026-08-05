@@ -7,7 +7,12 @@ import pytest
 from kairyu.bench.cli import add_bench_parser
 from kairyu.bench.config import build_config, build_judge_config, parse_target_flag
 from kairyu.bench.execution import build_execution_runner
-from kairyu.bench.types import ExecutionConfig, JudgeConfig, JudgeEndpointConfig
+from kairyu.bench.types import (
+    BenchConfig,
+    ExecutionConfig,
+    JudgeConfig,
+    JudgeEndpointConfig,
+)
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
@@ -32,7 +37,82 @@ def test_models_shorthand_builds_targets():
     assert [t.model for t in config.targets] == ["m", "kairyu-auto"]
     assert config.targets[0].label() == "m"
     assert config.suite == "fugu"
+    assert config.results_dir == "bench/results/fugu"
     assert config.limit is None  # full run is the default
+
+
+def test_core_suite_defaults_to_its_own_results_directory():
+    args = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--suite",
+            "core",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.suite == "core"
+    assert config.results_dir == "bench/results/core"
+
+
+def test_suite_results_directory_preserves_an_explicit_path():
+    args = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--suite",
+            "core",
+            "--results-dir",
+            "/custom/results",
+        ]
+    )
+
+    assert build_config(args).results_dir == "/custom/results"
+
+
+def test_yaml_core_suite_defaults_to_its_own_results_directory(tmp_path):
+    path = tmp_path / "bench.yaml"
+    path.write_text(
+        "suite: core\n"
+        "targets:\n"
+        "  - {base_url: 'http://gw:8000', model: m}\n",
+        encoding="utf-8",
+    )
+
+    config = build_config(_parse(["run", "--config", str(path)]))
+
+    assert config.suite == "core"
+    assert config.results_dir == "bench/results/core"
+
+
+def test_config_rejects_an_unknown_suite():
+    with pytest.raises(ValueError, match="suite"):
+        BenchConfig(
+            suite="unknown",
+            targets=(
+                {
+                    "base_url": "http://gw:8000",
+                    "model": "m",
+                },
+            ),
+        )
+
+
+def test_report_and_list_accept_core_suite():
+    report = _parse(["report", "run-1", "--suite", "core"])
+    listing = _parse(["list", "--suite", "core"])
+
+    assert report.suite == "core"
+    assert report.results_dir is None
+    assert listing.suite == "core"
 
 
 def test_model_without_base_url_rejected():

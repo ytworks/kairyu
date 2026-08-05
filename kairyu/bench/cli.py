@@ -9,9 +9,12 @@ from pathlib import Path
 
 
 def add_bench_parser(subparsers) -> None:
+    from kairyu.bench.adapters import suite_names
+
+    suites = suite_names()
     bench = subparsers.add_parser(
         "bench",
-        help="Fugu-suite quality benchmarks against a deployed OpenAI-compatible "
+        help="Quality benchmark suites against a deployed OpenAI-compatible "
         "gateway (single models and orchestrations are both just model names).",
     )
     commands = bench.add_subparsers(dest="bench_command", required=True)
@@ -58,7 +61,9 @@ def add_bench_parser(subparsers) -> None:
         help='JSON object merged into every target request, e.g. \'{"chat_template_kwargs":'
         ' {"enable_thinking": true}}\'',
     )
-    run.add_argument("--suite", default=None, help="Benchmark suite (default: fugu)")
+    run.add_argument(
+        "--suite", choices=suites, default=None, help="Benchmark suite (default: fugu)"
+    )
     run.add_argument("--only", action="append", default=None, help="Comma-separated names")
     run.add_argument("--exclude", action="append", default=None, help="Comma-separated names")
     run.add_argument("--limit", type=int, default=None, help="Max items per benchmark")
@@ -138,7 +143,7 @@ def add_bench_parser(subparsers) -> None:
     download = commands.add_parser(
         "download", help="Fetch and normalize the suite's datasets into the cache."
     )
-    download.add_argument("--suite", default="fugu")
+    download.add_argument("--suite", choices=suites, default="fugu")
     download.add_argument("--only", action="append", default=None)
     download.add_argument("--exclude", action="append", default=None)
     download.add_argument("--cache-dir", default=None)
@@ -149,10 +154,15 @@ def add_bench_parser(subparsers) -> None:
 
     report = commands.add_parser(
         "report",
-        help="Rebuild the scoreboard and the accuracy report vs published Fugu scores.",
+        help="Rebuild a suite scoreboard and its published comparison when available.",
     )
-    report.add_argument("run", help="Run id (under bench/results/fugu) or a run directory")
-    report.add_argument("--results-dir", default="bench/results/fugu")
+    report.add_argument("run", help="Run id (under the suite results dir) or a run directory")
+    report.add_argument("--suite", choices=suites, default="fugu")
+    report.add_argument(
+        "--results-dir",
+        default=None,
+        help="Results root (default: bench/results/<suite>)",
+    )
     report.add_argument(
         "--no-comparison",
         action="store_true",
@@ -200,7 +210,10 @@ def add_bench_parser(subparsers) -> None:
         help="Fail unless every judge has balanced, provenance-backed bias evidence",
     )
 
-    commands.add_parser("list", help="List benchmarks, requirements, and cache status.")
+    listing = commands.add_parser(
+        "list", help="List benchmarks, requirements, and cache status."
+    )
+    listing.add_argument("--suite", choices=suites, default="fugu")
 
     entrypoints = commands.add_parser(
         "entrypoints",
@@ -269,6 +282,7 @@ def _handle_download(args) -> int:
 
 
 def _handle_report(args) -> int:
+    from kairyu.bench.adapters import suite_info
     from kairyu.bench.aggregate import build_scoreboard, render_markdown
     from kairyu.bench.compare import build_comparison, render_comparison_markdown
     from kairyu.bench.store import ResultStore
@@ -281,7 +295,10 @@ def _handle_report(args) -> int:
 
     run_dir = Path(args.run)
     if not run_dir.is_dir():
-        run_dir = Path(args.results_dir) / args.run
+        results_dir = getattr(args, "results_dir", None) or (
+            f"bench/results/{getattr(args, 'suite', 'fugu')}"
+        )
+        run_dir = Path(results_dir) / args.run
     if not run_dir.is_dir():
         print(f"no such run: {args.run}")
         return 1
@@ -374,9 +391,10 @@ def _handle_report(args) -> int:
     elif raw_judge is not None:
         judge = JudgeConfig(model="identity-unavailable")
         judge_identity_incomplete = True
+    suite = config.get("suite", getattr(args, "suite", "fugu"))
     scoreboard = build_scoreboard(
         run_id=run_meta.get("run_id", run_dir.name),
-        suite=config.get("suite", "fugu"),
+        suite=suite,
         config=config,
         environment=run_meta.get("environment", {}),
         pairs=pairs,
@@ -390,7 +408,10 @@ def _handle_report(args) -> int:
     store.save_scoreboard(scoreboard, markdown)
     print(markdown)
 
-    if not getattr(args, "no_comparison", False):
+    if (
+        suite_info(suite).published_comparison
+        and not getattr(args, "no_comparison", False)
+    ):
         comparison = build_comparison(scoreboard)
         comparison_markdown = render_comparison_markdown(comparison)
         store.save_comparison(comparison, comparison_markdown)
@@ -404,14 +425,16 @@ def _handle_calibrate_judge(args) -> int:
     return asyncio.run(run_calibration_cli(args))
 
 
-def _handle_list(args) -> int:  # noqa: ARG001 - argparse handler signature
-    from kairyu.bench.adapters import FUGU_ROW_ORDER, all_adapters
+def _handle_list(args) -> int:
+    from kairyu.bench.adapters import all_adapters, suite_info
+    from kairyu.bench.adapters.base import adapter_cache_ready
     from kairyu.bench.cache import BenchCache, resolve_cache_root
 
     cache = BenchCache(resolve_cache_root())
     registry = all_adapters()
-    print(f"suite fugu ({len(FUGU_ROW_ORDER)} slots), cache: {cache.root}")
-    for name in FUGU_ROW_ORDER:
+    definition = suite_info(getattr(args, "suite", "fugu"))
+    print(f"suite {definition.name} ({len(definition.row_order)} slots), cache: {cache.root}")
+    for name in definition.row_order:
         adapter = registry.get(name)
         if adapter is None:
             print(f"  {name:24s} (not implemented)")
@@ -429,7 +452,11 @@ def _handle_list(args) -> int:  # noqa: ARG001 - argparse handler signature
             )
             if flag
         ]
-        state = "cached" if cache.is_ready(name) else "not downloaded"
+        state = (
+            "cached"
+            if adapter_cache_ready(adapter, cache)
+            else "not downloaded"
+        )
         extras = f" [{', '.join(needs)}]" if needs else ""
         print(f"  {name:24s} {info.display_name} — {info.metric}{extras} ({state})")
     return 0

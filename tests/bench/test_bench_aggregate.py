@@ -1,11 +1,11 @@
-"""Scoreboard aggregation: Fugu row order, cell rendering, footnotes."""
+"""Scoreboard aggregation: suite row order, cell rendering, and footnotes."""
 
 import json
 from argparse import Namespace
 
 import pytest
 
-from kairyu.bench.adapters import all_adapters
+from kairyu.bench.adapters import CORE_ROW_ORDER, all_adapters, suite_adapters
 from kairyu.bench.aggregate import _wilson_bounds, build_scoreboard, render_markdown
 from kairyu.bench.cli import _handle_report
 from kairyu.bench.types import (
@@ -74,10 +74,11 @@ def _board(
     target_configs=None,
     judge=None,
     judge_identity_incomplete=False,
+    suite="fugu",
 ):
     return build_scoreboard(
         run_id="run-1",
-        suite="fugu",
+        suite=suite,
         config=config or {},
         environment={},
         pairs=pairs,
@@ -86,6 +87,74 @@ def _board(
         judge=judge,
         judge_identity_incomplete=judge_identity_incomplete,
     )
+
+
+def test_core_scoreboard_uses_its_canonical_row_order_and_title():
+    board = _board(
+        [
+            _pair("ifeval", "m"),
+            _pair("gsm8k", "m"),
+            _pair("mmlu", "m"),
+        ],
+        ["m"],
+        suite="core",
+    )
+
+    assert board["benchmarks"] == list(CORE_ROW_ORDER)
+    assert render_markdown(board).startswith("# Core benchmark scoreboard — run run-1")
+
+
+def test_only_and_exclude_names_are_validated_within_the_selected_suite():
+    assert [adapter.info.name for adapter in suite_adapters("core")] == list(
+        CORE_ROW_ORDER
+    )
+    with pytest.raises(ValueError, match="gpqa-diamond"):
+        suite_adapters("core", only=("gpqa-diamond",))
+    with pytest.raises(ValueError, match="gsm8k"):
+        suite_adapters("fugu", exclude=("gsm8k",))
+    with pytest.raises(ValueError, match="available: fugu, core"):
+        suite_adapters("unknown")
+
+
+def test_report_resolves_a_core_run_under_its_suite_directory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    run_dir = tmp_path / "bench" / "results" / "core" / "core-report"
+    pair_dir = run_dir / "pair"
+    pair_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "core-report",
+                "config": {
+                    "suite": "core",
+                    "targets": [
+                        {
+                            "base_url": "http://gateway.test/v1",
+                            "model": "m",
+                        }
+                    ],
+                },
+                "environment": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (pair_dir / "result.json").write_text(
+        _pair("gsm8k", "m").model_dump_json(), encoding="utf-8"
+    )
+
+    args = Namespace(
+        run="core-report",
+        suite="core",
+        results_dir=None,
+        no_comparison=False,
+    )
+    assert _handle_report(args) == 0
+    assert (run_dir / "scoreboard.json").exists()
+    assert not (run_dir / "comparison.json").exists()
+    assert not (run_dir / "comparison.md").exists()
 
 
 def test_self_judged_target_is_flagged():
@@ -620,11 +689,14 @@ def test_only_contractually_binary_adapters_enable_wilson_intervals():
         if adapter.info.binary_outcomes
     } == {
         "charxiv-reasoning",
+        "gsm8k",
         "gpqa-diamond",
         "hle",
+        "ifeval",
         "livecodebench",
         "livecodebench-pro",
         "long-context-reasoning",
+        "mmlu",
         "scicode",
         "swe-bench-pro",
     }

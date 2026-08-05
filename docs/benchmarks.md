@@ -1,9 +1,12 @@
-# Fugu Benchmark Suite (`kairyu bench`)
+# Benchmark Suites (`kairyu bench`)
 
-One command runs every benchmark from Sakana's Fugu release table
+One command runs an installed answer-quality suite against a deployed Kairyu
+gateway — single models and orchestrations side by side — then writes a dated,
+footnoted scoreboard. The default `fugu` suite runs every benchmark from
+Sakana's Fugu release table
 ([sakana.ai/fugu-release](https://sakana.ai/fugu-release/)) against a deployed
-kairyu gateway — single models and orchestrations side by side — then writes a
-dated, footnoted scoreboard. This implements goal G6 gate P-C1 ("one command →
+gateway. The `core` suite provides judge-free, Docker-free GSM8K, MMLU, and
+IFEval regression checks. This implements goal G6 gate P-C1 ("one command →
 dated scoreboard") and the roadmap §6 evidence rules (per-item results,
 methodology, config committed next to every number).
 
@@ -16,9 +19,10 @@ The complete ownership policy and wrapper inventory live in
 
 `kairyu/bench/` is the single owner of reusable benchmark config, target types,
 credential resolution, statistics, atomic reporting, adapters, the public
-`kairyu bench` CLI, and the eight synthetic offline fixtures. All of those ship
-in the wheel. `kairyu/bench/entrypoints.toml` is also packaged and records every
-supported repository-only benchmark executable.
+`kairyu bench` CLI, 11 synthetic benchmark fixtures, and the published-gold
+judge calibration fixture. All of those ship in the wheel.
+`kairyu/bench/entrypoints.toml` is also packaged and records every supported
+repository-only benchmark executable.
 
 Top-level `bench/*.py` files are developer/formal wrappers, not installed
 commands. From a source checkout each registered wrapper supports both
@@ -39,13 +43,14 @@ uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
 After the declared development dependencies are synced, the first verifier
-exercises all 53 registered wrappers through both their path and module
+exercises all 64 registered wrappers through both their path and module
 `--help` forms without executing workloads or contacting external runtimes.
 The last command builds and imports a real wheel from an isolated temporary
-directory. It verifies the public CLI dispatch, packaged manifest and all eight
-fixtures, and rejects accidental inclusion of top-level benchmark scripts,
-results, or tests. Gate-specific code stays in its stable wrapper; semantics
-shared by the Fugu CLI and gate scripts belong in `kairyu.bench`.
+directory. It verifies the public CLI dispatch, packaged manifest and all 12
+JSONL fixtures, and rejects accidental inclusion of top-level benchmark
+scripts, results, or tests. Gate-specific code stays in its stable wrapper;
+semantics shared by the installed CLI and gate scripts belong in
+`kairyu.bench`.
 
 The shared target form is `name=base_url=model[=api_key_env]`; the fourth
 field names an environment variable and is never a literal secret. This
@@ -112,6 +117,11 @@ kairyu bench run --base-url http://localhost:8000/v1 \
 
 # or config-driven (targets + judge in one file, CLI flags still override):
 kairyu bench run --config examples/bench_fugu.yaml
+
+# deterministic core regression suite (60 requests with the smoke preset):
+kairyu bench run --suite core --smoke \
+    --base-url http://localhost:8000/v1 --model m1
+# or: kairyu bench run --config examples/bench_core.yaml --smoke
 ```
 
 Results land in `bench/results/fugu/<run_id>/`:
@@ -124,6 +134,11 @@ scoreboard.md                                 # Fugu-layout table (also printed 
 comparison.json                               # measured vs published, machine-readable
 comparison.md                                 # accuracy report vs the Fugu release table
 ```
+
+Core results default to `bench/results/core/<run_id>/` and contain the same
+run, pair, and scoreboard artifacts. They intentionally omit
+`comparison.json` and `comparison.md`: the published reference table is a Fugu
+contract, not a generic benchmark baseline.
 
 Benchmark and target components retain a readable sanitized prefix and append
 the first 16 hexadecimal characters of the raw name's SHA-256. Thus names such
@@ -152,6 +167,9 @@ kairyu bench list                      # slots, requirements, cache status
 kairyu bench download [--only a,b]     # pre-fetch datasets (idempotent)
 kairyu bench report <run_id>           # rebuild + print a stored scoreboard
 kairyu bench entrypoints               # installed/repository ownership inventory
+kairyu bench list --suite core
+kairyu bench download --suite core
+kairyu bench report --suite core <run_id>
 ```
 
 ## Single model vs orchestration
@@ -171,7 +189,47 @@ orchestrators:
 Every `--model` flag adds a scoreboard column; compare `m1` vs `kairyu-auto`
 vs `kairyu-auto-max` in one run.
 
-## The 11 slots
+## Core suite
+
+The core suite uses only deterministic local scorers. Install the benchmark
+extra before downloading real datasets:
+
+```bash
+uv sync --extra bench
+kairyu bench download --suite core --strict
+```
+
+| Slot | Pinned source | Headline score | Methodology boundary |
+|---|---|---|---|
+| GSM8K | `openai/gsm8k`, `main/test`, 1,319 rows | exact final numeric string after `####` (commas removed) | zero-shot Kairyu chat prompt; upstream answer extractor |
+| MMLU | `cais/mmlu`, `all/test`, 14,042 rows / 57 subjects | exact generated A-D letter, item-micro accuracy | zero-shot generated-letter variant, not canonical five-shot next-token-logprob MMLU |
+| IFEval | `google/IFEval`, `default/train`, 541 prompts / 834 instructions | strict prompt-level accuracy | all four strict/loose × prompt/instruction metrics retained; pinned Google 25-checker plus the documented two-row exact-character amendment |
+
+GSM8K and MMLU cap output at 1,024 and 64 tokens respectively. IFEval keeps
+the target's configured output allowance because valid prompts require as many
+as 1,200 words or 100 sentences. The dataset prompt is the sole user message;
+adding boilerplate would corrupt repeat, start, end, and formatting checks.
+
+IFEval's Google checker source and English NLTK Punkt parameters are immutable
+score-bearing inputs. The dataset download path fetches the pinned Punkt
+archive, verifies its SHA-256, and stores only the expected English parameters
+in the adapter cache. Evaluation never invokes `nltk.download()` or reads a
+mutable global tokenizer cache. `langdetect` is seeded before its first use.
+Pinned keys 1122 and 1129 request `#` and `!`; upstream
+`LetterFrequencyChecker` replaces those non-ASCII-letter arguments with a
+random ASCII letter. Kairyu's documented dataset-consistency amendment keeps
+the exact single non-whitespace character, so those rows are deterministic.
+The scoreboard uses strict prompt-level accuracy as Kairyu's headline; Google
+reports all four metrics without designating one official headline.
+
+A full core run sends 15,902 requests. `--smoke` or `--limit` is the intended
+fast development loop, but the resulting artifact remains visibly a subset and
+is never promoted to a full score. Dataset counts, MMLU subject coverage,
+IFEval keys/checker IDs/kwargs, and fixed scorer resources all fail closed on
+drift. Full design and source identities are recorded in
+[`docs/design/issue-367-core-evals.md`](design/issue-367-core-evals.md).
+
+## The 11 Fugu slots
 
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
@@ -283,8 +341,9 @@ the statement of what each helper was for.
 
 ## Live progress
 
-A full run is thousands of judged items across eleven slots and can take hours,
-so the runner reports what it is doing:
+A full Fugu run is thousands of judged items across eleven slots and can take
+hours; a full Core run is 15,902 target calls. The runner therefore reports
+what it is doing for either suite:
 
 - **On a TTY** — a `tqdm` bar for the suite (pairs) plus one for the current
   benchmark×target (items). `tqdm` comes with `kairyu[bench]`; without it the
@@ -312,12 +371,12 @@ so the runner reports what it is doing:
   the exact case where "working" and "hung" must stay distinguishable.
 
 The play-by-play goes to **stderr** and the artifacts (download notes, the
-scoreboard, the accuracy report) to **stdout**, so
+scoreboard, and the accuracy report when the suite has one) to **stdout**, so
 `kairyu bench run … > scoreboard.txt` keeps the two apart.
 
 ## Accuracy report vs the published Fugu scores
 
-Every run also writes `comparison.md` / `comparison.json` (and prints the
+Every Fugu run also writes `comparison.md` / `comparison.json` (and prints the
 report), placing each measured cell next to the values published on
 [sakana.ai/fugu-release](https://sakana.ai/fugu-release/) — Fugu, Fugu Ultra,
 Opus 4.8, Gemini 3.1 Pro, GPT 5.5, plus the Fable 5 / Mythos Preview columns
@@ -384,7 +443,9 @@ SHA-256 fingerprint in `run.json`. The identity contains:
 - the selected adapter names and each adapter's pinned dataset id, revision,
   and validated `data.jsonl` SHA-256 (or an explicit unavailable marker).
   HLE and CharXiv additionally carry the logical judge-template name, variant,
-  and SHA-256 of the exact UTF-8 template used for scoring; and
+  and SHA-256 of the exact UTF-8 template used for scoring. Each core adapter
+  carries package/resource/SHA-256 identities for its complete score-bearing
+  source; IFEval binds both the adapter and every vendored checker module; and
 - the output-affecting `BenchConfig` fields `suite`, `targets`, `judge`, `limit`,
   `smoke`, `offline_fixtures`, `only`, `exclude`, `seed`, `concurrency`,
   `request_timeout_s`, and `retries`. `targets` includes every target's name,
@@ -436,11 +497,14 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   the cache and run fingerprint attest something false. `revision` is a git ref,
   so a declared value that is not a commit sha (a config name such as
   `release_v6`) is replaced by the registry pin; the config name goes to `name=`.
-  Secondary artifacts that decide a slot's tests or expected answers — the
-  LiveCodeBench Pro testcase archives, SciCode's `test_data.h5` — are registered
-  in `SECONDARY_PINS` and carried in the adapter's `extra_sources`, so cache
-  invalidation and provenance cover them too. This matters: `openai/mrcr` was corrected in
-  December 2025 and HLE's item count has shifted since release, so a score taken
+  Immutable secondary source revisions that decide a slot's tests or expected
+  answers — the LiveCodeBench Pro testcase archive, vendored IFEval checker,
+  and IFEval Punkt source — are registered in `SECONDARY_PINS` and carried in
+  the adapter's `extra_sources`. Adapter-owned raw files such as SciCode's
+  `test_data.h5` and IFEval's Punkt archive additionally bind verified content
+  hashes, so cache invalidation and provenance cover the actual score-bearing
+  bytes. This matters: `openai/mrcr` was corrected in December 2025 and HLE's
+  item count has shifted since release, so a score taken
   against "whatever `main` was that day" is comparable to neither Fugu's number
   nor an earlier kairyu run. A pin only applies when the recorded dataset id
   still matches, and an adapter that declares its own revision keeps it.
@@ -682,8 +746,9 @@ is never mistaken for either.
 
 ## Scale and cost
 
-The full suite is expensive by design (HLE alone is ~2500 judged items per
-target). For quick runs:
+The full Fugu suite is expensive by design (HLE alone is ~2500 judged items per
+target). Core avoids judges, Docker, and vision, but its complete MMLU population
+still makes 14,042 requests. For quick runs:
 
 - `--smoke` — deterministic ≤20-item subset per benchmark (CI uses this).
 - `--limit N` — cap items per benchmark (seeded, comparable across runs).

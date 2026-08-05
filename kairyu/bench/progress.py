@@ -1,8 +1,8 @@
 """Live progress for a suite run: which slot is running, and how far in.
 
-A full Fugu run is thousands of judged items across eleven slots and can take
-hours, so "no output for 40 minutes" is indistinguishable from a hang. Three
-reporters cover the ways a run is watched:
+A full run can be thousands of judged items and take hours, so "no output for
+40 minutes" is indistinguishable from a hang. Three reporters cover the ways a
+run is watched:
 
 - `TqdmProgress` for an interactive terminal (a bar per pair plus an overall
   bar),
@@ -226,7 +226,7 @@ class TqdmProgress:
 
     def suite_start(self, pairs: int) -> None:
         self._suite = self._tqdm(
-            total=pairs, desc="fugu suite", unit="pair", position=0, leave=True,
+            total=pairs, desc="benchmark suite", unit="pair", position=0, leave=True,
             file=self._stream,
         )
 

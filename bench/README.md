@@ -12,16 +12,17 @@ preserving the affected command and evidence paths.
 |---|---|---|
 | Reusable config, target types, credential resolution, statistics, atomic reporting, adapters, and runners | `kairyu/bench/` | Installed in the Kairyu wheel; may be imported by both the public CLI and checkout-only wrappers |
 | Public benchmark CLI | `kairyu bench` | Installed console surface: `run`, `download`, `report`, `list`, and `entrypoints` |
-| Synthetic offline fixtures | `kairyu/bench/fixtures/` | Installed package data; all nine JSONL files must be readable through `importlib.resources` |
+| Offline benchmark/calibration fixtures | `kairyu/bench/fixtures/` | Installed package data; all 12 JSONL files must be readable through `importlib.resources` |
 | Entrypoint inventory | `kairyu/bench/entrypoints.toml` | Installed, machine-readable source of truth for every supported top-level wrapper |
 | Gate, comparison, operator, and microbenchmark executables | `bench/*.py` | Repository-only; both `python bench/<name>.py` and `python -m bench.<name>` are supported from a checkout |
 | Measurement and decision artifacts | `bench/results/` | Repository-only and never shipped in a wheel; routine output is ignored, while explicitly reviewed formal evidence may be retained by Git |
 | Tests | `tests/` | Repository-only and never shipped in a wheel |
 
 The default Fugu result location remains `bench/results/fugu/` for command
-compatibility. For an installed CLI used outside this repository, that is a
-path relative to the caller's working directory; it does not mean the
-top-level `bench/` tree is installed.
+compatibility; the core suite defaults to `bench/results/core/`. For an
+installed CLI used outside this repository, these are paths relative to the
+caller's working directory; they do not mean the top-level `bench/` tree is
+installed.
 
 Installed `kairyu` code must not import the repository-only `bench` namespace.
 If two wrappers need the same config, type, statistics, result writer, or
@@ -613,16 +614,21 @@ replay all passed.
 
 ## Fixtures, results, and wheel verification
 
-The nine installed fixtures are synthetic plumbing inputs, never substitutes
-for publishable benchmark measurements:
+The 11 installed benchmark fixtures are synthetic plumbing inputs, never
+substitutes for publishable benchmark measurements. The twelfth JSONL is the
+separately licensed published-gold judge calibration set:
 
 ```text
 charxiv-reasoning.jsonl
+gsm8k.jsonl
 gpqa-diamond.jsonl
 hle.jsonl
+ifeval.jsonl
+judge-calibration.jsonl
 livecodebench-pro.jsonl
 livecodebench.jsonl
 long-context-reasoning.jsonl
+mmlu.jsonl
 mrcr-v2.jsonl
 scicode.jsonl
 ```
@@ -634,8 +640,9 @@ summary number.
 
 The packaging gate builds a real wheel, inspects its contents, and imports it
 from an isolated temporary directory. It proves that the console dispatch,
-entrypoint manifest, and all nine fixtures are present, while the top-level
-`bench/`, `bench/results/`, and `tests/` trees are absent:
+entrypoint manifest, all 12 fixtures, the LLMBar license, and the vendored
+IFEval `LICENSE`/`NOTICE` are present, while the top-level `bench/`,
+`bench/results/`, and `tests/` trees are absent:
 
 ```bash
 uv run --frozen python scripts/verify_bench_entrypoints.py

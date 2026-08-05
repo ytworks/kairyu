@@ -1,8 +1,8 @@
 """Shared target parsing, URL normalization, and credential resolution.
 
 Benchmark configuration records environment-variable *names*, never resolved
-secret values.  The same target grammar is used by the installed Fugu CLI and
-the repository-only comparison harnesses:
+secret values.  The same target grammar is used by the installed benchmark
+suites and the repository-only comparison harnesses:
 
 ``name=base_url=model[=api_key_env]``.
 """

@@ -1,4 +1,4 @@
-"""Adapter contract for the Fugu suite + the shared generative run loop.
+"""Adapter contract for installed suites + the shared generative run loop.
 
 An adapter owns one scoreboard row: how its dataset is downloaded and
 normalized, how an item becomes an OpenAI-wire request, and how a response
@@ -10,6 +10,7 @@ PairResult(status="skipped", reason=...) so one command always completes.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import re
 import time
@@ -46,7 +47,7 @@ _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 @dataclass(frozen=True)
 class AdapterInfo:
     name: str  # registry key / directory name, kebab-case
-    display_name: str  # Fugu release table row label
+    display_name: str  # scoreboard row label
     metric: str  # human name of the score ("accuracy", "pass@1", ...)
     hf_dataset: str | None = None
     hf_revision: str | None = None
@@ -74,6 +75,10 @@ class AdapterInfo:
     # scoring prompt to runs selecting this adapter without invalidating
     # unrelated benchmark runs.
     judge_template_name: str | None = None
+    # Package resources that implement score-bearing prompt/parser/checker
+    # semantics. Their content digests enter the run fingerprint so a resumed
+    # run can never reuse pair evidence produced by different evaluator code.
+    evaluation_resources: tuple[tuple[str, str], ...] = ()
 
     def required_judge_template_name(self) -> str:
         if self.judge_template_name is None:
@@ -143,6 +148,55 @@ def cache_pins(info: AdapterInfo) -> dict:
         "revision": info.hf_revision,
         "sources": [list(source) for source in info.extra_sources],
     }
+
+
+def _read_evaluation_resource(package: str, resource: str) -> bytes:
+    """Read a packaged score-bearing resource through the wheel-safe API."""
+
+    from importlib import resources
+
+    return resources.files(package).joinpath(resource).read_bytes()
+
+
+def evaluation_protocol_identity(info: AdapterInfo) -> dict | None:
+    """Return content identities for an adapter's score-bearing implementation."""
+
+    if not info.evaluation_resources:
+        return None
+    return {
+        "resources": [
+            {
+                "package": package,
+                "resource": resource,
+                "sha256": hashlib.sha256(
+                    _read_evaluation_resource(package, resource)
+                ).hexdigest(),
+            }
+            for package, resource in info.evaluation_resources
+        ]
+    }
+
+
+def adapter_cache_ready(adapter: BenchmarkAdapter, cache: BenchCache) -> bool:
+    """Return whether an adapter's rows and adapter-owned assets are usable.
+
+    Most adapters only own normalized rows. Adapters with additional executable
+    assets may expose ``additional_cache_ready(cache)``; every cache consumer
+    goes through this helper so download, list, identity, resume, and runtime
+    preconditions cannot disagree about readiness.
+    """
+
+    if not cache.is_ready(adapter.info.name, **cache_pins(adapter.info)):
+        return False
+    additional_ready = getattr(adapter, "additional_cache_ready", None)
+    if additional_ready is None:
+        return True
+    try:
+        return bool(additional_ready(cache))
+    except Exception:
+        # Readiness is a trust boundary: a broken validator must never make a
+        # cache look usable.
+        return False
 
 
 def utc_now() -> str:
@@ -431,7 +485,7 @@ def skipped_pair(
 
 
 class GenerativeAdapter(ABC):
-    """Shared run loop for request/response benchmarks (9 of 11 Fugu slots)."""
+    """Shared run loop for installed request/response benchmarks."""
 
     info: AdapterInfo
 
@@ -457,13 +511,16 @@ class GenerativeAdapter(ABC):
 
     # -- optional hooks ----------------------------------------------------------
 
+    def additional_cache_ready(self, cache: BenchCache) -> bool:
+        """Validate adapter-owned assets beyond normalized dataset rows."""
+
+        return True
+
     def check_preconditions(self, target: BenchTarget, ctx: RunContext) -> str | None:
         """Return a skip reason, or None to proceed. Extend, don't replace."""
         if self.info.needs_vision and not target.supports_vision:
             return f"target {target.label()!r} does not support vision inputs"
-        if not ctx.offline_fixtures and not ctx.cache.is_ready(
-            self.info.name, **cache_pins(self.info)
-        ):
+        if not ctx.offline_fixtures and not adapter_cache_ready(self, ctx.cache):
             detail = ctx.download_failures.get(self.info.name, "run `kairyu bench download`")
             return f"dataset not in cache ({detail})"
         return None
@@ -476,9 +533,7 @@ class GenerativeAdapter(ABC):
             "temperature": 0.0,
             "source": "fixtures" if ctx.offline_fixtures else "cache",
         }
-        if not ctx.offline_fixtures and ctx.cache.is_ready(
-            self.info.name, **cache_pins(self.info)
-        ):
+        if not ctx.offline_fixtures and adapter_cache_ready(self, ctx.cache):
             manifest = ctx.cache.read_manifest(self.info.name)
             base["manifest"] = {
                 key: manifest.get(key)
@@ -510,9 +565,7 @@ class GenerativeAdapter(ABC):
     def download(self, ctx: DownloadContext) -> DownloadReport:
         from kairyu.bench.types import BenchExtrasMissing, DatasetGated, DatasetUnavailable
 
-        if not ctx.force and ctx.cache.is_ready(
-            self.info.name, **cache_pins(self.info)
-        ):
+        if not ctx.force and adapter_cache_ready(self, ctx.cache):
             return DownloadReport(adapter=self.info.name, status="cached")
         try:
             rows = self.normalize(ctx)

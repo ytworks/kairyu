@@ -1,4 +1,4 @@
-"""Pinned dataset revisions for the Fugu suite.
+"""Pinned dataset revisions for the packaged benchmark suites.
 
 A benchmark whose dataset tracks `main` is not reproducible: the published sets
 DO move. `openai/mrcr` was corrected in December 2025, HLE's item count has
@@ -34,6 +34,12 @@ _COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 # The dataset id is part of the record so a pin can never silently attach to a
 # different dataset after a source swap.
 DATASET_PINS: dict[str, tuple[str, str]] = {
+    # Cheap deterministic core suite. Counts at these revisions: 1,319 test
+    # rows (GSM8K), 14,042 test rows across 57 subjects (MMLU), and 541 prompts
+    # carrying 834 verifiable instructions (IFEval).
+    "gsm8k": ("openai/gsm8k", "740312add88f781978c0658806c59bc2815b9866"),
+    "mmlu": ("cais/mmlu", "c30699e8356da336a370243923dbaf21066bb9fe"),
+    "ifeval": ("google/IFEval", "966cd89545d6b6acfd7638bc708b98261ca58e84"),
     # 2,500 test items as of this commit — the count Fugu reports.
     "hle": ("cais/hle", "5a81a4c7271a2a2a312b9a690f0c2fde837e4c29"),
     "gpqa-diamond": ("Idavidrein/gpqa", "633f5ee89ab8ad4522a9f850766b73f62147ffdd"),
@@ -67,6 +73,20 @@ DATASET_PINS: dict[str, tuple[str, str]] = {
 #: single place that answers "what data produced this scoreboard", and the
 #: adapters' `extra_sources` must agree with it.
 SECONDARY_PINS: dict[str, tuple[tuple[str, str], ...]] = {
+    # The data alone does not define IFEval: the 25 deterministic checkers and
+    # the English Punkt parameters are also score-bearing inputs. The adapter
+    # records and verifies the Punkt archive's content digest in addition to
+    # this immutable repository commit.
+    "ifeval": (
+        (
+            "google-research/google-research:instruction_following_eval",
+            "066e1eda43f4785922e3994e95429e496080231f",
+        ),
+        (
+            "nltk/nltk_data:packages/tokenizers/punkt_tab.zip",
+            "550b6625bcef1f2abff2ff770a5a0d272c9c6b2a",
+        ),
+    ),
     "livecodebench-pro": (
         ("QAQAQAQAQ/LiveCodeBench-Pro-Testcase", "5257736c0a4e30ba0949d41c56a257c323d9c600"),
     ),

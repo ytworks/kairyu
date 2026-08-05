@@ -275,7 +275,7 @@ uv sync --group dev           # + テスト/lint ツールチェーン
 | `--extra fleet` | pyzmq, msgpack, psycopg | プロセス分離エンジン、KV イベントトランスポート、PostgreSQL 共有 BatchStore |
 | `--extra otel` | opentelemetry-sdk | トレーシングスパン(なければ no-op) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU カーネル/ファブリック(Linux 限定マーカー。macOS の `uv sync` はスキップ) |
-| `--extra bench` | datasets, huggingface_hub, pillow, h5py | `kairyu bench download` のデータセット取得 |
+| `--extra bench` | datasets/HF Hub、ベンチマーク形式、進捗 UI、固定 IFEval scorer 依存 | インストール済みベンチマークスイートの取得と採点 |
 | `--extra bench-agentic` | mini-swe-agent, swebench, harbor | docker ベースのエージェンティックベンチマーク |
 | `--group dev` | pytest, ruff, transformers, openai, … | テストスイート + パリティゴールデン |
 
@@ -832,14 +832,17 @@ tokens_per_minute=200_000)}))`。
 
 ## 8. ベンチマーク
 
-`kairyu bench` は、デプロイ済みゲートウェイに対して Fugu リリースの 11 ベンチマーク
-品質スイートを実行します — 単一モデルとオーケストレーションティアがスコアボードの
-列として並び、日付・脚注付きのスコアボードが出力されます:
+`kairyu bench` は、デプロイ済みゲートウェイに対して回答品質スイートを実行します。
+既定は Fugu リリースの 11 ベンチマークで、`--suite core` は決定論的な
+GSM8K/MMLU/IFEval 回帰スイートを選択します。単一モデルとオーケストレーション
+ティアはスコアボードの列として並びます:
 
 ```bash
 uv run kairyu serve examples/deploy_multi_orchestrator.yaml &
 uv run kairyu bench run --base-url http://localhost:8000/v1 \
     --model m1 --model kairyu-auto --model kairyu-auto-max
+uv run kairyu bench run --suite core --smoke \
+    --base-url http://localhost:8000/v1 --model m1
 ```
 
 データセットは `~/.cache/kairyu/benchmarks` にダウンロードされます(コミットされま
@@ -849,10 +852,10 @@ uv run kairyu bench run --base-url http://localhost:8000/v1 \
 `bench entrypoints`。詳細ガイド: [`docs/benchmarks.md`](docs/benchmarks.md)。
 
 wheel に含まれるのは、再利用可能な `kairyu.bench` ライブラリ、公開 CLI、
-エントリポイント台帳、8 個のオフライン fixture です。トップレベルの
-`bench/*.py` 開発／正式ゲート用ラッパー、`bench/results/`、`tests/` は
-ソース checkout 専用です。安定した一覧と互換性ポリシーは
-[`bench/README.md`](bench/README.md) を参照してください。
+エントリポイント台帳、11 個のベンチマーク fixture、judge calibration fixture
+です。トップレベルの `bench/*.py` 開発／正式ゲート用ラッパー、
+`bench/results/`、`tests/` はソース checkout 専用です。安定した一覧と
+互換性ポリシーは [`bench/README.md`](bench/README.md) を参照してください。
 
 ## 9. 開発
 
@@ -885,7 +888,7 @@ uv run python bench/orchestration_mock_bench.py
 | [`docs/goals/`](docs/goals/) | エビデンスファーストのゴール契約(マルチ GPU、MoE エンジン、フリートスケール、プロダクトサーフェス) |
 | [`docs/deployment.md`](docs/deployment.md) | 本番デプロイ: DC トポロジー、systemd、ローリング更新、可観測性 |
 | [`docs/gpu-runbook.md`](docs/gpu-runbook.md) | GPU デイ実行計画の集約(パフォーマンスゲート、カーネルチューニング、ファブリック立ち上げ) |
-| [`docs/benchmarks.md`](docs/benchmarks.md) | Fugu ベンチマークスイートのガイド |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | インストール済みベンチマークスイートのガイド |
 
 ## 11. ライセンス
 

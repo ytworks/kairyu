@@ -1,0 +1,15 @@
+IFEval checker
+Copyright 2023 The Google Research Authors.
+
+Source: https://github.com/google-research/google-research/tree/066e1eda43f4785922e3994e95429e496080231f/instruction_following_eval
+
+Kairyu vendors and adapts the 25 instruction checkers under the Apache License,
+Version 2.0. Adaptations include package-relative imports, standard-library
+logging, deterministic langdetect seeding, and a pure-function evaluation facade.
+The official strict/loose response transformations are retained.
+
+Dataset-consistency amendment: pinned IFEval keys 1122 and 1129 require the
+characters `#` and `!`. Upstream LetterFrequencyChecker silently replaces both
+with a random ASCII letter, independently for strict and loose evaluation.
+Kairyu preserves any non-whitespace single character and rejects invalid letter
+arguments, so both arms score the constraint encoded by the pinned dataset.
