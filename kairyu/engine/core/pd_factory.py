@@ -33,6 +33,10 @@ from typing import TYPE_CHECKING
 
 from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
 from kairyu.engine.core.kv_pool import PagedKVPool
+from kairyu.engine.core.logits_dtype import (
+    resolve_logits_dtype,
+    validate_logits_dtype,
+)
 from kairyu.models.generation import GenerationConfigMode
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -110,6 +114,7 @@ def build_pd_coordinator(
     prefill_attention_backend=None,
     decode_attention_backend=None,
     generation_config: GenerationConfigMode = "auto",
+    logits_dtype: str = "model",
 ):
     """Assemble a prefill/decode pair from a checkpoint (G2 stage 5.3 entry).
 
@@ -134,6 +139,7 @@ def build_pd_coordinator(
     physical completion poll. Pass False for the safe blocking/non-overlap
     control.
     """
+    logits_dtype = validate_logits_dtype(logits_dtype)
     import torch
 
     from kairyu.engine.core.attention import select_backend
@@ -255,6 +261,7 @@ def build_pd_coordinator(
             attention_backend=role_attention_backend,
             target_device=role_device,
             generation_config=generation_config,
+            logits_dtype=logits_dtype,
         )
         cache = RadixKVCache(num_pages=num_pages, page_size=page_size)
         scheduler = Scheduler(
@@ -308,5 +315,9 @@ def build_pd_coordinator(
         if isinstance(prefill_decision, AttentionBackendDecision)
         and isinstance(decode_decision, AttentionBackendDecision)
         else None
+    )
+    coordinator.logits_dtype_requested = logits_dtype
+    coordinator.logits_dtype_resolved = resolve_logits_dtype(
+        logits_dtype, dtype
     )
     return coordinator

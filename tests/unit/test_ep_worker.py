@@ -909,6 +909,7 @@ def test_build_ep_runner_replicates_attention_and_binds_rank_local_experts(
         device,
         attention_backend,
         attention_dp,
+        logits_dtype,
     ):
         seen["model"] = {
             "model_dir": model_dir,
@@ -919,6 +920,7 @@ def test_build_ep_runner_replicates_attention_and_binds_rank_local_experts(
             "device": device,
             "attention_backend": attention_backend,
             "attention_dp": attention_dp,
+            "logits_dtype": logits_dtype,
         }
         return "rank-local-model", full_config, load_info
 
@@ -960,6 +962,7 @@ def test_build_ep_runner_replicates_attention_and_binds_rank_local_experts(
         "device": f"cuda:{rank}",
         "attention_backend": backend,
         "attention_dp": False,
+        "logits_dtype": "model",
     }
     assert seen["pool"] == {
         "num_layers": 94,

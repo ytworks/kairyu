@@ -46,7 +46,13 @@ def llama_dir(tmp_path_factory):
     return str(path)
 
 
-def _generate(model_dir: str, graph_backend, max_new: int = 6):
+def _generate(
+    model_dir: str,
+    graph_backend,
+    max_new: int = 6,
+    *,
+    logits_dtype: str = "model",
+):
     from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend
     from kairyu.engine.core.engine_core import EngineCore
     from kairyu.engine.core.kv_pool import PagedKVPool
@@ -64,6 +70,7 @@ def _generate(model_dir: str, graph_backend, max_new: int = 6):
     model, config, _ = load_model(
         model_dir, dtype=torch.bfloat16, attention_backend=TorchAttentionBackend(),
         target_device="cuda:0",
+        logits_dtype=logits_dtype,
     )
     model = model.to("cuda:0")
     cache = RadixKVCache(num_pages=128, page_size=16)
@@ -97,6 +104,25 @@ def test_captured_decode_matches_eager(llama_dir):
     assert runner._graph._captured, "nothing was captured; the graph path was skipped"
     assert graphed == eager
     assert all(len(tokens) == 6 for tokens in eager.values())
+
+
+def test_float32_logits_are_captured_and_match_eager(llama_dir):
+    from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
+
+    _require_cuda()
+    eager, eager_runner = _generate(llama_dir, None, logits_dtype="float32")
+    graphed, graph_runner = _generate(
+        llama_dir,
+        CudaGraphBackend(),
+        logits_dtype="float32",
+    )
+
+    assert graphed == eager
+    assert eager_runner._model.logits_dtype == "float32"
+    assert graph_runner._model.logits_dtype == "float32"
+    captured = graph_runner._graph._captured
+    assert captured
+    assert all(replayable._static_out.dtype is torch.float32 for replayable, _ in captured.values())
 
 
 def test_production_builder_reaches_capture_and_replay(llama_dir, monkeypatch):

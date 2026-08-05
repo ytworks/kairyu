@@ -309,6 +309,23 @@ def test_build_ep_model_loads_only_owned_global_experts(
     )
 
 
+def test_build_ep_model_propagates_float32_logits_mode(tmp_path) -> None:
+    checkpoint = tmp_path / "ep-logits-dtype"
+    _write_checkpoint(checkpoint)
+
+    model, _config, _info = build_ep_model(
+        checkpoint,
+        ep_size=2,
+        ep_rank=1,
+        comm=_UnusedEpComm(),
+        logits_dtype="float32",
+    )
+
+    assert model.logits_dtype == "float32"
+    logits = model.logits(torch.randn(3, _RAW["hidden_size"]))
+    assert logits.dtype is torch.float32
+
+
 def test_ep4_attention_output_loads_only_rank_contiguous_nvfp4_k_shard(tmp_path):
     checkpoint = tmp_path / "ep4-attention-output"
     full_state = _write_checkpoint(checkpoint)

@@ -354,8 +354,11 @@ def test_structured_sampling_keeps_the_reviewed_cpu_matcher_path():
     assert token.token_id == 4
 
 
+@pytest.mark.parametrize("logits_dtype", ("model", "float32"))
 def test_steady_decode_feedback_profiler_has_no_host_scalar_sync(
-    llama_dir, monkeypatch
+    llama_dir,
+    monkeypatch,
+    logits_dtype,
 ):
     from torch.profiler import ProfilerActivity, profile
 
@@ -371,7 +374,10 @@ def test_steady_decode_feedback_profiler_has_no_host_scalar_sync(
     if not torch.cuda.is_available():  # pragma: no cover - CPU box
         pytest.skip("device sampler profiler gate needs CUDA")
     model, config, _ = load_model(
-        llama_dir, dtype=torch.bfloat16, target_device="cuda:0"
+        llama_dir,
+        dtype=torch.bfloat16,
+        target_device="cuda:0",
+        logits_dtype=logits_dtype,
     )
     model = model.to("cuda:0")
     cache = RadixKVCache(num_pages=128, page_size=16)

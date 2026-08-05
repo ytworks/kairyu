@@ -280,11 +280,17 @@ def test_startup_handshake_requires_the_same_dram_tier_identity(tmp_path):
     ),
 )
 @pytest.mark.parametrize("dram_enabled", [False, True], ids=["dram-off", "dram-on"])
+@pytest.mark.parametrize(
+    ("logits_dtype", "resolved_logits_dtype"),
+    (("model", "bfloat16"), ("float32", "float32")),
+)
 def test_build_tp_runner_probes_and_binds_the_rank_local_device(
     monkeypatch,
     requested_kv_dtype,
     resolved_kv_dtype,
     dram_enabled,
+    logits_dtype,
+    resolved_logits_dtype,
 ):
     from kairyu.engine.core import attention as attention_module
     from kairyu.engine.core import (
@@ -358,6 +364,7 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
         dtype,
         device,
         attention_backend,
+        logits_dtype,
     ):
         seen["model"] = {
             "model_dir": model_dir,
@@ -367,6 +374,7 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
             "dtype": dtype,
             "device": device,
             "attention_backend": attention_backend,
+            "logits_dtype": logits_dtype,
         }
         return object(), local_config, full_config
 
@@ -427,6 +435,7 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
         vocab=["token"],
         placement=placement,
         kv_cache_dtype=requested_kv_dtype,
+        logits_dtype=logits_dtype,
         dram_kv_tier_capacity_pages=7 if dram_enabled else 0,
         dram_kv_tier_profile="/profile.json" if dram_enabled else None,
         max_num_batched_tokens=1536,
@@ -443,6 +452,7 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
         "dtype": torch.bfloat16,
         "device": "cuda:3",
         "attention_backend": backend,
+        "logits_dtype": logits_dtype,
     }
     assert seen["pool"]["device"] == "cuda:3"
     assert seen["pool"]["dtype"] is resolved_kv_dtype
@@ -475,6 +485,8 @@ def test_build_tp_runner_probes_and_binds_the_rank_local_device(
         assert runner.dram_kv_tier_identity is None
     assert runner.kv_cache_dtype_requested == requested_kv_dtype
     assert runner.kv_cache_dtype_resolved == "bfloat16"
+    assert runner.logits_dtype_requested == logits_dtype
+    assert runner.logits_dtype_resolved == resolved_logits_dtype
     assert returned_full_config is full_config
 
 

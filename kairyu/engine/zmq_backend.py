@@ -50,6 +50,7 @@ from kairyu.engine.core.engine_service import (
     sampling_params_to_wire,
 )
 from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
+from kairyu.engine.core.logits_dtype import validate_logits_dtype
 from kairyu.engine.core.sampling_types import stable_request_seed
 from kairyu.engine.engine_loop import _validate_max_model_len
 from kairyu.engine.prompt import (
@@ -401,6 +402,38 @@ def _kv_cache_dtype_from_startup_frame(
     return requested, resolved
 
 
+def _logits_dtype_from_startup_frame(
+    frame,
+) -> tuple[str | None, str | None]:
+    """Validate optional logits metadata added compatibly to startup wire v1."""
+
+    requested = frame.get("logits_dtype_requested")
+    resolved = frame.get("logits_dtype_resolved")
+    if requested is None and resolved is None:
+        return None, None
+    if not isinstance(requested, str) or not requested:
+        raise EngineServiceError(
+            "engine startup logits_dtype_requested must be a non-empty string"
+        )
+    if not isinstance(resolved, str) or not resolved:
+        raise EngineServiceError(
+            "engine startup logits_dtype_resolved must be a non-empty string"
+        )
+    try:
+        validate_logits_dtype(requested)
+    except ValueError as error:
+        raise EngineServiceError(
+            "engine startup logits_dtype_requested is invalid: "
+            f"{error}"
+        ) from error
+    if resolved not in {"float16", "bfloat16", "float32", "not-applicable"}:
+        raise EngineServiceError(
+            "engine startup logits_dtype_resolved is invalid: "
+            f"{resolved!r}"
+        )
+    return requested, resolved
+
+
 def _tensor_parallel_size_from_startup_frame(frame) -> int | None:
     """Read the optional runtime TP identity added compatibly to startup v1."""
 
@@ -532,6 +565,38 @@ def _validate_startup_kv_cache_dtype_identity(
         )
 
 
+def _validate_startup_logits_dtype_identity(
+    configured: str,
+    requested: str | None,
+    resolved: str | None,
+) -> None:
+    """Reject a child that did not construct the requested logits policy."""
+
+    if requested is None:
+        if configured != "model":
+            raise EngineServiceError(
+                "engine service did not report logits dtype metadata for "
+                f"explicit request {configured!r}"
+            )
+        return
+    if requested != configured:
+        raise EngineServiceError(
+            "engine startup logits dtype request mismatch: "
+            f"parent={configured!r}, child={requested!r}"
+        )
+    allowed_resolutions = {
+        "model": frozenset(
+            {"float16", "bfloat16", "float32", "not-applicable"}
+        ),
+        "float32": frozenset({"float32"}),
+    }
+    if resolved not in allowed_resolutions[configured]:
+        raise EngineServiceError(
+            "engine startup logits dtype resolution is inconsistent: "
+            f"requested={configured!r}, resolved={resolved!r}"
+        )
+
+
 def _dram_kv_tier_from_startup_frame(frame) -> dict[str, object] | None:
     raw = frame.get("dram_kv_tier")
     if raw is None:
@@ -607,6 +672,8 @@ def _recv_optional_startup_frame(
     AttentionBackendDecision | None,
     str | None,
     str | None,
+    str | None,
+    str | None,
     dict[str, object] | None,
     GenerationDefaults | None,
     int | None,
@@ -618,12 +685,13 @@ def _recv_optional_startup_frame(
     except EOFError:
         if process.is_alive():
             # Old services close the Pipe immediately after the integer port.
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None, None
         raise EngineServiceError(
             "engine service exited before reporting startup metadata"
         ) from None
     decision = _decision_from_startup_frame(frame)
     requested, resolved = _kv_cache_dtype_from_startup_frame(frame)
+    requested_logits, resolved_logits = _logits_dtype_from_startup_frame(frame)
     dram_kv_tier = _dram_kv_tier_from_startup_frame(frame)
     generation_defaults = _generation_defaults_from_startup_frame(frame)
     tensor_parallel_size = _tensor_parallel_size_from_startup_frame(frame)
@@ -631,6 +699,8 @@ def _recv_optional_startup_frame(
         decision,
         requested,
         resolved,
+        requested_logits,
+        resolved_logits,
         dram_kv_tier,
         generation_defaults,
         tensor_parallel_size,
@@ -883,6 +953,7 @@ class ZmqEngineBackend:
         dram_kv_tier_profile: str | PathLike[str] | None = None,
         generation_config: GenerationConfigMode = "auto",
         tensor_parallel_size: int = 1,
+        logits_dtype: str = "model",
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
@@ -905,6 +976,11 @@ class ZmqEngineBackend:
         if kv_cache_dtype != "auto" and model_path is None:
             raise ValueError(
                 "kairyu-proc explicit KV cache dtype requires a real model_path"
+            )
+        logits_dtype = validate_logits_dtype(logits_dtype)
+        if logits_dtype == "float32" and model_path is None:
+            raise ValueError(
+                "kairyu-proc logits_dtype='float32' requires a real model_path"
             )
         if (
             type(dram_kv_tier_capacity_pages) is not int
@@ -964,6 +1040,7 @@ class ZmqEngineBackend:
             "cuda_graph_max_pages": cuda_graph_max_pages,
             "cuda_graph_warmup_iters": cuda_graph_warmup_iters,
             "kv_cache_dtype": kv_cache_dtype,
+            "logits_dtype": logits_dtype,
             "dram_kv_tier_capacity_pages": dram_kv_tier_capacity_pages,
             "dram_kv_tier_profile": (
                 str(dram_kv_tier_profile)
@@ -1014,6 +1091,8 @@ class ZmqEngineBackend:
         )
         self.kv_cache_dtype_requested = kv_cache_dtype
         self.kv_cache_dtype_resolved: str | None = None
+        self.logits_dtype_requested = logits_dtype
+        self.logits_dtype_resolved: str | None = None
         self.dram_kv_tier_enabled = dram_kv_tier_capacity_pages > 0
         self.dram_kv_tier_capacity_pages = dram_kv_tier_capacity_pages
         self.dram_kv_tier_profile = (
@@ -1166,6 +1245,8 @@ class ZmqEngineBackend:
                 decision,
                 requested_kv_dtype,
                 resolved_kv_dtype,
+                requested_logits_dtype,
+                resolved_logits_dtype,
                 dram_kv_tier,
                 generation_defaults,
                 actual_tensor_parallel_size,
@@ -1180,6 +1261,11 @@ class ZmqEngineBackend:
                 self.kv_cache_dtype_requested,
                 requested_kv_dtype,
                 resolved_kv_dtype,
+            )
+            _validate_startup_logits_dtype_identity(
+                self.logits_dtype_requested,
+                requested_logits_dtype,
+                resolved_logits_dtype,
             )
             _validate_startup_dram_kv_tier_identity(
                 self.dram_kv_tier_capacity_pages,
@@ -1216,6 +1302,7 @@ class ZmqEngineBackend:
             self.attention_backend_decision = None
             self.tensor_parallel_size = None
             self.kv_cache_dtype_resolved = None
+            self.logits_dtype_resolved = None
             self.dram_kv_tier_profile_sha256 = None
             self.dram_kv_tier_min_restore_tokens = None
             if self._lifetime_pipe is parent_lifetime_pipe:
@@ -1246,6 +1333,9 @@ class ZmqEngineBackend:
         if requested_kv_dtype is not None:
             self.kv_cache_dtype_requested = requested_kv_dtype
         self.kv_cache_dtype_resolved = resolved_kv_dtype
+        if requested_logits_dtype is not None:
+            self.logits_dtype_requested = requested_logits_dtype
+        self.logits_dtype_resolved = resolved_logits_dtype
         if dram_kv_tier is not None:
             profile_sha = dram_kv_tier["profile_sha256"]
             threshold = dram_kv_tier["min_restore_tokens"]
@@ -1454,6 +1544,7 @@ class ZmqEngineBackend:
         self.attention_backend_decision = None
         self.tensor_parallel_size = None
         self.kv_cache_dtype_resolved = None
+        self.logits_dtype_resolved = None
         self.dram_kv_tier_profile_sha256 = None
         self.dram_kv_tier_min_restore_tokens = None
         self._fail_generation_once(
@@ -1575,6 +1666,7 @@ class ZmqEngineBackend:
             self.attention_backend_decision = None
             self.tensor_parallel_size = None
             self.kv_cache_dtype_resolved = None
+            self.logits_dtype_resolved = None
             self.dram_kv_tier_profile_sha256 = None
             self.dram_kv_tier_min_restore_tokens = None
             self._fail_generation_once(
@@ -1624,6 +1716,7 @@ class ZmqEngineBackend:
                 self.attention_backend_decision = None
                 self.tensor_parallel_size = None
                 self.kv_cache_dtype_resolved = None
+                self.logits_dtype_resolved = None
                 self.dram_kv_tier_profile_sha256 = None
                 self.dram_kv_tier_min_restore_tokens = None
             if cleanup_error is not None:
@@ -1872,6 +1965,7 @@ class ZmqEngineBackend:
                 self.attention_backend_decision = None
                 self.tensor_parallel_size = None
                 self.kv_cache_dtype_resolved = None
+                self.logits_dtype_resolved = None
                 self.dram_kv_tier_profile_sha256 = None
                 self.dram_kv_tier_min_restore_tokens = None
             self._fail_generation_once(generation, failure)

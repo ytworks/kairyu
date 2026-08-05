@@ -411,6 +411,12 @@ def _startup_ready_frame(engine_loop) -> dict:
         "kv_cache_dtype_resolved": getattr(
             engine_loop, "kv_cache_dtype_resolved", None
         ),
+        "logits_dtype_requested": getattr(
+            engine_loop, "logits_dtype_requested", None
+        ),
+        "logits_dtype_resolved": getattr(
+            engine_loop, "logits_dtype_resolved", None
+        ),
         "dram_kv_tier": {
             "enabled": getattr(engine_loop, "dram_kv_tier_enabled", False),
             "capacity_pages": getattr(

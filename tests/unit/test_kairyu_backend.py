@@ -1823,6 +1823,8 @@ def test_dist_ep_builder_assembles_topology_neutral_serving_loop(
             self.attention_backend_decision = None
             self.kv_cache_dtype_requested = "bfloat16"
             self.kv_cache_dtype_resolved = "bfloat16"
+            self.logits_dtype_requested = kwargs["logits_dtype"]
+            self.logits_dtype_resolved = "bfloat16"
             self.shutdown_calls = 0
             created.append(self)
 
@@ -1898,6 +1900,8 @@ def test_dist_ep_attention_dp_propagates_cuda_graph_capacity_and_scratch(
             self.attention_backend_decision = None
             self.kv_cache_dtype_requested = "bfloat16"
             self.kv_cache_dtype_resolved = "bfloat16"
+            self.logits_dtype_requested = kwargs["logits_dtype"]
+            self.logits_dtype_resolved = "bfloat16"
             created.append(self)
 
         def parallelism_metadata(self):

@@ -11,10 +11,12 @@ import torch
 from torch import nn
 
 from kairyu.engine.core.kv_pool import PagedKVPool
+from kairyu.engine.core.logits_dtype import validate_logits_dtype
 from kairyu.engine.core.prefill import PrefillBatch
 from kairyu.models.attention import Attention
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm, RotaryEmbedding
+from kairyu.models.logits import project_logits
 from kairyu.models.mla import MlaAttention
 from kairyu.models.moe import build_mlp
 from kairyu.quant.linear import LinearRole, ModelScope, make_linear
@@ -249,8 +251,13 @@ class DenseDecoder(nn.Module):
         linear_factory=None,
         *,
         dtype: torch.dtype | None = None,
+        logits_dtype: str = "model",
     ) -> None:
         super().__init__()
+        # Reject an invalid public option before allocating the backbone or
+        # output head.  Top-level deployment builders validate too, but direct
+        # model construction must keep the same fail-fast contract.
+        self.logits_dtype = validate_logits_dtype(logits_dtype)
         self.config = config
         self.model = _Backbone(
             config,
@@ -269,6 +276,13 @@ class DenseDecoder(nn.Module):
             # is a hard format constraint; untied heads remain a policy choice.
             allow_quantization=not config.tie_word_embeddings,
         )
+        if self.logits_dtype == "float32" and not isinstance(
+            self.lm_head, nn.Linear
+        ):
+            raise ValueError(
+                "logits_dtype='float32' requires a dense torch.nn.Linear "
+                "output head"
+            )
         if config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         # Packing at construction gives direct models the optimized path;
@@ -511,4 +525,10 @@ class DenseDecoder(nn.Module):
 
     @torch.no_grad()
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:
-        return self.lm_head(hidden)
+        # Keep the compatibility arm on the exact pre-#364 hot path.  Besides
+        # preserving its numerical boundary, this avoids adding validation or
+        # helper-dispatch overhead to every decode step when the option is not
+        # enabled.
+        if self.logits_dtype == "model":
+            return self.lm_head(hidden)
+        return project_logits(self.lm_head, hidden, self.logits_dtype)

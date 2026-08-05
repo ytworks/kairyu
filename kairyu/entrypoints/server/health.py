@@ -583,6 +583,20 @@ def add_health_routes(
                 entry["requested_kv_cache_dtype"] = requested_kv_dtype
             if isinstance(resolved_kv_dtype, str) and resolved_kv_dtype:
                 entry["kv_cache_dtype"] = resolved_kv_dtype
+            requested_logits_dtype = getattr(
+                engine,
+                "logits_dtype_requested",
+                None,
+            )
+            resolved_logits_dtype = getattr(
+                engine,
+                "logits_dtype_resolved",
+                None,
+            )
+            if isinstance(requested_logits_dtype, str) and requested_logits_dtype:
+                entry["requested_logits_dtype"] = requested_logits_dtype
+            if isinstance(resolved_logits_dtype, str) and resolved_logits_dtype:
+                entry["logits_dtype"] = resolved_logits_dtype
             generation_defaults = getattr(
                 engine,
                 "generation_defaults",
@@ -671,6 +685,8 @@ def add_health_routes(
                     for field in (
                         "requested_kv_cache_dtype",
                         "kv_cache_dtype",
+                        "requested_logits_dtype",
+                        "logits_dtype",
                     ):
                         values = [
                             item.get(field)

@@ -2275,6 +2275,8 @@ def make_handshake(
     kv_cache_dtype_requested: str | None = None,
     kv_cache_dtype_resolved: str | None = None,
     dram_kv_tier_identity: str | None = None,
+    logits_dtype_requested: str | None = None,
+    logits_dtype_resolved: str | None = None,
 ) -> dict:
     """Rank 0 broadcasts this before the step loop; workers validate (A11)."""
     handshake = {
@@ -2290,6 +2292,10 @@ def make_handshake(
         handshake["kv_cache_dtype_resolved"] = kv_cache_dtype_resolved
     if dram_kv_tier_identity is not None:
         handshake["dram_kv_tier_identity"] = dram_kv_tier_identity
+    if logits_dtype_requested is not None:
+        handshake["logits_dtype_requested"] = logits_dtype_requested
+    if logits_dtype_resolved is not None:
+        handshake["logits_dtype_resolved"] = logits_dtype_resolved
     return handshake
 
 
@@ -2302,6 +2308,8 @@ def validate_handshake(
     kv_cache_dtype_requested: str | None = None,
     kv_cache_dtype_resolved: str | None = None,
     dram_kv_tier_identity: str | None = None,
+    logits_dtype_requested: str | None = None,
+    logits_dtype_resolved: str | None = None,
 ) -> None:
     expected = make_handshake(
         model_dir,
@@ -2311,12 +2319,15 @@ def validate_handshake(
         kv_cache_dtype_requested,
         kv_cache_dtype_resolved,
         dram_kv_tier_identity,
+        logits_dtype_requested,
+        logits_dtype_resolved,
     )
     if handshake != expected:
         raise RuntimeError(
             f"TP worker mismatch: driver={handshake} worker={expected} — "
             "pool sizing/config, backend identity, KV dtype identity, and "
-            "DRAM tier identity must be identical on every rank"
+            "DRAM tier identity, and logits dtype identity must be identical "
+            "on every rank"
         )
 
 
@@ -2610,6 +2621,8 @@ def _make_ep_handshake(
     page_size: int,
     attention_backend_identity: str,
     kv_cache_dtype_resolved: str,
+    logits_dtype_requested: str = "model",
+    logits_dtype_resolved: str = "bfloat16",
     *,
     attention_dp: bool = False,
     pipeline_depth: int = 1,
@@ -2641,6 +2654,8 @@ def _make_ep_handshake(
         attention_backend_identity=attention_backend_identity,
         kv_cache_dtype_requested="bfloat16",
         kv_cache_dtype_resolved=kv_cache_dtype_resolved,
+        logits_dtype_requested=logits_dtype_requested,
+        logits_dtype_resolved=logits_dtype_resolved,
     )
     if attention_dp:
         graph_decode = decode_mode == "cuda_graph"
@@ -2710,6 +2725,8 @@ def _validate_ep_handshake(
     page_size: int,
     attention_backend_identity: str,
     kv_cache_dtype_resolved: str,
+    logits_dtype_requested: str = "model",
+    logits_dtype_resolved: str = "bfloat16",
     *,
     attention_dp: bool = False,
     pipeline_depth: int = 1,
@@ -2725,6 +2742,8 @@ def _validate_ep_handshake(
         page_size,
         attention_backend_identity,
         kv_cache_dtype_resolved,
+        logits_dtype_requested,
+        logits_dtype_resolved,
         attention_dp=attention_dp,
         pipeline_depth=pipeline_depth,
         decode_mode=decode_mode,
@@ -2736,8 +2755,8 @@ def _validate_ep_handshake(
         raise RuntimeError(
             f"EP worker mismatch: driver={handshake} worker={expected} — "
             "expert topology, attention/KV ownership, MoE dispatcher, eager "
-            "decode/graph execution, BF16 KV, pool sizing/config, and backend identity "
-            "must match on every rank"
+            "decode/graph execution, BF16 KV, logits dtype, pool sizing/config, "
+            "and backend identity must match on every rank"
         )
 
 
@@ -5449,6 +5468,7 @@ def build_tp_runner(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     max_num_batched_tokens: int = 2048,
+    logits_dtype: str = "model",
 ):
     """The per-rank sharded PagedModelRunner (pool sized from the tp_view config).
 
@@ -5468,12 +5488,17 @@ def build_tp_runner(
         resolve_kv_cache_dtype,
     )
     from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.logits_dtype import (
+        resolve_logits_dtype,
+        validate_logits_dtype,
+    )
     from kairyu.engine.core.model_runner import PagedModelRunner
     from kairyu.engine.core.sampler import Sampler
     from kairyu.models.parallel import build_tp_model
 
     if placement is None:
         placement = TPPlacement("cpu", torch.float32, "gloo")
+    logits_dtype = validate_logits_dtype(logits_dtype)
     profile = probe(placement.device)
     attention_backend = select_backend(
         profile,
@@ -5492,6 +5517,7 @@ def build_tp_runner(
         # keyed off the PLACEMENT, not the raw probe: a CPU-placed rank on a GPU
         # box would otherwise get the flashinfer kernel and hand it fp32 tensors
         attention_backend=attention_backend,
+        logits_dtype=logits_dtype,
     )
     resolved_kv_cache_dtype = resolve_kv_cache_dtype(
         kv_cache_dtype,
@@ -5553,6 +5579,10 @@ def build_tp_runner(
     runner.kv_cache_dtype_resolved = kv_cache_dtype_name(
         resolved_kv_cache_dtype
     )
+    runner.logits_dtype_requested = logits_dtype
+    runner.logits_dtype_resolved = resolve_logits_dtype(
+        logits_dtype, placement.dtype
+    )
     runner.dram_kv_binding = dram_kv_binding
     runner.dram_kv_tier = (
         dram_kv_binding.tier if dram_kv_binding is not None else None
@@ -5590,6 +5620,7 @@ def build_ep_runner(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     speculative: str | None = None,
+    logits_dtype: str = "model",
 ):
     """Build one explicit replicated-attention or request-owned EP rank."""
 
@@ -5603,10 +5634,15 @@ def build_ep_runner(
         resolve_kv_cache_dtype,
     )
     from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.logits_dtype import (
+        resolve_logits_dtype,
+        validate_logits_dtype,
+    )
     from kairyu.engine.core.model_runner import PagedModelRunner
     from kairyu.engine.core.sampler import Sampler
     from kairyu.models.moe_parallel import build_ep_model
 
+    logits_dtype = validate_logits_dtype(logits_dtype)
     _validate_ep_mode(
         attention_dp=attention_dp,
         expert_parallel_size=expert_parallel_size,
@@ -5650,6 +5686,7 @@ def build_ep_runner(
         device=placement.device,
         attention_backend=attention_backend,
         attention_dp=attention_dp,
+        logits_dtype=logits_dtype,
     )
     resolved_kv_cache_dtype = resolve_kv_cache_dtype(
         kv_cache_dtype,
@@ -5728,6 +5765,10 @@ def build_ep_runner(
     runner.kv_cache_dtype_resolved = kv_cache_dtype_name(
         resolved_kv_cache_dtype
     )
+    runner.logits_dtype_requested = logits_dtype
+    runner.logits_dtype_resolved = resolve_logits_dtype(
+        logits_dtype, placement.dtype
+    )
     runner.dram_kv_binding = None
     runner.dram_kv_tier = None
     runner.dram_kv_policy = None
@@ -5799,6 +5840,7 @@ def _tp_worker_entry(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     max_num_batched_tokens: int = 2048,
+    logits_dtype: str = "model",
 ) -> None:
     """Spawned worker (rank = spawn_index + 1; rank 0 is the driver process).
 
@@ -5842,6 +5884,7 @@ def _tp_worker_entry(
         dram_kv_tier_capacity_pages,
         dram_kv_tier_profile,
         max_num_batched_tokens,
+        logits_dtype,
     )
     # the handshake is the collective that absorbs load skew, so it — and only it
     # — runs on the long-timeout startup group
@@ -5855,6 +5898,8 @@ def _tp_worker_entry(
         runner.kv_cache_dtype_requested,
         runner.kv_cache_dtype_resolved,
         runner.dram_kv_tier_identity,
+        runner.logits_dtype_requested,
+        runner.logits_dtype_resolved,
     )
     groups = serving_groups(placement.backend)
     comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
@@ -5895,6 +5940,7 @@ def _ep_worker_entry(
     graph_max_batch: int = 0,
     graph_max_pages: int = 0,
     graph_warmup_iters: int = 3,
+    logits_dtype: str = "model",
 ) -> None:
     """Spawned EP worker; rank 0 remains in the driver process."""
 
@@ -5942,6 +5988,7 @@ def _ep_worker_entry(
         graph_max_batch=graph_max_batch,
         graph_max_pages=graph_max_pages,
         graph_warmup_iters=graph_warmup_iters,
+        logits_dtype=logits_dtype,
     )
     if (
         runner.expert_parallel_size != expert_parallel_size
@@ -5959,6 +6006,8 @@ def _ep_worker_entry(
         page_size,
         runner.attention_backend_identity,
         runner.kv_cache_dtype_resolved,
+        runner.logits_dtype_requested,
+        runner.logits_dtype_resolved,
         attention_dp=attention_dp,
         pipeline_depth=pipeline_depth,
         decode_mode=decode_mode,
@@ -6021,6 +6070,7 @@ class DistTPLauncher:
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | Path | None = None,
         max_num_batched_tokens: int = 2048,
+        logits_dtype: str = "model",
     ) -> None:
         import tempfile
 
@@ -6029,6 +6079,7 @@ class DistTPLauncher:
 
         from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
         from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
+        from kairyu.engine.core.logits_dtype import validate_logits_dtype
 
         # Retain the constructed degree for process-boundary startup
         # attestation.  In the in-process backend the parent already owns this
@@ -6037,6 +6088,7 @@ class DistTPLauncher:
         self.tensor_parallel_size = tp
 
         kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
+        logits_dtype = validate_logits_dtype(logits_dtype)
         if kv_cache_dtype != "auto" and force_cpu:
             raise ValueError(
                 "explicit kv_cache_dtype cannot use forced CPU TP placement"
@@ -6092,6 +6144,7 @@ class DistTPLauncher:
                 dram_kv_tier_capacity_pages,
                 dram_kv_tier_profile,
                 max_num_batched_tokens,
+                logits_dtype,
             ),
             nprocs=tp - 1,
             join=False,
@@ -6132,11 +6185,14 @@ class DistTPLauncher:
                 dram_kv_tier_capacity_pages,
                 dram_kv_tier_profile,
                 max_num_batched_tokens,
+                logits_dtype,
             )
             self.attention_backend_decision = runner.attention_backend_decision
             self.attention_backend_identity = runner.attention_backend_identity
             self.kv_cache_dtype_requested = runner.kv_cache_dtype_requested
             self.kv_cache_dtype_resolved = runner.kv_cache_dtype_resolved
+            self.logits_dtype_requested = runner.logits_dtype_requested
+            self.logits_dtype_resolved = runner.logits_dtype_resolved
             self.dram_kv_binding = runner.dram_kv_binding
             self.dram_kv_tier_identity = runner.dram_kv_tier_identity
             # the one collective that legitimately absorbs load skew
@@ -6149,6 +6205,8 @@ class DistTPLauncher:
                     self.kv_cache_dtype_requested,
                     self.kv_cache_dtype_resolved,
                     self.dram_kv_tier_identity,
+                    self.logits_dtype_requested,
+                    self.logits_dtype_resolved,
                 ),
                 src=0,
             )
@@ -6159,6 +6217,8 @@ class DistTPLauncher:
             self._comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
             self._control_comm = TorchDistCommunicator(group=groups.control)
             self.runner = DistTPModelRunner(self._control_comm, runner, self._comm)
+            self.runner.logits_dtype_requested = self.logits_dtype_requested
+            self.runner.logits_dtype_resolved = self.logits_dtype_resolved
         except BaseException:
             self._abandon_start()
             raise
@@ -6336,6 +6396,7 @@ class DistEPLauncher(_DistLauncherLifecycle):
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | Path | None = None,
         speculative: str | None = None,
+        logits_dtype: str = "model",
     ) -> None:
         import tempfile
 
@@ -6343,6 +6404,9 @@ class DistEPLauncher(_DistLauncherLifecycle):
         import torch.multiprocessing as mp
 
         from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+        from kairyu.engine.core.logits_dtype import validate_logits_dtype
+
+        logits_dtype = validate_logits_dtype(logits_dtype)
 
         _validate_ep_mode(
             attention_dp=attention_dp,
@@ -6414,6 +6478,7 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 graph_max_batch,
                 graph_max_pages,
                 graph_warmup_iters,
+                logits_dtype,
             ),
             nprocs=expert_parallel_size - 1,
             join=False,
@@ -6451,11 +6516,14 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
                 dram_kv_tier_profile=dram_kv_tier_profile,
                 speculative=speculative,
+                logits_dtype=logits_dtype,
             )
             self.attention_backend_decision = runner.attention_backend_decision
             self.attention_backend_identity = runner.attention_backend_identity
             self.kv_cache_dtype_requested = runner.kv_cache_dtype_requested
             self.kv_cache_dtype_resolved = runner.kv_cache_dtype_resolved
+            self.logits_dtype_requested = runner.logits_dtype_requested
+            self.logits_dtype_resolved = runner.logits_dtype_resolved
             self.dram_kv_binding = None
             self.dram_kv_tier_identity = None
             startup_comm.broadcast(
@@ -6466,6 +6534,8 @@ class DistEPLauncher(_DistLauncherLifecycle):
                     page_size,
                     self.attention_backend_identity,
                     self.kv_cache_dtype_resolved,
+                    self.logits_dtype_requested,
+                    self.logits_dtype_resolved,
                     attention_dp=attention_dp,
                     pipeline_depth=pipeline_depth,
                     decode_mode=decode_mode,
@@ -6498,6 +6568,8 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 graph_max_pages=graph_max_pages,
                 graph_warmup_iters=graph_warmup_iters,
             )
+            self.runner.logits_dtype_requested = self.logits_dtype_requested
+            self.runner.logits_dtype_resolved = self.logits_dtype_resolved
         except BaseException:
             self._abandon_start()
             raise

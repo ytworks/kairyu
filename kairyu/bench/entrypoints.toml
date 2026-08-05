@@ -15,6 +15,7 @@ schema_version = 1
 "bench.g4_ma3_sglang_bench" = ["bench.g2_a6_vllm_bench", "bench.g4_ma1_qwen3_235b_nvfp4_bench", "bench.g4_ma1_qwen3_235b_nvfp4_capture"]
 "bench.gate_a1" = ["bench.parity_tp"]
 "bench.gate_a2" = ["bench.parity_hf", "bench.parity_tp"]
+"bench.gate_logits_dtype" = ["bench.gate_a1", "bench.gate_a2", "bench.parity_tp"]
 "bench.global_kv_pool_decision" = ["bench.kv_aware_ttft_f2c_bench"]
 "bench.issue_333_proc_http_bench" = ["bench.g2_a6_vllm_bench", "bench.run_g2_a6_formal"]
 "bench.kv_event_f2b_bench" = ["bench.fleet_churn_bench"]
@@ -256,6 +257,15 @@ module = "bench.gate_a2"
 kind = "operator"
 requires = ["core"]
 documentation = ["bench/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "bench/gate_logits_dtype.py"
+module = "bench.gate_logits_dtype"
+kind = "operator"
+requires = ["core"]
+documentation = ["docs/design/issue-364-fp32-logits.md"]
 installed = false
 invocations = ["path", "module"]
 

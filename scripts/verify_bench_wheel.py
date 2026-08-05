@@ -30,7 +30,7 @@ FIXTURE_PREFIX = "kairyu/bench/fixtures/"
 LLMBAR_LICENSE = f"{FIXTURE_PREFIX}LLMBAR_LICENSE"
 ENTRYPOINT_MANIFEST = "kairyu/bench/entrypoints.toml"
 CONSOLE_TARGET = "kairyu.entrypoints.cli:main"
-EXPECTED_ENTRYPOINTS = 63
+EXPECTED_ENTRYPOINTS = 64
 
 
 class VerificationError(RuntimeError):

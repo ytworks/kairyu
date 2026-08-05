@@ -935,6 +935,17 @@ growth, and routing latency. Fixed short workloads use same-process legacy
 ratios and deliberately loose bounds, retain one diagnostic JSON report, and
 never promote shared-runner absolute timings to formal performance evidence.
 
+Issue #364 now has an implemented and GPU-verified opt-in FP32 final-logits
+contract. The construction-level `logits_dtype` choice is `model` by default,
+preserving the existing output-head hot path, or `float32`, producing FP32 at
+the final dense GEMM before argmax, raw-logprob capture, and filtering. The same
+choice is propagated and attested across single-process, TP, EP, P-D, and
+process-isolated native real-model paths without changing model/KV/weight dtype,
+tied weights, state dictionaries, or host-sync ownership. Synthetic BF16
+near-ties, sampling boundaries, CUDA graphs, and the steady-decode profiler pass.
+The same-commit paired G2 A1 Llama-3.1-8B TP1/2 and pinned A2 70B FP8 TP2/4/8
+measurement remains in progress; no quality result is claimed yet.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -942,6 +953,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [design] FP32 final logits are a build-time opt-in measured against A1/A2
+- What: implemented `logits_dtype="model"|"float32"` for every native real-model construction path. The default retains the exact existing output-head operation; the opt-in produces FP32 at the final dense GEMM before greedy selection, raw-logprob capture, penalties, and filtering while preserving model/KV/weight dtype, tied weight identity, state dictionaries, distributed ownership, and the no-host-sync boundary. Process/rank attestation, health reporting, synthetic BF16 near-ties, sampling boundaries, and CUDA graph/profiler tests bind the option. A narrow same-reference paired A1/A2 matrix, separate from issue #365's generic A/B framework, will retain per-mode and per-TP evidence and report positive, mixed, unchanged, or negative quality results without rewriting the historical formal artifacts. Real-model measurement remains in progress.
+- Why: BF16 final logits are compatible rather than defective, but their roughly 0.125-nat resolution can move near-tied argmax and filtering decisions. Only an opt-in final-GEMM experiment measured against the existing self-agreement and tie-gap gates can determine whether FP32 output improves those decisions without weakening compatibility or correctness.
+- Refs: issue #364; M12 D2/D5/D6; M8 D2; M14 D3; G2 A1/A2; `docs/design/issue-364-fp32-logits.md`
 
 ### 2026-08-05 — [amendment] Gumbel sampling keeps full seed width and a 52-bit open uniform
 - What: retained the complete unsigned 64-bit output of the per-position seed mixer and replaced the 32-bit additive Wang counter with an odd-stride, XOR-keyed SplitMix64 finalizer implemented through signed-int64 wraparound and explicit logical shifts. Both CPU and CUDA now transform 52 random mantissa bits through a float64 midpoint in the strictly open interval `(0, 1)`. The stochastic CPU/CUDA sequence intentionally changes together; greedy, filtering, penalties, grammar support, raw logprobs, replay ownership, and the no-host-sync CUDA result boundary are unchanged. Independent uint64 word oracles, high-bit and known-low32-collision fixtures, 151,936-word uniqueness, adjacent-seed lag correlations, a deterministic 100,000-position three-category distribution, open-endpoint tail checks, CPU/CUDA raw-word and token parity, and a CUDA profiler gate bind the new stream. On SM120 the 151,936-vocabulary helper measured 0.169 → 0.201 ms and the complete filtered sampler 0.580 → 0.618 ms; single-thread CPU full sampling measured about 20% slower. The bounded CPU cost is accepted to preserve the same genuinely 52-bit transform and tail on both execution paths.

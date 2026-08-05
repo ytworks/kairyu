@@ -48,6 +48,8 @@ class _ToyRunner:
     def __init__(self, *, sampling_owner: bool = True) -> None:
         self._sampling_owner = sampling_owner
         self._future_tokens: dict[str, dict[int, int]] = {}
+        self.logits_dtype_requested = "model"
+        self.logits_dtype_resolved = "float32"
 
     def execute(self, scheduled, states):
         if not self._sampling_owner:
@@ -106,12 +108,15 @@ def _make_runner(tp: int):
         return _ToyRunner()
     validate_tp_degree(tp)
     comms = FakeCommunicator.create_group(tp)
-    return TPModelRunner(
+    runner = TPModelRunner(
         rank_runners=tuple(
             _ToyRunner(sampling_owner=rank == 0) for rank in range(tp)
         ),
         comms=comms,
     )
+    runner.logits_dtype_requested = "model"
+    runner.logits_dtype_resolved = "float32"
+    return runner
 
 
 def _model_vocab_size(model_path: str) -> int:
@@ -506,7 +511,14 @@ def _compare(base: dict, candidate: dict) -> dict:
     }
 
 
-def _real_runner(model_path: str, tp: int, num_pages: int, page_size: int):
+def _real_runner(
+    model_path: str,
+    tp: int,
+    num_pages: int,
+    page_size: int,
+    *,
+    logits_dtype: str = "model",
+):
     """The runner a deployment actually gets at this TP degree.
 
     tp=1 is the single-process path; tp>1 is the spawned DistTPLauncher group.
@@ -521,15 +533,24 @@ def _real_runner(model_path: str, tp: int, num_pages: int, page_size: int):
         from kairyu.engine.core.worker import DistTPLauncher
 
         launcher = DistTPLauncher(
-            model_path, tp=tp, num_pages=num_pages, page_size=page_size, vocab=vocab
+            model_path,
+            tp=tp,
+            num_pages=num_pages,
+            page_size=page_size,
+            vocab=vocab,
+            logits_dtype=logits_dtype,
         )
-        return launcher.runner, launcher.shutdown
+        runner = launcher.runner
+        runner.logits_dtype_requested = launcher.logits_dtype_requested
+        runner.logits_dtype_resolved = launcher.logits_dtype_resolved
+        return runner, launcher.shutdown
 
     import torch
 
     from kairyu.engine.core.attention import select_backend
     from kairyu.engine.core.hw_profile import probe
     from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.logits_dtype import resolve_logits_dtype
     from kairyu.engine.core.model_runner import PagedModelRunner
     from kairyu.engine.core.sampler import Sampler
     from kairyu.models.loader import load_model
@@ -540,7 +561,7 @@ def _real_runner(model_path: str, tp: int, num_pages: int, page_size: int):
     dtype = torch.bfloat16 if gpu else torch.float32
     model, config, _ = load_model(
         model_path, dtype=dtype, attention_backend=select_backend(profile),
-        target_device=device,
+        target_device=device, logits_dtype=logits_dtype,
     )
     model = model.to(device)
     pool = PagedKVPool(
@@ -555,6 +576,8 @@ def _real_runner(model_path: str, tp: int, num_pages: int, page_size: int):
     runner = PagedModelRunner(
         model, pool, sampler=Sampler(vocab_provider=lambda: vocab)
     )
+    runner.logits_dtype_requested = model.logits_dtype
+    runner.logits_dtype_resolved = resolve_logits_dtype(model.logits_dtype, dtype)
 
     def teardown() -> None:
         """Drop this degree's weights. The CALLER must clear its own references
@@ -570,6 +593,29 @@ def _real_runner(model_path: str, tp: int, num_pages: int, page_size: int):
     return runner, teardown
 
 
+def _logits_dtype_identity(runner, expected_request: str) -> dict[str, str]:
+    """Read the constructed runner's attestation; never infer an experiment arm."""
+
+    requested = getattr(runner, "logits_dtype_requested", None)
+    resolved = getattr(runner, "logits_dtype_resolved", None)
+    if requested != expected_request:
+        raise RuntimeError(
+            "constructed runner logits dtype request mismatch: "
+            f"expected {expected_request!r}, got {requested!r}"
+        )
+    if resolved not in {"float16", "bfloat16", "float32"}:
+        raise RuntimeError(
+            "constructed runner did not attest a supported resolved logits dtype: "
+            f"{resolved!r}"
+        )
+    if requested == "float32" and resolved != "float32":
+        raise RuntimeError(
+            "constructed runner silently ignored logits_dtype='float32': "
+            f"resolved {resolved!r}"
+        )
+    return {"requested": requested, "resolved": resolved}
+
+
 def _run(
     tp: int,
     overlap: bool,
@@ -577,13 +623,26 @@ def _run(
     model_path: str | None = None,
     num_pages: int = 4096,
     page_size: int = 16,
-) -> dict[str, tuple[int, ...]]:
+    *,
+    logits_dtype: str = "model",
+) -> tuple[dict[str, tuple[int, ...]], dict[str, str]]:
     kv = RadixKVCache(num_pages=num_pages, page_size=page_size)
     scheduler = Scheduler(kv, max_num_batched_tokens=2048, page_size=page_size)
     if model_path is None:
         runner, teardown = _make_runner(tp), (lambda: None)
     else:
-        runner, teardown = _real_runner(model_path, tp, num_pages, page_size)
+        runner, teardown = _real_runner(
+            model_path,
+            tp,
+            num_pages,
+            page_size,
+            logits_dtype=logits_dtype,
+        )
+    try:
+        logits_identity = _logits_dtype_identity(runner, logits_dtype)
+    except BaseException:
+        teardown()
+        raise
     try:
         core = OverlapEngineCore(scheduler, runner) if overlap else EngineCore(scheduler, runner)
         for request in prompts:
@@ -615,7 +674,7 @@ def _run(
             f"{dict(list(short.items())[:5])}... — the KV pool is too small or the "
             "scheduler rejected them; a parity score over these is meaningless"
         )
-    return outputs
+    return outputs, logits_identity
 
 
 def main() -> int:
@@ -627,6 +686,15 @@ def main() -> int:
         help="checkpoint dir; runs the REAL runners (single-process at tp=1, the "
         "spawned DistTPLauncher group above it). Omit for the toy CPU harness.",
     )
+    parser.add_argument(
+        "--logits-dtype",
+        choices=("model", "float32"),
+        default="model",
+        help=(
+            "output dtype of the final logits projection; 'model' preserves "
+            "the model compute dtype and 'float32' is the opt-in treatment arm"
+        ),
+    )
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--num-pages", type=int, default=4096)
     parser.add_argument("--page-size", type=int, default=16)
@@ -637,6 +705,8 @@ def main() -> int:
     )
     parser.add_argument("--out", type=Path, help="write the JSON result here too")
     args = parser.parse_args()
+    if args.model_path is None and args.logits_dtype != "model":
+        parser.error("--logits-dtype float32 requires --model-path")
     degrees = [int(value) for value in args.tp.split(",")]
     if len(degrees) < 2:
         raise SystemExit("need at least a base degree and one comparison degree")
@@ -654,15 +724,30 @@ def main() -> int:
     overlap_note = None
     results = {}
     runs: dict[tuple[int, bool], dict] = {}
+    logits_identities: list[dict[str, str]] = []
     for overlap in overlap_modes:
-        base = _run(
-            degrees[0], overlap, prompts, args.model_path, args.num_pages, args.page_size
+        base, identity = _run(
+            degrees[0],
+            overlap,
+            prompts,
+            args.model_path,
+            args.num_pages,
+            args.page_size,
+            logits_dtype=args.logits_dtype,
         )
+        logits_identities.append(identity)
         runs[(degrees[0], overlap)] = base
         for degree in degrees[1:]:
-            candidate = _run(
-                degree, overlap, prompts, args.model_path, args.num_pages, args.page_size
+            candidate, identity = _run(
+                degree,
+                overlap,
+                prompts,
+                args.model_path,
+                args.num_pages,
+                args.page_size,
+                logits_dtype=args.logits_dtype,
             )
+            logits_identities.append(identity)
             runs[(degree, overlap)] = candidate
             results[f"tp{degree}_vs_tp{degrees[0]}_overlap_{'on' if overlap else 'off'}"] = (
                 _compare(base, candidate)
@@ -699,12 +784,25 @@ def main() -> int:
         harness = "cpu-toy (pass --model-path for real ranks)"
         hardware = {"arch": "cpu"}
 
+    unique_logits_identities = {
+        (identity["requested"], identity["resolved"])
+        for identity in logits_identities
+    }
+    if len(unique_logits_identities) != 1:
+        raise RuntimeError(
+            "parity sweep constructed inconsistent logits dtype arms: "
+            f"{sorted(unique_logits_identities)}"
+        )
+    logits_requested, logits_resolved = next(iter(unique_logits_identities))
+
     config = {
         "harness": harness,
         "hardware": hardware,
         "checkpoint": _checkpoint_provenance(args.model_path) if args.model_path else None,
         "code": _code_provenance(),
         "tp_degrees": degrees,
+        "logits_dtype_requested": logits_requested,
+        "logits_dtype_resolved": logits_resolved,
         "num_prompts": len(prompts),
         "max_new_tokens": args.max_new_tokens,
         "overlap_modes": ["on" if mode else "off" for mode in overlap_modes],
