@@ -805,6 +805,8 @@ def main() -> int:
         "logits_dtype_resolved": logits_resolved,
         "num_prompts": len(prompts),
         "max_new_tokens": args.max_new_tokens,
+        "num_pages": args.num_pages,
+        "page_size": args.page_size,
         "overlap_modes": ["on" if mode else "off" for mode in overlap_modes],
         "overlap_on_gap": overlap_note,
         "seed": _SEED,

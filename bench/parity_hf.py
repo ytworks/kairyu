@@ -808,6 +808,8 @@ def main() -> int:
             "tensor_parallel_size": args.tp,
             "num_prompts": len(reference),
             "positions": args.positions,
+            "num_pages": args.num_pages,
+            "page_size": args.page_size,
             "dtype": "bfloat16" if profile.arch == "cuda" else "float32",
             "logits_dtype_requested": logits_identity["requested"],
             "logits_dtype_resolved": logits_identity["resolved"],
