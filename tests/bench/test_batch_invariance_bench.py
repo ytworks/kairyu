@@ -591,6 +591,15 @@ def test_source_preflight_uses_real_git_bytes_and_rejects_tracked_drift(
     monkeypatch.setattr(operator, "_REPO_ROOT", repo)
     monkeypatch.setattr(operator, "_CHECKOUT_MODULE_PREFIXES", ())
     monkeypatch.setattr(operator.gate, "REQUIRED_SOURCE_PATHS", ("one.py",))
+    monkeypatch.setitem(
+        sys.modules,
+        "external.relative_origin",
+        SimpleNamespace(
+            __file__=None,
+            __spec__=SimpleNamespace(origin="_ops.py"),
+        ),
+    )
+    monkeypatch.chdir(repo)
 
     operator._assert_tracked_tree_clean_before_repo_import()
     snapshot = operator._source_snapshot()

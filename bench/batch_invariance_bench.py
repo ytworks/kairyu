@@ -295,7 +295,15 @@ def _assert_loaded_repo_modules_head_identical() -> None:
         for origin in concrete:
             candidate = Path(origin)
             if not candidate.is_absolute():
-                candidate = Path.cwd() / candidate
+                # Some external namespace modules (notably ``torch.ops``)
+                # publish a synthetic relative ``__spec__.origin`` such as
+                # ``_ops.py``.  It is not a file loaded from the checkout and
+                # must not be resolved against the operator's cwd.  A
+                # checkout-owned module, in contrast, may use a package-
+                # relative origin and remains bound to the repository root.
+                if not checkout_owned:
+                    continue
+                candidate = repo_root / candidate
             candidate = candidate.absolute()
             try:
                 lexical_relative = candidate.relative_to(repo_root)
