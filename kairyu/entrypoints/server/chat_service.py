@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import time
 import uuid
@@ -29,7 +30,12 @@ from kairyu.engine.prompt import (
     TemplatedPrompt,
     TextPrompt,
 )
-from kairyu.entrypoints.chat_template import ChatTemplate, flatten_content, render_chat
+from kairyu.entrypoints.chat_template import (
+    ChatTemplate,
+    ToolCallProtocol,
+    flatten_content,
+    render_chat,
+)
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionRequest,
@@ -48,9 +54,19 @@ from kairyu.outputs import CompletionOutput, TokenLogprob
 from kairyu.sampling_params import (
     GENERATION_CONFIG_SAMPLING_FIELDS,
     SamplingParams,
+    resolve_parallel_tool_calls,
 )
 
 _TOOL_CALL_PATTERN = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_QWEN_FUNCTION_PATTERN = re.compile(
+    r"\s*<function=([^>\n]+)>(.*?)</function>\s*", re.DOTALL
+)
+_QWEN_PARAMETER_PATTERN = re.compile(
+    r"<parameter=([^>\n]+)>(.*?)</parameter>", re.DOTALL
+)
+_LLAMA_TOOL_PREFIX = "<|python_tag|>"
+_LLAMA_TOOL_SUFFIXES = ("<|eom_id|>", "<|eot_id|>")
+_SINGLE_TOOL_CONSTRAINT = "Call at most one function in this response."
 logger = logging.getLogger(__name__)
 
 
@@ -94,6 +110,8 @@ class ValidatedChatInput:
     normalized_tool_choice: NormalizedToolChoice
     tools_in_prompt: bool
     include_usage: bool
+    tool_call_protocol: ToolCallProtocol = ToolCallProtocol.GENERIC
+    parallel_tool_calls: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +129,7 @@ class ExecutedChat:
 
 def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
     extra_args = dict(request.extra_args or {})
+    resolve_parallel_tool_calls(request.parallel_tool_calls, extra_args)
     if "response_format" in extra_args:
         raise ValueError(
             "extra_args.response_format is reserved; use the top-level response_format field"
@@ -241,6 +260,58 @@ def validate_chat_policy(
         )
 
 
+def _add_single_tool_constraint(
+    messages: list[dict[str, object]],
+    *,
+    insert_if_missing: bool,
+) -> None:
+    """Merge the hint into system content, optionally creating that role."""
+
+    for message in messages:
+        if message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            if _SINGLE_TOOL_CONSTRAINT not in content:
+                separator = "\n\n" if content else ""
+                message["content"] = content + separator + _SINGLE_TOOL_CONSTRAINT
+            return
+        if content is None:
+            message["content"] = _SINGLE_TOOL_CONSTRAINT
+            return
+        if isinstance(content, list):
+            if any(
+                isinstance(part, Mapping)
+                and isinstance(part.get("text"), str)
+                and _SINGLE_TOOL_CONSTRAINT in part["text"]
+                for part in content
+            ):
+                return
+            message["content"] = [
+                *content,
+                {"type": "text", "text": _SINGLE_TOOL_CONSTRAINT},
+            ]
+            return
+        raise ChatRequestError("system message content has an unsupported shape")
+    if insert_if_missing:
+        messages.insert(
+            0,
+            {"role": "system", "content": _SINGLE_TOOL_CONSTRAINT},
+        )
+
+
+def _resolved_parallel_tool_calls(
+    request: ChatCompletionRequest,
+) -> bool | None:
+    try:
+        return resolve_parallel_tool_calls(
+            request.parallel_tool_calls,
+            request.extra_args or {},
+        )
+    except ValueError as error:
+        raise ChatRequestError(str(error)) from error
+
+
 def render_prompt(
     request: ChatCompletionRequest,
     chat_templates: Mapping[str, ChatTemplate] | None,
@@ -259,6 +330,12 @@ def render_prompt(
         # omitted optional fields stay undefined, while an explicit null stays
         # present. Pydantic extras remain included as sent.
         messages.append(message.model_dump(exclude_unset=True))
+    if (
+        _resolved_parallel_tool_calls(request) is False
+        and request.tools
+        and request.tool_choice != "none"
+    ):
+        _add_single_tool_constraint(messages, insert_if_missing=template is None)
     tools = None if request.tool_choice == "none" else request.tools
     if template is None:
         if request.model not in (legacy_chat_models or ()):
@@ -421,6 +498,14 @@ def validate_chat_input(
         request=request,
         prompt=prompt,
         normalized_tool_choice=normalized_tool_choice,
+        tool_call_protocol=(
+            (chat_templates or {})[request.model].tool_call_protocol_for_tools(
+                has_tools=(request.tool_choice != "none" and request.tools is not None)
+            )
+            if request.model in (chat_templates or {})
+            else ToolCallProtocol.GENERIC
+        ),
+        parallel_tool_calls=_resolved_parallel_tool_calls(request),
         tools_in_prompt=bool(
             (chat_templates or {}).get(request.model)
             and request.tools
@@ -473,6 +558,7 @@ def validate_chat_request(
         cache_hint=cache_hint,
         tools=tuple(request.tools or ()),
         tool_choice=request.tool_choice,
+        parallel_tool_calls=request.parallel_tool_calls,
         tools_in_prompt=validated_input.tools_in_prompt,
     )
     try:
@@ -500,6 +586,7 @@ async def execute_chat(validated: ValidatedChatRequest) -> ExecutedChat:
         result.completions,
         result.usage,
         normalized_tool_choice=validated.input.normalized_tool_choice,
+        tool_call_protocol=validated.input.tool_call_protocol,
     )
     execution = ExecutedChat(response=response, result=result)
     if not tool_choice_is_satisfied(response.choices, validated.input.normalized_tool_choice):
@@ -507,6 +594,17 @@ async def execute_chat(validated: ValidatedChatRequest) -> ExecutedChat:
             "upstream model did not satisfy tool_choice",
             status_code=502,
             code="tool_choice_not_satisfied",
+            error_type="upstream_error",
+            execution=execution,
+        )
+    if not parallel_tool_calls_is_satisfied(
+        response.choices,
+        validated.input.parallel_tool_calls,
+    ):
+        raise ChatRequestError(
+            "upstream model emitted multiple calls while parallel_tool_calls=false",
+            status_code=502,
+            code="parallel_tool_calls_not_satisfied",
             error_type="upstream_error",
             execution=execution,
         )
@@ -536,35 +634,245 @@ def chat_error_from_upstream_client_error(
     )
 
 
-def _parse_tool_calls(text: str) -> list[ToolCall]:
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(f"non-finite JSON number {value!r}")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def _validate_finite_json(value: object) -> None:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("JSON numbers must be finite")
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            _validate_finite_json(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            _validate_finite_json(nested)
+
+
+def _strict_json_loads(value: str) -> object:
+    parsed = json.loads(
+        value,
+        parse_constant=_reject_json_constant,
+        object_pairs_hook=_reject_duplicate_json_keys,
+    )
+    _validate_finite_json(parsed)
+    return parsed
+
+
+def _tool_call_from_payload(payload: object) -> ToolCall | None:
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    arguments = payload.get("arguments", payload.get("parameters", {}))
+    if not isinstance(arguments, (dict, str)):
+        return None
+    try:
+        if isinstance(arguments, dict):
+            serialized_arguments = json.dumps(arguments, allow_nan=False)
+        else:
+            parsed_arguments = _strict_json_loads(arguments)
+            if not isinstance(parsed_arguments, dict):
+                return None
+            serialized_arguments = arguments
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return ToolCall(
+        id=f"call_{uuid.uuid4().hex[:12]}",
+        function=FunctionCall(name=name, arguments=serialized_arguments),
+    )
+
+
+def _tool_parameters_schema(
+    tools: Sequence[Mapping[str, object]],
+    function_name: str,
+) -> Mapping[str, object] | None:
+    for tool in tools:
+        function = tool.get("function")
+        if tool.get("type") != "function" or not isinstance(function, Mapping):
+            continue
+        if function.get("name") != function_name:
+            continue
+        parameters = function.get("parameters", {})
+        return parameters if isinstance(parameters, Mapping) else None
+    return None
+
+
+def _schema_types(schema: Mapping[str, object]) -> frozenset[str]:
+    declared = schema.get("type")
+    if isinstance(declared, str):
+        return frozenset({declared})
+    if isinstance(declared, list) and all(isinstance(item, str) for item in declared):
+        return frozenset(declared)
+    if declared is None:
+        return frozenset()
+    raise ValueError("invalid tool parameter schema type")
+
+
+def _qwen_parameter_value(value: str, schema: object) -> object:
+    # Qwen3-Coder puts one formatting newline on each side of parameter values.
+    # Remove only those protocol newlines so intentional spaces/newlines survive.
+    if value.startswith("\n"):
+        value = value[1:]
+    if value.endswith("\n"):
+        value = value[:-1]
+    if not isinstance(schema, Mapping):
+        return value
+    kinds = _schema_types(schema)
+    if not kinds:
+        return value
+    if "null" in kinds and value.lower() == "null":
+        return None
+    non_null_kinds = kinds - {"null"}
+    if non_null_kinds == {"string"}:
+        return value
+    if not non_null_kinds:
+        raise ValueError("tool parameter does not match null schema")
+
+    parsed = _strict_json_loads(value)
+    for kind in non_null_kinds:
+        if kind == "integer" and isinstance(parsed, int) and not isinstance(parsed, bool):
+            return parsed
+        if kind == "number" and isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+            return parsed
+        if kind == "boolean" and isinstance(parsed, bool):
+            return parsed
+        if kind == "array" and isinstance(parsed, list):
+            return parsed
+        if kind == "object" and isinstance(parsed, dict):
+            return parsed
+        if kind == "string" and isinstance(parsed, str):
+            return parsed
+    raise ValueError("tool parameter does not match its schema")
+
+
+def _qwen_arguments(
+    body: str,
+    parameters_schema: Mapping[str, object],
+) -> dict[str, object]:
+    if parameters_schema.get("type", "object") != "object":
+        raise ValueError("tool parameters schema must describe an object")
+    properties = parameters_schema.get("properties", {})
+    if not isinstance(properties, Mapping):
+        raise ValueError("tool parameter properties must be an object")
+    required = parameters_schema.get("required", ())
+    if (
+        not isinstance(required, Sequence)
+        or isinstance(required, (str, bytes))
+        or not all(isinstance(name, str) for name in required)
+    ):
+        raise ValueError("tool required parameters must be a string array")
+    additional = parameters_schema.get("additionalProperties", True)
+    if not isinstance(additional, (bool, Mapping)):
+        raise ValueError("additionalProperties must be boolean or a schema")
+
+    arguments: dict[str, object] = {}
+    cursor = 0
+    for parameter_match in _QWEN_PARAMETER_PATTERN.finditer(body):
+        if body[cursor : parameter_match.start()].strip():
+            raise ValueError("unexpected text between tool parameters")
+        parameter_name = parameter_match.group(1).strip()
+        if not parameter_name or parameter_name in arguments:
+            raise ValueError("empty or duplicated tool parameter name")
+        parameter_schema = properties.get(parameter_name)
+        if parameter_schema is None:
+            if additional is False:
+                raise ValueError("unknown tool parameter")
+            parameter_schema = additional if isinstance(additional, Mapping) else {}
+        arguments[parameter_name] = _qwen_parameter_value(
+            parameter_match.group(2), parameter_schema
+        )
+        cursor = parameter_match.end()
+    if body[cursor:].strip():
+        raise ValueError("unexpected text after tool parameters")
+    if not set(required).issubset(arguments):
+        raise ValueError("required tool parameter is missing")
+    return arguments
+
+
+def _qwen_tool_calls(
+    text: str,
+    tools: Sequence[Mapping[str, object]],
+) -> list[ToolCall]:
+    matches = list(_TOOL_CALL_PATTERN.finditer(text))
+    if not matches:
+        return []
+    calls: list[ToolCall] = []
+    cursor = 0
+    try:
+        for match in matches:
+            if text[cursor : match.start()].strip():
+                raise ValueError("unexpected text outside Qwen tool call")
+            function_match = _QWEN_FUNCTION_PATTERN.fullmatch(match.group(1))
+            if function_match is None:
+                raise ValueError("Qwen tool call must contain exactly one function")
+            name = function_match.group(1).strip()
+            if not name:
+                raise ValueError("empty tool function name")
+            parameters_schema = _tool_parameters_schema(tools, name)
+            if parameters_schema is None:
+                raise ValueError("undeclared tool function")
+            arguments = _qwen_arguments(function_match.group(2), parameters_schema)
+            call = _tool_call_from_payload({"name": name, "arguments": arguments})
+            if call is None:
+                raise ValueError("invalid Qwen tool-call payload")
+            calls.append(call)
+            cursor = match.end()
+        if text[cursor:].strip():
+            raise ValueError("unexpected text after Qwen tool call")
+    except (TypeError, ValueError, RecursionError):
+        return []
+    return calls
+
+
+def _parse_tool_calls(
+    text: str,
+    tools: Sequence[Mapping[str, object]] = (),
+    protocol: ToolCallProtocol = ToolCallProtocol.GENERIC,
+) -> list[ToolCall]:
     calls = []
     for match in _TOOL_CALL_PATTERN.finditer(text):
         try:
-            payload = json.loads(match.group(1))
-        except (ValueError, RecursionError):
+            payload = _strict_json_loads(match.group(1))
+        except (TypeError, ValueError, RecursionError):
             continue
-        if not isinstance(payload, dict):
-            continue
-        name = payload.get("name")
-        if not isinstance(name, str) or not name.strip():
-            continue
-        arguments = payload.get("arguments", {})
-        if not isinstance(arguments, (dict, str)):
-            continue
-        if isinstance(arguments, dict):
-            try:
-                serialized_arguments = json.dumps(arguments)
-            except (ValueError, RecursionError):
-                continue
-        else:
-            serialized_arguments = arguments
-        calls.append(
-            ToolCall(
-                id=f"call_{uuid.uuid4().hex[:12]}",
-                function=FunctionCall(name=name, arguments=serialized_arguments),
-            )
-        )
-    return calls
+        call = _tool_call_from_payload(payload)
+        if call is not None:
+            calls.append(call)
+    if calls:
+        return calls
+
+    if protocol is ToolCallProtocol.QWEN:
+        return _qwen_tool_calls(text, tools)
+    if protocol is not ToolCallProtocol.LLAMA:
+        return []
+
+    # Llama 3.1's tokenizer template asks for one bare
+    # {"name": ..., "parameters": ...} object. Depending on tokenizer decode
+    # settings, the leading python-tag special token may still be present.
+    candidate = text.strip()
+    if candidate.startswith(_LLAMA_TOOL_PREFIX):
+        candidate = candidate[len(_LLAMA_TOOL_PREFIX) :].lstrip()
+    for suffix in _LLAMA_TOOL_SUFFIXES:
+        if candidate.endswith(suffix):
+            candidate = candidate[: -len(suffix)].rstrip()
+            break
+    try:
+        payload = _strict_json_loads(candidate)
+    except (TypeError, ValueError, RecursionError):
+        return []
+    call = _tool_call_from_payload(payload)
+    return [call] if call is not None else []
 
 
 def _logprob_entries(content: tuple[TokenLogprob, ...]) -> list[LogprobEntry]:
@@ -598,12 +906,14 @@ def _build_choice(
     tool_choice: NormalizedToolChoice,
     finish_reason: str | None,
     logprobs: ChoiceLogprobs | None = None,
+    tools: Sequence[Mapping[str, object]] = (),
+    tool_call_protocol: ToolCallProtocol = ToolCallProtocol.GENERIC,
 ) -> Choice:
     tool_calls = []
     if tool_choice.mode != "none":
         tool_calls = [
             call
-            for call in _parse_tool_calls(text)
+            for call in _parse_tool_calls(text, tools, tool_call_protocol)
             if call.function.name in tool_choice.allowed_names
             and (tool_choice.named is None or call.function.name == tool_choice.named)
         ]
@@ -652,6 +962,7 @@ def completion_response(
     completions: Sequence[CompletionOutput],
     usage: GenerationUsage | None = None,
     normalized_tool_choice: NormalizedToolChoice | None = None,
+    tool_call_protocol: ToolCallProtocol = ToolCallProtocol.GENERIC,
 ) -> ChatCompletionResponse:
     if normalized_tool_choice is None:
         normalized_tool_choice = _normalize_tool_choice(request)
@@ -662,6 +973,8 @@ def completion_response(
             normalized_tool_choice,
             completion.finish_reason,
             _choice_logprobs(completion),
+            request.tools or (),
+            tool_call_protocol,
         )
         for completion in completions
     ]
@@ -678,3 +991,14 @@ def tool_choice_is_satisfied(choices: Sequence[Choice], tool_choice: NormalizedT
     if tool_choice.mode not in {"required", "named"}:
         return True
     return bool(choices) and all(choice.message.tool_calls for choice in choices)
+
+
+def parallel_tool_calls_is_satisfied(
+    choices: Sequence[Choice],
+    parallel_tool_calls: bool | None,
+) -> bool:
+    """Enforce the limit per alternative; ``n`` choices are not parallel calls."""
+
+    if parallel_tool_calls is not False:
+        return True
+    return all(len(choice.message.tool_calls or ()) <= 1 for choice in choices)

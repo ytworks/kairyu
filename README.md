@@ -1071,6 +1071,7 @@ reproduction script.
 | [`docs/deployment.md`](docs/deployment.md) | production deployment: DC topology, systemd, rolling updates, observability |
 | [`docs/gpu-runbook.md`](docs/gpu-runbook.md) | consolidated GPU-day execution plan (performance gates, kernel tuning, fabric bring-up) |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | installed benchmark suites guide |
+| [`docs/ide-clients.md`](docs/ide-clients.md) | Cline/Continue setup, supported API surface, and SOCKS validation |
 
 ## 11. License
 

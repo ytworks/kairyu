@@ -1473,6 +1473,20 @@ async def test_multi_stream_reserves_all_sub_ids_before_submit():
             pass
 
 
+def test_multi_candidate_sub_requests_preserve_parallel_tool_intent():
+    backend = KairyuBackend(num_pages=64)
+    request = GenerationRequest(
+        request_id="multi-tools",
+        prompt="prompt",
+        sampling_params=SamplingParams(max_tokens=1, n=2),
+        parallel_tool_calls=False,
+    )
+
+    sub_requests = backend._sub_requests(request)
+
+    assert [sub.parallel_tool_calls for sub in sub_requests] == [False, False]
+
+
 async def test_multi_stream_partial_submit_failure_rolls_back_all_sub_ids():
     backend = KairyuBackend(num_pages=256)
     real_submit = backend._loop.submit

@@ -604,14 +604,6 @@ def _to_chat_request(
             0,
             {"role": "system", "content": "Provide a detailed, thorough response."},
         )
-    if request.parallel_tool_calls is False and request.tools:
-        messages.insert(
-            0,
-            {
-                "role": "system",
-                "content": "Call at most one function in this response.",
-            },
-        )
     if not messages:
         messages.append({"role": "user", "content": ""})
     values: dict[str, object] = {}
@@ -628,6 +620,7 @@ def _to_chat_request(
         stream=request.stream,
         tools=_chat_tools(request.tools),
         tool_choice=_chat_tool_choice(request.tool_choice, request.tools),
+        parallel_tool_calls=request.parallel_tool_calls,
         response_format=_response_format(request.text),
         user=request.user,
         priority=request.priority,

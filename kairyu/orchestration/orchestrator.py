@@ -388,6 +388,7 @@ class Orchestrator:
                 tools=call.tools,
                 tool_choice=call.tool_choice,
                 tools_in_prompt=call.tools_in_prompt,
+                parallel_tool_calls=call.parallel_tool_calls,
             )
             try:
                 validate(request)
@@ -485,6 +486,7 @@ class Orchestrator:
                 tools=call.tools,
                 tool_choice=call.tool_choice,
                 tools_in_prompt=call.tools_in_prompt,
+                parallel_tool_calls=call.parallel_tool_calls,
             )
         )
         # The last stage can ingest every preceding private output. Candidate
@@ -556,6 +558,7 @@ class Orchestrator:
             tools=call.tools,
             tool_choice=call.tool_choice,
             tools_in_prompt=call.tools_in_prompt,
+            parallel_tool_calls=call.parallel_tool_calls,
         )
         started_at = utc_now_iso()
         try:
@@ -718,6 +721,7 @@ class Orchestrator:
                         final_tools=call.tools,
                         final_tool_choice=call.tool_choice,
                         final_tools_in_prompt=call.tools_in_prompt,
+                        final_parallel_tool_calls=call.parallel_tool_calls,
                         shared_prefix=self._shared_prefix,
                     )
                     # M3: the deep MoA tier was invisible to the cost model / budget.
@@ -731,6 +735,7 @@ class Orchestrator:
                             tools=call.tools,
                             tool_choice=call.tool_choice,
                             tools_in_prompt=call.tools_in_prompt,
+                            parallel_tool_calls=call.parallel_tool_calls,
                         ),
                         GenerationResult(
                             request_id="moa",
@@ -903,6 +908,7 @@ class Orchestrator:
                 final_tools=call.tools,
                 final_tool_choice=call.tool_choice,
                 final_tools_in_prompt=call.tools_in_prompt,
+                final_parallel_tool_calls=call.parallel_tool_calls,
                 cost_model=self._cost_model,
                 worker_trace=self._conductor_worker_trace(),
             )
@@ -1058,6 +1064,7 @@ class Orchestrator:
                 tools=call.tools,
                 tool_choice=call.tool_choice,
                 tools_in_prompt=call.tools_in_prompt,
+                parallel_tool_calls=call.parallel_tool_calls,
             )
             emitted = 0
             last = None
@@ -1242,6 +1249,7 @@ class Orchestrator:
                     final_tools=call.tools,
                     final_tool_choice=call.tool_choice,
                     final_tools_in_prompt=call.tools_in_prompt,
+                    final_parallel_tool_calls=call.parallel_tool_calls,
                     shared_prefix=self._shared_prefix,
                     usage_observer=observe_moa_usage,
                 )
@@ -1268,6 +1276,7 @@ class Orchestrator:
                         tools=call.tools,
                         tool_choice=call.tool_choice,
                         tools_in_prompt=call.tools_in_prompt,
+                        parallel_tool_calls=call.parallel_tool_calls,
                     ),
                     GenerationResult(
                         request_id="moa",
@@ -1465,6 +1474,7 @@ class Orchestrator:
             final_tools=call.tools,
             final_tool_choice=call.tool_choice,
             final_tools_in_prompt=call.tools_in_prompt,
+            final_parallel_tool_calls=call.parallel_tool_calls,
             cost_model=self._cost_model,
             worker_trace=self._conductor_worker_trace(),
             usage_observer=usage_observer,

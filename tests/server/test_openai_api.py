@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import threading
+from pathlib import Path
 
 import httpx
 import pytest
@@ -30,6 +31,28 @@ RED_PNG_DATA_URL = (
     "xMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg=="
 )
 _red_png_bytes = base64.b64decode(RED_PNG_DATA_URL.partition(",")[2])
+TEMPLATE_FIXTURES = Path(__file__).parent.parent / "fixtures" / "templates"
+
+
+def _native_tool_template(protocol: str) -> ChatTemplate:
+    marker = {
+        "llama": "<|python_tag|>",
+        "qwen": "<function=name><parameter=value></parameter></function>",
+    }[protocol]
+    return ChatTemplate(
+        "{% if tools %}{{ " + repr(marker) + " }}{% endif %}"
+        "{% for message in messages %}{{ message.role }}: {{ message.content }}\n"
+        "{% endfor %}assistant:"
+    )
+
+
+def _native_tool_app(text: str, protocol: str):
+    return create_legacy_app(
+        engines={"stub": TemplatedStubBackend(text=text, finish_reason="stop")},
+        chat_templates={"stub": _native_tool_template(protocol)},
+    )
+
+
 TRUNCATED_RED_PNG_DATA_URL = (
     "data:image/png;base64,"
     + base64.b64encode(_red_png_bytes[:-8]).decode("ascii")
@@ -1559,6 +1582,11 @@ class StubBackend:
         return None
 
 
+class TemplatedStubBackend(StubBackend):
+    def validate_request(self, _request):
+        """The template-focused test double accepts template-owned text."""
+
+
 class MultiChoiceToolBackend:
     def __init__(self, texts, usage=None):
         self._texts = texts
@@ -2127,6 +2155,259 @@ async def test_named_tool_choice_filters_multi_call_output(stream):
         ["search"],
         "tool_calls",
     )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_parallel_tool_calls_false_rejects_multiple_calls_before_streaming(
+    stream,
+):
+    search_text = '<tool_call>{"name":"search","arguments":{"q":"rain"}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
+    app = create_legacy_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL, search_tool],
+        parallel_tool_calls=False,
+        stream=stream,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "parallel_tool_calls_not_satisfied"
+    assert not response.headers["content-type"].startswith("text/event-stream")
+    assert "Call at most one function" in engine.requests[0].prompt
+
+
+async def test_parallel_tool_calls_false_is_enforced_per_choice_not_across_n():
+    engine = MultiChoiceToolBackend((TOOL_CALL_TEXT, TOOL_CALL_TEXT))
+    app = create_legacy_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        parallel_tool_calls=False,
+        n=2,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert [
+        len(choice["message"]["tool_calls"])
+        for choice in response.json()["choices"]
+    ] == [1, 1]
+
+
+async def test_legacy_extra_parallel_tool_calls_remains_enforced_without_duplication():
+    search_text = '<tool_call>{"name":"search","arguments":{}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
+    app = create_legacy_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL, search_tool],
+        extra_args={"parallel_tool_calls": False},
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "parallel_tool_calls_not_satisfied"
+    assert "Call at most one function" in engine.requests[0].prompt
+
+
+async def test_duplicate_parallel_tool_call_sources_fail_before_dispatch():
+    engine = StubBackend()
+    app = create_legacy_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        parallel_tool_calls=False,
+        extra_args={"parallel_tool_calls": False},
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert "both" in response.json()["error"]["message"]
+    assert engine.calls == 0
+
+
+async def test_parallel_tool_calls_true_accepts_multiple_calls():
+    search_text = '<tool_call>{"name":"search","arguments":{"q":"rain"}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
+    app = create_legacy_app(engines={"stub": engine})
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL, search_tool],
+        parallel_tool_calls=True,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert len(response.json()["choices"][0]["message"]["tool_calls"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("template_name", "system_content", "system_header"),
+    [
+        ("llama3-style.jinja", "Keep the original instruction.", "system<|end_header_id|>"),
+        ("qwen-style.jinja", "Keep the original instruction.", "<|im_start|>system"),
+        ("llama3-style.jinja", None, "system<|end_header_id|>"),
+        (
+            "qwen-style.jinja",
+            [{"type": "text", "text": "Keep the original instruction."}],
+            "<|im_start|>system",
+        ),
+    ],
+)
+async def test_parallel_tool_constraint_merges_into_existing_system_message(
+    template_name, system_content, system_header
+):
+    engine = TemplatedStubBackend(text=TOOL_CALL_TEXT, finish_reason="stop")
+    template = ChatTemplate(
+        (TEMPLATE_FIXTURES / template_name).read_text(encoding="utf-8"),
+        {"bos_token": "<|begin_of_text|>"},
+    )
+    app = create_legacy_app(
+        engines={"stub": engine},
+        chat_templates={"stub": template},
+    )
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        parallel_tool_calls=False,
+    )
+    body["model"] = "stub"
+    body["messages"].insert(0, {"role": "system", "content": system_content})
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    prompt = engine.requests[0].prompt
+    assert prompt.count(system_header) == 1
+    assert prompt.count("Call at most one function in this response.") == 1
+    if system_content is not None:
+        assert prompt.count("Keep the original instruction.") == 1
+
+
+async def test_parallel_tool_constraint_does_not_add_unsupported_system_role():
+    search_text = '<tool_call>{"name":"search","arguments":{}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    engine = TemplatedStubBackend(
+        text=TOOL_CALL_TEXT + search_text,
+        finish_reason="stop",
+    )
+    template = ChatTemplate(
+        "{% for message in messages %}"
+        "{% if message.role != 'user' %}"
+        "{{ raise_exception('only user messages are supported') }}"
+        "{% endif %}"
+        "{{ message.content }}"
+        "{% endfor %}assistant:"
+    )
+    app = create_legacy_app(
+        engines={"strict": engine},
+        chat_templates={"strict": template},
+    )
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL, search_tool],
+        parallel_tool_calls=False,
+    )
+    body["model"] = "strict"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "parallel_tool_calls_not_satisfied"
+    assert engine.calls == 1
+    assert "Call at most one function" not in engine.requests[0].prompt
+
+
+async def test_responses_parallel_tool_constraint_is_injected_exactly_once():
+    engine = TemplatedStubBackend(text=TOOL_CALL_TEXT, finish_reason="stop")
+    template = ChatTemplate((TEMPLATE_FIXTURES / "qwen-style.jinja").read_text(encoding="utf-8"))
+    app = create_legacy_app(
+        engines={"stub": engine},
+        chat_templates={"stub": template},
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/responses",
+            json={
+                "model": "stub",
+                "input": "weather",
+                "instructions": "Keep the original instruction.",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "get_weather",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+                "parallel_tool_calls": False,
+            },
+        )
+
+    assert response.status_code == 200
+    prompt = engine.requests[0].prompt
+    assert prompt.count("Call at most one function in this response.") == 1
+    assert prompt.count("Keep the original instruction.") == 1
+
+
+async def test_orchestrated_parallel_tool_calls_false_rejects_multiple_calls():
+    search_text = '<tool_call>{"name":"search","arguments":{"q":"rain"}}</tool_call>'
+    search_tool = {
+        "type": "function",
+        "function": {"name": "search", "parameters": {"type": "object"}},
+    }
+    engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
+    app = create_legacy_app(
+        engines={},
+        orchestrators={"auto": Orchestrator({"tier1": engine})},
+    )
+    body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "weather"}],
+        "tools": [_WEATHER_TOOL, search_tool],
+        "parallel_tool_calls": False,
+    }
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "parallel_tool_calls_not_satisfied"
+    assert "Call at most one function" in engine.requests[0].prompt
 
 
 @pytest.mark.parametrize(
@@ -2826,6 +3107,341 @@ async def test_generated_tool_arguments_are_serialized_once(arguments, expected)
     call = response.json()["choices"][0]["message"]["tool_calls"][0]
     assert call["function"]["name"] == "get_weather"
     assert call["function"]["arguments"] == expected
+
+
+@pytest.mark.parametrize("prefix", ["", "<|python_tag|>"])
+async def test_llama_bare_json_tool_call_is_parsed(prefix):
+    text = prefix + json.dumps(
+        {"name": "get_weather", "parameters": {"city": "Tokyo"}}
+    )
+    app = _native_tool_app(text, "llama")
+    tools = [
+        {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
+    ]
+    body = _chat_body("weather", tools=tools, tool_choice="required")
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    call = choice["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "get_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Tokyo"}
+
+
+async def test_model_name_cannot_spoof_llama_bare_json_protocol():
+    text = '{"name":"get_weather","parameters":{"city":"Tokyo"}}'
+    engine = StubBackend(text=text, finish_reason="stop")
+    app = create_legacy_app(engines={"llama-3.1-spoof": engine})
+    body = _chat_body("weather", tools=[_WEATHER_TOOL])
+    body["model"] = "llama-3.1-spoof"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["message"]["content"] == text
+    assert choice["message"]["tool_calls"] is None
+
+
+async def test_server_configured_alias_retains_attested_llama_protocol():
+    text = '{"name":"get_weather","parameters":{"city":"Tokyo"}}'
+    engine = TemplatedStubBackend(text=text, finish_reason="stop")
+    template = _native_tool_template("llama")
+    app = create_legacy_app(
+        engines={"friendly-alias": engine},
+        chat_templates={"friendly-alias": template},
+    )
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        tool_choice="required",
+    )
+    body["model"] = "friendly-alias"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "get_weather"
+
+
+@pytest.mark.parametrize(
+    "template_kwarg",
+    ["builtin_tools", "custom_tools", "tools_in_user_message"],
+)
+async def test_llama_protocol_changing_template_kwargs_fail_before_dispatch(
+    template_kwarg,
+):
+    engine = TemplatedStubBackend(text=TOOL_CALL_TEXT, finish_reason="stop")
+    app = create_legacy_app(
+        engines={"llama": engine},
+        chat_templates={"llama": _native_tool_template("llama")},
+    )
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        chat_template_kwargs={template_kwarg: []},
+    )
+    body["model"] = "llama"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 400
+    assert template_kwarg in response.json()["error"]["message"]
+    assert engine.calls == 0
+
+
+async def test_llama_non_protocol_template_kwargs_remain_allowed():
+    engine = TemplatedStubBackend(text=TOOL_CALL_TEXT, finish_reason="stop")
+    app = create_legacy_app(
+        engines={"llama": engine},
+        chat_templates={"llama": _native_tool_template("llama")},
+    )
+    body = _chat_body(
+        "weather",
+        tools=[_WEATHER_TOOL],
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    body["model"] = "llama"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert engine.calls == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'Reasoning first. {"name":"get_weather","parameters":{}}',
+        '{"name":"get_weather","parameters":{}} trailing text',
+        '[{"name":"get_weather","parameters":{}}]',
+    ],
+)
+async def test_llama_json_tool_call_requires_one_complete_object(text):
+    app = _native_tool_app(text, "llama")
+    tools = [
+        {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
+    ]
+    body = _chat_body("weather", tools=tools)
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == text
+    assert choice["message"]["tool_calls"] is None
+
+
+async def test_qwen3_coder_xml_tool_call_is_parsed():
+    text = (
+        "<tool_call>\n"
+        "<function=read_file>\n"
+        "<parameter=path>\nREADME.md\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    app = _native_tool_app(text, "qwen")
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    body = _chat_body("read", tools=tools, tool_choice="required")
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    call = choice["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "read_file"
+    assert json.loads(call["function"]["arguments"]) == {"path": "README.md"}
+
+
+async def test_qwen3_coder_xml_parameters_follow_tool_schema_types():
+    text = (
+        "<tool_call>\n"
+        "<function=run>\n"
+        "<parameter=count>\n3\n</parameter>\n"
+        "<parameter=ratio>\n0.5\n</parameter>\n"
+        "<parameter=dry_run>\ntrue\n</parameter>\n"
+        '<parameter=paths>\n["a", "b"]\n</parameter>\n'
+        '<parameter=options>\n{"force": false}\n</parameter>\n'
+        "</function>\n"
+        "</tool_call>"
+    )
+    app = _native_tool_app(text, "qwen")
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "count": {"type": "integer"},
+                        "ratio": {"type": "number"},
+                        "dry_run": {"type": "boolean"},
+                        "paths": {"type": "array"},
+                        "options": {"type": "object"},
+                    },
+                },
+            },
+        }
+    ]
+    body = _chat_body("run", tools=tools, tool_choice="required")
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {
+        "count": 3,
+        "ratio": 0.5,
+        "dry_run": True,
+        "paths": ["a", "b"],
+        "options": {"force": False},
+    }
+
+
+async def test_qwen3_coder_xml_invalid_typed_parameter_fails_closed():
+    text = (
+        "<tool_call>\n"
+        "<function=run>\n"
+        "<parameter=count>\nnot-an-integer\n</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+    app = _native_tool_app(text, "qwen")
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"count": {"type": "integer"}},
+                },
+            },
+        }
+    ]
+    body = _chat_body("run", tools=tools, tool_choice="required")
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "expected_status"),
+    [
+        (None, 200),
+        ("required", 502),
+        (
+            {"type": "function", "function": {"name": "run"}},
+            502,
+        ),
+    ],
+)
+async def test_invalid_qwen_output_preserves_auto_content_and_fails_closed_for_forced_choice(
+    tool_choice, expected_status
+):
+    text = (
+        "<tool_call><function=run>"
+        "<parameter=value>one</parameter>"
+        "<parameter=value>two</parameter>"
+        "</function></tool_call>"
+    )
+    app = _native_tool_app(text, "qwen")
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
+    body = _chat_body("run", tools=tools)
+    body["model"] = "stub"
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == expected_status
+    if tool_choice is None:
+        choice = response.json()["choices"][0]
+        assert choice["message"]["content"] == text
+        assert choice["message"]["tool_calls"] is None
+    else:
+        assert response.json()["error"]["code"] == "tool_choice_not_satisfied"
+
+
+async def test_attested_qwen_tool_call_is_supported_in_buffered_stream():
+    text = "<tool_call><function=run><parameter=value>資料</parameter></function></tool_call>"
+    app = _native_tool_app(text, "qwen")
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "run",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+            },
+        }
+    ]
+    body = _chat_body(
+        "run",
+        tools=tools,
+        tool_choice="required",
+        stream=True,
+    )
+    body["model"] = "stub"
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    assert _tool_response_contract(response, True) == (
+        None,
+        ["run"],
+        "tool_calls",
+    )
 
 
 async def test_generated_tool_calls_keep_order_while_skipping_only_malformed_entries():

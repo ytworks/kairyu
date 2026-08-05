@@ -307,9 +307,19 @@ top-level or nested Chat fields are also rejected before dispatch. Use
 `PromptInput` for content and `CacheHint` for native affinity; a legacy backend
 without `validate_request` remains compatible only with plain string prompts.
 
+`GenerationRequest.parallel_tool_calls` is the typed forwarding path for the
+`openai`, `kairyu`, and `vllm` profiles. The `openai` profile also preserves its
+older `SamplingParams.extra_args.parallel_tool_calls` compatibility path, but a
+request cannot specify both sources. Unsupported upstreams do not receive the
+hint; the public Chat/Responses boundary still checks the generated call count
+and fails closed when `parallel_tool_calls=false`. A verified custom `generic`
+profile may opt in with `capabilities.parallel_tool_calls: true`; named
+provider profiles may be narrowed with `false` but not broadened beyond their
+built-in contract.
+
 | `upstream` | Portable request controls | Provider-specific notes |
 |---|---|---|
-| `openai` | OpenAI Chat Completions sampling, logprobs, structured output, tools | Emits the canonical `max_completion_tokens`; allows `reasoning_effort`, `service_tier`, and `parallel_tool_calls` in `extra_args`. |
+| `openai` | OpenAI Chat Completions sampling, logprobs, structured output, tools | Emits the canonical `max_completion_tokens`; forwards typed `parallel_tool_calls` and retains the legacy `extra_args` spelling; allows `reasoning_effort` and `service_tier` in `extra_args`. |
 | `anthropic` | temperature (0–1), top-p, one completion, max tokens, stop, non-strict tools | Rejects penalties, seed, logprobs, `response_format`, and strict tool schemas because the [Anthropic compatibility layer](https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk) documents them as ignored. Anthropic recommends its native API for production features. |
 | `gemini` | max tokens, structured output, and non-strict tools | Allows `reasoning_effort` and the documented `extra_body.google` extension object. Sampling controls vary across Gemini model families, so fields not guaranteed by the [Gemini OpenAI compatibility contract](https://ai.google.dev/gemini-api/docs/openai) fail closed unless a pinned deployment declares a verified custom contract. |
 | `kairyu` | OpenAI controls plus `top_k`, `min_p`, `repetition_penalty`, `stop_token_ids`, `min_tokens`, `ignore_eos`, `skip_special_tokens`, and signed-int64 `priority` | Use for gateway-to-Kairyu replica traffic. These extensions and the bounded interactive/batch class hint are typed and preserved through the receiving HTTP boundary into native scheduler admission. `skip_special_tokens` defaults to `true` and is isolated per request; `false` exposes otherwise-visible registered specials, but an ID that actually terminates on EOS or a stop token remains hidden under both values. |

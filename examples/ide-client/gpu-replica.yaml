@@ -1,0 +1,19 @@
+# Isolated single-model replica for IDE compatibility checks.
+#
+# Example launch:
+#   docker run --rm --gpus '"device=1"' -p 127.0.0.1:8002:8000 \
+#     -v "$PWD/examples/ide-client/gpu-replica.yaml:/etc/kairyu/config.yaml:ro" \
+#     -v /models:/models:ro <kairyu-cuda-image>
+engines:
+  llama-3.1-8b-instruct:
+    backend: kairyu
+    options:
+      model_path: /models/llama-3.1-8b-instruct/current
+
+server:
+  # The container listens on all interfaces; the example publish command above
+  # exposes it only on the host loopback interface.
+  host: 0.0.0.0
+  port: 8000
+  max_concurrency: 4
+  api_keys_env: null

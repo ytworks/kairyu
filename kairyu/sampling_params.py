@@ -26,6 +26,7 @@ GENERATION_CONFIG_SAMPLING_FIELDS = frozenset(
 # a new grammar carrier cannot silently bypass forced-continuation safeguards.
 RESPONSE_FORMAT_EXTRA_ARG = "response_format"
 STRUCTURED_OUTPUT_EXTRA_ARGS = frozenset({RESPONSE_FORMAT_EXTRA_ARG})
+PARALLEL_TOOL_CALLS_EXTRA_ARG = "parallel_tool_calls"
 
 
 class _FrozenDict(dict):
@@ -106,6 +107,32 @@ def validate_prompt_owned_extra_args(extra_args: object) -> None:
             f"{sorted(prompt_owned)}; pass input through PromptInput and "
             "cache identity through CacheHint"
         )
+
+
+def resolve_parallel_tool_calls(
+    parallel_tool_calls: bool | None,
+    extra_args: object,
+) -> bool | None:
+    """Resolve the typed control with the legacy SamplingParams carrier.
+
+    ``SamplingParams(extra_args=...)`` was the public Python compatibility
+    surface before GenerationRequest gained a typed field.  Preserve that
+    path, but reject ambiguous double specification and non-boolean values.
+    """
+
+    if parallel_tool_calls is not None and type(parallel_tool_calls) is not bool:
+        raise ValueError("parallel_tool_calls must be a boolean or None")
+    if not isinstance(extra_args, Mapping) or PARALLEL_TOOL_CALLS_EXTRA_ARG not in extra_args:
+        return parallel_tool_calls
+    legacy = extra_args[PARALLEL_TOOL_CALLS_EXTRA_ARG]
+    if type(legacy) is not bool:
+        raise ValueError("extra_args.parallel_tool_calls must be a boolean")
+    if parallel_tool_calls is not None:
+        raise ValueError(
+            "parallel_tool_calls cannot be specified through both the "
+            "top-level request field and SamplingParams.extra_args"
+        )
+    return legacy
 
 
 def _normalize_stop(stop: str | Sequence[str] | None) -> tuple[str, ...]:
