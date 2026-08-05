@@ -1243,7 +1243,7 @@ def _runtime_record(
     _require(graph is not None, f"{runtime_id} native CUDA graph executor is missing")
     _require(
         tuple(getattr(graph, "configured_buckets", ()))
-        == (1, 2, 4, 8, 16, gate.BATCH_SIZE)
+        == gate.CUDA_GRAPH_BUCKETS
         and getattr(graph, "max_pages", None) == expected["cuda_graph_max_pages"],
         f"{runtime_id} CUDA graph geometry differs",
     )

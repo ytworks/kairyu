@@ -46,6 +46,7 @@ DISTRACTOR_COUNT = BATCH_SIZE - 1
 MAX_PRESSURE_REQUESTS = 6
 TENSOR_PARALLEL_SIZE = 8
 NUM_LAYERS = 64
+CUDA_GRAPH_BUCKETS = (1, 2, 4, 8, 16, 24, 32)
 GPU_NAME = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
 GPU_COMPUTE_CAPABILITY = "12.0"
 
@@ -277,6 +278,8 @@ REQUIRED_SOURCE_PATHS = (
     "kairyu/engine/config_validation.py",
     "kairyu/engine/core/attention/flashinfer_gpu.py",
     "kairyu/engine/core/attention_selector.py",
+    "kairyu/engine/core/cuda_graph_gpu.py",
+    "kairyu/engine/core/graph_buckets.py",
     "kairyu/engine/core/model_runner.py",
     "kairyu/engine/core/radix_kv.py",
     "kairyu/engine/core/scheduler.py",
@@ -1276,7 +1279,7 @@ def _stats_contract(
             ]
         ):
             return False
-    configured = {1, 2, 4, 8, 16, 32}
+    configured = set(CUDA_GRAPH_BUCKETS)
     captures_bucket = scenario in {
         "batch32-cold",
         "pressure",
@@ -1837,6 +1840,7 @@ def write_artifact(
 
 __all__ = [
     "BATCH_SIZE",
+    "CUDA_GRAPH_BUCKETS",
     "CHUNK_RUNTIME_CONFIG",
     "DISTRACTOR_COUNT",
     "DISTRACTOR_TEXTS",

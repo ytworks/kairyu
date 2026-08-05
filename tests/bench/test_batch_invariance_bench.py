@@ -295,7 +295,7 @@ def _runtime_backend(config: dict[str, object]) -> object:
         for rank in range(gate.TENSOR_PARALLEL_SIZE)
     )
     graph = SimpleNamespace(
-        configured_buckets=(1, 2, 4, 8, 16, 32),
+        configured_buckets=gate.CUDA_GRAPH_BUCKETS,
         max_pages=16,
         _backend=SimpleNamespace(_warmup_iters=3),
     )

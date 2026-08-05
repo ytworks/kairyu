@@ -415,6 +415,8 @@ def _manifest(rows: list[dict[str, object]]) -> dict[str, object]:
 
 
 def test_public_contract_freezes_prompt_geometry_and_runtime_configs() -> None:
+    from kairyu.engine.core.graph_buckets import decode_buckets
+
     assert gate.SCHEMA_VERSION == "kairyu.a12.batch-invariance.v1"
     assert gate.GATE == "A12-BATCH-INVARIANCE"
     assert len(gate.TARGET_PROMPT_TOKEN_IDS) == gate.TARGET_PROMPT_TOKENS == 129
@@ -430,6 +432,15 @@ def test_public_contract_freezes_prompt_geometry_and_runtime_configs() -> None:
     assert gate.CHUNK_RUNTIME_CONFIG["max_num_batched_tokens"] == 32
     assert gate.FULL_RUNTIME_CONFIG["num_pages"] == 128
     assert gate.WARM_CACHED_TOKENS == 128
+    assert gate.CUDA_GRAPH_BUCKETS == decode_buckets(gate.BATCH_SIZE) == (
+        1,
+        2,
+        4,
+        8,
+        16,
+        24,
+        32,
+    )
     assert len(gate.REQUIRED_SOURCE_PATHS) == len(set(gate.REQUIRED_SOURCE_PATHS))
 
 
