@@ -59,6 +59,21 @@ def add_bench_parser(subparsers) -> None:
         help="reasoning_effort sent to every target (Fugu reports max effort)",
     )
     run.add_argument("--top-p", type=float, default=None, help="top_p sent to every target")
+    temperature = run.add_mutually_exclusive_group()
+    temperature.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Override the adapter-authored target temperature",
+    )
+    temperature.add_argument(
+        "--recommended-sampling",
+        action="store_true",
+        help=(
+            "Omit generation-default sampling fields so the endpoint may apply "
+            "its model generation_config (request intent, not remote attestation)"
+        ),
+    )
     run.add_argument(
         "--sampling-seed",
         type=int,
@@ -88,7 +103,10 @@ def add_bench_parser(subparsers) -> None:
         "--attempts",
         type=int,
         default=None,
-        help="Trials per task for the agentic harnesses (Fugu reports tau-3 as pass@4)",
+        help=(
+            "Trials per source item: seed sweep for chat adapters and harness "
+            "trial count for agentic adapters"
+        ),
     )
     run.add_argument("--judge-base-url", default=None)
     run.add_argument("--judge-model", default=None)

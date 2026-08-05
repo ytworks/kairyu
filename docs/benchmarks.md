@@ -698,13 +698,14 @@ SHA-256 fingerprint in `run.json`. The identity contains:
   and SHA-256 of the exact UTF-8 template used for scoring. Each core adapter
   carries package/resource/SHA-256 identities for its complete score-bearing
   source; IFEval binds both the adapter and every vendored checker module; and
-- the output-affecting `BenchConfig` fields `suite`, `targets`, `judge`, `limit`,
-  `smoke`, `offline_fixtures`, `only`, `exclude`, `seed`, `concurrency`,
-  `request_timeout_s`, and `retries`. `targets` includes every target's name,
+- the output-affecting `BenchConfig` fields `suite`, `targets`, `judge`,
+  `execution`, `limit`, `smoke`, `offline_fixtures`, `only`, `exclude`, `seed`,
+  `attempts`, `concurrency`, `request_timeout_s`, and `retries`. `targets`
+  includes every target's name,
   base URL, model, API-key environment-variable name, context/output limits,
   vision capability, optional operator-declared `served_config` label/SHA-256,
-  and sampling policy (`reasoning_effort`, `top_p`, `seed`,
-  `extra_body_json`); `judge` likewise includes every ordered grading-panel
+  and sampling policy (`sampling_mode`, `temperature`, `reasoning_effort`,
+  `top_p`, `seed`, `extra_body_json`); `judge` likewise includes every ordered grading-panel
   endpoint/model, API-key environment-variable name, concurrency, retry limit,
   and sampling policy. Changing a judge template, panel member, vote policy, or
   reasoning effort is therefore a different experiment, not a resumable run.
@@ -776,12 +777,30 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   `HF_TOKEN`. Without it those cells report `skipped (gated)` and the run
   continues.
 
-## Sampling policy (reasoning effort)
+## Sampling policy and sensitivity
 
 Fugu reports every model at its **maximum reasoning effort**, and ran the τ³
 user simulator at **low**. Sampling belongs to the endpoint, not to a
 benchmark, so it is configured per target (and per judge) and applies to every
 slot:
+
+Target chat requests have two mutually exclusive generation-default modes:
+
+- `sampling_mode: adapter` is the default. The adapter-authored temperature
+  (currently `0.0`) reaches the wire unless the target supplies an explicit
+  `temperature`; `--temperature` is the CLI form. The default mode and an
+  absent target temperature are omitted from serialized configuration, so an
+  ordinary one-attempt run retains its pre-sensitivity configuration shape and
+  canonical configuration-fingerprint input.
+- `sampling_mode: recommended` (CLI: `--recommended-sampling`) omits
+  `temperature`, `top_p`, `top_k`, `min_p`, and `repetition_penalty` from the
+  request so the endpoint may apply its model defaults. It cannot be combined
+  with an explicit `temperature`, `top_p`, or those other generation fields.
+  For a native Kairyu deployment, checkpoint values can be selected only when
+  the server itself uses `generation_config: auto`; `vllm` and `none` retain
+  their documented neutral policies. The artifact proves the requested wire
+  omission, **not** that a remote endpoint loaded or applied any particular
+  `generation_config.json`.
 
 For the native Kairyu Qwen3 endpoint, use the model's chat-template control;
 `reasoning_effort` is a provider-specific OpenAI field that this endpoint does
@@ -789,7 +808,7 @@ not implement:
 
 ```bash
 kairyu bench run --base-url http://localhost:8000/v1 --model qwen3-32b \
-    --top-p 0.95 --sampling-seed 0 \
+    --temperature 0.6 --top-p 0.95 --sampling-seed 100 --attempts 4 \
     --extra-body '{"chat_template_kwargs": {"enable_thinking": true}}' \
     --judge-model qwen3-32b \
     --judge-extra-body '{"chat_template_kwargs": {"enable_thinking": false}}'
@@ -800,17 +819,29 @@ targets:
   - name: qwen3-32b
     base_url: http://localhost:8001/v1
     model: qwen3-32b
+    temperature: 0.6
+    top_p: 0.95
+    seed: 100
     extra_body_json: '{"chat_template_kwargs": {"enable_thinking": true}}'
+attempts: 4
 judge:
   base_url: http://localhost:8001/v1
   model: qwen3-32b
   extra_body_json: '{"chat_template_kwargs": {"enable_thinking": false}}'
 ```
 
-`--sampling-seed` is the request `seed`; `--seed` remains the *item sampling*
-seed. Unset knobs are simply absent from the request body, so endpoints that
-reject them are unaffected. Use `reasoning_effort` only with an endpoint that
-documents support for it.
+To request endpoint defaults instead, replace the explicit `temperature` and
+`top_p` above with `sampling_mode: recommended`, or use
+`--recommended-sampling`. Keep `served_config` as the operator-owned binding of
+the deployment that is expected to interpret those omissions.
+
+`--sampling-seed` is the target request `seed`; `--seed` remains the *item
+selection* seed. With one attempt, an unset target seed remains absent from the
+wire. With `--attempts N` greater than one, chat adapters send one request per
+source item and seed: the ordered seeds are `target.seed + 0 .. N-1`, or
+`0 .. N-1` when the target seed is unset. Thus the example above uses
+`100, 101, 102, 103`. Other unset endpoint knobs remain absent. Use
+`reasoning_effort` only with an endpoint that documents support for it.
 
 `extra_body_json` is merged **last**, so it is validated at load time: it must be
 a JSON object, and it may not override `model`, `messages`, `stream`,
@@ -822,6 +853,63 @@ effective request disagree with the recorded configuration.
 This policy reaches every slot that issues its own chat requests. The three
 external-harness slots (SWE-Bench Pro, Terminal-Bench, τ³) drive a separate CLI,
 so each maps what its harness exposes and annotates what it cannot forward.
+`temperature` and `sampling_mode: recommended` are chat-only: all three
+external-harness rows fail closed as skipped when either is selected, because
+their pinned wrappers expose no verified equivalent. Run those rows separately
+with the default target policy. A full Fugu chat sensitivity run can use
+`--exclude swe-bench-pro,terminal-bench,tau-bench-banking`; SWE-Bench Pro also
+requires `attempts: 1`, while Harbor and τ interpret a larger attempt budget as
+their own harness trial count rather than as the grouped seed protocol below.
+
+### Sampling-sensitivity evidence and statistics
+
+A multi-attempt chat result remains one `ItemResult` per source dataset item;
+its ordered `sampling_attempts` children retain the 1-based attempt number,
+seed, and complete seed-specific item result. Attempts are deliberately not
+flattened into `PairResult.items`: repeated samples of one question are
+correlated and are not additional independent dataset items. A source item's
+score is the arithmetic mean of its attempts. If any child is incomplete, the
+ordinary pair remains visibly partial/failed as appropriate and the sampling
+summary is withheld rather than calculated from a changing denominator.
+The runner, standalone report path, and fresh history append all rebind the
+retained methodology to the authoritative run configuration: attempt budget,
+ordered schedule derived from the target seed, mode, and explicit temperature
+must agree. Parent/item status, scored/total denominators, and pair score are
+recomputed from the children. History schema 1 retains a protocol marker for
+new multi-attempt runs, so these checks do not reinterpret or reject older
+agentic harness records that used `attempts` only as a native trial count.
+
+For complete evidence, let `s_j` be the mean item score at seed `j`, across the
+same `N` source items. The scoreboard reports the mean of the `s_j` values, their
+minimum and maximum, and the **sample** standard deviation
+
+```text
+SD = sqrt(sum_j (s_j - mean(s))^2 / (n - 1))
+```
+
+where `n` is the number of seeds, not the number of dataset items. This is why
+the sensitivity summary requires at least two distinct seeds. It is a spread
+over the fixed seed sweep, not a confidence interval. Ordinary Wilson intervals
+are withheld for these cells because attempts within an item are repeated
+measures.
+
+For an adapter that declares binary outcomes, let item `i` have `c_i` successes
+among `n` attempts. Its unbiased estimator is
+
+```text
+pass_i@k = 1 - C(n - c_i, k) / C(n, k)
+pass@k   = (1 / N) * sum_i pass_i@k
+```
+
+The report includes `k = 1, 2, 4, ...` up to the attempt budget and also the
+actual budget when it is not a power of two. Non-binary rows still report the
+seed mean/SD/range but do not manufacture pass@k. Configuration A/B requires
+`attempts: 1` and rejects any run configured otherwise: its paired Newcombe and
+bootstrap procedures assume one scored outcome per source item and must not
+reinterpret correlated attempt means as independent evidence. Run a separate
+one-attempt experiment for that gate. Stored rendering accepts pass@k only for
+an adapter that declares binary outcomes and only when its item/seed margins
+form a realizable binary matrix; otherwise the label is withheld.
 
 ## Judge configuration
 
@@ -988,22 +1076,30 @@ Harness output and sampling, verified against the pinned harnesses:
   file, so a fixed name would make a second run interactive or resume
   simulations from another configuration.
 - **Sampling**: τ takes `--agent-llm-args` / `--user-llm-args`, and mini-swe-agent
-  takes `model.model_kwargs.*`, so the named fields reach both. Vendor
-  `extra_body` has no equivalent in either, and Harbor exposes no documented
-  sampling passthrough for terminus-2 — both are annotated on the cell rather
-  than silently dropped.
+  takes `model.model_kwargs.*`, so their verified `reasoning_effort`, `top_p`,
+  and `seed` fields reach the harness. Vendor `extra_body` has no equivalent in
+  mini-swe-agent, and Harbor exposes no documented sampling passthrough for
+  terminus-2; those omissions are annotated on the cell. Explicit target
+  `temperature` and recommended-default omission are not claimed through any
+  external harness: those rows skip as described above.
 
-`--attempts N` sets trials per task (`-k` for Harbor, `--num-trials` for τ).
-It defaults to **1** because each attempt is another full container run; Fugu
-reports τ³ Banking as **pass@4** and the Terminal-Bench leaderboard requires at
-least five, and both facts are annotated on the cell so a single-attempt number
-is never mistaken for either.
+`--attempts N` also controls the grouped multi-seed chat runs described above.
+For the external harnesses it continues to set trials per task where exposed
+(`-k` for Harbor and `--num-trials` for τ). It defaults to **1** because each
+attempt is another model request or full container run; Fugu reports τ³ Banking
+as **pass@4** and the Terminal-Bench leaderboard requires at least five, and
+both facts are annotated on the cell so a single-attempt number is never
+mistaken for either. SWE-Bench Pro has no verified repeated-trial flag and
+therefore skips unless `attempts: 1`.
 
 ## Scale and cost
 
 The full Fugu suite is expensive by design (HLE alone is ~2500 judged items per
 target). Core avoids judges, Docker, and vision, but its complete MMLU population
-still makes 14,042 requests. For quick runs:
+still makes 14,042 requests. Published request counts assume `attempts: 1`;
+increasing it multiplies generated-chat requests while teacher-forced MMLU keeps
+its fixed continuation-scoring calls and external harnesses apply their own
+trial semantics. For quick runs:
 
 - `--smoke` — deterministic ≤20-item subset per benchmark (CI uses this).
 - `--limit N` — cap items per benchmark (seeded, comparable across runs).

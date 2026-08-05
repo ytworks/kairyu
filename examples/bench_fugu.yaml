@@ -31,15 +31,29 @@ targets:
     base_url: http://localhost:8000/v1
     model: kairyu-auto-max
 
-# Sampling policy belongs to the endpoint and applies to every slot. Fugu
+# Sampling policy belongs to the endpoint and applies to every chat slot. Fugu
 # reports its table at each model's maximum reasoning effort, so set the
-# endpoint-supported equivalent here (per target) rather than per benchmark:
+# endpoint-supported equivalent under each target rather than per benchmark.
+# Choose either an explicit temperature or recommended mode, never both:
 #
 #   reasoning_effort: high  # only when the endpoint implements this field
+#   temperature: 0.6        # overrides the adapter-authored temperature
 #   top_p: 0.95
-#   seed: 0
+#   seed: 100               # with attempts=4, request seeds are 100..103
 #   # Native Kairyu Qwen3 uses this instead of reasoning_effort:
 #   extra_body_json: '{"chat_template_kwargs": {"enable_thinking": true}}'
+#
+# Or omit generation-default fields so the endpoint may apply its model
+# generation_config:
+#
+#   sampling_mode: recommended
+#
+# Recommended mode is request intent, not remote attestation that the endpoint
+# loaded particular defaults. Bind the expected deployment with served_config.
+# Explicit temperature and recommended mode are chat-only. SWE-Bench Pro,
+# Terminal-Bench, and tau-bench-banking fail closed as skipped under either;
+# exclude those rows for this run and run them separately with the default
+# target policy. SWE-Bench Pro additionally requires attempts=1.
 
 # LLM judge for free-form grading (HLE, CharXiv) and the tau-bench user
 # simulator. Pointing it at the deployed gateway keeps judging self-hosted;
@@ -52,7 +66,9 @@ judge:
 
 # limit: 50                  # optional: cap items per benchmark
 # smoke: true                # tiny deterministic subset (CI)
-# seed: 0
+# seed: 0                    # item selection, not the target request seed
+# attempts: 4                # grouped chat sweep; unset target seed gives 0..3
+# exclude: [swe-bench-pro, terminal-bench, tau-bench-banking]  # for chat-only policy
 # concurrency: 8
 # results_dir: bench/results/fugu
 # cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE

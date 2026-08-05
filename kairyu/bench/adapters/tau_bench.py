@@ -31,6 +31,7 @@ from kairyu.bench.adapters.base import (
     AdapterInfo,
     DownloadContext,
     RunContext,
+    external_harness_sampling_incompatibility,
     normalize_base_url,
     skipped_pair,
     summarize_items,
@@ -187,7 +188,13 @@ class TauBenchBankingAdapter:
         annotations=(
             f"domain {_DOMAIN}, retrieval config {_RETRIEVAL_CONFIG} "
             "(Fugu enables every knowledge-retrieval tool)",
-            "one trial per task by default (--attempts); Fugu reports pass@4",
+            "one trial per task by default (--attempts); Fugu reports pass@4; "
+            "--num-trials is a harness trial count, not grouped chat seed-sweep "
+            "sensitivity",
+            "target and user-simulator reasoning_effort, top_p, seed, and vendor "
+            "extra_body are forwarded through harness LLM args; explicit target "
+            "temperature and recommended sampling are rejected because the harness "
+            "has no verified equivalent",
         ),
         evaluation_distributions=("tau2", "tau3"),
         evaluation_executables=("tau3", "tau2"),
@@ -207,6 +214,12 @@ class TauBenchBankingAdapter:
         )
 
     def _preconditions(self, target: BenchTarget, ctx: RunContext) -> str | None:
+        sampling_reason = external_harness_sampling_incompatibility(
+            target,
+            harness="tau",
+        )
+        if sampling_reason is not None:
+            return sampling_reason
         if detect_harness() is None:
             return (
                 "tau harness not installed (install official tau2-bench v1.x "

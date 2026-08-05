@@ -30,6 +30,12 @@ import httpx
 
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.progress import NullProgress
+from kairyu.bench.sampling import (
+    combine_attempts,
+    sampling_metrics,
+    sampling_summary,
+    seed_schedule,
+)
 from kairyu.bench.targets import normalize_base_url, target_api_key
 from kairyu.bench.types import (
     BenchItem,
@@ -41,6 +47,7 @@ from kairyu.bench.types import (
     LogLikelihoodRequestSpec,
     LogLikelihoodResponse,
     PairResult,
+    SamplingAttemptResult,
     SkipItem,
 )
 
@@ -132,7 +139,9 @@ class RunContext:
     judge: JudgeClient | MajorityJudgeClient | None = None
     limit: int | None = None
     seed: int = 0
-    attempts: int = 1  # agentic trials per task (Terminal-Bench -k, tau --num-trials)
+    # Trials per source item: chat adapters retain a seed sweep; external
+    # agentic adapters continue mapping this to their harness trial flag.
+    attempts: int = 1
     run_id: str = ""  # provenance for artifacts the external harnesses name themselves
     concurrency: int = 8
     retries: int = 2
@@ -318,6 +327,7 @@ def evaluation_protocol_identity(adapter: BenchmarkAdapter) -> dict:
             ("kairyu.bench", "aggregate.py"),
             ("kairyu.bench", "cache.py"),
             ("kairyu.bench", "runner.py"),
+            ("kairyu.bench", "sampling.py"),
             ("kairyu.bench", "types.py"),
             ("kairyu.bench", "targets.py"),
         )
@@ -460,20 +470,28 @@ async def call_chat(
     retries: int,
     timeout_s: float,
     api_key: str | None = None,
+    sampling_seed: int | None = None,
 ) -> str:
     """Non-streaming POST /v1/chat/completions with backoff on 429/5xx/timeouts."""
     url = f"{normalize_base_url(target.base_url)}/chat/completions"
     body = {
         "model": target.model,
         "messages": list(request.messages),
-        "temperature": request.temperature,
-        "stream": False,
     }
+    if target.sampling_mode == "adapter":
+        body["temperature"] = (
+            request.temperature if target.temperature is None else target.temperature
+        )
+    # Preserve the legacy default body order.  Besides making byte-level
+    # fixtures stable, this keeps pre-#371 request captures directly diffable.
+    body["stream"] = False
     if request.max_tokens is not None:
         body["max_tokens"] = request.max_tokens
     # Endpoint-level sampling policy (reasoning effort, top_p, seed, vendor
     # knobs) applies to every slot; reserved keys are rejected at config load.
     body.update(target.wire_overrides())
+    if sampling_seed is not None:
+        body["seed"] = sampling_seed
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     attempt = 0
@@ -495,6 +513,31 @@ async def call_chat(
             attempt += 1
             continue
         raise RequestFailed(response.status_code, response.text)
+
+
+def external_harness_sampling_incompatibility(
+    target: BenchTarget,
+    *,
+    harness: str,
+) -> str | None:
+    """Reject chat-only sampling controls at external harness boundaries.
+
+    These wrappers do not construct the OpenAI request body themselves.  An
+    explicit temperature or generation-default omission therefore cannot be
+    claimed unless the pinned harness exposes a verified equivalent.
+    """
+
+    if target.sampling_mode == "recommended":
+        return (
+            f"{harness} has no verified generation-default omission passthrough; "
+            "sampling_mode='recommended' is supported only by chat adapters"
+        )
+    if target.temperature is not None:
+        return (
+            f"{harness} has no verified temperature passthrough; explicit target "
+            "temperature is supported only by chat adapters"
+        )
+    return None
 
 
 def _invalid_loglikelihood_response(message: str) -> RequestFailed:
@@ -707,6 +750,7 @@ async def attempt_item(
     item_id: str,
     ctx: RunContext,
     api_key: str | None,
+    sampling_seed: int | None = None,
 ) -> ItemAttempt:
     """Call the target for one item, converting request failures into data.
 
@@ -722,6 +766,7 @@ async def attempt_item(
             retries=ctx.retries,
             timeout_s=ctx.request_timeout_s,
             api_key=api_key,
+            sampling_seed=sampling_seed,
         )
     except RequestFailed as error:
         lowered = error.body.lower()
@@ -997,6 +1042,12 @@ class DatasetAdapter(ABC):
             }
         return base
 
+    def pair_methodology(self, target: BenchTarget, ctx: RunContext) -> dict:
+        """Target-aware methodology; ordinary adapters retain the old shape."""
+
+        del target
+        return self.methodology(ctx)
+
     def _incomparable_reasons(self) -> tuple[str, ...]:
         return (self.info.incomparable_reason,) if self.info.incomparable_reason else ()
 
@@ -1022,7 +1073,7 @@ class DatasetAdapter(ABC):
             self.info.name,
             target.label(),
             results,
-            methodology=self.methodology(ctx),
+            methodology=self.pair_methodology(target, ctx),
             annotations=self.info.annotations,
             started_at=started_at,
             comparable=self.info.comparable_to_published,
@@ -1090,6 +1141,72 @@ class GenerativeAdapter(DatasetAdapter):
     @abstractmethod
     async def score(self, item: BenchItem, response_text: str, ctx: RunContext) -> ItemResult: ...
 
+    def pair_methodology(self, target: BenchTarget, ctx: RunContext) -> dict:
+        methodology = self.methodology(ctx)
+        default_policy = (
+            target.sampling_mode == "adapter"
+            and target.temperature is None
+            and ctx.attempts == 1
+        )
+        if default_policy:
+            return methodology
+
+        if target.sampling_mode == "recommended":
+            methodology["temperature"] = None
+            wire_omitted = [
+                "temperature",
+                "top_p",
+                "top_k",
+                "min_p",
+                "repetition_penalty",
+            ]
+        else:
+            methodology["temperature"] = (
+                0.0 if target.temperature is None else target.temperature
+            )
+            wire_omitted = []
+        schedule = seed_schedule(target.seed, ctx.attempts)
+        methodology["sampling"] = {
+            "mode": target.sampling_mode,
+            "attempts": ctx.attempts,
+            "seeds": list(schedule),
+            "seed_source": (
+                "target.seed"
+                if target.seed is not None
+                else ("generated from zero" if ctx.attempts > 1 else "wire omission")
+            ),
+            "wire_omitted": wire_omitted,
+            "recommended_defaults_attested": False,
+        }
+        return methodology
+
+    def _attach_sampling_metrics(
+        self,
+        pair: PairResult,
+        target: BenchTarget,
+        ctx: RunContext,
+    ) -> PairResult:
+        if ctx.attempts == 1:
+            return pair
+        seeds = seed_schedule(target.seed, ctx.attempts)
+        metrics: dict[str, float | int | None] = {
+            **pair.metrics,
+            "sampling_attempts": ctx.attempts,
+            "sampling_base_items": len(pair.items),
+            "sampling_complete": 0,
+        }
+        try:
+            summary = sampling_summary(
+                pair.items,
+                seeds=tuple(int(seed) for seed in seeds),
+                declared_binary=self.info.binary_outcomes,
+            )
+        except ValueError:
+            return pair.model_copy(update={"metrics": metrics})
+        metrics.update(sampling_metrics(summary))
+        metrics["sampling_complete"] = 1
+        return pair.model_copy(update={"metrics": metrics})
+
     async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:
         started_at = utc_now()
         skip_reason = self.check_preconditions(target, ctx)
@@ -1097,26 +1214,61 @@ class GenerativeAdapter(DatasetAdapter):
             return self._skipped_pair(target, skip_reason)
 
         items = select_items(self.load_items(ctx), ctx.limit, ctx.seed)
-        ctx.progress.items_total(len(items))
+        seeds = seed_schedule(target.seed, ctx.attempts)
+        ctx.progress.items_total(len(items) * ctx.attempts)
         semaphore = asyncio.Semaphore(ctx.concurrency)
         api_key = target_api_key(target)
 
         async with ctx.http_factory() as client:
 
             async def run_item(item: BenchItem) -> ItemResult:
+                if ctx.attempts > 1:
+                    retained = await asyncio.gather(
+                        *(
+                            run_sampling_attempt(item, attempt, int(seed))
+                            for attempt, seed in enumerate(seeds, start=1)
+                        )
+                    )
+                    return combine_attempts(item.id, retained)
                 try:
                     return await run_one(item)
                 finally:
                     # every item advances the bar, including skips and failures
                     ctx.progress.item_done()
 
-            async def run_one(item: BenchItem) -> ItemResult:
+            async def run_sampling_attempt(
+                item: BenchItem,
+                attempt_index: int,
+                seed: int,
+            ) -> SamplingAttemptResult:
+                try:
+                    result = await run_one(item, sampling_seed=seed)
+                    result = result.model_copy(update={"item_id": item.id})
+                    return SamplingAttemptResult(
+                        attempt=attempt_index,
+                        seed=seed,
+                        result=result,
+                    )
+                finally:
+                    ctx.progress.item_done()
+
+            async def run_one(
+                item: BenchItem,
+                *,
+                sampling_seed: int | None = None,
+            ) -> ItemResult:
                 request = self.build_request(item, target, ctx)
                 if isinstance(request, SkipItem):
                     return ItemResult(item_id=item.id, status="skipped", error=request.reason)
                 async with semaphore:
                     attempt = await attempt_item(
-                        client, target, request, item_id=item.id, ctx=ctx, api_key=api_key
+                        client,
+                        target,
+                        request,
+                        item_id=item.id,
+                        ctx=ctx,
+                        api_key=api_key,
+                        sampling_seed=sampling_seed,
                     )
                 if attempt.failure is not None:
                     return attempt.failure
@@ -1125,12 +1277,13 @@ class GenerativeAdapter(DatasetAdapter):
 
             results = await asyncio.gather(*(run_item(item) for item in items))
 
-        return self._summarize_pair(
+        pair = self._summarize_pair(
             target,
             ctx,
             list(results),
             started_at=started_at,
         )
+        return self._attach_sampling_metrics(pair, target, ctx)
 
 
 class LogLikelihoodAdapter(DatasetAdapter):

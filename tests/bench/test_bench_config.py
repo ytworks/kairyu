@@ -32,6 +32,40 @@ def test_parse_target_flag():
         parse_target_flag("just-a-name")
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("seed", True, "sampling seed must be an integer"),
+        ("top_p", True, "top_p must be a number"),
+    ],
+)
+def test_target_sampling_identity_rejects_boolean_coercion(field, value, message):
+    with pytest.raises(ValueError, match=message):
+        BenchTarget(base_url="http://gateway", model="m", **{field: value})
+
+
+def test_attempts_rejects_boolean_coercion():
+    with pytest.raises(ValueError, match="attempts must be a positive JSON-safe integer"):
+        BenchConfig(
+            targets=(BenchTarget(base_url="http://gateway", model="m"),),
+            attempts=True,
+        )
+
+
+def test_sampling_seed_must_be_json_safe_without_reinterpreting_agentic_attempts():
+    maximum = (1 << 53) - 1
+    with pytest.raises(ValueError, match="sampling seed must be a JSON-safe integer"):
+        BenchTarget(base_url="http://gateway", model="m", seed=maximum + 1)
+    # A global attempt budget may be a native external-harness trial count or
+    # unused by a teacher-forced-only selection; only chat execution expands a
+    # target seed into a consecutive schedule.
+    config = BenchConfig(
+        targets=(BenchTarget(base_url="http://gateway", model="m", seed=maximum),),
+        attempts=2,
+    )
+    assert config.attempts == 2
+
+
 def test_models_shorthand_builds_targets():
     args = _parse(
         ["run", "--base-url", "http://gw:8000", "--model", "m", "--model", "kairyu-auto"]
@@ -211,7 +245,11 @@ def test_quantization_profile_rejects_conflated_or_unresolved_identity(profile):
 
 
 def test_recorded_non_quant_target_shape_remains_backward_compatible():
-    from kairyu.bench.runner import _recordable_config
+    from kairyu.bench.runner import (
+        _recordable_config,
+        _run_fingerprint,
+        _run_identity,
+    )
 
     ordinary = BenchConfig(
         suite="core",
@@ -233,12 +271,115 @@ def test_recorded_non_quant_target_shape_remains_backward_compatible():
         }
     )
 
-    assert "quantization" not in _recordable_config(ordinary)["targets"][0]
+    recorded_target = _recordable_config(ordinary)["targets"][0]
+    assert "quantization" not in recorded_target
+    assert "sampling_mode" not in recorded_target
+    assert "temperature" not in recorded_target
+    # Pin the pre-#371 canonical default experiment, not merely the absence of
+    # the two new keys. A default-only extension must not invalidate existing
+    # run identities or resumable evidence.
+    assert _run_fingerprint(_run_identity(ordinary, [])) == (
+        "a250c2db0bdebbcb5f77ee0802b31c9d9ee1ec14c54998a15ebd7a8f1ef9f2ff"
+    )
     assert _recordable_config(declared)["targets"][0]["quantization"] == {
         "weight_method": "none",
         "compute_dtype": "bfloat16",
         "kv_cache_dtype": "bfloat16",
     }
+
+
+def test_cli_temperature_is_a_fingerprinted_target_override():
+    args = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--temperature",
+            "0.7",
+        ]
+    )
+
+    config = build_config(args)
+    recorded_target = config.model_dump(mode="json")["targets"][0]
+
+    assert config.targets[0].temperature == 0.7
+    assert config.targets[0].sampling_mode == "adapter"
+    assert recorded_target["temperature"] == 0.7
+    assert "sampling_mode" not in recorded_target
+
+
+def test_recommended_sampling_omits_yaml_generation_overrides(tmp_path):
+    path = tmp_path / "recommended.yaml"
+    path.write_text(
+        "targets:\n"
+        "  - base_url: http://gw:8000/v1\n"
+        "    model: m\n"
+        "    temperature: 0.8\n"
+        "    top_p: 0.9\n",
+        encoding="utf-8",
+    )
+    args = _parse(
+        [
+            "run",
+            "--config",
+            str(path),
+            "--recommended-sampling",
+        ]
+    )
+
+    config = build_config(args)
+    target = config.targets[0]
+    recorded_target = config.model_dump(mode="json")["targets"][0]
+
+    assert target.sampling_mode == "recommended"
+    assert target.temperature is None
+    assert target.top_p is None
+    assert recorded_target["sampling_mode"] == "recommended"
+    assert "temperature" not in recorded_target
+
+
+def test_recommended_sampling_conflicts_fail_before_a_run_is_built():
+    common = ["run", "--base-url", "http://gw:8000", "--model", "m"]
+
+    with pytest.raises(SystemExit):
+        _parse(
+            [
+                *common,
+                "--temperature",
+                "0.7",
+                "--recommended-sampling",
+            ]
+        )
+
+    args = _parse([*common, "--top-p", "0.9", "--recommended-sampling"])
+    with pytest.raises(ValueError, match="cannot be combined with.*--top-p"):
+        build_config(args)
+
+
+@pytest.mark.parametrize("temperature", [-0.1, float("nan"), float("inf"), True])
+def test_target_temperature_must_be_a_finite_non_negative_number(temperature):
+    with pytest.raises(ValueError, match="finite non-negative"):
+        BenchTarget(base_url="http://gw:8000/v1", model="m", temperature=temperature)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"temperature": 0.7},
+        {"top_p": 0.9},
+        {"extra_body_json": '{"top_k": 20}'},
+    ],
+)
+def test_recommended_sampling_rejects_explicit_generation_overrides(overrides):
+    with pytest.raises(ValueError, match="recommended sampling cannot be combined"):
+        BenchTarget(
+            base_url="http://gw:8000/v1",
+            model="m",
+            sampling_mode="recommended",
+            **overrides,
+        )
 
 
 def test_suite_results_directory_preserves_an_explicit_path():

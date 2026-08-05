@@ -305,6 +305,11 @@ def _validate_run_pair(base: dict, candidate: dict) -> tuple[str, dict]:
     base_config = base["run"]["config"]
     candidate_config = candidate["run"]["config"]
     for role, config in (("baseline", base_config), ("candidate", candidate_config)):
+        attempts = config.get("attempts")
+        if type(attempts) is not int or attempts != 1:
+            raise ConfigComparisonError(
+                f"{role} configuration A/B requires attempts=1; got {attempts!r}"
+            )
         if config.get("smoke") is not False or config.get("limit") is not None:
             raise ConfigComparisonError(f"{role} is a subset run, not a full-dataset gate")
         if config.get("offline_fixtures") is not False:

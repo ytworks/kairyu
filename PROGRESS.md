@@ -803,6 +803,23 @@ Target construction now canonicalizes `/v1`, validates environment-variable
 credential names, fails closed when configured credentials are absent, and
 redacts secrets from errors. Generic serving/frontier artifacts record their
 nearest-rank percentile method; formal gate schemas remain source-bound.
+Chat benchmark rows now support fingerprinted multi-seed sensitivity runs
+without treating correlated attempts as independent dataset items. Attempts
+remain grouped beneath each source item; complete matrices report seed-level
+mean/sample-SD/range and the unbiased per-item pass@k estimator for declared
+binary rows, while incomplete matrices withhold the sensitivity summary and
+multi-attempt evidence is rejected by configuration A/B. The default one-call
+temperature-zero wire/config shape is unchanged. Targets may instead request
+checkpoint-recommended sampling by omitting the five generation-default fields;
+artifacts state that this is wire intent, not remote attestation. External
+harnesses fail closed on chat-only temperature/default-omission policies, and
+SWE-Bench Pro also fails closed above one attempt. Runner, report, and fresh
+history boundaries bind target seed/mode/temperature and attempt budget back to
+the raw grouped methodology. History proves every fresh sampling label against
+its raw pair before omitting that derived field from the schema-1 index; a
+durable protocol marker preserves pre-#371 agentic multi-trial history
+compatibility. SciCode reruns each problem dependency chain independently for
+every seed.
 
 The F1b zero-failure rollout gate now freezes each clean-head gateway and mock
 image to a private archive immediately after its build, before creating the
@@ -1115,6 +1132,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-06 — [design] Chat evaluations gain grouped sampling-sensitivity evidence
+- What: extended generative benchmark adapters so `attempts > 1` runs one ordered consecutive-seed sweep per source item, retaining strict child outcomes beneath that item rather than flattening correlated repeats. Complete rows recompute seed means, sample SD, range, and unbiased `1-C(n-c,k)/C(n,k)` pass@k for declared binary adapters; incomplete or tampered matrices withhold the sensitivity summary, and ordinary Wilson intervals plus configuration A/B are disabled for multi-attempt evidence. Raw source-item identities, canonical parent/pair status and reason, denominators, realizable binary pass@k margins, and fresh history labels are cross-validated. Runner, report, and history boundaries also bind target seed/mode/temperature plus the attempt budget to retained methodology; schema-1 history omits the derived label after proving it against the raw pair, while a new protocol marker preserves old agentic multi-trial records. SciCode independently reruns each seed's whole sequential problem chain. Targets can select an explicit temperature or `sampling_mode: recommended`, which omits temperature/top-p/top-k/min-p/repetition-penalty so endpoint generation defaults may apply while explicitly declining remote attestation. External harnesses fail closed when those chat-only policies cannot be forwarded, and SWE-Bench Pro requires one attempt. The default single-attempt target serialization, target-config fingerprint input, temperature-zero request bytes, and absent seed remain byte-shape compatible.
+- Why: one deterministic chat call cannot quantify sampling noise or pass@k, but flattening repeated seeds would understate uncertainty and corrupt paired statistics. Explicit omission is also required to measure the model-owned generation defaults added by issue #351 without falsely claiming that a remote server applied them.
+- Refs: issue #371; `docs/benchmarks.md`; `examples/bench_{fugu,core}.yaml`; `kairyu/bench/{sampling,types,aggregate,config,cli,config_ab,history}.py`; `kairyu/bench/adapters/{base,ifeval,scicode,swebench_pro,terminal_bench,tau_bench}.py`; `tests/bench/test_bench_{sampling_sensitivity,config,config_ab,history,agentic_conditions,scicode_sequential,runner}.py`
 
 ### 2026-08-06 — [design] Quantization formats gain task-level accuracy gates
 - What: added the fixed `quantization` suite and `kairyu bench quant-sweep` command for dense BF16, FP8, INT8, AWQ, GPTQ, NVFP4, and dense BF16 with FP8-E4M3 KV across GSM8K, MMLU, IFEval, and GPQA Diamond. Every target declares an exact weight/compute/KV classification plus a distinct served-manifest digest; six complete configuration A/B artifacts provide the sole paired statistical core, and all 24 independently toleranced Newcombe lower-bound gates must pass without task or scheme averaging. The dedicated atomic JSON/Markdown artifact binds the clean source, hash-chain record, raw pairs, deployment declarations, comparator runtime, and versioned protocol. Reports explicitly distinguish operator declaration from remote attestation and keep FP8-E4M3 KV scoped to external or experimental deployments because native Kairyu still rejects it after the failed quality bake. Optional quantization identity serializes only when declared, preserving existing Fugu/Core fingerprints and judge-calibration reloads.

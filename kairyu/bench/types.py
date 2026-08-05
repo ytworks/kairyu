@@ -26,6 +26,7 @@ from pydantic import (
 from kairyu.bench.targets import normalize_base_url, validate_api_key_env
 
 SCHEMA_VERSION = 1
+JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
 
 # `extra_body` is an escape hatch for vendor knobs, not a way to silently
 # retarget or reshape the benchmark request. It is merged LAST, so anything
@@ -86,6 +87,22 @@ class SamplingOptions(BaseModel):
     # JSON object string: hashable, so the frozen models stay hashable, and
     # validated once at config load instead of at request time.
     extra_body_json: str | None = None
+
+    @field_validator("seed", mode="before")
+    @classmethod
+    def _require_integer_seed(cls, value):
+        if value is not None and type(value) is not int:
+            raise ValueError("sampling seed must be an integer")
+        if value is not None and abs(value) > JSON_SAFE_INTEGER_MAX:
+            raise ValueError("sampling seed must be a JSON-safe integer")
+        return value
+
+    @field_validator("top_p", mode="before")
+    @classmethod
+    def _require_numeric_top_p(cls, value):
+        if value is not None and type(value) not in (int, float):
+            raise ValueError("top_p must be a number in (0, 1]")
+        return value
 
     @field_validator("extra_body_json")
     @classmethod
@@ -174,6 +191,13 @@ class BenchTarget(SamplingOptions):
     model: str
     served_config: ServedConfigIdentity | None = None
     quantization: QuantizationProfile | None = None
+    # ``adapter`` preserves the benchmark-authored request temperature (0.0
+    # today). ``recommended`` deliberately omits generation-default fields so
+    # a #351-capable backend may apply its checkpoint generation_config.json.
+    # This is an operator-requested wire policy, not remote attestation that a
+    # third-party endpoint actually loaded those defaults.
+    sampling_mode: Literal["adapter", "recommended"] = "adapter"
+    temperature: float | None = Field(default=None, ge=0.0)
     api_key_env: str | None = None  # env var NAME, never the key itself
     max_context_tokens: int | None = None  # gate for long-context items
     max_output_tokens: int = 8192
@@ -189,14 +213,48 @@ class BenchTarget(SamplingOptions):
     def _validate_api_key_env(cls, value: str | None) -> str | None:
         return validate_api_key_env(value)
 
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def _validate_temperature(cls, value):
+        if value is None:
+            return None
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise ValueError("temperature must be a finite non-negative number")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_sampling_policy(self) -> BenchTarget:
+        if self.sampling_mode != "recommended":
+            return self
+        if self.temperature is not None or self.top_p is not None:
+            raise ValueError(
+                "recommended sampling cannot be combined with explicit "
+                "temperature or top_p"
+            )
+        generation_overrides = {
+            "top_k",
+            "min_p",
+            "repetition_penalty",
+        } & set(self.extra_body())
+        if generation_overrides:
+            raise ValueError(
+                "recommended sampling cannot be combined with explicit "
+                f"{', '.join(sorted(generation_overrides))} in extra_body_json"
+            )
+        return self
+
     @model_serializer(mode="wrap")
-    def _serialize_without_absent_quantization(
+    def _serialize_without_absent_extensions(
         self, handler: SerializerFunctionWrapHandler
     ) -> dict:
-        """Keep pre-quantization target records byte-shape compatible."""
+        """Keep pre-#371/pre-quantization target records byte-shape compatible."""
         serialized = handler(self)
         if self.quantization is None:
             serialized.pop("quantization", None)
+        if self.sampling_mode == "adapter":
+            serialized.pop("sampling_mode", None)
+        if self.temperature is None:
+            serialized.pop("temperature", None)
         return serialized
 
     def label(self) -> str:
@@ -363,9 +421,10 @@ class BenchConfig(BaseModel):
     only: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     seed: int = 0
-    # Trials per task for the agentic harnesses (Terminal-Bench `-k`, tau
-    # `--num-trials`). Fugu reports tau-3 Banking as pass@4; the default stays 1
-    # because each extra attempt is another full docker/agent run.
+    # Trials per source task. Chat adapters retain an ordered seed sweep beneath
+    # each dataset item; Terminal-Bench and tau map the same budget to `-k` and
+    # `--num-trials`. The default stays 1 because every attempt adds a model or
+    # full docker/agent run.
     attempts: int = Field(default=1, ge=1)
     concurrency: int = Field(default=8, ge=1)  # in-flight requests per pair
     request_timeout_s: float = Field(default=600.0, gt=0)
@@ -376,6 +435,17 @@ class BenchConfig(BaseModel):
     rerun: bool = False  # ignore existing pair results
     download: bool = True  # auto-download missing datasets before running
     progress: bool = True  # live per-slot progress (bars on a TTY, lines in logs)
+
+    @field_validator("attempts", mode="before")
+    @classmethod
+    def _require_integer_attempts(cls, value):
+        if (
+            type(value) is not int
+            or value < 1
+            or value > JSON_SAFE_INTEGER_MAX
+        ):
+            raise ValueError("attempts must be a positive JSON-safe integer")
+        return value
 
     @model_validator(mode="before")
     @classmethod
@@ -564,6 +634,10 @@ class ItemResult(BaseModel):
     # Single: {model, correct, raw_excerpt}; panels add aggregation + ordered votes.
     judge: dict | None = None
     latency_s: float | None = None
+    # Multi-seed chat evidence stays grouped under its source dataset item.
+    # Flattening attempts into ``PairResult.items`` would make Wilson and
+    # paired-comparison code falsely treat correlated trials as independent.
+    sampling_attempts: tuple[SamplingAttemptResult, ...] | None = None
 
     @field_validator("score", mode="before")
     @classmethod
@@ -588,6 +662,109 @@ class ItemResult(BaseModel):
         if (isinstance(value, float) and not math.isfinite(value)) or value < 0:
             raise ValueError("item latency_s must be a finite non-negative number")
         return value
+
+    @model_validator(mode="after")
+    def _validate_sampling_attempts(self) -> ItemResult:
+        attempts = self.sampling_attempts
+        if attempts is None:
+            return self
+        if not attempts:
+            raise ValueError("sampling_attempts must be non-empty when present")
+        expected = list(range(1, len(attempts) + 1))
+        if [attempt.attempt for attempt in attempts] != expected:
+            raise ValueError("sampling_attempts must use consecutive 1-based indices")
+        seeds = [attempt.seed for attempt in attempts]
+        if len(seeds) != len(set(seeds)):
+            raise ValueError("sampling_attempts must use unique seeds")
+        if any(attempt.result.item_id != self.item_id for attempt in attempts):
+            raise ValueError("sampling attempt item_id must match its parent item")
+        completed_scores = [
+            attempt.result.score
+            for attempt in attempts
+            if attempt.result.status == "completed" and attempt.result.score is not None
+        ]
+        complete = len(completed_scores) == len(attempts)
+        if complete:
+            if self.status != "completed" or self.score is None:
+                raise ValueError("complete sampling attempts require a completed parent")
+            expected_score = sum(completed_scores) / len(completed_scores)
+            if not math.isclose(self.score, expected_score, rel_tol=0.0, abs_tol=1e-12):
+                raise ValueError("sampling parent score must equal the attempt mean")
+            if self.error is not None:
+                raise ValueError("a complete sampling parent cannot carry an error")
+        else:
+            child_statuses = [attempt.result.status for attempt in attempts]
+            missing_score = any(
+                attempt.result.status == "completed" and attempt.result.score is None
+                for attempt in attempts
+            )
+            if "failed" in child_statuses or missing_score:
+                expected_status = "failed"
+            elif "unjudged" in child_statuses:
+                expected_status = "unjudged"
+            else:
+                expected_status = "skipped"
+            if self.status != expected_status:
+                raise ValueError(
+                    "sampling parent status must match its incomplete attempt outcomes"
+                )
+            if self.score is not None:
+                raise ValueError("an incomplete sampling item cannot carry a score")
+            counts = {
+                status: child_statuses.count(status)
+                for status in ("failed", "unjudged", "skipped")
+            }
+            if missing_score:
+                counts["invalid"] = sum(
+                    attempt.result.status == "completed" and attempt.result.score is None
+                    for attempt in attempts
+                )
+            reason = ", ".join(
+                f"{count} {name}" for name, count in counts.items() if count
+            )
+            if self.error != f"sampling sweep incomplete: {reason}":
+                raise ValueError("sampling parent error must describe its attempt outcomes")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_single_attempt_extension(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict:
+        """Do not change any legacy/single-attempt ItemResult JSON shape."""
+        serialized = handler(self)
+        if self.sampling_attempts is None:
+            serialized.pop("sampling_attempts", None)
+        return serialized
+
+
+class SamplingAttemptResult(BaseModel):
+    """One seed-specific result retained beneath a source benchmark item."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
+
+    attempt: int = Field(ge=1)
+    seed: int
+    result: ItemResult
+
+    @field_validator("attempt", "seed", mode="before")
+    @classmethod
+    def _require_integer_identity(cls, value, info):
+        if type(value) is not int:
+            raise ValueError(f"sampling {info.field_name} must be an integer")
+        if abs(value) > JSON_SAFE_INTEGER_MAX:
+            raise ValueError(
+                f"sampling {info.field_name} must be a JSON-safe integer"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _reject_nested_sampling(self) -> SamplingAttemptResult:
+        if self.result.sampling_attempts is not None:
+            raise ValueError("sampling attempt results cannot contain nested attempts")
+        return self
+
+
+ItemResult.model_rebuild()
 
 
 PairStatus = Literal["completed", "partial", "skipped", "failed"]
@@ -694,7 +871,7 @@ class PairResult(BaseModel):
 _PAIR_COUNT_METRICS = frozenset(
     {"n_total", "n_scored", "n_unjudged", "n_skipped", "n_failed"}
 )
-_MAX_SAFE_INTEGER = (1 << 53) - 1
+_MAX_SAFE_INTEGER = JSON_SAFE_INTEGER_MAX
 
 
 def _json_evidence_error(
@@ -760,11 +937,57 @@ def _json_evidence_error(
         active.remove(identity)
 
 
+def sampling_configuration_error(value: object) -> str | None:
+    """Validate the sampling subset retained in run/target configuration."""
+
+    if not isinstance(value, dict):
+        return "expected sampling configuration must be an object"
+    attempts = value.get("attempts")
+    seed = value.get("seed")
+    mode = value.get("mode")
+    temperature = value.get("temperature")
+    top_p = value.get("top_p")
+    required = value.get("required")
+    if (
+        type(attempts) is not int
+        or attempts < 1
+        or attempts > JSON_SAFE_INTEGER_MAX
+        or (seed is not None and type(seed) is not int)
+        or (type(seed) is int and abs(seed) > JSON_SAFE_INTEGER_MAX)
+        or mode not in {"adapter", "recommended"}
+        or (
+            temperature is not None
+            and (
+                type(temperature) not in (int, float)
+                or not math.isfinite(temperature)
+                or temperature < 0
+            )
+        )
+        or (
+            top_p is not None
+            and (
+                type(top_p) not in (int, float)
+                or not math.isfinite(top_p)
+                or not 0 < top_p <= 1
+            )
+        )
+        or (mode == "recommended" and (temperature is not None or top_p is not None))
+        or type(required) is not bool
+    ):
+        return "expected sampling configuration is invalid"
+    if required and attempts > 1:
+        first_seed = seed if seed is not None else 0
+        if first_seed + attempts - 1 > JSON_SAFE_INTEGER_MAX:
+            return "expected sampling seed schedule exceeds JSON-safe integers"
+    return None
+
+
 def pair_result_evidence_error(
     value: object,
     *,
     expected_benchmark: str | None = None,
     expected_target: str | None = None,
+    expected_sampling: dict[str, object] | None = None,
     require_history_safe_counts: bool = False,
 ) -> str | None:
     """Explain why adapter/stored pair evidence is unsafe, or return ``None``.
@@ -844,6 +1067,187 @@ def pair_result_evidence_error(
                 or latency < 0
             ):
                 return f"items[{index}].latency_s must be finite and non-negative"
+
+    grouped_items = [item for item in value.items if item.sampling_attempts is not None]
+    if grouped_items:
+        if len(grouped_items) != len(value.items):
+            return "sampling evidence must group every source item"
+        item_ids = [item.item_id for item in value.items]
+        if len(item_ids) != len(set(item_ids)):
+            return "sampling source item ids must be unique"
+
+        sampling = value.methodology.get("sampling")
+        if not isinstance(sampling, dict):
+            return "sampling evidence requires methodology.sampling"
+        attempts = sampling.get("attempts")
+        seeds = sampling.get("seeds")
+        mode = sampling.get("mode")
+        expected_omissions = (
+            ["temperature", "top_p", "top_k", "min_p", "repetition_penalty"]
+            if mode == "recommended"
+            else []
+        )
+        if type(attempts) is not int or attempts < 2:
+            return "methodology.sampling.attempts must be an integer of at least two"
+        if (
+            not isinstance(seeds, list)
+            or len(seeds) != attempts
+            or any(type(seed) is not int for seed in seeds)
+            or len(set(seeds)) != attempts
+        ):
+            return "methodology.sampling.seeds must be the unique ordered seed schedule"
+        if mode not in {"adapter", "recommended"}:
+            return "methodology.sampling.mode is invalid"
+        if sampling.get("wire_omitted") != expected_omissions:
+            return "methodology.sampling.wire_omitted does not match the sampling mode"
+        if sampling.get("recommended_defaults_attested") is not False:
+            return "methodology.sampling must not claim remote default attestation"
+
+        for index, item in enumerate(value.items):
+            retained = item.sampling_attempts
+            assert retained is not None
+            if len(retained) != attempts:
+                return f"items[{index}].sampling_attempts does not match the attempt budget"
+            if [attempt.seed for attempt in retained] != seeds:
+                return f"items[{index}].sampling_attempts does not match the seed schedule"
+
+        expected_counts = {
+            "n_total": len(value.items),
+            "n_scored": sum(
+                item.status == "completed" and item.score is not None for item in value.items
+            ),
+            "n_unjudged": sum(item.status == "unjudged" for item in value.items),
+            "n_skipped": sum(item.status == "skipped" for item in value.items),
+            "n_failed": sum(item.status == "failed" for item in value.items),
+        }
+        for name, expected in expected_counts.items():
+            if value.metrics.get(name) != expected:
+                return f"metrics.{name} does not match grouped source-item evidence"
+        if value.metrics.get("sampling_attempts") != attempts:
+            return "metrics.sampling_attempts does not match methodology"
+        if value.metrics.get("sampling_base_items") != len(value.items):
+            return "metrics.sampling_base_items does not match grouped source items"
+
+        complete = expected_counts["n_scored"] == len(value.items)
+        if value.metrics.get("sampling_complete") != int(complete):
+            return "metrics.sampling_complete does not match grouped evidence"
+        scored_values = [
+            float(item.score)
+            for item in value.items
+            if item.status == "completed" and item.score is not None
+        ]
+        expected_score = sum(scored_values) / len(scored_values) if scored_values else None
+        stored_score = value.score
+        if expected_score is None:
+            if stored_score is not None:
+                return "metrics.score does not match grouped source-item evidence"
+        elif stored_score is None or not math.isclose(
+            stored_score,
+            expected_score,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            return "metrics.score does not match grouped source-item evidence"
+
+        completed_count = expected_counts["n_scored"]
+        failed_count = expected_counts["n_failed"]
+        if failed_count > len(value.items) / 2:
+            expected_status = "failed"
+        elif completed_count == len(value.items):
+            expected_status = "completed"
+        elif not scored_values:
+            expected_status = "skipped"
+        else:
+            expected_status = "partial"
+        if value.status != expected_status:
+            return "pair status does not match grouped source-item evidence"
+        reasons = []
+        for name, label in (
+            ("n_unjudged", "unjudgeable"),
+            ("n_skipped", "skipped"),
+            ("n_failed", "failed"),
+        ):
+            count = expected_counts[name]
+            if count:
+                reasons.append(f"{count}/{len(value.items)} items {label}")
+        expected_reason = (
+            None
+            if expected_status == "completed"
+            else "; ".join(reasons) or "no scoreable items"
+        )
+        if value.reason != expected_reason:
+            return "pair reason does not match grouped source-item evidence"
+
+    if expected_sampling is not None:
+        from kairyu.bench.sampling import seed_schedule
+
+        config_error = sampling_configuration_error(expected_sampling)
+        if config_error is not None:
+            return config_error
+        expected_attempts = expected_sampling.get("attempts")
+        expected_seed = expected_sampling.get("seed")
+        expected_mode = expected_sampling.get("mode")
+        expected_temperature = expected_sampling.get("temperature")
+        required = expected_sampling.get("required")
+        assert isinstance(expected_attempts, int)
+        assert expected_seed is None or isinstance(expected_seed, int)
+        assert expected_mode in {"adapter", "recommended"}
+        assert required is not None
+        sampling = value.methodology.get("sampling")
+        policy_requires_methodology = bool(required) and (
+            expected_attempts > 1
+            or expected_mode == "recommended"
+            or expected_temperature is not None
+        )
+        if (
+            policy_requires_methodology
+            and value.status in {"completed", "partial"}
+            and not isinstance(sampling, dict)
+        ):
+            return "pair omits the configured chat sampling methodology"
+        if isinstance(sampling, dict):
+            try:
+                schedule = list(seed_schedule(expected_seed, expected_attempts))
+            except ValueError as error:
+                return f"expected sampling seed schedule is invalid: {error}"
+            expected_omissions = (
+                ["temperature", "top_p", "top_k", "min_p", "repetition_penalty"]
+                if expected_mode == "recommended"
+                else []
+            )
+            expected_seed_source = (
+                "target.seed"
+                if expected_seed is not None
+                else (
+                    "generated from zero"
+                    if expected_attempts > 1
+                    else "wire omission"
+                )
+            )
+            wire_temperature = (
+                None
+                if expected_mode == "recommended"
+                else (0.0 if expected_temperature is None else expected_temperature)
+            )
+            if sampling.get("attempts") != expected_attempts:
+                return "sampling methodology attempt budget disagrees with run config"
+            if sampling.get("seeds") != schedule:
+                return "sampling methodology seeds disagree with target config"
+            if sampling.get("mode") != expected_mode:
+                return "sampling methodology mode disagrees with target config"
+            if sampling.get("seed_source") != expected_seed_source:
+                return "sampling methodology seed source disagrees with target config"
+            if sampling.get("wire_omitted") != expected_omissions:
+                return "sampling methodology omissions disagree with target config"
+            if sampling.get("recommended_defaults_attested") is not False:
+                return "sampling methodology must not claim remote default attestation"
+            methodology_temperature = value.methodology.get("temperature")
+            if (
+                isinstance(methodology_temperature, bool)
+                or methodology_temperature != wire_temperature
+            ):
+                return "sampling methodology temperature disagrees with target config"
+
     tree_error = _json_evidence_error(
         value,
         path="pair",

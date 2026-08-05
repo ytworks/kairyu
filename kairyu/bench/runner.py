@@ -31,6 +31,7 @@ from pydantic import ValidationError
 from kairyu.bench.adapters import suite_adapters, suite_info
 from kairyu.bench.adapters.base import (
     DownloadContext,
+    GenerativeAdapter,
     RunContext,
     adapter_cache_ready,
     cache_pins,
@@ -41,6 +42,7 @@ from kairyu.bench.aggregate import build_scoreboard, render_markdown
 from kairyu.bench.cache import BenchCache, resolve_cache_root
 from kairyu.bench.compare import build_comparison, render_comparison_markdown
 from kairyu.bench.history import cross_run_policies
+from kairyu.bench.sampling import PROTOCOL_ID as SAMPLING_PROTOCOL_ID
 from kairyu.bench.store import ResultStore
 from kairyu.bench.types import (
     SMOKE_LIMIT,
@@ -345,6 +347,12 @@ def _recordable_config(config: BenchConfig) -> dict:
 
     recorded = sanitize(config.model_dump(mode="json"))
     assert isinstance(recorded, dict)
+    if config.attempts > 1:
+        # ``attempts`` predates grouped chat sweeps and was already used by
+        # external agentic harnesses.  This durable marker lets history accept
+        # those legacy multi-trial records while still recognizing every new
+        # run whose evaluator surface includes the #371 protocol.
+        recorded["sampling_protocol"] = SAMPLING_PROTOCOL_ID
     return recorded
 
 
@@ -431,6 +439,7 @@ def _validated_pair_evidence(
     target: str,
     annotations: tuple[str, ...],
     context: str,
+    expected_sampling: dict[str, object],
     require_history_safe_counts: bool,
 ) -> PairResult:
     """Return trustworthy pair evidence or a failed pair at the scheduled key."""
@@ -438,6 +447,7 @@ def _validated_pair_evidence(
         value,
         expected_benchmark=benchmark,
         expected_target=target,
+        expected_sampling=expected_sampling,
         require_history_safe_counts=require_history_safe_counts,
     )
     if error is None:
@@ -666,6 +676,14 @@ class SuiteRunner:
         for adapter in adapters:
             for target in config.targets:
                 label = target.label()
+                expected_sampling = {
+                    "attempts": config.attempts,
+                    "seed": target.seed,
+                    "mode": target.sampling_mode,
+                    "temperature": target.temperature,
+                    "top_p": target.top_p,
+                    "required": isinstance(adapter, GenerativeAdapter),
+                }
                 source_before = observe_source()
                 current_adapter_identity = _adapter_identity(
                     adapter,
@@ -718,6 +736,7 @@ class SuiteRunner:
                             existing,
                             expected_benchmark=adapter.info.name,
                             expected_target=label,
+                            expected_sampling=expected_sampling,
                             require_history_safe_counts=history_candidate,
                         )
                         if existing_error is not None:
@@ -730,6 +749,7 @@ class SuiteRunner:
                                 target=label,
                                 annotations=adapter.info.annotations,
                                 context="stored pair contains invalid evidence",
+                                expected_sampling=expected_sampling,
                                 require_history_safe_counts=history_candidate,
                             )
                             store.save_pair(
@@ -809,6 +829,7 @@ class SuiteRunner:
                     target=label,
                     annotations=adapter.info.annotations,
                     context="adapter returned invalid pair evidence",
+                    expected_sampling=expected_sampling,
                     require_history_safe_counts=history_candidate,
                 )
                 source_after = observe_source()

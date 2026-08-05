@@ -65,6 +65,16 @@ def test_swebench_step_limit_is_disclosed():
     assert any("step_limit=1000" in note for note in adapter.info.annotations)
 
 
+async def test_swebench_rejects_unmapped_attempt_budget(tmp_path):
+    pair = await SweBenchProAdapter().run(
+        _target(),
+        _ctx(tmp_path, attempts=2),
+    )
+    assert pair.status == "skipped"
+    assert pair.reason is not None
+    assert "requires attempts=1" in pair.reason
+
+
 # -- Terminal-Bench ------------------------------------------------------------
 
 
@@ -95,6 +105,29 @@ def test_terminal_bench_passes_attempts(tmp_path, attempts):
 def test_terminal_bench_limit_is_a_task_cap(tmp_path):
     command = TerminalBenchAdapter()._command(_target(), _ctx(tmp_path, limit=3), tmp_path)
     assert _flag_value(command, "--n-tasks") == "3"
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        pytest.param(_target(temperature=0.6), id="temperature"),
+        pytest.param(_target(sampling_mode="recommended"), id="recommended"),
+    ],
+)
+@pytest.mark.parametrize(
+    "adapter",
+    [SweBenchProAdapter(), TerminalBenchAdapter(), TauBenchBankingAdapter()],
+)
+async def test_agentic_harnesses_reject_chat_only_sampling_policy(
+    tmp_path,
+    adapter,
+    target,
+):
+    ctx = _ctx(tmp_path, judge=_judge())
+    pair = await adapter.run(target, ctx)
+    assert pair.status == "skipped"
+    assert pair.reason is not None
+    assert "supported only by chat adapters" in pair.reason
 
 
 # -- Harbor result schema ------------------------------------------------------
@@ -285,6 +318,7 @@ def test_tau_annotations_disclose_conditions():
     notes = TauBenchBankingAdapter().info.annotations
     assert any("banking_knowledge" in note for note in notes)
     assert any("pass@4" in note for note in notes)
+    assert any("not grouped chat seed-sweep" in note for note in notes)
 
 
 def test_tau_save_to_is_unique_per_invocation(tmp_path):
@@ -357,8 +391,10 @@ def test_swebench_omits_model_kwargs_when_unset(tmp_path):
 def test_swebench_annotates_what_it_cannot_forward():
     notes = SweBenchProAdapter().info.annotations
     assert any("extra_body" in note and "NOT forwarded" in note for note in notes)
+    assert any("temperature" in note and "rejected" in note for note in notes)
 
 
 def test_terminal_bench_annotates_that_sampling_is_not_forwarded():
     notes = TerminalBenchAdapter().info.annotations
     assert any("NOT" in note and "sampling" in note for note in notes)
+    assert any("temperature" in note and "rejected" in note for note in notes)

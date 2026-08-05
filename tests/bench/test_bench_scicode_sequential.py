@@ -203,6 +203,63 @@ async def test_failed_step_does_not_abort_the_problem(tmp_path):
     assert pair.metrics["n_total"] == 2
 
 
+async def test_sampling_seeds_keep_independent_problem_histories(tmp_path):
+    """Each seed reruns the whole dependency chain; histories never cross."""
+    later_prompts: dict[int, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        body = _json.loads(request.content)
+        prompt = body["messages"][0]["content"]
+        seed = body["seed"]
+        if "vector_norm(v)" in prompt and "normalize" not in prompt.split(
+            "Now implement"
+        )[1]:
+            code = (
+                "def vector_norm(v):\n"
+                "    return float(np.sqrt(np.sum(np.asarray(v) ** 2)))\n"
+                f"# sampling-seed-{seed}"
+            )
+        else:
+            later_prompts[seed] = prompt
+            code = "def normalize(v):\n    return np.asarray(v) / vector_norm(v)"
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": f"```python\n{code}\n```",
+                        }
+                    }
+                ]
+            },
+        )
+
+    target = make_target(sampling_mode="recommended")
+    config = make_config(
+        tmp_path,
+        targets=(target,),
+        only=("scicode",),
+        attempts=2,
+    )
+    runner = SuiteRunner(
+        config,
+        http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        probe_docker=lambda: (False, "t"),
+    )
+    assert await runner.run() == 0
+    pair = ResultStore(tmp_path / "results", "test-run").load_pair("scicode", "m")
+    assert pair.status == "completed"
+    assert pair.metrics["sampling_complete"] == 1
+    assert set(later_prompts) == {0, 1}
+    assert "sampling-seed-0" in later_prompts[0]
+    assert "sampling-seed-1" not in later_prompts[0]
+    assert "sampling-seed-1" in later_prompts[1]
+    assert "sampling-seed-0" not in later_prompts[1]
+
+
 # -- golden data provenance ----------------------------------------------------
 
 
