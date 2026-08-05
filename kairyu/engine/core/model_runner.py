@@ -440,16 +440,16 @@ def _batched_prefill_gap(model: DenseDecoder) -> str | None:
     return None
 
 
-def _verification_batch_gap(model: DenseDecoder) -> str | None:
-    """Why multi-position target scoring cannot use either batched decode form.
+def _decode_batch_gap(model: DenseDecoder) -> str | None:
+    """Why this model cannot use either batched decode form.
 
     Tensor decode is the preferred path and the only graph-capable one.  The
     established list-metadata ``forward_decode_batch`` remains a valid eager
     compatibility path, though, so lack of graph/tensor support alone must not
     serialize an otherwise batch-capable model.  MLA is the important inverse:
     ``DenseDecoder`` exposes the model-level method, but ``MlaAttention`` has no
-    corresponding layer implementation and must retain position-at-a-time
-    verification.
+    corresponding layer implementation and must retain request/position-at-a-time
+    execution for both ordinary decode and speculative target verification.
     """
     tensor_gap = _tensor_decode_gap(model)
     if tensor_gap is None:
@@ -483,6 +483,11 @@ def _verification_batch_gap(model: DenseDecoder) -> str | None:
                 "attend_batched"
             )
     return None
+
+
+# Keep the original private helper name import-compatible for tests and
+# downstream diagnostics written before ordinary decode adopted the same check.
+_verification_batch_gap = _decode_batch_gap
 
 
 def _preflight_attention_runtime(model: DenseDecoder, pool: PagedKVPool) -> None:
@@ -589,7 +594,10 @@ class PagedModelRunner:
         # eager batching. Unsupported model/attention combinations retain the
         # list-based compatibility path.
         self._tensor_decode_supported = _tensor_decode_gap(model) is None
-        self._verification_batch_gap = _verification_batch_gap(model)
+        self._decode_batch_gap = _decode_batch_gap(model)
+        # Verification uses the same decode-shaped model contracts as ordinary
+        # decode; retain the established attribute for its structural stats.
+        self._verification_batch_gap = self._decode_batch_gap
         # Cross-request prefill is deliberately stricter than semantic
         # ``attend_batched`` support. Only a backend that owns one native
         # ragged plan/run opts in; Torch, MLA, and custom models keep the
@@ -1304,10 +1312,14 @@ class PagedModelRunner:
         # Eager execution keeps the cheaper per-sequence path for B=1, but graph
         # mode must use its tensor/static-buffer path at every supported bucket:
         # single-stream launch overhead is one of CUDA graph's primary targets.
-        if decodes and (
-            self._graph is not None
-            or len(decodes) >= 2
-            or (self._device.type == "cuda" and self._tensor_decode_supported)
+        if (
+            decodes
+            and self._decode_batch_gap is None
+            and (
+                self._graph is not None
+                or len(decodes) >= 2
+                or (self._device.type == "cuda" and self._tensor_decode_supported)
+            )
         ):
             self._execute_decode_batch(decodes, states, sampled)
         else:

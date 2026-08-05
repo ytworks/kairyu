@@ -14,7 +14,7 @@ preserving the affected command and evidence paths.
 | Public benchmark CLI | `kairyu bench` | Installed console surface: `run`, `download`, `report`, `list`, and `entrypoints` |
 | Offline benchmark/calibration fixtures | `kairyu/bench/fixtures/` | Installed package data; all 12 JSONL files must be readable through `importlib.resources` |
 | Entrypoint inventory | `kairyu/bench/entrypoints.toml` | Installed, machine-readable source of truth for every supported top-level wrapper |
-| Gate, comparison, operator, and microbenchmark executables | `bench/*.py` | Repository-only; the inventory declares a path form and, where supported, an optional module form; B7 evidence is path-only |
+| Gate, comparison, operator, and microbenchmark executables | `bench/*.py` | Repository-only; the inventory declares a path form and, where supported, an optional module form; B7 and A12 evidence are path-only |
 | Measurement and decision artifacts | `bench/results/` | Repository-only and never shipped in a wheel; routine output is ignored, while explicitly reviewed formal evidence may be retained by Git |
 | Tests | `tests/` | Repository-only and never shipped in a wheel |
 
@@ -738,6 +738,58 @@ GPU DRAM transfer. The complete contract and real-GPU procedure are in
 `docs/design/issue-373-kv-answer-equivalence.md` and
 `docs/gpu-runbook.md` §9.8c.
 
+### A12 batch-invariance determinism evidence
+
+`bench/batch_invariance_bench.py` is the checkout-only formal gate for issue
+#360. It runs one retained 129-token factual prompt under four production
+shapes on the pinned Qwen3-32B checkpoint: cold in a real batch of 32, cold
+alone after a proved eviction, warm alone after a proved 128-token page-aligned
+radix hit plus the required one-token terminal recomputation,
+and cold alone in a fresh runtime with the prefill budget forced to 32 tokens.
+The last arm must schedule the exact chunk sequence `32, 32, 32, 32, 1`.
+
+All target requests use greedy seed 0, produce exactly 32 tokens, ignore EOS,
+and preserve special tokens. The gate requires exact equality of native output
+token IDs, raw vocabulary pieces, and final text across all four arms. It does
+not use latency, text-only equality, prefix equality, or a disagreement
+tolerance. Thirty-one distinct distractors are forced to remain live for the
+whole batch arm, and retained scheduler observations must prove one 32-row
+prefill followed by target-bearing 32-row decode cohorts. A configured batch
+size or a synthetic scenario label is not sufficient evidence.
+
+The production geometry is fixed at TP8, FlashInfer, BF16 KV, CUDA graph,
+128 configured 16-token pages (127 allocatable after graph scratch), model
+length 192, graph batch 32/page width 16/three warmups, a 512-token full-runtime
+budget, and a 32-token fresh-runtime budget. Exactly six fixed lowercase
+129-token pressure requests are required; their roots are disjoint from the
+distractors, and five do not evict the target under this geometry. All eight
+ranks must report the expected topology, FlashInfer backend,
+graph bucket/capture/replay activity, and zero eager fallbacks. The cache proof
+uses independent non-mutating probes: zero target tokens after pressure and
+before the alone-cold request, then 128 cached tokens before the warm request.
+Native usage must agree and the warm schedule must recompute the final prompt
+token, as required by RadixKV's page-aligned reuse contract. Its one-token
+attention call is deliberately bound to the production decode-backend counters,
+not misclassified as a FlashInfer prefill-backend call.
+
+The target's exact text, 129 tokenizer IDs, and both hashes are schema-fixed.
+Every prompt and output ID must be below Qwen3's 151,669-entry tokenizer
+boundary; the model's padded 151,936-row logits head is not accepted as a
+tokenizer domain. The operator full-hashes all 17 checkpoint shards, tokenizer
+metadata, source paths, and the hardware/runtime environment before execution
+and again after both native runtimes shut down.
+
+Formal `run-native`, `verify`, and `replay` commands are path-only and must
+start with an already isolated `python -I -B` interpreter. They retain one
+canonical JSONL raw stream plus a derived manifest, never overwrite an
+existing artifact, and independently replay every schedule, cache, rank,
+provenance, and equality check rather than trusting stored `passed`. Portable
+tests exercise strict replay, tamper rejection, fake-native plumbing, and the
+ordinary DeepSeek/MLA batch fallback only; they do not claim a real Qwen3-32B
+or GPU result. The complete contract is in
+`docs/design/issue-360-batch-invariance.md`; the exact capture commands are in
+`docs/gpu-runbook.md` §9.8d.
+
 ## Fixtures, results, and wheel verification
 
 The 11 installed benchmark fixtures are synthetic plumbing inputs, never
@@ -775,7 +827,7 @@ uv run --frozen python scripts/verify_bench_entrypoints.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 65 registered wrappers through
-their 129 declared `--help` forms. It runs once in CI, on Python 3.12, after the
+The first command separately exercises all 66 registered wrappers through
+their 130 declared `--help` forms. It runs once in CI, on Python 3.12, after the
 declared development dependencies are synced, without duplicating those
 subprocesses in every portable test cell.

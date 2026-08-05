@@ -1769,6 +1769,60 @@ image, and drill are unchanged.
   semantic contract is in
   `docs/design/issue-373-kv-answer-equivalence.md`.
 
+- 9.8d A12 batch-invariance determinism (#360): capture this additive
+  correctness gate from the same clean reviewed checkout with the pinned
+  Qwen3-32B checkpoint on exactly eight RTX PRO 6000 Blackwell Server Edition
+  GPUs.  The operator is path-only and requires an already isolated
+  `python -I -B` startup.  It refuses an existing output directory and retains
+  a completed artifact even when its derived verdict fails, so use a new result
+  path for every attempt.
+
+  The fixed TP8 full runtime uses FlashInfer, BF16 KV, CUDA graphs, 128
+  configured 16-token pages (127 allocatable after graph scratch), model
+  length 192, batch width 32, graph page width 16, three capture warmups, and a
+  512-token scheduling budget.  It runs the target cold with 31 live
+  distractors, applies exactly six fixed lowercase pressure requests, proves
+  complete target eviction, then runs the target cold and warm alone.  The
+  warm probe must expose exactly 128 reusable tokens and a one-token terminal
+  prefill; that terminal call must appear in the decode-backend plan/run
+  counters.  A second fresh runtime differs only by its 32-token scheduling
+  budget and must prefill the same 129-token target in exact chunks
+  `32, 32, 32, 32, 1`.
+
+  All four target arms use the schema-fixed 129-token factual prompt, greedy
+  seed 0, exactly 32 output tokens, ignored EOS, and preserved special tokens.
+  Native token IDs, raw vocabulary pieces, and final text must be exactly
+  equal.  Retained schedule, radix probes, all-rank topology, FlashInfer plan
+  and run counters, graph capture/replay, checkpoint/source hashes, and the
+  exclusive eight-GPU environment are binding gate inputs; scenario labels or
+  configured limits alone are not evidence.
+
+  ```bash
+  uv run --frozen python -I -B \
+    bench/batch_invariance_bench.py run-native \
+    --model-path <qwen3-32b-model-path> \
+    --output-dir bench/results/<a12-artifact> --assert-gate
+
+  uv run --frozen python -I -B \
+    bench/batch_invariance_bench.py verify \
+    --artifact bench/results/<a12-artifact> --assert-gate
+
+  uv run --frozen python -I -B \
+    bench/batch_invariance_bench.py replay \
+    --artifact bench/results/<a12-artifact> --assert-gate
+  ```
+
+  Retain `batch-invariance-raw.jsonl` and
+  `batch-invariance-manifest.json` together.  `verify` compares the retained
+  manifest with an independent strict replay; `replay` ignores stored verdicts
+  and derives the result from canonical raw rows.  Duplicate keys, non-finite
+  JSON, reordered or unknown rows, any provenance drift, fabricated cache or
+  schedule evidence, eager graph fallback, or a target-output mismatch fails
+  closed.  Portable fake-native, replay, tamper, and ordinary MLA fallback
+  tests validate plumbing only; they do not claim a real GPU/model result.
+  The full semantic contract is in
+  `docs/design/issue-360-batch-invariance.md`.
+
 - 9.9 G4 E-KV FP8 cache correctness bake (#170): run from a clean commit on
   one SM120 GPU with the exact reviewed Qwen3-32B checkpoint. The current
   retained production image predates E4M3 attention AOT and contains no

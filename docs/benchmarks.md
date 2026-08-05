@@ -26,8 +26,8 @@ repository-only benchmark executable.
 
 Top-level `bench/*.py` files are developer/formal wrappers, not installed
 commands. From a source checkout each registered wrapper supports the path and
-optional module forms declared in the packaged inventory; B7 evidence is
-path-only. This keeps historical commands and artifact provenance replayable.
+optional module forms declared in the packaged inventory; B7 and A12 evidence
+are path-only. This keeps historical commands and artifact provenance replayable.
 `bench/results/` is likewise
 checkout-only: routine outputs are ignored, while explicitly reviewed formal
 evidence can be retained. Neither wrappers, result artifacts, nor `tests/` are
@@ -44,7 +44,7 @@ uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
 After the declared development dependencies are synced, the first verifier
-exercises all 65 registered wrappers through their 129 declared `--help` forms
+exercises all 66 registered wrappers through their 130 declared `--help` forms
 without executing workloads or contacting external runtimes.
 The last command builds and imports a real wheel from an isolated temporary
 directory. It verifies the public CLI dispatch, packaged manifest and all 12
