@@ -58,18 +58,20 @@ def verify(root: Path, *, workers: int) -> None:
 
     jobs: list[tuple[list[str], str]] = []
     for entry in load_entrypoints():
-        jobs.append(
-            (
-                [sys.executable, entry.path, "--help"],
-                f"python {entry.path} --help",
+        if "path" in entry.invocations:
+            jobs.append(
+                (
+                    [sys.executable, entry.path, "--help"],
+                    f"python {entry.path} --help",
+                )
             )
-        )
-        jobs.append(
-            (
-                [sys.executable, "-m", entry.module, "--help"],
-                f"python -m {entry.module} --help",
+        if "module" in entry.invocations:
+            jobs.append(
+                (
+                    [sys.executable, "-m", entry.module, "--help"],
+                    f"python -m {entry.module} --help",
+                )
             )
-        )
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
@@ -94,7 +96,7 @@ def verify(root: Path, *, workers: int) -> None:
         raise RuntimeError("benchmark CLI smoke failed:\n" + "\n\n".join(details))
     print(
         f"verified {len(load_entrypoints())} benchmark entrypoints "
-        f"through {len(results)} path/module --help invocations"
+        f"through {len(results)} declared --help invocations"
     )
 
 

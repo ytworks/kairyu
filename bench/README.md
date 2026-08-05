@@ -14,7 +14,7 @@ preserving the affected command and evidence paths.
 | Public benchmark CLI | `kairyu bench` | Installed console surface: `run`, `download`, `report`, `list`, and `entrypoints` |
 | Offline benchmark/calibration fixtures | `kairyu/bench/fixtures/` | Installed package data; all 12 JSONL files must be readable through `importlib.resources` |
 | Entrypoint inventory | `kairyu/bench/entrypoints.toml` | Installed, machine-readable source of truth for every supported top-level wrapper |
-| Gate, comparison, operator, and microbenchmark executables | `bench/*.py` | Repository-only; both `python bench/<name>.py` and `python -m bench.<name>` are supported from a checkout |
+| Gate, comparison, operator, and microbenchmark executables | `bench/*.py` | Repository-only; the inventory declares a path form and, where supported, an optional module form; B7 evidence is path-only |
 | Measurement and decision artifacts | `bench/results/` | Repository-only and never shipped in a wheel; routine output is ignored, while explicitly reviewed formal evidence may be retained by Git |
 | Tests | `tests/` | Repository-only and never shipped in a wheel |
 
@@ -49,7 +49,8 @@ Every `bench/*.py` entrypoint must:
 
 - have exactly one sorted `[[entrypoints]]` record in
   `kairyu/bench/entrypoints.toml`;
-- preserve both its path and module invocation forms;
+- preserve every path/module invocation form declared for it (B7 deliberately
+  declares only the trusted direct-path evidence form);
 - expose non-executing `--help`; CI supplies the declared development import
   dependencies, but help must not contact a GPU, service, Docker, Kubernetes,
   vLLM runtime, or model;
@@ -161,6 +162,7 @@ bench/gate_a2.py
 bench/gate_logits_dtype.py
 bench/global_kv_pool_decision.py
 bench/issue_333_proc_http_bench.py
+bench/kv_answer_equivalence_bench.py
 bench/kv_aware_ttft_f2c_bench.py
 bench/kv_event_f2b_bench.py
 bench/kv_event_hash_bench.py
@@ -612,6 +614,130 @@ Every divergent tier-on request restored 160 pages with no fallback or
 ownership failure. Sealing, retained-copy verification, and independent raw
 replay all passed.
 
+### B7 KV cache-hit/miss answer-equivalence evidence
+
+`bench/kv_answer_equivalence_bench.py` is an additive, checkout-only semantic
+companion for F2c, F2d, F4a, and F4b. It leaves every parent schema, artifact,
+performance threshold, and verdict unchanged. Its production matrix is five
+fixed topology cells in this exact order: `f2c-tp2`, `f2d-tp2`, `f4a-tp4`,
+`f4a-tp8`, and `f4b-tp4`. Before constructing a GPU runtime, every child
+replays its exact parent artifact through that gate's owning verifier and
+content-binds the reviewed manifest/raw pair. F4b additionally requires the
+sealed sibling quality manifest/raw in the same parent directory and replays
+the combined performance+quality closure through `verify_quality_artifact`;
+a performance-only F4b parent cannot publish B7 evidence.
+
+`--cell` selects all geometry; callers cannot override TP, page counts, DRAM
+capacity, decode mode, batch-token bounds, or model-length bounds. All cells
+use 16-token pages and a 1,024-token comparison prompt.
+
+| Cell | TP | Device pages | DRAM pages | Decode | Max batched tokens | Max model length |
+|---|---:|---:|---:|---|---:|---:|
+| `f2c-tp2` | 2 | 8,192 | 0 | CUDA graph | 1,024 | 8,192 |
+| `f2d-tp2` | 2 | 8,192 | 0 | CUDA graph | 1,024 | 8,192 |
+| `f4a-tp4` | 4 | 1,024 | 512 | eager | 2,048 | 8,193 |
+| `f4a-tp8` | 8 | 1,024 | 512 | eager | 2,048 | 8,193 |
+| `f4b-tp4` | 4 | 1,024 | 2,048 | eager | 2,048 | 8,192 |
+
+Within one persistent native runtime, the operator submits an isolated prompt
+first with a proven cold cache and then with a proven warm cache. Both requests
+use identical retained prompt token IDs, `temperature=0`, `seed=0`,
+`min_tokens=max_tokens=32`, and `ignore_eos=true`. Each response must report
+32 native token IDs and pieces, `finish_reason=length`, and exact usage; the
+cold and warm token IDs, pieces, and text must be exactly equal. F2c/F2d rows
+prove a native RadixKV miss-to-hit transition, including an independent
+non-mutating cache-residency probe immediately before the warm request rather
+than copying that request's usage claim. F4a/F4b rows place one or more
+pressure requests only between the comparison requests and additionally prove
+positive DRAM offload during the pressure interval and positive restore during
+the following warm interval, with no restore fallback or ownership failure.
+Separating those intervals prevents unrelated pressure traffic or a vacuous
+cache label from satisfying the gate.
+
+Every child full-hashes the pinned Qwen3-32B checkpoint: all 17 weight shards,
+both weight rollups, architecture/config identity, the exact six metadata files
+(`config.json`, `generation_config.json`, `tokenizer.json`,
+`tokenizer_config.json`, `vocab.json`, and `merges.txt`), and the separate
+safetensors-index hash. F2d's parent contains no model/checkpoint assertion, so
+its `aggregate-common-f2c` constraint inherits the checkpoint bound by
+`f2c-tp2` instead of inventing parent evidence. Assembly requires one common
+checkpoint and clean-source identity across all five cells, plus five distinct
+run nonces. Parent manifest/raw/profile bytes, including F2d's router sibling
+and both F4b quality files, are snapshotted and checked for drift around owner
+replay and semantic extraction. Reviewed structured values use canonical JSON type-exact equality
+(so booleans, integers, and floats cannot coerce), and the quality raw must be
+strict canonical JSONL without duplicate keys or non-finite values. Parent
+row indices, fixed scalar types, and F2d router rows are independently
+schema-checked. Source identity is checked
+both before runtime construction and after shutdown, including rejection of
+untracked/ignored executable import artifacts anywhere in the repository and
+verification that loaded repo modules are tracked `HEAD` bytes. Repository
+`__pycache__` bytecode is deliberately not exempt: remove every such directory
+before a formal capture. The repo-local `.venv` is the sole generated-code
+exclusion, so its locked interpreter, site bootstrap, and installed packages
+are part of the formal environment TCB. The complete checkpoint and any DRAM profile are likewise
+rehashed after shutdown, so evidence cannot straddle a source, parent, profile,
+or model swap.
+
+Formal B7 evidence uses only the trusted direct checkout path shown below, in
+a fresh `python -I -B` process. Evidence commands refuse a plain interpreter
+rather than attempting an in-script restart after `sitecustomize` may have
+run. After isolated startup and before adding the
+repository to `sys.path`, the wrapper creates an unpredictable, exclusive 0700
+directory under `/tmp` with `tempfile.TemporaryDirectory`, assigns it to
+`sys.pycache_prefix`, and runs the tracked-clean and import-artifact preflight.
+That internal pre-import check proves `git diff --quiet HEAD --` and rejects
+every untracked or ignored `.py`, `.pyc`, `.pth`, native `.so`, or symlink
+import artifact outside `.venv`; an operator may run the same Git checks in
+advance, but they do not replace the wrapper check. `-I` excludes ambient
+`PYTHONPATH` and user-site imports, while the selected interpreter, `.venv`
+bootstrap, and installed packages remain explicit TCB. The module form is
+excluded from the declared inventory; only unsupported, non-evidence `--help`
+remains as a convenience. `python -m`
+evidence capture, assembly, verification, and replay are unsupported and
+non-publishable.
+
+The existing F2c and F4b cross-arm output comparisons remain diagnostic. Those
+arms deliberately differ in replica, GPU, container, or prefill shape, and a
+BF16 near tie may move one free-running greedy token without demonstrating KV
+corruption. B7's same-runtime isolation removes those confounds; it does not
+promote the old diagnostics or replace F4b's distribution-quality evidence.
+
+```bash
+python -I -B \
+  bench/kv_answer_equivalence_bench.py run-native \
+  --cell f2c-tp2 --model-path <model-path> \
+  --parent-manifest <f2c-parent-manifest> --parent-raw <f2c-parent-raw> \
+  --output <run-root>/f2c-tp2.jsonl --assert-gate
+
+# Repeat run-native with --cell f2d-tp2. Run f4a-tp4, f4a-tp8, and
+# f4b-tp4 with their exact parent pair and the additional
+#   --dram-profile <cell-bound-profile>.
+python -I -B \
+  bench/kv_answer_equivalence_bench.py assemble \
+  --f2c-tp2 <run-root>/f2c-tp2.jsonl \
+  --f2d-tp2 <run-root>/f2d-tp2.jsonl \
+  --f4a-tp4 <run-root>/f4a-tp4.jsonl \
+  --f4a-tp8 <run-root>/f4a-tp8.jsonl \
+  --f4b-tp4 <run-root>/f4b-tp4.jsonl \
+  --output-dir bench/results/<b7-artifact> --assert-gate
+python -I -B \
+  bench/kv_answer_equivalence_bench.py verify \
+  --artifact bench/results/<b7-artifact> --assert-gate
+python -I -B \
+  bench/kv_answer_equivalence_bench.py replay \
+  --artifact bench/results/<b7-artifact> --assert-gate
+```
+
+`verify` checks retained hashes and the derived manifest before replaying the
+raw rows. `replay` reads each raw file into one immutable byte buffer and both
+parses and hashes that same buffer before independently recomputing the
+five-cell verdict. Portable tests exercise fake-native plumbing, tamper
+rejection, and replay only; they never claim a real model, GPU cache hit, or
+GPU DRAM transfer. The complete contract and real-GPU procedure are in
+`docs/design/issue-373-kv-answer-equivalence.md` and
+`docs/gpu-runbook.md` §9.8c.
+
 ## Fixtures, results, and wheel verification
 
 The 11 installed benchmark fixtures are synthetic plumbing inputs, never
@@ -649,7 +775,7 @@ uv run --frozen python scripts/verify_bench_entrypoints.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 64 registered wrappers through
-both their path and module `--help` forms. It runs once in CI, on Python 3.12,
-after the declared development dependencies are synced, without duplicating
-128 subprocesses in every portable test cell.
+The first command separately exercises all 65 registered wrappers through
+their 129 declared `--help` forms. It runs once in CI, on Python 3.12, after the
+declared development dependencies are synced, without duplicating those
+subprocesses in every portable test cell.
