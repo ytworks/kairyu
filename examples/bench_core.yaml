@@ -14,6 +14,11 @@ targets:
   - name: local-model
     base_url: http://localhost:8000/v1
     model: m1
+    # Required only when this target participates in `kairyu bench compare`.
+    # Hash a canonical manifest covering checkpoint, build, and engine config.
+    # served_config:
+    #   label: qwen3-32b-bf16
+    #   sha256: 0000000000000000000000000000000000000000000000000000000000000000
 
 # The seed controls deterministic item selection for --limit/--smoke. Generated
 # rows remain temperature zero. MMLU fixes its teacher-forced scoring fields and

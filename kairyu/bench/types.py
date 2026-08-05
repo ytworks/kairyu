@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -99,6 +100,39 @@ class SamplingOptions(BaseModel):
         return body
 
 
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+class ServedConfigIdentity(BaseModel):
+    """Operator-declared immutable identity of the served deployment config."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    label: str
+    sha256: str
+
+    @field_validator("label")
+    @classmethod
+    def _normalize_label(cls, value: str) -> str:
+        label = value.strip()
+        if not label:
+            raise ValueError("served config label must be non-empty")
+        if "`" in label or any(
+            unicodedata.category(character).startswith("C") for character in label
+        ):
+            raise ValueError(
+                "served config label must not contain control characters or backticks"
+            )
+        return label
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256(cls, value: str) -> str:
+        if _SHA256_RE.fullmatch(value) is None:
+            raise ValueError("served config sha256 must be 64 lowercase hexadecimal characters")
+        return value
+
+
 class BenchTarget(SamplingOptions):
     """One scoreboard column: a model name on an OpenAI-compatible endpoint.
 
@@ -111,6 +145,7 @@ class BenchTarget(SamplingOptions):
     name: str = ""  # scoreboard label; defaults to model
     base_url: str
     model: str
+    served_config: ServedConfigIdentity | None = None
     api_key_env: str | None = None  # env var NAME, never the key itself
     max_context_tokens: int | None = None  # gate for long-context items
     max_output_tokens: int = 8192

@@ -254,6 +254,7 @@ class SciCodeAdapter(GenerativeAdapter):
         display_name="SciCode",
         metric="sub-problem pass rate",
         binary_outcomes=True,
+        paired_cluster_key="item_id_before_final_dot_v1",
         hf_dataset="SciCode1/SciCode",
         needs_execution=True,
         annotations=(

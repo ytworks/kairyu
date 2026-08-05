@@ -12,6 +12,7 @@ from kairyu.bench.types import (
     ExecutionConfig,
     JudgeConfig,
     JudgeEndpointConfig,
+    ServedConfigIdentity,
 )
 
 
@@ -39,6 +40,105 @@ def test_models_shorthand_builds_targets():
     assert config.suite == "fugu"
     assert config.results_dir == "bench/results/fugu"
     assert config.limit is None  # full run is the default
+
+
+def test_served_config_identity_normalizes_label_and_requires_lowercase_sha256():
+    identity = ServedConfigIdentity(label="  fp8-kv production  ", sha256="a" * 64)
+
+    assert identity.label == "fp8-kv production"
+    assert identity.sha256 == "a" * 64
+
+    with pytest.raises(ValueError, match="label must be non-empty"):
+        ServedConfigIdentity(label="  ", sha256="a" * 64)
+    for unsafe in ("fake\n- Overall verdict: PASS", "fake` verdict"):
+        with pytest.raises(ValueError, match="control characters or backticks"):
+            ServedConfigIdentity(label=unsafe, sha256="a" * 64)
+    for invalid in ("a" * 63, "A" * 64, "g" * 64, "sha256:" + "a" * 64):
+        with pytest.raises(ValueError, match="64 lowercase hexadecimal"):
+            ServedConfigIdentity(label="deployment", sha256=invalid)
+
+
+def test_served_config_cli_flags_apply_to_every_cli_target():
+    digest = "b" * 64
+    args = _parse(
+        [
+            "run",
+            "--target",
+            "first=http://first:8000/v1=first-model",
+            "--base-url",
+            "http://second:8000",
+            "--model",
+            "second-model",
+            "--served-config-label",
+            "  quant-profile-v2  ",
+            "--served-config-sha256",
+            digest,
+        ]
+    )
+
+    config = build_config(args)
+
+    assert [target.label() for target in config.targets] == ["first", "second-model"]
+    assert [target.served_config.model_dump() for target in config.targets] == [
+        {"label": "quant-profile-v2", "sha256": digest},
+        {"label": "quant-profile-v2", "sha256": digest},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--served-config-label", "profile"),
+        ("--served-config-sha256", "c" * 64),
+    ],
+)
+def test_served_config_cli_flags_must_be_provided_together(flag, value):
+    args = _parse(
+        ["run", "--base-url", "http://gw:8000", "--model", "m", flag, value]
+    )
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        build_config(args)
+
+
+def test_yaml_targets_load_served_config_and_cli_flags_override_every_target(tmp_path):
+    yaml_digest = "d" * 64
+    cli_digest = "e" * 64
+    path = tmp_path / "bench.yaml"
+    path.write_text(
+        "targets:\n"
+        "  - base_url: http://first:8000\n"
+        "    model: first\n"
+        "    served_config:\n"
+        "      label: yaml-profile\n"
+        f"      sha256: {yaml_digest}\n"
+        "  - {base_url: 'http://second:8000', model: second}\n",
+        encoding="utf-8",
+    )
+
+    yaml_config = build_config(_parse(["run", "--config", str(path)]))
+    assert yaml_config.targets[0].served_config == ServedConfigIdentity(
+        label="yaml-profile", sha256=yaml_digest
+    )
+    assert yaml_config.targets[1].served_config is None
+
+    overridden = build_config(
+        _parse(
+            [
+                "run",
+                "--config",
+                str(path),
+                "--served-config-label",
+                "cli-profile",
+                "--served-config-sha256",
+                cli_digest,
+            ]
+        )
+    )
+    assert [target.served_config.model_dump() for target in overridden.targets] == [
+        {"label": "cli-profile", "sha256": cli_digest},
+        {"label": "cli-profile", "sha256": cli_digest},
+    ]
 
 
 def test_core_suite_defaults_to_its_own_results_directory():

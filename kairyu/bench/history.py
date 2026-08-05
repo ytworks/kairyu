@@ -862,8 +862,11 @@ def _scoreboard_matrix(scoreboard: dict) -> set[tuple[str, str]]:
     return matrix
 
 
-def _pair_result_binding(pair: object) -> dict:
-    from kairyu.bench.adapters import all_adapters
+def _pair_result_binding(
+    pair: object,
+    *,
+    declared_binary: bool | None = None,
+) -> dict:
     from kairyu.bench.aggregate import _binary_confidence_interval
     from kairyu.bench.types import PairResult, pair_result_evidence_error
 
@@ -906,10 +909,18 @@ def _pair_result_binding(pair: object) -> dict:
         summary_payload,
         field=f"pair {benchmark!r}/{payload.get('target')!r}",
     )
-    adapter = all_adapters().get(benchmark) if isinstance(benchmark, str) else None
+    if declared_binary is None:
+        from kairyu.bench.adapters import all_adapters
+
+        adapter = all_adapters().get(benchmark) if isinstance(benchmark, str) else None
+        binary_outcomes = bool(adapter is not None and adapter.info.binary_outcomes)
+    elif type(declared_binary) is bool:
+        binary_outcomes = declared_binary
+    else:
+        raise _fail("declared_binary must be a boolean when supplied")
     interval = _binary_confidence_interval(
         result,
-        declared_binary=bool(adapter is not None and adapter.info.binary_outcomes),
+        declared_binary=binary_outcomes,
     )
     summary_payload["confidence_interval"] = interval
     summary = _cell_summary(
@@ -924,6 +935,25 @@ def _pair_result_binding(pair: object) -> dict:
         **summary,
         "pair_sha256": _sha256(payload),
     }
+
+
+def pair_result_binding(
+    pair: object,
+    *,
+    declared_binary: bool | None = None,
+) -> dict:
+    """Return a detached, history-safe canonical binding for one PairResult.
+
+    ``declared_binary`` lets replay use the declaration already retained by an
+    authoritative index binding instead of consulting a later adapter registry.
+    Fresh index construction leaves it unset and uses the current adapter.
+    """
+    try:
+        return _snapshot(
+            _pair_result_binding(pair, declared_binary=declared_binary)
+        )
+    except RecursionError as error:
+        raise _fail("pair result exceeds the supported nesting depth") from error
 
 
 def _pair_bindings(
@@ -1172,6 +1202,140 @@ def _reject_constant(value: str) -> object:
     raise ValueError(f"non-finite JSON constant {value}")
 
 
+def indexed_pair_binding(
+    entry: object,
+    *,
+    run_id: str,
+    benchmark: str,
+    target: str,
+) -> dict:
+    """Revalidate an index row and return its unique requested pair binding."""
+    selected_run_id = _validate_run_id(run_id)
+    selected_benchmark = _nonempty_name(benchmark, field="benchmark")
+    selected_target = _nonempty_name(target, field="target")
+
+    try:
+        candidate = _snapshot(entry)
+        previous = (
+            candidate.get("previous_record_sha256")
+            if isinstance(candidate, dict)
+            else None
+        )
+        validated = _validate_entry(candidate, previous=previous)
+    except RecursionError as error:
+        raise _fail("indexed pair entry exceeds the supported nesting depth") from error
+    if validated["run_id"] != selected_run_id:
+        raise _fail(
+            f"store run id {selected_run_id!r} does not match indexed run "
+            f"{validated['run_id']!r}"
+        )
+
+    matches = [
+        binding
+        for binding in validated["pairs"]
+        if binding["benchmark"] == selected_benchmark
+        and binding["target"] == selected_target
+    ]
+    if len(matches) != 1:
+        raise _fail(
+            f"indexed run {selected_run_id!r} has no unique pair binding for "
+            f"{selected_benchmark!r}/{selected_target!r}"
+        )
+    return _snapshot(matches[0])
+
+
+def validate_pair_binding(
+    raw_pair: bytes,
+    binding: object,
+    *,
+    benchmark: str,
+    target: str,
+):
+    """Strictly parse one PairResult and match its complete canonical binding."""
+    from kairyu.bench.types import PairResult
+
+    selected_benchmark = _nonempty_name(benchmark, field="benchmark")
+    selected_target = _nonempty_name(target, field="target")
+    if not isinstance(binding, dict) or set(binding) != _PAIR_FIELDS:
+        raise _fail("pair binding fields do not match index schema 1")
+    try:
+        expected = _snapshot(binding)
+    except RecursionError as error:
+        raise _fail("pair binding exceeds the supported nesting depth") from error
+    if (
+        expected.get("benchmark") != selected_benchmark
+        or expected.get("target") != selected_target
+    ):
+        raise _fail("selected pair identity does not match its indexed binding")
+    if not isinstance(raw_pair, bytes):
+        raise _fail("persisted pair result must be supplied as bytes")
+
+    try:
+        parsed = json.loads(
+            raw_pair.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        raise _fail(
+            f"persisted pair {selected_benchmark!r}/{selected_target!r} is not strict JSON"
+        ) from error
+    except RecursionError as error:
+        raise _fail(
+            f"persisted pair {selected_benchmark!r}/{selected_target!r} "
+            "exceeds the supported nesting depth"
+        ) from error
+
+    try:
+        actual = pair_result_binding(
+            parsed,
+            declared_binary=expected.get("confidence_interval") is not None,
+        )
+        if _canonical_bytes(actual) != _canonical_bytes(expected):
+            raise _fail(
+                f"persisted pair {selected_benchmark!r}/{selected_target!r} "
+                "does not match its complete indexed binding"
+            )
+        # Revalidate and detach the returned model from the decoded mutable tree.
+        return PairResult.model_validate(parsed)
+    except RecursionError as error:
+        raise _fail(
+            f"persisted pair {selected_benchmark!r}/{selected_target!r} "
+            "exceeds the supported nesting depth"
+        ) from error
+
+
+def validate_indexed_pair(
+    entry: object,
+    raw_pair: bytes,
+    *,
+    run_id: str,
+    benchmark: str,
+    target: str,
+):
+    """Strictly bind one persisted ``PairResult`` to a validated index row.
+
+    ``entry`` is expected to originate from :func:`load_scoreboard_index`, but
+    is revalidated here so callers cannot accidentally bypass the record,
+    scoreboard-matrix, fingerprint, source-identity, or binding-uniqueness
+    checks.  The complete canonical pair binding is compared, not only its
+    aggregate score; this makes ``pair_sha256`` authoritative over item-level
+    evidence and methodology as well.
+    """
+    binding = indexed_pair_binding(
+        entry,
+        run_id=run_id,
+        benchmark=benchmark,
+        target=target,
+    )
+    return validate_pair_binding(
+        raw_pair,
+        binding,
+        benchmark=benchmark,
+        target=target,
+    )
+
+
 def parse_index(raw: bytes) -> tuple[dict, ...]:
     """Parse one immutable byte snapshot of the canonical JSONL index."""
     if not raw:
@@ -1194,11 +1358,21 @@ def parse_index(raw: bytes) -> tuple[dict, ...]:
                 object_pairs_hook=_object_without_duplicates,
                 parse_constant=_reject_constant,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+            RecursionError,
+        ) as error:
             raise _fail(f"line {line_number} is not strict JSON") from error
-        entry = _validate_entry(parsed, previous=previous)
-        if _canonical_bytes(entry) != line:
-            raise _fail(f"line {line_number} is not canonical JSON")
+        try:
+            entry = _validate_entry(parsed, previous=previous)
+            if _canonical_bytes(entry) != line:
+                raise _fail(f"line {line_number} is not canonical JSON")
+        except RecursionError as error:
+            raise _fail(
+                f"line {line_number} exceeds the supported nesting depth"
+            ) from error
         key = (entry["git_commit"], entry["fingerprint"])
         if key in keys:
             raise _fail(f"duplicate scoreboard key at line {line_number}")
@@ -1454,10 +1628,14 @@ __all__ = [
     "cross_run_policies",
     "ensure_scoreboard_key_available",
     "find_scoreboard_entry",
+    "indexed_pair_binding",
     "load_scoreboard_index",
+    "pair_result_binding",
     "parse_index",
     "scoreboard_key",
     "resumable_environment_identity_equal",
     "stable_environment_identity",
+    "validate_indexed_pair",
+    "validate_pair_binding",
     "validate_run_metadata",
 ]

@@ -38,6 +38,16 @@ def add_bench_parser(subparsers) -> None:
     )
     run.add_argument("--api-key-env", default=None, help="Env VAR holding the API key")
     run.add_argument(
+        "--served-config-label",
+        default=None,
+        help="Operator label for the immutable served deployment config (all targets)",
+    )
+    run.add_argument(
+        "--served-config-sha256",
+        default=None,
+        help="Lowercase SHA-256 of the served deployment config (all targets)",
+    )
+    run.add_argument(
         "--no-vision",
         action="store_true",
         help="Declare the target text-only, so vision slots skip instead of being "
@@ -182,6 +192,47 @@ def add_bench_parser(subparsers) -> None:
         help="Results root (default: bench/results/<suite>)",
     )
 
+    compare = commands.add_parser(
+        "compare",
+        help=(
+            "Gate candidate-vs-baseline served configurations using paired, "
+            "item-bound quality evidence."
+        ),
+    )
+    compare.add_argument("--baseline", required=True, help="Indexed baseline run id")
+    compare.add_argument("--candidate", required=True, help="Indexed candidate run id")
+    compare.add_argument(
+        "--baseline-target",
+        default=None,
+        help="Baseline target label (required when its run has multiple targets)",
+    )
+    compare.add_argument(
+        "--candidate-target",
+        default=None,
+        help="Candidate target label (required when its run has multiple targets)",
+    )
+    compare.add_argument(
+        "--tolerance",
+        action="append",
+        required=True,
+        metavar="BENCHMARK=PP",
+        help=(
+            "Allowed score loss in percentage points for one benchmark "
+            "(repeatable; every configured row must pass)"
+        ),
+    )
+    compare.add_argument("--suite", choices=suites, default="fugu")
+    compare.add_argument(
+        "--results-dir",
+        default=None,
+        help="Results root (default: bench/results/<suite>)",
+    )
+    compare.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the machine-readable artifact instead of Markdown",
+    )
+
     calibrate = commands.add_parser(
         "calibrate-judge",
         help="Measure judge agreement on the committed published-gold set.",
@@ -252,6 +303,8 @@ def handle(args: argparse.Namespace) -> int:
         return _handle_report(args)
     if args.bench_command == "compare-runs":
         return _handle_compare_runs(args)
+    if args.bench_command == "compare":
+        return _handle_compare(args)
     if args.bench_command == "calibrate-judge":
         return _handle_calibrate_judge(args)
     if args.bench_command == "list":
@@ -491,6 +544,120 @@ def _handle_compare_runs(args) -> int:
         return 1
     print(markdown)
     return 0
+
+
+def _config_tolerances(values: list[str]) -> dict[str, float]:
+    import math
+
+    tolerances: dict[str, float] = {}
+    for value in values:
+        if not isinstance(value, str) or value.count("=") != 1:
+            raise ValueError("--tolerance must use BENCHMARK=PP")
+        benchmark, raw_points = (part.strip() for part in value.split("=", 1))
+        if not benchmark or not raw_points:
+            raise ValueError("--tolerance must use BENCHMARK=PP")
+        if benchmark in tolerances:
+            raise ValueError(f"duplicate --tolerance for benchmark {benchmark!r}")
+        try:
+            points = float(raw_points)
+        except ValueError as error:
+            raise ValueError(
+                f"--tolerance for {benchmark!r} must be a number of percentage points"
+            ) from error
+        if not math.isfinite(points) or not 0.0 <= points <= 100.0:
+            raise ValueError(
+                f"--tolerance for {benchmark!r} must be finite and within [0, 100] "
+                "percentage points"
+            )
+        tolerances[benchmark] = points / 100.0
+    return tolerances
+
+
+def _config_target(entry: dict, requested: str | None, role: str) -> str:
+    scoreboard = entry.get("scoreboard")
+    targets = scoreboard.get("targets") if isinstance(scoreboard, dict) else None
+    if not isinstance(targets, list) or any(
+        not isinstance(target, str) or not target for target in targets
+    ):
+        raise ValueError(f"{role} indexed target layout is malformed")
+    if requested is None:
+        if len(targets) != 1:
+            raise ValueError(
+                f"{role} run has {len(targets)} targets; select --{role}-target"
+            )
+        return targets[0]
+    if requested not in targets:
+        raise ValueError(f"{role} target {requested!r} is not in the indexed run")
+    return requested
+
+
+def _handle_compare(args) -> int:
+    from kairyu.bench.config_ab import (
+        build_config_comparison,
+        render_config_comparison_markdown,
+    )
+    from kairyu.bench.store import ResultStore
+
+    results_dir = Path(
+        getattr(args, "results_dir", None) or f"bench/results/{getattr(args, 'suite', 'fugu')}"
+    )
+    try:
+        tolerances = _config_tolerances(args.tolerance)
+        baseline_store = ResultStore(results_dir, args.baseline)
+        candidate_store = ResultStore(results_dir, args.candidate)
+        entries = baseline_store.load_scoreboard_index()
+        by_run_id = {entry["run_id"]: entry for entry in entries}
+        missing = [
+            run_id
+            for run_id in (args.baseline, args.candidate)
+            if run_id not in by_run_id
+        ]
+        if missing:
+            names = ", ".join(repr(run_id) for run_id in missing)
+            raise ValueError(
+                f"run id(s) {names} are not present in {results_dir / 'scoreboards.jsonl'}"
+            )
+        baseline_entry = by_run_id[args.baseline]
+        candidate_entry = by_run_id[args.candidate]
+        if baseline_entry.get("suite") != args.suite or candidate_entry.get("suite") != args.suite:
+            raise ValueError(f"indexed runs do not both belong to selected suite {args.suite!r}")
+        baseline_target = _config_target(
+            baseline_entry, getattr(args, "baseline_target", None), "baseline"
+        )
+        candidate_target = _config_target(
+            candidate_entry, getattr(args, "candidate_target", None), "candidate"
+        )
+        baseline_pairs = {
+            benchmark: baseline_store.load_indexed_pair(
+                baseline_entry, benchmark, baseline_target
+            )
+            for benchmark in tolerances
+        }
+        candidate_pairs = {
+            benchmark: candidate_store.load_indexed_pair(
+                candidate_entry, benchmark, candidate_target
+            )
+            for benchmark in tolerances
+        }
+        comparison = build_config_comparison(
+            baseline_entry,
+            candidate_entry,
+            baseline_pairs=baseline_pairs,
+            candidate_pairs=candidate_pairs,
+            tolerances=tolerances,
+            baseline_target=baseline_target,
+            candidate_target=candidate_target,
+        )
+        markdown = render_config_comparison_markdown(comparison)
+        candidate_store.save_config_comparison(comparison, markdown)
+    except (OSError, ValueError) as error:
+        print(f"compare: {error}")
+        return 2
+    if getattr(args, "json", False):
+        print(json.dumps(comparison, indent=2, ensure_ascii=False, allow_nan=False))
+    else:
+        print(markdown)
+    return 0 if comparison["overall_verdict"] == "pass" else 1
 
 
 def _handle_calibrate_judge(args) -> int:
