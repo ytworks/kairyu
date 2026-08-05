@@ -156,7 +156,7 @@ def test_stateless_gumbel_cpu_has_fixed_golden_draws():
         int(stateless_gumbel_argmax(log_weights, seed).item()) for seed in seeds
     ]
 
-    assert actual == [0, 3, 3, 5, 4, 5, 2, 5, 1]
+    assert actual == [7, 4, 3, 7, 2, 5, 5, 5, 4]
 
 
 @pytest.mark.parametrize(
@@ -175,7 +175,7 @@ def test_cpu_scaled_wrappers_share_one_draw_across_seed_and_filter_matrix(sampli
         [1.7, -0.4, 0.2, 2.3, -1.8, 0.9, 1.1, -0.7, 0.5, 1.9, -2.2]
     )
 
-    for base_seed in (0, 1, 71, (1 << 63) - 1):
+    for base_seed in (0, 1, 71, (1 << 63) - 1, (1 << 64) - 1):
         for position in (0, 1, 7, 31):
             tensor_token = Sampler._sample_scaled_device(
                 logits, sampling, base_seed, position

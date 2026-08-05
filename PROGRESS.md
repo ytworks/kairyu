@@ -141,7 +141,10 @@ Structured xgrammar remains an explicit stateful CPU compatibility path, but
 its stochastic draw now uses the same stateless Gumbel algorithm and seed map
 as grammar-free CUDA. CPU replay, structured sampling, and CUDA serving
 therefore no longer select different random streams merely because their
-execution paths differ; greedy and the established CUDA sequence are unchanged.
+execution paths differ. Greedy is unchanged; the canonical stochastic stream
+now retains the full 64-bit per-position seed, separates seed and vocabulary
+index through a keyed SplitMix64-finalized counter, and uses a 52-bit open
+uniform on both CPU and CUDA.
 Speculative target verification now groups every draft position plus the
 bonus/correction position across compatible requests into one flattened
 decode-shaped target call. Paged KV writes, rejection overwrite, scheduler
@@ -939,6 +942,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [amendment] Gumbel sampling keeps full seed width and a 52-bit open uniform
+- What: retained the complete unsigned 64-bit output of the per-position seed mixer and replaced the 32-bit additive Wang counter with an odd-stride, XOR-keyed SplitMix64 finalizer implemented through signed-int64 wraparound and explicit logical shifts. Both CPU and CUDA now transform 52 random mantissa bits through a float64 midpoint in the strictly open interval `(0, 1)`. The stochastic CPU/CUDA sequence intentionally changes together; greedy, filtering, penalties, grammar support, raw logprobs, replay ownership, and the no-host-sync CUDA result boundary are unchanged. Independent uint64 word oracles, high-bit and known-low32-collision fixtures, 151,936-word uniqueness, adjacent-seed lag correlations, a deterministic 100,000-position three-category distribution, open-endpoint tail checks, CPU/CUDA raw-word and token parity, and a CUDA profiler gate bind the new stream. On SM120 the 151,936-vocabulary helper measured 0.169 → 0.201 ms and the complete filtered sampler 0.580 → 0.618 ms; single-thread CPU full sampling measured about 20% slower. The bounded CPU cost is accepted to preserve the same genuinely 52-bit transform and tail on both execution paths.
+- Why: truncating the 64-bit position seed to 32 bits created identical noise vectors in long generations, adding seed and vocabulary index made adjacent seeds shifted views, and the 24-bit midpoint limited the flipped-Gumbel winning tail to `2^-25`. A keyed full-width permutation removes both structural aliases while the 52-bit open uniform extends that tail to `2^-53` without mutable RNG state or a device-to-host scalar read.
+- Refs: issue #354; m8 D2; `kairyu/engine/core/sampling_types.py`; `kairyu/kernels/sampling_gpu.py`; `tests/unit/test_sampling_rng.py`; `tests/gpu/test_sampling_rng_parity_gpu.py`
 
 ### 2026-08-05 — [amendment] CPU and CUDA sampling share one stateless random draw
 - What: made the existing stateless Gumbel-max tensor sampler canonical for CPU, structured-output, and CUDA execution after one shared filtering implementation. CPU alone materializes the selected scalar, skips normal-path fallback construction, and reuses a bounded immutable offset cache; CUDA retains its branchless device result and established stochastic sequence. The former CPU/structured `torch.multinomial` sequence intentionally changes, while grammar masking and acceptance remain on CPU, greedy behavior is unchanged, and fixed-logit filter, penalty, minimum-token, structured-support, raw-logprob, replay, and CPU/CUDA parity gates cover the boundary.

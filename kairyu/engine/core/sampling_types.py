@@ -19,11 +19,16 @@ def stable_request_seed(request_id: str) -> int:
 
 
 def mix_seed(base: int, position: int) -> int:
-    """splitmix64-style mixer: plain addition collides across adjacent seeds."""
+    """Return a full-width SplitMix64-derived per-position seed.
+
+    Plain addition collides across adjacent user seeds.  The final value stays
+    in the unsigned 64-bit domain; tensor consumers convert that bit pattern to
+    signed two's-complement only at the PyTorch boundary.
+    """
     x = (base ^ ((position + 1) * 0x9E3779B97F4A7C15)) & _MASK64
     x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
     x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _MASK64
-    return (x ^ (x >> 31)) & _SEED_BITS
+    return (x ^ (x >> 31)) & _MASK64
 
 
 @dataclass(frozen=True)
