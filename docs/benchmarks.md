@@ -25,9 +25,10 @@ judge calibration fixture. All of those ship in the wheel.
 repository-only benchmark executable.
 
 Top-level `bench/*.py` files are developer/formal wrappers, not installed
-commands. From a source checkout each registered wrapper supports both
-`python bench/<name>.py` and `python -m bench.<name>` so historical commands and
-artifact provenance remain replayable. `bench/results/` is likewise
+commands. From a source checkout each registered wrapper supports the path and
+optional module forms declared in the packaged inventory; B7 and A12 evidence
+are path-only. This keeps historical commands and artifact provenance replayable.
+`bench/results/` is likewise
 checkout-only: routine outputs are ignored, while explicitly reviewed formal
 evidence can be retained. Neither wrappers, result artifacts, nor `tests/` are
 included in the wheel.
@@ -43,8 +44,8 @@ uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
 After the declared development dependencies are synced, the first verifier
-exercises all 64 registered wrappers through both their path and module
-`--help` forms without executing workloads or contacting external runtimes.
+exercises all 66 registered wrappers through their 130 declared `--help` forms
+without executing workloads or contacting external runtimes.
 The last command builds and imports a real wheel from an isolated temporary
 directory. It verifies the public CLI dispatch, packaged manifest and all 12
 JSONL fixtures, and rejects accidental inclusion of top-level benchmark
@@ -140,6 +141,53 @@ run, pair, and scoreboard artifacts. They intentionally omit
 `comparison.json` and `comparison.md`: the published reference table is a Fugu
 contract, not a generic benchmark baseline.
 
+A completed real-data run from a clean, tracked checkout is also snapshotted in
+the suite-local `bench/results/<suite>/scoreboards.jsonl`. The append-only
+hash-chained index is keyed by the local benchmark-harness Git commit and the
+run fingerprint; it stores the scoreboard itself rather than trusting a path
+to a later-mutated run directory. Dirty/Git-less executions and synthetic
+offline fixtures still write their ordinary run artifacts but are not history
+baselines. The recorded commit identifies the Kairyu code that ran the local
+benchmark harness. It does **not** attest the build deployed behind a target
+URL, so operators must use distinct fingerprinted target declarations when a
+served deployment changes.
+
+Every indexed pair carries the same clean source attestation as its run. Source
+drift observed after initialization permanently taints that run id, so restoring
+the checkout cannot relabel cached evidence; start a new run id instead. The
+fingerprint content-binds each adapter, shared scoring/aggregation code, judge
+protocol, referenced cache assets, score-time Python distributions, and any
+resolved third-party harness distribution and owned console script. Editable or
+otherwise unreadable installed distributions and executables without verified
+distribution ownership are never admitted to history. A detected evaluator or
+dataset-identity drift converts affected cached evidence to failed, so a restored
+resume must execute the pair again rather than relabel it.
+
+History records a complete eligible run without pretending that every cell has
+the same provenance strength. SWE-Bench Pro, Terminal-Bench, and τ³ retain
+their normal cells and the run may be registered, but those cells carry the
+structured `withheld_unresolved_runtime` policy while their harness-managed
+remote data, images, or sandbox inputs cannot be resolved to immutable content.
+SciCode and the LiveCodeBench slots similarly carry
+`withheld_unpinned_execution` under the local runner. They become cross-run
+comparable only when Docker is available and inspection resolves the configured
+content-addressed image to an exact image ID plus OS, architecture, and optional
+variant. A withheld cell never emits a cross-commit delta, even when both runs
+have the same policy and reason; independently source-complete cells in the same
+scoreboard remain comparable.
+
+Every index record also retains a SHA-256 of each complete `PairResult` and an
+explicit pair summary (status, score, denominators, reason, published-score
+comparability, cross-run policy, and confidence interval). The summary must
+match its scoreboard cell byte-for-byte; failed cells, missing pair evidence,
+and offline-fixture configuration are rejected by both append and load
+validation.
+
+Opaque `extra_body_json` values are used in memory but retained in durable
+metadata only as a semantic JSON SHA-256. Endpoint URLs with userinfo, query, or
+fragment components are rejected. This keeps the Git-trackable history from
+becoming a credential store while preserving exact configuration identity.
+
 Benchmark and target components retain a readable sanitized prefix and append
 the first 16 hexadecimal characters of the raw name's SHA-256. Thus names such
 as `org/model` and `org__model`, which otherwise sanitize to the same path, do
@@ -166,11 +214,27 @@ Useful subcommands:
 kairyu bench list                      # slots, requirements, cache status
 kairyu bench download [--only a,b]     # pre-fetch datasets (idempotent)
 kairyu bench report <run_id>           # rebuild + print a stored scoreboard
+kairyu bench compare-runs BASE CANDIDATE  # print CANDIDATE - BASE deltas
 kairyu bench entrypoints               # installed/repository ownership inventory
 kairyu bench list --suite core
 kairyu bench download --suite core
 kairyu bench report --suite core <run_id>
+kairyu bench compare-runs --suite core BASE CANDIDATE
 ```
+
+`compare-runs` reads only validated index snapshots and never modifies either
+run. It requires matching suite, fingerprint, Python/execution runtime, target
+layout, benchmark layout, methodology reasons, and scored denominators.
+Completed finite cells with an explicit `allowed` policy on both sides show the
+candidate-minus-baseline change in percentage points. Partial, failed,
+denominator-mismatched, synthetic-fixture, runtime-withheld, or
+differently-substituted cells fail closed to an explicit
+unavailable/non-comparable marker. When both runs carry the exact same subset
+or substitution boundary, a numeric diagnostic delta is shown together with
+that boundary; it is not promoted to like-for-like published comparability. An
+identical runtime-withholding policy never permits that diagnostic exception.
+A negative delta is a report, not a policy gate; thresholding and
+trailing-window alert policy belong to the nightly comparator.
 
 ## Single model vs orchestration
 
@@ -496,7 +560,9 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
 - A cache entry is ready only when `manifest.json` and `data.jsonl` exist, the
   manifest contains a well-formed lowercase SHA-256, a streaming hash of the
   current JSONL bytes matches it, and any requested dataset id/revision pins
-  match. Missing, malformed, unreadable, stale, or modified entries fail closed
+  match. Every `assets/...` reference in normalized rows is also recorded with
+  its content SHA-256 and re-read without following symlinks. Missing, malformed,
+  unreadable, stale, or modified entries fail closed
   as not ready; a readiness check never rewrites or deletes them. The same
   identity is checked again immediately before each pair, so bytes that change
   after run initialization are skipped rather than scored as valid input.

@@ -31,7 +31,6 @@ _KINDS = frozenset(
         "operator",
     }
 )
-_INVOCATIONS = frozenset({"module", "path"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,11 +81,9 @@ class BenchmarkEntrypoint:
             raise ValueError(f"{path}: requires must not be empty")
         if not documentation:
             raise ValueError(f"{path}: documentation must not be empty")
-        if set(invocations) != _INVOCATIONS or len(invocations) != len(
-            _INVOCATIONS
-        ):
+        if invocations not in (("path",), ("path", "module")):
             raise ValueError(
-                f"{path}: invocations must contain path and module exactly once"
+                f"{path}: invocations must be path, optionally followed by module"
             )
         if installed:
             raise ValueError(f"{path}: top-level benchmark entrypoints are not installed")
@@ -190,8 +187,8 @@ def validate_repository(root: str | Path) -> tuple[str, ...]:
     """Return every ownership violation in a Kairyu source checkout.
 
     Validation is deliberately read-only.  It proves that every supported
-    top-level executable is classified and documented, that both historical
-    invocation forms remain possible, and that installed package code does not
+    top-level executable is classified and documented, that every declared
+    invocation form remains possible, and that installed package code does not
     depend on repository-only ``bench`` modules.
     """
 

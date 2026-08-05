@@ -13,6 +13,7 @@ from kairyu.bench.adapters import all_adapters
 from kairyu.bench.adapters.base import DatasetAdapter
 from kairyu.bench.ownership import (
     MANIFEST_NAME,
+    BenchmarkEntrypoint,
     _top_level_bench_import_names,
     _top_level_bench_imports,
     entrypoints_payload,
@@ -25,16 +26,57 @@ from kairyu.entrypoints import cli
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize(
+    ("invocations", "message"),
+    (
+        ([], "path, optionally followed by module"),
+        (["module"], "path, optionally followed by module"),
+        (["module", "path"], "path, optionally followed by module"),
+        (["path", "path"], "must not contain duplicates"),
+    ),
+)
+def test_entrypoint_invocations_require_path_first(
+    invocations: list[str],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        BenchmarkEntrypoint.from_mapping(
+            {
+                "path": "bench/example.py",
+                "module": "bench.example",
+                "kind": "operator",
+                "requires": ["bench"],
+                "documentation": ["bench/README.md"],
+                "installed": False,
+                "invocations": invocations,
+            }
+        )
+
+
 def test_package_manifest_is_complete_and_sorted() -> None:
     manifest = resources.files("kairyu.bench").joinpath(MANIFEST_NAME)
     assert manifest.is_file()
     entries = load_entrypoints()
-    assert len(entries) == 64
+    assert len(entries) == 66
     assert [entry.path for entry in entries] == sorted(
         entry.path for entry in entries
     )
     assert all(not entry.installed for entry in entries)
-    assert all(set(entry.invocations) == {"path", "module"} for entry in entries)
+    invocation_by_path = {entry.path: entry.invocations for entry in entries}
+    path_only = {
+        "bench/batch_invariance_bench.py",
+        "bench/kv_answer_equivalence_bench.py",
+    }
+    assert {
+        path
+        for path, invocations in invocation_by_path.items()
+        if invocations == ("path",)
+    } == path_only
+    assert all(
+        set(invocations) == {"path", "module"}
+        for path, invocations in invocation_by_path.items()
+        if path not in path_only
+    )
 
 
 def test_packaged_fixtures_exactly_cover_dataset_adapters() -> None:
@@ -95,6 +137,12 @@ def test_retained_cross_wrapper_imports_are_an_exact_allowlist() -> None:
             "bench.g2_a6_vllm_bench",
             "bench.run_g2_a6_formal",
         ),
+        "bench.kv_answer_equivalence_bench": (
+            "bench.agentic_kv_tier_f4b_bench",
+            "bench.dram_kv_tier_qwen",
+            "bench.kv_aware_ttft_f2c_bench",
+            "bench.prefix_weight_f2d_bench",
+        ),
         "bench.kv_event_f2b_bench": ("bench.fleet_churn_bench",),
         "bench.parity_hf": ("bench.parity_tp",),
         "bench.pd_overlap_qwen": ("bench.parity_tp",),
@@ -139,7 +187,7 @@ def test_entrypoints_json_is_stable_and_explicit() -> None:
         source: list(targets)
         for source, targets in load_compatibility_imports().items()
     }
-    assert len(payload["entrypoints"]) == 64
+    assert len(payload["entrypoints"]) == 66
 
 
 def test_bench_entrypoints_parser_dispatches(capsys) -> None:
@@ -148,7 +196,7 @@ def test_bench_entrypoints_parser_dispatches(capsys) -> None:
     assert args.bench_command == "entrypoints"
     assert bench_cli.handle(args) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["entrypoints"]) == 64
+    assert len(payload["entrypoints"]) == 66
 
 
 def test_bench_entrypoints_check_failure_is_nonzero(

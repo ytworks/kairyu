@@ -12,6 +12,7 @@ a shell command.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -479,6 +480,7 @@ class DockerExecutionRunner:
         self._sleep = _sleep
         self._create_timeout_s = float(_create_timeout_s)
         self._available: tuple[bool, str] | None = None
+        self._resolved_image_identity: dict[str, str | None] | None = None
 
     def _control(self, command: list[str]):
         return self._run_command(
@@ -514,6 +516,35 @@ class DockerExecutionRunner:
                 f"docker execution image {self.image!r} unavailable "
                 f"(--pull=never): {detail[:120]}"
             )
+        try:
+            inspected = json.loads((image.stdout or b"").decode("utf-8"))
+            if not isinstance(inspected, list) or len(inspected) != 1:
+                raise ValueError("inspect did not return exactly one image")
+            image_info = inspected[0]
+            if not isinstance(image_info, dict):
+                raise ValueError("inspect image is not an object")
+            resolved_id = image_info.get("Id")
+            image_os = image_info.get("Os")
+            architecture = image_info.get("Architecture")
+            variant = image_info.get("Variant")
+            if (
+                not isinstance(resolved_id, str)
+                or _IMAGE_ID_RE.fullmatch(resolved_id) is None
+                or not isinstance(image_os, str)
+                or not image_os
+                or not isinstance(architecture, str)
+                or not architecture
+                or (variant is not None and (not isinstance(variant, str) or not variant))
+            ):
+                raise ValueError("inspect omitted immutable image/platform identity")
+        except (UnicodeError, json.JSONDecodeError, ValueError) as error:
+            return False, f"docker execution image identity unavailable ({error})"
+        self._resolved_image_identity = {
+            "resolved_image_id": resolved_id,
+            "image_os": image_os,
+            "image_architecture": architecture,
+            "image_variant": variant,
+        }
         self._available = (
             True,
             f"docker execution image available ({self.image})",
@@ -521,7 +552,7 @@ class DockerExecutionRunner:
         return self._available
 
     def metadata(self) -> dict[str, object]:
-        return {
+        metadata: dict[str, object] = {
             "runner": "docker",
             "image": self.image,
             "pull_policy": "never",
@@ -543,6 +574,9 @@ class DockerExecutionRunner:
             "numeric_library_threads": 1,
             "create_timeout_s": self._create_timeout_s,
         }
+        if self._resolved_image_identity is not None:
+            metadata.update(self._resolved_image_identity)
+        return metadata
 
     def _create_command(
         self,

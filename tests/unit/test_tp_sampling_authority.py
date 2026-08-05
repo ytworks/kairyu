@@ -393,6 +393,10 @@ def _passive_runner() -> tuple[PagedModelRunner, _PassiveModel]:
     runner._slot_copy_done = None
     runner._slot_staging_pool = []
     runner._tensor_decode_supported = False
+    # This white-box fixture bypasses PagedModelRunner.__init__; mirror the
+    # shared ordinary/verification capability decision that construction owns.
+    runner._decode_batch_gap = None
+    runner._verification_batch_gap = runner._decode_batch_gap
     runner._graph = None
     return runner, model
 
@@ -432,6 +436,33 @@ def test_passive_batched_decode_skips_lm_head_and_sampling():
 
     assert result == {}
     assert model.forward_calls == 1
+    assert model.logit_calls == 0
+    assert runner._future_tokens == {}
+    assert runner._future_device_tokens == {}
+
+
+def test_passive_decode_respects_shared_batch_gap(monkeypatch):
+    runner, model = _passive_runner()
+    runner._decode_batch_gap = "synthetic list-batch gap"
+    runner._verification_batch_gap = runner._decode_batch_gap
+    chunks = (
+        ScheduledChunk("a", 1, False, 1),
+        ScheduledChunk("b", 1, False, 1),
+    )
+    states = {
+        "a": _state("a", outputs=(13,), pages=(0,)),
+        "b": _state("b", outputs=(17,), pages=(1,)),
+    }
+
+    def forbidden_batch(*_args, **_kwargs):
+        pytest.fail("a capability-gapped passive runner must decode sequentially")
+
+    monkeypatch.setattr(model, "forward_decode_batch", forbidden_batch)
+
+    result = runner.execute_passive(chunks, states)
+
+    assert result == {}
+    assert model.forward_calls == 2
     assert model.logit_calls == 0
     assert runner._future_tokens == {}
     assert runner._future_device_tokens == {}

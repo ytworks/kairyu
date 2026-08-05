@@ -37,7 +37,7 @@ IFEVAL_VENDOR_FILES = (
 )
 ENTRYPOINT_MANIFEST = "kairyu/bench/entrypoints.toml"
 CONSOLE_TARGET = "kairyu.entrypoints.cli:main"
-EXPECTED_ENTRYPOINTS = 64
+EXPECTED_ENTRYPOINTS = 66
 
 
 class VerificationError(RuntimeError):
@@ -73,13 +73,9 @@ def _inspect_wheel(wheel: Path) -> tuple[str, ...]:
             if path.is_absolute() or ".." in path.parts:
                 raise VerificationError(f"unsafe wheel member: {name}")
 
-        expected_fixtures = {
-            f"{FIXTURE_PREFIX}{fixture}" for fixture in FIXTURE_FILES
-        }
+        expected_fixtures = {f"{FIXTURE_PREFIX}{fixture}" for fixture in FIXTURE_FILES}
         actual_fixtures = {
-            name
-            for name in names
-            if name.startswith(FIXTURE_PREFIX) and name.endswith(".jsonl")
+            name for name in names if name.startswith(FIXTURE_PREFIX) and name.endswith(".jsonl")
         }
         if actual_fixtures != expected_fixtures:
             raise VerificationError(
@@ -90,29 +86,19 @@ def _inspect_wheel(wheel: Path) -> tuple[str, ...]:
             raise VerificationError(f"wheel omits {LLMBAR_LICENSE}")
         missing_vendor_files = sorted(set(IFEVAL_VENDOR_FILES) - set(names))
         if missing_vendor_files:
-            raise VerificationError(
-                f"wheel omits IFEval attribution files: {missing_vendor_files}"
-            )
+            raise VerificationError(f"wheel omits IFEval attribution files: {missing_vendor_files}")
         if ENTRYPOINT_MANIFEST not in names:
             raise VerificationError(f"wheel omits {ENTRYPOINT_MANIFEST}")
 
         forbidden = tuple(
-            name
-            for name in names
-            if name.startswith(("bench/", "bench/results/", "tests/"))
+            name for name in names if name.startswith(("bench/", "bench/results/", "tests/"))
         )
         if forbidden:
-            raise VerificationError(
-                f"wheel contains checkout-only files: {list(forbidden)}"
-            )
+            raise VerificationError(f"wheel contains checkout-only files: {list(forbidden)}")
 
-        metadata_files = [
-            name for name in names if name.endswith(".dist-info/entry_points.txt")
-        ]
+        metadata_files = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
         if len(metadata_files) != 1:
-            raise VerificationError(
-                f"expected one entry_points.txt, found {metadata_files}"
-            )
+            raise VerificationError(f"expected one entry_points.txt, found {metadata_files}")
         parser = configparser.ConfigParser()
         parser.read_string(archive.read(metadata_files[0]).decode("utf-8"))
         try:
@@ -188,13 +174,10 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
     )
     module_path = Path(fixture_result.stdout.strip()).resolve()
     if not module_path.is_relative_to(extracted.resolve()):
-        raise VerificationError(
-            f"isolated fixture check imported outside the wheel: {module_path}"
-        )
+        raise VerificationError(f"isolated fixture check imported outside the wheel: {module_path}")
 
     entrypoint_code = (
-        "from kairyu.entrypoints.cli import main; "
-        "main(['bench', 'entrypoints', '--json'])"
+        "from kairyu.entrypoints.cli import main; main(['bench', 'entrypoints', '--json'])"
     )
     entrypoint_result = _isolated_run(
         extracted,
@@ -219,14 +202,12 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         ("bench", "run", "--help"),
         ("bench", "download", "--help"),
         ("bench", "report", "--help"),
+        ("bench", "compare-runs", "--help"),
         ("bench", "calibrate-judge", "--help"),
         ("bench", "list", "--help"),
         ("bench", "entrypoints", "--help"),
     ):
-        help_code = (
-            "from kairyu.entrypoints.cli import main; "
-            f"main({list(command)!r})"
-        )
+        help_code = f"from kairyu.entrypoints.cli import main; main({list(command)!r})"
         help_result = _isolated_run(
             extracted,
             dependency_site,
@@ -235,18 +216,14 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         )
         if "usage:" not in help_result.stdout.lower():
             raise VerificationError(
-                f"`kairyu {' '.join(command)}` did not render CLI help: "
-                f"{help_result.stdout!r}"
+                f"`kairyu {' '.join(command)}` did not render CLI help: {help_result.stdout!r}"
             )
 
     for command, expected in (
         (["bench", "list"], "suite fugu (11 slots)"),
         (["bench", "list", "--suite", "core"], "suite core (3 slots)"),
     ):
-        list_code = (
-            "from kairyu.entrypoints.cli import main; "
-            f"main({command!r})"
-        )
+        list_code = f"from kairyu.entrypoints.cli import main; main({command!r})"
         list_result = _isolated_run(
             extracted,
             dependency_site,
@@ -264,8 +241,8 @@ def verify(repo: Path, *, uv: str, wheel: Path | None = None) -> Path:
     repo = repo.resolve()
     with tempfile.TemporaryDirectory(prefix="kairyu-bench-wheel-") as temp:
         scratch = Path(temp)
-        built_wheel = wheel.resolve() if wheel is not None else _build_wheel(
-            repo, scratch / "dist", uv
+        built_wheel = (
+            wheel.resolve() if wheel is not None else _build_wheel(repo, scratch / "dist", uv)
         )
         _inspect_wheel(built_wheel)
         _verify_isolated_runtime(built_wheel, scratch)

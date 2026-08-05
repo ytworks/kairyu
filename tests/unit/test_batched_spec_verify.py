@@ -301,6 +301,191 @@ def test_list_decode_capability_keeps_verification_batched(monkeypatch):
     assert stats["sequential_positions"] == 0
 
 
+def test_list_decode_capability_keeps_ordinary_decode_batched(monkeypatch):
+    candidate_model = _model()
+    reference_model = _model()
+    for layer in candidate_model.model.layers:
+        # Tensor/graph decode is unavailable, but the model, layers, and backend
+        # still implement the established list-metadata batch contract.
+        layer.self_attn.backend.supports_graph_capture = False
+    candidate_pool = _pool(candidate_model)
+    reference_pool = _pool(reference_model)
+    candidate = PagedModelRunner(candidate_model, candidate_pool)
+    reference = PagedModelRunner(reference_model, reference_pool)
+    assert candidate._tensor_decode_supported is False
+    assert candidate._decode_batch_gap is None
+
+    prompts = {
+        "list-a": (1, 2, 3, 4),
+        "list-b": (5, 6, 7),
+    }
+    pages = {
+        "list-a": (0, 1),
+        "list-b": (2, 3),
+    }
+    chunks = (
+        ScheduledChunk("list-a", num_tokens=1, is_prefill=False, position=1),
+        ScheduledChunk("list-b", num_tokens=1, is_prefill=False, position=1),
+    )
+    for request_id in prompts:
+        _prime_prompt(
+            candidate_model,
+            candidate_pool,
+            prompts[request_id],
+            pages[request_id],
+        )
+        _prime_prompt(
+            reference_model,
+            reference_pool,
+            prompts[request_id],
+            pages[request_id],
+        )
+    candidate_states = {
+        request_id: _overlay_state(
+            request_id,
+            prompts[request_id],
+            pages[request_id],
+            (11,),
+            override=False,
+        )
+        for request_id in prompts
+    }
+    reference_states = {
+        request_id: _overlay_state(
+            request_id,
+            prompts[request_id],
+            pages[request_id],
+            (11,),
+            override=False,
+        )
+        for request_id in prompts
+    }
+
+    batch_rows: list[int] = []
+    forward_decode_batch = candidate_model.forward_decode_batch
+
+    def counted_batch(token_ids, *args, **kwargs):
+        batch_rows.append(int(token_ids.shape[0]))
+        return forward_decode_batch(token_ids, *args, **kwargs)
+
+    def forbidden_sequential(*_args, **_kwargs):
+        raise AssertionError("valid list decode was unnecessarily serialized")
+
+    monkeypatch.setattr(candidate_model, "forward_decode_batch", counted_batch)
+    monkeypatch.setattr(candidate_model, "forward_tokens", forbidden_sequential)
+
+    actual = candidate.execute(chunks, candidate_states)
+    expected = {
+        chunk.request_id: _score_sequential(
+            reference,
+            chunk,
+            reference_states[chunk.request_id],
+        )
+        for chunk in chunks
+    }
+
+    assert batch_rows == [2]
+    assert {
+        request_id: _token_ids(records)
+        for request_id, records in actual.items()
+    } == {
+        request_id: _token_ids(records)
+        for request_id, records in expected.items()
+    }
+
+
+def test_mla_ordinary_decode_falls_back_per_request_before_batch_call(monkeypatch):
+    candidate_model = _mla_model()
+    reference_model = _mla_model()
+    candidate_pool = _pool(candidate_model)
+    reference_pool = _pool(reference_model)
+    candidate = PagedModelRunner(candidate_model, candidate_pool)
+    reference = PagedModelRunner(reference_model, reference_pool)
+    assert candidate._tensor_decode_supported is False
+    assert "MlaAttention" in candidate._decode_batch_gap
+
+    prompts = {
+        "mla-a": (1, 2, 3, 4),
+        "mla-b": (5, 6, 7),
+    }
+    pages = {
+        "mla-a": (0, 1),
+        "mla-b": (2, 3),
+    }
+    chunks = (
+        ScheduledChunk("mla-a", num_tokens=1, is_prefill=False, position=1),
+        ScheduledChunk("mla-b", num_tokens=1, is_prefill=False, position=1),
+    )
+    for request_id in prompts:
+        _prime_prompt(
+            candidate_model,
+            candidate_pool,
+            prompts[request_id],
+            pages[request_id],
+        )
+        _prime_prompt(
+            reference_model,
+            reference_pool,
+            prompts[request_id],
+            pages[request_id],
+        )
+    candidate_states = {
+        request_id: _overlay_state(
+            request_id,
+            prompts[request_id],
+            pages[request_id],
+            (11,),
+            override=False,
+        )
+        for request_id in prompts
+    }
+    reference_states = {
+        request_id: _overlay_state(
+            request_id,
+            prompts[request_id],
+            pages[request_id],
+            (11,),
+            override=False,
+        )
+        for request_id in prompts
+    }
+
+    position_calls: list[int] = []
+    forward_tokens = candidate_model.forward_tokens
+
+    def counted_forward(token_ids, *args, **kwargs):
+        position_calls.append(int(token_ids.shape[0]))
+        return forward_tokens(token_ids, *args, **kwargs)
+
+    def forbidden_batch(*_args, **_kwargs):
+        raise AssertionError("MLA ordinary decode entered an unsupported batch path")
+
+    monkeypatch.setattr(candidate_model, "forward_tokens", counted_forward)
+    monkeypatch.setattr(candidate_model, "forward_decode_batch", forbidden_batch)
+    monkeypatch.setattr(candidate_model, "forward_decode_tensors", forbidden_batch)
+
+    actual = candidate.execute(chunks, candidate_states)
+    expected = {
+        chunk.request_id: _score_sequential(
+            reference,
+            chunk,
+            reference_states[chunk.request_id],
+        )
+        for chunk in chunks
+    }
+
+    assert position_calls == [1, 1]
+    assert {
+        request_id: _token_ids(records)
+        for request_id, records in actual.items()
+    } == {
+        request_id: _token_ids(records)
+        for request_id, records in expected.items()
+    }
+    assert torch.equal(candidate_pool.k, reference_pool.k)
+    assert torch.equal(candidate_pool.v, reference_pool.v)
+
+
 def test_mla_verification_falls_back_per_position_and_keeps_tp_packet_width(
     monkeypatch,
 ):
