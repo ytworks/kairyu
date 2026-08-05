@@ -1,0 +1,217 @@
+name: nightly-cpu-perf
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-cpu-perf-main
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  series:
+    name: Nightly CPU performance series
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          python-version: "3.12"
+      - name: Sync dependencies
+        run: uv sync --frozen --dev
+      - name: Prepare isolated result directories
+        env:
+          RESULT_DIR: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current
+          CANDIDATE_DIR: ${{ runner.temp }}/kairyu-nightly-cpu-perf/candidates
+          DOWNLOAD_DIR: ${{ runner.temp }}/kairyu-nightly-cpu-perf/downloads
+        run: mkdir -p "$RESULT_DIR" "$CANDIDATE_DIR" "$DOWNLOAD_DIR"
+      - name: Run issue 378 CPU microbenchmarks
+        id: measurement
+        continue-on-error: true
+        env:
+          REPORT: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/report.json
+        run: >-
+          uv run --frozen python scripts/cpu_microbench_gate.py
+          --output "$REPORT"
+      - name: Recover newest valid nightly history
+        id: recovery
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_PREFIX: nightly-cpu-perf-
+          CANDIDATE_DIR: ${{ runner.temp }}/kairyu-nightly-cpu-perf/candidates
+          DOWNLOAD_DIR: ${{ runner.temp }}/kairyu-nightly-cpu-perf/downloads
+          HISTORY: ${{ runner.temp }}/kairyu-nightly-cpu-perf/history.jsonl
+        run: |
+          set -euo pipefail
+
+          unsorted_artifact_list="${DOWNLOAD_DIR}/artifacts-unsorted.tsv"
+          artifact_list="${DOWNLOAD_DIR}/artifacts.tsv"
+          gh api --method GET --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false and .workflow_run.head_branch == "main" and (.name | startswith("nightly-cpu-perf-"))) | [.created_at, .id, .workflow_run.id, .workflow_run.head_sha, .name] | @tsv' \
+            > "$unsorted_artifact_list"
+          LC_ALL=C sort -t $'\t' -k1,1r -k2,2nr \
+            "$unsorted_artifact_list" > "$artifact_list"
+
+          candidate_index=0
+          while IFS=$'\t' read -r _created_at artifact_id workflow_run_id artifact_head_sha artifact_name; do
+            if [[ -z "$artifact_id" || -z "$workflow_run_id" ||
+                  -z "$artifact_head_sha" || -z "$artifact_name" ]]; then
+              continue
+            fi
+            if [[ ! "$artifact_name" =~ ^${ARTIFACT_PREFIX}${workflow_run_id}-([1-9][0-9]*)$ ]]; then
+              continue
+            fi
+            artifact_attempt="${BASH_REMATCH[1]}"
+
+            run_contract="$(
+              gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${workflow_run_id}/attempts/${artifact_attempt}" \
+                --jq '[.id, .run_attempt, .path, .head_branch, .event, .status, .head_sha, .repository.full_name] | @tsv'
+            )"
+            IFS=$'\t' read -r api_run_id api_attempt workflow_path head_branch \
+              run_event run_status run_head_sha run_repository <<< "$run_contract"
+            if [[ "$api_run_id" != "$workflow_run_id" ||
+                  "$api_attempt" != "$artifact_attempt" ||
+                  "$workflow_path" != ".github/workflows/nightly-cpu-perf.yml" ||
+                  "$head_branch" != "main" ||
+                  "$run_status" != "completed" ||
+                  "$run_head_sha" != "$artifact_head_sha" ||
+                  "$run_repository" != "$GITHUB_REPOSITORY" ]]; then
+              continue
+            fi
+            if [[ "$run_event" != "schedule" && "$run_event" != "workflow_dispatch" ]]; then
+              continue
+            fi
+
+            candidate="$(printf '%s/%06d' "$CANDIDATE_DIR" "$candidate_index")"
+            staging="$(printf '%s/candidate-%06d' "$DOWNLOAD_DIR" "$candidate_index")"
+            archive="${DOWNLOAD_DIR}/${artifact_id}.zip"
+            mkdir -p "$candidate" "$staging"
+            candidate_index=$((candidate_index + 1))
+
+            gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              > "$archive"
+
+            if ! uv run --frozen python - "$archive" "$staging" <<'PY'
+          import stat
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          archive = Path(sys.argv[1])
+          destination = Path(sys.argv[2])
+          expected = {"report.json", "series.jsonl", "comparison.json"}
+          with zipfile.ZipFile(archive) as bundle:
+              members = bundle.infolist()
+              names = [member.filename for member in members]
+              if len(members) != len(expected) or set(names) != expected:
+                  raise SystemExit("artifact must contain exactly the three root files")
+              for member in members:
+                  file_type = stat.S_IFMT(member.external_attr >> 16)
+                  if member.is_dir() or file_type not in (0, stat.S_IFREG):
+                      raise SystemExit("artifact members must be regular files")
+                  if member.file_size > 64 * 1024 * 1024:
+                      raise SystemExit("artifact member exceeds the size limit")
+              payloads = {name: bundle.read(name) for name in expected}
+          for name in ("report.json", "comparison.json", "series.jsonl"):
+              (destination / name).write_bytes(payloads[name])
+          PY
+            then
+              echo "artifact ${artifact_id} has no safe complete payload" >&2
+              continue
+            fi
+            if validation_json="$(
+              uv run --frozen python scripts/cpu_perf_series.py validate \
+                --series "${staging}/series.jsonl"
+            )"; then
+              if VALIDATION_JSON="$validation_json" \
+                EXPECTED_REPOSITORY="$run_repository" \
+                EXPECTED_RUN_ID="$workflow_run_id" \
+                EXPECTED_RUN_ATTEMPT="$artifact_attempt" \
+                EXPECTED_SHA="$run_head_sha" \
+                uv run --frozen python - <<'PY'
+          import json
+          import os
+
+          summary = json.loads(os.environ["VALIDATION_JSON"])
+          tip = summary.get("tip")
+          expected = {
+              "repository": os.environ["EXPECTED_REPOSITORY"],
+              "run_id": os.environ["EXPECTED_RUN_ID"],
+              "run_attempt": os.environ["EXPECTED_RUN_ATTEMPT"],
+              "sha": os.environ["EXPECTED_SHA"],
+          }
+          if summary.get("valid") is not True or not isinstance(tip, dict):
+              raise SystemExit("validated artifact has no series tip")
+          actual = {key: str(tip.get(key, "")) for key in expected}
+          if actual != expected:
+              raise SystemExit("series tip does not match Actions provenance")
+          PY
+              then
+                cp "${staging}/series.jsonl" "${candidate}/series.jsonl"
+                break
+              fi
+            fi
+          done < "$artifact_list"
+
+          uv run --frozen python scripts/cpu_perf_series.py select-history \
+            --candidates "$CANDIDATE_DIR" \
+            --output "$HISTORY"
+      - name: Append and compare the nightly record
+        id: comparison
+        if: >-
+          always() &&
+          steps.recovery.outcome == 'success'
+        continue-on-error: true
+        env:
+          REPORT: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/report.json
+          HISTORY: ${{ runner.temp }}/kairyu-nightly-cpu-perf/history.jsonl
+          SERIES: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/series.jsonl
+          COMPARISON: ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/comparison.json
+        run: >-
+          uv run --frozen python scripts/cpu_perf_series.py record
+          --report "$REPORT"
+          --history "$HISTORY"
+          --series "$SERIES"
+          --comparison "$COMPARISON"
+          --repository "$GITHUB_REPOSITORY"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+          --sha "$GITHUB_SHA"
+      - name: Retain nightly report, series, and comparison
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-cpu-perf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/report.json
+            ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/series.jsonl
+            ${{ runner.temp }}/kairyu-nightly-cpu-perf/current/comparison.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Enforce the retained nightly verdict
+        if: always()
+        env:
+          MEASUREMENT_OUTCOME: ${{ steps.measurement.outcome }}
+          RECOVERY_OUTCOME: ${{ steps.recovery.outcome }}
+          COMPARISON_OUTCOME: ${{ steps.comparison.outcome }}
+        run: |
+          if [[ "$MEASUREMENT_OUTCOME" == "success" &&
+                "$RECOVERY_OUTCOME" == "success" &&
+                "$COMPARISON_OUTCOME" == "success" ]]; then
+            exit 0
+          fi
+          echo "measurement=${MEASUREMENT_OUTCOME} recovery=${RECOVERY_OUTCOME} comparison=${COMPARISON_OUTCOME}" >&2
+          exit 1
