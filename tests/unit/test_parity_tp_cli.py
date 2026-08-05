@@ -21,12 +21,15 @@ def test_max_new_tokens_is_honoured_not_just_recorded(tmp_path):
     out = tmp_path / "result.json"
     result = _run(
         "--tp", "1,2", "--num-prompts", "1", "--max-new-tokens", "2",
+        "--num-pages", "17", "--page-size", "8",
         "--out", str(out),
     )
     assert result.returncode == 0, result.stderr
 
     payload = json.loads(out.read_text())
     assert payload["config"]["max_new_tokens"] == 2
+    assert payload["config"]["num_pages"] == 17
+    assert payload["config"]["page_size"] == 8
     for entry in payload["parity"].values():
         assert entry["tokens"] == 2, "reported config and measured tokens disagree"
 

@@ -705,6 +705,8 @@ def main() -> int:
         "checkpoint": _checkpoint_provenance(args.model_path) if args.model_path else None,
         "code": _code_provenance(),
         "tp_degrees": degrees,
+        "num_pages": args.num_pages,
+        "page_size": args.page_size,
         "num_prompts": len(prompts),
         "max_new_tokens": args.max_new_tokens,
         "overlap_modes": ["on" if mode else "off" for mode in overlap_modes],

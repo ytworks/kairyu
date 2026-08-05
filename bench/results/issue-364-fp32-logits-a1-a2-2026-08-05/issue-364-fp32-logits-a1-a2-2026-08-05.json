@@ -1,0 +1,1334 @@
+{
+  "schema": 2,
+  "gate": "issue #364 paired logits dtype A1/A2",
+  "verdict": "FAIL",
+  "evidence_valid": true,
+  "feature_ready": false,
+  "disposition": "withdrawn",
+  "quality_classification": "mixed",
+  "measurement_code": {
+    "commit": "ac589fb67452173f45f23d9107af313c2b79cc17",
+    "dirty": false,
+    "observations": 16,
+    "commits": [
+      "ac589fb67452173f45f23d9107af313c2b79cc17"
+    ]
+  },
+  "analysis_code": {
+    "commit": "d7510befd0d9d0a6312945ab4e1f0fcf92f7bd82",
+    "dirty": false,
+    "untracked_files": 2,
+    "source": "git"
+  },
+  "source_formal_analysis_codes": {
+    "a1_model": {
+      "commit": "ac589fb67452173f45f23d9107af313c2b79cc17",
+      "dirty": false,
+      "untracked_files": 2,
+      "source": "git"
+    },
+    "a1_float32": {
+      "commit": "ac589fb67452173f45f23d9107af313c2b79cc17",
+      "dirty": false,
+      "untracked_files": 2,
+      "source": "git"
+    },
+    "a2_model": {
+      "commit": "ac589fb67452173f45f23d9107af313c2b79cc17",
+      "dirty": false,
+      "untracked_files": 2,
+      "source": "git"
+    },
+    "a2_float32": {
+      "commit": "ac589fb67452173f45f23d9107af313c2b79cc17",
+      "dirty": false,
+      "untracked_files": 2,
+      "source": "git"
+    }
+  },
+  "checks": [
+    {
+      "name": "A1 model carries a recognized formal gate envelope",
+      "passed": true,
+      "detail": "schema=1, gate='G2 A1'",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model formal checks replay without an analysis error",
+      "passed": true,
+      "detail": "replay completed",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model retains the exact independently replayed formal checks",
+      "passed": true,
+      "detail": "retained=14, replayed=14",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model reported formal verdict matches independent replay",
+      "passed": true,
+      "detail": "reported='PASS', replayed='PASS'",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model formal analysis commit is clean and recorded",
+      "passed": true,
+      "detail": "formal_analysis={'commit': 'ac589fb67452173f45f23d9107af313c2b79cc17', 'dirty': False, 'untracked_files': 2, 'source': 'git'}",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model formal readiness taxonomy is exact",
+      "passed": true,
+      "detail": "expected=['amended teacher-forced verdict passes at TP1 and TP2', 'overlap ON reproduces OFF at TP1 and TP2'], missing=[], duplicated=[]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model formal evidence-integrity criteria all pass",
+      "passed": true,
+      "detail": "integrity_checks=12",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model independently replays all formal readiness criteria",
+      "passed": true,
+      "detail": "PASS",
+      "scope": "feature_readiness"
+    },
+    {
+      "name": "A1 model reported HF summaries match immutable raw evidence",
+      "passed": true,
+      "detail": "TP1: all retained summaries match raw evidence; TP2: all retained summaries match raw evidence",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model raw rows reproduce the retained agreement summaries",
+      "passed": true,
+      "detail": "TP1=match, TP2=match",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model raw rows recompute agreement and binding logprob tolerance",
+      "passed": true,
+      "detail": "TP1=PASS, max_delta=0.105073, TP2=PASS, max_delta=0.103198",
+      "scope": "feature_readiness"
+    },
+    {
+      "name": "A1 model uses one attested logits mode at every observation",
+      "passed": true,
+      "detail": "expected=('model', 'bfloat16'), found=[('model', 'bfloat16'), ('model', 'bfloat16'), ('model', 'bfloat16')]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 carries a recognized formal gate envelope",
+      "passed": true,
+      "detail": "schema=1, gate='G2 A1'",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 formal checks replay without an analysis error",
+      "passed": true,
+      "detail": "replay completed",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 retains the exact independently replayed formal checks",
+      "passed": true,
+      "detail": "retained=14, replayed=14",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 reported formal verdict matches independent replay",
+      "passed": true,
+      "detail": "reported='PASS', replayed='PASS'",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 formal analysis commit is clean and recorded",
+      "passed": true,
+      "detail": "formal_analysis={'commit': 'ac589fb67452173f45f23d9107af313c2b79cc17', 'dirty': False, 'untracked_files': 2, 'source': 'git'}",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 formal readiness taxonomy is exact",
+      "passed": true,
+      "detail": "expected=['amended teacher-forced verdict passes at TP1 and TP2', 'overlap ON reproduces OFF at TP1 and TP2'], missing=[], duplicated=[]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 formal evidence-integrity criteria all pass",
+      "passed": true,
+      "detail": "integrity_checks=12",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 independently replays all formal readiness criteria",
+      "passed": true,
+      "detail": "PASS",
+      "scope": "feature_readiness"
+    },
+    {
+      "name": "A1 float32 reported HF summaries match immutable raw evidence",
+      "passed": true,
+      "detail": "TP1: all retained summaries match raw evidence; TP2: all retained summaries match raw evidence",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 raw rows reproduce the retained agreement summaries",
+      "passed": true,
+      "detail": "TP1=match, TP2=match",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 raw rows recompute agreement and binding logprob tolerance",
+      "passed": true,
+      "detail": "TP1=PASS, max_delta=0.111150, TP2=PASS, max_delta=0.070201",
+      "scope": "feature_readiness"
+    },
+    {
+      "name": "A1 float32 uses one attested logits mode at every observation",
+      "passed": true,
+      "detail": "expected=('float32', 'float32'), found=[('float32', 'float32'), ('float32', 'float32'), ('float32', 'float32')]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model carries a recognized formal gate envelope",
+      "passed": true,
+      "detail": "schema=1, gate='G2 A2'",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model formal checks replay without an analysis error",
+      "passed": true,
+      "detail": "replay completed",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model retains the exact independently replayed formal checks",
+      "passed": true,
+      "detail": "retained=10, replayed=10",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model reported formal verdict matches independent replay",
+      "passed": true,
+      "detail": "reported='FAIL', replayed='FAIL'",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model formal analysis commit is clean and recorded",
+      "passed": true,
+      "detail": "formal_analysis={'commit': 'ac589fb67452173f45f23d9107af313c2b79cc17', 'dirty': False, 'untracked_files': 2, 'source': 'git'}",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model formal readiness taxonomy is exact",
+      "passed": true,
+      "detail": "expected=['TP4 and TP8 pass directly against TP2', 'every TP degree passes the amended HF-relative criteria', 'raw rows recompute both amended criteria at every TP degree'], missing=[], duplicated=[]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model formal evidence-integrity criteria all pass",
+      "passed": true,
+      "detail": "integrity_checks=7",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model independently replays all formal readiness criteria",
+      "passed": false,
+      "detail": "failed=['every TP degree passes the amended HF-relative criteria', 'raw rows recompute both amended criteria at every TP degree']",
+      "scope": "feature_readiness"
+    },
+    {
+      "name": "A2 model reported HF summaries match immutable raw evidence",
+      "passed": true,
+      "detail": "TP2: all retained summaries match raw evidence; TP4: all retained summaries match raw evidence; TP8: all retained summaries match raw evidence",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model retains the exact independently replayed comparisons",
+      "passed": true,
+      "detail": "retained=['tp2_vs_hf', 'tp4_vs_hf', 'tp4_vs_tp2', 'tp8_vs_hf', 'tp8_vs_tp2'], replayed=['tp2_vs_hf', 'tp4_vs_hf', 'tp4_vs_tp2', 'tp8_vs_hf', 'tp8_vs_tp2']",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model uses one attested logits mode at every observation",
+      "passed": true,
+      "detail": "expected=('model', 'bfloat16'), found=[('model', 'bfloat16'), ('model', 'bfloat16'), ('model', 'bfloat16')]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 carries a recognized formal gate envelope",
+      "passed": true,
+      "detail": "schema=1, gate='G2 A2'",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 formal checks replay without an analysis error",
+      "passed": true,
+      "detail": "replay completed",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 retains the exact independently replayed formal checks",
+      "passed": true,
+      "detail": "retained=10, replayed=10",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 reported formal verdict matches independent replay",
+      "passed": true,
+      "detail": "reported='FAIL', replayed='FAIL'",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 formal analysis commit is clean and recorded",
+      "passed": true,
+      "detail": "formal_analysis={'commit': 'ac589fb67452173f45f23d9107af313c2b79cc17', 'dirty': False, 'untracked_files': 2, 'source': 'git'}",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 formal readiness taxonomy is exact",
+      "passed": true,
+      "detail": "expected=['TP4 and TP8 pass directly against TP2', 'every TP degree passes the amended HF-relative criteria', 'raw rows recompute both amended criteria at every TP degree'], missing=[], duplicated=[]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 formal evidence-integrity criteria all pass",
+      "passed": true,
+      "detail": "integrity_checks=7",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 independently replays all formal readiness criteria",
+      "passed": false,
+      "detail": "failed=['every TP degree passes the amended HF-relative criteria', 'raw rows recompute both amended criteria at every TP degree']",
+      "scope": "feature_readiness"
+    },
+    {
+      "name": "A2 float32 reported HF summaries match immutable raw evidence",
+      "passed": true,
+      "detail": "TP2: all retained summaries match raw evidence; TP4: all retained summaries match raw evidence; TP8: all retained summaries match raw evidence",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 retains the exact independently replayed comparisons",
+      "passed": true,
+      "detail": "retained=['tp2_vs_hf', 'tp4_vs_hf', 'tp4_vs_tp2', 'tp8_vs_hf', 'tp8_vs_tp2'], replayed=['tp2_vs_hf', 'tp4_vs_hf', 'tp4_vs_tp2', 'tp8_vs_hf', 'tp8_vs_tp2']",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 uses one attested logits mode at every observation",
+      "passed": true,
+      "detail": "expected=('float32', 'float32'), found=[('float32', 'float32'), ('float32', 'float32'), ('float32', 'float32')]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 arms use the exact same immutable HF reference",
+      "passed": true,
+      "detail": "reference envelopes compared byte-for-byte as parsed JSON",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 arms use identical checkpoint and prompt token IDs",
+      "passed": true,
+      "detail": "continuation checkpoint/prompt envelopes compared exactly",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 continuation arms use identical non-logits measurement config",
+      "passed": true,
+      "detail": "parsed configs compared exactly after removing only logits_dtype_requested/logits_dtype_resolved",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 TP1 arms use identical non-logits measurement config",
+      "passed": true,
+      "detail": "parsed configs compared exactly after removing only logits_dtype_requested/logits_dtype_resolved",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 TP2 arms use identical non-logits measurement config",
+      "passed": true,
+      "detail": "parsed configs compared exactly after removing only logits_dtype_requested/logits_dtype_resolved",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 arms use the exact same immutable HF reference",
+      "passed": true,
+      "detail": "reference envelopes compared byte-for-byte as parsed JSON",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 TP2 arms use identical non-logits measurement config",
+      "passed": true,
+      "detail": "parsed configs compared exactly after removing only logits_dtype_requested/logits_dtype_resolved",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 TP4 arms use identical non-logits measurement config",
+      "passed": true,
+      "detail": "parsed configs compared exactly after removing only logits_dtype_requested/logits_dtype_resolved",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 TP8 arms use identical non-logits measurement config",
+      "passed": true,
+      "detail": "parsed configs compared exactly after removing only logits_dtype_requested/logits_dtype_resolved",
+      "scope": "evidence"
+    },
+    {
+      "name": "all four arms and both shared references use one clean measurement commit",
+      "passed": true,
+      "detail": "measurement_commits=['ac589fb67452173f45f23d9107af313c2b79cc17'], rows=16",
+      "scope": "evidence"
+    },
+    {
+      "name": "paired analysis commit is independently recorded and clean",
+      "passed": true,
+      "detail": "analysis={'commit': 'd7510befd0d9d0a6312945ab4e1f0fcf92f7bd82', 'dirty': False, 'untracked_files': 2, 'source': 'git'}, measurement_commits=['ac589fb67452173f45f23d9107af313c2b79cc17'], same_commit=False",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 TP1 has complete paired raw positions",
+      "passed": true,
+      "detail": "paired_positions=1024, model_rows/unique=1024/1024, float32_rows/unique=1024/1024, reference_mismatches=0, reference_contract=True",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 TP1 retains complete paired raw logprob observations",
+      "passed": true,
+      "detail": "top_k=20, model_complete=1024/1024, float32_complete=1024/1024, agreeing_delta_counts=1017/1017 and 1015/1015",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 TP2 has complete paired raw positions",
+      "passed": true,
+      "detail": "paired_positions=1024, model_rows/unique=1024/1024, float32_rows/unique=1024/1024, reference_mismatches=0, reference_contract=True",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 TP2 retains complete paired raw logprob observations",
+      "passed": true,
+      "detail": "top_k=20, model_complete=1024/1024, float32_complete=1024/1024, agreeing_delta_counts=1013/1013 and 1013/1013",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 TP2 has complete paired raw positions",
+      "passed": true,
+      "detail": "paired_positions=1024, model_rows/unique=1024/1024, float32_rows/unique=1024/1024, reference_mismatches=0, reference_contract=True",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 TP2 retains complete paired raw logprob observations",
+      "passed": true,
+      "detail": "top_k=20, model_complete=1024/1024, float32_complete=1024/1024, agreeing_delta_counts=1009/1009 and 1008/1008",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 TP4 has complete paired raw positions",
+      "passed": true,
+      "detail": "paired_positions=1024, model_rows/unique=1024/1024, float32_rows/unique=1024/1024, reference_mismatches=0, reference_contract=True",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 TP4 retains complete paired raw logprob observations",
+      "passed": true,
+      "detail": "top_k=20, model_complete=1024/1024, float32_complete=1024/1024, agreeing_delta_counts=1004/1004 and 1003/1003",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 TP8 has complete paired raw positions",
+      "passed": true,
+      "detail": "paired_positions=1024, model_rows/unique=1024/1024, float32_rows/unique=1024/1024, reference_mismatches=0, reference_contract=True",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 TP8 retains complete paired raw logprob observations",
+      "passed": true,
+      "detail": "top_k=20, model_complete=1024/1024, float32_complete=1024/1024, agreeing_delta_counts=999/999 and 1002/1002",
+      "scope": "evidence"
+    }
+  ],
+  "paired_tp_summaries": {
+    "a1_tp1": {
+      "complete": true,
+      "positions": 1024,
+      "reference_mismatches": [],
+      "reference_contract_match": true,
+      "reference_self_agreement_floor": 0.986328125,
+      "tie_gap_nats": 0.125,
+      "top_logprobs_k": 20,
+      "model_agreed": 1017,
+      "float32_agreed": 1015,
+      "agreement_delta": -2,
+      "classification": "worsened",
+      "toward_reference": 5,
+      "away_from_reference": 7,
+      "changed_other": 0,
+      "substantive": {
+        "model": 0,
+        "float32": 0
+      },
+      "missing": {
+        "model": 0,
+        "float32": 0
+      },
+      "changed_positions": [
+        {
+          "prompt": "p1",
+          "position": 15,
+          "reference_token": 387,
+          "model_token": 387,
+          "float32_token": 13592,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p10",
+          "position": 7,
+          "reference_token": 28337,
+          "model_token": 4,
+          "float32_token": 28337,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p17",
+          "position": 1,
+          "reference_token": 11,
+          "model_token": 11,
+          "float32_token": 13,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p19",
+          "position": 2,
+          "reference_token": 13,
+          "model_token": 13,
+          "float32_token": 389,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p19",
+          "position": 5,
+          "reference_token": 279,
+          "model_token": 264,
+          "float32_token": 279,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p23",
+          "position": 4,
+          "reference_token": 374,
+          "model_token": 374,
+          "float32_token": 574,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p27",
+          "position": 4,
+          "reference_token": 719,
+          "model_token": 11,
+          "float32_token": 719,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p3",
+          "position": 2,
+          "reference_token": 4314,
+          "model_token": 3277,
+          "float32_token": 4314,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p31",
+          "position": 8,
+          "reference_token": 1102,
+          "model_token": 1102,
+          "float32_token": 1115,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p38",
+          "position": 13,
+          "reference_token": 433,
+          "model_token": 433,
+          "float32_token": 9886,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p39",
+          "position": 7,
+          "reference_token": 7191,
+          "model_token": 374,
+          "float32_token": 7191,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p51",
+          "position": 3,
+          "reference_token": 11,
+          "model_token": 11,
+          "float32_token": 13,
+          "movement": "away_from_reference"
+        }
+      ],
+      "agreeing_position_logprob_delta": {
+        "model": {
+          "count": 1017,
+          "mean": 0.011402977607421868,
+          "p50": 0.002325258438587191,
+          "p95": 0.054473486270904536,
+          "max": 0.105072516784668
+        },
+        "float32": {
+          "count": 1015,
+          "mean": 0.011243066508371683,
+          "p50": 0.0055407075881958034,
+          "p95": 0.040483986091613744,
+          "max": 0.11115040241241458
+        }
+      },
+      "same_selected_token_logprob_delta": {
+        "count": 1012,
+        "mean": 0.009051826200422813,
+        "p50": 0.005288511514663696,
+        "p95": 0.03161144256591797,
+        "max": 0.058485984802246094
+      },
+      "shared_top_token_logprob_delta": {
+        "count": 20298,
+        "mean": 0.026789145302988825,
+        "p50": 0.02250075340270996,
+        "p95": 0.06699466705322266,
+        "max": 0.11799430847167969
+      },
+      "raw_position_integrity": {
+        "model": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        },
+        "float32": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        }
+      },
+      "raw_logprob_integrity": {
+        "top_k": 20,
+        "model": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        },
+        "float32": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        }
+      }
+    },
+    "a1_tp2": {
+      "complete": true,
+      "positions": 1024,
+      "reference_mismatches": [],
+      "reference_contract_match": true,
+      "reference_self_agreement_floor": 0.986328125,
+      "tie_gap_nats": 0.125,
+      "top_logprobs_k": 20,
+      "model_agreed": 1013,
+      "float32_agreed": 1013,
+      "agreement_delta": 0,
+      "classification": "same",
+      "toward_reference": 5,
+      "away_from_reference": 5,
+      "changed_other": 0,
+      "substantive": {
+        "model": 0,
+        "float32": 0
+      },
+      "missing": {
+        "model": 0,
+        "float32": 0
+      },
+      "changed_positions": [
+        {
+          "prompt": "p1",
+          "position": 15,
+          "reference_token": 387,
+          "model_token": 387,
+          "float32_token": 13592,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p11",
+          "position": 3,
+          "reference_token": 578,
+          "model_token": 578,
+          "float32_token": 3005,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p19",
+          "position": 5,
+          "reference_token": 279,
+          "model_token": 264,
+          "float32_token": 279,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p2",
+          "position": 2,
+          "reference_token": 12,
+          "model_token": 12,
+          "float32_token": 482,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p23",
+          "position": 4,
+          "reference_token": 374,
+          "model_token": 374,
+          "float32_token": 574,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p25",
+          "position": 8,
+          "reference_token": 2057,
+          "model_token": 2057,
+          "float32_token": 4452,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p29",
+          "position": 9,
+          "reference_token": 5238,
+          "model_token": 1052,
+          "float32_token": 5238,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p3",
+          "position": 2,
+          "reference_token": 4314,
+          "model_token": 3277,
+          "float32_token": 4314,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p31",
+          "position": 2,
+          "reference_token": 5629,
+          "model_token": 11,
+          "float32_token": 5629,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p40",
+          "position": 4,
+          "reference_token": 1102,
+          "model_token": 578,
+          "float32_token": 1102,
+          "movement": "toward_reference"
+        }
+      ],
+      "agreeing_position_logprob_delta": {
+        "model": {
+          "count": 1013,
+          "mean": 0.011745405930480934,
+          "p50": 0.0023356610584259196,
+          "p95": 0.05412525669097901,
+          "max": 0.10319844009399415
+        },
+        "float32": {
+          "count": 1013,
+          "mean": 0.011588419153428722,
+          "p50": 0.0056516068267822295,
+          "p95": 0.04145505176544195,
+          "max": 0.07020055187225349
+        }
+      },
+      "same_selected_token_logprob_delta": {
+        "count": 1014,
+        "mean": 0.009619796402546735,
+        "p50": 0.005220293998718262,
+        "p95": 0.03423184156417847,
+        "max": 0.06969285011291504
+      },
+      "shared_top_token_logprob_delta": {
+        "count": 20305,
+        "mean": 0.02720471932526749,
+        "p50": 0.02310943603515625,
+        "p95": 0.06785106658935547,
+        "max": 0.1217808723449707
+      },
+      "raw_position_integrity": {
+        "model": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        },
+        "float32": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        }
+      },
+      "raw_logprob_integrity": {
+        "top_k": 20,
+        "model": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        },
+        "float32": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        }
+      }
+    },
+    "a2_tp2": {
+      "complete": true,
+      "positions": 1024,
+      "reference_mismatches": [],
+      "reference_contract_match": true,
+      "reference_self_agreement_floor": 0.98046875,
+      "tie_gap_nats": 0.375,
+      "top_logprobs_k": 20,
+      "model_agreed": 1009,
+      "float32_agreed": 1008,
+      "agreement_delta": -1,
+      "classification": "worsened",
+      "toward_reference": 5,
+      "away_from_reference": 6,
+      "changed_other": 0,
+      "substantive": {
+        "model": 0,
+        "float32": 0
+      },
+      "missing": {
+        "model": 0,
+        "float32": 0
+      },
+      "changed_positions": [
+        {
+          "prompt": "p11",
+          "position": 7,
+          "reference_token": 43246,
+          "model_token": 2057,
+          "float32_token": 43246,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p18",
+          "position": 11,
+          "reference_token": 16997,
+          "model_token": 220,
+          "float32_token": 16997,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p19",
+          "position": 2,
+          "reference_token": 389,
+          "model_token": 389,
+          "float32_token": 627,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p24",
+          "position": 2,
+          "reference_token": 627,
+          "model_token": 13,
+          "float32_token": 627,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p25",
+          "position": 11,
+          "reference_token": 264,
+          "model_token": 264,
+          "float32_token": 279,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p29",
+          "position": 9,
+          "reference_token": 13,
+          "model_token": 11,
+          "float32_token": 13,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p45",
+          "position": 10,
+          "reference_token": 578,
+          "model_token": 578,
+          "float32_token": 1102,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p47",
+          "position": 14,
+          "reference_token": 617,
+          "model_token": 527,
+          "float32_token": 617,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p59",
+          "position": 1,
+          "reference_token": 11,
+          "model_token": 11,
+          "float32_token": 13,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p59",
+          "position": 2,
+          "reference_token": 323,
+          "model_token": 323,
+          "float32_token": 902,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p60",
+          "position": 0,
+          "reference_token": 1595,
+          "model_token": 1595,
+          "float32_token": 10134,
+          "movement": "away_from_reference"
+        }
+      ],
+      "agreeing_position_logprob_delta": {
+        "model": {
+          "count": 1009,
+          "mean": 0.02803879428415291,
+          "p50": 0.010433043327331637,
+          "p95": 0.11024346961975096,
+          "max": 0.6899092219161986
+        },
+        "float32": {
+          "count": 1008,
+          "mean": 0.0261141157356024,
+          "p50": 0.009614459125995636,
+          "p95": 0.09893499034881592,
+          "max": 0.6645019672203063
+        }
+      },
+      "same_selected_token_logprob_delta": {
+        "count": 1013,
+        "mean": 0.008819700642299493,
+        "p50": 0.003525853157043457,
+        "p95": 0.033841729164123535,
+        "max": 0.06371200084686279
+      },
+      "shared_top_token_logprob_delta": {
+        "count": 20327,
+        "mean": 0.028938128386815212,
+        "p50": 0.02456033229827881,
+        "p95": 0.07107019424438477,
+        "max": 0.17397117614746094
+      },
+      "raw_position_integrity": {
+        "model": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        },
+        "float32": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        }
+      },
+      "raw_logprob_integrity": {
+        "top_k": 20,
+        "model": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        },
+        "float32": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        }
+      }
+    },
+    "a2_tp4": {
+      "complete": true,
+      "positions": 1024,
+      "reference_mismatches": [],
+      "reference_contract_match": true,
+      "reference_self_agreement_floor": 0.98046875,
+      "tie_gap_nats": 0.375,
+      "top_logprobs_k": 20,
+      "model_agreed": 1004,
+      "float32_agreed": 1003,
+      "agreement_delta": -1,
+      "classification": "worsened",
+      "toward_reference": 6,
+      "away_from_reference": 7,
+      "changed_other": 0,
+      "substantive": {
+        "model": 0,
+        "float32": 0
+      },
+      "missing": {
+        "model": 0,
+        "float32": 0
+      },
+      "changed_positions": [
+        {
+          "prompt": "p17",
+          "position": 1,
+          "reference_token": 1606,
+          "model_token": 13,
+          "float32_token": 1606,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p19",
+          "position": 2,
+          "reference_token": 389,
+          "model_token": 389,
+          "float32_token": 627,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p19",
+          "position": 7,
+          "reference_token": 374,
+          "model_token": 374,
+          "float32_token": 1493,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p20",
+          "position": 3,
+          "reference_token": 902,
+          "model_token": 902,
+          "float32_token": 13489,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p21",
+          "position": 8,
+          "reference_token": 1988,
+          "model_token": 1160,
+          "float32_token": 1988,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p25",
+          "position": 11,
+          "reference_token": 264,
+          "model_token": 264,
+          "float32_token": 279,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p26",
+          "position": 5,
+          "reference_token": 21277,
+          "model_token": 12782,
+          "float32_token": 21277,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p28",
+          "position": 0,
+          "reference_token": 11583,
+          "model_token": 10640,
+          "float32_token": 11583,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p33",
+          "position": 5,
+          "reference_token": 527,
+          "model_token": 374,
+          "float32_token": 527,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p43",
+          "position": 10,
+          "reference_token": 18,
+          "model_token": 18,
+          "float32_token": 482,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p52",
+          "position": 7,
+          "reference_token": 1595,
+          "model_token": 433,
+          "float32_token": 1595,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p54",
+          "position": 6,
+          "reference_token": 264,
+          "model_token": 264,
+          "float32_token": 279,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p59",
+          "position": 1,
+          "reference_token": 11,
+          "model_token": 11,
+          "float32_token": 13,
+          "movement": "away_from_reference"
+        }
+      ],
+      "agreeing_position_logprob_delta": {
+        "model": {
+          "count": 1004,
+          "mean": 0.02731671134951418,
+          "p50": 0.008560211303830147,
+          "p95": 0.10221050369262707,
+          "max": 0.4415503985357284
+        },
+        "float32": {
+          "count": 1003,
+          "mean": 0.026181903536269806,
+          "p50": 0.010764001426696757,
+          "p95": 0.09564359504699704,
+          "max": 0.4404445684623718
+        }
+      },
+      "same_selected_token_logprob_delta": {
+        "count": 1011,
+        "mean": 0.008670372031784609,
+        "p50": 0.0034842193126678467,
+        "p95": 0.031735122203826904,
+        "max": 0.05770772695541382
+      },
+      "shared_top_token_logprob_delta": {
+        "count": 20303,
+        "mean": 0.028647231682018017,
+        "p50": 0.02395343780517578,
+        "p95": 0.07158565521240234,
+        "max": 0.12004852294921875
+      },
+      "raw_position_integrity": {
+        "model": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        },
+        "float32": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        }
+      },
+      "raw_logprob_integrity": {
+        "top_k": 20,
+        "model": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        },
+        "float32": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        }
+      }
+    },
+    "a2_tp8": {
+      "complete": true,
+      "positions": 1024,
+      "reference_mismatches": [],
+      "reference_contract_match": true,
+      "reference_self_agreement_floor": 0.98046875,
+      "tie_gap_nats": 0.375,
+      "top_logprobs_k": 20,
+      "model_agreed": 999,
+      "float32_agreed": 1002,
+      "agreement_delta": 3,
+      "classification": "improved",
+      "toward_reference": 7,
+      "away_from_reference": 4,
+      "changed_other": 0,
+      "substantive": {
+        "model": 0,
+        "float32": 0
+      },
+      "missing": {
+        "model": 0,
+        "float32": 0
+      },
+      "changed_positions": [
+        {
+          "prompt": "p14",
+          "position": 12,
+          "reference_token": 369,
+          "model_token": 330,
+          "float32_token": 369,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p18",
+          "position": 0,
+          "reference_token": 220,
+          "model_token": 198,
+          "float32_token": 220,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p19",
+          "position": 2,
+          "reference_token": 389,
+          "model_token": 389,
+          "float32_token": 627,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p23",
+          "position": 11,
+          "reference_token": 10975,
+          "model_token": 374,
+          "float32_token": 10975,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p24",
+          "position": 2,
+          "reference_token": 627,
+          "model_token": 13,
+          "float32_token": 627,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p37",
+          "position": 11,
+          "reference_token": 927,
+          "model_token": 369,
+          "float32_token": 927,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p45",
+          "position": 0,
+          "reference_token": 54792,
+          "model_token": 11834,
+          "float32_token": 54792,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p47",
+          "position": 14,
+          "reference_token": 617,
+          "model_token": 527,
+          "float32_token": 617,
+          "movement": "toward_reference"
+        },
+        {
+          "prompt": "p48",
+          "position": 0,
+          "reference_token": 279,
+          "model_token": 279,
+          "float32_token": 2663,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p54",
+          "position": 6,
+          "reference_token": 264,
+          "model_token": 264,
+          "float32_token": 279,
+          "movement": "away_from_reference"
+        },
+        {
+          "prompt": "p60",
+          "position": 12,
+          "reference_token": 374,
+          "model_token": 374,
+          "float32_token": 596,
+          "movement": "away_from_reference"
+        }
+      ],
+      "agreeing_position_logprob_delta": {
+        "model": {
+          "count": 999,
+          "mean": 0.026964682318112745,
+          "p50": 0.009912471070289613,
+          "p95": 0.1073223286819458,
+          "max": 0.46959867137908917
+        },
+        "float32": {
+          "count": 1002,
+          "mean": 0.025507928243305455,
+          "p50": 0.008957084114551546,
+          "p95": 0.09954935304641721,
+          "max": 0.41071333545684796
+        }
+      },
+      "same_selected_token_logprob_delta": {
+        "count": 1013,
+        "mean": 0.008685426753864772,
+        "p50": 0.003566339612007141,
+        "p95": 0.03252875804901123,
+        "max": 0.06090497970581055
+      },
+      "shared_top_token_logprob_delta": {
+        "count": 20282,
+        "mean": 0.028373355912237365,
+        "p50": 0.023941993713378906,
+        "p95": 0.07112407684326172,
+        "max": 0.12360000610351562
+      },
+      "raw_position_integrity": {
+        "model": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        },
+        "float32": {
+          "rows": 1024,
+          "unique_positions": 1024,
+          "exact_expected_keys": true
+        }
+      },
+      "raw_logprob_integrity": {
+        "top_k": 20,
+        "model": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        },
+        "float32": {
+          "rows": 1024,
+          "complete_rows": 1024,
+          "exact": true
+        }
+      }
+    }
+  },
+  "source_files": {
+    "a1_model": {
+      "path": "bench/results/issue-364-fp32-logits-a1-a2-2026-08-05/a1-model-formal.json",
+      "sha256": "860213e5d1bf44d47b14a15b97e2ad28ea8794845503a30eed69fc53e94755b9"
+    },
+    "a1_float32": {
+      "path": "bench/results/issue-364-fp32-logits-a1-a2-2026-08-05/a1-float32-formal.json",
+      "sha256": "1cc3a20be0e304eb99f2448a0f901cd70ddb96be818fe4077783d1c89f3979f8"
+    },
+    "a2_model": {
+      "path": "bench/results/issue-364-fp32-logits-a1-a2-2026-08-05/a2-model-formal.json",
+      "sha256": "febc8f62605e6744989115e4c00064ce241e0ef702440b4b7b85c685874c0195"
+    },
+    "a2_float32": {
+      "path": "bench/results/issue-364-fp32-logits-a1-a2-2026-08-05/a2-float32-formal.json",
+      "sha256": "aeb9acc84fa0fa8b9ac8d945de2231c86efb5e35499c80f5ed2b59a85e7c126a"
+    }
+  }
+}

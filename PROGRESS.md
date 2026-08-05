@@ -935,6 +935,17 @@ growth, and routing latency. Fixed short workloads use same-process legacy
 ratios and deliberately loose bounds, retain one diagnostic JSON report, and
 never promote shared-runner absolute timings to formal performance evidence.
 
+Issue #364 is closed as a valid negative experiment. At clean measurement
+commit `ac589fb`, both `model` and `float32` passed A1, but both failed A2's
+immutable 1004/1024 shared-reference floor: `model` TP2/4/8 measured
+1009/1004/999 and `float32` measured 1008/1003/1002. Every cell has zero
+substantive disagreements and zero missing observations. A `main@6cff10f` TP8
+control produced raw tokens, logprobs, and reference rows exactly equal to the
+`model` arm, confirming that cell's 999/1024 result was not introduced by the
+experiment. The retained result is `evidence_valid=true`,
+`feature_ready=false`, and `quality_classification=mixed`; the public
+`logits_dtype` option is withdrawn and is not shipped.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -942,6 +953,16 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [amendment] Issue #364 withdraws FP32 final logits after the paired A1/A2 result
+- What: completed the clean-commit `ac589fb` paired experiment. A1 passed for both `model` and `float32`; A2 failed for both against the immutable 1004/1024 shared-reference floor, with `model` TP2/4/8 agreement of 1009/1004/999 and `float32` agreement of 1008/1003/1002. All cells retain zero substantive disagreements and zero missing observations. A `main@6cff10f` TP8 control has raw tokens, logprobs, and reference rows exactly equal to the `model` arm. The retained conclusion is `evidence_valid=true`, `feature_ready=false`, and `quality_classification=mixed`; the public `logits_dtype` construction/deployment option is withdrawn and is not shipped, while the evidence operator and negative result remain.
+- Why: the existing A2 readiness floor must not be weakened or bypassed to ship an option whose paired result is mixed. The exact main-control match distinguishes pre-existing baseline drift from an experiment regression without turning a formal A2 failure into a pass.
+- Refs: issue #364; measurement commit `ac589fb67452173f45f23d9107af313c2b79cc17`; main control `6cff10f9f39c5d114d9a21875ea0c6e460d4cf32`; G2 A1/A2; `docs/design/issue-364-fp32-logits.md`; `bench/results/issue-364-fp32-logits-a1-a2-2026-08-05/`
+
+### 2026-08-05 — [design] FP32 final logits are a build-time opt-in measured against A1/A2
+- What: implemented `logits_dtype="model"|"float32"` for every native real-model construction path. The default retains the exact existing output-head operation; the opt-in produces FP32 at the final dense GEMM before greedy selection, raw-logprob capture, penalties, and filtering while preserving model/KV/weight dtype, tied weight identity, state dictionaries, distributed ownership, and the no-host-sync boundary. Process/rank attestation, health reporting, synthetic BF16 near-ties, sampling boundaries, and CUDA graph/profiler tests bind the option. A narrow same-reference paired A1/A2 matrix, separate from issue #365's generic A/B framework, will retain per-mode and per-TP evidence and report positive, mixed, unchanged, or negative quality results without rewriting the historical formal artifacts. Real-model measurement remains in progress.
+- Why: BF16 final logits are compatible rather than defective, but their roughly 0.125-nat resolution can move near-tied argmax and filtering decisions. Only an opt-in final-GEMM experiment measured against the existing self-agreement and tie-gap gates can determine whether FP32 output improves those decisions without weakening compatibility or correctness.
+- Refs: issue #364; M12 D2/D5/D6; M8 D2; M14 D3; G2 A1/A2; `docs/design/issue-364-fp32-logits.md`
 
 ### 2026-08-05 — [amendment] Gumbel sampling keeps full seed width and a 52-bit open uniform
 - What: retained the complete unsigned 64-bit output of the per-position seed mixer and replaced the 32-bit additive Wang counter with an odd-stride, XOR-keyed SplitMix64 finalizer implemented through signed-int64 wraparound and explicit logical shifts. Both CPU and CUDA now transform 52 random mantissa bits through a float64 midpoint in the strictly open interval `(0, 1)`. The stochastic CPU/CUDA sequence intentionally changes together; greedy, filtering, penalties, grammar support, raw logprobs, replay ownership, and the no-host-sync CUDA result boundary are unchanged. Independent uint64 word oracles, high-bit and known-low32-collision fixtures, 151,936-word uniqueness, adjacent-seed lag correlations, a deterministic 100,000-position three-category distribution, open-endpoint tail checks, CPU/CUDA raw-word and token parity, and a CUDA profiler gate bind the new stream. On SM120 the 151,936-vocabulary helper measured 0.169 → 0.201 ms and the complete filtered sampler 0.580 → 0.618 ms; single-thread CPU full sampling measured about 20% slower. The bounded CPU cost is accepted to preserve the same genuinely 52-bit transform and tail on both execution paths.

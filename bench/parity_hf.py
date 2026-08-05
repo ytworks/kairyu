@@ -775,6 +775,8 @@ def main() -> int:
             "reference_provenance": provenance,
             "code": _code_provenance(),
             "tensor_parallel_size": args.tp,
+            "num_pages": args.num_pages,
+            "page_size": args.page_size,
             "num_prompts": len(reference),
             "positions": args.positions,
             "dtype": "bfloat16" if profile.arch == "cuda" else "float32",
