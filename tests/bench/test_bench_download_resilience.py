@@ -86,6 +86,23 @@ def test_existence_only_readiness_rejects_mutated_data_without_modifying_cache(t
     assert cache.data_path("ds").read_bytes() == data_before
 
 
+def test_referenced_asset_rejects_an_intermediate_symlink(tmp_path):
+    cache = BenchCache(tmp_path / "cache")
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "image.png").write_bytes(b"external-image")
+    assets = cache.assets_dir("ds")
+    assets.mkdir(parents=True)
+    (assets / "linked").symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(OSError, match="missing or unsafe"):
+        cache.write_rows(
+            "ds",
+            [{"id": "1", "image": "assets/linked/image.png"}],
+            {"dataset": "org/ds", "revision": "v1"},
+        )
+
+
 @pytest.mark.parametrize(
     "digest",
     [

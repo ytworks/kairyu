@@ -10,8 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from collections.abc import Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 _ENV_VAR = "KAIRYU_BENCH_CACHE"
 _DEFAULT = "~/.cache/kairyu/benchmarks"
@@ -24,6 +25,79 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _referenced_assets(value: object) -> tuple[str, ...]:
+    references: set[str] = set()
+
+    def visit(item: object) -> None:
+        if isinstance(item, dict):
+            for child in item.values():
+                visit(child)
+            return
+        if isinstance(item, list):
+            for child in item:
+                visit(child)
+            return
+        if not isinstance(item, str) or not item.startswith("assets/"):
+            return
+        relative = PurePosixPath(item)
+        if relative.is_absolute() or ".." in relative.parts or len(relative.parts) < 2:
+            raise ValueError(f"unsafe benchmark asset reference {item!r}")
+        references.add(relative.as_posix())
+
+    visit(value)
+    return tuple(sorted(references))
+
+
+def _asset_identities(adapter_dir: Path, references: Sequence[str]) -> list[dict[str, str]]:
+    identities: list[dict[str, str]] = []
+    for reference in references:
+        relative = PurePosixPath(reference)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or len(relative.parts) < 2
+            or relative.parts[0] != "assets"
+        ):
+            raise ValueError(f"unsafe benchmark asset reference {reference!r}")
+        directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        directory_flags |= getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            directory_fd = os.open(adapter_dir, directory_flags)
+        except OSError as error:
+            raise OSError(f"benchmark asset {reference!r} is missing or unsafe") from error
+        try:
+            for component in relative.parts[:-1]:
+                try:
+                    child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+                except OSError as error:
+                    raise OSError(
+                        f"benchmark asset {reference!r} is missing or unsafe"
+                    ) from error
+                os.close(directory_fd)
+                directory_fd = child_fd
+
+            file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            file_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            try:
+                file_fd = os.open(relative.parts[-1], file_flags, dir_fd=directory_fd)
+            except OSError as error:
+                raise OSError(
+                    f"benchmark asset {reference!r} is missing or unsafe"
+                ) from error
+            try:
+                if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+                    raise OSError(f"benchmark asset {reference!r} is missing or unsafe")
+                digest = hashlib.sha256()
+                while chunk := os.read(file_fd, 1024 * 1024):
+                    digest.update(chunk)
+            finally:
+                os.close(file_fd)
+        finally:
+            os.close(directory_fd)
+        identities.append({"path": reference, "sha256": digest.hexdigest()})
+    return identities
 
 
 def resolve_cache_root(flag: str | None = None) -> Path:
@@ -77,7 +151,14 @@ class BenchCache:
                 return False
             if _sha256_file(self.data_path(adapter)) != expected_digest:
                 return False
-        except (OSError, UnicodeError, json.JSONDecodeError):
+            rows = self.read_rows(adapter)
+            references = _referenced_assets(rows)
+            recorded_assets = manifest.get("assets")
+            if not isinstance(recorded_assets, list):
+                return False
+            if _asset_identities(self.adapter_dir(adapter), references) != recorded_assets:
+                return False
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
             return False
         if dataset is not None and manifest.get("dataset") != dataset:
             return False
@@ -112,7 +193,13 @@ class BenchCache:
             for row in rows:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
         digest = _sha256_file(data_path)
-        full_manifest = {**manifest, "rows": len(rows), "sha256": digest}
+        assets = _asset_identities(self.adapter_dir(adapter), _referenced_assets(rows))
+        full_manifest = {
+            **manifest,
+            "rows": len(rows),
+            "sha256": digest,
+            "assets": assets,
+        }
         self.manifest_path(adapter).write_text(
             json.dumps(full_manifest, indent=2), encoding="utf-8"
         )

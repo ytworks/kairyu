@@ -132,13 +132,9 @@ def parse_harbor_results(data) -> list[ItemResult]:
                 )
             )
         elif entry.get("reward") is not None:
-            items.append(
-                ItemResult(item_id=name, status="completed", score=float(entry["reward"]))
-            )
+            items.append(ItemResult(item_id=name, status="completed", score=float(entry["reward"])))
         else:
-            items.append(
-                ItemResult(item_id=name, status="failed", error="no verdict in trial")
-            )
+            items.append(ItemResult(item_id=name, status="failed", error="no verdict in trial"))
     return items
 
 
@@ -158,6 +154,13 @@ class TerminalBenchAdapter:
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
             "documents no sampling passthrough",
             "score is Harbor's Mean over EVERY trial, errored trials as zero",
+        ),
+        evaluation_distributions=("harbor",),
+        evaluation_executables=("harbor",),
+        history_provenance_complete=False,
+        history_provenance_reason=(
+            "Harbor fetches mutable remote tasks and task container images without "
+            "resolved content identities"
         ),
     )
 

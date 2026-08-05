@@ -171,13 +171,9 @@ def parse_tau_results(data) -> list[ItemResult]:
         reward = entry.get("reward")
         task_id = str(entry.get("task_id", entry.get("id", index)))
         if reward is None:
-            items.append(
-                ItemResult(item_id=task_id, status="failed", error="no reward in entry")
-            )
+            items.append(ItemResult(item_id=task_id, status="failed", error="no reward in entry"))
         else:
-            items.append(
-                ItemResult(item_id=task_id, status="completed", score=float(reward))
-            )
+            items.append(ItemResult(item_id=task_id, status="completed", score=float(reward)))
     return items
 
 
@@ -192,6 +188,13 @@ class TauBenchBankingAdapter:
             f"domain {_DOMAIN}, retrieval config {_RETRIEVAL_CONFIG} "
             "(Fugu enables every knowledge-retrieval tool)",
             "one trial per task by default (--attempts); Fugu reports pass@4",
+        ),
+        evaluation_distributions=("tau2", "tau3"),
+        evaluation_executables=("tau3", "tau2"),
+        history_provenance_complete=False,
+        history_provenance_reason=(
+            "the harness may use mutable TAU2_DATA_DIR content and unresolved system "
+            "sandbox executables"
         ),
     )
 
@@ -211,9 +214,8 @@ class TauBenchBankingAdapter:
             )
         missing_runtime = missing_alltools_runtime()
         if missing_runtime:
-            return (
-                "tau alltools sandbox runtime unavailable; missing: "
-                + ", ".join(missing_runtime)
+            return "tau alltools sandbox runtime unavailable; missing: " + ", ".join(
+                missing_runtime
             )
         if ctx.judge is None:
             return (
@@ -361,9 +363,7 @@ class TauBenchBankingAdapter:
 
         items = parse_tau_results(data)
         metric = (
-            "pass^1 (avg reward)"
-            if ctx.attempts == 1
-            else f"avg reward over {ctx.attempts} trials"
+            "pass^1 (avg reward)" if ctx.attempts == 1 else f"avg reward over {ctx.attempts} trials"
         )
         return summarize_items(
             self.info.name,

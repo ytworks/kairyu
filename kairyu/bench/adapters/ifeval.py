@@ -341,6 +341,7 @@ class IfevalAdapter(GenerativeAdapter):
             ("kairyu.bench._vendor.ifeval", "instructions_registry.py"),
             ("kairyu.bench._vendor.ifeval", "instructions_util.py"),
         ),
+        evaluation_distributions=("immutabledict", "langdetect", "nltk"),
     )
 
     def additional_cache_ready(self, cache: BenchCache) -> bool:

@@ -13,6 +13,7 @@ import os
 import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 if TYPE_CHECKING:
     from kairyu.bench.types import BenchTarget
@@ -28,6 +29,11 @@ def normalize_base_url(base_url: str) -> str:
     root = base_url.strip().rstrip("/")
     if not root:
         raise ValueError("base_url must not be empty")
+    parsed = urlsplit(root)
+    if "@" in parsed.netloc or parsed.username is not None or parsed.password is not None:
+        raise ValueError("base_url must not contain userinfo credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("base_url must not contain a query or fragment")
     return root if root.endswith("/v1") else f"{root}/v1"
 
 
@@ -57,9 +63,7 @@ def parse_target_spec(spec: str, **sampling: object) -> BenchTarget:
     name, base_url, model = (part.strip() for part in parts[:3])
     api_key_env = parts[3].strip() if len(parts) == 4 else None
     if not name or not base_url or not model:
-        raise ValueError(
-            "--target: name, base_url, and model must be non-empty"
-        )
+        raise ValueError("--target: name, base_url, and model must be non-empty")
     try:
         api_key_env = validate_api_key_env(api_key_env)
     except ValueError as error:
@@ -95,9 +99,7 @@ def resolve_api_key_env(
     if value:
         return value
     if required:
-        raise ValueError(
-            f"API key environment variable {api_key_env!r} is not set or is empty"
-        )
+        raise ValueError(f"API key environment variable {api_key_env!r} is not set or is empty")
     return None
 
 

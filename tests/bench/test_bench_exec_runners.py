@@ -101,7 +101,15 @@ class CommandRecorder:
             return subprocess.CompletedProcess(
                 command,
                 0 if self.image_ok else 1,
-                b"[]" if self.image_ok else b"",
+                (
+                    (
+                        '[{"Id":"sha256:'
+                        + _DIGEST
+                        + '","Os":"linux","Architecture":"amd64"}]'
+                    ).encode()
+                    if self.image_ok
+                    else b""
+                ),
                 b"" if self.image_ok else b"no such image",
             )
         if command[:2] == ["docker", "create"]:
@@ -333,6 +341,42 @@ def test_docker_availability_fails_closed_for_binary_daemon_and_image():
     )
     available, detail = runner.availability()
     assert not available and "--pull=never" in detail
+
+
+def test_docker_availability_binds_resolved_image_and_platform_identity():
+    recorder = CommandRecorder()
+    runner = DockerExecutionRunner(
+        _IMAGE,
+        _run_command=recorder,
+        _which=lambda _name: "/usr/bin/docker",
+    )
+
+    assert runner.availability()[0] is True
+    assert {
+        "resolved_image_id": f"sha256:{_DIGEST}",
+        "image_os": "linux",
+        "image_architecture": "amd64",
+        "image_variant": None,
+    }.items() <= runner.metadata().items()
+
+
+def test_docker_availability_rejects_missing_resolved_platform_identity():
+    recorder = CommandRecorder()
+
+    def malformed_inspect(command, **kwargs):
+        if command[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, b"[]", b"")
+        return recorder(command, **kwargs)
+
+    runner = DockerExecutionRunner(
+        _IMAGE,
+        _run_command=malformed_inspect,
+        _which=lambda _name: "/usr/bin/docker",
+    )
+
+    available, detail = runner.availability()
+    assert available is False
+    assert "identity unavailable" in detail
 
 
 def test_docker_runner_builds_hardened_argv_and_read_only_input_bundle():

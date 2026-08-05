@@ -150,9 +150,7 @@ class JudgeEndpointConfig(SamplingOptions):
     @classmethod
     def _validate_optional_model(cls, value: str | None) -> str | None:
         if value is not None and (not value.strip() or value != value.strip()):
-            raise ValueError(
-                "judge model must be non-empty and have no surrounding whitespace"
-            )
+            raise ValueError("judge model must be non-empty and have no surrounding whitespace")
         return value
 
     @field_validator("api_key_env")
@@ -190,8 +188,7 @@ class JudgeConfig(JudgeEndpointConfig):
     def _validate_panel(self) -> JudgeConfig:
         if self.additional_judges and not self.enabled:
             raise ValueError(
-                "judge.base_url and judge.model are required when "
-                "additional_judges are configured"
+                "judge.base_url and judge.model are required when additional_judges are configured"
             )
         identities: list[tuple[str, str]] = []
         primary = self.resolved_identity()
@@ -200,14 +197,11 @@ class JudgeConfig(JudgeEndpointConfig):
         for member in self.additional_judges:
             identity = member.resolved_identity()
             if identity is None:
-                raise ValueError(
-                    "each additional judge requires both base_url and model"
-                )
+                raise ValueError("each additional judge requires both base_url and model")
             identities.append(identity)
         if len(identities) != len(set(identities)):
             raise ValueError(
-                "judge panel members must use distinct resolved endpoint/model "
-                "identities"
+                "judge panel members must use distinct resolved endpoint/model identities"
             )
         return self
 
@@ -229,9 +223,7 @@ class JudgeConfig(JudgeEndpointConfig):
         return (primary, *self.additional_judges)
 
 
-_IMMUTABLE_IMAGE_RE = re.compile(
-    r"(?:sha256:[0-9a-f]{64}|[^\s@]+@sha256:[0-9a-f]{64})"
-)
+_IMMUTABLE_IMAGE_RE = re.compile(r"(?:sha256:[0-9a-f]{64}|[^\s@]+@sha256:[0-9a-f]{64})")
 
 
 class ExecutionConfig(BaseModel):
@@ -270,9 +262,7 @@ class ExecutionConfig(BaseModel):
                 256,
                 "never",
             ):
-                raise ValueError(
-                    "Docker execution resource settings require runner='docker'"
-                )
+                raise ValueError("Docker execution resource settings require runner='docker'")
             return self
         if self.image is None:
             raise ValueError("execution.image is required for runner='docker'")
@@ -282,9 +272,7 @@ class ExecutionConfig(BaseModel):
                 "or repository@sha256:<64 hex> digest"
             )
         repository = self.image.split("@", 1)[0]
-        if "@" in self.image and (
-            repository.startswith("-") or repository.endswith(":")
-        ):
+        if "@" in self.image and (repository.startswith("-") or repository.endswith(":")):
             raise ValueError("execution.image repository is invalid")
         return self
 
@@ -417,9 +405,7 @@ class ContinuationLogLikelihood(BaseModel):
     @field_validator("text_offsets", mode="before")
     @classmethod
     def _validate_text_offsets(cls, value):
-        if not isinstance(value, (list, tuple)) or any(
-            type(offset) is not int for offset in value
-        ):
+        if not isinstance(value, (list, tuple)) or any(type(offset) is not int for offset in value):
             raise ValueError("text_offsets must contain integers")
         return value
 
@@ -476,9 +462,7 @@ class LogLikelihoodResponse(BaseModel):
             expected = candidate.sum_logprob
             if self.reduction == "mean_token":
                 expected /= len(candidate.token_ids)
-            if not math.isclose(
-                candidate.score, expected, rel_tol=0.0, abs_tol=1e-12
-            ):
+            if not math.isclose(candidate.score, expected, rel_tol=0.0, abs_tol=1e-12):
                 raise ValueError("candidate score does not match the declared reduction")
         return self
 
@@ -495,7 +479,7 @@ ItemStatus = Literal["completed", "failed", "unjudged", "skipped"]
 
 
 class ItemResult(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
     item_id: str
     status: ItemStatus
@@ -508,19 +492,51 @@ class ItemResult(BaseModel):
     judge: dict | None = None
     latency_s: float | None = None
 
+    @field_validator("score", mode="before")
+    @classmethod
+    def _validate_score(cls, value):
+        if value is None:
+            return None
+        if type(value) not in (int, float):
+            raise ValueError("item score must be a number within [0, 1]")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("item score must be finite within [0, 1]")
+        if not 0 <= value <= 1:
+            raise ValueError("item score must be within [0, 1]")
+        return value
+
+    @field_validator("latency_s", mode="before")
+    @classmethod
+    def _validate_latency(cls, value):
+        if value is None:
+            return None
+        if type(value) not in (int, float):
+            raise ValueError("item latency_s must be a finite non-negative number")
+        if (isinstance(value, float) and not math.isfinite(value)) or value < 0:
+            raise ValueError("item latency_s must be a finite non-negative number")
+        return value
+
 
 PairStatus = Literal["completed", "partial", "skipped", "failed"]
+CrossRunPolicy = Literal[
+    "allowed",
+    "withheld_unresolved_runtime",
+    "withheld_unpinned_execution",
+]
 
 
 class PairResult(BaseModel):
     """One scoreboard cell: one benchmark run against one target."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
     schema_version: int = SCHEMA_VERSION
     benchmark: str
     target: str
     run_fingerprint: str | None = None
+    # Exact local harness source observed for this evidence.  Cross-commit
+    # history accepts a pair only when this matches the clean run attestation.
+    source_identity: dict | None = None
     status: PairStatus
     reason: str | None = None  # "docker unavailable", "dataset unavailable", ...
     # {"score":…, "n_total":…, "n_scored":…, "n_unjudged":…, "n_skipped":…, "n_failed":…}
@@ -535,13 +551,243 @@ class PairResult(BaseModel):
     # benchmark-name allow list.
     comparable: bool = True
     incomparable_reasons: tuple[str, ...] = ()
+    # Separate from published-score comparability. An unresolved harness/data
+    # runtime may remain visible in a complete Fugu scoreboard, but can never
+    # produce a cross-commit regression delta even when both runs share it.
+    cross_run_policy: CrossRunPolicy = "allowed"
+    cross_run_reason: str | None = None
     started_at: str = ""
     finished_at: str = ""
 
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _validate_schema_version(cls, value):
+        if type(value) is not int or value != SCHEMA_VERSION:
+            raise ValueError(f"schema_version must be {SCHEMA_VERSION}")
+        return value
+
+    @field_validator("comparable", mode="before")
+    @classmethod
+    def _validate_comparable(cls, value):
+        if type(value) is not bool:
+            raise ValueError("comparable must be a boolean")
+        return value
+
+    @field_validator("metrics", mode="before")
+    @classmethod
+    def _preserve_metric_types(cls, value):
+        """Reject coercions that could turn malformed evidence into a score."""
+        if not isinstance(value, dict):
+            raise ValueError("metrics must be an object")
+        for name, metric in value.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("metric names must be non-empty strings")
+            if metric is None:
+                continue
+            if type(metric) not in (int, float):
+                raise ValueError(f"metrics.{name} must be a number or null")
+            if isinstance(metric, float) and not math.isfinite(metric):
+                raise ValueError(f"metrics.{name} must be finite")
+        return value
+
     @property
     def score(self) -> float | None:
+        """Return a bounded primary score without trusting stored evidence.
+
+        ``metrics`` is persisted adapter output and old artifacts may predate
+        stricter runner checks.  In particular, converting an arbitrarily large
+        JSON integer directly to ``float`` raises ``OverflowError``.  Reporters
+        and resume progress are observability paths: malformed evidence must not
+        be able to terminate the run from either one.
+        """
+        if not isinstance(self.metrics, dict):
+            return None
         value = self.metrics.get("score")
-        return float(value) if value is not None else None
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        # Compare while the value is still an integer.  Python can compare an
+        # arbitrary-size integer safely even when it cannot convert it to float.
+        if not 0 <= value <= 1:
+            return None
+        try:
+            score = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return None
+        return score if math.isfinite(score) else None
+
+
+_PAIR_COUNT_METRICS = frozenset(
+    {"n_total", "n_scored", "n_unjudged", "n_skipped", "n_failed"}
+)
+_MAX_SAFE_INTEGER = (1 << 53) - 1
+
+
+def _json_evidence_error(
+    value: object,
+    *,
+    path: str,
+    require_safe_integers: bool,
+    active: set[int] | None = None,
+) -> str | None:
+    """Validate the raw tree without Pydantic's lossy JSON coercions."""
+    if value is None or type(value) in (str, bool):
+        return None
+    if type(value) is int:
+        if require_safe_integers and abs(value) > _MAX_SAFE_INTEGER:
+            return f"{path} must be a safe integer"
+        return None
+    if type(value) is float:
+        return None if math.isfinite(value) else f"{path} must be finite"
+
+    active = set() if active is None else active
+    identity = id(value)
+    if identity in active:
+        return f"{path} contains a reference cycle"
+    active.add(identity)
+    try:
+        if isinstance(value, BaseModel):
+            for name in type(value).model_fields:
+                error = _json_evidence_error(
+                    getattr(value, name),
+                    path=f"{path}.{name}",
+                    require_safe_integers=require_safe_integers,
+                    active=active,
+                )
+                if error is not None:
+                    return error
+            return None
+        if type(value) in (list, tuple):
+            for index, item in enumerate(value):
+                error = _json_evidence_error(
+                    item,
+                    path=f"{path}[{index}]",
+                    require_safe_integers=require_safe_integers,
+                    active=active,
+                )
+                if error is not None:
+                    return error
+            return None
+        if type(value) is dict:
+            for name, item in value.items():
+                if not isinstance(name, str):
+                    return f"{path} contains a non-string object key"
+                error = _json_evidence_error(
+                    item,
+                    path=f"{path}.{name}",
+                    require_safe_integers=require_safe_integers,
+                    active=active,
+                )
+                if error is not None:
+                    return error
+            return None
+        return f"{path} contains non-JSON value {type(value).__name__}"
+    finally:
+        active.remove(identity)
+
+
+def pair_result_evidence_error(
+    value: object,
+    *,
+    expected_benchmark: str | None = None,
+    expected_target: str | None = None,
+    require_history_safe_counts: bool = False,
+) -> str | None:
+    """Explain why adapter/stored pair evidence is unsafe, or return ``None``.
+
+    The Pydantic schema deliberately remains able to load legacy artifacts and
+    adversarial fixtures.  This semantic boundary is used by the runner before
+    progress, persistence, or history, and by aggregation before rendering.
+    """
+    if not isinstance(value, PairResult):
+        return f"expected PairResult, got {type(value).__name__}"
+    try:
+        PairResult.model_validate(value)
+    except (TypeError, ValueError):
+        return "pair does not match the strict PairResult schema"
+    if expected_benchmark is not None and value.benchmark != expected_benchmark:
+        return "benchmark identity does not match the scheduled adapter"
+    if expected_target is not None and value.target != expected_target:
+        return "target identity does not match the scheduled target"
+    if not isinstance(value.metrics, dict):
+        return "metrics must be an object"
+
+    for name, metric in value.metrics.items():
+        if not isinstance(name, str) or not name:
+            return "metric names must be non-empty strings"
+        if metric is None:
+            continue
+        if isinstance(metric, bool) or not isinstance(metric, int | float):
+            return f"metrics.{name} must be a number or null"
+        if isinstance(metric, float) and not math.isfinite(metric):
+            return f"metrics.{name} must be finite"
+        if (
+            type(metric) is int
+            and name != "score"
+            and name not in _PAIR_COUNT_METRICS
+            and abs(metric) > _MAX_SAFE_INTEGER
+        ):
+            return f"metrics.{name} must be a safe integer"
+
+    raw_score = value.metrics.get("score")
+    if raw_score is not None and value.score is None:
+        return "metrics.score must be finite and within [0, 1]"
+
+    counts: dict[str, int] = {}
+    for name in _PAIR_COUNT_METRICS:
+        raw_count = value.metrics.get(name)
+        if raw_count is None:
+            continue
+        if type(raw_count) is not int or raw_count < 0:
+            return f"metrics.{name} must be a non-negative integer or null"
+        if require_history_safe_counts and raw_count > _MAX_SAFE_INTEGER:
+            return f"metrics.{name} must be a non-negative safe integer for history"
+        counts[name] = raw_count
+    total = counts.get("n_total")
+    scored = counts.get("n_scored")
+    if total is not None and scored is not None and scored > total:
+        return "metrics.n_scored must not exceed metrics.n_total"
+    if not isinstance(value.items, tuple) or any(
+        not isinstance(item, ItemResult) for item in value.items
+    ):
+        return "items must contain ItemResult evidence"
+    for index, item in enumerate(value.items):
+        raw_item_score = item.score
+        if raw_item_score is not None:
+            if (
+                isinstance(raw_item_score, bool)
+                or not isinstance(raw_item_score, int | float)
+                or (isinstance(raw_item_score, float) and not math.isfinite(raw_item_score))
+                or not 0 <= raw_item_score <= 1
+            ):
+                return f"items[{index}].score must be finite and within [0, 1]"
+        latency = item.latency_s
+        if latency is not None:
+            if (
+                isinstance(latency, bool)
+                or not isinstance(latency, int | float)
+                or (isinstance(latency, float) and not math.isfinite(latency))
+                or latency < 0
+            ):
+                return f"items[{index}].latency_s must be finite and non-negative"
+    tree_error = _json_evidence_error(
+        value,
+        path="pair",
+        require_safe_integers=require_history_safe_counts,
+    )
+    if tree_error is not None:
+        return tree_error
+    try:
+        serialized = value.model_dump_json()
+        if require_history_safe_counts:
+            # History hashes canonical Python JSON after the pair is saved.  A
+            # JSON integer beyond the interpreter's digit limit, including one
+            # nested in methodology/item evidence, must be quarantined here.
+            json.loads(serialized)
+    except (OverflowError, RecursionError, TypeError, ValueError):
+        return "pair evidence is not safely JSON serializable"
+    return None
 
 
 class DownloadReport(BaseModel):
@@ -556,9 +802,7 @@ class BenchExtrasMissing(RuntimeError):
     """Raised when an optional dependency group is required but not installed."""
 
     def __init__(self, extra: str, purpose: str) -> None:
-        super().__init__(
-            f"{purpose} requires the [{extra}] extra: pip install 'kairyu[{extra}]'"
-        )
+        super().__init__(f"{purpose} requires the [{extra}] extra: pip install 'kairyu[{extra}]'")
         self.extra = extra
 
 

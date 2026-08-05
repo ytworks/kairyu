@@ -18,10 +18,31 @@ from kairyu.bench.types import (
     BenchTarget,
     JudgeConfig,
     PairResult,
+    pair_result_evidence_error,
 )
 
 _WILSON_CONFIDENCE = 0.95
 _WILSON_Z = NormalDist().inv_cdf(0.5 + _WILSON_CONFIDENCE / 2)
+
+
+def _scoreboard_safe_pair(pair: PairResult) -> PairResult:
+    """Turn malformed pair metrics into a visible failed cell.
+
+    Reports can be rebuilt directly from legacy or manually repaired pair
+    artifacts, bypassing ``SuiteRunner``.  Keep aggregation total and preserve
+    the cell identity/policy while withholding evidence that cannot be scored.
+    """
+    error = pair_result_evidence_error(pair)
+    if error is None:
+        return pair
+    return pair.model_copy(
+        update={
+            "status": "failed",
+            "reason": f"invalid pair evidence: {error}",
+            "metrics": {"score": None, "n_total": 0},
+            "items": (),
+        }
+    )
 
 
 def _resolved_identity(base_url: str, model: str) -> tuple[str, str]:
@@ -40,6 +61,16 @@ def _whole_count(value: object) -> int | None:
     return int(value)
 
 
+def _finite_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _wilson_bounds(successes: int, trials: int) -> tuple[float, float] | None:
     """Return the two-sided 95% Wilson score interval for binary trials."""
     if trials <= 0 or successes < 0 or successes > trials:
@@ -50,18 +81,13 @@ def _wilson_bounds(successes: int, trials: int) -> tuple[float, float] | None:
     center = (proportion + z_squared / (2 * trials)) / denominator
     margin = (
         _WILSON_Z
-        * math.sqrt(
-            proportion * (1 - proportion) / trials
-            + z_squared / (4 * trials**2)
-        )
+        * math.sqrt(proportion * (1 - proportion) / trials + z_squared / (4 * trials**2))
         / denominator
     )
     return max(0.0, center - margin), min(1.0, center + margin)
 
 
-def _binary_confidence_interval(
-    pair: PairResult, *, declared_binary: bool
-) -> dict | None:
+def _binary_confidence_interval(pair: PairResult, *, declared_binary: bool) -> dict | None:
     """Build a Wilson interval only when item evidence proves binomial data."""
     if not declared_binary or pair.status != "completed":
         return None
@@ -69,9 +95,7 @@ def _binary_confidence_interval(
     if score is None or not math.isfinite(score) or not 0.0 <= score <= 1.0:
         return None
     scored = [
-        item.score
-        for item in pair.items
-        if item.status == "completed" and item.score is not None
+        item.score for item in pair.items if item.status == "completed" and item.score is not None
     ]
     if not scored or any(value not in (0.0, 1.0) for value in scored):
         return None
@@ -102,6 +126,7 @@ def build_scoreboard(
     suite: str,
     config: dict,
     environment: dict,
+    fingerprint: str | None = None,
     pairs: list[PairResult],
     targets: list[str],
     target_configs: Sequence[BenchTarget] | None = None,
@@ -110,14 +135,11 @@ def build_scoreboard(
 ) -> dict:
     definition = suite_info(suite)
     adapters = all_adapters()
-    display_names = {
-        name: adapter.info.display_name for name, adapter in adapters.items()
-    }
+    display_names = {name: adapter.info.display_name for name, adapter in adapters.items()}
+    pairs = [_scoreboard_safe_pair(pair) for pair in pairs]
     by_key = {(pair.benchmark, pair.target): pair for pair in pairs}
     benchmarks = [
-        name
-        for name in definition.row_order
-        if any(pair.benchmark == name for pair in pairs)
+        name for name in definition.row_order if any(pair.benchmark == name for pair in pairs)
     ]
 
     footnotes: list[str] = []
@@ -130,12 +152,9 @@ def build_scoreboard(
     # Self-judging is an endpoint/model identity question, never a display-label
     # comparison. Legacy artifacts without enough identity data fail closed as
     # "independence unknown" instead of being declared independent.
-    configured_by_label = {
-        target.label(): target for target in (target_configs or ())
-    }
+    configured_by_label = {target.label(): target for target in (target_configs or ())}
     judge_requested = judge_identity_incomplete or (
-        judge is not None
-        and (judge.base_url is not None or judge.model is not None)
+        judge is not None and (judge.base_url is not None or judge.model is not None)
     )
     judge_identities = (
         [
@@ -161,8 +180,7 @@ def build_scoreboard(
     cells: dict[str, dict[str, dict]] = {}
     for benchmark in benchmarks:
         uses_judge_template = (
-            benchmark in adapters
-            and adapters[benchmark].info.judge_template_name is not None
+            benchmark in adapters and adapters[benchmark].info.judge_template_name is not None
         )
         cells[benchmark] = {}
         for target in targets:
@@ -174,6 +192,10 @@ def build_scoreboard(
                     "n": 0,
                     "confidence_interval": None,
                     "reason": "not run",
+                    "comparable": False,
+                    "incomparable_reasons": ["pair was not run"],
+                    "cross_run_policy": "allowed",
+                    "cross_run_reason": None,
                     "footnotes": [footnote(f"{benchmark}/{target}: not run")],
                 }
                 continue
@@ -205,8 +227,7 @@ def build_scoreboard(
                 "confidence_interval": _binary_confidence_interval(
                     pair,
                     declared_binary=(
-                        benchmark in adapters
-                        and adapters[benchmark].info.binary_outcomes
+                        benchmark in adapters and adapters[benchmark].info.binary_outcomes
                     ),
                 ),
                 "reason": pair.reason,
@@ -214,6 +235,8 @@ def build_scoreboard(
                 # report never has to infer it from a benchmark-name allow list
                 "comparable": pair.comparable,
                 "incomparable_reasons": list(pair.incomparable_reasons),
+                "cross_run_policy": pair.cross_run_policy,
+                "cross_run_reason": pair.cross_run_reason,
                 "footnotes": notes,
             }
 
@@ -221,6 +244,7 @@ def build_scoreboard(
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
         "suite": suite,
+        "fingerprint": fingerprint,
         "environment": environment,
         "config": config,
         "benchmarks": benchmarks,
@@ -242,31 +266,29 @@ def _stored_wilson_bounds(
     confidence = value.get("confidence")
     lower = value.get("lower")
     upper = value.get("upper")
-    if (
-        isinstance(confidence, bool)
-        or not isinstance(confidence, int | float)
-        or isinstance(lower, bool)
-        or not isinstance(lower, int | float)
-        or isinstance(upper, bool)
-        or not isinstance(upper, int | float)
-        or not all(math.isfinite(number) for number in (confidence, lower, upper))
-        or not math.isclose(
-            float(confidence), _WILSON_CONFIDENCE, rel_tol=0.0, abs_tol=1e-12
-        )
+    confidence_number = _finite_number(confidence)
+    lower_number = _finite_number(lower)
+    upper_number = _finite_number(upper)
+    if confidence_number is None or lower_number is None or upper_number is None:
+        return None
+    if not math.isclose(
+        confidence_number,
+        _WILSON_CONFIDENCE,
+        rel_tol=0.0,
+        abs_tol=1e-12,
     ):
         return None
     trials = _whole_count(value.get("trials"))
     successes = _whole_count(value.get("successes"))
+    expected_score_number = _finite_number(expected_score)
     if (
         trials is None
         or trials == 0
         or trials != expected_trials
         or successes is None
-        or isinstance(expected_score, bool)
-        or not isinstance(expected_score, int | float)
-        or not math.isfinite(expected_score)
+        or expected_score_number is None
         or not math.isclose(
-            float(expected_score),
+            expected_score_number,
             successes / trials,
             rel_tol=0.0,
             abs_tol=1e-12,
@@ -276,10 +298,10 @@ def _stored_wilson_bounds(
     calculated = _wilson_bounds(successes, trials)
     if calculated is None or not all(
         math.isclose(stored, expected, rel_tol=0.0, abs_tol=1e-12)
-        for stored, expected in zip((float(lower), float(upper)), calculated, strict=True)
+        for stored, expected in zip((lower_number, upper_number), calculated, strict=True)
     ):
         return None
-    return float(lower), float(upper)
+    return lower_number, upper_number
 
 
 def _cell_text(cell: dict) -> str:
@@ -326,17 +348,18 @@ def run_banner(scoreboard: dict) -> list[str]:
             shared = reasons if shared is None else [r for r in shared if r in reasons]
     if not shared:
         return []
-    return ["> **This run is not a full-suite measurement.**", ">"] + [
-        f"> - {reason}" for reason in shared
-    ] + [""]
+    return (
+        ["> **This run is not a full-suite measurement.**", ">"]
+        + [f"> - {reason}" for reason in shared]
+        + [""]
+    )
 
 
 def render_markdown(scoreboard: dict) -> str:
     targets = scoreboard["targets"]
     definition = suite_info(scoreboard.get("suite", "fugu"))
     lines = [
-        f"# {definition.display_name} benchmark scoreboard — run "
-        f"{scoreboard['run_id']}",
+        f"# {definition.display_name} benchmark scoreboard — run {scoreboard['run_id']}",
         "",
         *run_banner(scoreboard),
         "Scores are percentages; brackets are 95% Wilson CIs for binary item "
@@ -348,9 +371,7 @@ def render_markdown(scoreboard: dict) -> str:
     ]
     for benchmark in scoreboard["benchmarks"]:
         display = scoreboard["display_names"].get(benchmark, benchmark)
-        row = [display] + [
-            _cell_text(scoreboard["cells"][benchmark][target]) for target in targets
-        ]
+        row = [display] + [_cell_text(scoreboard["cells"][benchmark][target]) for target in targets]
         lines.append("| " + " | ".join(row) + " |")
     if scoreboard["footnotes"]:
         lines.append("")
