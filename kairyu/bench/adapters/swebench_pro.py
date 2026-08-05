@@ -64,10 +64,7 @@ def parse_swebench_report(report: dict) -> tuple[list[ItemResult], int]:
     items = (
         [ItemResult(item_id=str(i), status="completed", score=1.0) for i in resolved]
         + [ItemResult(item_id=str(i), status="completed", score=0.0) for i in unresolved]
-        + [
-            ItemResult(item_id=str(i), status="failed", error="evaluation error")
-            for i in errors
-        ]
+        + [ItemResult(item_id=str(i), status="failed", error="evaluation error") for i in errors]
     )
     total = report.get("total_instances") or len(items)
     return items, int(total)
@@ -88,6 +85,13 @@ class SweBenchProAdapter:
             "the target's named sampling fields are forwarded as "
             "model.model_kwargs.*; vendor extra_body has no harness equivalent "
             "and is NOT forwarded",
+        ),
+        evaluation_distributions=("mini-swe-agent", "swebench"),
+        evaluation_executables=("mini-extra",),
+        history_provenance_complete=False,
+        history_provenance_reason=(
+            "the harness fetches a mutable remote dataset and task container images "
+            "without resolved content identities"
         ),
     )
 

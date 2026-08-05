@@ -11,14 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.metadata
+import json
 import math
 import random
 import re
+import shutil
+import sysconfig
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import httpx
@@ -83,6 +88,17 @@ class AdapterInfo:
     # semantics. Their content digests enter the run fingerprint so a resumed
     # run can never reuse pair evidence produced by different evaluator code.
     evaluation_resources: tuple[tuple[str, str], ...] = ()
+    # Third-party harness distributions whose resolved implementation produces
+    # the score.  Their version and installed content enter the fingerprint.
+    evaluation_distributions: tuple[str, ...] = ()
+    # PATH entry points that launch an external harness.  History requires each
+    # resolved executable to be owned by a declared distribution.
+    evaluation_executables: tuple[str, ...] = ()
+    # False when runtime inputs cannot yet be resolved to immutable content
+    # (for example a harness-managed remote task/image set). The run and cell
+    # remain in history, but that cell is structurally withheld from deltas.
+    history_provenance_complete: bool = True
+    history_provenance_reason: str = ""
 
     def required_judge_template_name(self) -> str:
         if self.judge_template_name is None:
@@ -170,22 +186,172 @@ def _read_evaluation_resource(package: str, resource: str) -> bytes:
     return resources.files(package).joinpath(resource).read_bytes()
 
 
-def evaluation_protocol_identity(info: AdapterInfo) -> dict | None:
-    """Return content identities for an adapter's score-bearing implementation."""
+def _evaluation_distribution_identity(name: str) -> dict:
+    """Return a path-free content identity for one installed harness."""
 
-    if not info.evaluation_resources:
-        return None
+    try:
+        distribution = importlib.metadata.distribution(name)
+    except importlib.metadata.PackageNotFoundError:
+        return {"name": name, "installed": False}
+    try:
+        files = distribution.files
+        if files is None:
+            raise OSError("distribution has no installed-file manifest")
+        digest = hashlib.sha256()
+        digest.update(b"kairyu-bench-harness-distribution-v1\0")
+        count = 0
+        for relative in sorted(files, key=str):
+            relative_name = str(relative).replace("\\", "/")
+            if "__pycache__" in relative_name or relative_name.endswith((".pyc", ".pyo")):
+                continue
+            basename = relative_name.rsplit("/", 1)[-1]
+            if relative_name.endswith(".egg-link") or (
+                relative_name.endswith(".pth")
+                and basename.startswith(("__editable__.", "_editable_impl_"))
+            ):
+                raise OSError("editable distribution source is not content-bound")
+            path = distribution.locate_file(relative)
+            if not path.is_file():
+                continue
+            payload = path.read_bytes()
+            if relative_name.endswith(".dist-info/direct_url.json"):
+                try:
+                    direct_url = json.loads(payload.decode("utf-8", errors="strict"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise OSError("distribution has malformed direct_url metadata") from error
+                directory = direct_url.get("dir_info") if isinstance(direct_url, dict) else None
+                if isinstance(directory, dict) and directory.get("editable") is True:
+                    raise OSError("editable distribution source is not content-bound")
+            encoded_name = relative_name.encode("utf-8", errors="strict")
+            digest.update(len(encoded_name).to_bytes(8, "big"))
+            digest.update(encoded_name)
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+            count += 1
+        if count == 0:
+            raise OSError("distribution has no readable installed files")
+    except (OSError, UnicodeError) as error:
+        return {
+            "name": name,
+            "installed": True,
+            "version": distribution.version,
+            "content_verified": False,
+            "detail": type(error).__name__,
+        }
+    return {
+        "name": name,
+        "installed": True,
+        "version": distribution.version,
+        "content_verified": True,
+        "file_count": count,
+        "content_sha256": digest.hexdigest(),
+    }
+
+
+def _evaluation_executable_identity(name: str, distributions: tuple[str, ...]) -> dict:
+    resolved_text = shutil.which(name)
+    if resolved_text is None:
+        return {"name": name, "found": False}
+    try:
+        resolved = Path(resolved_text).resolve(strict=True)
+        payload = resolved.read_bytes()
+    except OSError as error:
+        return {
+            "name": name,
+            "found": True,
+            "content_verified": False,
+            "detail": type(error).__name__,
+        }
+
+    owners: list[str] = []
+    expected_script = Path(sysconfig.get_path("scripts")) / name
+    for distribution_name in distributions:
+        try:
+            distribution = importlib.metadata.distribution(distribution_name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        declares_script = any(
+            entry.group == "console_scripts" and entry.name == name
+            for entry in distribution.entry_points
+        )
+        if not declares_script:
+            continue
+        try:
+            if expected_script.resolve(strict=True) == resolved:
+                owners.append(distribution_name)
+        except OSError:
+            continue
+    return {
+        "name": name,
+        "found": True,
+        "content_verified": True,
+        "content_sha256": hashlib.sha256(payload).hexdigest(),
+        "owned_by_distribution": owners,
+    }
+
+
+def evaluation_protocol_identity(adapter: BenchmarkAdapter) -> dict:
+    """Bind every built-in adapter to the code that can change its score.
+
+    ``AdapterInfo.evaluation_resources`` remains the escape hatch for vendored
+    checkers and other non-adapter resources.  The adapter implementation and
+    shared request/scoring machinery are discovered automatically, so adding a
+    new benchmark cannot silently omit its prompt/parser/scorer module from the
+    cross-commit methodology fingerprint.
+    """
+
+    info = adapter.info
+    resources: list[tuple[str, str]] = []
+    for implementation in type(adapter).__mro__:
+        module = implementation.__module__
+        if not module.startswith("kairyu.bench.adapters."):
+            continue
+        package, _, module_name = module.rpartition(".")
+        resources.append((package, f"{module_name}.py"))
+
+    resources.extend(
+        (
+            ("kairyu.bench.adapters", "base.py"),
+            ("kairyu.bench", "aggregate.py"),
+            ("kairyu.bench", "cache.py"),
+            ("kairyu.bench", "runner.py"),
+            ("kairyu.bench", "types.py"),
+            ("kairyu.bench", "targets.py"),
+        )
+    )
+    if info.needs_execution:
+        resources.extend(
+            (
+                ("kairyu.bench", "execution.py"),
+                ("kairyu.bench", "sandbox.py"),
+            )
+        )
+    if info.judge_template_name is not None:
+        resources.extend(
+            (
+                ("kairyu.bench", "judge.py"),
+                ("kairyu.bench", "judge_prompts.py"),
+            )
+        )
+    resources.extend(info.evaluation_resources)
+
+    ordered_resources = tuple(dict.fromkeys(resources))
     return {
         "resources": [
             {
                 "package": package,
                 "resource": resource,
-                "sha256": hashlib.sha256(
-                    _read_evaluation_resource(package, resource)
-                ).hexdigest(),
+                "sha256": hashlib.sha256(_read_evaluation_resource(package, resource)).hexdigest(),
             }
-            for package, resource in info.evaluation_resources
-        ]
+            for package, resource in ordered_resources
+        ],
+        "distributions": [
+            _evaluation_distribution_identity(name) for name in info.evaluation_distributions
+        ],
+        "executables": [
+            _evaluation_executable_identity(name, info.evaluation_distributions)
+            for name in info.evaluation_executables
+        ],
     }
 
 
@@ -223,9 +389,7 @@ def estimate_tokens(text: str) -> int:
 def mcq_prompt(question: str, choices: list[str]) -> str:
     letters = [chr(ord("A") + i) for i in range(len(choices))]
     lines = [question, "", "Choices:"]
-    lines += [
-        f"{letter}) {choice}" for letter, choice in zip(letters, choices, strict=True)
-    ]
+    lines += [f"{letter}) {choice}" for letter, choice in zip(letters, choices, strict=True)]
     lines += [
         "",
         "Answer with the single letter of the correct choice. "
@@ -312,9 +476,7 @@ async def call_chat(
     attempt = 0
     while True:
         try:
-            response = await client.post(
-                url, json=body, headers=headers, timeout=timeout_s
-            )
+            response = await client.post(url, json=body, headers=headers, timeout=timeout_s)
         except httpx.HTTPError as error:
             if attempt >= retries:
                 raise RequestFailed(0, f"transport error: {error}") from error
@@ -333,9 +495,7 @@ async def call_chat(
 
 
 def _invalid_loglikelihood_response(message: str) -> RequestFailed:
-    return LogLikelihoodSchemaError(
-        200, f"invalid loglikelihood response: {message}"
-    )
+    return LogLikelihoodSchemaError(200, f"invalid loglikelihood response: {message}")
 
 
 def _parse_loglikelihood_choice(
@@ -383,10 +543,7 @@ def _parse_loglikelihood_choice(
     if (
         not isinstance(prompt_token_ids, list)
         or not prompt_token_ids
-        or any(
-            type(token_id) is not int or token_id < 0
-            for token_id in prompt_token_ids
-        )
+        or any(type(token_id) is not int or token_id < 0 for token_id in prompt_token_ids)
     ):
         raise _invalid_loglikelihood_response(
             "prompt_token_ids must be a non-empty list of non-negative integers"
@@ -414,9 +571,7 @@ def _parse_loglikelihood_choice(
     parsed_logprobs: list[float] = []
     for value in token_logprobs:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise _invalid_loglikelihood_response(
-                "token_logprobs must contain only finite numbers"
-            )
+            raise _invalid_loglikelihood_response("token_logprobs must contain only finite numbers")
         parsed = float(value)
         if not math.isfinite(parsed) or parsed > 0.0:
             raise _invalid_loglikelihood_response(
@@ -429,16 +584,13 @@ def _parse_loglikelihood_choice(
         or any(type(offset) is not int for offset in text_offsets)
     ):
         raise _invalid_loglikelihood_response(
-            "logprobs.text_offset must be an integer list matching "
-            "continuation_token_ids"
+            "logprobs.text_offset must be an integer list matching continuation_token_ids"
         )
 
     total = sum(parsed_logprobs)
     score = total if reduction == "sum" else total / length
     if not math.isfinite(total) or not math.isfinite(score):
-        raise _invalid_loglikelihood_response(
-            "reduced token_logprobs must remain finite"
-        )
+        raise _invalid_loglikelihood_response("reduced token_logprobs must remain finite")
     return (
         ContinuationLogLikelihood(
             continuation=continuation,
@@ -487,9 +639,7 @@ async def call_loglikelihood(
         attempt = 0
         while True:
             try:
-                response = await client.post(
-                    url, json=body, headers=headers, timeout=timeout_s
-                )
+                response = await client.post(url, json=body, headers=headers, timeout=timeout_s)
             except httpx.HTTPError as error:
                 if attempt >= retries:
                     raise RequestFailed(0, f"transport error: {error}") from error
@@ -724,11 +874,7 @@ def summarize_items(
     by_status = {status: 0 for status in ("completed", "failed", "unjudged", "skipped")}
     for item in items:
         by_status[item.status] += 1
-    scored = [
-        item.score
-        for item in items
-        if item.status == "completed" and item.score is not None
-    ]
+    scored = [item.score for item in items if item.status == "completed" and item.score is not None]
 
     if score_fn is not None:
         score = score_fn(items)
@@ -849,11 +995,7 @@ class DatasetAdapter(ABC):
         return base
 
     def _incomparable_reasons(self) -> tuple[str, ...]:
-        return (
-            (self.info.incomparable_reason,)
-            if self.info.incomparable_reason
-            else ()
-        )
+        return (self.info.incomparable_reason,) if self.info.incomparable_reason else ()
 
     def _skipped_pair(self, target: BenchTarget, reason: str) -> PairResult:
         return skipped_pair(
@@ -919,9 +1061,7 @@ class DatasetAdapter(ABC):
         except DatasetGated as error:
             return DownloadReport(adapter=self.info.name, status="gated", detail=str(error))
         except DatasetUnavailable as error:
-            return DownloadReport(
-                adapter=self.info.name, status="unavailable", detail=str(error)
-            )
+            return DownloadReport(adapter=self.info.name, status="unavailable", detail=str(error))
         except Exception as error:
             # schema drift (KeyError), image/codec errors, unpickling failures —
             # any un-typed normalize() error must degrade THIS dataset to data,
@@ -945,9 +1085,7 @@ class GenerativeAdapter(DatasetAdapter):
     ) -> ChatRequestSpec | SkipItem: ...
 
     @abstractmethod
-    async def score(
-        self, item: BenchItem, response_text: str, ctx: RunContext
-    ) -> ItemResult: ...
+    async def score(self, item: BenchItem, response_text: str, ctx: RunContext) -> ItemResult: ...
 
     async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:
         started_at = utc_now()
@@ -1033,9 +1171,7 @@ class LogLikelihoodAdapter(DatasetAdapter):
 
         items = select_items(self.load_items(ctx), ctx.limit, ctx.seed)
         ctx.progress.items_total(len(items))
-        prepared: list[
-            tuple[int, BenchItem, LogLikelihoodRequestSpec]
-        ] = []
+        prepared: list[tuple[int, BenchItem, LogLikelihoodRequestSpec]] = []
         results: list[ItemResult | None] = [None] * len(items)
         for index, item in enumerate(items):
             request = self.build_request(item, target, ctx)
@@ -1087,18 +1223,12 @@ class LogLikelihoodAdapter(DatasetAdapter):
                     if attempt.response is None:  # pragma: no cover - invariant
                         raise RuntimeError("loglikelihood attempt has no outcome")
                     result = await self.score(item, attempt.response, ctx)
-                    result = result.model_copy(
-                        update={"latency_s": round(attempt.latency_s, 3)}
-                    )
+                    result = result.model_copy(update={"latency_s": round(attempt.latency_s, 3)})
                     return (
                         index,
                         result,
                         None,
-                        (
-                            self.probe_result_fatal_reason(result)
-                            if capability_probe
-                            else None
-                        ),
+                        (self.probe_result_fatal_reason(result) if capability_probe else None),
                     )
                 finally:
                     ctx.progress.item_done()
@@ -1128,13 +1258,9 @@ class LogLikelihoodAdapter(DatasetAdapter):
                     [result for result in results if result is not None],
                     started_at=started_at,
                 )
-                return pair.model_copy(
-                    update={"status": "failed", "reason": fatal_reason}
-                )
+                return pair.model_copy(update={"status": "failed", "reason": fatal_reason})
 
-            remaining = await asyncio.gather(
-                *(execute(entry) for entry in prepared[1:])
-            )
+            remaining = await asyncio.gather(*(execute(entry) for entry in prepared[1:]))
             for index, result, unsupported, fatal_reason in remaining:
                 # Only the serial first item is a capability probe.  A later
                 # generic or explicit 400 is local failed evidence, never a

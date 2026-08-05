@@ -1,5 +1,7 @@
 """Shared adapter helpers: shuffling, extraction, sampling, URL normalization."""
 
+import pytest
+
 from kairyu.bench.adapters.base import (
     estimate_tokens,
     extract_choice_letter,
@@ -23,8 +25,7 @@ def test_shuffle_choices_deterministic_per_seed_and_item():
 
 def test_shuffle_choices_varies_across_items():
     orders = {
-        tuple(shuffle_choices(0, f"item-{i}", "right", ["a", "b", "c"])[0])
-        for i in range(20)
+        tuple(shuffle_choices(0, f"item-{i}", "right", ["a", "b", "c"])[0]) for i in range(20)
     }
     assert len(orders) > 1  # not a fixed permutation
 
@@ -80,6 +81,19 @@ def test_normalize_base_url():
     assert normalize_base_url("http://gw:8000/") == "http://gw:8000/v1"
     assert normalize_base_url("http://gw:8000/v1") == "http://gw:8000/v1"
     assert normalize_base_url("http://gw:8000/v1/") == "http://gw:8000/v1"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://alice:password@gateway.test",
+        "https://gateway.test?access_token=secret",
+        "https://gateway.test#credential",
+    ],
+)
+def test_normalize_base_url_rejects_credential_capable_url_components(value):
+    with pytest.raises(ValueError, match="userinfo|query or fragment"):
+        normalize_base_url(value)
 
 
 def test_estimate_tokens_scales_with_chars():

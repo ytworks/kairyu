@@ -1,8 +1,9 @@
 """Result store: bench/results/<suite>/<run_id>/ with atomic per-pair JSON.
 
 Resume contract: a pair JSON whose status is not "failed" is reused on the
-next run with the same run_id; failed pairs are always retried; --rerun
-ignores everything. Filenames sanitize model names (they may contain "/").
+next run with the same run_id; failed pairs are always retried; --rerun and a
+persisted evaluator-drift recovery marker ignore every pair. Filenames sanitize
+model names (they may contain "/").
 """
 
 from __future__ import annotations
@@ -10,10 +11,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path, PureWindowsPath
 
+from kairyu.bench import history as scoreboard_history
 from kairyu.bench.reporting import atomic_write_text
 from kairyu.bench.types import PairResult
+
+_SOURCE_TAINT_NAME = "source-taint.json"
+_EVALUATOR_TAINT_NAME = "evaluator-taint.json"
 
 
 def _safe(name: str) -> str:
@@ -33,9 +39,7 @@ def _validate_run_id(run_id: str) -> None:
         or "/" in run_id
         or "\\" in run_id
     ):
-        raise ValueError(
-            f"invalid run id {run_id!r}: expected one non-dot path component"
-        )
+        raise ValueError(f"invalid run id {run_id!r}: expected one non-dot path component")
 
 
 class ResultStore:
@@ -54,13 +58,18 @@ class ResultStore:
         self.ensure()
         self._atomic_write(self.run_dir / "run.json", json.dumps(config, indent=2))
 
-    def initialize_run(self, metadata: dict) -> None:
-        """Create run metadata once, or validate an existing run identity."""
+    def initialize_run(self, metadata: dict) -> dict:
+        """Create run metadata once, or return its persisted authority.
+
+        Resume tolerates a new observation time and momentary execution-runner
+        availability, but never a different score-bearing fingerprint or stable
+        source/runtime environment.
+        """
         fingerprint = metadata.get("fingerprint")
         if not isinstance(fingerprint, str) or not fingerprint:
-            raise ValueError(
-                f"run id {self.run_id!r} requires a non-empty fingerprint"
-            )
+            raise ValueError(f"run id {self.run_id!r} requires a non-empty fingerprint")
+        if metadata.get("run_id") != self.run_id:
+            raise ValueError(f"run id {self.run_id!r} does not match persisted run metadata")
 
         text = json.dumps(metadata, indent=2)
         self._require_contained_run_dir()
@@ -70,8 +79,7 @@ class ResultStore:
             self.run_dir.mkdir()
         except FileExistsError:
             self._require_contained_run_dir()
-            self._require_matching_fingerprint(fingerprint)
-            return
+            return self._require_matching_metadata(metadata)
 
         try:
             self._atomic_write(self.run_dir / "run.json", text)
@@ -82,6 +90,90 @@ class ResultStore:
             except OSError:
                 pass
             raise
+        return json.loads(text)
+
+    def require_resumable_environment(self, environment: dict) -> None:
+        """Preflight an existing run's stable environment before external work.
+
+        A new run has nothing to validate.  An existing run must disclose a
+        readable ``run.json`` whose stable source/runtime identity matches the
+        candidate environment; containment checks happen before any read.
+        """
+        self._require_contained_run_dir()
+        if not self.run_dir.exists():
+            return
+        self.require_source_untainted()
+        run_config = self._require_contained_artifact(self.run_dir / "run.json")
+        try:
+            existing = json.loads(run_config.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(
+                f"run id {self.run_id!r} has no matching fingerprint or stable environment identity"
+            ) from error
+        if not isinstance(
+            existing, dict
+        ) or not scoreboard_history.resumable_environment_identity_equal(
+            existing.get("environment"), environment
+        ):
+            raise ValueError(
+                f"run id {self.run_id!r} has no matching fingerprint or stable environment identity"
+            )
+
+    def require_source_untainted(self) -> None:
+        """Permanently reject a run id that observed local source drift."""
+        self._require_contained_run_dir()
+        if not self.run_dir.exists():
+            return
+        marker = self._require_contained_artifact(self.run_dir / _SOURCE_TAINT_NAME)
+        if marker.exists():
+            raise ValueError(
+                f"run id {self.run_id!r} is permanently source-tainted; use a new run id"
+            )
+
+    def mark_source_tainted(self, *, expected: dict, observed: dict) -> Path:
+        """Persist the first source-drift observation before the run can resume."""
+        self.ensure()
+        marker = self._require_contained_artifact(self.run_dir / _SOURCE_TAINT_NAME)
+        if marker.exists():
+            return marker
+        payload = {
+            "schema_version": 1,
+            "reason": "local benchmark source identity changed while the suite ran",
+            "expected": expected,
+            "observed": observed,
+        }
+        self._atomic_write(marker, json.dumps(payload, indent=2))
+        return marker
+
+    def has_evaluator_taint(self) -> bool:
+        """Return whether a prior attempt observed score-bearing identity drift."""
+        self._require_contained_run_dir()
+        if not self.run_dir.exists():
+            return False
+        marker = self._require_contained_artifact(self.run_dir / _EVALUATOR_TAINT_NAME)
+        return marker.exists()
+
+    def mark_evaluator_tainted(self, *, reason: str, adapters: Sequence[str]) -> Path:
+        """Persist evaluator drift before any previously completed pair can survive it."""
+        self.ensure()
+        marker = self._require_contained_artifact(self.run_dir / _EVALUATOR_TAINT_NAME)
+        if marker.exists():
+            return marker
+        payload = {
+            "schema_version": 1,
+            "reason": reason,
+            "adapters": sorted(set(adapters)),
+        }
+        self._atomic_write(marker, json.dumps(payload, indent=2))
+        return marker
+
+    def clear_evaluator_taint(self) -> None:
+        """Clear the recovery marker only after every pair was safely re-evaluated."""
+        self._require_contained_run_dir()
+        if not self.run_dir.exists():
+            return
+        marker = self._require_contained_artifact(self.run_dir / _EVALUATOR_TAINT_NAME)
+        marker.unlink(missing_ok=True)
 
     def _require_contained_run_dir(self) -> None:
         try:
@@ -94,8 +186,7 @@ class ResultStore:
             ) from error
         if self.run_dir.is_symlink() or resolved_run_dir.parent != resolved_results_dir:
             raise ValueError(
-                f"fingerprint-bound run id {self.run_id!r} resolves outside "
-                "the results directory"
+                f"fingerprint-bound run id {self.run_id!r} resolves outside the results directory"
             )
 
     def _require_contained_artifact(self, path: Path) -> Path:
@@ -116,8 +207,7 @@ class ResultStore:
                 current /= component
                 if current.is_symlink():
                     raise ValueError(
-                        f"fingerprint-bound run id {self.run_id!r} refuses "
-                        f"symlink artifact {path}"
+                        f"fingerprint-bound run id {self.run_id!r} refuses symlink artifact {path}"
                     )
         except OSError as error:
             raise ValueError(
@@ -133,9 +223,7 @@ class ResultStore:
 
     def _preflight_atomic_write(self, path: Path) -> None:
         self._require_contained_artifact(path)
-        self._require_contained_artifact(
-            path.with_suffix(path.suffix + ".tmp")
-        )
+        self._require_contained_artifact(path.with_suffix(path.suffix + ".tmp"))
 
     def _remove_partial_legacy_tmp(self, path: Path) -> None:
         legacy_tmp = path.with_suffix(path.suffix + ".tmp")
@@ -145,19 +233,66 @@ class ResultStore:
             return
         legacy_tmp.unlink(missing_ok=True)
 
-    def _require_matching_fingerprint(self, expected: str) -> None:
+    def _require_matching_metadata(self, expected: dict) -> dict:
         run_config = self._require_contained_artifact(self.run_dir / "run.json")
         try:
             existing = json.loads(run_config.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError(
-                f"run id {self.run_id!r} has no matching fingerprint"
-            ) from error
+            raise ValueError(f"run id {self.run_id!r} has no matching fingerprint") from error
 
-        if not isinstance(existing, dict) or existing.get("fingerprint") != expected:
-            raise ValueError(
-                f"run id {self.run_id!r} has no matching fingerprint"
+        if (
+            not isinstance(existing, dict)
+            or existing.get("fingerprint") != expected.get("fingerprint")
+            or existing.get("run_id") != expected.get("run_id")
+            or not scoreboard_history.resumable_environment_identity_equal(
+                existing.get("environment"), expected.get("environment")
             )
+        ):
+            raise ValueError(
+                f"run id {self.run_id!r} has no matching fingerprint and "
+                "stable environment identity"
+            )
+        return existing
+
+    def append_scoreboard_index(
+        self,
+        scoreboard: dict,
+        run_metadata: dict,
+        pairs: Sequence[object] = (),
+    ) -> Path:
+        """Append one source-bound scoreboard snapshot to the suite history."""
+        self._require_metadata_run_id(run_metadata)
+        return scoreboard_history.append_scoreboard_index(
+            self.results_dir,
+            scoreboard,
+            run_metadata,
+            pairs=pairs,
+        )
+
+    def load_scoreboard_index(self) -> tuple[dict, ...]:
+        """Load and fully validate this results root's scoreboard history."""
+        return scoreboard_history.load_scoreboard_index(self.results_dir)
+
+    def find_scoreboard_entry(self, run_id: str) -> dict | None:
+        """Find one validated history entry by its unique run id."""
+        return scoreboard_history.find_scoreboard_entry(self.results_dir, run_id)
+
+    def ensure_scoreboard_key_available(
+        self,
+        run_metadata: dict,
+        rerun: bool = False,
+    ) -> None:
+        """Fail before work if this immutable commit/fingerprint key is occupied."""
+        self._require_metadata_run_id(run_metadata)
+        scoreboard_history.ensure_scoreboard_key_available(
+            self.results_dir,
+            run_metadata,
+            rerun=rerun,
+        )
+
+    def _require_metadata_run_id(self, metadata: object) -> None:
+        if not isinstance(metadata, dict) or metadata.get("run_id") != self.run_id:
+            raise ValueError(f"run id {self.run_id!r} does not match scoreboard run metadata")
 
     def pair_path(self, benchmark: str, target: str) -> Path:
         return self._require_contained_artifact(
@@ -170,14 +305,17 @@ class ResultStore:
         target: str,
         *,
         expected_fingerprint: str | None = None,
+        expected_source_identity: dict | None = None,
     ) -> PairResult | None:
         path = self.pair_path(benchmark, target)
         if not path.exists():
             return None
         result = PairResult.model_validate_json(path.read_text(encoding="utf-8"))
+        if expected_fingerprint is not None and result.run_fingerprint != expected_fingerprint:
+            return None
         if (
-            expected_fingerprint is not None
-            and result.run_fingerprint != expected_fingerprint
+            expected_source_identity is not None
+            and result.source_identity != expected_source_identity
         ):
             return None
         return result

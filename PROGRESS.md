@@ -1026,6 +1026,28 @@ phase plumbing, and MLA fallback. The formal Qwen3-32B TP8 run at source commit
 retained verification and raw replay both passed with raw SHA-256
 `c42797f18b8db7b9c87ab9203a3abc2bf0b26aaa2264d9ce42024fbcc5bf8b88`.
 
+Issue #369 now records each completed, real-data quality run as an immutable
+scoreboard snapshot in a suite-local canonical JSONL hash chain keyed by the
+local benchmark-harness commit and run fingerprint. The loaded runner module,
+not the caller's working directory, anchors source provenance; dirty/Git-less
+packages and synthetic fixtures retain per-run artifacts but cannot become
+history baselines. Every pair binds the exact clean source and evaluator
+content, observed drift is durably tainted before evidence can be rewritten,
+and resume rejects stable source/environment drift before downloads while
+keeping the first metadata authoritative. Fingerprints content-bind all
+adapter/runner/cache/aggregation code, referenced assets, score-time
+dependencies, resolved third-party harness distributions, and owned PATH
+executables. Full-suite history keeps unresolved agentic/code cells visible but
+stamps them with structured cross-run withholding policies; resolved Docker
+image ID/platform identity permits generated-code deltas while safe sibling
+cells remain comparable. Opaque request bodies persist only as digests, and
+index I/O pins the results-root dirfd so read-only comparisons neither create
+locks nor follow replacement symlinks/FIFOs. The `compare-runs` command requires
+exact runtime/methodology/target/matrix and pair-digest bindings, then reports
+candidate-minus-baseline deltas only for completed, finite, explicitly allowed
+cells with matching reasons and denominators. Commit labels identify the local
+harness, not the served target build.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -1033,6 +1055,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [design] B3 scoreboards become source-bound cross-commit history
+- What: added a canonical, append-only, hash-chained `scoreboards.jsonl` per benchmark suite. Each record snapshots validated run metadata, source-attested complete PairResult digests/summaries, and the complete scoreboard under `(local harness git_commit, run fingerprint)` with dirfd-pinned fixed-lock concurrent append, atomic replace, directory durability, strict JSON/chain/schema/status/tamper validation, canonical-byte idempotence, and conflicting-evidence rejection. Resume rejects stable environment/source drift before download; observed source or evaluator drift is durably tainted before evidence rewrite. Fingerprints bind adapter, runner, cache, aggregation, judge, referenced assets, score-time dependencies, and resolved external-harness content/PATH ownership; opaque request bodies persist only as hashes. Full-suite records retain unresolved agentic/code cells under structured per-cell withholding policies, while an available inspected Docker image ID/platform can make generated-code cells eligible. The public `kairyu bench compare-runs BASE CANDIDATE` command remains read-only and renders candidate-minus-baseline scores only across exact suite/fingerprint/Python/runtime/target/benchmark/methodology/denominator matches with `allowed` policies, revalidates Wilson intervals, suppresses synthetic-fixture and withheld deltas, and does not turn a negative delta into a policy exit code.
+- Why: per-run directories alone cannot expose regressions across commits, while CWD-derived commits, mutable path references, source or evaluator drift, executable shadowing, runtime mismatch, credential-bearing tracked config, or structurally mismatched cells can produce unsafe artifacts or confident but false trend claims. A local harness commit also cannot attest a redeployed target at the same URL, so artifacts and reports state that boundary explicitly.
+- Refs: issue #369; `docs/design/issue-369-cross-commit-scoreboards.md`; `kairyu/bench/{history,store,runner,aggregate,compare,cli}.py`; `tests/bench/test_bench_{history,run_compare,cli_compare,runner}.py`
 
 ### 2026-08-05 — [progress] A12 passes the real Qwen3-32B TP8 gate
 - What: executed the strict direct-path batch-invariance operator on the pinned Qwen3-32B checkpoint and eight RTX PRO 6000 Blackwell GPUs. The retained 38-row raw stream passed all 28 independently derived checks, including exact four-arm answers, all-rank FlashInfer/CUDA-graph execution, scheduler/cache causality, and complete source/checkpoint/hardware identity; retained verification and raw replay also passed. Portable CI then exposed a constructor-bypassing TP follower fixture that had not mirrored the new shared decode capability field, so the fixture now preserves the production alias and a regression proves capability-gapped passive runners fall back before the batch call.

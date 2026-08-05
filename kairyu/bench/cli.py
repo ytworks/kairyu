@@ -169,6 +169,19 @@ def add_bench_parser(subparsers) -> None:
         help="Print only the scoreboard, without the published-score comparison",
     )
 
+    compare_runs = commands.add_parser(
+        "compare-runs",
+        help="Compare two immutable indexed scoreboards (candidate minus baseline).",
+    )
+    compare_runs.add_argument("baseline", help="Baseline run id")
+    compare_runs.add_argument("candidate", help="Candidate run id")
+    compare_runs.add_argument("--suite", choices=suites, default="fugu")
+    compare_runs.add_argument(
+        "--results-dir",
+        default=None,
+        help="Results root (default: bench/results/<suite>)",
+    )
+
     calibrate = commands.add_parser(
         "calibrate-judge",
         help="Measure judge agreement on the committed published-gold set.",
@@ -177,8 +190,7 @@ def add_bench_parser(subparsers) -> None:
         "--run",
         default=None,
         help=(
-            "Bind headline calibration to a benchmark run id (under "
-            "--results-dir) or run directory"
+            "Bind headline calibration to a benchmark run id (under --results-dir) or run directory"
         ),
     )
     calibrate.add_argument("--results-dir", default="bench/results/fugu")
@@ -210,9 +222,7 @@ def add_bench_parser(subparsers) -> None:
         help="Fail unless every judge has balanced, provenance-backed bias evidence",
     )
 
-    listing = commands.add_parser(
-        "list", help="List benchmarks, requirements, and cache status."
-    )
+    listing = commands.add_parser("list", help="List benchmarks, requirements, and cache status.")
     listing.add_argument("--suite", choices=suites, default="fugu")
 
     entrypoints = commands.add_parser(
@@ -240,6 +250,8 @@ def handle(args: argparse.Namespace) -> int:
         return _handle_download(args)
     if args.bench_command == "report":
         return _handle_report(args)
+    if args.bench_command == "compare-runs":
+        return _handle_compare_runs(args)
     if args.bench_command == "calibrate-judge":
         return _handle_calibrate_judge(args)
     if args.bench_command == "list":
@@ -324,9 +336,18 @@ def _handle_report(args) -> int:
         try:
             target_configs.append(BenchTarget.model_validate(raw_target))
         except ValueError:
-            # Legacy/incomplete target records remain displayable, but aggregate
-            # marks their judge-independence identity unknown.
-            continue
+            # Durable run metadata hashes opaque request bodies. They are not
+            # executable config anymore, but removing only that sentinel keeps
+            # the endpoint/model identity available for self-judge disclosure.
+            without_opaque_body = {
+                key: value for key, value in raw_target.items() if key != "extra_body_json"
+            }
+            try:
+                target_configs.append(BenchTarget.model_validate(without_opaque_body))
+            except ValueError:
+                # Legacy/incomplete target records remain displayable, but
+                # aggregate marks their judge-independence identity unknown.
+                continue
     raw_judge = config.get("judge")
     judge = None
     judge_identity_incomplete = False
@@ -339,8 +360,24 @@ def _handle_report(args) -> int:
             and not raw_judge.get("additional_judges")
         )
         if raw_judge and not explicitly_disabled:
+
+            def without_opaque_body(endpoint):
+                if not isinstance(endpoint, dict):
+                    return endpoint
+                marker = endpoint.get("extra_body_json")
+                if isinstance(marker, str) and marker.startswith("sha256:") and len(marker) == 71:
+                    return {
+                        key: value for key, value in endpoint.items() if key != "extra_body_json"
+                    }
+                return endpoint
+
+            judge_for_validation = dict(without_opaque_body(raw_judge))
+            if isinstance(raw_judge.get("additional_judges"), list | tuple):
+                judge_for_validation["additional_judges"] = [
+                    without_opaque_body(member) for member in raw_judge.get("additional_judges", [])
+                ]
             try:
-                candidate = JudgeConfig.model_validate(raw_judge)
+                candidate = JudgeConfig.model_validate(judge_for_validation)
             except ValueError:
                 judge_identity_incomplete = True
                 candidate = None
@@ -397,6 +434,7 @@ def _handle_report(args) -> int:
         suite=suite,
         config=config,
         environment=run_meta.get("environment", {}),
+        fingerprint=run_meta.get("fingerprint"),
         pairs=pairs,
         targets=configured or targets,
         target_configs=target_configs,
@@ -408,14 +446,50 @@ def _handle_report(args) -> int:
     store.save_scoreboard(scoreboard, markdown)
     print(markdown)
 
-    if (
-        suite_info(suite).published_comparison
-        and not getattr(args, "no_comparison", False)
-    ):
+    if suite_info(suite).published_comparison and not getattr(args, "no_comparison", False):
         comparison = build_comparison(scoreboard)
         comparison_markdown = render_comparison_markdown(comparison)
         store.save_comparison(comparison, comparison_markdown)
         print(comparison_markdown)
+    return 0
+
+
+def _handle_compare_runs(args) -> int:
+    from kairyu.bench.compare import (
+        build_run_comparison,
+        render_run_comparison_markdown,
+    )
+    from kairyu.bench.store import ResultStore
+
+    results_dir = Path(
+        getattr(args, "results_dir", None) or f"bench/results/{getattr(args, 'suite', 'fugu')}"
+    )
+    try:
+        store = ResultStore(results_dir, args.baseline)
+        # Validate both user-supplied ids before touching the shared index.
+        ResultStore(results_dir, args.candidate)
+        entries = store.load_scoreboard_index()
+        by_run_id = {entry["run_id"]: entry for entry in entries}
+        missing = [run_id for run_id in (args.baseline, args.candidate) if run_id not in by_run_id]
+        if missing:
+            names = ", ".join(repr(run_id) for run_id in missing)
+            raise ValueError(
+                f"run id(s) {names} are not present in {results_dir / 'scoreboards.jsonl'}"
+            )
+        comparison = build_run_comparison(
+            by_run_id[args.baseline],
+            by_run_id[args.candidate],
+        )
+        if comparison["suite"] != args.suite:
+            raise ValueError(
+                f"indexed runs belong to suite {comparison['suite']!r}, "
+                f"not selected suite {args.suite!r}"
+            )
+        markdown = render_run_comparison_markdown(comparison)
+    except (OSError, ValueError) as error:
+        print(f"compare-runs: {error}")
+        return 1
+    print(markdown)
     return 0
 
 
@@ -452,11 +526,7 @@ def _handle_list(args) -> int:
             )
             if flag
         ]
-        state = (
-            "cached"
-            if adapter_cache_ready(adapter, cache)
-            else "not downloaded"
-        )
+        state = "cached" if adapter_cache_ready(adapter, cache) else "not downloaded"
         extras = f" [{', '.join(needs)}]" if needs else ""
         print(f"  {name:24s} {info.display_name} — {info.metric}{extras} ({state})")
     return 0
@@ -469,11 +539,7 @@ def _handle_entrypoints(args) -> int:
         validate_repository,
     )
 
-    errors = (
-        validate_repository(args.check_repo)
-        if args.check_repo is not None
-        else ()
-    )
+    errors = validate_repository(args.check_repo) if args.check_repo is not None else ()
     if args.json:
         payload = entrypoints_payload()
         if args.check_repo is not None:

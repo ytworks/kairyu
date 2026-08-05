@@ -48,8 +48,7 @@ def _binary_pair(
         for index, score in enumerate(scores)
     ]
     items.extend(
-        ItemResult(item_id=f"missing-{index}", status="unjudged")
-        for index in range(total - trials)
+        ItemResult(item_id=f"missing-{index}", status="unjudged") for index in range(total - trials)
     )
     return PairResult(
         benchmark=benchmark,
@@ -105,9 +104,7 @@ def test_core_scoreboard_uses_its_canonical_row_order_and_title():
 
 
 def test_only_and_exclude_names_are_validated_within_the_selected_suite():
-    assert [adapter.info.name for adapter in suite_adapters("core")] == list(
-        CORE_ROW_ORDER
-    )
+    assert [adapter.info.name for adapter in suite_adapters("core")] == list(CORE_ROW_ORDER)
     with pytest.raises(ValueError, match="gpqa-diamond"):
         suite_adapters("core", only=("gpqa-diamond",))
     with pytest.raises(ValueError, match="gsm8k"):
@@ -116,9 +113,7 @@ def test_only_and_exclude_names_are_validated_within_the_selected_suite():
         suite_adapters("unknown")
 
 
-def test_report_resolves_a_core_run_under_its_suite_directory(
-    tmp_path, monkeypatch
-):
+def test_report_resolves_a_core_run_under_its_suite_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = tmp_path / "bench" / "results" / "core" / "core-report"
     pair_dir = run_dir / "pair"
@@ -141,9 +136,7 @@ def test_report_resolves_a_core_run_under_its_suite_directory(
         ),
         encoding="utf-8",
     )
-    (pair_dir / "result.json").write_text(
-        _pair("gsm8k", "m").model_dump_json(), encoding="utf-8"
-    )
+    (pair_dir / "result.json").write_text(_pair("gsm8k", "m").model_dump_json(), encoding="utf-8")
 
     args = Namespace(
         run="core-report",
@@ -164,9 +157,7 @@ def test_self_judged_target_is_flagged():
         base_url="http://gateway.test/v1/",
         model="shared-model",
     )
-    judge = JudgeConfig(
-        base_url="http://gateway.test/v1", model="shared-model"
-    )
+    judge = JudgeConfig(base_url="http://gateway.test/v1", model="shared-model")
     board = _board(
         [_pair("hle", "friendly-target")],
         targets=["friendly-target"],
@@ -189,9 +180,7 @@ def test_target_matching_any_panel_member_is_flagged_as_self_judged():
         base_url="http://primary.test/v1",
         model="primary-model",
         additional_judges=(
-            JudgeEndpointConfig(
-                base_url="http://secondary.test", model="secondary-model"
-            ),
+            JudgeEndpointConfig(base_url="http://secondary.test", model="secondary-model"),
         ),
     )
     board = _board(
@@ -202,10 +191,7 @@ def test_target_matching_any_panel_member_is_flagged_as_self_judged():
     )
     assert board["self_judged_targets"] == ["candidate"]
     cell = board["cells"]["hle"]["candidate"]
-    assert any(
-        "self-judged" in board["footnotes"][number - 1]
-        for number in cell["footnotes"]
-    )
+    assert any("self-judged" in board["footnotes"][number - 1] for number in cell["footnotes"])
 
 
 def test_self_judged_target_normalizes_default_openai_v1_path():
@@ -233,26 +219,14 @@ def test_self_judged_target_normalizes_default_openai_v1_path():
 @pytest.mark.parametrize(
     ("judge_base_url", "judge_model"),
     [
-        pytest.param(
-            "http://judge.test:8443/proxy/v1", "judge-model", id="scheme"
-        ),
-        pytest.param(
-            "https://other.test:8443/proxy/v1", "judge-model", id="host"
-        ),
-        pytest.param(
-            "https://judge.test:9443/proxy/v1", "judge-model", id="port"
-        ),
-        pytest.param(
-            "https://judge.test:8443/other/v1", "judge-model", id="path"
-        ),
-        pytest.param(
-            "https://judge.test:8443/proxy/v1", "other-model", id="model"
-        ),
+        pytest.param("http://judge.test:8443/proxy/v1", "judge-model", id="scheme"),
+        pytest.param("https://other.test:8443/proxy/v1", "judge-model", id="host"),
+        pytest.param("https://judge.test:9443/proxy/v1", "judge-model", id="port"),
+        pytest.param("https://judge.test:8443/other/v1", "judge-model", id="path"),
+        pytest.param("https://judge.test:8443/proxy/v1", "other-model", id="model"),
     ],
 )
-def test_self_judge_identity_keeps_other_endpoint_parts_strict(
-    judge_base_url, judge_model
-):
+def test_self_judge_identity_keeps_other_endpoint_parts_strict(judge_base_url, judge_model):
     target = BenchTarget(
         name="target",
         base_url="https://judge.test:8443/proxy",
@@ -312,8 +286,7 @@ def test_missing_legacy_target_identity_is_annotated_unknown():
     assert board["judge_independence_unknown_targets"] == [label]
     cell = board["cells"]["hle"][label]
     assert any(
-        "independence unknown" in board["footnotes"][number - 1]
-        for number in cell["footnotes"]
+        "independence unknown" in board["footnotes"][number - 1] for number in cell["footnotes"]
     )
 
 
@@ -339,8 +312,7 @@ def test_judge_identity_notes_only_appear_on_judge_template_rows():
     assert board["self_judged_targets"] == [label]
     assert board["judge_independence_unknown_targets"] == [label]
     hle_notes = [
-        board["footnotes"][number - 1]
-        for number in board["cells"]["hle"][label]["footnotes"]
+        board["footnotes"][number - 1] for number in board["cells"]["hle"][label]["footnotes"]
     ]
     gpqa_notes = [
         board["footnotes"][number - 1]
@@ -349,9 +321,7 @@ def test_judge_identity_notes_only_appear_on_judge_template_rows():
     assert any("self-judged" in note for note in hle_notes)
     assert any("independence unknown" in note for note in hle_notes)
     assert not any(
-        marker in note
-        for note in gpqa_notes
-        for marker in ("self-judged", "independence unknown")
+        marker in note for note in gpqa_notes for marker in ("self-judged", "independence unknown")
     )
 
 
@@ -410,6 +380,26 @@ def test_report_reconstructs_resolved_target_and_judge_identity(tmp_path):
     assert board["judge_independence_unknown_targets"] == []
 
 
+def test_report_preserves_target_identity_when_opaque_body_is_hashed(tmp_path):
+    board = _write_report_fixture(
+        tmp_path,
+        target_config={
+            "name": "alias",
+            "base_url": "http://judge.test/v1/",
+            "model": "judge-model",
+            "extra_body_json": "sha256:" + "a" * 64,
+        },
+        judge_config={
+            "base_url": "http://judge.test/v1",
+            "model": "judge-model",
+            "extra_body_json": "sha256:" + "b" * 64,
+        },
+    )
+
+    assert board["self_judged_targets"] == ["alias"]
+    assert board["judge_independence_unknown_targets"] == []
+
+
 def test_legacy_report_without_target_endpoint_fails_closed(tmp_path):
     board = _write_report_fixture(
         tmp_path,
@@ -427,9 +417,7 @@ def test_legacy_report_without_target_endpoint_fails_closed(tmp_path):
         pytest.param(JudgeConfig().model_dump(mode="json"), id="serialized-disabled"),
     ],
 )
-def test_report_does_not_annotate_explicitly_disabled_judge(
-    tmp_path, judge_config
-):
+def test_report_does_not_annotate_explicitly_disabled_judge(tmp_path, judge_config):
     board = _write_report_fixture(
         tmp_path,
         target_config={
@@ -448,15 +436,11 @@ def test_report_does_not_annotate_explicitly_disabled_judge(
     "judge_config",
     [
         pytest.param({"model": "judge-model"}, id="missing-base-url"),
-        pytest.param(
-            {"base_url": "http://judge.test/v1"}, id="missing-model"
-        ),
+        pytest.param({"base_url": "http://judge.test/v1"}, id="missing-model"),
         pytest.param({"api_key_env": "LEGACY_JUDGE_KEY"}, id="missing-both-keys"),
     ],
 )
-def test_legacy_report_without_complete_judge_identity_fails_closed(
-    tmp_path, judge_config
-):
+def test_legacy_report_without_complete_judge_identity_fails_closed(tmp_path, judge_config):
     board = _write_report_fixture(
         tmp_path,
         target_config={
@@ -494,8 +478,7 @@ def test_report_non_mapping_judge_identity_fails_closed(tmp_path, judge_config):
     assert board["self_judged_targets"] == []
     assert board["judge_independence_unknown_targets"] == ["target"]
     notes = [
-        board["footnotes"][number - 1]
-        for number in board["cells"]["hle"]["target"]["footnotes"]
+        board["footnotes"][number - 1] for number in board["cells"]["hle"]["target"]["footnotes"]
     ]
     assert any("independence unknown" in note for note in notes)
 
@@ -513,9 +496,7 @@ def test_report_keeps_known_self_match_when_secondary_identity_is_malformed(
         judge_config={
             "base_url": "http://primary.test/v1",
             "model": "primary-model",
-            "additional_judges": [
-                {"base_url": "http://malformed-secondary.test/v1"}
-            ],
+            "additional_judges": [{"base_url": "http://malformed-secondary.test/v1"}],
         },
     )
 
@@ -532,18 +513,14 @@ def test_report_keeps_known_self_match_when_secondary_identity_is_malformed(
 @pytest.mark.parametrize(
     "judge_config",
     [
-        pytest.param(
-            {"base_url": "", "model": "judge-model"}, id="empty-base-url"
-        ),
+        pytest.param({"base_url": "", "model": "judge-model"}, id="empty-base-url"),
         pytest.param(
             {"base_url": "http://judge.test/v1", "model": " "},
             id="blank-model",
         ),
     ],
 )
-def test_report_malformed_primary_identity_degrades_without_crashing(
-    tmp_path, judge_config
-):
+def test_report_malformed_primary_identity_degrades_without_crashing(tmp_path, judge_config):
     board = _write_report_fixture(
         tmp_path,
         target_config={
@@ -633,10 +610,7 @@ def test_missing_pair_rendered_as_not_run():
     pairs = [_pair("gpqa-diamond", "m")]
     board = _board(pairs, ["m", "other"])
     assert board["cells"]["gpqa-diamond"]["other"]["reason"] == "not run"
-    assert (
-        board["cells"]["gpqa-diamond"]["other"]["confidence_interval"]
-        is None
-    )
+    assert board["cells"]["gpqa-diamond"]["other"]["confidence_interval"] is None
 
 
 @pytest.mark.parametrize(
@@ -668,9 +642,7 @@ def test_scoreboard_records_machine_readable_wilson_interval():
     interval = cell["confidence_interval"]
 
     assert interval["method"] == "wilson"
-    assert {
-        key: value for key, value in interval.items() if key != "method"
-    } == pytest.approx(
+    assert {key: value for key, value in interval.items() if key != "method"} == pytest.approx(
         {
             "confidence": 0.95,
             "successes": 8,
@@ -683,11 +655,7 @@ def test_scoreboard_records_machine_readable_wilson_interval():
 
 
 def test_only_contractually_binary_adapters_enable_wilson_intervals():
-    assert {
-        name
-        for name, adapter in all_adapters().items()
-        if adapter.info.binary_outcomes
-    } == {
+    assert {name for name, adapter in all_adapters().items() if adapter.info.binary_outcomes} == {
         "charxiv-reasoning",
         "gsm8k",
         "gpqa-diamond",
@@ -809,11 +777,7 @@ def test_renderer_does_not_mislabel_tampered_interval(field, value):
     cell = board["cells"]["gpqa-diamond"]["m"]
     cell["confidence_interval"][field] = value
 
-    row = next(
-        line
-        for line in render_markdown(board).splitlines()
-        if line.startswith("| GPQA")
-    )
+    row = next(line for line in render_markdown(board).splitlines() if line.startswith("| GPQA"))
 
     assert row == "| GPQA Diamond | 40.0 (n=20) |"
 
@@ -823,11 +787,7 @@ def test_renderer_withholds_interval_when_point_estimate_is_tampered():
     board = _board([pair], ["m"])
     board["cells"]["gpqa-diamond"]["m"]["score"] = 0.5
 
-    row = next(
-        line
-        for line in render_markdown(board).splitlines()
-        if line.startswith("| GPQA")
-    )
+    row = next(line for line in render_markdown(board).splitlines() if line.startswith("| GPQA"))
 
     assert row == "| GPQA Diamond | 50.0 (n=20) |"
 
@@ -843,6 +803,33 @@ def test_legacy_huge_integer_count_does_not_overflow_renderer():
     assert f"50.0 (n={huge})" in text
 
 
+def test_huge_primary_score_is_rendered_as_failed_evidence_without_overflow():
+    pair = _pair("gpqa-diamond", "malformed").model_copy(
+        update={"metrics": {"score": 10**4000, "n_total": 1}}
+    )
+
+    assert pair.score is None
+    board = _board([pair], ["malformed"])
+    cell = board["cells"]["gpqa-diamond"]["malformed"]
+
+    assert cell["status"] == "failed"
+    assert cell["score"] is None
+    assert cell["n"] == 0
+    assert "invalid pair evidence" in cell["reason"]
+    assert "n/a[^" in render_markdown(board)
+
+
+@pytest.mark.parametrize("score", [True, "0.5"], ids=["boolean", "numeric-string"])
+def test_pair_metrics_do_not_coerce_non_numeric_score_evidence(score):
+    with pytest.raises(ValueError, match="metrics.score"):
+        PairResult(
+            benchmark="gpqa-diamond",
+            target="malformed",
+            status="completed",
+            metrics={"score": score, "n_total": 1},
+        )
+
+
 def test_markdown_layout():
     pairs = [
         _pair("gpqa-diamond", "m", score=0.955),
@@ -856,9 +843,7 @@ def test_markdown_layout():
 
 
 def test_markdown_skip_cell_is_dash():
-    pairs = [
-        _pair("gpqa-diamond", "m", status="skipped", score=None, reason="docker unavailable")
-    ]
+    pairs = [_pair("gpqa-diamond", "m", status="skipped", score=None, reason="docker unavailable")]
     text = render_markdown(_board(pairs, ["m"]))
     assert "—[^1]" in text
     assert "docker unavailable" in text
