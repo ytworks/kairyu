@@ -967,6 +967,44 @@ experiment. The retained result is `evidence_valid=true`,
 `feature_ready=false`, and `quality_classification=mixed`; the public
 `logits_dtype` option is withdrawn and is not shipped.
 
+Issue #373 now has an additive B7 KV answer-equivalence operator without
+changing any F2c, F2d, F4a, or F4b schema, threshold, artifact, or verdict.
+Its frozen matrix is `f2c-tp2`, `f2d-tp2`, `f4a-tp4`, `f4a-tp8`, and
+`f4b-tp4`. Before GPU construction, each cell replays its exact parent through
+the owning verifier; F4b additionally requires its sealed performance and
+distribution-quality closure and binds both quality files. All five bind one
+clean source and the same full
+Qwen3-32B identity (17 shards, both rollups, exact six metadata files, and the
+separate weight index) while retaining distinct run nonces; F2d correctly
+inherits the F2c checkpoint because its parent contains no model assertion.
+Same-runtime cold/warm answers must match exactly under the frozen 32-token
+greedy contract. Radix cells require a complete native hit independently
+observed by a pre-warm cache-residency probe; DRAM cells separate
+pressure/offload from the following warm/restore interval with no fallback or
+ownership failure. Parent bytes are immutable across owner replay/extraction;
+formal commands are publishable only as fresh direct-path processes whose
+initial interpreter is launched with `python -I -B`; a plain process is
+rejected instead of restarted. Before adding the checkout
+to `sys.path`, the wrapper creates an unpredictable, exclusive 0700
+`tempfile.TemporaryDirectory` under `/tmp`, assigns it to
+`sys.pycache_prefix`, and performs the tracked-clean/import-artifact preflight.
+Module invocation is excluded from inventory and remains only as unsupported,
+non-evidence help; the selected
+interpreter, locked `.venv`, site bootstrap, and installed packages remain
+explicit TCB. Repo-root import shadows and non-`HEAD` loaded modules fail
+closed; source, checkpoint, and profile identities are rechecked after
+shutdown. B7 validates every retained prompt and response ID below
+`TOKENIZER_VOCAB_SIZE = 151669`: the tokenizer ID domain has 151,669 entries,
+while the model's 151,936-wide LM head is a distinct padded logits dimension
+whose extra IDs are not valid evidence.
+Canonical raw replay parses and hashes one immutable byte snapshot before
+deriving the five-cell verdict.
+Portable tests validate the operator without claiming real model, GPU-cache,
+or GPU-DRAM measurement. Final checkout validation passed 1,652 benchmark
+tests (9 deselected) and 5,589 portable tests (231 deselected), plus Ruff,
+all 65 entrypoints through 129 declared help invocations, the isolated wheel
+boundary, and `git diff --check`.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -974,6 +1012,21 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [amendment] B7 formal evidence requires isolated direct-path startup
+- What: formal `run-native`, `assemble`, `verify`, and `replay` now require a fresh direct checkout-script process whose initial interpreter is launched with `python -I -B` (or the runbook's `uv run --frozen` equivalent); a plain interpreter is rejected instead of receiving an unsafe late restart. Before exposing the checkout on `sys.path`, the wrapper creates an unpredictable, exclusive 0700 `tempfile.TemporaryDirectory` under `/tmp`, assigns it to `sys.pycache_prefix`, and performs its tracked-clean/import-artifact preflight. Module invocation is excluded from the declared inventory and remains only as an unsupported, non-evidence `--help` convenience; its evidence output is unsupported and non-publishable. The selected interpreter, locked `.venv`, site bootstrap, and installed packages are explicit TCB. The contract also distinguishes the 151,669-entry tokenizer ID domain from the model's padded 151,936-wide logits head and validates every prompt/response ID against `TOKENIZER_VOCAB_SIZE = 151669`.
+- Why: module startup, ambient import paths, or repository bytecode could execute before an ordinary in-process source check, while conflating tokenizer IDs with padded logits rows could admit 267 non-tokenizer IDs as answer evidence. Isolated direct-path bootstrap, a wrapper-owned fresh cache namespace, and pre-import clean/artifact checks close the former gap without pretending to attest the interpreter; the explicit tokenizer boundary closes the latter.
+- Refs: issue #373; `docs/design/issue-373-kv-answer-equivalence.md`; `bench/README.md`; `docs/gpu-runbook.md` §9.8c; `kairyu/bench/kv_equivalence.py`
+
+### 2026-08-05 — [amendment] B7 fails closed on sealed F4b quality and executable drift
+- What: review hardened the B7 companion without changing a parent gate. F4b now replays its owning sealed performance-plus-quality verifier and content-binds separate performance manifest/raw and quality manifest/raw snapshots. F2d's router sibling is also snapshotted around replay; every parent row index, schema-fixed numeric/boolean value, and F2d raw/router row schema is validated with exact JSON types. Every repository bytecode/import artifact outside the locked `.venv` is rejected, loaded checkout namespaces must resolve to tracked `HEAD` files, and source/checkpoint/profile identities are checked again after shutdown. The pure contract additionally enforces the exact 1,024-token prompt, pinned vocabulary bounds, nonempty native pieces, JSON type-sensitive frozen values, immutable single-read raw replay, and exclusive no-overwrite output with post-write byte verification.
+- Why: a performance-only F4b parent, crafted cached bytecode, JSON bool/int/float coercion, out-of-vocabulary evidence, or a write/read replacement race could otherwise manufacture a passing child without proving the reviewed native cache path and answer.
+- Refs: issue #373; `docs/design/issue-373-kv-answer-equivalence.md`; `bench/kv_answer_equivalence_bench.py`; `kairyu/bench/kv_equivalence.py`; `tests/bench/test_kv_answer_equivalence_bench.py`; `tests/bench/test_kv_equivalence.py`
+
+### 2026-08-05 — [design] B7 binds cache-warm answers to exact cache-cold answers
+- What: added an additive five-cell companion gate in the exact order `f2c-tp2`, `f2d-tp2`, `f4a-tp4`, `f4a-tp8`, `f4b-tp4`. `run-native --cell` selects fixed geometry and `assemble` requires one raw for every named cell. Before GPU construction each child replays and content-binds immutable snapshots of its exact parent through the owning verifier. The cells require five distinct nonces but one clean-source identity and one fully hashed Qwen3-32B checkpoint: all 17 shards, both weight rollups, architecture/config, six exact metadata files, and the separate weight index. F2d uses `aggregate-common-f2c` because its parent contains no checkpoint assertion. Each persistent native runtime retains and rehashes exact prompt IDs and requires identical IDs, pieces, and text from cold and complete-hit 32-token greedy requests. Radix cells require an independently probed exact full-prompt hit; DRAM cells separately prove pressure-interval offload and following warm-interval restore with zero fallback/ownership failures. Clean-source preflight rejects import shadows and non-`HEAD` loaded repo modules; source, checkpoint, and profile identities are rechecked after shutdown. Canonical replay hashes and parses the same immutable raw bytes; assembly, manifest verification, strict no-overwrite behavior, and the checkout boundary fail closed. All existing parent schemas, gates, diagnostics, and verdicts remain unchanged. Portable tests make no real-model, GPU-cache, or GPU-DRAM claim.
+- Why: performance-only KV gates can pass while radix reuse, page-table state, or DRAM spill/restore silently corrupts an answer. Same-runtime cold/warm equality isolates that corruption signal from the known BF16 near ties and topology/shape differences in existing cross-arm diagnostics.
+- Refs: issue #373; `docs/design/issue-373-kv-answer-equivalence.md`; `bench/kv_answer_equivalence_bench.py`; `kairyu/bench/kv_equivalence.py`; `docs/gpu-runbook.md` §9.8c
 
 ### 2026-08-05 — [design] Core MMLU ranks exact teacher-forced continuations
 - What: added a native `kairyu_continuation` completions mode and an ordered forced-token engine path that returns each candidate token's raw pre-processor log probability while genuinely conditioning later positions on the forced prefix. Token boundaries and the processed prompt/continuation IDs are tokenizer-owned and exact; EOS can be scored as data, process-isolated and in-process engines preserve the intent, malformed backend evidence fails closed, and remote/OpenAI/vLLM paths cannot silently drop it. A separate benchmark request/response protocol validates finite aligned evidence, probes capability before dataset fan-out, and distinguishes explicit unsupported targets from authentication, endpoint, retry, schema, and fixed-tokenizer failures. Core MMLU now ranks `" A"` through `" D"` with a stable tie break, requires four distinct single-token candidates, and retains every candidate score and token proof. A full core run is consequently 58,028 calls. The final portable collection is 5,436 selected tests; exact full-suite runs plus all 19 post-run hardening selections are green, with 83.86% measured combined coverage, all 64 benchmark entrypoints, and the isolated wheel boundary verified.

@@ -18,6 +18,7 @@ schema_version = 1
 "bench.gate_logits_dtype" = ["bench.gate_a1", "bench.gate_a2", "bench.parity_tp"]
 "bench.global_kv_pool_decision" = ["bench.kv_aware_ttft_f2c_bench"]
 "bench.issue_333_proc_http_bench" = ["bench.g2_a6_vllm_bench", "bench.run_g2_a6_formal"]
+"bench.kv_answer_equivalence_bench" = ["bench.agentic_kv_tier_f4b_bench", "bench.dram_kv_tier_qwen", "bench.kv_aware_ttft_f2c_bench", "bench.prefix_weight_f2d_bench"]
 "bench.kv_event_f2b_bench" = ["bench.fleet_churn_bench"]
 "bench.parity_hf" = ["bench.parity_tp"]
 "bench.pd_overlap_qwen" = ["bench.parity_tp"]
@@ -286,6 +287,15 @@ requires = ["bench", "docker", "engine", "gpu", "hf", "service"]
 documentation = ["docs/design/m8-engine-cpu.md", "docs/gpu-runbook.md"]
 installed = false
 invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "bench/kv_answer_equivalence_bench.py"
+module = "bench.kv_answer_equivalence_bench"
+kind = "formal-gate"
+requires = ["engine", "gpu", "hf"]
+documentation = ["bench/README.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path"]
 
 [[entrypoints]]
 path = "bench/kv_aware_ttft_f2c_bench.py"

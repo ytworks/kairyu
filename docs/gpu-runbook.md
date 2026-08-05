@@ -1609,6 +1609,166 @@ image, and drill are unchanged.
   maximum difference. Seal, retained-copy verification, and independent
   replay all passed.
 
+- 9.8c B7 KV cache-hit/miss answer equivalence (#373): run this additive
+  correctness companion after locating the reviewed F2c, F2d, F4a, and F4b
+  parent artifacts. Do not edit, reseal, schema-upgrade, or relabel a parent.
+  Before any GPU runtime is constructed, each B7 invocation replays its exact
+  supplied parent through that gate's owning verifier and content-binds the
+  manifest/raw pair. F4a uses one parent manifest with its distinct TP4 and TP8
+  raw shards. F4b must also find the sealed sibling quality manifest/raw in the
+  supplied performance manifest's directory; it runs
+  `verify_quality_artifact(..., assert_gate=True)` and requires the combined
+  performance+quality closure to pass. The production matrix is five cells in this exact order:
+  `f2c-tp2`, `f2d-tp2`, `f4a-tp4`, `f4a-tp8`, `f4b-tp4`.
+
+  `--cell` freezes every geometry field; do not supply caller-selected TP,
+  page-count, DRAM-capacity, decode-mode, batch-token, or model-length flags.
+  All cells use 16-token pages and a 1,024-token comparison prompt.
+
+  | Cell | TP | Device pages | DRAM pages | Decode | Max batched tokens | Max model length | Minimum restore |
+  |---|---:|---:|---:|---|---:|---:|---:|
+  | `f2c-tp2` | 2 | 8,192 | 0 | CUDA graph | 1,024 | 8,192 | n/a |
+  | `f2d-tp2` | 2 | 8,192 | 0 | CUDA graph | 1,024 | 8,192 | n/a |
+  | `f4a-tp4` | 4 | 1,024 | 512 | eager | 2,048 | 8,193 | 1,024 tokens |
+  | `f4a-tp8` | 8 | 1,024 | 512 | eager | 2,048 | 8,193 | 16 tokens |
+  | `f4b-tp4` | 4 | 1,024 | 2,048 | eager | 2,048 | 8,192 | 1,024 tokens |
+
+  Every cell full-hashes the same pinned Qwen3-32B checkpoint: all 17 shard
+  names, sizes, and SHA-256s; both weight rollups; architecture/config; the
+  exact six `config.json`, `generation_config.json`, `tokenizer.json`,
+  `tokenizer_config.json`, `vocab.json`, and `merges.txt` metadata hashes; and
+  the separate safetensors-index hash. F2d's parent has no model/checkpoint
+  assertion, so its `aggregate-common-f2c` constraint requires the exact
+  checkpoint already bound by `f2c-tp2`. Assembly requires that checkpoint and
+  one clean-source identity across all five cells, while requiring five
+  distinct run nonces.
+
+  Existing cross-arm equality stays diagnostic. F2c deliberately crosses
+  replicas/GPU pairs and independently populated caches, while F4b crosses
+  containers and tier-dependent prefill shapes. A BF16 near tie can move the
+  first free-running greedy token and thereby change every later input without
+  proving corrupt KV. B7 instead changes cache state inside one persistent
+  native runtime. The same retained prompt token IDs run first cold and then
+  warm with `temperature=0`, `seed=0`, `min_tokens=max_tokens=32`, and
+  `ignore_eos=true`. Each native response must complete without error and
+  report `finish_reason=length`, exact usage, and 32 native token IDs/pieces;
+  cold and warm IDs, pieces, and text must be exact. Replay recomputes prompt
+  count and SHA-256 from the retained IDs.
+
+  Run the five cells sequentially from the same clean reviewed source and
+  pinned checkpoint, using a fresh isolated process, native runtime,
+  wrapper-owned cache namespace, and evidence file for each. Use only the
+  direct script path with `uv run --frozen python -I -B`; the wrapper rejects
+  a plain interpreter rather than restarting after startup hooks. After isolated
+  startup and before exposing the checkout on `sys.path`, the wrapper creates
+  an unpredictable, exclusive 0700 directory under `/tmp` with
+  `tempfile.TemporaryDirectory`, assigns it to `sys.pycache_prefix`, proves
+  `git diff --quiet HEAD --`, and rejects untracked or ignored `.py`, direct or
+  cached `.pyc`, `.pth`, native `.so`, and symlink artifacts anywhere outside
+  `.venv`. Existing repository `__pycache__` therefore fails before a
+  repository package can execute. An explicit operator-side Git/artifact check
+  may fail earlier, but does not replace this wrapper-owned pre-import
+  preflight. Module invocation is excluded from the declared inventory and
+  retained only as an unsupported, non-evidence `--help` convenience;
+  `python -m` evidence
+  capture, assembly, verification, and replay are unsupported and
+  non-publishable. `-I` excludes ambient `PYTHONPATH` and user-site imports,
+  but the interpreter selected by `uv`, locked `.venv`, site bootstrap, and
+  installed packages remain part of the formal environment TCB. The in-process
+  preflight then proves every loaded repo module is tracked and byte-identical
+  to `HEAD`. After backend
+  shutdown, the source identity and complete checkpoint must still equal their
+  preflight snapshots. Parent manifest/raw/profile bytes, including F2d's
+  router sibling and both F4b quality files, are immutable across owner replay
+  and extraction, and the bound DRAM profile is rechecked after shutdown.
+  Parent/recomputed structures compare as canonical type-exact JSON,
+  and F4b quality raw must be strict canonical JSONL with no duplicate keys or
+  non-finite numbers. Every parent row index, fixed numeric/boolean field, and
+  F2d router row is independently exact-type/schema checked. Keep every output
+  even on a failed gate. F2c and F2d prove cold
+  `cached_tokens=0`, complete warm reuse, and a same-runtime RadixKV proof whose
+  immediately pre-warm cache-residency probe independently reports the full
+  prefix rather than copying response usage.
+  The three DRAM cells use their exact reviewed profile. Pressure requests run
+  only between the comparison requests: the pressure interval must show
+  positive offload without restore, and the immediately following warm
+  interval must independently show positive restore, with zero
+  `restore_fallbacks` and `ownership_failures`. Pressure answers are not
+  compared.
+
+  ```bash
+  uv run --frozen python -I -B \
+    bench/kv_answer_equivalence_bench.py run-native \
+    --cell f2c-tp2 --model-path <model-path> \
+    --parent-manifest <f2c-parent-manifest> \
+    --parent-raw <f2c-parent-raw> \
+    --output <run-root>/f2c-tp2.jsonl --assert-gate
+
+  uv run --frozen python -I -B \
+    bench/kv_answer_equivalence_bench.py run-native \
+    --cell f2d-tp2 --model-path <model-path> \
+    --parent-manifest <f2d-parent-manifest> \
+    --parent-raw <f2d-parent-raw> \
+    --output <run-root>/f2d-tp2.jsonl --assert-gate
+
+  uv run --frozen python -I -B \
+    bench/kv_answer_equivalence_bench.py run-native \
+    --cell f4a-tp4 --model-path <model-path> \
+    --parent-manifest <f4a-parent-manifest> \
+    --parent-raw <f4a-tp4-parent-raw> \
+    --dram-profile <f4a-tp4-dram-profile> \
+    --output <run-root>/f4a-tp4.jsonl --assert-gate
+
+  uv run --frozen python -I -B \
+    bench/kv_answer_equivalence_bench.py run-native \
+    --cell f4a-tp8 --model-path <model-path> \
+    --parent-manifest <f4a-parent-manifest> \
+    --parent-raw <f4a-tp8-parent-raw> \
+    --dram-profile <f4a-tp8-dram-profile> \
+    --output <run-root>/f4a-tp8.jsonl --assert-gate
+
+  uv run --frozen python -I -B \
+    bench/kv_answer_equivalence_bench.py run-native \
+    --cell f4b-tp4 --model-path <model-path> \
+    --parent-manifest <f4b-parent-manifest> \
+    --parent-raw <f4b-parent-raw> \
+    --dram-profile <f4b-bound-dram-profile> \
+    --output <run-root>/f4b-tp4.jsonl --assert-gate
+  ```
+
+  Assemble exactly those five retained raw files. `assemble` recomputes every
+  transition and binding before deriving the aggregate verdict; `verify`
+  additionally checks retained hashes and the derived manifest, while
+  `replay` independently derives the verdict from raw evidence. All three
+  commands fail closed under `--assert-gate`.
+
+  ```bash
+  uv run --frozen python -I -B \
+    bench/kv_answer_equivalence_bench.py assemble \
+    --f2c-tp2 <run-root>/f2c-tp2.jsonl \
+    --f2d-tp2 <run-root>/f2d-tp2.jsonl \
+    --f4a-tp4 <run-root>/f4a-tp4.jsonl \
+    --f4a-tp8 <run-root>/f4a-tp8.jsonl \
+    --f4b-tp4 <run-root>/f4b-tp4.jsonl \
+    --output-dir bench/results/<b7-artifact> --assert-gate
+
+  uv run --frozen python -I -B \
+    bench/kv_answer_equivalence_bench.py verify \
+    --artifact bench/results/<b7-artifact> --assert-gate
+
+  uv run --frozen python -I -B \
+    bench/kv_answer_equivalence_bench.py replay \
+    --artifact bench/results/<b7-artifact> --assert-gate
+  ```
+
+  Retain all five cell raw files, the assembled artifact, parent digest
+  bindings, and DRAM-profile digests together. Replay parses and hashes each
+  retained raw from the same immutable byte snapshot. Portable fake-native,
+  replay, and tamper tests validate the operator only; they never claim a real
+  checkpoint execution, GPU cache hit, or GPU DRAM transfer. The complete
+  semantic contract is in
+  `docs/design/issue-373-kv-answer-equivalence.md`.
+
 - 9.9 G4 E-KV FP8 cache correctness bake (#170): run from a clean commit on
   one SM120 GPU with the exact reviewed Qwen3-32B checkpoint. The current
   retained production image predates E4M3 attention AOT and contains no
