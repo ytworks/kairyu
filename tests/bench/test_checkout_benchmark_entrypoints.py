@@ -42,13 +42,17 @@ def test_package_manifest_exactly_inventories_checkout_entrypoints() -> None:
     assert payload["schema_version"] == 1
     assert declared_paths == actual_paths
     assert len(declared_paths) == len(set(declared_paths))
+    path_only = {
+        "bench/batch_invariance_bench.py",
+        "bench/kv_answer_equivalence_bench.py",
+    }
     for entry in entries:
         assert set(entry) == EXPECTED_FIELDS
         assert entry["module"] == entry["path"].removesuffix(".py").replace("/", ".")
         assert entry["installed"] is False
         expected_invocations = (
             ["path"]
-            if entry["path"] == "bench/kv_answer_equivalence_bench.py"
+            if entry["path"] in path_only
             else ["path", "module"]
         )
         assert entry["invocations"] == expected_invocations

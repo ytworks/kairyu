@@ -64,6 +64,15 @@ installed = false
 invocations = ["path", "module"]
 
 [[entrypoints]]
+path = "bench/batch_invariance_bench.py"
+module = "bench.batch_invariance_bench"
+kind = "formal-gate"
+requires = ["engine", "gpu", "hf"]
+documentation = ["bench/README.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path"]
+
+[[entrypoints]]
 path = "bench/batched_prefill_qwen.py"
 module = "bench.batched_prefill_qwen"
 kind = "formal-gate"

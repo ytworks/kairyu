@@ -1000,10 +1000,28 @@ whose extra IDs are not valid evidence.
 Canonical raw replay parses and hashes one immutable byte snapshot before
 deriving the five-cell verdict.
 Portable tests validate the operator without claiming real model, GPU-cache,
-or GPU-DRAM measurement. Final checkout validation passed 1,652 benchmark
-tests (9 deselected) and 5,589 portable tests (231 deselected), plus Ruff,
-all 65 entrypoints through 129 declared help invocations, the isolated wheel
-boundary, and `git diff --check`.
+or GPU-DRAM measurement. Latest checkout validation passed all 1,698 benchmark
+tests (9 deselected) and the 88-test affected engine/radix/scheduler selection,
+plus Ruff, all 66 entrypoints through 130 declared help invocations, the
+isolated wheel boundary, and `git diff --check`.
+
+Issue #360 now has an additive A12 batch-invariance determinism gate for one
+schema-fixed 129-token factual prompt. The same native greedy 32-token answer
+must match exactly by token ID, raw vocabulary piece, and final text when run
+cold in a live batch of 32, cold alone after proved eviction, warm alone after
+an independently proved 128-token page-aligned radix hit plus terminal-token
+recomputation, and cold alone in a fresh 32-token-budget runtime whose retained
+prefill chunks are exactly `32, 32, 32, 32, 1`. The frozen Qwen3-32B TP8
+operator binds 31 live distractors, the necessary and sufficient six fixed
+pressure requests, all-rank FlashInfer plan/run and CUDA-graph counters,
+scheduler cohorts, cache probes, source/checkpoint hashes, and exclusive SM120
+hardware. Canonical raw replay derives every verdict without trusting retained
+`passed`; direct-path `python -I -B`, clean tracked source, import-shadow
+rejection, and exclusive output creation are mandatory. The work also closes
+an ordinary DeepSeek/MLA decode bug: unsupported multi-row list batching now
+falls back before any model/KV mutation, while valid list-only backends remain
+batched. Portable tests validate the contract, tamper rejection, fake-native
+phase plumbing, and MLA fallback without claiming a production GPU result.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -1012,6 +1030,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [design] A12 binds greedy answers across batch, cache, and chunk shapes
+- What: added a checkout-only, path-only Qwen3-32B TP8 gate that runs one fixed 129-token prompt cold in a real 32-request cohort, cold alone after six-request deterministic radix eviction, warm alone after an independent 128-token page-aligned cache probe, and cold alone in a fresh runtime with exact `32, 32, 32, 32, 1` prefill chunks. All four native 32-token responses must match exactly by token ID, raw vocabulary piece, and final text. The raw contract additionally binds all-rank FlashInfer prefill/decode counters, CUDA-graph capture/replay, scheduler cohorts, cache usage, source/checkpoint/hardware identity, strict isolated startup, canonical replay, and exclusive no-overwrite artifacts. Ordinary decode now shares the existing model/layer/backend capability gate with speculative verification, so unsupported MLA/custom stacks serialize before model or KV mutation while complete list-only implementations remain batched.
+- Why: identical prompts can otherwise cross shape-dependent attention, graph, batching, cache, and chunked-prefill paths and return different greedy answers, making production incidents and load-dependent quality comparisons unreproducible. Causal native schedule/cache evidence distinguishes a real shape comparison from copied configuration or scenario labels, and pre-call capability selection avoids unsafe retry after partial KV writes.
+- Refs: issue #360; `docs/design/issue-360-batch-invariance.md`; `bench/batch_invariance_bench.py`; `kairyu/bench/batch_invariance.py`; `kairyu/engine/core/model_runner.py`; `docs/gpu-runbook.md` §9.8d
 
 ### 2026-08-05 — [amendment] B7 formal evidence requires isolated direct-path startup
 - What: formal `run-native`, `assemble`, `verify`, and `replay` now require a fresh direct checkout-script process whose initial interpreter is launched with `python -I -B` (or the runbook's `uv run --frozen` equivalent); a plain interpreter is rejected instead of receiving an unsafe late restart. Before exposing the checkout on `sys.path`, the wrapper creates an unpredictable, exclusive 0700 `tempfile.TemporaryDirectory` under `/tmp`, assigns it to `sys.pycache_prefix`, and performs its tracked-clean/import-artifact preflight. Module invocation is excluded from the declared inventory and remains only as an unsupported, non-evidence `--help` convenience; its evidence output is unsupported and non-publishable. The selected interpreter, locked `.venv`, site bootstrap, and installed packages are explicit TCB. The contract also distinguishes the 151,669-entry tokenizer ID domain from the model's padded 151,936-wide logits head and validates every prompt/response ID against `TOKENIZER_VOCAB_SIZE = 151669`.
