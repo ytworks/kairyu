@@ -19,12 +19,19 @@ from kairyu.bench.runner import (
     SuiteRunner,
     _adapter_identity,
     _methodology_history_ineligibility,
+    _recordable_config,
     _run_fingerprint,
     _run_identity,
     _source_provenance,
 )
 from kairyu.bench.store import ResultStore
-from kairyu.bench.types import DownloadReport, ExecutionConfig, ItemResult, PairResult
+from kairyu.bench.types import (
+    DownloadReport,
+    ExecutionConfig,
+    ItemResult,
+    PairResult,
+    ServedConfigIdentity,
+)
 
 _FINGERPRINT_EXCLUSIONS = {
     "run_id",
@@ -144,6 +151,51 @@ def test_source_provenance_is_anchored_to_the_loaded_module_not_cwd(tmp_path, mo
     assert isinstance(source["source_tree_clean"], bool)
 
 
+def test_served_config_identity_is_recorded_and_changes_fingerprint_without_secret(tmp_path):
+    secret = "dummy-served-config-test-token"
+    plain_target = make_target(
+        "m",
+        extra_body_json=json.dumps({"vendor_access_token": secret}),
+    )
+    identified_target = plain_target.model_copy(
+        update={
+            "served_config": ServedConfigIdentity(
+                label="fp8-kv-profile",
+                sha256="a" * 64,
+            )
+        }
+    )
+    plain = make_config(tmp_path, models=(), targets=(plain_target,))
+    identified = make_config(tmp_path, models=(), targets=(identified_target,))
+    changed = identified.model_copy(
+        update={
+            "targets": (
+                identified_target.model_copy(
+                    update={
+                        "served_config": ServedConfigIdentity(
+                            label="fp8-kv-profile",
+                            sha256="b" * 64,
+                        )
+                    }
+                ),
+            )
+        }
+    )
+
+    recorded = _recordable_config(identified)
+    served_config = recorded["targets"][0]["served_config"]
+
+    assert served_config == {"label": "fp8-kv-profile", "sha256": "a" * 64}
+    assert recorded["targets"][0]["extra_body_json"].startswith("sha256:")
+    assert secret not in json.dumps(recorded)
+    assert len(
+        {
+            _run_fingerprint(_run_identity(config, []))
+            for config in (plain, identified, changed)
+        }
+    ) == 3
+
+
 def test_selected_judge_templates_are_content_bound_to_adapter_identity(tmp_path, monkeypatch):
     from kairyu.bench import judge_prompts
     from kairyu.bench.adapters import all_adapters
@@ -178,6 +230,27 @@ def test_selected_judge_templates_are_content_bound_to_adapter_identity(tmp_path
     changed_identity = _adapter_identity(adapters["hle"], cache, offline_fixtures=True)
     assert changed_identity["judge_template"] != hle_identity["judge_template"]
     assert _run_fingerprint(_run_identity(config, [changed_identity])) != before
+
+
+def test_config_ab_statistical_routing_is_recorded_in_adapter_identity(tmp_path):
+    from kairyu.bench.adapters import all_adapters
+
+    adapters = all_adapters()
+    cache = BenchCache(tmp_path / "cache")
+    scicode = _adapter_identity(adapters["scicode"], cache, offline_fixtures=True)
+    gsm8k = _adapter_identity(adapters["gsm8k"], cache, offline_fixtures=True)
+    mrcr = _adapter_identity(adapters["mrcr-v2"], cache, offline_fixtures=True)
+    hle = _adapter_identity(adapters["hle"], cache, offline_fixtures=True)
+
+    assert (scicode["binary_outcomes"], scicode["paired_cluster_key"]) == (
+        True,
+        "item_id_before_final_dot_v1",
+    )
+    assert (gsm8k["binary_outcomes"], gsm8k["paired_cluster_key"]) == (True, None)
+    assert (mrcr["binary_outcomes"], mrcr["paired_cluster_key"]) == (False, None)
+    assert scicode["uses_judge_template"] is False
+    assert hle["uses_judge_template"] is True
+    assert isinstance(hle["judge_template"], dict)
 
 
 def test_referenced_cache_assets_are_content_bound_and_revalidated(tmp_path):

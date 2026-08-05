@@ -670,6 +670,14 @@ def test_only_contractually_binary_adapters_enable_wilson_intervals():
     }
 
 
+def test_only_scicode_declares_dependent_config_ab_clusters():
+    assert {
+        name: adapter.info.paired_cluster_key
+        for name, adapter in all_adapters().items()
+        if adapter.info.paired_cluster_key is not None
+    } == {"scicode": "item_id_before_final_dot_v1"}
+
+
 @pytest.mark.parametrize(
     "benchmark",
     ["mrcr-v2", "tau-bench-banking", "terminal-bench"],

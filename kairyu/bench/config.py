@@ -14,6 +14,7 @@ from kairyu.bench.types import (
     BenchTarget,
     JudgeConfig,
     JudgeEndpointConfig,
+    ServedConfigIdentity,
 )
 
 
@@ -53,6 +54,18 @@ def _cli_targets(args) -> tuple[BenchTarget, ...]:
             for model in args.model
         ]
     return tuple(targets)
+
+
+def _cli_served_config(args) -> ServedConfigIdentity | None:
+    label = getattr(args, "served_config_label", None)
+    sha256 = getattr(args, "served_config_sha256", None)
+    if (label is None) != (sha256 is None):
+        raise ValueError(
+            "--served-config-label and --served-config-sha256 must be provided together"
+        )
+    if label is None:
+        return None
+    return ServedConfigIdentity(label=label, sha256=sha256)
 
 
 def _split_csv(values: list[str] | None) -> tuple[str, ...]:
@@ -118,6 +131,7 @@ def build_judge_config(args) -> JudgeConfig:
 
 def build_config(args) -> BenchConfig:
     data = _load_config_mapping(args.config)
+    served_config = _cli_served_config(args)
 
     cli_targets = _cli_targets(args)
     if cli_targets:
@@ -130,6 +144,15 @@ def build_config(args) -> BenchConfig:
                 {**target, **sampling} if isinstance(target, dict) else target
                 for target in data.get("targets") or []
             ]
+
+    if served_config is not None:
+        served_config_data = served_config.model_dump()
+        data["targets"] = [
+            {**target, "served_config": served_config_data}
+            if isinstance(target, dict)
+            else target
+            for target in data.get("targets") or []
+        ]
 
     judge = _judge_data(data, args)
     if judge:

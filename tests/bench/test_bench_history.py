@@ -260,6 +260,173 @@ def test_append_load_find_and_canonical_framing(tmp_path):
     assert store.find_scoreboard_entry("absent") is None
 
 
+def _persist_indexed_pair(tmp_path):
+    metadata = _metadata()
+    pair = _pair(metadata)
+    store = ResultStore(tmp_path, "run-1")
+    store.save_pair(pair)
+    store.append_scoreboard_index(_scoreboard(metadata), metadata, (pair,))
+    entry = store.find_scoreboard_entry("run-1")
+    assert entry is not None
+    return store, entry, pair
+
+
+def test_load_indexed_pair_revalidates_complete_raw_binding(tmp_path):
+    store, entry, pair = _persist_indexed_pair(tmp_path)
+
+    assert store.load_indexed_pair(entry, "gsm8k", "target-a") == pair
+
+
+def test_load_indexed_pair_rejects_missing_and_complete_binding_tamper(tmp_path):
+    metadata = _metadata()
+    pair = _pair(metadata)
+    missing_store = ResultStore(tmp_path / "missing", "run-1")
+    missing_store.append_scoreboard_index(_scoreboard(metadata), metadata, (pair,))
+    missing_entry = missing_store.find_scoreboard_entry("run-1")
+    assert missing_entry is not None
+
+    with pytest.raises(ValueError, match="indexed pair .* is missing"):
+        missing_store.load_indexed_pair(missing_entry, "gsm8k", "target-a")
+
+    store, entry, original = _persist_indexed_pair(tmp_path / "tampered")
+    changed = original.model_copy(update={"annotations": ("changed after indexing",)})
+    store.save_pair(changed)
+
+    with pytest.raises(ValueError, match="complete indexed binding"):
+        store.load_indexed_pair(entry, "gsm8k", "target-a")
+
+
+def test_load_indexed_pair_requires_entry_from_authoritative_current_index(tmp_path):
+    store, entry, original = _persist_indexed_pair(tmp_path)
+    forged_pair = original.model_copy(update={"annotations": ("forged binding",)})
+    forged_entry = history.build_entry(
+        entry["scoreboard"],
+        entry["run"],
+        pairs=(forged_pair,),
+        previous_record_sha256=entry["previous_record_sha256"],
+    )
+    store.save_pair(forged_pair)
+
+    with pytest.raises(ValueError, match="authoritative current scoreboard-index"):
+        store.load_indexed_pair(forged_entry, "gsm8k", "target-a")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(
+            b'{"benchmark":"gsm8k","benchmark":"gsm8k"}',
+            id="duplicate-key",
+        ),
+        pytest.param(b'{"metrics":{"score":NaN}}', id="non-finite"),
+        pytest.param(
+            None,
+            id="excessive-nesting",
+        ),
+    ],
+)
+def test_load_indexed_pair_wraps_malformed_raw_json_as_value_error(tmp_path, raw):
+    store, entry, pair = _persist_indexed_pair(tmp_path)
+    if raw is None:
+        deep_value = ("[" * 2_000) + "0" + ("]" * 2_000)
+        raw = pair.model_dump_json().replace(
+            '"methodology":{}',
+            f'"methodology":{{"deep":{deep_value}}}',
+        ).encode()
+    store.pair_path("gsm8k", "target-a").write_bytes(raw)
+
+    with pytest.raises(ValueError, match="strict JSON|supported nesting depth"):
+        store.load_indexed_pair(entry, "gsm8k", "target-a")
+
+
+def test_load_indexed_pair_rejects_wrong_entry_run_and_unknown_cell(tmp_path):
+    store, entry, _ = _persist_indexed_pair(tmp_path)
+    malformed = json.loads(json.dumps(entry))
+    malformed["unexpected"] = True
+
+    with pytest.raises(ValueError, match="record fields"):
+        store.load_indexed_pair(malformed, "gsm8k", "target-a")
+
+    with pytest.raises(ValueError, match="does not match indexed scoreboard entry"):
+        ResultStore(tmp_path, "run-2").load_indexed_pair(
+            entry, "gsm8k", "target-a"
+        )
+
+    with pytest.raises(ValueError, match="no unique pair binding"):
+        store.load_indexed_pair(entry, "unknown-benchmark", "target-a")
+    with pytest.raises(ValueError, match="no unique pair binding"):
+        store.load_indexed_pair(entry, "gsm8k", "unknown-target")
+
+
+def test_load_indexed_pair_rejects_duplicate_binding_and_symlink(tmp_path):
+    store, entry, pair = _persist_indexed_pair(tmp_path / "duplicate")
+    duplicate = json.loads(json.dumps(entry))
+    duplicate["pairs"].append(json.loads(json.dumps(duplicate["pairs"][0])))
+    _rehash(duplicate)
+
+    with pytest.raises(ValueError, match="duplicate pair binding"):
+        store.load_indexed_pair(duplicate, "gsm8k", "target-a")
+
+    symlink_store, symlink_entry, _ = _persist_indexed_pair(tmp_path / "symlink")
+    pair_path = symlink_store.pair_path("gsm8k", "target-a")
+    outside = tmp_path / "outside-pair.json"
+    outside.write_text(pair.model_dump_json(), encoding="utf-8")
+    before = outside.read_bytes()
+    pair_path.unlink()
+    pair_path.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="cannot be opened safely"):
+        symlink_store.load_indexed_pair(symlink_entry, "gsm8k", "target-a")
+
+    assert outside.read_bytes() == before
+
+
+def test_load_indexed_pair_pins_intermediate_directory_before_final_open(
+    tmp_path,
+    monkeypatch,
+):
+    store, entry, _ = _persist_indexed_pair(tmp_path / "results")
+    pair_path = store.pair_path("gsm8k", "target-a")
+    renamed_directory = pair_path.parent.with_name(f"{pair_path.parent.name}-original")
+    outside_directory = tmp_path / "outside"
+    outside_directory.mkdir()
+    outside_pair = outside_directory / pair_path.name
+    outside_pair.write_bytes(b"external bytes must never be read")
+    outside_stat = outside_pair.stat()
+
+    real_open = os.open
+    real_read = os.read
+    swapped = False
+    external_reads: list[int] = []
+
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and path == pair_path.name and dir_fd is not None:
+            pair_path.parent.rename(renamed_directory)
+            pair_path.parent.symlink_to(outside_directory, target_is_directory=True)
+            swapped = True
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    def recording_read(descriptor, size):
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev == outside_stat.st_dev
+            and opened.st_ino == outside_stat.st_ino
+        ):
+            external_reads.append(size)
+        return real_read(descriptor, size)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    monkeypatch.setattr(os, "read", recording_read)
+
+    with pytest.raises(ValueError, match="path changed while reading"):
+        store.load_indexed_pair(entry, "gsm8k", "target-a")
+
+    assert swapped is True
+    assert external_reads == []
+    assert outside_pair.read_bytes() == b"external bytes must never be read"
+
+
 def test_exact_duplicate_is_noop_but_conflict_preserves_bytes(tmp_path):
     metadata = _metadata()
     store = ResultStore(tmp_path, "run-1")

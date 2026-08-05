@@ -275,6 +275,9 @@ def _adapter_identity(adapter, cache: BenchCache, *, offline_fixtures: bool) -> 
         "name": info.name,
         "dataset": info.hf_dataset,
         "revision": info.hf_revision,
+        "binary_outcomes": info.binary_outcomes,
+        "paired_cluster_key": info.paired_cluster_key,
+        "uses_judge_template": info.judge_template_name is not None,
         "history_provenance": {
             "complete": info.history_provenance_complete,
             "reason": info.history_provenance_reason or None,

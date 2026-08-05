@@ -8,9 +8,12 @@ model names (they may contain "/").
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import re
+import stat
 from collections.abc import Sequence
 from pathlib import Path, PureWindowsPath
 
@@ -320,6 +323,216 @@ class ResultStore:
             return None
         return result
 
+    def load_indexed_pair(
+        self,
+        entry: dict,
+        benchmark: str,
+        target: str,
+    ) -> PairResult:
+        """Load one raw pair only when it exactly matches its history binding.
+
+        The supplied row must still be the authoritative record in this
+        results root's fully validated index. Missing, malformed, replaced, or
+        symlinked evidence is an error. This is intentionally stricter than
+        :meth:`load_pair`, whose ``None`` return is part of resume behavior.
+        """
+        if not isinstance(entry, dict) or entry.get("run_id") != self.run_id:
+            raise ValueError(
+                f"run id {self.run_id!r} does not match indexed scoreboard entry"
+            )
+        for field, value in (("benchmark", benchmark), ("target", target)):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"indexed pair {field} must be a non-empty string")
+
+        binding = scoreboard_history.indexed_pair_binding(
+            entry,
+            run_id=self.run_id,
+            benchmark=benchmark,
+            target=target,
+        )
+        authoritative = self.find_scoreboard_entry(self.run_id)
+        if (
+            authoritative is None
+            or authoritative["record_sha256"] != entry["record_sha256"]
+        ):
+            raise ValueError(
+                f"run id {self.run_id!r} entry is not the authoritative current "
+                "scoreboard-index record"
+            )
+        authoritative_binding = scoreboard_history.indexed_pair_binding(
+            authoritative,
+            run_id=self.run_id,
+            benchmark=benchmark,
+            target=target,
+        )
+        if authoritative_binding != binding:
+            raise ValueError(
+                f"run id {self.run_id!r} pair binding differs from the authoritative index"
+            )
+
+        raw = self._read_regular_indexed_pair(benchmark=benchmark, target=target)
+        return scoreboard_history.validate_pair_binding(
+            raw,
+            binding,
+            benchmark=benchmark,
+            target=target,
+        )
+
+    def _read_regular_indexed_pair(
+        self,
+        *,
+        benchmark: str,
+        target: str,
+    ) -> bytes:
+        """Read through pinned root/run/benchmark descriptors without symlinks."""
+        directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        directory_flags |= getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_NONBLOCK", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        file_flags |= getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+        benchmark_name = _safe(benchmark)
+        pair_name = f"{_safe(target)}.json"
+        descriptors: list[int] = []
+
+        def require_same_entry(
+            parent_fd: int,
+            name: str,
+            opened: os.stat_result,
+            *,
+            directory: bool,
+        ) -> None:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            expected_kind = stat.S_ISDIR if directory else stat.S_ISREG
+            if (
+                not expected_kind(opened.st_mode)
+                or current.st_dev != opened.st_dev
+                or current.st_ino != opened.st_ino
+            ):
+                raise ValueError(
+                    f"indexed pair {benchmark!r}/{target!r} path changed while reading"
+                )
+
+        def require_same_root(root_fd: int, opened: os.stat_result) -> None:
+            pinned = os.fstat(root_fd)
+            current = self.results_dir.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or pinned.st_dev != opened.st_dev
+                or pinned.st_ino != opened.st_ino
+                or current.st_dev != opened.st_dev
+                or current.st_ino != opened.st_ino
+            ):
+                raise ValueError(
+                    f"indexed pair {benchmark!r}/{target!r} results root changed while reading"
+                )
+
+        try:
+            try:
+                root_fd = os.open(self.results_dir, directory_flags)
+                descriptors.append(root_fd)
+                root_opened = os.fstat(root_fd)
+                require_same_root(root_fd, root_opened)
+
+                run_fd = os.open(self.run_id, directory_flags, dir_fd=root_fd)
+                descriptors.append(run_fd)
+                run_opened = os.fstat(run_fd)
+                require_same_entry(
+                    root_fd,
+                    self.run_id,
+                    run_opened,
+                    directory=True,
+                )
+
+                benchmark_fd = os.open(
+                    benchmark_name,
+                    directory_flags,
+                    dir_fd=run_fd,
+                )
+                descriptors.append(benchmark_fd)
+                benchmark_opened = os.fstat(benchmark_fd)
+                require_same_entry(
+                    run_fd,
+                    benchmark_name,
+                    benchmark_opened,
+                    directory=True,
+                )
+
+                pair_fd = os.open(pair_name, file_flags, dir_fd=benchmark_fd)
+                descriptors.append(pair_fd)
+                pair_opened = os.fstat(pair_fd)
+                require_same_entry(
+                    benchmark_fd,
+                    pair_name,
+                    pair_opened,
+                    directory=False,
+                )
+            except OSError as error:
+                if error.errno == errno.ENOENT:
+                    raise ValueError(
+                        f"indexed pair {benchmark!r}/{target!r} is missing for "
+                        f"run id {self.run_id!r}"
+                    ) from error
+                raise ValueError(
+                    f"indexed pair {benchmark!r}/{target!r} cannot be opened safely "
+                    f"for run id {self.run_id!r}"
+                ) from error
+
+            chunks: list[bytes] = []
+            remaining = pair_opened.st_size
+            while remaining:
+                chunk = os.read(pair_fd, min(remaining, 1024 * 1024))
+                if not chunk:
+                    raise ValueError(
+                        f"indexed pair {benchmark!r}/{target!r} changed while reading"
+                    )
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(pair_fd, 1):
+                raise ValueError(
+                    f"indexed pair {benchmark!r}/{target!r} changed while reading"
+                )
+
+            pair_after = os.fstat(pair_fd)
+            if (
+                pair_after.st_dev != pair_opened.st_dev
+                or pair_after.st_ino != pair_opened.st_ino
+                or pair_after.st_size != pair_opened.st_size
+            ):
+                raise ValueError(
+                    f"indexed pair {benchmark!r}/{target!r} changed while reading"
+                )
+            require_same_entry(
+                benchmark_fd,
+                pair_name,
+                pair_opened,
+                directory=False,
+            )
+            require_same_entry(
+                run_fd,
+                benchmark_name,
+                benchmark_opened,
+                directory=True,
+            )
+            require_same_entry(
+                root_fd,
+                self.run_id,
+                run_opened,
+                directory=True,
+            )
+            require_same_root(root_fd, root_opened)
+            return b"".join(chunks)
+        except ValueError:
+            raise
+        except OSError as error:
+            raise ValueError(
+                f"indexed pair {benchmark!r}/{target!r} cannot be read safely "
+                f"for run id {self.run_id!r}"
+            ) from error
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
     def save_pair(self, result: PairResult) -> Path:
         path = self.pair_path(result.benchmark, result.target)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,6 +558,20 @@ class ResultStore:
         for path in (json_path, markdown_path):
             self._preflight_atomic_write(path)
         self._atomic_write(json_path, json.dumps(comparison, indent=2))
+        self._atomic_write(markdown_path, markdown)
+        return markdown_path
+
+    def save_config_comparison(self, comparison: dict, markdown: str) -> Path:
+        """Configuration A/B report without replacing published-score output."""
+        self.ensure()
+        json_path = self.run_dir / "config-comparison.json"
+        markdown_path = self.run_dir / "config-comparison.md"
+        for path in (json_path, markdown_path):
+            self._preflight_atomic_write(path)
+        self._atomic_write(
+            json_path,
+            json.dumps(comparison, indent=2, allow_nan=False),
+        )
         self._atomic_write(markdown_path, markdown)
         return markdown_path
 

@@ -80,6 +80,9 @@ class AdapterInfo:
     # True only when every scored item is contractually a Bernoulli outcome.
     # Observing only 0/1 values in one continuous/reward run is not enough.
     binary_outcomes: bool = False
+    # Optional versioned grouping rule for paired uncertainty. Items inside one
+    # group may be dependent and must be resampled together for config A/B.
+    paired_cluster_key: str | None = None
     # Logical name in judge_prompts.judge_templates(). This binds the exact
     # scoring prompt to runs selecting this adapter without invalidating
     # unrelated benchmark runs.

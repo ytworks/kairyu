@@ -134,6 +134,8 @@ scoreboard.json                               # machine-readable table
 scoreboard.md                                 # Fugu-layout table (also printed to stdout)
 comparison.json                               # measured vs published, machine-readable
 comparison.md                                 # accuracy report vs the Fugu release table
+config-comparison.json                        # optional config A/B gate artifact
+config-comparison.md                          # optional config A/B gate report
 ```
 
 Core results default to `bench/results/core/<run_id>/` and contain the same
@@ -215,6 +217,8 @@ kairyu bench list                      # slots, requirements, cache status
 kairyu bench download [--only a,b]     # pre-fetch datasets (idempotent)
 kairyu bench report <run_id>           # rebuild + print a stored scoreboard
 kairyu bench compare-runs BASE CANDIDATE  # print CANDIDATE - BASE deltas
+kairyu bench compare --baseline BASE --candidate CANDIDATE \
+    --tolerance gpqa-diamond=2.0       # paired config A/B non-inferiority gate
 kairyu bench entrypoints               # installed/repository ownership inventory
 kairyu bench list --suite core
 kairyu bench download --suite core
@@ -235,6 +239,90 @@ that boundary; it is not promoted to like-for-like published comparability. An
 identical runtime-withholding policy never permits that diagnostic exception.
 A negative delta is a report, not a policy gate; thresholding and
 trailing-window alert policy belong to the nightly comparator.
+
+### Configuration A/B quality gate
+
+`compare-runs` answers whether the same declared target changed across local
+harness commits. Configuration A/B intentionally answers a different question:
+whether one immutable served configuration is non-inferior to another under
+the same harness, samples, and request policy. First run both configurations
+either as two targets in one run or as two separately indexed runs. Every arm
+used by the gate must declare an operator-owned immutable identity:
+
+```yaml
+targets:
+  - name: bf16-baseline
+    base_url: http://baseline.example/v1
+    model: m1
+    served_config:
+      label: qwen3-32b-bf16
+      sha256: 1111111111111111111111111111111111111111111111111111111111111111
+  - name: fp8-candidate
+    base_url: http://candidate.example/v1
+    model: m1
+    served_config:
+      label: qwen3-32b-fp8
+      sha256: 2222222222222222222222222222222222222222222222222222222222222222
+```
+
+The SHA-256 should cover a canonical deployment manifest that binds the
+checkpoint/tokenizer revisions, Kairyu build, and all relevant engine,
+quantization, KV-cache, expert-parallel, and speculation settings. It is
+fingerprinted and retained, but remains an operator declaration: the benchmark
+client does not remotely attest which deployment answered a request. For a
+single target per run the same identity can be supplied with
+`--served-config-label` and `--served-config-sha256`; the flags must be used
+together.
+
+Gate two targets from the same immutable run:
+
+```bash
+kairyu bench run --config bench-ab.yaml --run-id qwen3-ab
+kairyu bench compare --suite core \
+    --baseline qwen3-ab --candidate qwen3-ab \
+    --baseline-target bf16-baseline --candidate-target fp8-candidate \
+    --tolerance gsm8k=1.0 --tolerance mmlu=0.5
+```
+
+Or use different run IDs when the deployments cannot be measured in one run:
+
+```bash
+kairyu bench compare --suite fugu \
+    --baseline qwen3-bf16 --candidate qwen3-fp8 \
+    --tolerance gpqa-diamond=2.0 --tolerance scicode=1.0
+```
+
+Tolerance values are percentage points; every named row must pass and scores
+are never averaged across benchmarks. The command validates the complete
+hash-chained history, then reloads each raw `PairResult` and matches its
+canonical SHA-256 to the index. Item IDs must be unique and identical across
+arms, all items must be completed, denominators and recomputed means must
+agree, and subset/smoke/offline or provenance-withheld evidence is rejected.
+Different full run fingerprints are expected because targets differ; after
+removing only `identity.config.targets`, the complete methodology identity,
+local commit/source tree, Python/execution runtime, judge, dataset/evaluator
+identity, and sample-selection configuration must match. Target model,
+sampling/reasoning options, context/output limits, and vision policy must also
+match; only the arm label, endpoint, credential-variable name, and declared
+served configuration may differ.
+
+Independent binary items use a paired 2x2 table. Their artifact records a
+two-sided 95% Newcombe paired-score method-10 interval for candidate minus
+baseline and a one-sided 95% lower confidence bound. MRCR and other bounded
+non-binomial item scores use a deterministic paired percentile bootstrap.
+SciCode's sequential sub-steps are dependent within a problem, so they use a
+problem-clustered paired bootstrap that resamples whole problems while retaining
+sub-step weighting. Both bootstrap variants fix 20,000 resamples, symmetric
+nearest-rank quantiles, and the repository-owned
+`splitmix64_rejection_v1` sampler. The run fingerprint records each adapter's
+binary and cluster declarations; comparison never reclassifies old evidence
+from a later adapter registry. A row passes only when its unrounded one-sided
+lower bound is at least the negative tolerance; a point estimate inside the
+margin with insufficient evidence still fails. Exit 0 means all rows passed,
+1 means a valid gate did not demonstrate non-inferiority, and 2 means the
+inputs/provenance/evidence were invalid.
+`config-comparison.json` and `.md` are saved atomically under the candidate run
+before exit 1, without changing `comparison.*` or `scoreboards.jsonl`.
 
 ## Single model vs orchestration
 
@@ -517,6 +605,9 @@ SHA-256 fingerprint in `run.json`. The identity contains:
 
 - the selected adapter names and each adapter's pinned dataset id, revision,
   and validated `data.jsonl` SHA-256 (or an explicit unavailable marker).
+  Each adapter also records its binary-outcome declaration and optional
+  versioned paired-cluster key, which determine config-A/B uncertainty without
+  consulting a later checkout's registry.
   HLE and CharXiv additionally carry the logical judge-template name, variant,
   and SHA-256 of the exact UTF-8 template used for scoring. Each core adapter
   carries package/resource/SHA-256 identities for its complete score-bearing
@@ -525,7 +616,8 @@ SHA-256 fingerprint in `run.json`. The identity contains:
   `smoke`, `offline_fixtures`, `only`, `exclude`, `seed`, `concurrency`,
   `request_timeout_s`, and `retries`. `targets` includes every target's name,
   base URL, model, API-key environment-variable name, context/output limits,
-  vision capability, and sampling policy (`reasoning_effort`, `top_p`, `seed`,
+  vision capability, optional operator-declared `served_config` label/SHA-256,
+  and sampling policy (`reasoning_effort`, `top_p`, `seed`,
   `extra_body_json`); `judge` likewise includes every ordered grading-panel
   endpoint/model, API-key environment-variable name, concurrency, retry limit,
   and sampling policy. Changing a judge template, panel member, vote policy, or

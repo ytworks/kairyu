@@ -502,7 +502,7 @@ trace/span/parent IDs across distinct gateway and replica services and rejects
 prompt/output canaries; it does not infer success from log order or timing.
 Production/fabric drills remain untouched.**
 
-_Last updated: 2026-08-05_
+_Last updated: 2026-08-06_
 
 Master roadmap: `docs/roadmap.md` (2026-07-03) — dual hardware profiles (NVLink-HBM
 A100/H100/B200 nodes AND the PCIe-only RTX PRO 6000 fleet, A100 and later all
@@ -1061,6 +1061,23 @@ candidate-minus-baseline deltas only for completed, finite, explicitly allowed
 cells with matching reasons and denominators. Commit labels identify the local
 harness, not the served target build.
 
+Issue #365 now turns that immutable history into configuration A/B quality
+gates. Each selected arm must disclose a distinct operator-declared served
+configuration digest, while the clean local source, execution runtime,
+methodology, item set, and request policy remain exact. The command reopens
+every raw `PairResult` through its authoritative hash-chain entry and refuses
+partial, synthetic, provenance-withheld, or unmatched evidence. Independent
+binary rows use paired Newcombe method-10 intervals; bounded rows use a
+deterministic paired bootstrap, while SciCode resamples dependent sub-steps by
+whole problem without changing its item-weighted estimand. Every configured
+benchmark must prove its one-sided 95%
+lower bound is within its own non-inferiority margin. Candidate-owned JSON and
+Markdown reports retain the exact raw-pair, deployment, method, and policy
+bindings without mutating the history index or published-score comparison.
+Portable validation passed 1,960 benchmark tests (9 deselected), the 349-test
+affected suite, Ruff, all 66 benchmark entrypoints through 130 declared help
+invocations, the isolated wheel boundary, and `git diff --check`.
+
 IDE-agent compatibility now binds model-native tool-call parsing to the
 server-owned chat template rather than a client-supplied model name. Generic
 templates accept only explicit JSON `<tool_call>` envelopes; bare Llama JSON
@@ -1083,6 +1100,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-06 — [design] Configuration A/B gates bind deployments to paired task evidence
+- What: added `kairyu bench compare` for non-inferiority gates between two explicit served configurations. The command validates the complete scoreboard hash chain, reopens and content-binds every selected raw pair, requires identical full-data methodology, runtime, request policy, and item sets, then applies paired Newcombe method-10 intervals to independent binary outcomes, deterministic paired bootstrap intervals to bounded scores, or whole-problem clustered bootstrap intervals to SciCode's dependent sequential sub-steps. Versioned binary/cluster declarations live in the run fingerprint, and the fixed SplitMix64 sampler removes Python `randrange()` drift. Each benchmark has an independent percentage-point tolerance and one-sided 95% lower-bound verdict; candidate-owned JSON/Markdown artifacts retain the deployment, source, comparator runtime, protocol, policy, and raw-evidence hashes without changing the history index. Runs can declare the operator-owned served configuration label and SHA-256 in YAML or paired CLI flags, with the non-attestation boundary stated explicitly.
+- Why: token parity and published-number comparisons cannot quantify whether a quantization, KV-cache, expert-parallel, or speculation configuration causes a task-level regression. Paired item evidence reduces avoidable variance, while source, methodology, deployment, and raw-result bindings keep a toleranced PASS from silently comparing different experiments or anonymous redeployments.
+- Refs: issue #365; `docs/design/issue-365-config-ab.md`; `kairyu/bench/{config_ab,config_compare,history,store,cli,types,runner}.py`; `kairyu/bench/adapters/{base,scicode}.py`; `tests/bench/test_bench_{config_ab,config_compare_stats,cli_config_compare,history,store}.py`
 
 ### 2026-08-06 — [design] Nightly CPU ratios gain trailing-median history
 - What: added a scheduled/manual main-only workflow that reuses the portable CPU microbenchmark report, records eight fixed same-process ratios in a canonical SHA-256-chained JSONL series, and alerts when any current ratio is at least 15% below the median of up to seven preceding records after five compatible warmup observations. Exact method/workload/runtime/policy segmentation, strict JSON and chain validation, attempt-specific Actions provenance, newest-valid recovery including failed regression runs, and upload-before-enforcement keep the baseline fail closed. Absolute timings, router/process-wire data, and sampler overlay measurements stay outside the cross-run comparator while the unchanged same-run source gate remains binding.
