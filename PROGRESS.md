@@ -1021,7 +1021,10 @@ rejection, and exclusive output creation are mandatory. The work also closes
 an ordinary DeepSeek/MLA decode bug: unsupported multi-row list batching now
 falls back before any model/KV mutation, while valid list-only backends remain
 batched. Portable tests validate the contract, tamper rejection, fake-native
-phase plumbing, and MLA fallback without claiming a production GPU result.
+phase plumbing, and MLA fallback. The formal Qwen3-32B TP8 run at source commit
+`d5044c2` retained 38 canonical rows and passed all 28 derived checks; direct
+retained verification and raw replay both passed with raw SHA-256
+`c42797f18b8db7b9c87ab9203a3abc2bf0b26aaa2264d9ce42024fbcc5bf8b88`.
 
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
@@ -1030,6 +1033,10 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [progress] A12 passes the real Qwen3-32B TP8 gate
+- What: executed the strict direct-path batch-invariance operator on the pinned Qwen3-32B checkpoint and eight RTX PRO 6000 Blackwell GPUs. The retained 38-row raw stream passed all 28 independently derived checks, including exact four-arm answers, all-rank FlashInfer/CUDA-graph execution, scheduler/cache causality, and complete source/checkpoint/hardware identity; retained verification and raw replay also passed. Portable CI then exposed a constructor-bypassing TP follower fixture that had not mirrored the new shared decode capability field, so the fixture now preserves the production alias and a regression proves capability-gapped passive runners fall back before the batch call.
+- Refs: issue #360; PR #411; source commit `d5044c2`; raw SHA-256 `c42797f18b8db7b9c87ab9203a3abc2bf0b26aaa2264d9ce42024fbcc5bf8b88`; `docs/design/issue-360-batch-invariance.md`; `tests/unit/test_tp_sampling_authority.py`
 
 ### 2026-08-05 — [design] A12 binds greedy answers across batch, cache, and chunk shapes
 - What: added a checkout-only, path-only Qwen3-32B TP8 gate that runs one fixed 129-token prompt cold in a real 32-request cohort, cold alone after six-request deterministic radix eviction, warm alone after an independent 128-token page-aligned cache probe, and cold alone in a fresh runtime with exact `32, 32, 32, 32, 1` prefill chunks. All four native 32-token responses must match exactly by token ID, raw vocabulary piece, and final text. The raw contract additionally binds all-rank FlashInfer prefill/decode counters, CUDA-graph capture/replay, scheduler cohorts, cache usage, source/checkpoint/hardware identity, strict isolated startup, canonical replay, and exclusive no-overwrite artifacts. Ordinary decode now shares the existing model/layer/backend capability gate with speculative verification, so unsupported MLA/custom stacks serialize before model or KV mutation while complete list-only implementations remain batched.

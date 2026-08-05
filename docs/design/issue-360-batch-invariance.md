@@ -1,6 +1,6 @@
 # Issue #360 Design: A12 Batch-Invariance Determinism Gate
 
-Status: **Implemented** (2026-08-05).
+Status: **GPU-validated** (2026-08-05).
 
 Related contracts: M2 radix-paged KV and chunked prefill, M13 FlashInfer
 attention selection, M15 MLA/MoE execution, and M17 CUDA-graph decode buckets.
@@ -146,6 +146,11 @@ unknown or missing rows, row reordering, hash drift, source/checkpoint drift,
 rank loss, graph fallback, cache-proof failure, and any output difference fail
 closed.  Portable fake-runtime and tamper tests validate this operator and
 contract; they make no real-GPU execution claim.
+
+The formal Qwen3-32B TP8 run at source commit `d5044c2` produced 38 canonical
+raw rows and passed all 28 derived checks.  Direct-path retained verification
+and raw replay both passed with raw SHA-256
+`c42797f18b8db7b9c87ab9203a3abc2bf0b26aaa2264d9ce42024fbcc5bf8b88`.
 
 ## 6. Decisions
 
