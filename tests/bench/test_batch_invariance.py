@@ -143,18 +143,26 @@ def _runtime(runtime_id: str) -> dict[str, object]:
 
 
 _STRUCTURE_PROFILES = {
-    "batch32-cold": (32, 1, 1, 0, 31, [32], True),
-    "pressure": (6, 6, 0, 6, 186, [1, 32], True),
-    "alone-cold": (1, 1, 0, 1, 31, [1, 32], False),
-    "alone-warm": (1, 1, 0, 1, 31, [1, 32], False),
-    "chunked-alone-cold": (5, 5, 0, 5, 31, [1], True),
+    "batch32-cold": (32, 1, 1, 0, 1, 0, 31, [32], True),
+    "pressure": (6, 6, 0, 6, 6, 0, 186, [1, 32], True),
+    "alone-cold": (1, 1, 0, 1, 1, 0, 31, [1, 32], False),
+    "alone-warm": (1, 1, 0, 1, 0, 1, 31, [1, 32], False),
+    "chunked-alone-cold": (5, 5, 0, 5, 4, 1, 31, [1], True),
 }
 
 
 def _structure(scenario: str, request_ids: list[str]) -> dict[str, object]:
-    rows, calls, batched, sequential, graph_executions, buckets, captures = _STRUCTURE_PROFILES[
-        scenario
-    ]
+    (
+        rows,
+        calls,
+        batched,
+        sequential,
+        prefill_backend_calls,
+        decode_stock_calls,
+        graph_executions,
+        buckets,
+        captures,
+    ) = _STRUCTURE_PROFILES[scenario]
     prefill_stats = {
         "enabled": True,
         "capability_gap": None,
@@ -165,8 +173,8 @@ def _structure(scenario: str, request_ids: list[str]) -> dict[str, object]:
         "backend": [
             {
                 "type": "FlashInferBackend",
-                "plans": calls,
-                "runs": calls * 64,
+                "plans": prefill_backend_calls,
+                "runs": prefill_backend_calls * 64,
             }
         ],
     }
@@ -187,8 +195,10 @@ def _structure(scenario: str, request_ids: list[str]) -> dict[str, object]:
         "backend": [
             {
                 "type": "FlashInferBackend",
-                "plans": graph_executions + (3 if captures else 0),
-                "runs": 256 if captures else 0,
+                "plans": graph_executions
+                + decode_stock_calls
+                + (3 if captures else 0),
+                "runs": (256 if captures else 0) + decode_stock_calls * 64,
                 "fast_replay_plans": graph_executions,
                 "stock_replay_fallbacks": 0,
                 "replay_fallback_reason": None,
@@ -517,15 +527,21 @@ def test_operator_assembly_matches_the_pure_38_row_schema_exactly() -> None:
 
 def test_valid_fixture_binds_fresh_and_reused_graph_capture_counters() -> None:
     rows = _rows()
-    for scenario, plans, runs, fast in (
-        ("batch32-cold", 34, 256, 31),
-        ("pressure", 189, 256, 186),
-        ("alone-cold", 31, 0, 31),
-        ("alone-warm", 31, 0, 31),
-        ("chunked-alone-cold", 34, 256, 31),
+    for scenario, prefill_plans, prefill_runs, plans, runs, fast in (
+        ("batch32-cold", 1, 64, 34, 256, 31),
+        ("pressure", 6, 384, 189, 256, 186),
+        ("alone-cold", 1, 64, 31, 0, 31),
+        ("alone-warm", 0, 0, 32, 64, 31),
+        ("chunked-alone-cold", 4, 256, 35, 320, 31),
     ):
         row_type = "pressure_summary" if scenario == "pressure" else "request"
         structure = _row(rows, row_type, scenario)["structure"]
+        for rank in structure["prefill_rank_stats"]:
+            backend = rank["stats"]["backend"][0]
+            assert (backend["plans"], backend["runs"]) == (
+                prefill_plans,
+                prefill_runs,
+            )
         for rank in structure["decode_rank_stats"]:
             backend = rank["stats"]["backend"][0]
             assert (backend["plans"], backend["runs"], backend["fast_replay_plans"]) == (

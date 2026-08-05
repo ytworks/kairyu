@@ -1242,6 +1242,8 @@ def _stats_contract(
     expected_prefill_calls: int,
     expected_batched_groups: int,
     expected_sequential_rows: int,
+    expected_prefill_backend_calls: int,
+    expected_decode_stock_calls: int,
     expected_graph_executions: int,
     expected_bucket: int,
 ) -> bool:
@@ -1273,8 +1275,8 @@ def _stats_contract(
             == [
                 {
                     "type": "FlashInferBackend",
-                    "plans": expected_prefill_calls,
-                    "runs": expected_prefill_calls * NUM_LAYERS,
+                    "plans": expected_prefill_backend_calls,
+                    "runs": expected_prefill_backend_calls * NUM_LAYERS,
                 }
             ]
         ):
@@ -1289,12 +1291,20 @@ def _stats_contract(
     # warmup plus two lazy stock replans between the three non-capturing
     # warmups.  The capture forward reuses the third plan; each real replay
     # contributes one fast plan.
-    expected_decode_plans = expected_graph_executions + (3 if captures_bucket else 0)
+    # A terminal one-token prefill remains a scheduler/model prefill call but
+    # Qwen attention deliberately dispatches it through the decode-shaped
+    # FlashInfer backend.  Its one stock plan/run is therefore visible in the
+    # decode backend counters before graph replay/capture accounting.
+    expected_decode_plans = (
+        expected_graph_executions
+        + expected_decode_stock_calls
+        + (3 if captures_bucket else 0)
+    )
     expected_decode_runs = (
         (int(FULL_RUNTIME_CONFIG["cuda_graph_warmup_iters"]) + 1) * NUM_LAYERS
         if captures_bucket
         else 0
-    )
+    ) + expected_decode_stock_calls * NUM_LAYERS
     for row in decode:
         stats = row["stats"]
         graph = stats["graph"]
@@ -1436,13 +1446,22 @@ def _scenario_structure_checks(
 ) -> dict[str, bool]:
     expected_shape = _expected_scheduler(scenario, request_ids)
     profiles = {
-        "batch32-cold": (32, 1, 1, 0, 31, 32),
-        "pressure": (6, 6, 0, 6, 186, 1),
-        "alone-cold": (1, 1, 0, 1, 31, 1),
-        "alone-warm": (1, 1, 0, 1, 31, 1),
-        "chunked-alone-cold": (5, 5, 0, 5, 31, 1),
+        "batch32-cold": (32, 1, 1, 0, 1, 0, 31, 32),
+        "pressure": (6, 6, 0, 6, 6, 0, 186, 1),
+        "alone-cold": (1, 1, 0, 1, 1, 0, 31, 1),
+        "alone-warm": (1, 1, 0, 1, 0, 1, 31, 1),
+        "chunked-alone-cold": (5, 5, 0, 5, 4, 1, 31, 1),
     }
-    prefill_rows, calls, batched, sequential, graphs, bucket = profiles[scenario]
+    (
+        prefill_rows,
+        calls,
+        batched,
+        sequential,
+        prefill_backend_calls,
+        decode_stock_calls,
+        graphs,
+        bucket,
+    ) = profiles[scenario]
     return {
         f"{scenario}_scheduler_shape_exact": _same_json(
             structure["scheduler_steps"], expected_shape
@@ -1454,6 +1473,8 @@ def _scenario_structure_checks(
             expected_prefill_calls=calls,
             expected_batched_groups=batched,
             expected_sequential_rows=sequential,
+            expected_prefill_backend_calls=prefill_backend_calls,
+            expected_decode_stock_calls=decode_stock_calls,
             expected_graph_executions=graphs,
             expected_bucket=bucket,
         ),

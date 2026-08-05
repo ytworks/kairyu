@@ -768,7 +768,9 @@ graph bucket/capture/replay activity, and zero eager fallbacks. The cache proof
 uses independent non-mutating probes: zero target tokens after pressure and
 before the alone-cold request, then 128 cached tokens before the warm request.
 Native usage must agree and the warm schedule must recompute the final prompt
-token, as required by RadixKV's page-aligned reuse contract.
+token, as required by RadixKV's page-aligned reuse contract. Its one-token
+attention call is deliberately bound to the production decode-backend counters,
+not misclassified as a FlashInfer prefill-backend call.
 
 The target's exact text, 129 tokenizer IDs, and both hashes are schema-fixed.
 Every prompt and output ID must be below Qwen3's 151,669-entry tokenizer

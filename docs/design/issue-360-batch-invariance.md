@@ -83,6 +83,15 @@ terminal prefill.  RadixKV intentionally recomputes the last prompt token even
 when every preceding page is reusable.  These separate observations prevent a
 scenario label or copied usage value from fabricating a cache transition.
 
+The one-token terminal prefill is also bound at the attention seam.  It counts
+as one scheduler/runner prefill call but, by the production `chunk_len == 1`
+dispatch, performs one stock FlashInfer decode plan/run.  The warm arm therefore
+retains zero prefill-backend plans and one decode-backend plan/64 layer runs;
+the chunk arm retains four prefill-backend plans plus that terminal decode call
+before its new graph bucket is captured.  Treating every scheduler prefill row
+as a prefill-backend invocation would make the formal gate reject the exact
+shape-dependent path it exists to exercise.
+
 The chunk runtime has a different nonce and a fresh empty cache.  Its target
 pre-probe and native cached usage must both be zero.  The retained schedule and
 runner counters must prove five sequential prefill calls with the exact chunk

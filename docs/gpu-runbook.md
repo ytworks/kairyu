@@ -1784,7 +1784,8 @@ image, and drill are unchanged.
   distractors, applies exactly six fixed lowercase pressure requests, proves
   complete target eviction, then runs the target cold and warm alone.  The
   warm probe must expose exactly 128 reusable tokens and a one-token terminal
-  prefill.  A second fresh runtime differs only by its 32-token scheduling
+  prefill; that terminal call must appear in the decode-backend plan/run
+  counters.  A second fresh runtime differs only by its 32-token scheduling
   budget and must prefill the same 129-token target in exact chunks
   `32, 32, 32, 32, 1`.
 
