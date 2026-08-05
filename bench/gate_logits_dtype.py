@@ -33,6 +33,7 @@ _EXPECTED_POSITION_KEYS = {
 _ARM_CONFIG_FIELDS = frozenset(
     {"logits_dtype_requested", "logits_dtype_resolved"}
 )
+_REQUIRED_POSITIVE_CONFIG_FIELDS = ("num_pages", "page_size")
 
 
 def _record(checks: list[dict[str, Any]], name: str, passed: bool, detail: str) -> None:
@@ -72,6 +73,11 @@ def _same_non_arm_config(model: object, float32: object) -> bool:
         and bool(model)
         and isinstance(float32, dict)
         and bool(float32)
+        and all(
+            type(config.get(field)) is int and config[field] > 0
+            for config in (model, float32)
+            for field in _REQUIRED_POSITIVE_CONFIG_FIELDS
+        )
         and _non_arm_config(model) == _non_arm_config(float32)
     )
 

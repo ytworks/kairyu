@@ -135,6 +135,38 @@ def test_paired_gate_rejects_cross_arm_hardware_drift(
 
 
 @pytest.mark.parametrize(
+    ("artifact_names", "evidence_name", "field", "check_name"),
+    (
+        (
+            ("a1_model", "a1_float32"),
+            "continuations",
+            "page_size",
+            "A1 continuation arms use identical non-logits measurement config",
+        ),
+        (
+            ("a2_model", "a2_float32"),
+            "teacher_tp4",
+            "num_pages",
+            "A2 TP4 arms use identical non-logits measurement config",
+        ),
+    ),
+)
+def test_paired_gate_rejects_kv_config_missing_from_both_arms(
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_names: tuple[str, str],
+    evidence_name: str,
+    field: str,
+    check_name: str,
+) -> None:
+    artifacts = _artifacts()
+    for artifact_name in artifact_names:
+        del artifacts[artifact_name]["evidence"][evidence_name]["config"][field]
+
+    checks = _paired_checks(monkeypatch, artifacts)
+    assert checks[check_name]["passed"] is False
+
+
+@pytest.mark.parametrize(
     ("artifact_name", "teacher_name", "row"),
     (
         ("a1_float32", "teacher_tp1", None),
