@@ -1277,6 +1277,19 @@ async def test_rejects_non_string_tokenizer():
         ZmqEngineBackend(tokenizer=ToyTokenizer())  # type: ignore[arg-type]
 
 
+async def test_process_backend_resolves_loglikelihood_boundary_without_starting_child():
+    backend = ZmqEngineBackend(tokenizer="toy")
+
+    context_ids, continuation_ids = backend.tokenize_loglikelihood(
+        "Question Answer:", " A"
+    )
+
+    tokenizer = ToyTokenizer()
+    assert context_ids == tokenizer.encode("Question Answer:")
+    assert context_ids + continuation_ids == tokenizer.encode("Question Answer: A")
+    assert backend._process is None
+
+
 @pytest.mark.parametrize("value", [0, -1, True, float("nan"), float("inf"), "10"])
 async def test_rejects_invalid_death_timeout(value):
     with pytest.raises(ValueError, match="death_timeout_s"):

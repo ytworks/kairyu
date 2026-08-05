@@ -14,6 +14,7 @@ from kairyu.engine.tokenizer import (
     grammar_vocabulary,
     load_tokenizer_chat_metadata,
     resolve_tokenizer,
+    tokenize_loglikelihood_continuation,
 )
 
 
@@ -110,6 +111,43 @@ def _ids_for_tokens(tokenizer, *tokens):
 
 
 class TestToyTokenizer:
+    def test_loglikelihood_continuation_uses_combined_tokenization(self):
+        toy = ToyTokenizer()
+        context_ids, continuation_ids = tokenize_loglikelihood_continuation(
+            toy, "Question Answer:", " A"
+        )
+
+        assert context_ids == toy.encode("Question Answer:")
+        assert context_ids + continuation_ids == toy.encode("Question Answer: A")
+        assert continuation_ids == toy.encode("A")
+
+    def test_loglikelihood_continuation_rejects_cross_boundary_merge(self):
+        class BoundaryMergingTokenizer:
+            eos_token_id = None
+
+            def encode(self, text):
+                return {"x": (1,), "xy": (2,)}[text]
+
+            def decode(self, token_ids):
+                return ""
+
+            def vocab(self):
+                return ["", "x", "xy"]
+
+        with pytest.raises(ValueError, match="boundary is not aligned"):
+            tokenize_loglikelihood_continuation(
+                BoundaryMergingTokenizer(), "x", "y"
+            )
+
+    @pytest.mark.parametrize(("context", "continuation"), [("", "x"), ("x", "")])
+    def test_loglikelihood_continuation_rejects_empty_text(
+        self, context, continuation
+    ):
+        with pytest.raises(ValueError, match="non-empty string"):
+            tokenize_loglikelihood_continuation(
+                ToyTokenizer(), context, continuation
+            )
+
     def test_encode_is_deterministic_across_calls(self):
         toy = ToyTokenizer()
         assert toy.encode("hello world") == toy.encode("hello world")

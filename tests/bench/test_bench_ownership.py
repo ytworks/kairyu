@@ -10,7 +10,7 @@ import pytest
 
 from kairyu.bench import cli as bench_cli
 from kairyu.bench.adapters import all_adapters
-from kairyu.bench.adapters.base import GenerativeAdapter
+from kairyu.bench.adapters.base import DatasetAdapter
 from kairyu.bench.ownership import (
     MANIFEST_NAME,
     _top_level_bench_import_names,
@@ -37,7 +37,7 @@ def test_package_manifest_is_complete_and_sorted() -> None:
     assert all(set(entry.invocations) == {"path", "module"} for entry in entries)
 
 
-def test_packaged_fixtures_exactly_cover_generative_adapters() -> None:
+def test_packaged_fixtures_exactly_cover_dataset_adapters() -> None:
     fixture_root = resources.files("kairyu.bench.fixtures")
     packaged = {
         item.name
@@ -47,7 +47,7 @@ def test_packaged_fixtures_exactly_cover_generative_adapters() -> None:
     expected = {
         adapter.fixture_name()
         for adapter in all_adapters().values()
-        if isinstance(adapter, GenerativeAdapter)
+        if isinstance(adapter, DatasetAdapter)
     }
     expected.add("judge-calibration.jsonl")
 

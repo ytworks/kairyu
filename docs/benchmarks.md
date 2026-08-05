@@ -202,13 +202,21 @@ kairyu bench download --suite core --strict
 | Slot | Pinned source | Headline score | Methodology boundary |
 |---|---|---|---|
 | GSM8K | `openai/gsm8k`, `main/test`, 1,319 rows | exact final numeric string after `####` (commas removed) | zero-shot Kairyu chat prompt; upstream answer extractor |
-| MMLU | `cais/mmlu`, `all/test`, 14,042 rows / 57 subjects | exact generated A-D letter, item-micro accuracy | zero-shot generated-letter variant, not canonical five-shot next-token-logprob MMLU |
+| MMLU | `cais/mmlu`, `all/test`, 14,042 rows / 57 subjects | exact teacher-forced A-D continuation-likelihood argmax, item-micro accuracy | zero-shot raw-completion variant, not canonical five-shot MMLU |
 | IFEval | `google/IFEval`, `default/train`, 541 prompts / 834 instructions | strict prompt-level accuracy | all four strict/loose × prompt/instruction metrics retained; pinned Google 25-checker plus the documented two-row exact-character amendment |
 
-GSM8K and MMLU cap output at 1,024 and 64 tokens respectively. IFEval keeps
-the target's configured output allowance because valid prompts require as many
-as 1,200 words or 100 sentences. The dataset prompt is the sole user message;
-adding boilerplate would corrupt repeat, start, end, and formatting checks.
+GSM8K caps generated output at 1,024 tokens. MMLU does not free-generate an
+answer: it teacher-forces the ordered continuations `" A"` through `" D"` over
+the native `/v1/completions` extension and ranks their raw, pre-processor
+natural-log probabilities. Every candidate must resolve to exactly one target
+token. A missing capability, token-boundary mismatch, malformed/non-finite
+evidence, or partial candidate set is skipped or failed and unmeasured rather
+than converted into a wrong answer. Direct native targets support this exact
+path; orchestration and remote/chat-only targets are visibly skipped for the
+MMLU row. IFEval keeps the target's configured output allowance because valid
+prompts require as many as 1,200 words or 100 sentences. The IFEval dataset
+prompt is the sole user message; adding boilerplate would corrupt repeat,
+start, end, and formatting checks.
 
 IFEval's Google checker source and English NLTK Punkt parameters are immutable
 score-bearing inputs. The dataset download path fetches the pinned Punkt
@@ -222,12 +230,15 @@ the exact single non-whitespace character, so those rows are deterministic.
 The scoreboard uses strict prompt-level accuracy as Kairyu's headline; Google
 reports all four metrics without designating one official headline.
 
-A full core run sends 15,902 requests. `--smoke` or `--limit` is the intended
+A full core run sends 58,028 target calls: one each for GSM8K and IFEval and
+four exact continuation calls per MMLU item. `--smoke` or `--limit` is the intended
 fast development loop, but the resulting artifact remains visibly a subset and
 is never promoted to a full score. Dataset counts, MMLU subject coverage,
 IFEval keys/checker IDs/kwargs, and fixed scorer resources all fail closed on
 drift. Full design and source identities are recorded in
-[`docs/design/issue-367-core-evals.md`](design/issue-367-core-evals.md).
+[`docs/design/issue-367-core-evals.md`](design/issue-367-core-evals.md) and the
+exact likelihood transport/scoring contract is recorded in
+[`docs/design/issue-368-loglikelihood.md`](design/issue-368-loglikelihood.md).
 
 ## The 11 Fugu slots
 

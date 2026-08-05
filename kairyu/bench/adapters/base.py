@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import random
 import re
 import time
@@ -29,8 +30,11 @@ from kairyu.bench.types import (
     BenchItem,
     BenchTarget,
     ChatRequestSpec,
+    ContinuationLogLikelihood,
     DownloadReport,
     ItemResult,
+    LogLikelihoodRequestSpec,
+    LogLikelihoodResponse,
     PairResult,
     SkipItem,
 )
@@ -139,6 +143,14 @@ class RequestFailed(RuntimeError):
         super().__init__(f"HTTP {status_code}: {body[:300]}")
         self.status_code = status_code
         self.body = body
+
+
+class LogLikelihoodUnsupported(RequestFailed):
+    """A successful ordinary completion proved the extension was not honored."""
+
+
+class LogLikelihoodSchemaError(RequestFailed):
+    """The extension claimed support but returned unusable score evidence."""
 
 
 def cache_pins(info: AdapterInfo) -> dict:
@@ -320,6 +332,200 @@ async def call_chat(
         raise RequestFailed(response.status_code, response.text)
 
 
+def _invalid_loglikelihood_response(message: str) -> RequestFailed:
+    return LogLikelihoodSchemaError(
+        200, f"invalid loglikelihood response: {message}"
+    )
+
+
+def _parse_loglikelihood_choice(
+    data: object,
+    continuation: str,
+    reduction: str,
+) -> tuple[ContinuationLogLikelihood, tuple[int, ...]]:
+    """Validate one extension response before any score can consume it."""
+
+    if not isinstance(data, dict):
+        raise _invalid_loglikelihood_response("top level must be a JSON object")
+    if data.get("mode") != "loglikelihood":
+        raise LogLikelihoodUnsupported(
+            200,
+            "response did not identify mode='loglikelihood'; target did not honor "
+            "kairyu_continuation",
+        )
+    choices = data.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise _invalid_loglikelihood_response("choices must contain exactly one entry")
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise _invalid_loglikelihood_response("choice must be a JSON object")
+    if type(choice.get("index")) is not int or choice["index"] != 0:
+        raise _invalid_loglikelihood_response("choice.index must be integer 0")
+    if choice.get("finish_reason") != "length":
+        raise _invalid_loglikelihood_response(
+            "choice.finish_reason must be 'length' for forced continuation scoring"
+        )
+    if choice.get("text") != continuation:
+        raise _invalid_loglikelihood_response(
+            "choice.text does not exactly match the requested continuation"
+        )
+
+    token_ids = choice.get("continuation_token_ids")
+    if (
+        not isinstance(token_ids, list)
+        or not token_ids
+        or any(type(token_id) is not int or token_id < 0 for token_id in token_ids)
+    ):
+        raise _invalid_loglikelihood_response(
+            "continuation_token_ids must be a non-empty list of non-negative integers"
+        )
+    prompt_token_ids = choice.get("prompt_token_ids")
+    if (
+        not isinstance(prompt_token_ids, list)
+        or not prompt_token_ids
+        or any(
+            type(token_id) is not int or token_id < 0
+            for token_id in prompt_token_ids
+        )
+    ):
+        raise _invalid_loglikelihood_response(
+            "prompt_token_ids must be a non-empty list of non-negative integers"
+        )
+
+    logprobs = choice.get("logprobs")
+    if not isinstance(logprobs, dict):
+        raise _invalid_loglikelihood_response("choice.logprobs must be a JSON object")
+    tokens = logprobs.get("tokens")
+    token_logprobs = logprobs.get("token_logprobs")
+    text_offsets = logprobs.get("text_offset")
+    length = len(token_ids)
+    if (
+        not isinstance(tokens, list)
+        or len(tokens) != length
+        or any(not isinstance(token, str) for token in tokens)
+    ):
+        raise _invalid_loglikelihood_response(
+            "logprobs.tokens must be a string list matching continuation_token_ids"
+        )
+    if not isinstance(token_logprobs, list) or len(token_logprobs) != length:
+        raise _invalid_loglikelihood_response(
+            "logprobs.token_logprobs must match continuation_token_ids"
+        )
+    parsed_logprobs: list[float] = []
+    for value in token_logprobs:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _invalid_loglikelihood_response(
+                "token_logprobs must contain only finite numbers"
+            )
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed > 0.0:
+            raise _invalid_loglikelihood_response(
+                "token_logprobs must contain only finite values <= 0"
+            )
+        parsed_logprobs.append(parsed)
+    if (
+        not isinstance(text_offsets, list)
+        or len(text_offsets) != length
+        or any(type(offset) is not int for offset in text_offsets)
+    ):
+        raise _invalid_loglikelihood_response(
+            "logprobs.text_offset must be an integer list matching "
+            "continuation_token_ids"
+        )
+
+    total = sum(parsed_logprobs)
+    score = total if reduction == "sum" else total / length
+    if not math.isfinite(total) or not math.isfinite(score):
+        raise _invalid_loglikelihood_response(
+            "reduced token_logprobs must remain finite"
+        )
+    return (
+        ContinuationLogLikelihood(
+            continuation=continuation,
+            token_ids=tuple(token_ids),
+            tokens=tuple(tokens),
+            token_logprobs=tuple(parsed_logprobs),
+            text_offsets=tuple(text_offsets),
+            sum_logprob=total,
+            score=score,
+        ),
+        tuple(prompt_token_ids),
+    )
+
+
+async def call_loglikelihood(
+    client: httpx.AsyncClient,
+    target: BenchTarget,
+    request: LogLikelihoodRequestSpec,
+    *,
+    retries: int,
+    timeout_s: float,
+    api_key: str | None = None,
+) -> LogLikelihoodResponse:
+    """Score ordered continuations through Kairyu's teacher-forced extension.
+
+    One non-streaming ``/v1/completions`` request is made per continuation.
+    Target sampling overrides deliberately do not apply: this protocol fixes
+    temperature and all score-bearing fields and records the exact selected
+    token log probabilities returned by the backend.
+    """
+
+    url = f"{normalize_base_url(target.base_url)}/completions"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    candidates: list[ContinuationLogLikelihood] = []
+    common_prompt_token_ids: tuple[int, ...] | None = None
+    for continuation in request.continuations:
+        body = {
+            "model": target.model,
+            "prompt": request.context,
+            "kairyu_continuation": continuation,
+            "max_tokens": None,
+            "temperature": 0.0,
+            "stream": False,
+            "logprobs": 0,
+        }
+        attempt = 0
+        while True:
+            try:
+                response = await client.post(
+                    url, json=body, headers=headers, timeout=timeout_s
+                )
+            except httpx.HTTPError as error:
+                if attempt >= retries:
+                    raise RequestFailed(0, f"transport error: {error}") from error
+                await asyncio.sleep(0.5 * 2**attempt)
+                attempt += 1
+                continue
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                except ValueError as error:
+                    raise _invalid_loglikelihood_response(
+                        f"body is not valid JSON: {error}"
+                    ) from error
+                candidate, prompt_token_ids = _parse_loglikelihood_choice(
+                    data, continuation, request.reduction
+                )
+                if common_prompt_token_ids is None:
+                    common_prompt_token_ids = prompt_token_ids
+                elif prompt_token_ids != common_prompt_token_ids:
+                    raise _invalid_loglikelihood_response(
+                        "prompt_token_ids changed across ordered candidates"
+                    )
+                candidates.append(candidate)
+                break
+            if response.status_code in _RETRYABLE_STATUS and attempt < retries:
+                await asyncio.sleep(0.5 * 2**attempt)
+                attempt += 1
+                continue
+            raise RequestFailed(response.status_code, response.text)
+    return LogLikelihoodResponse(
+        reduction=request.reduction,
+        prompt_token_ids=common_prompt_token_ids or (),
+        candidates=tuple(candidates),
+    )
+
+
 @dataclass(frozen=True)
 class ItemAttempt:
     """One backend call: either text (+latency) or a terminal ItemResult."""
@@ -327,6 +533,17 @@ class ItemAttempt:
     text: str | None = None
     latency_s: float = 0.0
     failure: ItemResult | None = None
+
+
+@dataclass(frozen=True)
+class LogLikelihoodAttempt:
+    """One ranked-candidate call, a terminal item, or a capability verdict."""
+
+    response: LogLikelihoodResponse | None = None
+    latency_s: float = 0.0
+    failure: ItemResult | None = None
+    unsupported_reason: str | None = None
+    fatal_reason: str | None = None
 
 
 async def attempt_item(
@@ -379,6 +596,106 @@ async def attempt_item(
             )
         )
     return ItemAttempt(text=text, latency_s=latency_s)
+
+
+def _explicitly_unsupported_loglikelihood(error: RequestFailed) -> bool:
+    """Recognize only an explicit extension rejection, never a generic 400."""
+
+    if error.status_code not in {400, 422}:
+        return False
+    body = error.body.lower()
+    return "kairyu_continuation" in body and (
+        "unsupported" in body
+        or "not supported" in body
+        or "unknown parameter" in body
+        or "unknown field" in body
+        or "unknown argument" in body
+        or "unrecognized field" in body
+        or "unrecognized request argument" in body
+        or "extra_forbidden" in body
+        or "extra inputs are not permitted" in body
+    )
+
+
+def _fatal_probe_failure(error: RequestFailed) -> str | None:
+    if isinstance(error, LogLikelihoodSchemaError):
+        return "target returned malformed log-likelihood evidence during capability probe"
+    if error.status_code == 0:
+        return "target transport failed after capability-probe retries"
+    if error.status_code in {401, 403}:
+        return "target authentication or authorization failed during capability probe"
+    if error.status_code == 404:
+        return "target completion endpoint or model was not found during capability probe"
+    if error.status_code in _RETRYABLE_STATUS:
+        return "target remained unavailable after capability-probe retries"
+    body = error.body.lower()
+    if (
+        error.status_code == 400
+        and "kairyu_continuation" in body
+        and "does not align with a model token boundary" in body
+    ):
+        return "target tokenizer rejected the fixed continuation boundary"
+    return None
+
+
+async def attempt_loglikelihood(
+    client: httpx.AsyncClient,
+    target: BenchTarget,
+    request: LogLikelihoodRequestSpec,
+    *,
+    item_id: str,
+    ctx: RunContext,
+    api_key: str | None,
+    capability_probe: bool = False,
+) -> LogLikelihoodAttempt:
+    """Convert wire/schema failures to evidence without manufacturing a score."""
+
+    start = time.perf_counter()
+    try:
+        response = await call_loglikelihood(
+            client,
+            target,
+            request,
+            retries=ctx.retries,
+            timeout_s=ctx.request_timeout_s,
+            api_key=api_key,
+        )
+    except RequestFailed as error:
+        latency_s = round(time.perf_counter() - start, 3)
+        if capability_probe and (
+            isinstance(error, LogLikelihoodUnsupported)
+            or _explicitly_unsupported_loglikelihood(error)
+        ):
+            return LogLikelihoodAttempt(
+                latency_s=latency_s,
+                unsupported_reason=(
+                    "target does not support the required kairyu_continuation "
+                    "teacher-forced log-likelihood extension"
+                ),
+            )
+        if capability_probe and (fatal_reason := _fatal_probe_failure(error)):
+            return LogLikelihoodAttempt(
+                latency_s=latency_s,
+                failure=ItemResult(
+                    item_id=item_id,
+                    status="failed",
+                    error=str(error),
+                    latency_s=latency_s,
+                ),
+                fatal_reason=fatal_reason,
+            )
+        return LogLikelihoodAttempt(
+            failure=ItemResult(
+                item_id=item_id,
+                status="failed",
+                error=str(error),
+                latency_s=latency_s,
+            )
+        )
+    return LogLikelihoodAttempt(
+        response=response,
+        latency_s=time.perf_counter() - start,
+    )
 
 
 def select_items(items: list[BenchItem], limit: int | None, seed: int) -> list[BenchItem]:
@@ -484,8 +801,8 @@ def skipped_pair(
     )
 
 
-class GenerativeAdapter(ABC):
-    """Shared run loop for installed request/response benchmarks."""
+class DatasetAdapter(ABC):
+    """Shared dataset, cache, precondition, and result lifecycle."""
 
     info: AdapterInfo
 
@@ -498,16 +815,6 @@ class GenerativeAdapter(ABC):
         Only called by download(); the only place allowed to import
         `datasets`/`huggingface_hub` (lazily).
         """
-
-    @abstractmethod
-    def build_request(
-        self, item: BenchItem, target: BenchTarget, ctx: RunContext
-    ) -> ChatRequestSpec | SkipItem: ...
-
-    @abstractmethod
-    async def score(
-        self, item: BenchItem, response_text: str, ctx: RunContext
-    ) -> ItemResult: ...
 
     # -- optional hooks ----------------------------------------------------------
 
@@ -540,6 +847,42 @@ class GenerativeAdapter(ABC):
                 for key in ("dataset", "revision", "sources", "rows", "sha256")
             }
         return base
+
+    def _incomparable_reasons(self) -> tuple[str, ...]:
+        return (
+            (self.info.incomparable_reason,)
+            if self.info.incomparable_reason
+            else ()
+        )
+
+    def _skipped_pair(self, target: BenchTarget, reason: str) -> PairResult:
+        return skipped_pair(
+            self.info.name,
+            target.label(),
+            reason,
+            annotations=self.info.annotations,
+            comparable=self.info.comparable_to_published,
+            incomparable_reasons=self._incomparable_reasons(),
+        )
+
+    def _summarize_pair(
+        self,
+        target: BenchTarget,
+        ctx: RunContext,
+        results: list[ItemResult],
+        *,
+        started_at: str,
+    ) -> PairResult:
+        return summarize_items(
+            self.info.name,
+            target.label(),
+            results,
+            methodology=self.methodology(ctx),
+            annotations=self.info.annotations,
+            started_at=started_at,
+            comparable=self.info.comparable_to_published,
+            incomparable_reasons=self._incomparable_reasons(),
+        )
 
     # -- shared machinery ---------------------------------------------------------
 
@@ -592,22 +935,25 @@ class GenerativeAdapter(ABC):
         ctx.cache.write_rows(self.info.name, rows, cache_pins(self.info))
         return DownloadReport(adapter=self.info.name, status="ok", detail=f"{len(rows)} rows")
 
+
+class GenerativeAdapter(DatasetAdapter):
+    """Shared run loop for chat-generation benchmarks."""
+
+    @abstractmethod
+    def build_request(
+        self, item: BenchItem, target: BenchTarget, ctx: RunContext
+    ) -> ChatRequestSpec | SkipItem: ...
+
+    @abstractmethod
+    async def score(
+        self, item: BenchItem, response_text: str, ctx: RunContext
+    ) -> ItemResult: ...
+
     async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:
         started_at = utc_now()
         skip_reason = self.check_preconditions(target, ctx)
         if skip_reason is not None:
-            return skipped_pair(
-                self.info.name,
-                target.label(),
-                skip_reason,
-                annotations=self.info.annotations,
-                comparable=self.info.comparable_to_published,
-                incomparable_reasons=(
-                    (self.info.incomparable_reason,)
-                    if self.info.incomparable_reason
-                    else ()
-                ),
-            )
+            return self._skipped_pair(target, skip_reason)
 
         items = select_items(self.load_items(ctx), ctx.limit, ctx.seed)
         ctx.progress.items_total(len(items))
@@ -638,17 +984,172 @@ class GenerativeAdapter(ABC):
 
             results = await asyncio.gather(*(run_item(item) for item in items))
 
-        return summarize_items(
-            self.info.name,
-            target.label(),
+        return self._summarize_pair(
+            target,
+            ctx,
             list(results),
-            methodology=self.methodology(ctx),
-            annotations=self.info.annotations,
             started_at=started_at,
-            comparable=self.info.comparable_to_published,
-            incomparable_reasons=(
-                (self.info.incomparable_reason,)
-                if self.info.incomparable_reason
-                else ()
-            ),
+        )
+
+
+class LogLikelihoodAdapter(DatasetAdapter):
+    """Shared run loop for teacher-forced continuation-ranking benchmarks."""
+
+    @abstractmethod
+    def build_request(
+        self, item: BenchItem, target: BenchTarget, ctx: RunContext
+    ) -> LogLikelihoodRequestSpec | SkipItem: ...
+
+    @abstractmethod
+    async def score(
+        self, item: BenchItem, response: LogLikelihoodResponse, ctx: RunContext
+    ) -> ItemResult: ...
+
+    def methodology(self, ctx: RunContext) -> dict:
+        methodology = super().methodology(ctx)
+        methodology.update(
+            {
+                "request_mode": "teacher-forced continuation log-likelihood",
+                "endpoint": "/v1/completions",
+                "wire_extension": "kairyu_continuation",
+                "target_sampling_overrides": (
+                    "not applied; temperature=0 and score-bearing fields are fixed"
+                ),
+            }
+        )
+        return methodology
+
+    def probe_result_fatal_reason(self, result: ItemResult) -> str | None:
+        """Classify adapter-specific, target-wide structural incompatibility."""
+
+        del result
+        return None
+
+    async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:
+        started_at = utc_now()
+        skip_reason = self.check_preconditions(target, ctx)
+        if skip_reason is not None:
+            return self._skipped_pair(target, skip_reason)
+
+        items = select_items(self.load_items(ctx), ctx.limit, ctx.seed)
+        ctx.progress.items_total(len(items))
+        prepared: list[
+            tuple[int, BenchItem, LogLikelihoodRequestSpec]
+        ] = []
+        results: list[ItemResult | None] = [None] * len(items)
+        for index, item in enumerate(items):
+            request = self.build_request(item, target, ctx)
+            if isinstance(request, SkipItem):
+                results[index] = ItemResult(
+                    item_id=item.id,
+                    status="skipped",
+                    error=request.reason,
+                )
+                ctx.progress.item_done()
+            else:
+                prepared.append((index, item, request))
+
+        if not prepared:
+            return self._summarize_pair(
+                target,
+                ctx,
+                [result for result in results if result is not None],
+                started_at=started_at,
+            )
+
+        semaphore = asyncio.Semaphore(ctx.concurrency)
+        api_key = target_api_key(target)
+        async with ctx.http_factory() as client:
+
+            async def execute(
+                entry: tuple[int, BenchItem, LogLikelihoodRequestSpec],
+                *,
+                capability_probe: bool = False,
+            ) -> tuple[int, ItemResult | None, str | None, str | None]:
+                index, item, request = entry
+                try:
+                    async with semaphore:
+                        attempt = await attempt_loglikelihood(
+                            client,
+                            target,
+                            request,
+                            item_id=item.id,
+                            ctx=ctx,
+                            api_key=api_key,
+                            capability_probe=capability_probe,
+                        )
+                    if attempt.unsupported_reason is not None:
+                        return index, None, attempt.unsupported_reason, None
+                    if attempt.fatal_reason is not None:
+                        return index, attempt.failure, None, attempt.fatal_reason
+                    if attempt.failure is not None:
+                        return index, attempt.failure, None, None
+                    if attempt.response is None:  # pragma: no cover - invariant
+                        raise RuntimeError("loglikelihood attempt has no outcome")
+                    result = await self.score(item, attempt.response, ctx)
+                    result = result.model_copy(
+                        update={"latency_s": round(attempt.latency_s, 3)}
+                    )
+                    return (
+                        index,
+                        result,
+                        None,
+                        (
+                            self.probe_result_fatal_reason(result)
+                            if capability_probe
+                            else None
+                        ),
+                    )
+                finally:
+                    ctx.progress.item_done()
+
+            # The first runnable item is both the capability probe and real
+            # evidence.  An explicitly unsupported extension skips the pair
+            # before concurrency can fan out over the remaining dataset.
+            probe_index, probe_result, unsupported, fatal_reason = await execute(
+                prepared[0], capability_probe=True
+            )
+            if unsupported is not None:
+                for _ in prepared[1:]:
+                    ctx.progress.item_done()
+                return self._skipped_pair(target, unsupported)
+            results[probe_index] = probe_result
+            if fatal_reason is not None:
+                for index, item, _ in prepared[1:]:
+                    results[index] = ItemResult(
+                        item_id=item.id,
+                        status="failed",
+                        error=f"not attempted after fatal capability probe: {fatal_reason}",
+                    )
+                    ctx.progress.item_done()
+                pair = self._summarize_pair(
+                    target,
+                    ctx,
+                    [result for result in results if result is not None],
+                    started_at=started_at,
+                )
+                return pair.model_copy(
+                    update={"status": "failed", "reason": fatal_reason}
+                )
+
+            remaining = await asyncio.gather(
+                *(execute(entry) for entry in prepared[1:])
+            )
+            for index, result, unsupported, fatal_reason in remaining:
+                # Only the serial first item is a capability probe.  A later
+                # generic or explicit 400 is local failed evidence, never a
+                # retroactive pair-level verdict.
+                if unsupported is not None:  # pragma: no cover - probe=False
+                    raise RuntimeError("unexpected non-probe capability verdict")
+                if fatal_reason is not None:  # pragma: no cover - probe=False
+                    raise RuntimeError("unexpected non-probe fatal verdict")
+                results[index] = result
+
+        if any(result is None for result in results):  # pragma: no cover - invariant
+            raise RuntimeError("loglikelihood run did not produce every item result")
+        return self._summarize_pair(
+            target,
+            ctx,
+            [result for result in results if result is not None],
+            started_at=started_at,
         )

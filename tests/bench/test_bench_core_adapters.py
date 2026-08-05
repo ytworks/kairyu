@@ -27,11 +27,15 @@ from kairyu.bench.adapters.ifeval import IfevalAdapter
 from kairyu.bench.adapters.mmlu import (
     _CANONICAL_SUBJECTS,
     MmluAdapter,
-    extract_mmlu_choice,
 )
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.runner import SuiteRunner, _adapter_identity
-from kairyu.bench.types import BenchItem, DatasetUnavailable
+from kairyu.bench.types import (
+    BenchItem,
+    ContinuationLogLikelihood,
+    DatasetUnavailable,
+    LogLikelihoodResponse,
+)
 
 
 def _ctx(tmp_path, *, http_factory=None, offline_fixtures=True) -> RunContext:
@@ -125,14 +129,6 @@ async def test_gsm8k_request_and_exact_score(tmp_path) -> None:
     assert (await adapter.score(item, "work\n#### 2.0", _ctx(tmp_path))).score == 0.0
 
 
-@pytest.mark.parametrize(
-    ("response", "expected"),
-    [("B", "B"), (" Answer: (b). ", "B"), ("The answer is B because...", None), ("AB", None)],
-)
-def test_mmlu_generated_choice_is_bounded(response, expected) -> None:
-    assert extract_mmlu_choice(response) == expected
-
-
 def _mmlu_rows() -> list[dict]:
     subjects = sorted(_CANONICAL_SUBJECTS)
     return [
@@ -194,13 +190,34 @@ async def test_mmlu_request_is_zero_shot_fixed_order_and_annotated(tmp_path) -> 
         },
     )
     request = adapter.build_request(item, make_target(max_output_tokens=512), _ctx(tmp_path))
-    prompt = request.messages[0]["content"]
+    prompt = request.context
     assert prompt.index("A. one") < prompt.index("B. two") < prompt.index("C. three")
-    assert request.max_tokens == 64
+    assert request.continuations == (" A", " B", " C", " D")
+    assert request.reduction == "sum"
     assert not adapter.info.comparable_to_published
     assert "five demonstrations" in adapter.info.incomparable_reason
-    assert (await adapter.score(item, "C", _ctx(tmp_path))).score == 1.0
-    assert (await adapter.score(item, "C because it is correct", _ctx(tmp_path))).score == 0.0
+    response = LogLikelihoodResponse(
+        reduction="sum",
+        prompt_token_ids=(101, 102),
+        candidates=tuple(
+            ContinuationLogLikelihood(
+                continuation=f" {letter}",
+                token_ids=(index,),
+                tokens=(f" {letter}",),
+                token_logprobs=(value,),
+                text_offsets=(0,),
+                sum_logprob=value,
+                score=value,
+            )
+            for index, (letter, value) in enumerate(
+                zip("ABCD", (-3.0, -2.0, -0.1, -4.0), strict=True)
+            )
+        ),
+    )
+    result = await adapter.score(item, response, _ctx(tmp_path))
+    assert result.score == 1.0
+    assert result.details["winner"] == "C"
+    assert result.details["candidates"][2]["text"] == "three"
 
 
 _KWARG_VALUES = {

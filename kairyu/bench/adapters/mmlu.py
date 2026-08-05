@@ -1,29 +1,30 @@
-"""MMLU: cheap zero-shot generated-letter accuracy without logprobs."""
+"""MMLU: zero-shot A-D ranking by teacher-forced continuation likelihood."""
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 
 from kairyu.bench.adapters.base import (
     AdapterInfo,
     DownloadContext,
-    GenerativeAdapter,
+    LogLikelihoodAdapter,
     RunContext,
-    excerpt,
+    estimate_tokens,
 )
 from kairyu.bench.types import (
     BenchItem,
     BenchTarget,
-    ChatRequestSpec,
     DatasetUnavailable,
     ItemResult,
+    LogLikelihoodRequestSpec,
+    LogLikelihoodResponse,
     SkipItem,
 )
 
 _EXPECTED_ROWS = 14_042
 _EXPECTED_SUBJECTS = 57
 _LETTERS = ("A", "B", "C", "D")
+_CONTINUATIONS = tuple(f" {letter}" for letter in _LETTERS)
 _CANONICAL_SUBJECTS = frozenset(
     {
         "abstract_algebra",
@@ -85,17 +86,6 @@ _CANONICAL_SUBJECTS = frozenset(
         "world_religions",
     }
 )
-_GENERATED_ANSWER_RE = re.compile(
-    r"\s*(?:answer\s*(?:is\s*)?:?\s*)?\(?([A-D])\)?[.\s]*\Z",
-    re.IGNORECASE,
-)
-
-
-def extract_mmlu_choice(text: str) -> str | None:
-    """Accept only a generated answer letter (optionally in a short marker)."""
-
-    match = _GENERATED_ANSWER_RE.fullmatch(text)
-    return match.group(1).upper() if match else None
 
 
 def _prompt(payload: dict) -> str:
@@ -108,29 +98,32 @@ def _prompt(payload: dict) -> str:
             payload["question"],
             *(f"{letter}. {choice}" for letter, choice in zip(_LETTERS, choices, strict=True)),
             "",
-            "Answer with only the single letter A, B, C, or D.",
             "Answer:",
         ]
     )
 
 
-class MmluAdapter(GenerativeAdapter):
+class MmluAdapter(LogLikelihoodAdapter):
     info = AdapterInfo(
         name="mmlu",
         display_name="MMLU",
-        metric="zero-shot generated-letter accuracy",
+        metric="zero-shot continuation-likelihood accuracy",
         binary_outcomes=True,
         hf_dataset="cais/mmlu",
         annotations=(
-            "zero-shot generated-letter adapter; canonical MMLU is 5-shot and "
-            "selects A-D by next-token log probability, so scores are not comparable",
+            "zero-shot continuation-likelihood adapter; canonical MMLU is 5-shot, "
+            "so scores are not comparable",
         ),
         comparable_to_published=False,
         incomparable_reason=(
-            "Kairyu core uses zero-shot generated-letter exact match; canonical MMLU "
-            "uses five demonstrations per subject and A-D next-token logprob argmax"
+            "Kairyu core uses zero-shot A-D continuation likelihood; canonical MMLU "
+            "uses five demonstrations per subject"
         ),
-        evaluation_resources=(("kairyu.bench.adapters", "mmlu.py"),),
+        evaluation_resources=(
+            ("kairyu.bench.adapters", "mmlu.py"),
+            ("kairyu.bench.adapters", "base.py"),
+            ("kairyu.bench", "types.py"),
+        ),
     )
 
     def normalize(self, ctx: DownloadContext) -> list[dict]:
@@ -196,21 +189,106 @@ class MmluAdapter(GenerativeAdapter):
 
     def build_request(
         self, item: BenchItem, target: BenchTarget, ctx: RunContext
-    ) -> ChatRequestSpec | SkipItem:
-        return ChatRequestSpec(
-            messages=({"role": "user", "content": _prompt(item.payload)},),
-            max_tokens=min(target.max_output_tokens, 64),
+    ) -> LogLikelihoodRequestSpec | SkipItem:
+        context = _prompt(item.payload)
+        estimated = estimate_tokens(context)
+        if (
+            target.max_context_tokens is not None
+            and estimated > target.max_context_tokens
+        ):
+            return SkipItem(
+                reason=(
+                    f"est. {estimated} prompt tokens > target limit "
+                    f"{target.max_context_tokens}"
+                )
+            )
+        return LogLikelihoodRequestSpec(
+            context=context,
+            continuations=_CONTINUATIONS,
+            reduction="sum",
+            est_prompt_tokens=estimated,
         )
 
     async def score(
-        self, item: BenchItem, response_text: str, ctx: RunContext
+        self, item: BenchItem, response: LogLikelihoodResponse, ctx: RunContext
     ) -> ItemResult:
-        extracted = extract_mmlu_choice(response_text)
+        candidate_details = [
+            {
+                "label": label,
+                "text": item.payload["choices"][index],
+                "continuation": candidate.continuation,
+                "token_ids": list(candidate.token_ids),
+                "tokens": list(candidate.tokens),
+                "token_logprobs": list(candidate.token_logprobs),
+                "text_offset": list(candidate.text_offsets),
+                "sum_logprob": candidate.sum_logprob,
+                "score": candidate.score,
+            }
+            for index, (label, candidate) in enumerate(
+                zip(_LETTERS, response.candidates, strict=False)
+            )
+        ]
+        evidence_details = {
+            "prompt_token_ids": list(response.prompt_token_ids),
+            "candidates": candidate_details,
+        }
+        if (
+            response.reduction != "sum"
+            or len(response.candidates) != len(_CONTINUATIONS)
+            or tuple(
+                candidate.continuation for candidate in response.candidates
+            )
+            != _CONTINUATIONS
+        ):
+            return ItemResult(
+                item_id=item.id,
+                status="failed",
+                error="MMLU log-likelihood response changed candidate order or reduction",
+                details=evidence_details,
+            )
+        if any(len(candidate.token_ids) != 1 for candidate in response.candidates):
+            return ItemResult(
+                item_id=item.id,
+                status="failed",
+                error=(
+                    "MMLU requires each of ' A' through ' D' to tokenize as exactly "
+                    "one continuation token"
+                ),
+                details=evidence_details,
+            )
+        candidate_token_ids = [
+            candidate.token_ids[0] for candidate in response.candidates
+        ]
+        if len(set(candidate_token_ids)) != len(candidate_token_ids):
+            return ItemResult(
+                item_id=item.id,
+                status="failed",
+                error=(
+                    "MMLU requires ' A' through ' D' to map to four distinct "
+                    "continuation token IDs"
+                ),
+                details=evidence_details,
+            )
+
+        scores = [candidate.score for candidate in response.candidates]
+        best_score = max(scores)
+        tie_indices = [index for index, score in enumerate(scores) if score == best_score]
+        winner_index = tie_indices[0]
+        winner = _LETTERS[winner_index]
+        runner_up_score = sorted(scores, reverse=True)[1]
+        margin = best_score - runner_up_score
         return ItemResult(
             item_id=item.id,
             status="completed",
-            score=1.0 if extracted == item.payload["answer"] else 0.0,
-            response_excerpt=excerpt(response_text),
+            score=1.0 if winner == item.payload["answer"] else 0.0,
+            details={
+                **evidence_details,
+                "winner": winner,
+                "gold": item.payload["answer"],
+                "ties": [_LETTERS[index] for index in tie_indices],
+                "margin": margin,
+                "reduction": response.reduction,
+            },
         )
 
     def methodology(self, ctx: RunContext) -> dict:
@@ -223,13 +301,38 @@ class MmluAdapter(GenerativeAdapter):
                 "expected_subjects": _EXPECTED_SUBJECTS,
                 "shots": 0,
                 "choice_order": "upstream A-D order; never shuffled",
-                "response": "generated A-D letter exact match",
+                "response": (
+                    "rank exact continuations ' A' through ' D' by teacher-forced "
+                    "selected-token log likelihood"
+                ),
+                "continuation_tokens": (
+                    "exactly one distinct token ID per candidate or item failed"
+                ),
+                "reduction": "sum of selected-token logprobs",
+                "tie_break": "stable A-D candidate order",
                 "aggregation": "micro accuracy across test questions",
-                "max_tokens": "min(target.max_output_tokens, 64)",
+                "context_gate": (
+                    "skip, never truncate, when chars/4 estimated prompt tokens exceed "
+                    "target.max_context_tokens"
+                ),
                 "canonical_difference": (
-                    "the original MMLU evaluates five-shot prompts and chooses among "
-                    "the tokens ' A' through ' D' by logprob argmax"
+                    "the original MMLU evaluates five-shot prompts; this adapter has "
+                    "no subject demonstrations"
                 ),
             }
         )
         return methodology
+
+    def probe_result_fatal_reason(self, result: ItemResult) -> str | None:
+        """Stop once the fixed A-D tokenizer structure is proven incompatible."""
+
+        if (
+            result.status == "failed"
+            and result.error is not None
+            and result.error.startswith("MMLU requires")
+        ):
+            return (
+                "target tokenizer cannot represent MMLU's fixed A-D candidates "
+                "as four distinct single tokens"
+            )
+        return None

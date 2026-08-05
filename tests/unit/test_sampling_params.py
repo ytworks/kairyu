@@ -1,6 +1,7 @@
 import pytest
 
 from kairyu import SamplingParams
+from kairyu.engine.engine_loop import engine_sampling_from
 from kairyu.sampling_params import (
     GENERATION_CONFIG_SAMPLING_FIELDS,
     PROMPT_OWNED_EXTRA_ARGS,
@@ -22,6 +23,7 @@ def test_defaults_match_vllm():
     assert params.seed is None
     assert params.stop == ()
     assert params.stop_token_ids == ()
+    assert params.forced_token_ids is None
     assert params.logprobs is None
     assert params.ignore_eos is False
     assert params.skip_special_tokens is True
@@ -42,6 +44,54 @@ def test_stop_string_normalized_to_tuple():
     assert SamplingParams(stop=None).stop == ()
 
 
+def test_forced_token_ids_are_normalized_and_mapped_to_engine_sampling():
+    params = SamplingParams(
+        max_tokens=3,
+        forced_token_ids=[7, 3, 11],
+        ignore_eos=True,
+    )
+
+    assert params.forced_token_ids == (7, 3, 11)
+    assert engine_sampling_from(params).forced_token_ids == (7, 3, 11)
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        pytest.param({"type": "json_object"}, id="json-object"),
+        pytest.param(
+            {
+                "type": "json_schema",
+                "json_schema": {"schema": {"type": "object"}},
+            },
+            id="json-schema",
+        ),
+    ],
+)
+def test_forced_token_ids_reject_structured_output_intent(response_format):
+    with pytest.raises(ValueError, match="structured-output.*response_format"):
+        SamplingParams(
+            max_tokens=1,
+            forced_token_ids=(7,),
+            ignore_eos=True,
+            extra_args={"response_format": response_format},
+        )
+
+
+def test_forced_token_ids_leave_unrecognized_extra_args_unchanged():
+    params = SamplingParams(
+        max_tokens=1,
+        forced_token_ids=(7,),
+        ignore_eos=True,
+        extra_args={"vendor_cache": {"mode": "ephemeral"}},
+    )
+
+    sampling = engine_sampling_from(params)
+    assert params.extra_args == {"vendor_cache": {"mode": "ephemeral"}}
+    assert sampling.forced_token_ids == (7,)
+    assert sampling.needs_grammar is False
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -54,6 +104,27 @@ def test_stop_string_normalized_to_tuple():
         {"repetition_penalty": 0.0},
         {"min_tokens": -1},
         {"max_tokens": 1, "min_tokens": 2},
+        {"forced_token_ids": []},
+        {"forced_token_ids": [-1]},
+        {"forced_token_ids": [True]},
+        {"forced_token_ids": ["7"]},
+        {"forced_token_ids": 7},
+        {"max_tokens": 1, "forced_token_ids": [7, 3]},
+        {"max_tokens": None, "forced_token_ids": [7]},
+        {"max_tokens": 1, "forced_token_ids": [7]},
+        {"max_tokens": 1, "forced_token_ids": [7], "stop": "END", "ignore_eos": True},
+        {
+            "max_tokens": 1,
+            "forced_token_ids": [7],
+            "stop_token_ids": [9],
+            "ignore_eos": True,
+        },
+        {
+            "max_tokens": 1,
+            "forced_token_ids": [7],
+            "min_tokens": 1,
+            "ignore_eos": True,
+        },
     ],
 )
 def test_invalid_values_raise_value_error(kwargs):
@@ -117,6 +188,7 @@ def test_non_prompt_sampling_extensions_remain_supported():
 
     assert params.extra_args["response_format"] == {"type": "json_object"}
     assert params.extra_args["vendor_cache"] == {"mode": "ephemeral"}
+    assert engine_sampling_from(params).json_mode is True
 
 
 def test_extra_args_are_defensively_copied_and_top_level_immutable():

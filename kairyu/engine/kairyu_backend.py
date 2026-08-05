@@ -1164,6 +1164,15 @@ class KairyuBackend:
         metadata = self.parallelism_metadata
         return dict(metadata) if isinstance(metadata, Mapping) else None
 
+    def tokenize_loglikelihood(
+        self,
+        context: str,
+        continuation: str,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Tokenize a teacher-forced continuation with native model ownership."""
+
+        return self._loop.tokenize_loglikelihood(context, continuation)
+
     def _peek_prepared_request(
         self,
         request: GenerationRequest,

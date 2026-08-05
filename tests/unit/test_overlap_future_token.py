@@ -8,6 +8,8 @@ snapshot for step N+1 is taken before step N commits. Every real-model overlap
 run raised `IndexError: tuple index out of range`.
 """
 
+import math
+
 import pytest
 import torch
 
@@ -29,7 +31,12 @@ def llama_dir(tmp_path_factory):
 
 
 def _generate(
-    model_dir: str, core_cls, prompt, max_new: int, sampling=None, **scheduler_kwargs
+    model_dir: str,
+    core_cls,
+    prompt,
+    max_new: int,
+    sampling=None,
+    **scheduler_kwargs,
 ):
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.model_runner import PagedModelRunner
@@ -56,6 +63,59 @@ def _generate(
     return core.run_to_completion(), runner
 
 
+def _generate_with_production_loop(
+    model_dir: str,
+    *,
+    pipeline_depth: int,
+    forced: tuple[int, ...],
+):
+    from kairyu import SamplingParams
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampler import Sampler
+    from kairyu.engine.core.scheduler import Scheduler
+    from kairyu.engine.engine_loop import EngineLoop
+    from kairyu.engine.prompt import TokensPrompt
+    from kairyu.engine.tokenizer import ToyTokenizer
+    from kairyu.models.loader import load_model
+
+    model, config, _ = load_model(model_dir)
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    scheduler = Scheduler(cache, max_num_batched_tokens=6, page_size=4)
+    runner = PagedModelRunner(
+        model,
+        PagedKVPool.for_cache(cache, config),
+        sampler=Sampler(),
+    )
+    loop = EngineLoop(
+        ToyTokenizer(),
+        scheduler,
+        runner,
+        pipeline_depth=pipeline_depth,
+    )
+    loop.submit(
+        "forced",
+        TokensPrompt(tuple(range(11))),
+        SamplingParams(
+            max_tokens=len(forced),
+            forced_token_ids=forced,
+            ignore_eos=True,
+            logprobs=0,
+        ),
+    )
+    updates = []
+    while loop.has_work():
+        updates.extend(loop.step())
+    final = next(
+        update
+        for request_id, update in updates
+        if request_id == "forced" and update.finished
+    )
+    loop.close()
+    return final
+
+
 def test_overlap_matches_eager_on_a_real_runner(llama_dir):
     from kairyu.engine.core.engine_core import EngineCore
     from kairyu.engine.core.overlap import OverlapEngineCore
@@ -77,6 +137,51 @@ def test_overlap_matches_eager_with_several_requests(llama_dir):
     overlapped, _ = _generate(llama_dir, OverlapEngineCore, prompt, 6)
     assert overlapped == eager
     assert all(len(v) == 6 for v in eager.values())
+
+
+@pytest.mark.parametrize("depth", [1, 2, 4])
+def test_forced_continuation_logprobs_match_production_depth_one(llama_dir, depth):
+    forced = (7, 9, 3, 5)
+    oracle = _generate_with_production_loop(
+        llama_dir,
+        pipeline_depth=1,
+        forced=forced,
+    )
+    actual = _generate_with_production_loop(
+        llama_dir,
+        pipeline_depth=depth,
+        forced=forced,
+    )
+
+    for final in (oracle, actual):
+        assert final.finished is True
+        assert final.finish_reason == "length"
+        assert final.outputs == forced
+        assert final.logprobs is not None
+        assert final.logprob_content is not None
+        assert tuple(entry.token_id for entry in final.logprob_content) == forced
+    oracle_logprobs = tuple(
+        row[token_id]
+        for row, token_id in zip(oracle.logprobs, forced, strict=True)
+    )
+    actual_logprobs = tuple(
+        row[token_id]
+        for row, token_id in zip(actual.logprobs, forced, strict=True)
+    )
+    assert all(
+        logprob is not None and math.isfinite(logprob) and logprob <= 0.0
+        for logprob in oracle_logprobs
+    )
+    assert actual_logprobs == pytest.approx(
+        oracle_logprobs,
+        rel=0.0,
+        abs=1e-7,
+    )
+    assert actual.cumulative_logprob == pytest.approx(
+        oracle.cumulative_logprob,
+        rel=0.0,
+        abs=1e-7,
+    )
 
 
 def test_committed_outputs_win_over_the_in_flight_buffer(llama_dir):

@@ -46,6 +46,7 @@ class EngineSampling:
     logprobs: int | None = None  # None: no report; N >= 0: chosen + top-N
     json_schema: dict | None = None
     json_mode: bool = False
+    forced_token_ids: tuple[int, ...] | None = None
 
     @property
     def needs_grammar(self) -> bool:
@@ -59,6 +60,7 @@ class EngineSampling:
             and self.presence_penalty == 0.0
             and self.frequency_penalty == 0.0
             and self.repetition_penalty == 1.0
+            and self.forced_token_ids is None
             and not self.needs_grammar
         )
 

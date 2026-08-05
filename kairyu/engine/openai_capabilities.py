@@ -69,6 +69,7 @@ RESERVED_EXTRA_ARGS = frozenset(
         "top_logprobs",
         "max_completion_tokens",
         "prompt_logprobs",
+        "forced_token_ids",
         "priority",
         *SAMPLING_FIELD_NAMES,
         *PROMPT_OWNED_EXTRA_ARGS,

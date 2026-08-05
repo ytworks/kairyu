@@ -61,7 +61,11 @@ from kairyu.engine.prompt import (
     supplied_prompt_token_ids,
 )
 from kairyu.engine.registry import register_backend
-from kairyu.engine.tokenizer import Tokenizer, resolve_tokenizer
+from kairyu.engine.tokenizer import (
+    Tokenizer,
+    resolve_tokenizer,
+    tokenize_loglikelihood_continuation,
+)
 from kairyu.models.generation import (
     GenerationConfigMode,
     GenerationDefaults,
@@ -1770,6 +1774,19 @@ class ZmqEngineBackend:
                 tokenizer = resolve_tokenizer(self._preflight_tokenizer_source)
                 self._preflight_tokenizer = tokenizer
         return tokenizer
+
+    def tokenize_loglikelihood(
+        self,
+        context: str,
+        continuation: str,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Resolve scoring IDs in the parent with the child's tokenizer source."""
+
+        return tokenize_loglikelihood_continuation(
+            self._get_preflight_tokenizer(),
+            context,
+            continuation,
+        )
 
     def validate_request(self, request: GenerationRequest) -> None:
         validate_native_request_surface(request)

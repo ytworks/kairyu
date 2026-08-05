@@ -1015,6 +1015,14 @@ uv run kairyu bench run --suite core --smoke \
     --base-url http://localhost:8000/v1 --model m1
 ```
 
+The core MMLU row ranks the exact teacher-forced continuations `" A"` through
+`" D"` by raw token log-likelihood through Kairyu's native completions
+extension. It never substitutes generated top-k membership for a missing
+candidate score. The row remains a disclosed zero-shot variant; targets that
+cannot provide exact continuation evidence are skipped rather than scored, and
+a fixed MMLU token-boundary failure on the serialized probe stops dataset
+fan-out.
+
 Datasets download to `~/.cache/kairyu/benchmarks` (never committed); unmet preconditions
 (no docker, gated dataset, no judge) become annotated `skipped` cells, so the run always
 completes. Subcommands: `bench run`, `bench download`, `bench report <run>`, `bench list`,

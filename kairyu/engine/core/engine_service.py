@@ -86,7 +86,7 @@ def sampling_params_from_wire(payload: dict) -> SamplingParams:
 
 
 def sampling_params_to_wire(params: SamplingParams) -> dict:
-    return {
+    payload = {
         "n": params.n,
         "presence_penalty": params.presence_penalty,
         "frequency_penalty": params.frequency_penalty,
@@ -105,6 +105,12 @@ def sampling_params_to_wire(params: SamplingParams) -> dict:
         "skip_special_tokens": params.skip_special_tokens,
         "extra_args": params.extra_args or {},
     }
+    # Preserve the exact legacy/default wire bytes.  An active native-only
+    # continuation is explicit and fails loudly against an older service,
+    # while ordinary rolling-upgrade traffic remains unchanged.
+    if params.forced_token_ids is not None:
+        payload["forced_token_ids"] = list(params.forced_token_ids)
+    return payload
 
 
 def _trace_requested_from_wire(message: dict) -> bool:

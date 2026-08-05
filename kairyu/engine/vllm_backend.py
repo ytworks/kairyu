@@ -34,6 +34,10 @@ from kairyu.sampling_params import SamplingParams
 
 def to_vllm_sampling_kwargs(params: SamplingParams) -> dict:
     """Map kairyu SamplingParams to vllm.SamplingParams constructor kwargs."""
+    if params.forced_token_ids is not None:
+        raise ValueError(
+            "vLLM backend does not support request field forced_token_ids"
+        )
     return {
         "n": params.n,
         "temperature": params.temperature,
@@ -167,6 +171,10 @@ class VLLMBackend:
     def validate_request(self, request: GenerationRequest) -> None:
         """Reject prompt variants that this adapter cannot preserve exactly."""
 
+        if request.sampling_params.forced_token_ids is not None:
+            raise ValueError(
+                "vLLM backend does not support request field forced_token_ids"
+            )
         self._validated_prompt(request)
 
     def _to_result(self, request: GenerationRequest, output) -> GenerationResult:
