@@ -11,7 +11,7 @@ preserving the affected command and evidence paths.
 | Surface | Owner | Distribution and compatibility contract |
 |---|---|---|
 | Reusable config, target types, credential resolution, statistics, atomic reporting, adapters, and runners | `kairyu/bench/` | Installed in the Kairyu wheel; may be imported by both the public CLI and checkout-only wrappers |
-| Public benchmark CLI | `kairyu bench` | Installed console surface: `run`, `download`, `report`, `list`, and `entrypoints` |
+| Public benchmark CLI | `kairyu bench` | Installed console surface: `run`, `download`, `report`, `compare-runs`, `compare`, `quant-sweep`, `calibrate-judge`, `list`, and `entrypoints` |
 | Offline benchmark/calibration fixtures | `kairyu/bench/fixtures/` | Installed package data; all 12 JSONL files must be readable through `importlib.resources` |
 | Entrypoint inventory | `kairyu/bench/entrypoints.toml` | Installed, machine-readable source of truth for every supported top-level wrapper |
 | Gate, comparison, operator, and microbenchmark executables | `bench/*.py` | Repository-only; the inventory declares a path form and, where supported, an optional module form; B7 and A12 evidence are path-only |
@@ -19,10 +19,18 @@ preserving the affected command and evidence paths.
 | Tests | `tests/` | Repository-only and never shipped in a wheel |
 
 The default Fugu result location remains `bench/results/fugu/` for command
-compatibility; the core suite defaults to `bench/results/core/`. For an
-installed CLI used outside this repository, these are paths relative to the
-caller's working directory; they do not mean the top-level `bench/` tree is
-installed.
+compatibility; Core defaults to `bench/results/core/`, and the fixed seven-arm
+task-accuracy suite defaults to `bench/results/quantization/`. For an installed
+CLI used outside this repository, these are paths relative to the caller's
+working directory; they do not mean the top-level `bench/` tree is installed.
+
+`kairyu bench quant-sweep` is package-owned composition, not another top-level
+wrapper. It reloads a complete indexed `quantization` run and reuses the public
+configuration A/B comparator for dense-BF16 versus FP8, INT8, AWQ, GPTQ,
+NVFP4, and experimental FP8-KV arms. The dedicated aggregate JSON/Markdown
+artifacts are eligible for Git retention; routine raw pair directories remain
+ignored. See `docs/design/issue-372-quantization-sweep.md` for the identity,
+support, evidence, and exit-status boundaries.
 
 Installed `kairyu` code must not import the repository-only `bench` namespace.
 If two wrappers need the same config, type, statistics, result writer, or

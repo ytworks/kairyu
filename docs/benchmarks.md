@@ -123,6 +123,13 @@ kairyu bench run --config examples/bench_fugu.yaml
 kairyu bench run --suite core --smoke \
     --base-url http://localhost:8000/v1 --model m1
 # or: kairyu bench run --config examples/bench_core.yaml --smoke
+
+# full seven-arm quantization sweep (use the example's real manifest digests):
+kairyu bench run --config examples/bench_quantization.yaml \
+    --run-id qwen3-quant-accuracy
+kairyu bench quant-sweep --run qwen3-quant-accuracy \
+    --tolerance gsm8k=1.0 --tolerance mmlu=1.0 \
+    --tolerance ifeval=1.0 --tolerance gpqa-diamond=2.0
 ```
 
 Results land in `bench/results/fugu/<run_id>/`:
@@ -136,12 +143,17 @@ comparison.json                               # measured vs published, machine-r
 comparison.md                                 # accuracy report vs the Fugu release table
 config-comparison.json                        # optional config A/B gate artifact
 config-comparison.md                          # optional config A/B gate report
+quantization-sweep.json                       # seven-arm task-accuracy artifact
+quantization-sweep.md                         # scheme-major accuracy/gate report
 ```
 
-Core results default to `bench/results/core/<run_id>/` and contain the same
-run, pair, and scoreboard artifacts. They intentionally omit
+Core results default to `bench/results/core/<run_id>/`; quantization results
+default to `bench/results/quantization/<run_id>/`. Both contain the same run,
+pair, and scoreboard artifacts. They intentionally omit
 `comparison.json` and `comparison.md`: the published reference table is a Fugu
-contract, not a generic benchmark baseline.
+contract, not a generic benchmark baseline. A completed quantization run adds
+its dedicated `quantization-sweep.{json,md}` only after the strict sweep command
+validates all raw evidence.
 
 A completed real-data run from a clean, tracked checkout is also snapshotted in
 the suite-local `bench/results/<suite>/scoreboards.jsonl`. The append-only
@@ -219,6 +231,9 @@ kairyu bench report <run_id>           # rebuild + print a stored scoreboard
 kairyu bench compare-runs BASE CANDIDATE  # print CANDIDATE - BASE deltas
 kairyu bench compare --baseline BASE --candidate CANDIDATE \
     --tolerance gpqa-diamond=2.0       # paired config A/B non-inferiority gate
+kairyu bench quant-sweep --run RUN \
+    --tolerance gsm8k=1 --tolerance mmlu=1 \
+    --tolerance ifeval=1 --tolerance gpqa-diamond=2
 kairyu bench entrypoints               # installed/repository ownership inventory
 kairyu bench list --suite core
 kairyu bench download --suite core
@@ -303,8 +318,8 @@ removing only `identity.config.targets`, the complete methodology identity,
 local commit/source tree, Python/execution runtime, judge, dataset/evaluator
 identity, and sample-selection configuration must match. Target model,
 sampling/reasoning options, context/output limits, and vision policy must also
-match; only the arm label, endpoint, credential-variable name, and declared
-served configuration may differ.
+match; only the arm label, endpoint, credential-variable name, declared served
+configuration, and declared quantization classification may differ.
 
 Independent binary items use a paired 2x2 table. Their artifact records a
 two-sided 95% Newcombe paired-score method-10 interval for candidate minus
@@ -391,6 +406,77 @@ drift. Full design and source identities are recorded in
 [`docs/design/issue-367-core-evals.md`](design/issue-367-core-evals.md) and the
 exact likelihood transport/scoring contract is recorded in
 [`docs/design/issue-368-loglikelihood.md`](design/issue-368-loglikelihood.md).
+
+## Quantization x task-accuracy suite
+
+Kernel throughput and short teacher-forced parity do not answer whether a
+quantized model still solves downstream tasks. The `quantization` suite keeps
+the complete deterministic Core task order and adds judge-free GPQA Diamond as
+one reasoning row:
+
+| Task | Role in the sweep |
+|---|---|
+| GSM8K | generative mathematical exact match |
+| MMLU | exact teacher-forced continuation-likelihood accuracy |
+| IFEval | strict prompt-level instruction-following accuracy |
+| GPQA Diamond | graduate-level reasoning MCQ exact match |
+
+A complete run has exactly seven declared profiles: dense BF16 reference, FP8,
+INT8, AWQ, GPTQ, NVFP4, and dense BF16 with FP8-E4M3 KV. Dense BF16 is encoded
+as `weight_method: none` plus `compute_dtype: bfloat16`; BF16 is not a
+checkpoint quantization method. All weight-quantized arms use effective BF16
+KV, while the final arm isolates the KV dtype change. See
+[`examples/bench_quantization.yaml`](../examples/bench_quantization.yaml) for
+the complete configuration.
+
+Each target also requires a distinct `served_config` SHA-256. Hash a canonical
+deployment manifest covering the common model/tokenizer lineage, exact
+checkpoint tensors, quantization dialect/bits/group/scales/calibration/ignored
+layers, compute and effective KV dtypes, Kairyu build/image, topology, and
+hardware. The profile and manifest are operator declarations: `/backends` does
+not remotely attest all of those fields or every replica, and the report never
+claims otherwise. API model and every sampling/reasoning/context/output request
+field must match across arms.
+
+Current native Kairyu deliberately rejects `fp8_e4m3` KV because its retained
+G4 E-KV bake failed the output/logprob/cache-quality gates. The required FP8-KV
+row can classify an explicitly served external or experimental endpoint, but it
+does not enable or demonstrate native support. The other formats retain their
+real hardware, dialect, model-family, and parallel-topology restrictions; a
+sweep score is not a universal loader-support claim.
+
+A full run sends 58,226 target calls per arm (58,028 Core plus 198 GPQA), or
+407,582 across all seven arms. `--smoke` and `--limit` are useful for plumbing
+only: `quant-sweep` rejects subsets, offline fixtures, skipped/partial/failed
+cells, source/runtime withholding, mismatched request policy, and any missing,
+duplicate, additional, or anonymously configured arm.
+
+```bash
+kairyu bench download --suite quantization --strict
+kairyu bench run --config examples/bench_quantization.yaml \
+    --run-id qwen3-quant-accuracy
+kairyu bench quant-sweep --run qwen3-quant-accuracy \
+    --tolerance gsm8k=1.0 --tolerance mmlu=1.0 \
+    --tolerance ifeval=1.0 --tolerance gpqa-diamond=2.0
+```
+
+The four margins are percentage points and must be supplied exactly once. For
+each candidate/task cell the command reuses the source-, item-, and
+pair-SHA-bound configuration A/B comparator. All four headline outcomes are
+binary, so it retains Newcombe paired method-10 two-sided 95% intervals and a
+one-sided 95% non-inferiority lower bound. A cell passes only when the unrounded
+lower bound is at least the negative task margin. There is no averaging across
+tasks or schemes: all 24 cells must pass.
+
+The source run receives atomic `quantization-sweep.json` and `.md` files. JSON
+embeds all six complete A/B comparisons, the fixed profile/task contract,
+source/index/raw-pair bindings, runtime and protocol identities, evidence
+hashes, policy, support/attestation boundaries, and its own canonical SHA-256.
+Markdown transposes the ordinary benchmark-major scoreboard into one absolute
+accuracy row per scheme and lists every paired gate separately. Exit 0 means
+all gates passed, exit 1 is a valid retained quality failure, and exit 2 means
+the input or evidence was invalid. The complete design is in
+[`docs/design/issue-372-quantization-sweep.md`](design/issue-372-quantization-sweep.md).
 
 ## The 11 Fugu slots
 

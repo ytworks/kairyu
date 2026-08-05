@@ -233,6 +233,35 @@ def add_bench_parser(subparsers) -> None:
         help="Print the machine-readable artifact instead of Markdown",
     )
 
+    quant_sweep = commands.add_parser(
+        "quant-sweep",
+        help=(
+            "Build the retained BF16/FP8/INT8/AWQ/GPTQ/NVFP4 and FP8-KV "
+            "task-accuracy table from one indexed quantization-suite run."
+        ),
+    )
+    quant_sweep.add_argument("--run", required=True, help="Indexed quantization run id")
+    quant_sweep.add_argument(
+        "--tolerance",
+        action="append",
+        required=True,
+        metavar="BENCHMARK=PP",
+        help=(
+            "Allowed score loss in percentage points for one required task "
+            "(repeat for GSM8K, MMLU, IFEval, and GPQA Diamond)"
+        ),
+    )
+    quant_sweep.add_argument(
+        "--results-dir",
+        default=None,
+        help="Results root (default: bench/results/quantization)",
+    )
+    quant_sweep.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the machine-readable artifact instead of Markdown",
+    )
+
     calibrate = commands.add_parser(
         "calibrate-judge",
         help="Measure judge agreement on the committed published-gold set.",
@@ -305,6 +334,8 @@ def handle(args: argparse.Namespace) -> int:
         return _handle_compare_runs(args)
     if args.bench_command == "compare":
         return _handle_compare(args)
+    if args.bench_command == "quant-sweep":
+        return _handle_quant_sweep(args)
     if args.bench_command == "calibrate-judge":
         return _handle_calibrate_judge(args)
     if args.bench_command == "list":
@@ -658,6 +689,63 @@ def _handle_compare(args) -> int:
     else:
         print(markdown)
     return 0 if comparison["overall_verdict"] == "pass" else 1
+
+
+def _handle_quant_sweep(args) -> int:
+    from kairyu.bench.adapters import QUANTIZATION_ROW_ORDER
+    from kairyu.bench.quant_sweep import (
+        build_quantization_sweep,
+        render_quantization_sweep_markdown,
+    )
+    from kairyu.bench.store import ResultStore
+
+    results_dir = Path(
+        getattr(args, "results_dir", None) or "bench/results/quantization"
+    )
+    try:
+        tolerances = _config_tolerances(args.tolerance)
+        store = ResultStore(results_dir, args.run)
+        entries = store.load_scoreboard_index()
+        matching = [entry for entry in entries if entry.get("run_id") == args.run]
+        if len(matching) != 1:
+            raise ValueError(
+                f"run id {args.run!r} is not present exactly once in "
+                f"{results_dir / 'scoreboards.jsonl'}"
+            )
+        entry = matching[0]
+        if entry.get("suite") != "quantization":
+            raise ValueError("indexed run does not belong to suite 'quantization'")
+        scoreboard = entry.get("scoreboard")
+        targets = scoreboard.get("targets") if isinstance(scoreboard, dict) else None
+        benchmarks = scoreboard.get("benchmarks") if isinstance(scoreboard, dict) else None
+        if not isinstance(targets, list) or any(
+            not isinstance(target, str) or not target for target in targets
+        ):
+            raise ValueError("indexed quantization target layout is malformed")
+        if benchmarks != list(QUANTIZATION_ROW_ORDER):
+            raise ValueError("indexed quantization task layout is incomplete")
+        pairs = {
+            target: {
+                benchmark: store.load_indexed_pair(entry, benchmark, target)
+                for benchmark in QUANTIZATION_ROW_ORDER
+            }
+            for target in targets
+        }
+        sweep = build_quantization_sweep(
+            entry,
+            pairs=pairs,
+            tolerances=tolerances,
+        )
+        markdown = render_quantization_sweep_markdown(sweep)
+        store.save_quantization_sweep(sweep, markdown)
+    except (OSError, ValueError) as error:
+        print(f"quant-sweep: {error}")
+        return 2
+    if getattr(args, "json", False):
+        print(json.dumps(sweep, indent=2, ensure_ascii=False, allow_nan=False))
+    else:
+        print(markdown)
+    return 0 if sweep["overall_verdict"] == "pass" else 1
 
 
 def _handle_calibrate_judge(args) -> int:

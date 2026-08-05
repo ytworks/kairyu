@@ -575,6 +575,20 @@ class ResultStore:
         self._atomic_write(markdown_path, markdown)
         return markdown_path
 
+    def save_quantization_sweep(self, sweep: dict, markdown: str) -> Path:
+        """Retained quantization table without replacing other reports."""
+        self.ensure()
+        json_path = self.run_dir / "quantization-sweep.json"
+        markdown_path = self.run_dir / "quantization-sweep.md"
+        for path in (json_path, markdown_path):
+            self._preflight_atomic_write(path)
+        self._atomic_write(
+            json_path,
+            json.dumps(sweep, indent=2, allow_nan=False),
+        )
+        self._atomic_write(markdown_path, markdown)
+        return markdown_path
+
     def _atomic_write(self, path: Path, text: str) -> None:
         self._preflight_atomic_write(path)
         atomic_write_text(

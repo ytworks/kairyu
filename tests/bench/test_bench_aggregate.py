@@ -5,7 +5,12 @@ from argparse import Namespace
 
 import pytest
 
-from kairyu.bench.adapters import CORE_ROW_ORDER, all_adapters, suite_adapters
+from kairyu.bench.adapters import (
+    CORE_ROW_ORDER,
+    QUANTIZATION_ROW_ORDER,
+    all_adapters,
+    suite_adapters,
+)
 from kairyu.bench.aggregate import _wilson_bounds, build_scoreboard, render_markdown
 from kairyu.bench.cli import _handle_report
 from kairyu.bench.types import (
@@ -103,13 +108,25 @@ def test_core_scoreboard_uses_its_canonical_row_order_and_title():
     assert render_markdown(board).startswith("# Core benchmark scoreboard — run run-1")
 
 
+def test_quantization_suite_preserves_core_and_adds_one_reasoning_row():
+    pairs = [_pair(benchmark, "m") for benchmark in reversed(QUANTIZATION_ROW_ORDER)]
+
+    board = _board(pairs, ["m"], suite="quantization")
+
+    assert QUANTIZATION_ROW_ORDER == (*CORE_ROW_ORDER, "gpqa-diamond")
+    assert board["benchmarks"] == list(QUANTIZATION_ROW_ORDER)
+    assert render_markdown(board).startswith(
+        "# Quantization benchmark scoreboard — run run-1"
+    )
+
+
 def test_only_and_exclude_names_are_validated_within_the_selected_suite():
     assert [adapter.info.name for adapter in suite_adapters("core")] == list(CORE_ROW_ORDER)
     with pytest.raises(ValueError, match="gpqa-diamond"):
         suite_adapters("core", only=("gpqa-diamond",))
     with pytest.raises(ValueError, match="gsm8k"):
         suite_adapters("fugu", exclude=("gsm8k",))
-    with pytest.raises(ValueError, match="available: fugu, core"):
+    with pytest.raises(ValueError, match="available: fugu, core, quantization"):
         suite_adapters("unknown")
 
 

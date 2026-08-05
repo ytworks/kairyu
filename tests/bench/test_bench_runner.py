@@ -185,6 +185,7 @@ def test_served_config_identity_is_recorded_and_changes_fingerprint_without_secr
     recorded = _recordable_config(identified)
     served_config = recorded["targets"][0]["served_config"]
 
+    assert "quantization" not in _recordable_config(plain)["targets"][0]
     assert served_config == {"label": "fp8-kv-profile", "sha256": "a" * 64}
     assert recorded["targets"][0]["extra_body_json"].startswith("sha256:")
     assert secret not in json.dumps(recorded)
@@ -670,6 +671,21 @@ async def test_core_offline_runner_completes_all_three_pairs(tmp_path, http_fact
     store = ResultStore(tmp_path / "results", "test-run")
     pairs = {
         benchmark: store.load_pair(benchmark, "m") for benchmark in ("gsm8k", "mmlu", "ifeval")
+    }
+    assert all(pair is not None and pair.status == "completed" for pair in pairs.values())
+
+
+async def test_quantization_offline_runner_executes_core_plus_gpqa(tmp_path, http_factory):
+    from kairyu.bench.adapters import QUANTIZATION_ROW_ORDER
+
+    config = make_config(tmp_path, models=("m",), suite="quantization")
+
+    assert await _runner(config, http_factory).run() == 0
+
+    store = ResultStore(tmp_path / "results", "test-run")
+    pairs = {
+        benchmark: store.load_pair(benchmark, "m")
+        for benchmark in QUANTIZATION_ROW_ORDER
     }
     assert all(pair is not None and pair.status == "completed" for pair in pairs.values())
 

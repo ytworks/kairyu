@@ -9,9 +9,11 @@ from kairyu.bench.config import build_config, build_judge_config, parse_target_f
 from kairyu.bench.execution import build_execution_runner
 from kairyu.bench.types import (
     BenchConfig,
+    BenchTarget,
     ExecutionConfig,
     JudgeConfig,
     JudgeEndpointConfig,
+    QuantizationProfile,
     ServedConfigIdentity,
 )
 
@@ -158,6 +160,85 @@ def test_core_suite_defaults_to_its_own_results_directory():
 
     assert config.suite == "core"
     assert config.results_dir == "bench/results/core"
+
+
+def test_quantization_yaml_loads_explicit_effective_profile_and_suite_default(tmp_path):
+    path = tmp_path / "quantization.yaml"
+    path.write_text(
+        "suite: quantization\n"
+        "targets:\n"
+        "  - name: dense-bf16\n"
+        "    base_url: http://dense:8000/v1\n"
+        "    model: m\n"
+        "    served_config:\n"
+        "      label: dense-manifest\n"
+        f"      sha256: {'a' * 64}\n"
+        "    quantization:\n"
+        "      weight_method: none\n"
+        "      compute_dtype: bfloat16\n"
+        "      kv_cache_dtype: bfloat16\n",
+        encoding="utf-8",
+    )
+
+    config = build_config(_parse(["run", "--config", str(path)]))
+
+    assert config.suite == "quantization"
+    assert config.results_dir == "bench/results/quantization"
+    assert config.targets[0].quantization == QuantizationProfile(
+        weight_method="none",
+        compute_dtype="bfloat16",
+        kv_cache_dtype="bfloat16",
+    )
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"weight_method": "bf16", "compute_dtype": "bfloat16", "kv_cache_dtype": "bfloat16"},
+        {"weight_method": "none", "kv_cache_dtype": "bfloat16"},
+        {"weight_method": "none", "compute_dtype": "bfloat16", "kv_cache_dtype": "auto"},
+        {
+            "weight_method": "none",
+            "compute_dtype": "bfloat16",
+            "kv_cache_dtype": "bfloat16",
+            "attested": True,
+        },
+    ],
+)
+def test_quantization_profile_rejects_conflated_or_unresolved_identity(profile):
+    with pytest.raises(ValueError):
+        QuantizationProfile.model_validate(profile)
+
+
+def test_recorded_non_quant_target_shape_remains_backward_compatible():
+    from kairyu.bench.runner import _recordable_config
+
+    ordinary = BenchConfig(
+        suite="core",
+        targets=(BenchTarget(base_url="http://gateway:8000/v1", model="m"),),
+    )
+    declared = ordinary.model_copy(
+        update={
+            "targets": (
+                ordinary.targets[0].model_copy(
+                    update={
+                        "quantization": QuantizationProfile(
+                            weight_method="none",
+                            compute_dtype="bfloat16",
+                            kv_cache_dtype="bfloat16",
+                        )
+                    }
+                ),
+            )
+        }
+    )
+
+    assert "quantization" not in _recordable_config(ordinary)["targets"][0]
+    assert _recordable_config(declared)["targets"][0]["quantization"] == {
+        "weight_method": "none",
+        "compute_dtype": "bfloat16",
+        "kv_cache_dtype": "bfloat16",
+    }
 
 
 def test_suite_results_directory_preserves_an_explicit_path():

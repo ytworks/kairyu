@@ -13,7 +13,15 @@ import re
 import unicodedata
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from kairyu.bench.targets import normalize_base_url, validate_api_key_env
 
@@ -133,6 +141,25 @@ class ServedConfigIdentity(BaseModel):
         return value
 
 
+class QuantizationProfile(BaseModel):
+    """Operator-declared effective quantization class for one served target.
+
+    The profile classifies rows in the quantization sweep.  Exact checkpoint,
+    kernel, scale, ignored-layer, and deployment details remain content-bound
+    by :class:`ServedConfigIdentity`; this compact declaration must never be
+    mistaken for remote attestation of the server that answered a request.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    # Dense BF16 is represented honestly as unquantized weights plus BF16
+    # compute.  ``bf16`` is not a checkpoint quantization method.
+    weight_method: Literal["none", "fp8", "int8", "awq", "gptq", "nvfp4"]
+    compute_dtype: Literal["bfloat16"]
+    # Effective storage dtype, never the unresolved runtime request ``auto``.
+    kv_cache_dtype: Literal["bfloat16", "fp8_e4m3"]
+
+
 class BenchTarget(SamplingOptions):
     """One scoreboard column: a model name on an OpenAI-compatible endpoint.
 
@@ -146,6 +173,7 @@ class BenchTarget(SamplingOptions):
     base_url: str
     model: str
     served_config: ServedConfigIdentity | None = None
+    quantization: QuantizationProfile | None = None
     api_key_env: str | None = None  # env var NAME, never the key itself
     max_context_tokens: int | None = None  # gate for long-context items
     max_output_tokens: int = 8192
@@ -160,6 +188,16 @@ class BenchTarget(SamplingOptions):
     @classmethod
     def _validate_api_key_env(cls, value: str | None) -> str | None:
         return validate_api_key_env(value)
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_absent_quantization(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict:
+        """Keep pre-quantization target records byte-shape compatible."""
+        serialized = handler(self)
+        if self.quantization is None:
+            serialized.pop("quantization", None)
+        return serialized
 
     def label(self) -> str:
         return self.name or self.model
@@ -315,7 +353,7 @@ class ExecutionConfig(BaseModel):
 class BenchConfig(BaseModel):
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
-    suite: Literal["fugu", "core"] = "fugu"
+    suite: Literal["fugu", "core", "quantization"] = "fugu"
     targets: tuple[BenchTarget, ...] = Field(min_length=1)
     judge: JudgeConfig = JudgeConfig()
     execution: ExecutionConfig = ExecutionConfig()
