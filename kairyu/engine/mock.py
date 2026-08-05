@@ -17,10 +17,15 @@ from kairyu.engine.prompt import (
     prompt_text,
     supplied_prompt_token_ids,
 )
-from kairyu.outputs import CompletionOutput
+from kairyu.engine.tokenizer import (
+    ToyTokenizer,
+    tokenize_loglikelihood_continuation,
+)
+from kairyu.outputs import CompletionOutput, TokenLogprob
 
 _ECHO_TAIL_CHARS = 48
 _STREAM_CHUNK_CHARS = 8
+_LOGLIKELIHOOD_TOKENIZER = ToyTokenizer()
 
 
 def _fake_token_ids(text: str) -> tuple[int, ...]:
@@ -75,18 +80,73 @@ class MockBackend:
     def validate_request(self, request: GenerationRequest) -> None:
         self._execution_text(request)
 
+    def tokenize_loglikelihood(
+        self,
+        context: str,
+        continuation: str,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Resolve mock continuations through one process-stable tokenizer."""
+
+        return tokenize_loglikelihood_continuation(
+            _LOGLIKELIHOOD_TOKENIZER,
+            context,
+            continuation,
+        )
+
     def _result_for(self, request: GenerationRequest) -> GenerationResult:
         execution_text = self._execution_text(request)
-        completions = tuple(
-            CompletionOutput(
-                index=i,
-                text=(text := self._text_for(execution_text, i)),
-                token_ids=_fake_token_ids(text),
-                cumulative_logprob=0.0,
-                finish_reason="stop",
+        forced_token_ids = request.sampling_params.forced_token_ids
+        if forced_token_ids is None:
+            completions = tuple(
+                CompletionOutput(
+                    index=i,
+                    text=(text := self._text_for(execution_text, i)),
+                    token_ids=_fake_token_ids(text),
+                    cumulative_logprob=0.0,
+                    finish_reason="stop",
+                )
+                for i in range(request.sampling_params.n)
             )
-            for i in range(request.sampling_params.n)
-        )
+        else:
+            token_text = tuple(str(token_id) for token_id in forced_token_ids)
+            selected_logprobs = tuple(
+                -float(((token_id * 31 + position) % 997) + 1) / 1000.0
+                for position, token_id in enumerate(forced_token_ids)
+            )
+            logprobs = tuple(
+                {token_id: logprob}
+                for token_id, logprob in zip(
+                    forced_token_ids,
+                    selected_logprobs,
+                    strict=True,
+                )
+            )
+            logprob_content = tuple(
+                TokenLogprob(
+                    token=token,
+                    token_id=token_id,
+                    logprob=logprob,
+                    bytes_=tuple(token.encode()),
+                )
+                for token, token_id, logprob in zip(
+                    token_text,
+                    forced_token_ids,
+                    selected_logprobs,
+                    strict=True,
+                )
+            )
+            completions = tuple(
+                CompletionOutput(
+                    index=i,
+                    text=" ".join(token_text),
+                    token_ids=forced_token_ids,
+                    cumulative_logprob=sum(selected_logprobs),
+                    logprobs=logprobs,
+                    logprob_content=logprob_content,
+                    finish_reason="length",
+                )
+                for i in range(request.sampling_params.n)
+            )
         return GenerationResult(
             request_id=request.request_id,
             prompt=request.prompt,
@@ -115,6 +175,9 @@ class MockBackend:
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         final = await self.generate(request)
+        if request.sampling_params.forced_token_ids is not None:
+            yield final
+            return
         longest = max(len(completion.text) for completion in final.completions)
         for end in range(_STREAM_CHUNK_CHARS, longest, _STREAM_CHUNK_CHARS):
             partials = tuple(

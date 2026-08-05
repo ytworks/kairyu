@@ -100,6 +100,21 @@ def test_legacy_sampling_wire_defaults_to_skipping_special_tokens() -> None:
     assert sampling_params_from_wire(payload).skip_special_tokens is True
 
 
+def test_forced_token_ids_roundtrip_only_when_active() -> None:
+    ordinary = sampling_params_to_wire(SamplingParams())
+    forced = sampling_params_to_wire(
+        SamplingParams(
+            max_tokens=3,
+            forced_token_ids=(7, 3, 11),
+            ignore_eos=True,
+        )
+    )
+
+    assert "forced_token_ids" not in ordinary
+    assert forced["forced_token_ids"] == [7, 3, 11]
+    assert sampling_params_from_wire(forced).forced_token_ids == (7, 3, 11)
+
+
 def test_v2_snapshot_and_deltas_reconstruct_every_cumulative_field():
     cursor = WireEventCursor()
     accumulator = _WireAccumulator()

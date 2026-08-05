@@ -654,6 +654,14 @@ async def test_generate_forwards_explicit_neutral_generation_values(upstream):
         ("stop_token_ids", SamplingParams(stop_token_ids=[7])),
         ("min_tokens", SamplingParams(min_tokens=1)),
         ("prompt_logprobs", SamplingParams(prompt_logprobs=1)),
+        (
+            "forced_token_ids",
+            SamplingParams(
+                max_tokens=1,
+                forced_token_ids=(7,),
+                ignore_eos=True,
+            ),
+        ),
         ("ignore_eos", SamplingParams(ignore_eos=True)),
         ("skip_special_tokens", SamplingParams(skip_special_tokens=False)),
         (
@@ -878,6 +886,21 @@ async def test_upstream_profiles_forward_exact_supported_body(upstream, params, 
         ("kairyu", "prompt_logprobs", SamplingParams(prompt_logprobs=1)),
         (
             "openai",
+            "forced_token_ids",
+            SamplingParams(max_tokens=1, forced_token_ids=(7,), ignore_eos=True),
+        ),
+        (
+            "vllm",
+            "forced_token_ids",
+            SamplingParams(max_tokens=1, forced_token_ids=(7,), ignore_eos=True),
+        ),
+        (
+            "kairyu",
+            "forced_token_ids",
+            SamplingParams(max_tokens=1, forced_token_ids=(7,), ignore_eos=True),
+        ),
+        (
+            "openai",
             "extra_args.extra_body",
             SamplingParams(extra_args={"extra_body": {"google": {}}}),
         ),
@@ -1065,6 +1088,28 @@ def test_unrepresentable_prompt_logprobs_cannot_be_enabled_by_custom_policy():
         OpenAIRequestCapabilities(
             upstream="custom",
             sampling_fields={"prompt_logprobs"},
+        )
+
+
+def test_native_forced_tokens_cannot_be_enabled_by_remote_custom_policy():
+    with pytest.raises(ValueError, match="unknown OpenAI sampling capability fields"):
+        OpenAICompatBackend(
+            base_url="https://verified.example/v1",
+            model="m",
+            upstream="generic",
+            capabilities={"allow_sampling_fields": ["forced_token_ids"]},
+        )
+    with pytest.raises(ValueError, match="may not override"):
+        OpenAICompatBackend(
+            base_url="https://verified.example/v1",
+            model="m",
+            upstream="generic",
+            capabilities={"allow_extra_args": ["forced_token_ids"]},
+        )
+    with pytest.raises(ValueError, match="unknown OpenAI sampling capability fields"):
+        OpenAIRequestCapabilities(
+            upstream="custom",
+            sampling_fields={"forced_token_ids"},
         )
 
 

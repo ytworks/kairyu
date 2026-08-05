@@ -355,6 +355,24 @@ def test_vllm_backend_rejects_unrendered_tool_intent_for_token_prompt(monkeypatc
         backend.validate_request(request)
 
 
+async def test_vllm_backend_rejects_forced_tokens_before_engine_dispatch(monkeypatch):
+    backend, engine = _capturing_backend(monkeypatch)
+    request = GenerationRequest(
+        request_id="forced",
+        prompt="hello",
+        sampling_params=SamplingParams(
+            max_tokens=1,
+            forced_token_ids=(7,),
+            ignore_eos=True,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="forced_token_ids"):
+        await backend.generate(request)
+
+    assert engine.calls == []
+
+
 @pytest.mark.vllm
 @pytest.mark.hf_hub
 async def test_generate_roundtrip_with_real_vllm():

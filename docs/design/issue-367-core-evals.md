@@ -1,7 +1,7 @@
 # Issue #367 Design: Cheap Deterministic Core Evals
 
-Status: **Implemented and validated locally** (2026-08-05); GitHub CI is the
-merge gate.
+Status: **Implemented and merged** (2026-08-05); MMLU scoring amended by
+issue #368 as described below.
 
 Related contracts: M7 benchmark adapter/cache/result contracts and the Fugu
 suite's existing reproducibility, degradation, resume, and reporting rules.
@@ -14,7 +14,7 @@ agentic evaluations. Issue #367 adds a separate `core` suite for frequent,
 deterministic quality regression checks:
 
 1. GSM8K numerical exact match;
-2. MMLU generated-choice exact match;
+2. MMLU ordered continuation-likelihood choice ranking;
 3. IFEval rule-based instruction following.
 
 `fugu` remains the default and keeps its row order, result path, published-score
@@ -24,7 +24,8 @@ download/cache, request, retry, resume, pair evidence, scoreboard, fixture, and
 Wilson-confidence-interval contracts.
 
 “Cheap” describes the absence of an LLM judge, Docker, vision, and agent loops.
-A full run still sends 15,902 target requests, dominated by 14,042 MMLU items.
+A full run sends 58,028 target calls: one per GSM8K/IFEval item and four exact
+candidate-continuation calls per MMLU item.
 Fast development runs use the existing deterministic `--smoke` or `--limit`
 paths and are marked non-comparable by the existing run contract; a subset is
 never presented as a full score.
@@ -50,10 +51,11 @@ existing comparison files. A comparison builder rejects a non-Fugu scoreboard
 instead of silently emitting a table full of missing reference values.
 
 All three headline item outcomes are Bernoulli values, so a complete pair may
-use the existing 95% Wilson interval. A non-empty completion with no required
-answer marker is an ordinary wrong answer (`0`). A successful HTTP response with
-empty content retains the suite-wide missing-evidence contract and is failed/
-unmeasured rather than scored. Unavailable data, scorer dependencies, fixed
+use the existing 95% Wilson interval. For the generative rows, a non-empty
+completion with no required answer marker is an ordinary wrong answer (`0`),
+while empty content is failed/unmeasured. MMLU has no generated-text or empty-
+completion fallback: all four exact likelihood records must validate before an
+item can be right or wrong. Unavailable data, scorer dependencies, fixed
 resources, unknown checker IDs, or schema/count drift fail the adapter or pair
 closed rather than manufacturing a zero.
 
@@ -78,17 +80,21 @@ extraction is claimed to match the original scorer.
 - Data: `cais/mmlu@c30699e8356da336a370243923dbaf21066bb9fe`,
   config `all`, split `test`, exactly 14,042 rows and 57 subjects.
 - Prompt: zero-shot multiple choice with the upstream A-D choice order
-  preserved. The model returns a generated answer letter.
-- Score: a strict generated-letter parser accepts only a lone A-D answer
-  (optionally wrapped in a short `Answer:` marker), followed by exact match.
+  preserved, ending at `Answer:` on the raw completions surface.
+- Score: exact teacher-forced raw log-likelihood for the ordered continuations
+  `" A"`, `" B"`, `" C"`, and `" D"`; each must resolve to exactly one target
+  token. Stable candidate order resolves an exact tie, which remains recorded
+  in item evidence.
 - Headline metric: item-micro accuracy over the full test set.
 
-This is intentionally a cheap generated-letter regression variant. Canonical
-MMLU uses five subject-specific development examples and next-token A-D logprob
-argmax. The OpenAI-compatible chat contract does not expose portable candidate
-logprobs, so Kairyu neither labels this variant canonical nor compares it with
-published MMLU numbers. That difference is permanent methodology and annotation
-data, not a footnote added after seeing a result.
+Issue #368 supersedes the initial generated-letter transport while preserving
+the predeclared zero-shot population and prompt boundary. Canonical MMLU uses
+five subject-specific development examples as well as next-token A-D logprob
+argmax, so Kairyu still neither labels this zero-shot variant canonical nor
+compares it with published MMLU numbers. The zero-shot difference remains
+permanent methodology and annotation data, not a footnote added after seeing a
+result. Exact likelihood semantics and failure handling are defined in
+`docs/design/issue-368-loglikelihood.md`.
 
 ### 3.3 IFEval
 
@@ -160,9 +166,11 @@ tests, not benchmark evidence; the existing fixture run reason prevents their
 scores from being treated as full measurements.
 
 The packaged source bytes implementing each core prompt, parser, and scorer
-also enter that adapter's run identity. IFEval binds both its adapter and every
-vendored checker module. Consequently, changing the exact-character amendment,
-loose variants, Punkt/dependency digest constants, or any other score-bearing
+also enter that adapter's run identity. MMLU additionally binds the shared exact
+likelihood client/parser/scorer implementation delivered by issue #368. IFEval
+binds both its adapter and every vendored checker module. Consequently, changing
+candidate reduction/boundary validation, the exact-character amendment, loose
+variants, Punkt/dependency digest constants, or any other score-bearing
 implementation changes the run fingerprint before stored pair evidence can be
 reused.
 

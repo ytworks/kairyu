@@ -34,10 +34,14 @@ from kairyu.engine.prompt import (
     prompt_text,
     supplied_prompt_token_ids,
 )
-from kairyu.engine.tokenizer import IncrementalDetokenizer, Tokenizer
+from kairyu.engine.tokenizer import (
+    IncrementalDetokenizer,
+    Tokenizer,
+    tokenize_loglikelihood_continuation,
+)
 from kairyu.models.generation import GenerationDefaults
 from kairyu.outputs import TokenLogprob
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import RESPONSE_FORMAT_EXTRA_ARG, SamplingParams
 
 _DEFAULT_MAX_NEW_TOKENS = 16
 _DEFAULT_PIPELINE_DEPTH = 1
@@ -123,7 +127,7 @@ def engine_sampling_from(params: SamplingParams) -> EngineSampling:
     """Map API SamplingParams (+ response_format in extra_args) to the engine
     subset (m8 D2): {"type": "json_object"} -> builtin JSON grammar;
     {"type": "json_schema", "json_schema": {"schema": ...}} -> schema."""
-    response_format = (params.extra_args or {}).get("response_format") or {}
+    response_format = (params.extra_args or {}).get(RESPONSE_FORMAT_EXTRA_ARG) or {}
     kind = response_format.get("type")
     json_schema = None
     json_mode = kind == "json_object"
@@ -139,6 +143,7 @@ def engine_sampling_from(params: SamplingParams) -> EngineSampling:
         repetition_penalty=params.repetition_penalty,
         seed=params.seed,
         logprobs=params.logprobs,
+        forced_token_ids=params.forced_token_ids,
         json_schema=json_schema,
         json_mode=json_mode,
     )
@@ -435,6 +440,19 @@ class EngineLoop:
             raise ValueError("prompt must tokenize to at least one token")
         return prompt_token_ids
 
+    def tokenize_loglikelihood(
+        self,
+        context: str,
+        continuation: str,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Resolve one exact continuation boundary with the engine tokenizer."""
+
+        return tokenize_loglikelihood_continuation(
+            self._tokenizer,
+            context,
+            continuation,
+        )
+
     def resolve_prompt_token_ids(self, prompt: PromptInput) -> tuple[int, ...]:
         """Resolve public input while preserving caller-owned token IDs."""
 
@@ -562,14 +580,19 @@ class EngineLoop:
             )
         prompt_token_ids = prepared_prompt.prompt_token_ids
         max_new_tokens = prepared_prompt.max_new_tokens
+        forced_continuation = params.forced_token_ids is not None
         engine_request = EngineRequest(
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             max_new_tokens=max_new_tokens,
             eos_token_id=self._default_eos,
-            stop_token_ids=tuple(params.stop_token_ids or ()) + self._default_stop_ids,
-            min_tokens=params.min_tokens,
-            ignore_eos=params.ignore_eos,
+            stop_token_ids=(
+                ()
+                if forced_continuation
+                else tuple(params.stop_token_ids or ()) + self._default_stop_ids
+            ),
+            min_tokens=0 if forced_continuation else params.min_tokens,
+            ignore_eos=True if forced_continuation else params.ignore_eos,
             priority=priority,
             scheduling_class=scheduling_class,
             sampling=engine_sampling_from(params),
@@ -579,7 +602,7 @@ class EngineLoop:
                 self._tokenizer,
                 skip_special_tokens=params.skip_special_tokens,
             ),
-            stops=tuple(params.stop or ()),
+            stops=() if forced_continuation else tuple(params.stop or ()),
             num_prompt_tokens=len(engine_request.prompt_token_ids),
             trace_requested=trace_requested,
             tokenize_duration_ns=(

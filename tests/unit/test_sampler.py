@@ -41,6 +41,99 @@ def test_only_plain_greedy_without_logprobs_can_argmax_before_host_copy():
     assert not sampler.can_argmax_logits(
         "grammar", EngineSampling(json_mode=True), eos_token_id=1
     )
+    assert not sampler.can_argmax_logits(
+        "forced", EngineSampling(forced_token_ids=(3,))
+    )
+
+
+def test_forced_tokens_override_selection_and_report_raw_logprob_without_top_n():
+    logits = torch.full((VOCAB,), -4.0)
+    logits[1] = 12.0
+    logits[7] = 2.0
+    logits[9] = -1.0
+    raw = torch.log_softmax(logits, dim=-1)
+    sampling = EngineSampling(
+        temperature=0.0,
+        top_k=1,
+        min_p=1.0,
+        repetition_penalty=100.0,
+        presence_penalty=2.0,
+        frequency_penalty=2.0,
+        forced_token_ids=(7, 9),
+    )
+    sampler = Sampler()
+
+    first = sampler.sample(
+        "forced",
+        sampling,
+        0,
+        logits,
+        prompt=(7,),
+        eos_token_id=7,
+        stop_token_ids=(9,),
+        min_tokens=2,
+    )
+    second = sampler.sample(
+        "forced",
+        sampling,
+        1,
+        logits,
+        prompt=(7,),
+        outputs=(7,),
+        eos_token_id=7,
+        stop_token_ids=(9,),
+        min_tokens=2,
+    )
+
+    assert (first.token_id, second.token_id) == (7, 9)
+    assert first.logprob == pytest.approx(float(raw[7]))
+    assert second.logprob == pytest.approx(float(raw[9]))
+    assert first.top_logprobs is None
+    assert second.top_logprobs is None
+    assert sampling.is_greedy_pure is False
+
+
+def test_forced_token_device_path_keeps_selection_and_raw_report_on_device():
+    logits = _logits()
+    raw = torch.log_softmax(logits, dim=-1)
+    sampling = EngineSampling(
+        temperature=1.7,
+        top_k=1,
+        logprobs=3,
+        forced_token_ids=(5,),
+    )
+
+    sampled = Sampler().sample_device("forced-device", sampling, 0, logits)
+
+    assert sampled.token_id.dtype == torch.int64
+    assert sampled.token_id.device == logits.device
+    assert int(sampled.token_id.item()) == 5
+    assert sampled.logprob is not None
+    assert float(sampled.logprob.item()) == pytest.approx(float(raw[5]))
+    assert sampled.top_indices is not None
+    assert sampled.top_logprobs is not None
+    assert sampled.top_indices.shape == (3,)
+    assert sampled.top_logprobs.shape == (3,)
+
+
+@pytest.mark.parametrize("position", [-1, 2])
+def test_forced_token_position_outside_sequence_is_rejected(position):
+    sampling = EngineSampling(forced_token_ids=(1, 2))
+
+    with pytest.raises(ValueError, match="no token for output position"):
+        Sampler().sample("forced-position", sampling, position, _logits())
+
+
+@pytest.mark.parametrize("device_path", [False, True])
+def test_forced_token_outside_vocabulary_is_rejected(device_path):
+    sampler = Sampler()
+    sampling = EngineSampling(forced_token_ids=(VOCAB,))
+
+    with pytest.raises(ValueError, match="outside vocabulary size"):
+        if device_path:
+            sampler.sample_device("forced-vocab", sampling, 0, _logits())
+        else:
+            sampler.sample("forced-vocab", sampling, 0, _logits())
 
 
 def test_min_tokens_mask_blocks_fast_argmax_until_logical_position_is_reached():

@@ -11,7 +11,8 @@ Order of operations (reviewed convention, m8 §6):
    logical scheduled position is authoritative under overlap/speculation.
 4. Penalties — repetition over prompt + committed outputs; presence/frequency
    over committed outputs only (vLLM/HF agreement).
-5. ``temperature == 0`` → argmax on the masked logits; else scale.
+5. A native forced continuation selects its token for this logical position;
+   otherwise ``temperature == 0`` → argmax on the masked logits; else scale.
 6. min_p, then top-k, then top-p (vLLM v1 order; HF differs — recorded).
 7. softmax → stateless seeded Gumbel-max sample.
 
@@ -657,6 +658,28 @@ class Sampler:
             indices = torch.as_tensor(blocked, dtype=torch.long, device=logits.device)
             logits.index_fill_(0, indices, float("-inf"))
 
+    @staticmethod
+    def _forced_token_id(
+        sampling: EngineSampling,
+        position: int,
+        vocab_size: int,
+    ) -> int | None:
+        forced = sampling.forced_token_ids
+        if forced is None:
+            return None
+        if type(position) is not int or not 0 <= position < len(forced):
+            raise ValueError(
+                "forced_token_ids has no token for output position "
+                f"{position}; sequence length is {len(forced)}"
+            )
+        token_id = forced[position]
+        if type(token_id) is not int or not 0 <= token_id < vocab_size:
+            raise ValueError(
+                f"forced token ID {token_id!r} at output position {position} "
+                f"is outside vocabulary size {vocab_size}"
+            )
+        return token_id
+
     def sample(
         self,
         request_id: str,
@@ -673,6 +696,11 @@ class Sampler:
         min_tokens: int = 0,
     ) -> SampledToken:
         state = self._state_for(request_id, sampling, eos_token_id)
+        forced_token_id = self._forced_token_id(
+            sampling,
+            position,
+            logits.shape[-1],
+        )
         if self.can_argmax_logits(
             request_id,
             sampling,
@@ -689,7 +717,7 @@ class Sampler:
         logits = logits.detach().to(device="cpu", dtype=torch.float32).clone()
 
         raw_logsoftmax: torch.Tensor | None = None
-        if sampling.logprobs is not None:
+        if sampling.logprobs is not None or forced_token_id is not None:
             raw_logsoftmax = torch.log_softmax(logits, dim=-1)
 
         if state.enforcer is not None:
@@ -713,7 +741,9 @@ class Sampler:
             history_epoch,
         )
 
-        if sampling.temperature == 0.0:
+        if forced_token_id is not None:
+            token_id = forced_token_id
+        elif sampling.temperature == 0.0:
             token_id = int(torch.argmax(logits).item())
         else:
             token_id = self._sample_scaled(logits, sampling, state.base_seed, position)
@@ -755,9 +785,15 @@ class Sampler:
         if state.enforcer is not None:
             raise ValueError("structured sampling requires the CPU matcher path")
 
+        forced_token_id = self._forced_token_id(
+            sampling,
+            position,
+            logits.shape[-1],
+        )
+
         work = logits.detach().to(dtype=torch.float32).clone()
         raw_logsoftmax: torch.Tensor | None = None
-        if sampling.logprobs is not None:
+        if sampling.logprobs is not None or forced_token_id is not None:
             raw_logsoftmax = torch.log_softmax(work, dim=-1)
 
         self._apply_min_tokens_mask(
@@ -778,7 +814,13 @@ class Sampler:
             history_epoch,
         )
 
-        if sampling.temperature == 0.0:
+        if forced_token_id is not None:
+            token_id = torch.tensor(
+                forced_token_id,
+                dtype=torch.int64,
+                device=work.device,
+            )
+        elif sampling.temperature == 0.0:
             token_id = torch.argmax(work).to(dtype=torch.int64)
         else:
             token_id = self._sample_scaled_device(work, sampling, state.base_seed, position)
@@ -788,8 +830,7 @@ class Sampler:
         top_logprobs = None
         if raw_logsoftmax is not None:
             logprob = raw_logsoftmax.gather(0, token_id.view(1)).squeeze(0)
-            assert sampling.logprobs is not None
-            if sampling.logprobs > 0:
+            if sampling.logprobs is not None and sampling.logprobs > 0:
                 k = min(sampling.logprobs, raw_logsoftmax.shape[-1])
                 top_logprobs, top_indices = torch.topk(raw_logsoftmax, k)
         return DeviceSample(
@@ -866,8 +907,7 @@ class Sampler:
             return None, None
         logprob = float(raw_logsoftmax[token_id].item())
         top: tuple[tuple[int, float], ...] | None = None
-        assert sampling.logprobs is not None
-        if sampling.logprobs > 0:
+        if sampling.logprobs is not None and sampling.logprobs > 0:
             k = min(sampling.logprobs, raw_logsoftmax.shape[-1])
             values, indices = torch.topk(raw_logsoftmax, k)
             top = tuple(

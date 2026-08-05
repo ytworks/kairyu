@@ -229,6 +229,31 @@ class _CountingTokenizer(ToyTokenizer):
         return super().encode(text)
 
 
+class _LoglikelihoodBoundaryTokenizer(ToyTokenizer):
+    def encode(self, text: str) -> tuple[int, ...]:
+        known = {
+            "context": (1, 2),
+            "context continuation": (1, 2, 7, 9),
+        }
+        if text in known:
+            return known[text]
+        return super().encode(text)
+
+
+def test_native_backend_exposes_exact_loglikelihood_token_boundary():
+    backend = KairyuBackend(
+        tokenizer=_LoglikelihoodBoundaryTokenizer(),
+        num_pages=64,
+    )
+
+    assert backend.tokenize_loglikelihood("context", " continuation") == (
+        (1, 2),
+        (7, 9),
+    )
+
+    backend._loop.close()
+
+
 async def test_trace_metrics_survive_preflight_and_backend_result_boundary():
     tokenizer = _CountingTokenizer()
     backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)

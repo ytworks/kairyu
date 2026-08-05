@@ -400,6 +400,9 @@ class CompletionRequest(BaseModel):
     frequency_penalty: float = 0.0
     user: str | None = None
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
+    # Kairyu extension: score one caller-supplied continuation without
+    # presenting it as ordinary generation or OpenAI ``echo`` support.
+    kairyu_continuation: str | None = None
 
     @field_validator("prompt", mode="before")
     @classmethod
@@ -474,6 +477,20 @@ class CompletionResponse(BaseModel):
     model: str
     choices: list[CompletionChoice]
     usage: Usage = Usage()
+
+
+class LogLikelihoodCompletionChoice(CompletionChoice):
+    """Exact token evidence exposed only by the Kairyu scoring extension."""
+
+    prompt_token_ids: list[int]
+    continuation_token_ids: list[int]
+
+
+class LogLikelihoodCompletionResponse(CompletionResponse):
+    """Separate response type keeps the ordinary completion wire unchanged."""
+
+    choices: list[LogLikelihoodCompletionChoice]
+    mode: Literal["loglikelihood"] = "loglikelihood"
 
 
 class CompletionChunk(BaseModel):

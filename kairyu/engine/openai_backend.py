@@ -268,6 +268,7 @@ def _active_sampling_fields(params: SamplingParams) -> set[str]:
     values_and_neutral = {
         "best_of": (params.best_of, None),
         "frequency_penalty": (params.frequency_penalty, 0.0),
+        "forced_token_ids": (params.forced_token_ids, None),
         "ignore_eos": (params.ignore_eos, False),
         "logprobs": (params.logprobs, None),
         "max_tokens": (params.max_tokens, None),

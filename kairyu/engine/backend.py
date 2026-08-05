@@ -22,7 +22,11 @@ from kairyu.engine.prompt import (
     supplied_prompt_token_ids,
 )
 from kairyu.outputs import CompletionOutput
-from kairyu.sampling_params import SamplingParams, validate_prompt_owned_extra_args
+from kairyu.sampling_params import (
+    STRUCTURED_OUTPUT_EXTRA_ARGS,
+    SamplingParams,
+    validate_prompt_owned_extra_args,
+)
 
 _GENERATION_STAGE_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _MAX_STAGE_DURATION_NS = (1 << 63) - 1
@@ -296,7 +300,7 @@ def validate_native_request_surface(request: GenerationRequest) -> None:
         unsupported.extend(
             f"extra_args.{key}"
             for key in params.extra_args
-            if key != "response_format"
+            if key not in STRUCTURED_OUTPUT_EXTRA_ARGS
         )
     for index, tool in enumerate(request.tools):
         function = tool.get("function")

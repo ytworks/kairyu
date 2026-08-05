@@ -116,6 +116,52 @@ class Tokenizer(Protocol):
     def vocab(self) -> list[str]: ...
 
 
+def tokenize_loglikelihood_continuation(
+    tokenizer: Tokenizer,
+    context: str,
+    continuation: str,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Resolve an exact teacher-forced continuation at a token boundary.
+
+    Tokenizing ``continuation`` independently is incorrect for BPE and
+    sentence-piece tokenizers: a merge can cross the caller's text boundary.
+    Encode the context and the combined text with the target tokenizer, then
+    accept only an exact token-prefix boundary.  The caller can consequently
+    force every returned continuation ID without guessing from decoded pieces
+    or character offsets.
+    """
+
+    if not isinstance(context, str) or not context:
+        raise ValueError("loglikelihood context must be a non-empty string")
+    if not isinstance(continuation, str) or not continuation:
+        raise ValueError("loglikelihood continuation must be a non-empty string")
+    context_ids = tuple(tokenizer.encode(context))
+    combined_ids = tuple(tokenizer.encode(context + continuation))
+    if not context_ids:
+        raise ValueError("loglikelihood context must tokenize to at least one token")
+    if combined_ids[: len(context_ids)] != context_ids:
+        raise ValueError(
+            "loglikelihood continuation boundary is not aligned for the "
+            "backend tokenizer"
+        )
+    continuation_ids = combined_ids[len(context_ids) :]
+    if not continuation_ids:
+        raise ValueError(
+            "loglikelihood continuation must tokenize to at least one new token"
+        )
+    for label, token_ids in (
+        ("context", context_ids),
+        ("continuation", continuation_ids),
+    ):
+        for index, token_id in enumerate(token_ids):
+            if type(token_id) is not int or token_id < 0:
+                raise ValueError(
+                    f"loglikelihood {label} token_ids[{index}] must be a "
+                    "non-negative integer"
+                )
+    return context_ids, continuation_ids
+
+
 class TokenDecodeStream(Protocol):
     """Optional tokenizer-native incremental decode contract.
 

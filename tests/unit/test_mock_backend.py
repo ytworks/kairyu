@@ -1,4 +1,5 @@
 import importlib.util
+import math
 
 import pytest
 
@@ -38,6 +39,63 @@ async def test_n_samples_produce_distinct_completions():
     assert [c.index for c in result.completions] == [0, 1, 2]
     texts = {c.text for c in result.completions}
     assert len(texts) == 3
+
+
+async def test_forced_tokens_return_exact_ids_and_finite_selected_logprobs():
+    backend = MockBackend()
+    request = _request(
+        "score this continuation",
+        SamplingParams(
+            n=2,
+            max_tokens=3,
+            forced_token_ids=(7, 3, 11),
+            ignore_eos=True,
+        ),
+    )
+
+    result = await backend.generate(request)
+
+    assert len(result.completions) == 2
+    for completion in result.completions:
+        assert completion.token_ids == (7, 3, 11)
+        assert completion.logprobs is not None
+        assert [tuple(row) for row in completion.logprobs] == [(7,), (3,), (11,)]
+        assert completion.logprob_content is not None
+        assert [entry.token_id for entry in completion.logprob_content] == [7, 3, 11]
+        selected = [entry.logprob for entry in completion.logprob_content]
+        assert all(math.isfinite(logprob) for logprob in selected)
+        assert completion.cumulative_logprob == pytest.approx(sum(selected))
+        assert completion.finish_reason == "length"
+
+
+def test_mock_loglikelihood_tokenizer_has_stable_distinct_choice_boundaries():
+    backend = MockBackend()
+    resolved = [
+        backend.tokenize_loglikelihood("Answer:", f" {choice}")
+        for choice in "ABCD"
+    ]
+
+    assert len({context for context, _continuation in resolved}) == 1
+    assert all(len(continuation) == 1 for _context, continuation in resolved)
+    assert len({continuation for _context, continuation in resolved}) == 4
+
+
+async def test_forced_token_stream_emits_only_the_exact_final_snapshot():
+    backend = MockBackend()
+    request = _request(
+        "score",
+        SamplingParams(
+            max_tokens=2,
+            forced_token_ids=(5, 9),
+            ignore_eos=True,
+        ),
+    )
+
+    streamed = [result async for result in backend.stream(request)]
+
+    assert len(streamed) == 1
+    assert streamed[0].completions[0].token_ids == (5, 9)
+    assert streamed[0].finished is True
 
 
 async def test_stream_chunks_reassemble_to_full_text():

@@ -4,8 +4,10 @@
 #   uv sync --extra bench
 #   kairyu bench run --config examples/bench_core.yaml
 #
-# A full run sends 15,902 requests. Add `--smoke` for the 20-item-per-slot
-# development preset; subset artifacts remain explicitly non-comparable.
+# A full run sends 58,028 target calls: MMLU scores four exact continuations
+# per item through a direct native Kairyu target. Add `--smoke` for the
+# 20-item-per-slot development preset; subset artifacts remain explicitly
+# non-comparable.
 suite: core
 
 targets:
@@ -13,9 +15,9 @@ targets:
     base_url: http://localhost:8000/v1
     model: m1
 
-# The seed controls deterministic item selection for --limit/--smoke. Endpoint
-# sampling remains temperature zero; set a target sampling seed only when the
-# endpoint supports and requires it.
+# The seed controls deterministic item selection for --limit/--smoke. Generated
+# rows remain temperature zero. MMLU fixes its teacher-forced scoring fields and
+# does not apply target sampling overrides.
 seed: 0
 concurrency: 8
 

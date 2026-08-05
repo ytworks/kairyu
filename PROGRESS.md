@@ -654,6 +654,16 @@ and IFEval regression suite. Fugu retains its row order, published comparison,
 and result path; core writes its own three-row scoreboard without a Fugu
 comparison. Core pins 1,319 GSM8K test rows, 14,042 MMLU test rows across the
 exact 57 subjects, and 541 IFEval prompts/834 instructions/all 25 checker IDs.
+MMLU now ranks the ordered continuations `" A"` through `" D"` by exact
+teacher-forced raw log likelihood. The native completions extension verifies
+the tokenizer-owned context boundary, exact processed prompt/continuation token
+IDs, complete length termination, and finite selected-token logprobs; ordinary
+completion wire behavior is unchanged. The benchmark probes the first runnable
+item before fan-out, skips explicitly incapable targets, and stops the pair on
+authentication, endpoint, retry-exhaustion, malformed-evidence, or fixed MMLU
+token-boundary/structure failure. A full core run therefore makes 58,028 target
+calls; remote and orchestrated targets visibly skip only the native-only MMLU
+row.
 IFEval retains all four strict/loose prompt/instruction metrics and documents a
 two-row exact-character amendment for keys 1122 (`#`) and 1129 (`!`) that
 removes upstream's random ASCII fallback. Dataset and Punkt cache readiness is
@@ -670,10 +680,13 @@ vote concurrently under a strict-majority policy, while incomplete, tied, or
 unparseable panels fail closed. A packaged, pinned LLMBar Natural calibration
 set exercises both response orders, measures position and self-preference bias,
 and permits headline evidence only when its frozen promotion gates and the full
-canonical identity of the evaluated run agree. The complete portable suite
-passes 5,301 selected tests with no selected skips and 83.75% combined coverage;
-the isolated wheel contains all 11 benchmark fixtures plus the judge-calibration
-fixture, the LLMBar and IFEval attribution files, and the installed CLI.
+canonical identity of the evaluated run agree. The final portable collection
+contains 5,436 selected tests with no selected skips. The exact 1,494-test
+benchmark and 3,923-test non-benchmark runs passed, then all 19 post-run
+fail-closed hardening selections passed in focused regression; combined
+coverage measured 83.86%. The isolated wheel contains all 11 benchmark fixtures
+plus the judge-calibration fixture, the LLMBar and IFEval attribution files, and
+the installed CLI.
 LiveCodeBench and SciCode scoring now select one explicit, fingerprinted
 execution runner. The trusted-development local subprocess remains available;
 the unattended path uses a digest-only Docker image, completed create before
@@ -961,6 +974,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-05 — [design] Core MMLU ranks exact teacher-forced continuations
+- What: added a native `kairyu_continuation` completions mode and an ordered forced-token engine path that returns each candidate token's raw pre-processor log probability while genuinely conditioning later positions on the forced prefix. Token boundaries and the processed prompt/continuation IDs are tokenizer-owned and exact; EOS can be scored as data, process-isolated and in-process engines preserve the intent, malformed backend evidence fails closed, and remote/OpenAI/vLLM paths cannot silently drop it. A separate benchmark request/response protocol validates finite aligned evidence, probes capability before dataset fan-out, and distinguishes explicit unsupported targets from authentication, endpoint, retry, schema, and fixed-tokenizer failures. Core MMLU now ranks `" A"` through `" D"` with a stable tie break, requires four distinct single-token candidates, and retains every candidate score and token proof. A full core run is consequently 58,028 calls. The final portable collection is 5,436 selected tests; exact full-suite runs plus all 19 post-run hardening selections are green, with 83.86% measured combined coverage, all 64 benchmark entrypoints, and the isolated wheel boundary verified.
+- Why: generated letters and generated top-k membership cannot provide the conditional probability of an arbitrary candidate and can hide quantization or cache quality changes. Exact teacher forcing makes multiple-choice ranking auditable and supplies the reusable primitive required by later likelihood-based quality gates without weakening the ordinary completion contract or manufacturing scores on incapable targets.
+- Refs: issue #368; `docs/design/issue-368-loglikelihood.md`; `docs/design/issue-367-core-evals.md`; `kairyu/engine/core/sampler.py`; `kairyu/entrypoints/server/app.py`; `kairyu/bench/adapters/{base,mmlu}.py`; `docs/benchmarks.md`
 
 ### 2026-08-05 — [design] Deterministic core suite adds GSM8K, MMLU, and IFEval
 - What: added a separate `core` benchmark suite with the immutable full GSM8K test set, the full 57-subject MMLU test set, and all 541 IFEval prompts/834 instructions/25 checker IDs. Fugu remains the unchanged default 11-row suite and alone receives its published comparison. Core uses deterministic exact-match or programmatic scoring, retains IFEval's four strict/loose aggregates, pins the Google checker and English Punkt resources, repairs missing Punkt assets without rewriting valid normalized data, and records per-instruction evidence. Pinned IFEval keys 1122 (`#`) and 1129 (`!`) receive one documented dataset-consistency amendment because upstream replaces their punctuation with independently random ASCII letters; Kairyu scores the exact requested character. Dataset/resource readiness is unified across every cache consumer, and package-resource SHA-256 identities bind each core prompt/parser/scorer plus every vendored IFEval module before resume. Real pinned downloads yielded exactly 1,319/14,042/541 rows, all 834 IFEval instructions replayed with random fallbacks disabled, 64 checkout-only entrypoints and 12 wheel fixtures verified, and the 5,301-test portable CI sequence passed with 83.75% coverage.

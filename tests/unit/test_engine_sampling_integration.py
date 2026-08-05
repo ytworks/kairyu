@@ -7,12 +7,14 @@ import json
 import pytest
 import torch
 
+from kairyu import SamplingParams
 from kairyu.engine.core.engine_core import EngineCore
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 from kairyu.engine.core.torch_runner import TinyAttentionLM, TorchPagedRunner
+from kairyu.engine.engine_loop import EngineLoop
 
 PAGE = 4
 
@@ -129,6 +131,64 @@ def test_ignore_eos_still_masks_below_minimum_then_runs_to_length():
 
     assert outputs == (3, 3, 7, 7)
     assert reason == "length"
+
+
+def test_forced_continuation_scores_through_default_eos_and_stop_ids():
+    class _Tokenizer:
+        eos_token_id = 7
+
+        @staticmethod
+        def encode(text):
+            del text
+            return (1, 2, 4)
+
+        @staticmethod
+        def decode(token_ids):
+            return " ".join(str(token_id) for token_id in token_ids)
+
+        @staticmethod
+        def vocab():
+            return [str(token_id) for token_id in range(16)]
+
+    model = _EosBiasedLM(vocab=16, seed=0)
+    cache = RadixKVCache(num_pages=64, page_size=PAGE)
+    scheduler = Scheduler(cache, max_num_batched_tokens=16, page_size=PAGE)
+    runner = TorchPagedRunner(
+        model,
+        num_pages=64,
+        page_size=PAGE,
+        sampler=Sampler(),
+    )
+    loop = EngineLoop(
+        _Tokenizer(),
+        scheduler,
+        runner,
+        default_eos_token_id=7,
+        default_stop_token_ids=(9,),
+    )
+    loop.submit(
+        "forced",
+        "context",
+        SamplingParams(
+            max_tokens=3,
+            forced_token_ids=(7, 9, 3),
+            ignore_eos=True,
+        ),
+    )
+
+    updates = []
+    while loop.has_work():
+        updates.extend(loop.step())
+    final = next(
+        update
+        for request_id, update in updates
+        if request_id == "forced" and update.finished
+    )
+
+    assert final.outputs == (7, 9, 3)
+    assert final.finish_reason == "length"
+    assert final.logprobs is not None and len(final.logprobs) == 3
+    loop.close()
 
 
 def test_finished_penalty_request_releases_sampler_state():

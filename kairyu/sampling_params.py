@@ -20,6 +20,13 @@ GENERATION_CONFIG_SAMPLING_FIELDS = frozenset(
     }
 )
 
+# ``response_format`` is the only sampling-extension key the native engine
+# translates into structured-output/grammar state.  Keep that ownership shared
+# by SamplingParams validation, native request validation, and engine mapping so
+# a new grammar carrier cannot silently bypass forced-continuation safeguards.
+RESPONSE_FORMAT_EXTRA_ARG = "response_format"
+STRUCTURED_OUTPUT_EXTRA_ARGS = frozenset({RESPONSE_FORMAT_EXTRA_ARG})
+
 
 class _FrozenDict(dict):
     """JSON/msgpack-compatible dictionary with no public mutation methods."""
@@ -130,6 +137,10 @@ class SamplingParams:
     ignore_eos: bool = False
     skip_special_tokens: bool = True
     extra_args: dict = field(default_factory=dict, compare=False)
+    # Native-engine continuation scoring: emit these exact token IDs in order
+    # while retaining their raw model log probabilities.  Appending the field
+    # after the existing public parameters preserves their positional order.
+    forced_token_ids: Sequence[int] | None = None
     # HTTP/Responses requests must preserve which model-owned sampling values
     # were omitted until the final backend is known.  Concrete Python
     # SamplingParams remain fully explicit by default.  The field is private
@@ -154,6 +165,15 @@ class SamplingParams:
         object.__setattr__(
             self, "stop_token_ids", tuple(self.stop_token_ids) if self.stop_token_ids else ()
         )
+        if self.forced_token_ids is not None:
+            try:
+                forced_token_ids = tuple(self.forced_token_ids)
+            except TypeError as error:
+                raise ValueError(
+                    "forced_token_ids must be a non-empty sequence of "
+                    "non-negative integers"
+                ) from error
+            object.__setattr__(self, "forced_token_ids", forced_token_ids)
         if isinstance(self.extra_args, Mapping):
             # A frozen SamplingParams must not expose a mutable top-level bag
             # that can acquire a prompt carrier after construction.
@@ -191,6 +211,46 @@ class SamplingParams:
                 "min_tokens must be <= max_tokens, "
                 f"got min_tokens={self.min_tokens}, max_tokens={self.max_tokens}"
             )
+        if self.forced_token_ids is not None:
+            if not self.forced_token_ids:
+                raise ValueError("forced_token_ids must not be empty when set")
+            if any(
+                type(token_id) is not int or token_id < 0
+                for token_id in self.forced_token_ids
+            ):
+                raise ValueError(
+                    "forced_token_ids must contain only non-negative integers"
+                )
+            if self.max_tokens != len(self.forced_token_ids):
+                raise ValueError(
+                    "max_tokens must equal the forced_token_ids length, "
+                    f"got max_tokens={self.max_tokens}, "
+                    f"forced_token_ids length={len(self.forced_token_ids)}"
+                )
+            if not self.ignore_eos:
+                raise ValueError(
+                    "forced_token_ids requires ignore_eos=True so an EOS token "
+                    "can be scored without terminating the continuation"
+                )
+            if self.stop or self.stop_token_ids:
+                raise ValueError(
+                    "forced_token_ids cannot be combined with stop or "
+                    "stop_token_ids"
+                )
+            if self.min_tokens != 0:
+                raise ValueError(
+                    "forced_token_ids cannot be combined with min_tokens"
+                )
+            structured_output = (
+                STRUCTURED_OUTPUT_EXTRA_ARGS.intersection(self.extra_args)
+                if isinstance(self.extra_args, Mapping)
+                else set()
+            )
+            if structured_output:
+                raise ValueError(
+                    "forced_token_ids cannot be combined with structured-output "
+                    "extra args: " + ", ".join(sorted(structured_output))
+                )
 
     def clone(self, **overrides: object) -> SamplingParams:
         """Return a new SamplingParams with the given fields replaced."""

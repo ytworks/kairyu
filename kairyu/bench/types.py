@@ -8,6 +8,7 @@ and re-read for resume, so round-tripping through JSON must be lossless.
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Literal
 
@@ -348,6 +349,138 @@ class ChatRequestSpec(BaseModel):
     max_tokens: int | None = None
     temperature: float = 0.0
     est_prompt_tokens: int | None = None  # chars/4 heuristic, for context gating
+
+
+class LogLikelihoodRequestSpec(BaseModel):
+    """Teacher-forced continuations an adapter ranks for one item.
+
+    Each continuation is scored against the same exact context.  Ordering is
+    significant: it is retained on the wire and provides the deterministic
+    tie-break used by multiple-choice adapters.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    context: str
+    continuations: tuple[str, ...]
+    reduction: Literal["sum", "mean_token"] = "sum"
+    est_prompt_tokens: int | None = None
+
+    @field_validator("context")
+    @classmethod
+    def _validate_context(cls, value: str) -> str:
+        if not value:
+            raise ValueError("context must be non-empty")
+        return value
+
+    @field_validator("continuations")
+    @classmethod
+    def _validate_continuations(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if not value:
+            raise ValueError("continuations must contain at least one candidate")
+        if any(not continuation for continuation in value):
+            raise ValueError("continuations must be non-empty strings")
+        if len(value) != len(set(value)):
+            raise ValueError("continuations must be unique")
+        return value
+
+
+class ContinuationLogLikelihood(BaseModel):
+    """Validated, selected-token evidence for one teacher-forced candidate."""
+
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
+
+    continuation: str
+    token_ids: tuple[int, ...]
+    tokens: tuple[str, ...]
+    token_logprobs: tuple[float, ...]
+    text_offsets: tuple[int, ...]
+    sum_logprob: float = Field(le=0.0)
+    score: float = Field(le=0.0)
+
+    @field_validator("continuation")
+    @classmethod
+    def _validate_continuation(cls, value: str) -> str:
+        if not value:
+            raise ValueError("candidate continuation must be non-empty")
+        return value
+
+    @field_validator("token_ids", mode="before")
+    @classmethod
+    def _validate_token_ids(cls, value):
+        if not isinstance(value, (list, tuple)) or any(
+            type(token_id) is not int or token_id < 0 for token_id in value
+        ):
+            raise ValueError("token_ids must contain non-negative integers")
+        return value
+
+    @field_validator("text_offsets", mode="before")
+    @classmethod
+    def _validate_text_offsets(cls, value):
+        if not isinstance(value, (list, tuple)) or any(
+            type(offset) is not int for offset in value
+        ):
+            raise ValueError("text_offsets must contain integers")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_parallel_evidence(self) -> ContinuationLogLikelihood:
+        lengths = {
+            len(self.token_ids),
+            len(self.tokens),
+            len(self.token_logprobs),
+            len(self.text_offsets),
+        }
+        if lengths != {len(self.token_ids)} or not self.token_ids:
+            raise ValueError("candidate token evidence must have equal nonzero lengths")
+        if any(logprob > 0.0 for logprob in self.token_logprobs):
+            raise ValueError("token_logprobs must be <= 0")
+        if not math.isclose(
+            self.sum_logprob,
+            sum(self.token_logprobs),
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("sum_logprob must equal the selected token_logprobs sum")
+        return self
+
+
+class LogLikelihoodResponse(BaseModel):
+    """Ordered evidence returned for all candidates in one request spec."""
+
+    model_config = ConfigDict(frozen=True)
+
+    reduction: Literal["sum", "mean_token"]
+    prompt_token_ids: tuple[int, ...]
+    candidates: tuple[ContinuationLogLikelihood, ...]
+
+    @field_validator("prompt_token_ids", mode="before")
+    @classmethod
+    def _validate_prompt_token_ids(cls, value):
+        if not isinstance(value, (list, tuple)) or any(
+            type(token_id) is not int or token_id < 0 for token_id in value
+        ):
+            raise ValueError("prompt_token_ids must contain non-negative integers")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_ranking_evidence(self) -> LogLikelihoodResponse:
+        if not self.prompt_token_ids:
+            raise ValueError("prompt_token_ids must be non-empty")
+        if not self.candidates:
+            raise ValueError("candidates must be non-empty")
+        continuations = [candidate.continuation for candidate in self.candidates]
+        if len(continuations) != len(set(continuations)):
+            raise ValueError("candidate continuations must be unique")
+        for candidate in self.candidates:
+            expected = candidate.sum_logprob
+            if self.reduction == "mean_token":
+                expected /= len(candidate.token_ids)
+            if not math.isclose(
+                candidate.score, expected, rel_tol=0.0, abs_tol=1e-12
+            ):
+                raise ValueError("candidate score does not match the declared reduction")
+        return self
 
 
 class SkipItem(BaseModel):

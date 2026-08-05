@@ -138,6 +138,14 @@ def test_core_evaluators_are_content_bound_to_adapter_identity(tmp_path, monkeyp
         for entry in identity["evaluation_protocol"]["resources"]
     }
     assert {"gsm8k.py", "mmlu.py", "ifeval.py", "checker.py", "instructions.py"} <= resources
+    assert {
+        (entry["package"], entry["resource"])
+        for entry in identities[1]["evaluation_protocol"]["resources"]
+    } == {
+        ("kairyu.bench.adapters", "mmlu.py"),
+        ("kairyu.bench.adapters", "base.py"),
+        ("kairyu.bench", "types.py"),
+    }
 
     config = make_config(tmp_path, models=("m",), suite="core")
     before = _run_fingerprint(_run_identity(config, identities))

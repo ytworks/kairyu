@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -24,6 +25,7 @@ from kairyu.engine.backend import (
     CacheHint,
     EngineBackend,
     GenerationRequest,
+    GenerationResult,
     GenerationStageMetric,
     GenerationUsage,
     UpstreamClientError,
@@ -87,6 +89,8 @@ from kairyu.entrypoints.server.protocol import (
     CompletionLogprobs,
     CompletionRequest,
     CompletionResponse,
+    LogLikelihoodCompletionChoice,
+    LogLikelihoodCompletionResponse,
     ModelCard,
     ModelList,
     PromptTokensDetails,
@@ -972,6 +976,164 @@ def _completion_choice(index: int, completion: CompletionOutput) -> CompletionCh
     )
 
 
+def _loglikelihood_request_error(request: CompletionRequest) -> str | None:
+    """Validate the deliberately narrow continuation-scoring wire contract."""
+
+    if type(request.prompt) is not str or not request.prompt:
+        return "kairyu_continuation requires one non-empty string prompt"
+    if not request.kairyu_continuation:
+        return "kairyu_continuation must be a non-empty string"
+    if request.stream:
+        return "kairyu_continuation does not support streaming"
+    if request.n != 1:
+        return "kairyu_continuation requires n=1"
+    if "max_tokens" not in request.model_fields_set or request.max_tokens is not None:
+        return "kairyu_continuation requires max_tokens=null"
+    if request.logprobs != 0:
+        return "kairyu_continuation requires logprobs=0"
+    if request.temperature != 0.0:
+        return "kairyu_continuation requires temperature=0"
+    if request.seed is not None:
+        return "kairyu_continuation does not support seed"
+    if "ignore_eos" in request.model_fields_set:
+        return "kairyu_continuation controls ignore_eos internally"
+    if "skip_special_tokens" in request.model_fields_set:
+        return "kairyu_continuation controls skip_special_tokens internally"
+
+    neutral_fields = (
+        ("top_p", request.top_p, 1.0),
+        ("top_k", request.top_k, -1),
+        ("min_p", request.min_p, 0.0),
+        ("min_tokens", request.min_tokens, 0),
+        ("presence_penalty", request.presence_penalty, 0.0),
+        ("frequency_penalty", request.frequency_penalty, 0.0),
+        ("repetition_penalty", request.repetition_penalty, 1.0),
+    )
+    for name, actual, expected in neutral_fields:
+        if actual != expected:
+            return f"kairyu_continuation requires {name}={expected}"
+    if request.stop is not None:
+        return "kairyu_continuation does not support stop"
+    if request.stop_token_ids is not None:
+        return "kairyu_continuation does not support stop_token_ids"
+    return None
+
+
+def _loglikelihood_token_ids(
+    engine: EngineBackend,
+    context: str,
+    continuation: str,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Call a tokenizer-owned boundary check and validate its typed evidence."""
+
+    tokenize = getattr(engine, "tokenize_loglikelihood", None)
+    if not callable(tokenize):
+        raise AttributeError("tokenize_loglikelihood")
+    tokenized = tokenize(context, continuation)
+    if type(tokenized) is not tuple or len(tokenized) != 2:
+        raise RuntimeError(
+            "tokenize_loglikelihood must return a pair of token-ID sequences"
+        )
+
+    validated: list[tuple[int, ...]] = []
+    for label, values in zip(
+        ("context", "continuation"), tokenized, strict=True
+    ):
+        if isinstance(values, (str, bytes, bytearray)) or not isinstance(
+            values, Sequence
+        ):
+            raise RuntimeError(
+                f"tokenize_loglikelihood returned invalid {label} token IDs"
+            )
+        copied = tuple(values)
+        if not copied:
+            raise RuntimeError(
+                f"tokenize_loglikelihood returned empty {label} token IDs"
+            )
+        if any(
+            type(token_id) is not int or not 0 <= token_id <= (1 << 64) - 1
+            for token_id in copied
+        ):
+            raise RuntimeError(
+                f"tokenize_loglikelihood returned invalid {label} token IDs"
+            )
+        validated.append(copied)
+    return validated[0], validated[1]
+
+
+def _loglikelihood_choice(
+    result: GenerationResult,
+    *,
+    context_ids: tuple[int, ...],
+    continuation: str,
+    continuation_ids: tuple[int, ...],
+) -> LogLikelihoodCompletionChoice:
+    """Build a scoring choice only from exact, finite forced-token evidence."""
+
+    returned_prompt_ids = result.prompt_token_ids
+    if isinstance(returned_prompt_ids, (str, bytes, bytearray)) or not isinstance(
+        returned_prompt_ids, Sequence
+    ):
+        raise RuntimeError("loglikelihood backend returned invalid prompt token IDs")
+    returned_prompt_ids = tuple(returned_prompt_ids)
+    if any(type(token_id) is not int for token_id in returned_prompt_ids):
+        raise RuntimeError("loglikelihood backend returned invalid prompt token IDs")
+    if returned_prompt_ids != context_ids:
+        raise RuntimeError("loglikelihood backend did not process the prompt token IDs")
+
+    result_completions = result.completions
+    if len(result_completions) != 1:
+        raise RuntimeError("loglikelihood backend returned the wrong choice count")
+    completion = result_completions[0]
+    if type(completion.index) is not int or completion.index != 0:
+        raise RuntimeError("loglikelihood backend returned a non-zero choice index")
+    returned_token_ids = completion.token_ids
+    if isinstance(returned_token_ids, (str, bytes, bytearray)) or not isinstance(
+        returned_token_ids, Sequence
+    ):
+        raise RuntimeError("loglikelihood backend returned invalid forced token IDs")
+    returned_token_ids = tuple(returned_token_ids)
+    if any(type(token_id) is not int for token_id in returned_token_ids):
+        raise RuntimeError("loglikelihood backend returned invalid forced token IDs")
+    if returned_token_ids != continuation_ids:
+        raise RuntimeError("loglikelihood backend did not return the forced token IDs")
+    if completion.finish_reason != "length":
+        raise RuntimeError(
+            "loglikelihood backend did not finish the complete forced continuation"
+        )
+    content = completion.logprob_content
+    if content is None or len(content) != len(continuation_ids):
+        raise RuntimeError("loglikelihood backend returned missing token logprobs")
+    for expected_id, entry in zip(continuation_ids, content, strict=True):
+        if type(entry.token_id) is not int or entry.token_id != expected_id:
+            raise RuntimeError("loglikelihood backend returned misaligned token logprobs")
+        value = entry.logprob
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuntimeError("loglikelihood backend returned an invalid token logprob")
+        try:
+            parsed = float(value)
+        except (OverflowError, ValueError) as error:
+            raise RuntimeError(
+                "loglikelihood backend returned an invalid token logprob"
+            ) from error
+        if not math.isfinite(parsed) or parsed > 0.0:
+            raise RuntimeError("loglikelihood backend returned an invalid token logprob")
+
+    logprobs = _completion_logprobs(completion)
+    if logprobs is None:
+        raise RuntimeError("loglikelihood backend returned missing token logprobs")
+    return LogLikelihoodCompletionChoice(
+        index=0,
+        # This is the caller-supplied continuation, not a claim that separately
+        # detokenizing its IDs is context independent (e.g. WordPiece is not).
+        text=continuation,
+        logprobs=logprobs,
+        finish_reason="length",
+        prompt_token_ids=list(context_ids),
+        continuation_token_ids=list(continuation_ids),
+    )
+
+
 async def _stream_completions(
     engine: EngineBackend,
     generation_request: GenerationRequest,
@@ -1687,6 +1849,7 @@ def create_app(
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest, http_request: Request):
         http_request.state.model = request.model
+        is_loglikelihood = request.kairyu_continuation is not None
         extra = request.model_extra or {}
         for unsupported in ("echo", "suffix", "best_of"):
             if extra.get(unsupported) is not None:
@@ -1700,6 +1863,10 @@ def create_app(
             return invalid_request("logprobs must be between 0 and 5")
         if request.stream_options is not None and not request.stream:
             return invalid_request("stream_options is only allowed when stream is true")
+        if is_loglikelihood:
+            validation_error = _loglikelihood_request_error(request)
+            if validation_error is not None:
+                return invalid_request(validation_error)
         if isinstance(request.prompt, list) and not request.prompt:
             return invalid_request("prompt array must not be empty")
         text_batch = (
@@ -1716,11 +1883,47 @@ def create_app(
             return invalid_request("streaming with a prompt array is not supported")
         engine = served_engines.get(request.model)
         if engine is None:
+            if is_loglikelihood and request.model in auto_models:
+                return invalid_request(
+                    "kairyu_continuation is not supported by model "
+                    f"{request.model!r}"
+                )
             return model_not_found(request.model)
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
             return invalid_request(f"model {request.model!r} does not support n > 1")
+        loglikelihood_context_ids: tuple[int, ...] | None = None
+        loglikelihood_continuation_ids: tuple[int, ...] | None = None
         prompts: list[PromptInput]
-        if type(request.prompt) is str:
+        if is_loglikelihood:
+            tokenize = getattr(engine, "tokenize_loglikelihood", None)
+            if not callable(tokenize):
+                return invalid_request(
+                    "kairyu_continuation is not supported by model "
+                    f"{request.model!r}"
+                )
+            assert type(request.prompt) is str
+            assert request.kairyu_continuation is not None
+            try:
+                (
+                    loglikelihood_context_ids,
+                    loglikelihood_continuation_ids,
+                ) = _loglikelihood_token_ids(
+                    engine,
+                    request.prompt,
+                    request.kairyu_continuation,
+                )
+            except ValueError:
+                # Boundary validation is tokenizer owned. Do not expose
+                # tokenizer internals, vocabulary pieces, or model paths.
+                return invalid_request(
+                    "kairyu_continuation does not align with a model token boundary"
+                )
+            except Exception as error:
+                return upstream_error(error)
+            prompts = [
+                TokensPrompt(loglikelihood_context_ids, prompt=request.prompt)
+            ]
+        elif type(request.prompt) is str:
             prompts = [request.prompt]
         elif text_batch:
             prompts = list(request.prompt)
@@ -1732,34 +1935,45 @@ def create_app(
         else:
             prompts = [TokensPrompt(tuple(request.prompt))]
         try:
-            sampling = SamplingParams(  # invalid params are a client error, not a 502
-                temperature=request.temperature,
-                top_p=request.top_p,
-                top_k=request.top_k,
-                min_p=request.min_p,
-                n=request.n,
-                max_tokens=(
-                    request.max_tokens
-                    if request.max_tokens is not None
-                    else 16
-                ),
-                stop=request.stop,
-                stop_token_ids=request.stop_token_ids,
-                min_tokens=request.min_tokens,
-                ignore_eos=request.ignore_eos,
-                seed=request.seed,
-                presence_penalty=request.presence_penalty,
-                frequency_penalty=request.frequency_penalty,
-                repetition_penalty=request.repetition_penalty,
-                logprobs=request.logprobs,
-                skip_special_tokens=request.skip_special_tokens,
-            ).with_generation_config_omitted(
-                {
-                    name
-                    for name in GENERATION_CONFIG_SAMPLING_FIELDS
-                    if name not in request.model_fields_set
-                }
-            )
+            if is_loglikelihood:
+                assert loglikelihood_continuation_ids is not None
+                sampling = SamplingParams(
+                    max_tokens=len(loglikelihood_continuation_ids),
+                    temperature=0.0,
+                    logprobs=0,
+                    ignore_eos=True,
+                    forced_token_ids=loglikelihood_continuation_ids,
+                    skip_special_tokens=False,
+                )
+            else:
+                sampling = SamplingParams(  # invalid params are a client error, not a 502
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                    top_k=request.top_k,
+                    min_p=request.min_p,
+                    n=request.n,
+                    max_tokens=(
+                        request.max_tokens
+                        if request.max_tokens is not None
+                        else 16
+                    ),
+                    stop=request.stop,
+                    stop_token_ids=request.stop_token_ids,
+                    min_tokens=request.min_tokens,
+                    ignore_eos=request.ignore_eos,
+                    seed=request.seed,
+                    presence_penalty=request.presence_penalty,
+                    frequency_penalty=request.frequency_penalty,
+                    repetition_penalty=request.repetition_penalty,
+                    logprobs=request.logprobs,
+                    skip_special_tokens=request.skip_special_tokens,
+                ).with_generation_config_omitted(
+                    {
+                        name
+                        for name in GENERATION_CONFIG_SAMPLING_FIELDS
+                        if name not in request.model_fields_set
+                    }
+                )
         except ValueError as error:
             return invalid_request(str(error))
 
@@ -1792,9 +2006,22 @@ def create_app(
             for prompt_index, prompt in enumerate(prompts)
         ]
         for generation_request in generation_requests:
-            validation_error = _validate_generation_request(engine, generation_request)
-            if validation_error is not None:
-                return validation_error
+            if is_loglikelihood:
+                # tokenize_loglikelihood is itself an explicit token-prompt
+                # capability. Preserve any stronger backend-specific validator
+                # without requiring the legacy fallback declaration as well.
+                validate = getattr(engine, "validate_request", None)
+                if callable(validate):
+                    try:
+                        validate(generation_request)
+                    except ValueError as error:
+                        return invalid_request(str(error))
+            else:
+                validation_error = _validate_generation_request(
+                    engine, generation_request
+                )
+                if validation_error is not None:
+                    return validation_error
         try:
             bounds = [
                 admission_upper_bound(generation_request)
@@ -1848,10 +2075,29 @@ def create_app(
         except Exception as error:
             return upstream_error(error)
         for prompt_index, (prompt, result) in enumerate(zip(prompts, results, strict=True)):
-            for completion in result.completions:
-                choices.append(
-                    _completion_choice(prompt_index * request.n + completion.index, completion)
-                )
+            if is_loglikelihood:
+                assert loglikelihood_context_ids is not None
+                assert loglikelihood_continuation_ids is not None
+                assert request.kairyu_continuation is not None
+                try:
+                    choices.append(
+                        _loglikelihood_choice(
+                            result,
+                            context_ids=loglikelihood_context_ids,
+                            continuation=request.kairyu_continuation,
+                            continuation_ids=loglikelihood_continuation_ids,
+                        )
+                    )
+                except Exception as error:
+                    return upstream_error(error)
+            else:
+                for completion in result.completions:
+                    choices.append(
+                        _completion_choice(
+                            prompt_index * request.n + completion.index,
+                            completion,
+                        )
+                    )
             prompt_tokens, completion_tokens = resolve_usage_counts(
                 result.usage,
                 prompt=prompt,
@@ -1874,7 +2120,12 @@ def create_app(
             completions=(),
             usage_exact=all(result.usage is not None for result in results),
         )
-        return CompletionResponse(
+        response_type = (
+            LogLikelihoodCompletionResponse
+            if is_loglikelihood
+            else CompletionResponse
+        )
+        return response_type(
             id=f"cmpl-{uuid.uuid4().hex[:16]}",
             created=int(time.time()),
             model=request.model,
