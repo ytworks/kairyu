@@ -12,7 +12,7 @@ preserving the affected command and evidence paths.
 |---|---|---|
 | Reusable config, target types, credential resolution, statistics, atomic reporting, adapters, and runners | `kairyu/bench/` | Installed in the Kairyu wheel; may be imported by both the public CLI and checkout-only wrappers |
 | Public benchmark CLI | `kairyu bench` | Installed console surface: `run`, `download`, `report`, `list`, and `entrypoints` |
-| Synthetic offline fixtures | `kairyu/bench/fixtures/` | Installed package data; all eight JSONL files must be readable through `importlib.resources` |
+| Synthetic offline fixtures | `kairyu/bench/fixtures/` | Installed package data; all nine JSONL files must be readable through `importlib.resources` |
 | Entrypoint inventory | `kairyu/bench/entrypoints.toml` | Installed, machine-readable source of truth for every supported top-level wrapper |
 | Gate, comparison, operator, and microbenchmark executables | `bench/*.py` | Repository-only; both `python bench/<name>.py` and `python -m bench.<name>` are supported from a checkout |
 | Measurement and decision artifacts | `bench/results/` | Repository-only and never shipped in a wheel; routine output is ignored, while explicitly reviewed formal evidence may be retained by Git |
@@ -152,10 +152,14 @@ bench/g2_a6_vllm_bench.py
 bench/g2_a9_dp_tp_crossover_bench.py
 bench/g4_ma1_qwen3_235b_nvfp4_bench.py
 bench/g4_ma1_qwen3_235b_nvfp4_capture.py
+bench/g4_ma2_qwen3_235b_ep_kv_bench.py
+bench/g4_ma3_kairyu_server.py
 bench/g4_ma3_sglang_bench.py
 bench/gate_a1.py
 bench/gate_a2.py
+bench/gate_logits_dtype.py
 bench/global_kv_pool_decision.py
+bench/issue_333_proc_http_bench.py
 bench/kv_aware_ttft_f2c_bench.py
 bench/kv_event_f2b_bench.py
 bench/kv_event_hash_bench.py
@@ -609,7 +613,7 @@ replay all passed.
 
 ## Fixtures, results, and wheel verification
 
-The eight installed fixtures are synthetic plumbing inputs, never substitutes
+The nine installed fixtures are synthetic plumbing inputs, never substitutes
 for publishable benchmark measurements:
 
 ```text
@@ -630,7 +634,7 @@ summary number.
 
 The packaging gate builds a real wheel, inspects its contents, and imports it
 from an isolated temporary directory. It proves that the console dispatch,
-entrypoint manifest, and all eight fixtures are present, while the top-level
+entrypoint manifest, and all nine fixtures are present, while the top-level
 `bench/`, `bench/results/`, and `tests/` trees are absent:
 
 ```bash
@@ -638,7 +642,7 @@ uv run --frozen python scripts/verify_bench_entrypoints.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 56 registered wrappers through
+The first command separately exercises all 64 registered wrappers through
 both their path and module `--help` forms. It runs once in CI, on Python 3.12,
 after the declared development dependencies are synced, without duplicating
-110 subprocesses in every portable test cell.
+128 subprocesses in every portable test cell.
