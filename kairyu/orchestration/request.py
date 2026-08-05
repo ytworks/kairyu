@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import (
+    PARALLEL_TOOL_CALLS_EXTRA_ARG,
+    SamplingParams,
+    resolve_parallel_tool_calls,
+)
 
 
 @dataclass(frozen=True)
@@ -25,12 +29,17 @@ class OrchestrationRequest:
     tool_choice: str | Mapping[str, object] | None = None
     tools_in_prompt: bool = False
     response_format: Mapping[str, object] | None = None
+    parallel_tool_calls: bool | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
         sampling_format = self.sampling_params.extra_args.get("response_format")
         if self.response_format != sampling_format:
             raise ValueError("response_format intent must match sampling_params.extra_args")
+        resolve_parallel_tool_calls(
+            self.parallel_tool_calls,
+            self.sampling_params.extra_args,
+        )
 
     def internal_sampling_params(
         self,
@@ -49,6 +58,7 @@ class OrchestrationRequest:
 
         extra_args = dict(self.sampling_params.extra_args)
         extra_args.pop("response_format", None)
+        extra_args.pop(PARALLEL_TOOL_CALLS_EXTRA_ARG, None)
         max_tokens = self.sampling_params.max_tokens
         if max_tokens_cap is not None:
             max_tokens = max_tokens_cap if max_tokens is None else min(max_tokens, max_tokens_cap)

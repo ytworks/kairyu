@@ -100,6 +100,8 @@ class OpenAIRequestCapabilities:
     # contract is text-only. Keeping prompt kinds in the immutable validation
     # key makes future modality/token support an explicit capability change.
     prompt_kinds: frozenset[str] = frozenset({"text"})
+    # Appended to preserve the positional ABI of the existing capability key.
+    parallel_tool_calls: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_fields", frozenset(self.sampling_fields))
@@ -112,6 +114,8 @@ class OpenAIRequestCapabilities:
         object.__setattr__(self, "prompt_kinds", frozenset(self.prompt_kinds))
         if not isinstance(self.upstream, str) or not self.upstream:
             raise ValueError("upstream must be a non-empty string")
+        if type(self.parallel_tool_calls) is not bool:
+            raise ValueError("parallel_tool_calls capability must be a boolean")
         unknown = self.sampling_fields - SAMPLING_FIELD_NAMES
         if unknown:
             raise ValueError(f"unknown OpenAI sampling capability fields: {sorted(unknown)}")
@@ -162,10 +166,12 @@ _PROFILES = {
         extra_args={"parallel_tool_calls", "reasoning_effort", "service_tier"},
         max_tokens_wire_name="max_completion_tokens",
         strict_tools=True,
+        parallel_tool_calls=True,
     ),
     "vllm": OpenAIRequestCapabilities(
         upstream="vllm",
         sampling_fields=_OPENAI_CORE | _VLLM_EXTENSIONS,
+        parallel_tool_calls=True,
         priority=True,
     ),
     # Kairyu's typed HTTP boundary exposes the vLLM-style sampling controls
@@ -185,6 +191,7 @@ _PROFILES = {
             "top_k",
         },
         max_tokens_wire_name="max_completion_tokens",
+        parallel_tool_calls=True,
         priority=True,
     ),
     # Anthropic documents that these are the compatible controls it executes;
@@ -214,6 +221,7 @@ _OVERRIDE_KEYS = frozenset(
         "allow_prompt_kinds",
         "allow_sampling_fields",
         "deny_sampling_fields",
+        "parallel_tool_calls",
         "strict_tools",
     }
 )
@@ -303,12 +311,25 @@ def resolve_openai_capabilities(
             "enabling strict tool semantics requires upstream='generic'; "
             "named provider presets may only be narrowed"
         )
+    parallel_tool_calls = overrides.get(
+        "parallel_tool_calls",
+        base.parallel_tool_calls,
+    )
+    if type(parallel_tool_calls) is not bool:
+        raise ValueError("capabilities.parallel_tool_calls must be a boolean")
+    if parallel_tool_calls and not base.parallel_tool_calls and upstream != "generic":
+        raise ValueError(
+            "enabling parallel_tool_calls requires upstream='generic'; "
+            "named provider presets may only be narrowed"
+        )
     return replace(
         base,
         sampling_fields=(base.sampling_fields | allow_sampling) - deny_sampling,
-        extra_args=base.extra_args | allow_extra,
+        extra_args=(base.extra_args | allow_extra)
+        - ({"parallel_tool_calls"} if overrides.get("parallel_tool_calls") is False else set()),
         forward_neutral_fields=base.forward_neutral_fields - deny_sampling,
         strict_tools=strict_tools,
+        parallel_tool_calls=parallel_tool_calls,
         prompt_kinds=base.prompt_kinds | allow_prompt_kinds,
     )
 

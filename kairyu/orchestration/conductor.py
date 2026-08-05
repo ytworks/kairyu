@@ -33,7 +33,7 @@ from kairyu.orchestration.trace import (
     utc_now_iso,
 )
 from kairyu.outputs import CompletionOutput
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import PARALLEL_TOOL_CALLS_EXTRA_ARG, SamplingParams
 
 _PASS_PREFIX = "PASS"
 
@@ -170,6 +170,7 @@ class Conductor:
         cost_model: CostModel = zero_cost,
         worker_trace: Mapping[str, WorkerTraceIdentity] | None = None,
         usage_observer: Callable[[GenerationUsage], None] | None = None,
+        final_parallel_tool_calls: bool | None = None,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -180,11 +181,15 @@ class Conductor:
         self._workers = dict(workers)
         self._shared_prefix = shared_prefix
         self._prefix_fingerprint = prefix_root_fingerprint(shared_prefix)
-        self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
-        self._final_sampling_params = final_sampling_params or self._sampling_params
+        public_sampling = sampling_params or SamplingParams(max_tokens=1024)
+        self._final_sampling_params = final_sampling_params or public_sampling
+        internal_extra_args = dict(public_sampling.extra_args)
+        internal_extra_args.pop(PARALLEL_TOOL_CALLS_EXTRA_ARG, None)
+        self._sampling_params = public_sampling.clone(extra_args=internal_extra_args)
         self._final_tools = tuple(final_tools)
         self._final_tool_choice = final_tool_choice
         self._final_tools_in_prompt = final_tools_in_prompt
+        self._final_parallel_tool_calls = final_parallel_tool_calls
         self._cost_model = cost_model
         self._usage_observer = usage_observer
         supplied_trace = dict(worker_trace or {})
@@ -218,6 +223,7 @@ class Conductor:
         tuple[Mapping[str, object], ...],
         str | Mapping[str, object] | None,
         bool,
+        bool | None,
     ]:
         if spec.name == self._selected_final_unit().name:
             return (
@@ -225,8 +231,9 @@ class Conductor:
                 self._final_tools,
                 self._final_tool_choice,
                 self._final_tools_in_prompt,
+                self._final_parallel_tool_calls,
             )
-        return self._sampling_params, (), None, False
+        return self._sampling_params, (), None, False, None
 
     def _observe_usage(
         self,
@@ -356,7 +363,9 @@ class Conductor:
     ) -> _GenerationObservation:
         event_spec = spec or RoleSpec(name=node, worker=worker, prompt="")
         backend = self._workers[worker]
-        sampling_params, tools, tool_choice, tools_in_prompt = self._request_intent(event_spec)
+        sampling_params, tools, tool_choice, tools_in_prompt, parallel_tool_calls = (
+            self._request_intent(event_spec)
+        )
         request = GenerationRequest(
             request_id=f"{session}-{node}-{attempt}",
             prompt=prompt,
@@ -365,6 +374,7 @@ class Conductor:
             tools=tools,
             tool_choice=tool_choice,
             tools_in_prompt=tools_in_prompt,
+            parallel_tool_calls=parallel_tool_calls,
         )
         queued_at = utc_now_iso()
         budget_before = run.budget
@@ -654,7 +664,9 @@ class Conductor:
 
         prompt = self._render(spec.prompt, query, run.outputs)
         backend = self._workers[spec.worker]
-        sampling_params, tools, tool_choice, tools_in_prompt = self._request_intent(spec)
+        sampling_params, tools, tool_choice, tools_in_prompt, parallel_tool_calls = (
+            self._request_intent(spec)
+        )
         request = GenerationRequest(
             request_id=f"{session}-{spec.name}-0",
             prompt=prompt,
@@ -663,6 +675,7 @@ class Conductor:
             tools=tools,
             tool_choice=tool_choice,
             tools_in_prompt=tools_in_prompt,
+            parallel_tool_calls=parallel_tool_calls,
         )
         queued_at = utc_now_iso()
         budget_before = run.budget

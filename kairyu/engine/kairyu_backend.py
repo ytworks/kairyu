@@ -1601,6 +1601,7 @@ class KairyuBackend:
                     tool_choice=request.tool_choice,
                     tools_in_prompt=request.tools_in_prompt,
                     trace_requested=request.trace_requested,
+                    parallel_tool_calls=request.parallel_tool_calls,
                 )
             )
         return subs

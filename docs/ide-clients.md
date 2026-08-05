@@ -63,6 +63,12 @@ completed in one request. An Act-mode task then emitted `read_file`, consumed
 the file result, emitted `attempt_completion`, and reached `Task Completed`;
 both chat-completions requests returned 200.
 
+For an attested Llama-native tool template, Kairyu rejects the request-level
+`builtin_tools`, `custom_tools`, and `tools_in_user_message` template variables.
+Those variables select alternate tokenizer-template branches whose output
+syntax is outside this parser contract; configure a separate reviewed model
+template instead of changing that branch per request.
+
 Cline 4.0.12's global `Native Tool Call` switch is not sufficient by itself:
 its model-family matcher enables native calls only for selected model IDs, and
 an unrecognized Llama ID continues to use Cline's XML protocol. Kairyu supports
@@ -80,9 +86,11 @@ checkpoint validation. The isolated TP1 replica uses
 Qwen3-Coder emits its native
 `<function=name><parameter=name>...</parameter></function>` XML inside
 `<tool_call>` rather than JSON; Kairyu parses that form and converts parameter
-values according to the declared tool JSON Schema. A live required-tool API
-test completed the two-request `read_file` → `attempt_completion` loop through
-an SSH local forward. After setting a 65,536-token context window and 4,096
+values using the declared top-level property types, then enforces required
+properties and strict additional-property boundaries. This is not a general
+JSON Schema evaluator. A live required-tool API test completed the two-request
+`read_file` → `attempt_completion` loop through an SSH local forward. After
+setting a 65,536-token context window and 4,096
 output tokens, a fresh Cline 4.1.3 Act-mode task also read `README.md` once and
 reached `Task Completed` with the exact first line. The two corresponding
 chat-completions requests returned 200, establishing the Qwen Cline UI loop as
@@ -103,9 +111,9 @@ engines:
 ## Continue
 
 Continue is an agent available as a VS Code extension, JetBrains plugin, and
-`cn` CLI; it is not a standalone IDE. Upstream published 2.0.0 as the final
-release and made the source repository read-only, so it is useful as a
-compatibility target but should not be the primary long-term integration.
+`cn` CLI; it is not a standalone IDE. Confirm the configuration schema against
+the installed client version because the project remains under active
+development.
 
 An OpenAI-compatible model entry uses:
 
@@ -132,8 +140,10 @@ models:
 Do not assign an embedding or autocomplete role until the selected Kairyu
 deployment provides a production embedding backend and the required infill
 contract. The built-in mock embedding backend is not suitable for semantic
-code retrieval, image input is currently rejected, and legacy completion
-`suffix` infill is not implemented.
+code retrieval, and legacy completion `suffix` infill is not implemented.
+The two IDE example deployments in this guide are text-only; Kairyu's separate
+remote-VLM multimodal boundary does not by itself establish that an IDE's image
+workflow is compatible with either example.
 
 ## SOCKS validation
 
@@ -160,3 +170,7 @@ curl http://127.0.0.1:18002/v1/models
 
 Then use `http://127.0.0.1:18002/v1` as the editor provider's Base URL and
 confirm both the editor outcome and the server-side request log.
+
+The example Docker commands publish Kairyu on the host loopback interface.
+Publishing on a non-loopback address requires an authentication configuration
+and a host firewall rule that limits access to trusted clients.

@@ -191,6 +191,12 @@ def test_non_prompt_sampling_extensions_remain_supported():
     assert engine_sampling_from(params).json_mode is True
 
 
+def test_legacy_parallel_tool_calls_extra_arg_remains_supported():
+    params = SamplingParams(extra_args={"parallel_tool_calls": False})
+
+    assert params.extra_args["parallel_tool_calls"] is False
+
+
 def test_extra_args_are_defensively_copied_and_top_level_immutable():
     source = {"vendor_cache": {"mode": "ephemeral"}}
     params = SamplingParams(extra_args=source)

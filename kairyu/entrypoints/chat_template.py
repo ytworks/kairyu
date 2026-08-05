@@ -16,8 +16,10 @@ production model templates are represented by ``ChatTemplate``.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 
 from kairyu.sampling_params import PROMPT_CARRIER_EXTRA_ARGS
@@ -45,6 +47,41 @@ _HF_STANDARD_SPECIAL_TOKEN_VARIABLES = frozenset(
         "mask_token",
     }
 )
+_LLAMA_PROTOCOL_TEMPLATE_KWARGS = frozenset(
+    {"builtin_tools", "custom_tools", "tools_in_user_message"}
+)
+
+
+class ToolCallProtocol(StrEnum):
+    """Model-native tool syntax attested by a server-owned chat template."""
+
+    GENERIC = "generic"
+    LLAMA = "llama"
+    QWEN = "qwen"
+
+
+def _tool_call_protocol(source: str | Mapping[str, str]) -> ToolCallProtocol:
+    """Infer only syntax explicitly declared by the configured template text.
+
+    The served model name is deliberately absent from this decision.  Aliases
+    of one configured template therefore retain its protocol, while a client
+    cannot opt into a parser by choosing a suggestive model identifier.
+    """
+
+    sources = (source,) if isinstance(source, str) else tuple(source.values())
+    sources = tuple(re.sub(r"{#.*?#}", "", template, flags=re.DOTALL) for template in sources)
+    has_llama = any("<|python_tag|>" in template for template in sources)
+    has_qwen = any(
+        "<function=" in template and "<parameter=" in template and "</function>" in template
+        for template in sources
+    )
+    if has_llama and has_qwen:
+        return ToolCallProtocol.GENERIC
+    if has_llama:
+        return ToolCallProtocol.LLAMA
+    if has_qwen:
+        return ToolCallProtocol.QWEN
+    return ToolCallProtocol.GENERIC
 
 
 def _reject_prompt_carriers(
@@ -283,6 +320,8 @@ class ChatTemplate:
             return environment.from_string(template_source)
 
         if isinstance(source, str):
+            self._tool_call_protocol = _tool_call_protocol(source)
+            self._tool_call_protocols = None
             if not source.strip():
                 raise ValueError("chat template source must be non-empty")
             self._template = compile_source(source)
@@ -313,6 +352,11 @@ class ChatTemplate:
                     "chat template sources must be non-empty; invalid templates: "
                     f"{sorted(empty_sources)}"
                 )
+            self._tool_call_protocol = None
+            self._tool_call_protocols = {
+                name: _tool_call_protocol(template_source)
+                for name, template_source in source.items()
+            }
             self._template = None
             self._templates = {
                 name: compile_source(template_source)
@@ -373,6 +417,28 @@ class ChatTemplate:
         """Tokenizer-owned variables referenced by any compiled template."""
 
         return self._referenced_special_token_variables
+
+    @property
+    def tool_call_protocol(self) -> ToolCallProtocol:
+        """Protocol for a single template, or generic for a named collection."""
+
+        return self._tool_call_protocol or ToolCallProtocol.GENERIC
+
+    def tool_call_protocol_for_tools(self, *, has_tools: bool) -> ToolCallProtocol:
+        """Protocol of the named template that this request will execute."""
+
+        if self._tool_call_protocol is not None:
+            return self._tool_call_protocol
+        assert self._tool_call_protocols is not None
+        if has_tools and "tool_use" in self._tool_call_protocols:
+            return self._tool_call_protocols["tool_use"]
+        if "default" in self._tool_call_protocols:
+            return self._tool_call_protocols["default"]
+        available = ", ".join(sorted(self._tool_call_protocols))
+        raise ValueError(
+            "chat template mapping has no 'default' template for this request; "
+            f"available templates: {available}"
+        )
 
     @property
     def unresolved_special_token_variables(self) -> frozenset[str]:
@@ -450,11 +516,18 @@ class ChatTemplate:
             "add_generation_prompt": add_generation_prompt,
         }
         custom = dict(template_kwargs or {})
+        protocol_reserved = (
+            _LLAMA_PROTOCOL_TEMPLATE_KWARGS
+            if self.tool_call_protocol_for_tools(has_tools=normalized_tools is not None)
+            is ToolCallProtocol.LLAMA
+            else frozenset()
+        )
         reserved = custom.keys() & (
             trusted.keys()
             | _HF_TEMPLATE_CONTROL_VARIABLES
             | _HF_STANDARD_SPECIAL_TOKEN_VARIABLES
             | self._referenced_special_token_variables
+            | protocol_reserved
         )
         if reserved:
             raise ValueError(

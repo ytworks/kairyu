@@ -1048,6 +1048,21 @@ candidate-minus-baseline deltas only for completed, finite, explicitly allowed
 cells with matching reasons and denominators. Commit labels identify the local
 harness, not the served target build.
 
+IDE-agent compatibility now binds model-native tool-call parsing to the
+server-owned chat template rather than a client-supplied model name. Generic
+templates accept only explicit JSON `<tool_call>` envelopes; bare Llama JSON
+and Qwen function XML require their matching configured template protocol.
+Malformed, duplicate, or non-finite arguments, plus Qwen-native arguments that
+violate supported top-level type, required-property, or additional-property
+constraints, remain ordinary content for automatic tool choice and fail closed
+for required or named choice. `parallel_tool_calls=false` augments an existing
+system message
+without creating a second system role, remains enforced after generation, and
+is forwarded only to a supported final upstream. The typed request field
+coexists with the pre-existing `SamplingParams.extra_args` compatibility path,
+while ambiguous double specification is rejected. IDE Docker examples publish
+unauthenticated replicas only on the host loopback interface.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -1055,6 +1070,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-06 — [amendment] IDE tool-call compatibility fails closed without rolling back public APIs
+- What: hardened the pending IDE integration so the single-call hint merges into one existing system message, Responses does not inject it twice, and native Llama/Qwen parsing is selected by the executed server-owned template rather than the request model name while request-controlled Llama syntax branches are rejected. JSON arguments reject duplicate keys and non-finite values; Qwen XML additionally rejects duplicate parameters, residual markup, and violations of the supported top-level type/required/additional-property constraints. Only supported final upstreams receive typed `parallel_tool_calls`. The documented legacy `SamplingParams.extra_args.parallel_tool_calls` path remains supported when it is the sole source, all new public dataclass/function parameters are appended to preserve positional binding, and the unauthenticated Docker examples publish on host loopback only. Documentation now scopes multimodal and schema claims to the implemented IDE boundary.
+- Why: the original branch could manufacture a second system role rejected by valid tokenizer templates, reinterpret ordinary bare JSON as a tool call for unrelated models, accept malformed model output as executable arguments, expose unauthenticated examples beyond localhost, misstate existing multimodal support, and accidentally roll back positional and legacy Python compatibility while adding typed propagation.
+- Refs: PR #409; `kairyu/entrypoints/{chat_template,server/chat_service,server/responses_service}.py`; `kairyu/{engine,orchestration}/`; `tests/server/test_{openai_api,tool_call_protocol}.py`; `tests/unit/test_{kairyu_backend,openai_backend,orchestration_request,ide_client_examples}.py`; `docs/{deployment,ide-clients}.md`
 
 ### 2026-08-05 — [progress] IDE agents complete model-native tool loops
 - What: added OpenAI-compatible `parallel_tool_calls=false` enforcement, model-native Llama and Qwen3-Coder tool-call parsing, isolated gpu02 deployment examples, and Cline/Continue configuration guidance. A Qwen3-Coder-30B-A3B-Instruct TP1 replica on gpu02 completed a real Cline 4.1.3 Act-mode `read_file` → `attempt_completion` loop through an SSH local forward; both requests returned 200. The implementation was rebased onto current `main`, retaining its tokenizer-owned template auto-discovery, and 396 focused API/template/deployment tests pass.

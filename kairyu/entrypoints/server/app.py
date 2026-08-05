@@ -610,6 +610,7 @@ async def _stream_orchestrator(
             sampling_params=sampling_params_from(request),
             tools=tuple(request.tools or ()),
             tool_choice=request.tool_choice,
+            parallel_tool_calls=request.parallel_tool_calls,
             response_format=request.response_format,
         )
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
@@ -1592,6 +1593,7 @@ def create_app(
                 sampling_params=sampling,
                 tools=tuple(request.tools or ()),
                 tool_choice=request.tool_choice,
+                parallel_tool_calls=request.parallel_tool_calls,
                 tools_in_prompt=validated_input.tools_in_prompt,
                 response_format=request.response_format,
             )
@@ -1680,6 +1682,7 @@ def create_app(
                 completions,
                 usage=usage,
                 normalized_tool_choice=normalized_tool_choice,
+                tool_call_protocol=validated_input.tool_call_protocol,
             )
             response.usage.orchestration_input_tokens = result.prompt_tokens
             response.usage.orchestration_output_tokens = result.completion_tokens
@@ -1707,7 +1710,7 @@ def create_app(
                 )
             if not parallel_tool_calls_is_satisfied(
                 response.choices,
-                request.parallel_tool_calls,
+                validated_input.parallel_tool_calls,
             ):
                 _record_usage(
                     http_request,

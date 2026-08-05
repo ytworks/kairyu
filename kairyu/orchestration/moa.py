@@ -21,7 +21,7 @@ from kairyu.engine.backend import (
 )
 from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.outputs import CompletionOutput
-from kairyu.sampling_params import SamplingParams
+from kairyu.sampling_params import PARALLEL_TOOL_CALLS_EXTRA_ARG, SamplingParams
 
 _DEFAULT_N_SAMPLES = 3
 _PROPOSAL_TEMPERATURE = 0.9
@@ -84,6 +84,7 @@ async def _prepare_moa(
     final_tools: tuple[Mapping[str, object], ...],
     final_tool_choice: str | Mapping[str, object] | None,
     final_tools_in_prompt: bool,
+    final_parallel_tool_calls: bool | None,
     shared_prefix: str,
     usage_observer: Callable[[GenerationUsage], None] | None,
 ) -> tuple[tuple[str, ...], list[int], GenerationRequest]:
@@ -98,11 +99,16 @@ async def _prepare_moa(
         )
     if n_samples < 1:
         raise ValueError(f"n_samples must be >= 1, got {n_samples}")
-    params = sampling_params or SamplingParams(temperature=_PROPOSAL_TEMPERATURE, max_tokens=1024)
-    synthesis_params = final_sampling_params or params.clone(
+    public_params = sampling_params or SamplingParams(
+        temperature=_PROPOSAL_TEMPERATURE, max_tokens=1024
+    )
+    synthesis_params = final_sampling_params or public_params.clone(
         temperature=0.3,
         seed=None,
     )
+    internal_extra_args = dict(public_params.extra_args)
+    internal_extra_args.pop(PARALLEL_TOOL_CALLS_EXTRA_ARG, None)
+    params = public_params.clone(extra_args=internal_extra_args)
     session = uuid.uuid4().hex[:12]
     hint = CacheHint(session_id=session)
 
@@ -170,6 +176,7 @@ async def _prepare_moa(
         tools=final_tools,
         tool_choice=final_tool_choice,
         tools_in_prompt=final_tools_in_prompt,
+        parallel_tool_calls=final_parallel_tool_calls,
     )
     return proposals, usage_totals, synthesis_request
 
@@ -186,6 +193,7 @@ async def run_moa(
     final_tools_in_prompt: bool = False,
     shared_prefix: str = "",
     usage_observer: Callable[[GenerationUsage], None] | None = None,
+    final_parallel_tool_calls: bool | None = None,
 ) -> MoAResult:
     proposals, usage_totals, synthesis_request = await _prepare_moa(
         backend,
@@ -196,6 +204,7 @@ async def run_moa(
         final_tools=final_tools,
         final_tool_choice=final_tool_choice,
         final_tools_in_prompt=final_tools_in_prompt,
+        final_parallel_tool_calls=final_parallel_tool_calls,
         shared_prefix=shared_prefix,
         usage_observer=usage_observer,
     )
@@ -243,6 +252,7 @@ async def stream_moa(
     final_tools_in_prompt: bool = False,
     shared_prefix: str = "",
     usage_observer: Callable[[GenerationUsage], None] | None = None,
+    final_parallel_tool_calls: bool | None = None,
 ) -> AsyncIterator[MoAEvent]:
     """Generate proposals concurrently and pull synthesis deltas through.
 
@@ -260,6 +270,7 @@ async def stream_moa(
         final_tools=final_tools,
         final_tool_choice=final_tool_choice,
         final_tools_in_prompt=final_tools_in_prompt,
+        final_parallel_tool_calls=final_parallel_tool_calls,
         shared_prefix=shared_prefix,
         usage_observer=usage_observer,
     )

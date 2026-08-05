@@ -25,6 +25,7 @@ from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import (
     STRUCTURED_OUTPUT_EXTRA_ARGS,
     SamplingParams,
+    resolve_parallel_tool_calls,
     validate_prompt_owned_extra_args,
 )
 
@@ -180,11 +181,19 @@ class GenerationRequest:
     # Explicit diagnostic opt-in. Native engines leave their timing hot path
     # inert unless the public request asks for the structured stage trace.
     trace_requested: bool = False
+    # OpenAI Chat Completions execution hint. Appended after the pre-existing
+    # fields so positional callers retain their historical argument binding.
+    # The public boundary still enforces cardinality after generation.
+    parallel_tool_calls: bool | None = None
 
     def __post_init__(self) -> None:
         # Defense in depth for callers holding a SamplingParams created by an
         # older process or deliberately altered through low-level reflection.
         validate_prompt_owned_extra_args(self.sampling_params.extra_args)
+        resolve_parallel_tool_calls(
+            self.parallel_tool_calls,
+            self.sampling_params.extra_args,
+        )
         if type(self.trace_requested) is not bool:
             raise ValueError("trace_requested must be a boolean")
         kind = prompt_kind(self.prompt)

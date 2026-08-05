@@ -46,11 +46,30 @@ _GENERATION_NEUTRALS = {
 }
 
 
+def test_parallel_tool_capability_preserves_existing_positional_abi():
+    capabilities = OpenAIRequestCapabilities(
+        "custom",
+        frozenset(),
+        frozenset({"vendor_field"}),
+        2,
+        3.0,
+        "max_tokens",
+        frozenset(),
+        True,
+        True,
+        frozenset({"text"}),
+    )
+    assert capabilities.priority is True
+    assert capabilities.prompt_kinds == frozenset({"text"})
+    assert capabilities.parallel_tool_calls is False
+
+
 def _request(
     prompt: PromptInput = "hi",
     sampling_params: SamplingParams | None = None,
     *,
     explicit_generation_neutrals: bool = False,
+    parallel_tool_calls: bool | None = None,
     trace_requested: bool = False,
 ) -> GenerationRequest:
     params = sampling_params or SamplingParams(temperature=0.2, max_tokens=64)
@@ -66,6 +85,7 @@ def _request(
         request_id="r1",
         prompt=prompt,
         sampling_params=params,
+        parallel_tool_calls=parallel_tool_calls,
         trace_requested=trace_requested,
     )
 
@@ -569,6 +589,127 @@ async def test_generate_forwards_representable_sampling_payload():
     await backend.shutdown()
 
 
+@pytest.mark.parametrize("upstream", ["openai", "kairyu", "vllm"])
+async def test_generate_forwards_typed_parallel_tool_calls_to_supported_upstream(
+    upstream,
+):
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        upstream=upstream,
+    )
+
+    await backend.generate(_request(parallel_tool_calls=False))
+
+    assert captured["body"]["parallel_tool_calls"] is False
+    await backend.shutdown()
+
+
+async def test_generate_preserves_legacy_parallel_tool_calls_extra_arg():
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        upstream="openai",
+    )
+
+    await backend.generate(
+        _request(
+            sampling_params=SamplingParams(
+                extra_args={"parallel_tool_calls": False},
+            )
+        )
+    )
+
+    assert captured["body"]["parallel_tool_calls"] is False
+    await backend.shutdown()
+
+
+def test_generation_request_rejects_duplicate_parallel_tool_call_sources():
+    with pytest.raises(ValueError, match="cannot be specified through both"):
+        _request(
+            sampling_params=SamplingParams(
+                extra_args={"parallel_tool_calls": False},
+            ),
+            parallel_tool_calls=False,
+        )
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", None])
+def test_generation_request_rejects_invalid_legacy_parallel_tool_calls(value):
+    with pytest.raises(ValueError, match="extra_args.parallel_tool_calls"):
+        _request(
+            sampling_params=SamplingParams(
+                extra_args={"parallel_tool_calls": value},
+            )
+        )
+
+
+@pytest.mark.parametrize("upstream", ["generic", "anthropic", "gemini"])
+async def test_generate_omits_parallel_tool_calls_for_unattested_upstream(upstream):
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        upstream=upstream,
+    )
+
+    await backend.generate(
+        _request(
+            sampling_params=SamplingParams(max_tokens=8),
+            parallel_tool_calls=False,
+        )
+    )
+
+    assert "parallel_tool_calls" not in captured["body"]
+    await backend.shutdown()
+
+
+async def test_custom_generic_capability_can_attest_parallel_tool_calls():
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        capabilities={"parallel_tool_calls": True},
+    )
+
+    await backend.generate(_request(parallel_tool_calls=True))
+
+    assert captured["body"]["parallel_tool_calls"] is True
+    await backend.shutdown()
+
+
+async def test_custom_generic_legacy_parallel_tool_calls_allowlist_still_works():
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        capabilities={"allow_extra_args": ["parallel_tool_calls"]},
+    )
+
+    await backend.generate(
+        _request(
+            sampling_params=SamplingParams(
+                extra_args={"parallel_tool_calls": False},
+            )
+        )
+    )
+
+    assert captured["body"]["parallel_tool_calls"] is False
+    await backend.shutdown()
+
+
 async def test_generate_forwards_logprobs_zero():
     captured: dict = {}
     backend = OpenAICompatBackend(
@@ -1067,6 +1208,28 @@ def test_named_provider_capability_configuration_cannot_broaden_sampling_contrac
             upstream="anthropic",
             capabilities={"allow_sampling_fields": ["frequency_penalty"]},
         )
+
+
+def test_named_provider_cannot_claim_unattested_parallel_tool_calls():
+    with pytest.raises(ValueError, match="enabling parallel_tool_calls"):
+        OpenAICompatBackend(
+            base_url="https://api.example.com/v1",
+            model="m",
+            upstream="anthropic",
+            capabilities={"parallel_tool_calls": True},
+        )
+
+
+def test_supported_provider_capability_can_disable_parallel_tool_calls():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        upstream="openai",
+        capabilities={"parallel_tool_calls": False},
+    )
+
+    assert backend.capabilities.parallel_tool_calls is False
+    assert "parallel_tool_calls" not in backend.capabilities.extra_args
 
 
 def test_unrepresentable_prompt_logprobs_cannot_be_enabled_by_custom_policy():

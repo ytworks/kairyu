@@ -52,6 +52,7 @@ from kairyu.outputs import CompletionOutput, TokenLogprob
 from kairyu.sampling_params import (
     GENERATION_CONFIG_SAMPLING_FIELDS,
     SamplingParams,
+    resolve_parallel_tool_calls,
 )
 from kairyu.sse import iter_sse_data
 
@@ -442,6 +443,16 @@ def _validated_request_payload(
             "does not support request field: priority",
         )
     payload = _sampling_payload(request.sampling_params, capabilities)
+    parallel_tool_calls = resolve_parallel_tool_calls(
+        request.parallel_tool_calls,
+        request.sampling_params.extra_args,
+    )
+    if (
+        request.parallel_tool_calls is not None
+        and parallel_tool_calls is not None
+        and capabilities.parallel_tool_calls
+    ):
+        payload["parallel_tool_calls"] = parallel_tool_calls
     if capabilities.priority:
         payload["priority"] = request.priority
     return payload

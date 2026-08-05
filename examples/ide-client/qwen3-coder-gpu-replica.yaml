@@ -1,7 +1,7 @@
 # Isolated Qwen3-Coder replica for IDE agent-loop checks.
 #
 # Example launch (keeps the Llama compatibility replica on GPU 1 / port 8002):
-#   docker run --rm --gpus '"device=2"' -p 8003:8000 \
+#   docker run --rm --gpus '"device=2"' -p 127.0.0.1:8003:8000 \
 #     -v "$PWD/examples/ide-client/qwen3-coder-gpu-replica.yaml:/etc/kairyu/config.yaml:ro" \
 #     -v /models:/models:ro <kairyu-cuda-image>
 engines:
@@ -15,6 +15,8 @@ engines:
       # Kairyu auto-loads the checkpoint's tokenizer-owned chat template.
 
 server:
+  # The container listens on all interfaces; the example publish command above
+  # exposes it only on the host loopback interface.
   host: 0.0.0.0
   port: 8000
   max_concurrency: 2

@@ -1,4 +1,7 @@
 import asyncio
+import inspect
+
+import pytest
 
 from kairyu.engine.backend import (
     GenerationRequest,
@@ -6,6 +9,8 @@ from kairyu.engine.backend import (
     GenerationUsage,
     prompt_with_tool_intent,
 )
+from kairyu.orchestration.conductor import Conductor
+from kairyu.orchestration.moa import run_moa, stream_moa
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.outputs import CompletionOutput, TokenLogprob
@@ -36,6 +41,29 @@ TOOLS = (
         },
     },
 )
+
+
+def test_parallel_tool_fields_preserve_existing_public_positional_abi():
+    request = GenerationRequest(
+        "positional",
+        "prompt",
+        SamplingParams(),
+        7,
+        "batch",
+        None,
+        (),
+        None,
+        False,
+        123,
+        True,
+    )
+    assert request.placement_started_ns == 123
+    assert request.trace_requested is True
+    assert request.parallel_tool_calls is None
+
+    assert list(inspect.signature(Conductor).parameters)[-1] == ("final_parallel_tool_calls")
+    assert list(inspect.signature(run_moa).parameters)[-1] == ("final_parallel_tool_calls")
+    assert list(inspect.signature(stream_moa).parameters)[-1] == ("final_parallel_tool_calls")
 
 
 class IntentBackend:
@@ -91,7 +119,13 @@ class IntentBackend:
         return None
 
 
-def _call(prompt: str, *, n: int = 3, temperature: float = 0.25):
+def _call(
+    prompt: str,
+    *,
+    n: int = 3,
+    temperature: float = 0.25,
+    parallel_tool_calls: bool | None = False,
+):
     params = SamplingParams(
         n=n,
         temperature=temperature,
@@ -110,6 +144,7 @@ def _call(prompt: str, *, n: int = 3, temperature: float = 0.25):
         tools=TOOLS,
         tool_choice="required",
         response_format=SCHEMA,
+        parallel_tool_calls=parallel_tool_calls,
     )
 
 
@@ -122,6 +157,7 @@ def test_internal_sampling_removes_only_final_output_intent():
         tools=call.tools,
         tool_choice=call.tool_choice,
         response_format=call.response_format,
+        parallel_tool_calls=call.parallel_tool_calls,
     )
 
     internal = call.internal_sampling_params()
@@ -151,12 +187,40 @@ def test_internal_sampling_caps_private_work_without_changing_final_intent():
         tools=call.tools,
         tool_choice=call.tool_choice,
         response_format=call.response_format,
+        parallel_tool_calls=call.parallel_tool_calls,
     )
 
     internal = call.internal_sampling_params(max_tokens_cap=1024)
 
     assert internal.max_tokens == 1024
     assert call.sampling_params.max_tokens == 8192
+
+
+def test_internal_sampling_removes_legacy_parallel_tool_calls_intent():
+    params = SamplingParams(
+        extra_args={
+            "response_format": SCHEMA,
+            "parallel_tool_calls": False,
+        }
+    )
+    call = OrchestrationRequest(
+        prompt="hello",
+        sampling_params=params,
+        response_format=SCHEMA,
+    )
+
+    assert call.internal_sampling_params().extra_args == {}
+
+
+def test_orchestration_request_rejects_duplicate_parallel_tool_call_sources():
+    with pytest.raises(ValueError, match="cannot be specified through both"):
+        OrchestrationRequest(
+            prompt="hello",
+            sampling_params=SamplingParams(
+                extra_args={"parallel_tool_calls": False},
+            ),
+            parallel_tool_calls=False,
+        )
 
 
 def test_native_tool_prompt_is_added_once_and_honors_template_ownership():
@@ -199,6 +263,7 @@ async def test_direct_route_preserves_complete_final_intent():
     assert request.sampling_params == _call("hello").sampling_params
     assert request.tools == TOOLS
     assert request.tool_choice == "required"
+    assert request.parallel_tool_calls is False
     assert [completion.index for completion in result.completions] == [0, 1, 2]
     assert all(completion.logprob_content for completion in result.completions)
 
@@ -214,12 +279,43 @@ async def test_conductor_applies_complete_intent_only_to_final_role():
     assert final.sampling_params == _call(COMPLEX).sampling_params
     assert final.tools == TOOLS
     assert final.tool_choice == "required"
+    assert final.parallel_tool_calls is False
     assert len(result.completions) == 3
     assert internal
     assert all(request.sampling_params.n == 1 for request in internal)
     assert all(request.sampling_params.logprobs is None for request in internal)
     assert all(request.sampling_params.extra_args == {} for request in internal)
     assert all(request.tools == () and request.tool_choice is None for request in internal)
+    assert all(request.parallel_tool_calls is None for request in internal)
+
+
+async def test_conductor_keeps_legacy_parallel_intent_only_on_final_role():
+    backend = IntentBackend()
+    orchestrator = Orchestrator({"tier1": backend, "tier2": backend})
+    base = _call(COMPLEX, parallel_tool_calls=None)
+    legacy = OrchestrationRequest(
+        prompt=base.prompt,
+        sampling_params=base.sampling_params.clone(
+            extra_args={
+                **base.sampling_params.extra_args,
+                "parallel_tool_calls": False,
+            }
+        ),
+        tools=base.tools,
+        tool_choice=base.tool_choice,
+        response_format=base.response_format,
+    )
+
+    await orchestrator.run(legacy)
+
+    final = next(request for request in backend.requests if "[synthesizer]" in request.prompt)
+    internal = [request for request in backend.requests if request is not final]
+    assert final.parallel_tool_calls is None
+    assert final.sampling_params.extra_args["parallel_tool_calls"] is False
+    assert internal
+    assert all(
+        "parallel_tool_calls" not in request.sampling_params.extra_args for request in internal
+    )
 
 
 async def test_orchestrator_private_token_policy_caps_only_internal_roles():
@@ -261,7 +357,31 @@ async def test_moa_preserves_seeded_proposals_and_complete_synthesis_intent():
     assert synthesis.sampling_params == _call(COMPLEX).sampling_params
     assert synthesis.tools == TOOLS
     assert synthesis.tool_choice == "required"
+    assert synthesis.parallel_tool_calls is False
+    assert all(request.parallel_tool_calls is None for request in proposals)
     assert len(result.completions) == 3
+
+
+async def test_streaming_direct_route_preserves_parallel_tool_calls():
+    backend = IntentBackend()
+    orchestrator = Orchestrator({"tier1": backend})
+
+    stream = await orchestrator.run_chat(_call("hello"), stream=True)
+    events = [event async for event in stream]
+
+    assert events[-1].kind == "result"
+    assert len(backend.requests) == 1
+    assert backend.requests[0].parallel_tool_calls is False
+
+
+@pytest.mark.parametrize("value", [0, 1, "false"])
+def test_orchestration_request_rejects_non_boolean_parallel_tool_calls(value):
+    with pytest.raises(ValueError, match="parallel_tool_calls"):
+        OrchestrationRequest(
+            prompt="hello",
+            sampling_params=SamplingParams(),
+            parallel_tool_calls=value,
+        )
 
 
 async def test_concurrent_calls_do_not_mix_request_intent():
