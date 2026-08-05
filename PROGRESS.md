@@ -1078,6 +1078,21 @@ Portable validation passed 1,960 benchmark tests (9 deselected), the 349-test
 affected suite, Ruff, all 66 benchmark entrypoints through 130 declared help
 invocations, the isolated wheel boundary, and `git diff --check`.
 
+Issue #372 now composes those source- and pair-bound gates into a fixed
+quantization task-accuracy sweep. One indexed run must provide dense BF16, FP8,
+INT8, AWQ, GPTQ, NVFP4, and dense-BF16-plus-FP8-KV deployments across GSM8K,
+MMLU, IFEval, and GPQA Diamond. Every arm has a distinct operator-declared
+served-manifest digest and an explicit weight/compute/KV classification; the
+artifact states that neither is remotely attested and that native FP8-E4M3 KV
+remains disabled after its failed bake. Six exact configuration A/B artifacts
+supply the paired Newcombe evidence and independent per-task tolerances; all 24
+candidate/task gates must pass without averaging. Dedicated JSON/Markdown
+artifacts retain the source/index/pair/protocol bindings, while absent
+quantization declarations preserve the pre-existing Fugu/Core configuration
+shape and judge-calibration reload contract. Portable validation passed all
+1,988 benchmark tests, Ruff, all 66 benchmark entrypoints through 130 declared
+help invocations, the isolated wheel boundary, and `git diff --check`.
+
 IDE-agent compatibility now binds model-native tool-call parsing to the
 server-owned chat template rather than a client-supplied model name. Generic
 templates accept only explicit JSON `<tool_call>` envelopes; bare Llama JSON
@@ -1100,6 +1115,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-06 — [design] Quantization formats gain task-level accuracy gates
+- What: added the fixed `quantization` suite and `kairyu bench quant-sweep` command for dense BF16, FP8, INT8, AWQ, GPTQ, NVFP4, and dense BF16 with FP8-E4M3 KV across GSM8K, MMLU, IFEval, and GPQA Diamond. Every target declares an exact weight/compute/KV classification plus a distinct served-manifest digest; six complete configuration A/B artifacts provide the sole paired statistical core, and all 24 independently toleranced Newcombe lower-bound gates must pass without task or scheme averaging. The dedicated atomic JSON/Markdown artifact binds the clean source, hash-chain record, raw pairs, deployment declarations, comparator runtime, and versioned protocol. Reports explicitly distinguish operator declaration from remote attestation and keep FP8-E4M3 KV scoped to external or experimental deployments because native Kairyu still rejects it after the failed quality bake. Optional quantization identity serializes only when declared, preserving existing Fugu/Core fingerprints and judge-calibration reloads.
+- Why: kernel parity and throughput measurements do not establish downstream task quality, while a flat score table without exact source, deployment, item, and pair bindings could hide missing formats, incomparable requests, or post-hoc tolerance choices.
+- Refs: issue #372; `docs/design/issue-372-quantization-sweep.md`; `examples/bench_quantization.yaml`; `kairyu/bench/{quant_sweep,config_ab,cli,store,types}.py`; `tests/bench/test_bench_{quant_sweep,cli_quant_sweep,config,aggregate,runner,store}.py`
 
 ### 2026-08-06 — [design] Configuration A/B gates bind deployments to paired task evidence
 - What: added `kairyu bench compare` for non-inferiority gates between two explicit served configurations. The command validates the complete scoreboard hash chain, reopens and content-binds every selected raw pair, requires identical full-data methodology, runtime, request policy, and item sets, then applies paired Newcombe method-10 intervals to independent binary outcomes, deterministic paired bootstrap intervals to bounded scores, or whole-problem clustered bootstrap intervals to SciCode's dependent sequential sub-steps. Versioned binary/cluster declarations live in the run fingerprint, and the fixed SplitMix64 sampler removes Python `randrange()` drift. Each benchmark has an independent percentage-point tolerance and one-sided 95% lower-bound verdict; candidate-owned JSON/Markdown artifacts retain the deployment, source, comparator runtime, protocol, policy, and raw-evidence hashes without changing the history index. Runs can declare the operator-owned served configuration label and SHA-256 in YAML or paired CLI flags, with the non-attestation boundary stated explicitly.

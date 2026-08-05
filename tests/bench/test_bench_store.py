@@ -376,6 +376,35 @@ def test_config_comparison_has_distinct_atomic_artifacts(tmp_path):
     assert not list(store.run_dir.rglob("*.tmp"))
 
 
+def test_quantization_sweep_has_distinct_atomic_artifacts(tmp_path):
+    store = ResultStore(tmp_path, "quant-run")
+    published = {"comparison_type": "published", "score": 0.5}
+    config_ab = {"comparison_type": "config_ab", "overall_verdict": "pass"}
+    sweep = {"sweep_type": "quantization_task_accuracy", "overall_verdict": "pass"}
+    store.save_comparison(published, "# Published")
+    store.save_config_comparison(config_ab, "# Config A/B")
+    existing = {
+        path.name: path.read_bytes()
+        for path in store.run_dir.iterdir()
+        if path.is_file()
+    }
+
+    path = store.save_quantization_sweep(sweep, "# Quantization sweep")
+
+    assert path == store.run_dir / "quantization-sweep.md"
+    assert json.loads((store.run_dir / "quantization-sweep.json").read_bytes()) == sweep
+    assert path.read_text(encoding="utf-8") == "# Quantization sweep"
+    assert all((store.run_dir / name).read_bytes() == payload for name, payload in existing.items())
+
+    json_before = (store.run_dir / "quantization-sweep.json").read_bytes()
+    markdown_before = path.read_bytes()
+    with pytest.raises(ValueError, match="Out of range float values"):
+        store.save_quantization_sweep({"score": float("nan")}, "must not be written")
+    assert (store.run_dir / "quantization-sweep.json").read_bytes() == json_before
+    assert path.read_bytes() == markdown_before
+    assert not list(store.run_dir.rglob("*.tmp"))
+
+
 def test_save_pair_refuses_symlinked_benchmark_directory_without_external_write(
     tmp_path,
 ):

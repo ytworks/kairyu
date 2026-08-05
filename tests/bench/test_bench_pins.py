@@ -268,7 +268,7 @@ def test_pins_do_not_mutate_the_class_attribute():
 def test_pinned_slots_exist_in_a_suite(name):
     suite_slots = {
         adapter.info.name
-        for suite in ("fugu", "core")
+        for suite in ("fugu", "core", "quantization")
         for adapter in suite_adapters(suite)
     }
     assert name in suite_slots

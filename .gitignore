@@ -235,6 +235,15 @@ bench/results/fugu/*
 !bench/results/core/
 bench/results/core/*
 !bench/results/core/scoreboards.jsonl
+!bench/results/quantization/
+bench/results/quantization/*
+!bench/results/quantization/scoreboards.jsonl
+# A completed quantization sweep is a published decision artifact. Keep only
+# its two aggregate files visible; raw per-pair run data remains ignored.
+!bench/results/quantization/*/
+bench/results/quantization/*/*
+!bench/results/quantization/*/quantization-sweep.json
+!bench/results/quantization/*/quantization-sweep.md
 # G2 §8 requires that any number a DECISION rests on be reviewable next to the
 # config that produced it, so the environment records stay tracked.
 !bench/results/env-*.json

@@ -16,7 +16,7 @@ from kairyu.bench.calibration import (
 )
 from kairyu.bench.judge import judge_protocol_identity
 from kairyu.bench.judge_prompts import judge_template_identity
-from kairyu.bench.runner import _run_fingerprint, _run_identity
+from kairyu.bench.runner import _recordable_config, _run_fingerprint, _run_identity
 from kairyu.bench.types import (
     BenchConfig,
     BenchTarget,
@@ -211,7 +211,7 @@ def _write_bound_run(tmp_path, *, self_judged: bool = False):
             {
                 "fingerprint": fingerprint,
                 "identity": identity,
-                "config": config.model_dump(mode="json"),
+                "config": _recordable_config(config),
                 "run_id": run_dir.name,
             }
         ),
@@ -709,6 +709,8 @@ async def test_self_preference_measurement_rejects_unknown_or_thin_strata(tmp_pa
 
 def test_bound_run_loader_verifies_fingerprint_and_fingerprinted_config(tmp_path):
     run_dir, judge, target, fingerprint = _write_bound_run(tmp_path)
+    recorded = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert "quantization" not in recorded["config"]["targets"][0]
     loaded_judge, loaded_fingerprint, loaded_targets, loaded_adapters = (
         _calibration_inputs_from_args(
             _bound_cli_args(run_dir, tmp_path / "calibration.json")

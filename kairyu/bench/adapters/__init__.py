@@ -40,6 +40,11 @@ CORE_ROW_ORDER: tuple[str, ...] = (
     "ifeval",
 )
 
+QUANTIZATION_ROW_ORDER: tuple[str, ...] = (
+    *CORE_ROW_ORDER,
+    "gpqa-diamond",
+)
+
 SUITES: dict[str, SuiteInfo] = {
     "fugu": SuiteInfo(
         name="fugu",
@@ -51,6 +56,11 @@ SUITES: dict[str, SuiteInfo] = {
         name="core",
         display_name="Core",
         row_order=CORE_ROW_ORDER,
+    ),
+    "quantization": SuiteInfo(
+        name="quantization",
+        display_name="Quantization",
+        row_order=QUANTIZATION_ROW_ORDER,
     ),
 }
 

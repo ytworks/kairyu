@@ -1,0 +1,96 @@
+# Complete quantization x task-accuracy sweep. A full run issues 407,582 target
+# calls (58,226 per arm); use --smoke only for development, never for a gate.
+#
+# Every served_config SHA-256 below is a placeholder. Replace it with the hash
+# of a canonical deployment manifest binding the common base-model/tokenizer
+# revision plus checkpoint tensors, quantization dialect/bits/scales/calibration,
+# ignored layers, compute and effective KV dtypes, Kairyu build/image, topology,
+# and hardware. The benchmark records this operator declaration but cannot
+# remotely attest that the endpoint actually serves it.
+suite: quantization
+
+targets:
+  - name: bf16
+    base_url: http://bf16.example:8000/v1
+    model: qwen3-32b
+    served_config:
+      label: qwen3-32b-dense-bf16
+      sha256: "1111111111111111111111111111111111111111111111111111111111111111"
+    quantization:
+      weight_method: none
+      compute_dtype: bfloat16
+      kv_cache_dtype: bfloat16
+
+  - name: fp8
+    base_url: http://fp8.example:8000/v1
+    model: qwen3-32b
+    served_config:
+      label: qwen3-32b-fp8
+      sha256: "2222222222222222222222222222222222222222222222222222222222222222"
+    quantization:
+      weight_method: fp8
+      compute_dtype: bfloat16
+      kv_cache_dtype: bfloat16
+
+  - name: int8
+    base_url: http://int8.example:8000/v1
+    model: qwen3-32b
+    served_config:
+      label: qwen3-32b-int8
+      sha256: "3333333333333333333333333333333333333333333333333333333333333333"
+    quantization:
+      weight_method: int8
+      compute_dtype: bfloat16
+      kv_cache_dtype: bfloat16
+
+  - name: awq
+    base_url: http://awq.example:8000/v1
+    model: qwen3-32b
+    served_config:
+      label: qwen3-32b-awq
+      sha256: "4444444444444444444444444444444444444444444444444444444444444444"
+    quantization:
+      weight_method: awq
+      compute_dtype: bfloat16
+      kv_cache_dtype: bfloat16
+
+  - name: gptq
+    base_url: http://gptq.example:8000/v1
+    model: qwen3-32b
+    served_config:
+      label: qwen3-32b-gptq
+      sha256: "5555555555555555555555555555555555555555555555555555555555555555"
+    quantization:
+      weight_method: gptq
+      compute_dtype: bfloat16
+      kv_cache_dtype: bfloat16
+
+  - name: nvfp4
+    base_url: http://nvfp4.example:8000/v1
+    model: qwen3-32b
+    served_config:
+      label: qwen3-32b-nvfp4
+      sha256: "6666666666666666666666666666666666666666666666666666666666666666"
+    quantization:
+      weight_method: nvfp4
+      compute_dtype: bfloat16
+      kv_cache_dtype: bfloat16
+
+  # Current native Kairyu deliberately rejects fp8_e4m3 KV after its failed
+  # quality bake. This required classification is only for an explicitly
+  # served external/experimental arm; it does not enable native support.
+  - name: fp8-kv
+    base_url: http://experimental-fp8-kv.example:8000/v1
+    model: qwen3-32b
+    served_config:
+      label: qwen3-32b-dense-fp8-kv-experimental
+      sha256: "7777777777777777777777777777777777777777777777777777777777777777"
+    quantization:
+      weight_method: none
+      compute_dtype: bfloat16
+      kv_cache_dtype: fp8_e4m3
+
+seed: 0
+concurrency: 8
+# results_dir: bench/results/quantization
+# cache_dir: ~/.cache/kairyu/benchmarks

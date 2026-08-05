@@ -30,7 +30,9 @@ from kairyu.bench.types import PairResult, pair_result_evidence_error
 
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
-_TARGET_ARM_FIELDS = frozenset({"name", "base_url", "api_key_env", "served_config"})
+_TARGET_ARM_FIELDS = frozenset(
+    {"name", "base_url", "api_key_env", "served_config", "quantization"}
+)
 _SOURCE_FIELDS = (
     "git_commit",
     "git_commit_role",
