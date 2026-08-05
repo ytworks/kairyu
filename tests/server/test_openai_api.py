@@ -2139,7 +2139,7 @@ async def test_parallel_tool_calls_false_rejects_multiple_calls_before_streaming
         "function": {"name": "search", "parameters": {"type": "object"}},
     }
     engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body(
         "weather",
         tools=[_WEATHER_TOOL, search_tool],
@@ -2159,7 +2159,7 @@ async def test_parallel_tool_calls_false_rejects_multiple_calls_before_streaming
 
 async def test_parallel_tool_calls_false_is_enforced_per_choice_not_across_n():
     engine = MultiChoiceToolBackend((TOOL_CALL_TEXT, TOOL_CALL_TEXT))
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body(
         "weather",
         tools=[_WEATHER_TOOL],
@@ -2185,7 +2185,7 @@ async def test_parallel_tool_calls_true_accepts_multiple_calls():
         "function": {"name": "search", "parameters": {"type": "object"}},
     }
     engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
-    app = create_app(engines={"stub": engine})
+    app = create_legacy_app(engines={"stub": engine})
     body = _chat_body(
         "weather",
         tools=[_WEATHER_TOOL, search_tool],
@@ -2207,7 +2207,7 @@ async def test_orchestrated_parallel_tool_calls_false_rejects_multiple_calls():
         "function": {"name": "search", "parameters": {"type": "object"}},
     }
     engine = StubBackend(text=TOOL_CALL_TEXT + search_text, finish_reason="stop")
-    app = create_app(
+    app = create_legacy_app(
         engines={},
         orchestrators={"auto": Orchestrator({"tier1": engine})},
     )
@@ -2930,7 +2930,9 @@ async def test_llama_bare_json_tool_call_is_parsed(prefix):
     text = prefix + json.dumps(
         {"name": "get_weather", "parameters": {"city": "Tokyo"}}
     )
-    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    app = create_legacy_app(
+        engines={"stub": StubBackend(text=text, finish_reason="stop")}
+    )
     tools = [
         {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
     ]
@@ -2957,7 +2959,9 @@ async def test_llama_bare_json_tool_call_is_parsed(prefix):
     ],
 )
 async def test_llama_json_tool_call_requires_one_complete_object(text):
-    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    app = create_legacy_app(
+        engines={"stub": StubBackend(text=text, finish_reason="stop")}
+    )
     tools = [
         {"type": "function", "function": {"name": "get_weather", "parameters": {}}}
     ]
@@ -2981,7 +2985,9 @@ async def test_qwen3_coder_xml_tool_call_is_parsed():
         "</function>\n"
         "</tool_call>"
     )
-    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    app = create_legacy_app(
+        engines={"stub": StubBackend(text=text, finish_reason="stop")}
+    )
     tools = [
         {
             "type": "function",
@@ -3020,7 +3026,9 @@ async def test_qwen3_coder_xml_parameters_follow_tool_schema_types():
         "</function>\n"
         "</tool_call>"
     )
-    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    app = create_legacy_app(
+        engines={"stub": StubBackend(text=text, finish_reason="stop")}
+    )
     tools = [
         {
             "type": "function",
@@ -3064,7 +3072,9 @@ async def test_qwen3_coder_xml_invalid_typed_parameter_fails_closed():
         "</function>\n"
         "</tool_call>"
     )
-    app = create_app(engines={"stub": StubBackend(text=text, finish_reason="stop")})
+    app = create_legacy_app(
+        engines={"stub": StubBackend(text=text, finish_reason="stop")}
+    )
     tools = [
         {
             "type": "function",
