@@ -1,8 +1,8 @@
-"""Scoreboard aggregation: pair results -> scoreboard.json + Fugu-layout markdown.
+"""Scoreboard aggregation: pair results -> scoreboard.json + markdown.
 
-Layout mirrors the Fugu release table: rows = benchmarks in FUGU_ROW_ORDER,
-columns = targets. Cells carry footnote markers for annotations and
-partial/skip reasons so a degraded run is still an honest artifact.
+Rows follow the selected suite's canonical order and columns are targets. Cells
+carry footnote markers for annotations and partial/skip reasons so a degraded
+run is still an honest artifact.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import math
 from collections.abc import Sequence
 from statistics import NormalDist
 
-from kairyu.bench.adapters import FUGU_ROW_ORDER, all_adapters
+from kairyu.bench.adapters import all_adapters, suite_info
 from kairyu.bench.adapters.base import normalize_base_url
 from kairyu.bench.types import (
     SCHEMA_VERSION,
@@ -108,12 +108,17 @@ def build_scoreboard(
     judge: JudgeConfig | None = None,
     judge_identity_incomplete: bool = False,
 ) -> dict:
+    definition = suite_info(suite)
     adapters = all_adapters()
     display_names = {
         name: adapter.info.display_name for name, adapter in adapters.items()
     }
     by_key = {(pair.benchmark, pair.target): pair for pair in pairs}
-    benchmarks = [name for name in FUGU_ROW_ORDER if any(p.benchmark == name for p in pairs)]
+    benchmarks = [
+        name
+        for name in definition.row_order
+        if any(pair.benchmark == name for pair in pairs)
+    ]
 
     footnotes: list[str] = []
 
@@ -328,8 +333,10 @@ def run_banner(scoreboard: dict) -> list[str]:
 
 def render_markdown(scoreboard: dict) -> str:
     targets = scoreboard["targets"]
+    definition = suite_info(scoreboard.get("suite", "fugu"))
     lines = [
-        f"# Fugu benchmark scoreboard — run {scoreboard['run_id']}",
+        f"# {definition.display_name} benchmark scoreboard — run "
+        f"{scoreboard['run_id']}",
         "",
         *run_banner(scoreboard),
         "Scores are percentages; brackets are 95% Wilson CIs for binary item "

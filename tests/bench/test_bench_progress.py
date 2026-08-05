@@ -167,6 +167,7 @@ def test_tqdm_reporter_drives_suite_and_pair_bars():
 
     suite, pair = _FakeBar.instances[0], _FakeBar.instances[1]
     assert suite.total == 2 and suite.updates == 1 and suite.closed
+    assert suite.desc == "benchmark suite"
     assert pair.desc == "scicode × m"
     assert pair.total == 4 and pair.updates == 2 and pair.closed
     assert any("partial" in text for text, _ in _FakeBar.written)

@@ -1488,6 +1488,15 @@ wheels = [
 ]
 
 [[package]]
+name = "immutabledict"
+version = "4.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1d/e6/718471048fea0366c3e3d1df3acfd914ca66d571cdffcf6d37bbcd725708/immutabledict-4.3.1.tar.gz", hash = "sha256:f844a669106cfdc73f47b1a9da003782fb17dc955a54c80972e0d93d1c63c514", size = 7806, upload-time = "2026-02-15T10:32:34.668Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a3/ce/f9018bf69ae91b273b6391a095e7c93fa5e1617f25b6ba81ad4b20c9df10/immutabledict-4.3.1-py3-none-any.whl", hash = "sha256:c9facdc0ff30fdb8e35bd16532026cac472a549e182c94fa201b51b25e4bf7bf", size = 5000, upload-time = "2026-02-15T10:32:33.672Z" },
+]
+
+[[package]]
 name = "importlib-metadata"
 version = "8.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1607,6 +1616,15 @@ wheels = [
 ]
 
 [[package]]
+name = "joblib"
+version = "1.5.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/f2/d34e8b3a08a9cc79a50b2208a93dce981fe615b64d5a4d4abee421d898df/joblib-1.5.3.tar.gz", hash = "sha256:8561a3269e6801106863fd0d6d84bb737be9e7631e33aaed3fb9ce5953688da3", size = 331603, upload-time = "2025-12-15T08:41:46.427Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/91/984aca2ec129e2757d1e4e3c81c3fcda9d0f85b74670a094cc443d9ee949/joblib-1.5.3-py3-none-any.whl", hash = "sha256:5fc3c5039fc5ca8c0276333a188bbd59d6b7ab37fe6632daa76bc7f9ec18e713", size = 309071, upload-time = "2025-12-15T08:41:44.973Z" },
+]
+
+[[package]]
 name = "jsonschema"
 version = "4.26.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1656,6 +1674,9 @@ bench = [
     { name = "datasets" },
     { name = "h5py" },
     { name = "huggingface-hub" },
+    { name = "immutabledict" },
+    { name = "langdetect" },
+    { name = "nltk" },
     { name = "pillow" },
     { name = "tiktoken" },
     { name = "tqdm" },
@@ -1702,7 +1723,10 @@ vision = [
 [package.dev-dependencies]
 dev = [
     { name = "datasets" },
+    { name = "immutabledict" },
+    { name = "langdetect" },
     { name = "msgpack" },
+    { name = "nltk" },
     { name = "openai" },
     { name = "opentelemetry-sdk" },
     { name = "pillow" },
@@ -1732,10 +1756,13 @@ requires-dist = [
     { name = "httptools", marker = "sys_platform == 'linux'", specifier = ">=0.8.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "huggingface-hub", marker = "extra == 'bench'", specifier = ">=0.26" },
+    { name = "immutabledict", marker = "extra == 'bench'", specifier = ">=4.2" },
     { name = "jinja2", specifier = ">=3.1" },
+    { name = "langdetect", marker = "extra == 'bench'", specifier = "==1.0.9" },
     { name = "mini-swe-agent", marker = "extra == 'bench-agentic'", specifier = ">=2" },
     { name = "msgpack", marker = "extra == 'fleet'", specifier = ">=1.0" },
     { name = "nixl", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=0.2" },
+    { name = "nltk", marker = "extra == 'bench'", specifier = "==3.9.2" },
     { name = "nvidia-cutlass-dsl-libs-cu13", marker = "sys_platform == 'linux' and extra == 'flashattention4'", specifier = "==4.6.0.dev0" },
     { name = "opentelemetry-sdk", marker = "extra == 'otel'", specifier = ">=1.27" },
     { name = "pillow", marker = "extra == 'bench'", specifier = ">=10" },
@@ -1765,7 +1792,10 @@ provides-extras = ["hf", "engine", "embeddings", "vision", "otel", "gpu", "flash
 [package.metadata.requires-dev]
 dev = [
     { name = "datasets", specifier = ">=3.2" },
+    { name = "immutabledict", specifier = ">=4.2" },
+    { name = "langdetect", specifier = "==1.0.9" },
     { name = "msgpack", specifier = ">=1.0" },
+    { name = "nltk", specifier = "==3.9.2" },
     { name = "openai", specifier = ">=1.66" },
     { name = "opentelemetry-sdk", specifier = ">=1.27" },
     { name = "pillow", specifier = ">=10" },
@@ -1782,6 +1812,15 @@ dev = [
     { name = "transformers", specifier = ">=5.12,<5.13" },
     { name = "xgrammar", specifier = ">=0.2.3" },
 ]
+
+[[package]]
+name = "langdetect"
+version = "1.0.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz", hash = "sha256:cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0", size = 981474, upload-time = "2021-05-07T07:54:13.562Z" }
 
 [[package]]
 name = "linkify-it-py"
@@ -2380,6 +2419,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/67/96/d01c466193e88fcc4afeb2dc29ff35512b4af497db7a2e76e95f3f75b821/nixl_cu13-1.3.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:2363d3922402f7f3b7302254c3b44cc71520e5ad6a9dc43898fa59a6ee0620a3", size = 45134021, upload-time = "2026-06-15T23:19:50.763Z" },
     { url = "https://files.pythonhosted.org/packages/1f/0d/6dcc0ee08bcccb0d3ac8a8bb2f81fd871f638a9c6a338fd696de62404ea0/nixl_cu13-1.3.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:c49cde36dbc7829056f510d25aff6149b3b6591bc4bb454d3db1e278fa812fd1", size = 43679897, upload-time = "2026-06-15T23:22:32.667Z" },
     { url = "https://files.pythonhosted.org/packages/aa/fa/35e98554c0163a1d63aee2d30b9a217827c41363acded3588156a894fbba/nixl_cu13-1.3.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:b260ca708fa88da098702fc3d71649dcaf69731a93d20b361ba5611019e0da36", size = 45135458, upload-time = "2026-06-15T23:20:14.369Z" },
+]
+
+[[package]]
+name = "nltk"
+version = "3.9.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "joblib" },
+    { name = "regex" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f9/76/3a5e4312c19a028770f86fd7c058cf9f4ec4321c6cf7526bab998a5b683c/nltk-3.9.2.tar.gz", hash = "sha256:0f409e9b069ca4177c1903c3e843eef90c7e92992fa4931ae607da6de49e1419", size = 2887629, upload-time = "2025-10-01T07:19:23.764Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/90/81ac364ef94209c100e12579629dc92bf7a709a84af32f8c551b02c07e94/nltk-3.9.2-py3-none-any.whl", hash = "sha256:1e209d2b3009110635ed9709a67a1a3e33a10f799490fa71cf4bec218c11c88a", size = 1513404, upload-time = "2025-10-01T07:19:21.648Z" },
 ]
 
 [[package]]

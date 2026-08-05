@@ -1,0 +1,2 @@
+{"id": "fixture-mmlu-0001", "question": "Which number is the only even prime?", "subject": "elementary_mathematics", "choices": ["1", "2", "3", "5"], "answer": "B"}
+{"id": "fixture-mmlu-0002", "question": "Which layer of Earth is liquid and surrounds the solid inner core?", "subject": "high_school_geography", "choices": ["Crust", "Mantle", "Inner core", "Outer core"], "answer": "D"}

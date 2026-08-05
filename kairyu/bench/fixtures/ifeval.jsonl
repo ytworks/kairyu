@@ -1,0 +1,2 @@
+{"id": "fixture-ifeval-0001", "key": 1, "prompt": "Write one short sentence about blue skies. Do not use any commas.", "instruction_id_list": ["punctuation:no_comma"], "kwargs": [{}]}
+{"id": "fixture-ifeval-0002", "key": 2, "prompt": "Write one sentence that includes both keywords ORCHID and COMPASS.", "instruction_id_list": ["keywords:existence"], "kwargs": [{"keywords": ["ORCHID", "COMPASS"]}]}

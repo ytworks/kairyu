@@ -1,4 +1,4 @@
-"""Schemas for the Fugu benchmark suite: config, items, per-pair results.
+"""Schemas for benchmark suites: config, items, and per-pair results.
 
 Everything is a frozen pydantic model (repo convention, m7 D3): configs are
 loaded from YAML/CLI once and never mutated; results are written atomically
@@ -291,12 +291,12 @@ class ExecutionConfig(BaseModel):
 class BenchConfig(BaseModel):
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
-    suite: str = "fugu"
+    suite: Literal["fugu", "core"] = "fugu"
     targets: tuple[BenchTarget, ...] = Field(min_length=1)
     judge: JudgeConfig = JudgeConfig()
     execution: ExecutionConfig = ExecutionConfig()
     limit: int | None = Field(default=None, ge=1)  # None = full dataset
-    smoke: bool = False  # preset: limit<=SMOKE_LIMIT, halved output budget
+    smoke: bool = False  # preset: limit<=SMOKE_LIMIT
     offline_fixtures: bool = False  # read committed fixtures, no cache/network
     only: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
@@ -314,6 +314,17 @@ class BenchConfig(BaseModel):
     rerun: bool = False  # ignore existing pair results
     download: bool = True  # auto-download missing datasets before running
     progress: bool = True  # live per-slot progress (bars on a TTY, lines in logs)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _suite_results_dir_default(cls, value):
+        """Keep explicit paths while defaulting new runs under their suite."""
+        if isinstance(value, dict) and value.get("results_dir") is None:
+            value = {
+                **value,
+                "results_dir": f"bench/results/{value.get('suite', 'fugu')}",
+            }
+        return value
 
 
 SMOKE_LIMIT = 20
@@ -358,6 +369,8 @@ class ItemResult(BaseModel):
     score: float | None = None  # 0..1
     response_excerpt: str | None = None  # capped, evidence only
     error: str | None = None
+    # Deterministic scorer evidence (for example IFEval per-instruction booleans).
+    details: dict | None = None
     # Single: {model, correct, raw_excerpt}; panels add aggregation + ordered votes.
     judge: dict | None = None
     latency_s: float | None = None

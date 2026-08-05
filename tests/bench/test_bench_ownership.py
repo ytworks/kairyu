@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from kairyu.bench import cli as bench_cli
+from kairyu.bench.adapters import all_adapters
+from kairyu.bench.adapters.base import GenerativeAdapter
 from kairyu.bench.ownership import (
     MANIFEST_NAME,
     _top_level_bench_import_names,
@@ -33,6 +35,23 @@ def test_package_manifest_is_complete_and_sorted() -> None:
     )
     assert all(not entry.installed for entry in entries)
     assert all(set(entry.invocations) == {"path", "module"} for entry in entries)
+
+
+def test_packaged_fixtures_exactly_cover_generative_adapters() -> None:
+    fixture_root = resources.files("kairyu.bench.fixtures")
+    packaged = {
+        item.name
+        for item in fixture_root.iterdir()
+        if item.is_file() and item.name.endswith(".jsonl")
+    }
+    expected = {
+        adapter.fixture_name()
+        for adapter in all_adapters().values()
+        if isinstance(adapter, GenerativeAdapter)
+    }
+    expected.add("judge-calibration.jsonl")
+
+    assert packaged == expected
 
 
 def test_source_checkout_satisfies_ownership_contract() -> None:

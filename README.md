@@ -268,7 +268,7 @@ Everything heavier is opt-in:
 | `--extra otel` | opentelemetry-sdk | tracing spans (no-op without it) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU kernels/fabric (Linux-only markers; macOS `uv sync` skips them) |
 | `--extra flashattention4` | `flash-attn-4[cu13]==4.0.0b24` | opt-in FlashAttention-4 prefill kernels using the upstream-recommended CUDA 13 extra (Linux only; combine with `--extra gpu` for delegated FlashInfer decode; both are included by `Dockerfile.cuda`) |
-| `--extra bench` | datasets, huggingface_hub, pillow, h5py | `kairyu bench download` dataset fetching |
+| `--extra bench` | datasets/HF Hub, benchmark formats, progress UI, pinned IFEval scorer dependencies | installed benchmark-suite download and scoring |
 | `--extra bench-agentic` | mini-swe-agent, swebench, harbor | docker-based agentic benchmarks |
 | `--group dev` | pytest, ruff, transformers, openai, … | test suite + parity goldens |
 
@@ -1002,14 +1002,17 @@ returns `invoice_ledger_invalid` instead of a partial invoice.
 
 ## 8. Benchmarks
 
-`kairyu bench` runs the 11-benchmark Fugu-release quality suite against any deployed
-gateway — single models and orchestration tiers as scoreboard columns — and writes a
-dated, footnoted scoreboard:
+`kairyu bench` runs answer-quality suites against any deployed gateway — single
+models and orchestration tiers become scoreboard columns. The default is the
+11-benchmark Fugu-release suite; `--suite core` selects the deterministic
+GSM8K/MMLU/IFEval regression suite:
 
 ```bash
 uv run kairyu serve examples/deploy_multi_orchestrator.yaml &
 uv run kairyu bench run --base-url http://localhost:8000/v1 \
     --model m1 --model kairyu-auto --model kairyu-auto-max
+uv run kairyu bench run --suite core --smoke \
+    --base-url http://localhost:8000/v1 --model m1
 ```
 
 Datasets download to `~/.cache/kairyu/benchmarks` (never committed); unmet preconditions
@@ -1018,9 +1021,10 @@ completes. Subcommands: `bench run`, `bench download`, `bench report <run>`, `be
 and `bench entrypoints`. Full guide: [`docs/benchmarks.md`](docs/benchmarks.md).
 
 The wheel includes the reusable `kairyu.bench` library, public CLI, entrypoint
-manifest, and eight offline fixtures. Top-level `bench/*.py` developer/formal
-wrappers, `bench/results/`, and `tests/` remain checkout-only; their stable
-inventory and compatibility policy are in [`bench/README.md`](bench/README.md).
+manifest, 11 benchmark fixtures, and the judge-calibration fixture. Top-level
+`bench/*.py` developer/formal wrappers, `bench/results/`, and `tests/` remain
+checkout-only; their stable inventory and compatibility policy are in
+[`bench/README.md`](bench/README.md).
 
 ## 9. Development
 
@@ -1058,7 +1062,7 @@ reproduction script.
 | [`docs/goals/`](docs/goals/) | evidence-first goal contracts (multi-GPU, MoE engine, fleet scale, product surface) |
 | [`docs/deployment.md`](docs/deployment.md) | production deployment: DC topology, systemd, rolling updates, observability |
 | [`docs/gpu-runbook.md`](docs/gpu-runbook.md) | consolidated GPU-day execution plan (performance gates, kernel tuning, fabric bring-up) |
-| [`docs/benchmarks.md`](docs/benchmarks.md) | Fugu benchmark suite guide |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | installed benchmark suites guide |
 
 ## 11. License
 

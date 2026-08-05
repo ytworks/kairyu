@@ -22,7 +22,12 @@ def _pair(
         run_fingerprint=run_fingerprint,
         metrics={"score": 0.5, "n_total": 2},
         items=(
-            ItemResult(item_id="a", status="completed", score=1.0),
+            ItemResult(
+                item_id="a",
+                status="completed",
+                score=1.0,
+                details={"strict": True, "instructions": [True, True]},
+            ),
             ItemResult(item_id="b", status="completed", score=0.0),
         ),
         started_at="2026-07-03T00:00:00+00:00",
@@ -134,10 +139,13 @@ def test_sanitized_name_collisions_use_distinct_stable_hash_suffixes(tmp_path):
 
 def test_legacy_pair_without_run_fingerprint_remains_readable():
     legacy = _pair().model_dump(exclude={"run_fingerprint"})
+    for item in legacy["items"]:
+        item.pop("details", None)
 
     loaded = PairResult.model_validate(legacy)
 
     assert loaded.run_fingerprint is None
+    assert all(item.details is None for item in loaded.items)
 
 
 def test_pair_resume_requires_exact_expected_fingerprint(tmp_path):

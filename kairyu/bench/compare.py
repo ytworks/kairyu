@@ -31,6 +31,11 @@ DELTA_AGAINST = "Fugu"
 
 def build_comparison(scoreboard: dict) -> dict:
     """Scoreboard + published values -> a comparison document."""
+    from kairyu.bench.adapters import suite_info
+
+    definition = suite_info(scoreboard.get("suite", "fugu"))
+    if not definition.published_comparison:
+        raise ValueError(f"suite {definition.name!r} has no published comparison")
     targets = list(scoreboard.get("targets") or [])
     rows = []
     for benchmark in scoreboard.get("benchmarks") or []:

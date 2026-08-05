@@ -1,9 +1,8 @@
 """Pinned dataset revisions: reproducibility of every scoreboard cell.
 
-Unpinned datasets moved under the suite: `openai/mrcr` was corrected in December
-2025 and HLE's item count has shifted since release, so a score recorded against
-"whatever main was that day" is not comparable with Fugu's number or with an
-earlier kairyu run.
+Published datasets move: `openai/mrcr` was corrected in December 2025 and HLE's
+item count has shifted since release, so a score recorded against "whatever main
+was that day" is not comparable with a published number or an earlier run.
 """
 
 import re
@@ -41,9 +40,40 @@ def test_registry_adapters_are_pinned():
         assert all_adapters()[name].info.hf_revision == revision
 
 
+def test_list_checks_cache_readiness_against_all_declared_pins(monkeypatch, capsys):
+    from argparse import Namespace
+
+    from kairyu.bench.cache import BenchCache
+    from kairyu.bench.cli import _handle_list
+
+    seen: dict[str, dict] = {}
+
+    def record_ready(self, adapter, dataset=None, revision=None, sources=None):
+        seen[adapter] = {
+            "dataset": dataset,
+            "revision": revision,
+            "sources": sources,
+        }
+        return False
+
+    monkeypatch.setattr(BenchCache, "is_ready", record_ready)
+
+    assert _handle_list(Namespace(suite="core")) == 0
+    assert set(seen) == {"gsm8k", "mmlu", "ifeval"}
+    registry = all_adapters()
+    for name, pins in seen.items():
+        info = registry[name].info
+        assert pins == {
+            "dataset": info.hf_dataset,
+            "revision": info.hf_revision,
+            "sources": [list(source) for source in info.extra_sources],
+        }
+    assert "suite core (3 slots)" in capsys.readouterr().out
+
+
 def test_every_pinned_slot_declares_a_commit_sha():
     """`revision` is a git ref: a config name there simply cannot be fetched."""
-    for adapter in suite_adapters("fugu"):
+    for adapter in all_adapters().values():
         revision = adapter.info.hf_revision
         if revision is None:
             continue
@@ -81,7 +111,7 @@ def test_secondary_pins_match_the_adapters():
 
 
 def test_every_secondary_source_an_adapter_uses_is_registered():
-    for adapter in suite_adapters("fugu"):
+    for adapter in all_adapters().values():
         for source in adapter.info.extra_sources:
             assert source in SECONDARY_PINS.get(adapter.info.name, ()), (
                 f"{adapter.info.name} fetches {source[0]} without a registry entry"
@@ -204,7 +234,7 @@ def test_every_cache_backed_slot_has_a_revision():
     """
     unpinned = [
         adapter.info.name
-        for adapter in suite_adapters("fugu")
+        for adapter in all_adapters().values()
         if adapter.info.hf_dataset is not None
         and adapter.info.hf_revision is None
         and not adapter.info.agentic
@@ -235,8 +265,13 @@ def test_pins_do_not_mutate_the_class_attribute():
 
 
 @pytest.mark.parametrize("name", sorted(DATASET_PINS))
-def test_pinned_slots_exist_in_the_suite(name):
-    assert name in {adapter.info.name for adapter in suite_adapters("fugu")}
+def test_pinned_slots_exist_in_a_suite(name):
+    suite_slots = {
+        adapter.info.name
+        for suite in ("fugu", "core")
+        for adapter in suite_adapters(suite)
+    }
+    assert name in suite_slots
 
 
 def test_pin_change_moves_the_run_fingerprint(tmp_path, monkeypatch):

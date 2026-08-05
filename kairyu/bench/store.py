@@ -1,4 +1,4 @@
-"""Result store: bench/results/fugu/<run_id>/ with atomic per-pair JSON.
+"""Result store: bench/results/<suite>/<run_id>/ with atomic per-pair JSON.
 
 Resume contract: a pair JSON whose status is not "failed" is reused on the
 next run with the same run_id; failed pairs are always retried; --rerun

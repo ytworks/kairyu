@@ -2,5 +2,6 @@
 
 They keep the default CPU test suite and `--offline-fixtures` runs hermetic:
 every adapter's request-building and scoring paths execute without network,
-tokens, or the [bench] extra.
+target tokens, or a dataset cache. Adapter-owned scorer dependencies still
+fail closed when the ``bench`` extra is not installed.
 """

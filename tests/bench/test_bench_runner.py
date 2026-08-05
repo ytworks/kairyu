@@ -122,6 +122,39 @@ def test_selected_judge_templates_are_content_bound_to_adapter_identity(
     assert _run_fingerprint(_run_identity(config, [changed_identity])) != before
 
 
+def test_core_evaluators_are_content_bound_to_adapter_identity(tmp_path, monkeypatch):
+    from kairyu.bench.adapters import all_adapters
+    from kairyu.bench.adapters import base as adapter_base
+
+    cache = BenchCache(tmp_path / "cache")
+    adapters = all_adapters()
+    identities = [
+        _adapter_identity(adapters[name], cache, offline_fixtures=True)
+        for name in ("gsm8k", "mmlu", "ifeval")
+    ]
+    resources = {
+        entry["resource"]
+        for identity in identities
+        for entry in identity["evaluation_protocol"]["resources"]
+    }
+    assert {"gsm8k.py", "mmlu.py", "ifeval.py", "checker.py", "instructions.py"} <= resources
+
+    config = make_config(tmp_path, models=("m",), suite="core")
+    before = _run_fingerprint(_run_identity(config, identities))
+    original_read = adapter_base._read_evaluation_resource
+
+    def changed_read(package: str, resource: str) -> bytes:
+        content = original_read(package, resource)
+        return content + b"\n# changed scorer\n" if resource == "checker.py" else content
+
+    monkeypatch.setattr(adapter_base, "_read_evaluation_resource", changed_read)
+    changed_identities = [
+        _adapter_identity(adapters[name], cache, offline_fixtures=True)
+        for name in ("gsm8k", "mmlu", "ifeval")
+    ]
+    assert _run_fingerprint(_run_identity(config, changed_identities)) != before
+
+
 def test_production_judge_template_registry_is_complete():
     from kairyu.bench import judge_prompts
 
@@ -253,6 +286,18 @@ async def test_run_produces_scoreboard_for_all_targets(tmp_path, http_factory, c
     assert (run_dir / "run.json").exists()
     out = capsys.readouterr().out
     assert "| Benchmark |" in out  # table printed to stdout
+
+
+async def test_core_offline_runner_completes_all_three_pairs(tmp_path, http_factory):
+    config = make_config(tmp_path, models=("m",), suite="core")
+    assert await _runner(config, http_factory).run() == 0
+
+    store = ResultStore(tmp_path / "results", "test-run")
+    pairs = {
+        benchmark: store.load_pair(benchmark, "m")
+        for benchmark in ("gsm8k", "mmlu", "ifeval")
+    }
+    assert all(pair is not None and pair.status == "completed" for pair in pairs.values())
 
 
 async def test_pair_results_carry_item_evidence(tmp_path, http_factory):

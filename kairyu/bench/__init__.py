@@ -1,4 +1,4 @@
-"""Fugu-suite quality benchmarks: one command against a deployed gateway (G6 P-C1).
+"""Installed quality benchmark suites: one command against a deployed gateway.
 
 `kairyu bench run` downloads missing datasets, runs every benchmark of the
 suite against every target model (single engines and orchestrations alike —

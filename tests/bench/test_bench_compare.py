@@ -47,6 +47,14 @@ def test_every_suite_row_has_published_scores():
     assert set(PUBLISHED_SCORES) == set(FUGU_ROW_ORDER)
 
 
+def test_non_fugu_suite_has_no_published_comparison():
+    board = _scoreboard(**{"gsm8k": {"status": "completed", "score": 1.0}})
+    board["suite"] = "core"
+
+    with pytest.raises(ValueError, match="has no published comparison"):
+        build_comparison(board)
+
+
 def test_published_scores_are_percentages_with_fugu_present():
     for benchmark, scores in PUBLISHED_SCORES.items():
         assert "Fugu" in scores, benchmark
@@ -195,6 +203,32 @@ async def test_run_writes_the_comparison_next_to_the_scoreboard(tmp_path, http_f
     row = comparison["rows"][0]
     assert row["benchmark"] == "gpqa-diamond"
     assert row["published"]["Fugu"] == 95.5
+
+
+async def test_core_run_writes_three_rows_without_a_published_comparison(
+    tmp_path, http_factory, capsys
+):
+    from kairyu.bench.adapters import CORE_ROW_ORDER
+
+    config = make_config(tmp_path, models=("m",), suite="core")
+    runner = SuiteRunner(
+        config,
+        http_factory=http_factory,
+        probe_docker=lambda: (False, "t"),
+    )
+
+    assert await runner.run() == 0
+
+    run_dir = tmp_path / "results" / "test-run"
+    scoreboard = json.loads(
+        (run_dir / "scoreboard.json").read_text(encoding="utf-8")
+    )
+    assert scoreboard["benchmarks"] == list(CORE_ROW_ORDER)
+    assert not (run_dir / "comparison.json").exists()
+    assert not (run_dir / "comparison.md").exists()
+    output = capsys.readouterr().out
+    assert "# Core benchmark scoreboard" in output
+    assert "# Accuracy vs published" not in output
 
 
 async def test_comparison_is_printed_after_the_scoreboard(tmp_path, http_factory, capsys):

@@ -18,16 +18,23 @@ from pathlib import Path, PurePosixPath
 FIXTURE_FILES = (
     "charxiv-reasoning.jsonl",
     "gpqa-diamond.jsonl",
+    "gsm8k.jsonl",
     "hle.jsonl",
+    "ifeval.jsonl",
     "judge-calibration.jsonl",
     "livecodebench-pro.jsonl",
     "livecodebench.jsonl",
     "long-context-reasoning.jsonl",
+    "mmlu.jsonl",
     "mrcr-v2.jsonl",
     "scicode.jsonl",
 )
 FIXTURE_PREFIX = "kairyu/bench/fixtures/"
 LLMBAR_LICENSE = f"{FIXTURE_PREFIX}LLMBAR_LICENSE"
+IFEVAL_VENDOR_FILES = (
+    "kairyu/bench/_vendor/ifeval/LICENSE",
+    "kairyu/bench/_vendor/ifeval/NOTICE",
+)
 ENTRYPOINT_MANIFEST = "kairyu/bench/entrypoints.toml"
 CONSOLE_TARGET = "kairyu.entrypoints.cli:main"
 EXPECTED_ENTRYPOINTS = 64
@@ -81,6 +88,11 @@ def _inspect_wheel(wheel: Path) -> tuple[str, ...]:
             )
         if LLMBAR_LICENSE not in names:
             raise VerificationError(f"wheel omits {LLMBAR_LICENSE}")
+        missing_vendor_files = sorted(set(IFEVAL_VENDOR_FILES) - set(names))
+        if missing_vendor_files:
+            raise VerificationError(
+                f"wheel omits IFEval attribution files: {missing_vendor_files}"
+            )
         if ENTRYPOINT_MANIFEST not in names:
             raise VerificationError(f"wheel omits {ENTRYPOINT_MANIFEST}")
 
@@ -161,6 +173,9 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         "[json.loads(line) for name in names "
         "for line in fixtures.joinpath(name).read_text(encoding='utf-8').splitlines() "
         "if line.strip()]; "
+        "vendor=resources.files('kairyu.bench._vendor.ifeval'); "
+        "assert 'Apache License' in vendor.joinpath('LICENSE').read_text(encoding='utf-8'); "
+        "assert 'Google Research' in vendor.joinpath('NOTICE').read_text(encoding='utf-8'); "
         "manifest=resources.files('kairyu.bench').joinpath('entrypoints.toml'); "
         "assert manifest.read_text(encoding='utf-8').strip(); "
         "print(module)"
@@ -224,20 +239,25 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
                 f"{help_result.stdout!r}"
             )
 
-    list_code = (
-        "from kairyu.entrypoints.cli import main; main(['bench', 'list'])"
-    )
-    list_result = _isolated_run(
-        extracted,
-        dependency_site,
-        list_code,
-        cache_dir=scratch / "cache",
-    )
-    if "suite fugu (11 slots)" not in list_result.stdout:
-        raise VerificationError(
-            "`kairyu bench list` did not dispatch the packaged Fugu suite: "
-            f"{list_result.stdout!r}"
+    for command, expected in (
+        (["bench", "list"], "suite fugu (11 slots)"),
+        (["bench", "list", "--suite", "core"], "suite core (3 slots)"),
+    ):
+        list_code = (
+            "from kairyu.entrypoints.cli import main; "
+            f"main({command!r})"
         )
+        list_result = _isolated_run(
+            extracted,
+            dependency_site,
+            list_code,
+            cache_dir=scratch / "cache",
+        )
+        if expected not in list_result.stdout:
+            raise VerificationError(
+                f"`kairyu {' '.join(command)}` did not dispatch the packaged suite: "
+                f"{list_result.stdout!r}"
+            )
 
 
 def verify(repo: Path, *, uv: str, wheel: Path | None = None) -> Path:

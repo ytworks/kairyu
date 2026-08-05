@@ -24,11 +24,13 @@ from datetime import UTC, datetime
 
 import httpx
 
-from kairyu.bench.adapters import suite_adapters
+from kairyu.bench.adapters import suite_adapters, suite_info
 from kairyu.bench.adapters.base import (
     DownloadContext,
     RunContext,
+    adapter_cache_ready,
     cache_pins,
+    evaluation_protocol_identity,
     skipped_pair,
     utc_now,
 )
@@ -100,9 +102,12 @@ def _adapter_identity(adapter, cache: BenchCache, *, offline_fixtures: bool) -> 
             info.judge_template_name
         )
         identity["judge_protocol"] = judge_protocol_identity()
+    evaluation = evaluation_protocol_identity(info)
+    if evaluation is not None:
+        identity["evaluation_protocol"] = evaluation
     pins = cache_pins(info)
     identity = {**identity, "sources": pins["sources"]}
-    if offline_fixtures or not cache.is_ready(info.name, **pins):
+    if offline_fixtures or not adapter_cache_ready(adapter, cache):
         return {**identity, "unavailable": True}
     try:
         manifest = cache.read_manifest(info.name)
@@ -263,7 +268,7 @@ class SuiteRunner:
     def _download_missing(self, adapters, cache: BenchCache, ctx: RunContext) -> None:
         download_ctx = DownloadContext(cache=cache)
         for adapter in adapters:
-            if cache.is_ready(adapter.info.name, **cache_pins(adapter.info)):
+            if adapter_cache_ready(adapter, cache):
                 continue
             report = adapter.download(download_ctx)
             if report.status in ("gated", "unavailable", "extras_missing"):
@@ -401,10 +406,11 @@ class SuiteRunner:
         print()
         print(markdown)
 
-        comparison = build_comparison(scoreboard)
-        comparison_markdown = render_comparison_markdown(comparison)
-        store.save_comparison(comparison, comparison_markdown)
-        print(comparison_markdown)
+        if suite_info(config.suite).published_comparison:
+            comparison = build_comparison(scoreboard)
+            comparison_markdown = render_comparison_markdown(comparison)
+            store.save_comparison(comparison, comparison_markdown)
+            print(comparison_markdown)
 
         print(f"results: {path.parent}")
         return 1 if any(pair.status == "failed" for pair in pairs) else 0
