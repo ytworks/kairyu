@@ -94,6 +94,69 @@ Absolute timings and the profiled runner must not be used to claim a product
 speedup; reproduce any suspected regression on the owning benchmark before
 changing production behavior or a formal performance gate.
 
+### Nightly CPU performance series
+
+The main-only `.github/workflows/nightly-cpu-perf.yml` workflow reuses the
+same `scripts/cpu_microbench_gate.py` report once per night and on explicit
+manual dispatch.  It adds a cross-run smoke alarm without turning shared
+GitHub-hosted runner timings into formal performance evidence.  Only these
+eight higher-is-better, same-process ratios are hard-alert metrics:
+
+- scheduler FIFO-drain, indexed-removal, and priority-drain speedups;
+- radix-eviction speedup;
+- operation-queue add and abort elapsed-time speedups; and
+- sampler legacy and append-legacy speedups.
+
+For each metric, the current observation is compared with the median of at
+most the seven most recent preceding records anywhere in the chain with its
+exact compatibility fingerprint.  Intervening incompatible records are
+ignored, and the current observation is never part of its own baseline.  Five
+preceding compatible records are required; an unseen or younger fingerprint
+is reported as warmup and cannot raise a cross-run regression alert.  Returning
+to an exact prior fingerprint resumes its prior compatible history.  A hard
+alert occurs when the current value is at least 15% below that trailing median.
+Absolute legacy and optimized timings, router p50/p99, process-wire sizes and
+growth, and all other report fields remain report-only for the cross-run
+trailing-median comparison.  They can still fail the unchanged issue-#378
+same-run source gate and keep the workflow red.  A nightly alert must be
+reproduced on the owning benchmark before it supports a product-performance
+claim or a threshold change.
+
+Compatibility segmentation binds the report/methodology schema, benchmark
+inventory and fixed arguments, CPU-only environment controls, Python
+implementation and major/minor version, runner operating-system, architecture,
+and hosted-image class, metric paths and directions, and the comparator policy
+(15%, seven, and five).  A previously unseen methodology or runtime-class
+fingerprint therefore starts a new warmup segment.
+The measured source commit is provenance, not compatibility: including it in
+the segment key would prevent comparison across main commits.
+
+Every completed record uploads `report.json`, `series.jsonl`, and
+`comparison.json` from a directory under `RUNNER_TEMP`, with 90-day retention;
+an earlier infrastructure/input failure can retain only the files it safely
+produced and is never a history candidate.  The canonical JSONL series is
+append-only and SHA-256 chained.  Recovery scans this workflow's
+completed main-branch artifacts newest first, including artifacts from runs
+whose regression-enforcement step failed.  Expired, incomplete, malformed,
+non-finite, duplicate, non-canonical, or hash-chain-invalid candidates are
+skipped in full; they are never truncated into an apparently valid baseline.
+Only an authoritative empty artifact listing starts first-run warmup; if one
+or more eligible candidates exist but none validates, recovery fails closed
+instead of silently resetting the baseline.  Artifact-listing, attempt-metadata,
+and download transport failures also fail immediately.  The comparison command
+validates the existing report and writes the updated series and comparison
+before returning a regression status.  The workflow uploads those outputs
+together with the unchanged report using `always()` before propagating that
+status.
+If the reused issue-#378 absolute gate returns nonzero but emits a structurally
+valid report, the record is still appended with that source-gate outcome while
+the workflow remains red; dropping it would create a measurement blind spot.
+Only explicitly allowlisted performance failures receive that treatment.
+Fixed requests, repeats, benchmark configuration, protocol, shape, and
+structural-source mismatches are invalid and are not recorded.
+The seven-day pull-request reports produced by issue #378 do not seed this
+separate nightly chain.
+
 ### Target and credential migration
 
 Every benchmark target now uses one package-owned grammar:

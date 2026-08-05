@@ -955,6 +955,19 @@ radix eviction, engine operation queues, sampler penalty state, process-wire
 growth, and routing latency. Fixed short workloads use same-process legacy
 ratios and deliberately loose bounds, retain one diagnostic JSON report, and
 never promote shared-runner absolute timings to formal performance evidence.
+The same report now feeds a serialized, main-only nightly performance series.
+Eight explicitly allowlisted higher-is-better ratios are recorded in a
+canonical SHA-256-chained JSONL history and, after five exact-compatible
+warmup observations, compared with the median of at most seven preceding
+records. A drop of 15% or more is a binding smoke alert only after the report,
+updated series, and comparison have been retained. Exact workload, method,
+runtime class, and policy changes start a new segment; source commits remain
+provenance so consecutive main revisions stay comparable. Failed regression
+runs remain eligible history, while malformed or provenance-mismatched
+artifacts fail closed. Absolute timings, router latency, process-wire data,
+and sampler overlay diagnostics stay outside the cross-run comparator while
+the unchanged same-run source gate remains binding. This portable job makes no
+real-serving TTFT claim.
 
 Issue #364 is closed as a valid negative experiment. At clean measurement
 commit `ac589fb`, both `model` and `float32` passed A1, but both failed A2's
@@ -1070,6 +1083,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-06 — [design] Nightly CPU ratios gain trailing-median history
+- What: added a scheduled/manual main-only workflow that reuses the portable CPU microbenchmark report, records eight fixed same-process ratios in a canonical SHA-256-chained JSONL series, and alerts when any current ratio is at least 15% below the median of up to seven preceding records after five compatible warmup observations. Exact method/workload/runtime/policy segmentation, strict JSON and chain validation, attempt-specific Actions provenance, newest-valid recovery including failed regression runs, and upload-before-enforcement keep the baseline fail closed. Absolute timings, router/process-wire data, and sampler overlay measurements stay outside the cross-run comparator while the unchanged same-run source gate remains binding.
+- Why: one-shot CI artifacts could satisfy absolute smoke bounds while a persistent cross-commit regression went unnoticed. Same-process ratios are the portable signal available on shared CPU runners; the 15% alert intentionally remains a reproducibility prompt rather than formal product-performance or TTFT evidence, including for the observed noisy sampler-append ratio.
+- Refs: issue #377; `scripts/cpu_perf_series.py`; `.github/workflows/nightly-cpu-perf.yml`; `docs/design/issue-377-nightly-cpu-perf.md`; `tests/unit/test_cpu_perf_series.py`; `tests/unit/test_nightly_cpu_perf_workflow.py`
 
 ### 2026-08-06 — [amendment] IDE tool-call compatibility fails closed without rolling back public APIs
 - What: hardened the pending IDE integration so the single-call hint merges into one existing system message, Responses does not inject it twice, and native Llama/Qwen parsing is selected by the executed server-owned template rather than the request model name while request-controlled Llama syntax branches are rejected. JSON arguments reject duplicate keys and non-finite values; Qwen XML additionally rejects duplicate parameters, residual markup, and violations of the supported top-level type/required/additional-property constraints. Only supported final upstreams receive typed `parallel_tool_calls`. The documented legacy `SamplingParams.extra_args.parallel_tool_calls` path remains supported when it is the sole source, all new public dataclass/function parameters are appended to preserve positional binding, and the unauthenticated Docker examples publish on host loopback only. Documentation now scopes multimodal and schema claims to the implemented IDE boundary.
