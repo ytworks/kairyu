@@ -1,4 +1,4 @@
-"""CPU/structured and CUDA sampling share one canonical RNG (issue #353)."""
+"""CPU/structured and CUDA sampling share one full-width RNG (#353/#354)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,10 @@ import torch
 
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import EngineSampling, mix_seed
-from kairyu.kernels.sampling_gpu import stateless_gumbel_argmax
+from kairyu.kernels.sampling_gpu import (
+    _stateless_random_words,
+    stateless_gumbel_argmax,
+)
 
 pytestmark = pytest.mark.gpu
 
@@ -96,6 +99,31 @@ def test_stateless_gumbel_primitive_matches_on_cpu_and_cuda() -> None:
         assert cpu.device.type == "cpu"
         assert cuda.device.type == "cuda"
         assert int(cuda.cpu()) == int(cpu)
+
+
+def test_full_width_counter_words_match_exactly_on_cpu_and_cuda() -> None:
+    offsets = torch.tensor([0, 1, 2, 3, 7, 31, 257, 151_935], dtype=torch.int64)
+
+    for seed in (0, 1, 1 << 32, 1 << 48, 1 << 63, (1 << 64) - 1):
+        cpu = _stateless_random_words(offsets, seed)
+        cuda = _stateless_random_words(offsets.cuda(), seed)
+        assert torch.equal(cuda.cpu(), cpu)
+
+
+def test_gumbel_primitive_keeps_result_on_cuda_without_scalar_sync() -> None:
+    from torch.profiler import ProfilerActivity, profile
+
+    log_weights = torch.log_softmax(_logits().cuda(), dim=-1)
+    stateless_gumbel_argmax(log_weights, mix_seed(354, 0))
+
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as trace:
+        token = stateless_gumbel_argmax(log_weights, mix_seed(354, 1))
+
+    scalar_reads = sum(
+        event.count for event in trace.key_averages() if event.key == "aten::_local_scalar_dense"
+    )
+    assert token.device.type == "cuda"
+    assert scalar_reads == 0
 
 
 def test_request_derived_seed_matches_across_cpu_and_cuda() -> None:
@@ -280,7 +308,7 @@ def test_raw_logprobs_are_unchanged_while_selected_tokens_match() -> None:
     )
 
 
-def test_cuda_canonical_gumbel_trajectory_keeps_its_existing_sequence() -> None:
+def test_cuda_canonical_gumbel_trajectory_uses_full_width_issue_354_sequence() -> None:
     sampling = EngineSampling(
         temperature=0.64,
         min_p=0.02,
@@ -296,4 +324,4 @@ def test_cuda_canonical_gumbel_trajectory_keeps_its_existing_sequence() -> None:
         for position in range(12)
     ]
 
-    assert actual == [230, 254, 226, 248, 252, 251, 256, 248, 238, 256, 227, 252]
+    assert actual == [228, 240, 237, 231, 254, 247, 247, 253, 244, 231, 232, 229]

@@ -271,33 +271,43 @@ explicit `min_tokens > max_tokens`, matching the compatible request contract.
 
 **Determinism (amended)**: per-request base seed = `sampling.seed` or
 **sha256(request_id) → 63-bit int** (never Python `hash()` — randomized per
-process, and D6 splits processes); per-position generator seed =
-splitmix64-style mix of (base_seed, position) — plain addition collides across
-adjacent user seeds. Scope of the claim: the sampler *preserves* TP rank
+process, and D6 splits processes); the splitmix64-style mix of
+(base_seed, position) retains its complete unsigned 64-bit output — plain
+addition collides across adjacent user seeds. Scope of the claim: the sampler
+*preserves* TP rank
 agreement given bitwise-identical logits per rank (a collectives/runner
 property); it cannot repair divergent logits. CPU, structured-output, and CUDA
 paths use one stateless Gumbel-max algorithm:
 each uniform is a pure function of `(base_seed, output_position, vocab_index)`.
+The vocabulary index is first permuted by an odd 64-bit counter stride, XORed
+with every per-position seed bit, and avalanched by a SplitMix64 finalizer.
+PyTorch's signed-int64 wraparound plus explicitly masked logical shifts preserve
+the unsigned word on CPU and CUDA. A 52-bit mantissa is then mapped by its
+float64 midpoint to the strictly open interval `(0, 1)`, giving the flipped
+Gumbel winning tail a minimum uniform of `2^-53` instead of `2^-25`.
 Changing only the sampling execution path therefore does not change the random
 stream, and representative fixed-logit CPU/CUDA parity is a binding regression
-gate. Ordinary fp32 filtering and transcendental operations may differ by a
-few ulps across devices, so candidates at a min-p/top-p/top-k support boundary
-or a near-tied final Gumbel score are not claimed to have a cross-device token
-guarantee.
+gate. Ordinary fp32 filtering and the float64 Gumbel transcendental operations
+may differ by a few ulps across devices, so candidates at a min-p/top-p/top-k
+support boundary or a near-tied final Gumbel score are not claimed to have a
+cross-device token guarantee.
 
-**GPU amendment (2026-07-27, issue #206; amended 2026-08-05, issue #353):**
-grammar-free CUDA sampling keeps the reviewed processing order and the original
-stateless Gumbel-max sequence. CPU and structured-output sampling now use that
-same canonical tensor draw instead of `torch.multinomial`; their prior seeded
-stochastic sequence intentionally changes. Replay, TP rank execution, batch
-reordering, and CPU reproduction need no host-owned generator offset. Greedy
-sampling (and therefore spec ≡ greedy) is unchanged. Device penalties include
-committed host history plus uncommitted device scalars. Logprobs remain raw and
-temperature-independent. The CPU implementation skips degenerate-fallback
-construction on positive finite support and retains at most four immutable
-vocabulary-offset tensors up to 1,048,576 entries; concurrent cold misses may
-construct duplicate temporary tensors. CUDA retains the original branchless
-operations and sequence.
+**GPU amendment (2026-07-27, issue #206; amended 2026-08-05, issues #353 and
+#354):** grammar-free CUDA sampling keeps the reviewed processing order. CPU and
+structured-output sampling use the same canonical tensor draw instead of
+`torch.multinomial`. Issue #353 intentionally changed their prior seeded
+stochastic sequence while retaining CUDA's then-current sequence; issue #354
+then intentionally replaces that common CPU/CUDA stochastic sequence with the
+full-width keyed counter and 52-bit open uniform described above. Same-version
+replay, TP rank execution, batch reordering, and CPU reproduction need no
+host-owned generator offset. Greedy sampling (and therefore spec ≡ greedy) is
+unchanged. Device penalties include committed host history plus uncommitted
+device scalars. Logprobs remain raw and temperature-independent. The CPU
+implementation skips degenerate-fallback construction on positive finite
+support and retains at most four immutable vocabulary-offset tensors up to
+1,048,576 entries; concurrent cold misses may construct duplicate temporary
+tensors. CUDA retains branchless device execution and returns the selected token
+without a host-visible scalar read.
 
 **Incremental penalty-state amendment (2026-07-27, issue #216):** a
 penalty-active request lazily allocates one dense row for its logits
