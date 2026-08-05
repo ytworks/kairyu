@@ -23,7 +23,6 @@ from types import MethodType
 import torch
 from torch import nn
 
-from kairyu.engine.core.logits_dtype import validate_logits_dtype
 from kairyu.engine.core.quant_config import (
     QuantConfig,
     QuantMethod,
@@ -585,7 +584,6 @@ def build_tp_model(
     sequence_parallel: bool = False,
     linear_capabilities=None,
     linear_selection_policy=None,
-    logits_dtype: str = "model",
 ):
     """Rank-sharded DenseDecoder: tp_view config + canonical TP/SP bindings.
 
@@ -593,7 +591,6 @@ def build_tp_model(
     places the whole model (bf16 on-device for GPU, fp32 on host for CPU); the
     defaults keep every CPU test byte-for-byte unchanged.
     """
-    logits_dtype = validate_logits_dtype(logits_dtype)
     import json
     from pathlib import Path
 
@@ -623,7 +620,6 @@ def build_tp_model(
             selection_policy=linear_selection_policy,
         ),
         dtype=dtype,
-        logits_dtype=logits_dtype,
     )
     # Bind execution behavior before loading. Parameter-owning modules stay at
     # their HF/checkpoint paths, so post-bind state enumeration and canonical

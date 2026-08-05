@@ -13,7 +13,6 @@ import torch
 from torch import nn
 
 from kairyu.models.llama import DenseDecoder
-from kairyu.models.logits import project_logits
 
 
 def stage_layer_bounds(num_layers: int, num_stages: int, stage: int) -> tuple[int, int]:
@@ -44,7 +43,6 @@ class PpStageModel(nn.Module):
         self.embed_tokens = full.model.embed_tokens if self.is_first else None
         self.norm = full.model.norm if self.is_last else None
         self.lm_head = full.lm_head if self.is_last else None
-        self.logits_dtype = full.logits_dtype
 
     @torch.no_grad()
     def forward_stage(
@@ -79,9 +77,7 @@ class PpStageModel(nn.Module):
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:
         if not self.is_last:  # pragma: no cover - guarded by callers
             raise RuntimeError("logits only exist on the final pipeline stage")
-        if self.logits_dtype == "model":
-            return self.lm_head(hidden)
-        return project_logits(self.lm_head, hidden, self.logits_dtype)
+        return self.lm_head(hidden)
 
 
 def pp_greedy_generate(

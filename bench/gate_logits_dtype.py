@@ -1,9 +1,11 @@
-"""Assemble the fail-closed paired A1/A2 logits-dtype experiment (#364).
+"""Verify the fail-closed paired A1/A2 logits-dtype experiment (#364).
 
 Inputs are four self-contained formal gate artifacts: the ``model`` and
-``float32`` arms of G2 A1 and G2 A2.  A non-positive quality result is valid,
-but incomplete, mixed-provenance, mislabelled, or independently failing arms
-make this assembler fail.
+``float32`` arms of G2 A1 and G2 A2.  A negative formal result is valid
+experimental evidence when the retained inputs independently reproduce that
+result.  Incomplete, mixed-provenance, mislabelled, or irreproducible evidence
+still fails closed.  Use ``--assert-feature-ready`` when a caller specifically
+requires every formal readiness criterion to pass.
 """
 
 from __future__ import annotations
@@ -34,10 +36,42 @@ _ARM_CONFIG_FIELDS = frozenset(
     {"logits_dtype_requested", "logits_dtype_resolved"}
 )
 _REQUIRED_POSITIVE_CONFIG_FIELDS = ("num_pages", "page_size")
+_EVIDENCE_SCOPE = "evidence"
+_FEATURE_SCOPE = "feature_readiness"
 
 
-def _record(checks: list[dict[str, Any]], name: str, passed: bool, detail: str) -> None:
-    checks.append({"name": name, "passed": bool(passed), "detail": detail})
+def _record(
+    checks: list[dict[str, Any]],
+    name: str,
+    passed: bool,
+    detail: str,
+    *,
+    scope: str = _EVIDENCE_SCOPE,
+) -> None:
+    checks.append(
+        {
+            "name": name,
+            "passed": bool(passed),
+            "detail": detail,
+            "scope": scope,
+        }
+    )
+
+
+def _outcome(checks: list[dict[str, Any]]) -> tuple[bool, bool]:
+    """Return independent evidence-integrity and feature-readiness outcomes."""
+
+    evidence_checks = [check for check in checks if check.get("scope") == _EVIDENCE_SCOPE]
+    feature_checks = [check for check in checks if check.get("scope") == _FEATURE_SCOPE]
+    evidence_valid = bool(evidence_checks) and all(
+        check.get("passed") is True for check in evidence_checks
+    )
+    feature_ready = (
+        evidence_valid
+        and bool(feature_checks)
+        and all(check.get("passed") is True for check in feature_checks)
+    )
+    return evidence_valid, feature_ready
 
 
 def _file_sha256(path: Path) -> str:
@@ -178,88 +212,167 @@ def _arm_configs(
     return continuation, teachers
 
 
-def _validate_arm(
-    artifact: dict[str, Any], gate: str, arm: str
-) -> list[dict[str, Any]]:
+def _validate_arm(artifact: dict[str, Any], gate: str, arm: str) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     expected_gate = f"G2 {gate}"
     _record(
         checks,
-        f"{gate} {arm} carries a passing formal gate artifact",
-        artifact.get("gate") == expected_gate and artifact.get("verdict") == "PASS",
-        f"gate={artifact.get('gate')!r}, verdict={artifact.get('verdict')!r}",
+        f"{gate} {arm} carries a recognized formal gate envelope",
+        artifact.get("schema") == 1 and artifact.get("gate") == expected_gate,
+        f"schema={artifact.get('schema')!r}, gate={artifact.get('gate')!r}",
     )
     evidence = artifact.get("evidence") or {}
-    if gate == "A1":
-        recomputed = gate_a1.evaluate(
-            evidence.get("continuations") or {},
-            evidence.get("reference") or {},
-            [evidence.get("teacher_tp1") or {}, evidence.get("teacher_tp2") or {}],
-        )
-        comparisons = None
-    else:
-        recomputed, comparisons = gate_a2.evaluate(
-            evidence.get("reference") or {},
-            [
-                evidence.get("teacher_tp2") or {},
-                evidence.get("teacher_tp4") or {},
-                evidence.get("teacher_tp8") or {},
-            ],
-        )
-    failed = [row["name"] for row in recomputed if not row["passed"]]
+    recomputed: list[dict[str, Any]] = []
+    comparisons: dict[str, Any] | None = None
+    replay_error: str | None = None
+    try:
+        if gate == "A1":
+            recomputed = gate_a1.evaluate(
+                evidence.get("continuations") or {},
+                evidence.get("reference") or {},
+                [
+                    evidence.get("teacher_tp1") or {},
+                    evidence.get("teacher_tp2") or {},
+                ],
+            )
+        else:
+            recomputed, comparisons = gate_a2.evaluate(
+                evidence.get("reference") or {},
+                [
+                    evidence.get("teacher_tp2") or {},
+                    evidence.get("teacher_tp4") or {},
+                    evidence.get("teacher_tp8") or {},
+                ],
+            )
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+        replay_error = f"{type(exc).__name__}: {exc}"
+
+    formal_ready = bool(recomputed) and all(row.get("passed") is True for row in recomputed)
+    expected_verdict = "PASS" if formal_ready else "FAIL"
+    failed = [str(row.get("name")) for row in recomputed if row.get("passed") is not True]
     _record(
         checks,
-        f"{gate} {arm} independently recomputes its formal safety gate",
-        not failed,
-        "PASS" if not failed else f"failed={failed}",
+        f"{gate} {arm} formal checks replay without an analysis error",
+        replay_error is None and bool(recomputed),
+        "replay completed" if replay_error is None else replay_error,
     )
+    _record(
+        checks,
+        f"{gate} {arm} retains the exact independently replayed formal checks",
+        bool(recomputed) and artifact.get("checks") == recomputed,
+        f"retained={len(artifact.get('checks') or [])}, replayed={len(recomputed)}",
+    )
+    _record(
+        checks,
+        f"{gate} {arm} reported formal verdict matches independent replay",
+        artifact.get("verdict") == expected_verdict,
+        f"reported={artifact.get('verdict')!r}, replayed={expected_verdict!r}",
+    )
+    formal_code = artifact.get("code") or {}
+    _record(
+        checks,
+        f"{gate} {arm} formal analysis commit is clean and recorded",
+        isinstance(formal_code.get("commit"), str)
+        and bool(formal_code["commit"])
+        and formal_code.get("dirty") is False,
+        f"formal_analysis={formal_code}",
+    )
+    _record(
+        checks,
+        f"{gate} {arm} independently replays all formal readiness criteria",
+        formal_ready,
+        "PASS" if formal_ready else f"failed={failed}",
+        scope=_FEATURE_SCOPE,
+    )
+
     if gate == "A1":
         reference = (evidence.get("reference") or {}).get("reference") or {}
-        noise_floor = gate_a2._reference_noise_floor(reference)
-        tie_gap = max(
-            gate_a2._MIN_TIE_GAP,
-            noise_floor["max_gap_at_self_disagreement"],
-        )
-        raw_scores = {
-            tp: gate_a2._recompute_hf_score(
-                evidence.get(f"teacher_tp{tp}") or {},
-                reference,
-                noise_floor["raw_self_agreement_rate"],
-                tie_gap,
+        raw_scores: dict[int, dict[str, Any]] = {}
+        raw_error: str | None = None
+        try:
+            noise_floor = gate_a2._reference_noise_floor(reference)
+            tie_gap = max(
+                gate_a2._MIN_TIE_GAP,
+                noise_floor["max_gap_at_self_disagreement"],
             )
-            for tp in _A1_TP
-        }
+            raw_scores = {
+                tp: gate_a2._recompute_hf_score(
+                    evidence.get(f"teacher_tp{tp}") or {},
+                    reference,
+                    noise_floor["raw_self_agreement_rate"],
+                    tie_gap,
+                )
+                for tp in _A1_TP
+            }
+        except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+            raw_error = f"{type(exc).__name__}: {exc}"
+
+        raw_consistent = bool(raw_scores)
+        consistency_details = []
+        for tp, score in raw_scores.items():
+            result = evidence.get(f"teacher_tp{tp}") or {}
+            reported_agreement = result.get("agreement") or {}
+            reported_tolerance = result.get("logprob_tolerance") or {}
+            agreement_verdict = (
+                "PASS"
+                if score.get("complete") is True
+                and score.get("rate", 0.0) >= score.get("threshold", 1.0)
+                else "FAIL"
+            )
+            tolerance_verdict = (
+                "PASS"
+                if not score.get("substantive")
+                and not score.get("missing_logprobs")
+                and score.get("max_abs_logprob_delta", math.inf) <= gate_a2._MAX_LOGPROB_DELTA
+                else "FAIL"
+            )
+            row_consistent = (
+                reported_agreement.get("positions") == score.get("positions")
+                and reported_agreement.get("agreed") == score.get("agreed")
+                and reported_agreement.get("threshold") == score.get("threshold")
+                and reported_agreement.get("verdict") == agreement_verdict
+                and reported_tolerance.get("substantive") == len(score.get("substantive") or [])
+                and reported_tolerance.get("missing_samples") == score.get("missing_logprobs")
+                and reported_tolerance.get("agreeing_positions_max_abs_delta")
+                == round(float(score.get("max_abs_logprob_delta", math.inf)), 5)
+                and reported_tolerance.get("within_delta_bound")
+                is (score.get("max_abs_logprob_delta", math.inf) <= gate_a2._MAX_LOGPROB_DELTA)
+                and reported_tolerance.get("expected_samples") == score.get("agreed")
+                and reported_tolerance.get("collected_samples")
+                == score.get("agreed") - len(score.get("missing_logprobs") or [])
+                and reported_tolerance.get("verdict") == tolerance_verdict
+            )
+            raw_consistent = raw_consistent and row_consistent
+            consistency_details.append(f"TP{tp}={'match' if row_consistent else 'mismatch'}")
+        _record(
+            checks,
+            f"{gate} {arm} raw rows reproduce the retained agreement summaries",
+            raw_error is None and raw_consistent,
+            raw_error or ", ".join(consistency_details),
+        )
         raw_pass = all(
             score["verdict"] == "PASS"
             and score["max_abs_logprob_delta"] <= gate_a2._MAX_LOGPROB_DELTA
             for score in raw_scores.values()
-        )
+        ) and set(raw_scores) == set(_A1_TP)
         _record(
             checks,
             f"{gate} {arm} raw rows recompute agreement and binding logprob tolerance",
             raw_pass,
-            ", ".join(
-                f"TP{tp}={score['verdict']}, max_delta="
-                f"{score['max_abs_logprob_delta']:.6f}"
+            raw_error
+            or ", ".join(
+                f"TP{tp}={score['verdict']}, max_delta={score['max_abs_logprob_delta']:.6f}"
                 for tp, score in raw_scores.items()
             ),
+            scope=_FEATURE_SCOPE,
         )
     if gate == "A2":
-        expected_comparisons = {
-            "tp2_vs_hf",
-            "tp4_vs_hf",
-            "tp8_vs_hf",
-            "tp4_vs_tp2",
-            "tp8_vs_tp2",
-        }
-        comparison_pass = set(comparisons or {}) == expected_comparisons and all(
-            row.get("verdict") == "PASS" for row in (comparisons or {}).values()
-        )
         _record(
             checks,
-            f"{gate} {arm} recomputes every HF and direct-TP comparison",
-            comparison_pass,
-            f"comparisons={sorted((comparisons or {}).keys())}",
+            f"{gate} {arm} retains the exact independently replayed comparisons",
+            comparisons is not None and artifact.get("tp_comparisons") == comparisons,
+            f"retained={sorted((artifact.get('tp_comparisons') or {}).keys())}, "
+            f"replayed={sorted((comparisons or {}).keys())}",
         )
 
     continuation, teachers = _arm_configs(artifact, gate)
@@ -276,21 +389,42 @@ def _validate_arm(
     return checks
 
 
-def _code_rows(artifact: dict[str, Any], gate: str) -> list[dict[str, Any]]:
+def _measurement_code_rows(artifact: dict[str, Any], gate: str) -> list[dict[str, Any]]:
+    """Return only code that produced measurements, not analysis commits."""
+
     evidence = artifact.get("evidence") or {}
-    reference_code = (
-        ((evidence.get("reference") or {}).get("reference_runtime") or {}).get("code")
-        or {}
-    )
+    reference_code = ((evidence.get("reference") or {}).get("reference_runtime") or {}).get(
+        "code"
+    ) or {}
     continuation, teachers = _arm_configs(artifact, gate)
     rows = [
-        artifact.get("code") or {},
         reference_code,
         *(config.get("code") or {} for config in teachers.values()),
     ]
     if gate == "A1":
         rows.append(continuation.get("code") or {})
     return rows
+
+
+def _measurement_provenance(
+    artifacts: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize measurement provenance without folding in analysis code."""
+
+    rows = [
+        code
+        for (gate, _arm), artifact in artifacts.items()
+        for code in _measurement_code_rows(artifact, gate)
+    ]
+    commits = {code.get("commit") for code in rows}
+    clean = bool(rows) and all(code.get("dirty") is False for code in rows)
+    unique_commit = next(iter(commits)) if len(commits) == 1 and None not in commits else None
+    return {
+        "commit": unique_commit,
+        "dirty": not clean,
+        "observations": len(rows),
+        "commits": sorted(str(commit) for commit in commits),
+    }
 
 
 def _delta_summary(values: list[float]) -> dict[str, float | int | None]:
@@ -538,33 +672,26 @@ def evaluate(
                 "logits_dtype_requested/logits_dtype_resolved",
             )
 
-    code_rows = [
-        code
-        for (gate, _arm), artifact in artifacts.items()
-        for code in _code_rows(artifact, gate)
-    ]
-    commits = {code.get("commit") for code in code_rows}
-    same_clean_commit = (
-        len(commits) == 1
-        and None not in commits
-        and code_rows
-        and all(code.get("dirty") is False for code in code_rows)
-    )
+    measurement = _measurement_provenance(artifacts)
+    measurement_commits = set(measurement["commits"])
+    same_clean_commit = measurement["commit"] is not None and measurement["dirty"] is False
     _record(
         checks,
-        "all four arms and both shared references use one clean commit",
+        "all four arms and both shared references use one clean measurement commit",
         same_clean_commit,
-        f"commits={sorted(str(commit) for commit in commits)}, rows={len(code_rows)}",
+        f"measurement_commits={measurement['commits']}, rows={measurement['observations']}",
     )
     if assembly_code is not None:
         _record(
             checks,
-            "paired assembler itself uses the same clean measurement commit",
-            assembly_code.get("dirty") is False
-            and assembly_code.get("commit") in commits
-            and len(commits) == 1,
-            f"assembler={assembly_code}, measurement_commits="
-            f"{sorted(str(commit) for commit in commits)}",
+            "paired analysis commit is independently recorded and clean",
+            isinstance(assembly_code.get("commit"), str)
+            and bool(assembly_code["commit"])
+            and assembly_code.get("dirty") is False,
+            f"analysis={assembly_code}, measurement_commits="
+            f"{measurement['commits']}, "
+            "same_commit="
+            f"{assembly_code.get('commit') in measurement_commits}",
         )
 
     summaries: dict[str, Any] = {}
@@ -664,6 +791,14 @@ def main() -> int:
     parser.add_argument("--a2-model", type=Path, required=True)
     parser.add_argument("--a2-float32", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--assert-feature-ready",
+        action="store_true",
+        help=(
+            "exit non-zero unless every formal A1/A2 readiness criterion "
+            "passes; by default a valid negative experiment exits zero"
+        ),
+    )
     args = parser.parse_args()
     paths = {
         "a1_model": args.a1_model,
@@ -677,13 +812,31 @@ def main() -> int:
         **artifacts,
         assembly_code=assembly_code,
     )
-    passed = all(check["passed"] for check in checks)
+    evidence_valid, feature_ready = _outcome(checks)
+    disposition = (
+        "invalid_evidence" if not evidence_valid else "ready" if feature_ready else "withdrawn"
+    )
+    measurement_code = _measurement_provenance(
+        {
+            ("A1", "model"): artifacts["a1_model"],
+            ("A1", "float32"): artifacts["a1_float32"],
+            ("A2", "model"): artifacts["a2_model"],
+            ("A2", "float32"): artifacts["a2_float32"],
+        }
+    )
     payload = {
-        "schema": 1,
+        "schema": 2,
         "gate": "issue #364 paired logits dtype A1/A2",
-        "verdict": "PASS" if passed else "FAIL",
+        "verdict": "PASS" if feature_ready else "FAIL",
+        "evidence_valid": evidence_valid,
+        "feature_ready": feature_ready,
+        "disposition": disposition,
         "quality_classification": quality,
-        "code": assembly_code,
+        "measurement_code": measurement_code,
+        "analysis_code": assembly_code,
+        "source_formal_analysis_codes": {
+            name: artifact.get("code") for name, artifact in artifacts.items()
+        },
         "checks": checks,
         "paired_tp_summaries": summaries,
         "source_files": {
@@ -698,15 +851,22 @@ def main() -> int:
             {
                 "gate": payload["gate"],
                 "verdict": payload["verdict"],
+                "evidence_valid": evidence_valid,
+                "feature_ready": feature_ready,
+                "disposition": disposition,
                 "quality_classification": quality,
             },
             indent=2,
         )
     )
     for check in checks:
-        print(f"[{'PASS' if check['passed'] else 'FAIL'}] {check['name']}: {check['detail']}")
+        print(
+            f"[{'PASS' if check['passed'] else 'FAIL'}] "
+            f"[{check['scope']}] {check['name']}: {check['detail']}"
+        )
     print(f"written: {args.out}")
-    return 0 if passed else 1
+    succeeded = evidence_valid and (feature_ready if args.assert_feature_ready else True)
+    return 0 if succeeded else 1
 
 
 if __name__ == "__main__":

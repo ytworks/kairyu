@@ -507,33 +507,16 @@ def _teacher_forced_waves(reference: dict):
 
 
 def _engine_next_tokens(
-    model_path: str,
-    tp: int,
-    reference: dict,
-    num_pages: int,
-    page_size: int,
-    *,
-    logits_dtype: str = "model",
-) -> tuple[dict[str, list], dict[str, str]]:
+    model_path: str, tp: int, reference: dict, num_pages: int, page_size: int
+) -> dict[str, list]:
     """One token per teacher-forced prefix, through the ordinary request path."""
-    from bench.parity_tp import _logits_dtype_identity, _real_runner
+    from bench.parity_tp import _real_runner
     from kairyu.engine.core.engine_core import EngineCore
     from kairyu.engine.core.radix_kv import RadixKVCache
     from kairyu.engine.core.sampling_types import EngineSampling
     from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 
-    inner, teardown = _real_runner(
-        model_path,
-        tp,
-        num_pages,
-        page_size,
-        logits_dtype=logits_dtype,
-    )
-    try:
-        logits_identity = _logits_dtype_identity(inner, logits_dtype)
-    except BaseException:
-        teardown()
-        raise
+    inner, teardown = _real_runner(model_path, tp, num_pages, page_size)
     # EngineCore.step() returns finished request ids; the SampledToken that
     # carries the logprobs is local to it and discarded. Wrapping the runner is
     # the only seam that sees them without changing the engine.
@@ -567,22 +550,13 @@ def _engine_next_tokens(
     for request_id, (name, _position) in sorted(index.items(), key=lambda kv: kv[1]):
         # a request that produced nothing is a disagreement, not a skip
         predicted[name].append(sampled.get(request_id))
-    return predicted, logits_identity
+    return predicted
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--tp", type=int, default=1)
-    parser.add_argument(
-        "--logits-dtype",
-        choices=("model", "float32"),
-        default="model",
-        help=(
-            "output dtype of the final logits projection; 'model' preserves "
-            "the model compute dtype and 'float32' is the opt-in treatment arm"
-        ),
-    )
     parser.add_argument("--num-prompts", type=int, default=16)
     parser.add_argument("--positions", type=int, default=16, help="teacher-forced steps")
     parser.add_argument("--num-pages", type=int, default=2048)
@@ -673,13 +647,8 @@ def main() -> int:
     # the tolerance is the reference's own instability, never tighter
     tie_gap = max(_MIN_TIE_GAP, noise_floor["max_gap_at_self_disagreement"])
 
-    predicted, logits_identity = _engine_next_tokens(
-        args.model_path,
-        args.tp,
-        reference,
-        args.num_pages,
-        args.page_size,
-        logits_dtype=args.logits_dtype,
+    predicted = _engine_next_tokens(
+        args.model_path, args.tp, reference, args.num_pages, args.page_size
     )
 
     total = 0
@@ -806,13 +775,11 @@ def main() -> int:
             "reference_provenance": provenance,
             "code": _code_provenance(),
             "tensor_parallel_size": args.tp,
-            "num_prompts": len(reference),
-            "positions": args.positions,
             "num_pages": args.num_pages,
             "page_size": args.page_size,
+            "num_prompts": len(reference),
+            "positions": args.positions,
             "dtype": "bfloat16" if profile.arch == "cuda" else "float32",
-            "logits_dtype_requested": logits_identity["requested"],
-            "logits_dtype_resolved": logits_identity["resolved"],
             "hardware": {
                 "arch": profile.arch,
                 "device_name": profile.device_name,

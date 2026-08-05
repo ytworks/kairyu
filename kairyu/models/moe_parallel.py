@@ -21,7 +21,6 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from kairyu.engine.core.logits_dtype import validate_logits_dtype
 from kairyu.models.moe import (
     apply_nvfp4_moe_global_input_scales,
     route_experts,
@@ -1669,7 +1668,6 @@ def build_ep_model(
     linear_capabilities=None,
     linear_selection_policy=None,
     attention_dp: bool = False,
-    logits_dtype: str = "model",
 ) -> tuple[nn.Module, object, ExpertParallelLoadInfo]:
     """Build one real Qwen3-MoE rank without materializing remote experts.
 
@@ -1682,7 +1680,6 @@ def build_ep_model(
     is constructed and loaded. The complete checkpoint name/shape contract is
     validated on every rank before any request can execute.
     """
-    logits_dtype = validate_logits_dtype(logits_dtype)
 
     from kairyu.engine.core.quant_config import (
         QuantMethod,
@@ -1775,7 +1772,6 @@ def build_ep_model(
             attention_backend=attention_backend,
             linear_factory=factory,
             dtype=dtype,
-            logits_dtype=logits_dtype,
         )
     for layer_index, layer in enumerate(model.model.layers):
         if quant.method is QuantMethod.NVFP4:

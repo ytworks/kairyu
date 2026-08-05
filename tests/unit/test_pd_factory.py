@@ -440,35 +440,6 @@ def test_generation_config_mode_reaches_both_pd_model_loads(
     assert modes == ["vllm", "vllm"]
 
 
-def test_logits_dtype_reaches_both_pd_model_loads(
-    model_dir,
-    monkeypatch,
-):
-    from kairyu.engine.core.pd_factory import build_pd_coordinator
-    from kairyu.models import loader as loader_module
-
-    original = loader_module.load_model
-    modes = []
-
-    def recording_load_model(*args, **kwargs):
-        modes.append(kwargs.get("logits_dtype"))
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(loader_module, "load_model", recording_load_model)
-
-    coordinator = build_pd_coordinator(
-        model_path=model_dir,
-        num_pages=64,
-        page_size=16,
-        logits_dtype="float32",
-        **_cpu_placement(),
-    )
-
-    assert modes == ["float32", "float32"]
-    assert coordinator.logits_dtype_requested == "float32"
-    assert coordinator.logits_dtype_resolved == "float32"
-
-
 def test_the_deferred_handoff_records_an_event_instead_of_blocking():
     """The ordering contract, on the recording provider."""
     from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
@@ -1453,7 +1424,6 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
     assert keyword_only == (
         "expert_parallel_attention_dp",
         "generation_config",
-        "logits_dtype",
     )
     assert parameters["expert_parallel_attention_dp"].default is False
     assert parameters["generation_config"].default == "auto"

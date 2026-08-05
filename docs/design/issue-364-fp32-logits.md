@@ -1,7 +1,6 @@
 # Issue #364 Design: Opt-in FP32 Final Logits
 
-Status: **Implemented and locally/GPU verified; paired real-model measurement
-pending** (2026-08-05).
+Status: **Measured; evidence valid, production option withdrawn** (2026-08-05).
 
 Related contracts: M12 D2/D5/D6, M8 D2, M14 D3, and G2 A1/A2.
 
@@ -14,16 +13,21 @@ after the final output rounding has already happened. This is compatible with
 the existing Hugging Face and vLLM behavior and is not a parity defect, but it
 can move an argmax or a filtering boundary when two logits are close.
 
-Issue #364 adds a construction-time precision choice for the final dense
-output-head GEMM and measures it against the already-closed G2 A1/A2 parity
-contracts. It does not change hidden-state, checkpoint-weight, KV-cache, or
-sampler-processing precision, and it does not introduce a per-request option.
-The generic config-versus-config experiment framework in issue #365 is a later
-meta-issue item and is explicitly outside this change.
+Issue #364 tested a construction-time precision choice for the final dense
+output-head GEMM against the already-closed G2 A1/A2 parity contracts. The
+measurement-only implementation did not change hidden-state, checkpoint-weight,
+KV-cache, or sampler-processing precision, and did not introduce a per-request
+option. The paired evidence is valid, but both A2 arms failed the current shared
+reference floor and the quality result is mixed. The public option was therefore
+withdrawn and is not shipped. The generic config-versus-config experiment
+framework in issue #365 is a later meta-issue item and remains outside this
+change.
 
-## 2. Public contract
+## 2. Measured experimental contract (withdrawn)
 
-All native real-model construction and deployment surfaces expose:
+At measurement commit `ac589fb67452173f45f23d9107af313c2b79cc17`, the
+experimental implementation exposed the following construction-time choice to
+native real-model builders solely so both arms could be exercised end to end:
 
 ```python
 logits_dtype: Literal["model", "float32"] = "model"
@@ -45,36 +49,31 @@ logits_dtype: Literal["model", "float32"] = "model"
   OpenAI request schema, or an individual scheduled request. A captured CUDA
   graph and every rank in a distributed model have one stable logits mode.
 
-The value is propagated consistently through single-process, process-isolated,
-TP, EP, and P-D native real-model builders. Process startup attestation and the
-distributed handshake bind the requested and resolved mode so a child or rank
-cannot silently use a different precision. Backend health reports both the
-requested value and resolved tensor dtype; a homogeneous pool may promote the
-field only after all local workers agree.
+The value was propagated consistently through single-process,
+process-isolated, TP, EP, and P-D native real-model builders. Process startup
+attestation and the distributed handshake bound the requested and resolved mode
+so a child or rank could not silently use a different precision. Backend health
+reported both the requested value and resolved tensor dtype, and a homogeneous
+pool could promote the field only after all local workers agreed.
 
-For example, the process-isolated deployment form is:
+This syntax is a record of the measured experiment, not a current API contract.
+No deployment YAML example is retained because `logits_dtype` was removed from
+the production construction and deployment surfaces after the failed readiness
+result.
 
-```yaml
-engines:
-  precise:
-    backend: kairyu-proc
-    options:
-      model_path: /models/llama
-      logits_dtype: float32
-```
+The measured repository's internal pipeline-stage wrapper inherited the mode
+from the already-constructed full decoder and applied it at the final stage.
+Pipeline parallelism was not a standalone production deployment surface, so the
+experiment did not introduce a separate PP launcher option.
 
-The repository's internal pipeline-stage wrapper inherits the mode from the
-already-constructed full decoder and applies it at the final stage. Pipeline
-parallelism is not currently a standalone production deployment surface, so
-this issue does not introduce a separate PP launcher option.
+During the experiment, an explicit `float32` request could never be silently
+ignored. A custom or non-dense output-head implementation that could not provide
+FP32 at the final GEMM boundary had to implement the same semantic contract or
+fail during construction. The measured real-model output head remained dense
+and unquantized, including for quantized checkpoints, under the default
+linear-selection policy.
 
-An explicit `float32` request must never be silently ignored. Any future custom
-or non-dense output-head implementation that cannot provide FP32 at the final
-GEMM boundary must either implement this same semantic contract or fail during
-construction. The current real-model output head remains dense and unquantized,
-including for quantized checkpoints, under the default linear-selection policy.
-
-## 3. Numerical and compatibility contract
+## 3. Numerical and compatibility contract used by the experiment
 
 For an input shaped `[..., hidden_size]`, the CUDA BF16/FP16 implementation
 flattens all leading dimensions, multiplies by the transposed dense head weight
@@ -82,11 +81,11 @@ with FP32 output, and restores `[..., vocab_size]`. One-dimensional terminal
 prefill rows, two-dimensional batched/decode rows, and higher-rank compatibility
 inputs therefore preserve the existing shape contract.
 
-The option does not cast or duplicate the output-head weight. Model weights
-remain in their configured dtype; tied embedding/output-head identity remains
-intact; parameter and buffer names, `state_dict`, checkpoint loading, sharding,
-and memory ownership are unchanged. No scalar or tensor is copied to the host
-before the established public result boundary.
+The experimental option did not cast or duplicate the output-head weight. Model
+weights remained in their configured dtype; tied embedding/output-head identity
+remained intact; parameter and buffer names, `state_dict`, checkpoint loading,
+sharding, and memory ownership were unchanged. No scalar or tensor was copied to
+the host before the established public result boundary.
 
 The `model` arm must remain the exact former path and is expected to preserve
 existing tokens, raw logprobs, CUDA graph behavior, deterministic replay, and
@@ -103,9 +102,9 @@ their existing determinism and correctness contracts. The option must affect
 the target output head before greedy argmax, raw-logprob capture, penalties, or
 filtering; it must not alter the stateless random stream itself.
 
-## 4. Required local and GPU verification
+## 4. Local and GPU verification completed at the measurement commit
 
-P0 correctness tests are binding:
+The following P0 correctness tests passed before the paired measurement:
 
 1. A synthetic CUDA BF16 near-tie head demonstrates that the former BF16 output
    can collapse or reorder candidates, while `float32` matches an FP32-output
@@ -130,13 +129,13 @@ P0 correctness tests are binding:
    types, and unknown values. Existing CPU, GPU, TP, CUDA-graph, speculative,
    and process suites remain green.
 
-P1 evidence and documentation are required for issue closure: the narrow paired
-A1/A2 runner, raw position-level evidence, complete provenance, public examples,
-and the final result amendment described below. Final-head latency or peak-output
-memory measurements are optional P2 diagnostics; issue #364 sets no new
-performance threshold, so an ad-hoc timing cannot become an unwritten pass/fail
-gate. P0 and P1 are the blocking completion levels. Any P2 rows that are collected
-must still be retained without post-hoc selection.
+P1 evidence and documentation required for issue closure are the narrow paired
+A1/A2 operator, raw position-level evidence, complete provenance, and the final
+result amendment below. No public example is appropriate for a withdrawn
+option. Final-head latency or peak-output memory measurements remain optional P2
+diagnostics; issue #364 sets no new performance threshold, so an ad-hoc timing
+cannot become an unwritten pass/fail gate. Any collected P2 rows must still be
+retained without post-hoc selection.
 
 ## 5. Existing A1/A2 baselines (not issue #364 results)
 
@@ -158,7 +157,7 @@ Reference artifacts:
 - `bench/results/g2-a1-llama31-8b-rtxpro6000-2026-07-26.json`
 - `bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json`
 
-## 6. Predeclared paired real-model measurement
+## 6. Predeclared paired real-model measurement and result
 
 Both arms are measured from the same clean implementation commit, on the same
 hardware/runtime, with identical model and tokenizer revisions, prompt token
@@ -171,14 +170,18 @@ The narrow issue #364 matrix is:
 
 | Gate | Arm | Required TP degrees and observations | Result |
 |---|---|---|---|
-| A1 | `model` | TP1/2, 64 prompts x 16 teacher-forced positions; complete overlap OFF/ON continuations | pending |
-| A1 | `float32` | TP1/2, the same 64 x 16 rows and overlap continuations | pending |
-| A2 | `model` | TP2/4/8, 64 prompts x 16 teacher-forced positions; TP4/8 versus TP2 | pending |
-| A2 | `float32` | TP2/4/8, the same 64 x 16 rows and TP comparisons | pending |
+| A1 | `model` | TP1/2, 64 prompts x 16 teacher-forced positions; complete overlap OFF/ON continuations | **PASS**; HF agreement 1017/1024 and 1013/1024; overlap 64/64 at both degrees |
+| A1 | `float32` | TP1/2, the same 64 x 16 rows and overlap continuations | **PASS**; HF agreement 1015/1024 and 1013/1024; overlap 64/64 at both degrees |
+| A2 | `model` | TP2/4/8, 64 prompts x 16 teacher-forced positions; TP4/8 versus TP2 | **FAIL**; HF agreement 1009/1024, 1004/1024, and 999/1024 against a shared 1004/1024 floor |
+| A2 | `float32` | TP2/4/8, the same 64 x 16 rows and TP comparisons | **FAIL**; HF agreement 1008/1024, 1003/1024, and 1002/1024 against the same floor |
 
 The four formal arm artifacts are assembled by
 `bench/gate_logits_dtype.py`; it fails closed on mixed arm identity,
 provenance, references, checkpoints, prompts, commits, or incomplete raw rows.
+All A1 and A2 cells have zero substantive disagreements and zero missing
+observations. Direct A2 TP4/8-versus-TP2 comparisons likewise have zero
+substantive disagreements. The two A2 arm verdicts fail only because one or
+more per-TP agreement counts are below the immutable shared floor.
 
 Every A1 arm must independently preserve exact overlap ON/OFF continuations,
 zero substantive disagreements, zero missing observations, agreement at or
@@ -198,24 +201,40 @@ The paired summary reports each checkpoint and TP degree separately:
 - the immutable reference self-agreement floor and measured tie gap;
 - any separately collected non-binding latency or memory diagnostics.
 
-Results are not pooled across models or TP degrees to manufacture one global
+Results were not pooled across models or TP degrees to manufacture one global
 improvement. A cell is a positive quality result only when agreement improves
 against the same reference and all existing safety gates still pass. A broader
 claim requires no measured cell to worsen and at least one cell to improve;
 otherwise the conclusion is `mixed`, `no_measurable_improvement`, or `negative`
-as the retained numbers require. A truthful non-positive result is still a
-valid outcome of the issue proposal. If the `float32` arm fails an existing A1
-or A2 correctness gate, however, the public feature is not ready for closure.
+as the retained numbers require. Here `float32` worsened A1 TP1 and A2 TP2/TP4,
+matched A1 TP2, and improved A2 TP8 without lifting that cell above the floor;
+the retained quality classification is therefore `mixed`. A truthful
+non-positive result is a valid issue outcome, but failure of the existing A2
+gate means the public feature is not ready to ship.
 
-## 7. Completion record (fill after the retained run)
+The current-`main` control at commit
+`6cff10f9f39c5d114d9a21875ea0c6e460d4cf32` reproduced the A2 `model` TP8
+cell exactly: engine tokens, engine logprobs, and reference rows are all
+element-for-element equal to the measurement-arm raw data. The 999/1024 TP8 result is
+therefore present on the pre-experiment baseline rather than introduced by the
+default experimental path. This control does not convert either A2 formal
+verdict into a pass and does not justify weakening the 1004/1024 floor.
 
-- Implementation commit: pending
-- Paired artifact (`bench/results/issue-364-fp32-logits-a1-a2-<date>.json`)
-  and independent replay command: pending
-- A1 `model` / `float32` verdicts: pending / pending
-- A2 `model` / `float32` verdicts: pending / pending
-- Quality classification: pending
-- CI and focused GPU tests: pending
+## 7. Completion record
 
-After measurement, this section and `PROGRESS.md` receive the result without
-editing the historical A1/A2 closure text or artifacts.
+- Measurement commit: `ac589fb67452173f45f23d9107af313c2b79cc17`
+- Paired artifact:
+  `bench/results/issue-364-fp32-logits-a1-a2-2026-08-05/issue-364-fp32-logits-a1-a2-2026-08-05.json`
+- A1 `model` / `float32` verdicts: **PASS / PASS**
+- A2 `model` / `float32` verdicts: **FAIL / FAIL**
+- Evidence result: `evidence_valid=true`
+- Feature result: `feature_ready=false`
+- Quality classification: `mixed`
+- Disposition: `withdrawn`; public `logits_dtype` is not shipped
+- Control: `main@6cff10f` A2 TP8 raw tokens, logprobs, and reference rows are
+  exactly equal to the `model` arm
+
+The historical A1/A2 closure text and artifacts remain unchanged. This issue
+closes as a valid negative experiment: the evidence operator and retained raw
+results remain reproducible, while production construction, deployment,
+attestation, health, and model surfaces do not expose `logits_dtype`.

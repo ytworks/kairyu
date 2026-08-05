@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -91,6 +94,7 @@ def _artifact(gate: str, arm: str) -> dict[str, object]:
             "prompts": [{"request_id": f"p{prompt}"} for prompt in range(64)],
         }
     return {
+        "schema": 1,
         "gate": f"G2 {gate}",
         "verdict": "PASS",
         "code": copy.deepcopy(_CODE),
@@ -255,7 +259,7 @@ def test_paired_gate_rejects_selected_logprob_map_inconsistency(
     ]["passed"] is False
 
 
-def test_paired_gate_rejects_assembler_from_a_different_commit(
+def test_paired_gate_distinguishes_later_clean_analysis_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifacts = _artifacts()
@@ -265,6 +269,160 @@ def test_paired_gate_rejects_assembler_from_a_different_commit(
         assembly_code={"commit": "b" * 40, "dirty": False},
     )
     by_name = {check["name"]: check for check in checks}
-    assert by_name[
-        "paired assembler itself uses the same clean measurement commit"
-    ]["passed"] is False
+    assert (
+        by_name["all four arms and both shared references use one clean measurement commit"][
+            "passed"
+        ]
+        is True
+    )
+    analysis = by_name["paired analysis commit is independently recorded and clean"]
+    assert analysis["passed"] is True
+    assert "same_commit=False" in analysis["detail"]
+
+
+def test_paired_gate_rejects_dirty_analysis_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = _artifacts()
+    monkeypatch.setattr(gate_logits_dtype, "_validate_arm", lambda *_args: [])
+    checks, _summaries, _quality = gate_logits_dtype.evaluate(
+        **artifacts,
+        assembly_code={"commit": "b" * 40, "dirty": True},
+    )
+    by_name = {check["name"]: check for check in checks}
+    assert by_name["paired analysis commit is independently recorded and clean"]["passed"] is False
+
+
+def test_negative_formal_result_is_valid_but_not_feature_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact("A2", "float32")
+    formal_checks = [
+        {"name": "evidence is complete", "passed": True, "detail": "complete"},
+        {"name": "HF floor is met", "passed": False, "detail": "1003 < 1004"},
+    ]
+    comparisons = {
+        "tp2_vs_hf": {"verdict": "PASS"},
+        "tp4_vs_hf": {"verdict": "FAIL"},
+        "tp8_vs_hf": {"verdict": "FAIL"},
+        "tp4_vs_tp2": {"verdict": "PASS"},
+        "tp8_vs_tp2": {"verdict": "PASS"},
+    }
+    artifact["verdict"] = "FAIL"
+    artifact["checks"] = copy.deepcopy(formal_checks)
+    artifact["tp_comparisons"] = copy.deepcopy(comparisons)
+    monkeypatch.setattr(
+        gate_logits_dtype.gate_a2,
+        "evaluate",
+        lambda *_args: (copy.deepcopy(formal_checks), copy.deepcopy(comparisons)),
+    )
+
+    checks = gate_logits_dtype._validate_arm(artifact, "A2", "float32")
+    evidence_valid, feature_ready = gate_logits_dtype._outcome(checks)
+
+    assert evidence_valid is True
+    assert feature_ready is False
+    by_name = {check["name"]: check for check in checks}
+    assert (
+        by_name["A2 float32 reported formal verdict matches independent replay"]["passed"] is True
+    )
+    assert by_name["A2 float32 independently replays all formal readiness criteria"] == {
+        "name": "A2 float32 independently replays all formal readiness criteria",
+        "passed": False,
+        "detail": "failed=['HF floor is met']",
+        "scope": "feature_readiness",
+    }
+
+
+def test_negative_formal_result_rejects_a_forged_pass_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact("A2", "float32")
+    formal_checks = [{"name": "HF floor is met", "passed": False, "detail": "1003 < 1004"}]
+    artifact["verdict"] = "PASS"
+    artifact["checks"] = copy.deepcopy(formal_checks)
+    artifact["tp_comparisons"] = {}
+    monkeypatch.setattr(
+        gate_logits_dtype.gate_a2,
+        "evaluate",
+        lambda *_args: (copy.deepcopy(formal_checks), {}),
+    )
+
+    checks = gate_logits_dtype._validate_arm(artifact, "A2", "float32")
+    evidence_valid, feature_ready = gate_logits_dtype._outcome(checks)
+
+    assert evidence_valid is False
+    assert feature_ready is False
+
+
+def test_cli_accepts_valid_negative_evidence_unless_readiness_is_asserted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = {
+        name: tmp_path / f"{name}.json"
+        for name in ("a1_model", "a1_float32", "a2_model", "a2_float32")
+    }
+    for path in paths.values():
+        path.write_text(json.dumps({"code": copy.deepcopy(_CODE)}))
+    negative_checks = [
+        {
+            "name": "retained evidence replays",
+            "passed": True,
+            "detail": "PASS",
+            "scope": "evidence",
+        },
+        {
+            "name": "every formal arm passes",
+            "passed": False,
+            "detail": "A2 failed",
+            "scope": "feature_readiness",
+        },
+    ]
+    monkeypatch.setattr(
+        gate_logits_dtype,
+        "evaluate",
+        lambda **_kwargs: (copy.deepcopy(negative_checks), {}, "mixed"),
+    )
+    monkeypatch.setattr(
+        gate_logits_dtype,
+        "_code_provenance",
+        lambda: {"commit": "d" * 40, "dirty": False},
+    )
+    monkeypatch.setattr(
+        gate_logits_dtype,
+        "_measurement_provenance",
+        lambda _artifacts: {
+            "commit": "a" * 40,
+            "dirty": False,
+            "observations": 16,
+            "commits": ["a" * 40],
+        },
+    )
+
+    default_out = tmp_path / "default.json"
+    argv = ["gate_logits_dtype.py"]
+    for name, path in paths.items():
+        argv.extend([f"--{name.replace('_', '-')}", str(path)])
+    argv.extend(["--out", str(default_out)])
+    monkeypatch.setattr(sys, "argv", argv)
+    assert gate_logits_dtype.main() == 0
+    payload = json.loads(default_out.read_text())
+    assert payload["verdict"] == "FAIL"
+    assert payload["evidence_valid"] is True
+    assert payload["feature_ready"] is False
+    assert payload["disposition"] == "withdrawn"
+    assert payload["measurement_code"]["commit"] == "a" * 40
+    assert payload["analysis_code"]["commit"] == "d" * 40
+    assert "code" not in payload
+
+    asserted_out = tmp_path / "asserted.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*argv[:-1], str(asserted_out), "--assert-feature-ready"],
+    )
+    assert gate_logits_dtype.main() == 1
+    asserted = json.loads(asserted_out.read_text())
+    assert asserted["evidence_valid"] is True
+    assert asserted["feature_ready"] is False

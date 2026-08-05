@@ -50,32 +50,6 @@ def test_the_toy_harness_still_gates_on_exactness(tmp_path):
     assert "toy harness must be exact" in result.stdout
 
 
-def test_toy_harness_rejects_the_real_model_float32_treatment(tmp_path):
-    result = _run(
-        "--tp",
-        "1,2",
-        "--num-prompts",
-        "1",
-        "--logits-dtype",
-        "float32",
-        "--out",
-        str(tmp_path / "must-not-exist.json"),
-    )
-
-    assert result.returncode != 0
-    assert "--logits-dtype float32 requires --model-path" in result.stderr
-
-
-def test_toy_artifact_uses_the_constructed_runner_logits_attestation(tmp_path):
-    out = tmp_path / "toy.json"
-    result = _run("--tp", "1,2", "--num-prompts", "1", "--out", str(out))
-    assert result.returncode == 0, result.stderr
-
-    config = json.loads(out.read_text())["config"]
-    assert config["logits_dtype_requested"] == "model"
-    assert config["logits_dtype_resolved"] == "float32"
-
-
 def test_the_exact_gate_compares_counts_not_a_rounded_rate():
     """Review [P2] on #130: 20000/20001 rounds to 1.0 at four places, so an
     `== 1.0` gate on `match_rate` would pass a run with a real mismatch."""

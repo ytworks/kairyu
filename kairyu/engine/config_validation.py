@@ -15,7 +15,6 @@ from collections.abc import Callable, Mapping
 from os import PathLike
 
 from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
-from kairyu.engine.core.logits_dtype import validate_logits_dtype
 from kairyu.engine.openai_capabilities import resolve_openai_capabilities
 from kairyu.engine.vision import ImageInputPolicy
 from kairyu.models.generation import validate_generation_config_mode
@@ -68,7 +67,6 @@ _KAIRYU_OPTIONS = frozenset(
         "cuda_graph_max_pages",
         "cuda_graph_warmup_iters",
         "kv_cache_dtype",
-        "logits_dtype",
         "dram_kv_tier_capacity_pages",
         "dram_kv_tier_profile",
         "generation_config",
@@ -94,7 +92,6 @@ _KAIRYU_PROC_OPTIONS = frozenset(
         "cuda_graph_max_pages",
         "cuda_graph_warmup_iters",
         "kv_cache_dtype",
-        "logits_dtype",
         "dram_kv_tier_capacity_pages",
         "dram_kv_tier_profile",
         "generation_config",
@@ -222,10 +219,6 @@ def _validate_openai(options: Mapping[str, object]) -> None:
 
 def _validate_vllm(options: Mapping[str, object]) -> None:
     # VLLMBackend intentionally forwards unknown keys to AsyncEngineArgs.
-    if "logits_dtype" in options:
-        raise ValueError(
-            "vllm backend does not support the native logits_dtype option"
-        )
     _require_string("vllm", options, "model")
     policy = options.get("scheduling_policy", "priority")
     if policy != "priority":
@@ -321,11 +314,6 @@ def _validate_native_common(
     if kv_cache_dtype != "auto" and pd_separation:
         raise ValueError(
             "native backend explicit KV cache dtype does not support P-D separation"
-        )
-    logits_dtype = validate_logits_dtype(options.get("logits_dtype", "model"))
-    if logits_dtype == "float32" and model_path is None:
-        raise ValueError(
-            "native backend logits_dtype='float32' requires a real model_path"
         )
     dram_pages = _require_int_at_least(
         backend,

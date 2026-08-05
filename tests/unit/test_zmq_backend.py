@@ -112,8 +112,6 @@ def _fake_ready_engine_service(port_pipe, _config):
             "attention_backend_decision": _READY_DECISION,
             "kv_cache_dtype_requested": "auto",
             "kv_cache_dtype_resolved": "not-applicable",
-            "logits_dtype_requested": "model",
-            "logits_dtype_resolved": "not-applicable",
             "generation_defaults": _READY_GENERATION_DEFAULTS,
         }
     )
@@ -1721,8 +1719,6 @@ async def test_versioned_startup_frame_propagates_the_child_actual_decision(
         )
         assert backend.kv_cache_dtype_requested == "auto"
         assert backend.kv_cache_dtype_resolved == "not-applicable"
-        assert backend.logits_dtype_requested == "model"
-        assert backend.logits_dtype_resolved == "not-applicable"
         assert backend.generation_defaults.eos_token_id == 151645
         assert backend.generation_defaults.stop_token_ids == (151643,)
         assert backend.generation_defaults.sampling_defaults() == (

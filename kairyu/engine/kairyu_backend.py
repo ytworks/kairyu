@@ -37,10 +37,6 @@ from kairyu.engine.core.kv_cache_dtype import (
     resolve_kv_cache_dtype,
     validate_kv_cache_dtype,
 )
-from kairyu.engine.core.logits_dtype import (
-    resolve_logits_dtype,
-    validate_logits_dtype,
-)
 from kairyu.engine.core.pd_loop import PDLoopAdapter
 from kairyu.engine.core.radix_kv import RadixKVCache
 from kairyu.engine.core.sampling_types import SampledToken, mix_seed
@@ -341,7 +337,6 @@ def build_engine_loop(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     generation_config: GenerationConfigMode = "auto",
-    logits_dtype: str = "model",
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler | PDLoopAdapter]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
@@ -355,7 +350,6 @@ def build_engine_loop(
     """
     _validate_max_model_len(max_model_len)
     generation_config = validate_generation_config_mode(generation_config)
-    logits_dtype = validate_logits_dtype(logits_dtype)
     if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
         raise ValueError(
             "tensor_parallel_size must be a positive integer; "
@@ -412,11 +406,6 @@ def build_engine_loop(
             )
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
-    if logits_dtype == "float32" and model_path is None:
-        raise ValueError(
-            "logits_dtype='float32' requires a real model_path; custom and "
-            "toy runners do not expose a managed output head"
-        )
     kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
     if kv_cache_dtype != "auto" and model_path is None:
         raise ValueError(
@@ -503,7 +492,6 @@ def build_engine_loop(
             cuda_graph_warmup_iters=cuda_graph_warmup_iters,
             kv_cache_dtype=kv_cache_dtype,
             generation_config=generation_config,
-            logits_dtype=logits_dtype,
         )
     if pd_separation:
         if model_path is None:
@@ -530,7 +518,6 @@ def build_engine_loop(
             decode_device=pd_decode_device,
             defer_handoff=pd_defer_handoff,
             generation_config=generation_config,
-            logits_dtype=logits_dtype,
         )
 
     if model_path is not None and tensor_parallel_size > 1:
@@ -555,7 +542,6 @@ def build_engine_loop(
             dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
             dram_kv_tier_profile=dram_kv_tier_profile,
             generation_config=generation_config,
-            logits_dtype=logits_dtype,
         )
     if speculative is not None and tensor_parallel_size > 1:
         # The FakeCommunicator TP path has rank-local toy runners but no
@@ -582,7 +568,6 @@ def build_engine_loop(
     num_kv_heads_for_tp = None
     attention_backend_decision = None
     resolved_kv_cache_dtype = None
-    resolved_logits_dtype = "not-applicable"
     if model_path is not None:
         import torch
 
@@ -610,7 +595,6 @@ def build_engine_loop(
             raise RuntimeError("decode_mode='cuda_graph' requires CUDA hardware")
         compute_device = "cuda" if gpu else "cpu"
         compute_dtype = torch.bfloat16 if gpu else torch.float32
-        resolved_logits_dtype = resolve_logits_dtype(logits_dtype, compute_dtype)
         attention_backend = select_backend(profile, device=compute_device)
         attention_backend_decision = attention_backend.selection_decision
         model, model_config, loaded_generation = load_model(
@@ -619,7 +603,6 @@ def build_engine_loop(
             attention_backend=attention_backend,
             target_device=compute_device,
             generation_config=generation_config,
-            logits_dtype=logits_dtype,
         )
         if loaded_generation != generation:
             raise RuntimeError("generation defaults changed during model loading")
@@ -747,8 +730,6 @@ def build_engine_loop(
         if resolved_kv_cache_dtype is not None
         else "not-applicable"
     )
-    loop.logits_dtype_requested = logits_dtype
-    loop.logits_dtype_resolved = resolved_logits_dtype
     loop.dram_kv_tier_enabled = dram_kv_binding is not None
     loop.dram_kv_tier_capacity_pages = (
         dram_kv_binding.tier.capacity_pages
@@ -783,7 +764,6 @@ def _build_pd_loop(
     decode_device: str | None,
     defer_handoff: bool,
     generation_config: GenerationConfigMode,
-    logits_dtype: str,
 ) -> tuple[EngineLoop, RadixKVCache, PDLoopAdapter]:
     """Serve through a prefill/decode pair (m18 D3, G2 stage 5.3).
 
@@ -822,7 +802,6 @@ def _build_pd_loop(
         decode_device=decode_device,
         defer_handoff=defer_handoff,
         generation_config=generation_config,
-        logits_dtype=logits_dtype,
     )
     adapter = PDLoopAdapter(coordinator)
     loop = EngineLoop(
@@ -845,8 +824,6 @@ def _build_pd_loop(
     # reports its own resolved pool dtype.
     loop.kv_cache_dtype_requested = "auto"
     loop.kv_cache_dtype_resolved = "role-specific"
-    loop.logits_dtype_requested = coordinator.logits_dtype_requested
-    loop.logits_dtype_resolved = coordinator.logits_dtype_resolved
     loop.dram_kv_tier_enabled = False
     loop.dram_kv_tier_capacity_pages = 0
     loop.dram_kv_tier_profile_sha256 = None
@@ -873,7 +850,6 @@ def _build_dist_ep_loop(
     cuda_graph_warmup_iters: int = 3,
     kv_cache_dtype: str = "bfloat16",
     generation_config: GenerationConfigMode = "auto",
-    logits_dtype: str = "model",
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Build the production replicated-attention or attention-DP EP loop."""
 
@@ -928,7 +904,6 @@ def _build_dist_ep_loop(
         dram_kv_tier_capacity_pages=0,
         dram_kv_tier_profile=None,
         speculative=None,
-        logits_dtype=logits_dtype,
     )
     try:
         loop = EngineLoop(
@@ -951,8 +926,6 @@ def _build_dist_ep_loop(
     loop.attention_backend_decision = launcher.attention_backend_decision
     loop.kv_cache_dtype_requested = launcher.kv_cache_dtype_requested
     loop.kv_cache_dtype_resolved = launcher.kv_cache_dtype_resolved
-    loop.logits_dtype_requested = launcher.logits_dtype_requested
-    loop.logits_dtype_resolved = launcher.logits_dtype_resolved
     loop.dram_kv_tier_enabled = False
     loop.dram_kv_tier_capacity_pages = 0
     loop.dram_kv_tier_profile_sha256 = None
@@ -982,7 +955,6 @@ def _build_dist_tp_loop(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     generation_config: GenerationConfigMode = "auto",
-    logits_dtype: str = "model",
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
     drive them through DistTPModelRunner, and expose the launcher on the loop so
@@ -1025,7 +997,6 @@ def _build_dist_tp_loop(
         dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
         dram_kv_tier_profile=dram_kv_tier_profile,
         max_num_batched_tokens=max_num_batched_tokens,
-        logits_dtype=logits_dtype,
     )
     if launcher.dram_kv_binding is not None:
         cache.attach_dram_tier(
@@ -1058,8 +1029,6 @@ def _build_dist_tp_loop(
     loop.attention_backend_decision = launcher.attention_backend_decision
     loop.kv_cache_dtype_requested = launcher.kv_cache_dtype_requested
     loop.kv_cache_dtype_resolved = launcher.kv_cache_dtype_resolved
-    loop.logits_dtype_requested = launcher.logits_dtype_requested
-    loop.logits_dtype_resolved = launcher.logits_dtype_resolved
     loop.dram_kv_tier_enabled = launcher.dram_kv_binding is not None
     loop.dram_kv_tier_capacity_pages = (
         launcher.dram_kv_binding.tier.capacity_pages
@@ -1110,7 +1079,6 @@ class KairyuBackend:
         *,
         expert_parallel_attention_dp: bool = False,
         generation_config: GenerationConfigMode = "auto",
-        logits_dtype: str = "model",
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self.expert_parallel_size = expert_parallel_size
@@ -1143,7 +1111,6 @@ class KairyuBackend:
             dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
             dram_kv_tier_profile=dram_kv_tier_profile,
             generation_config=generation_config,
-            logits_dtype=logits_dtype,
         )
         self.generation_defaults = self._loop.generation_defaults
         self.attention_backend_decision = getattr(
@@ -1161,8 +1128,6 @@ class KairyuBackend:
         )
         self.kv_cache_dtype_requested = self._loop.kv_cache_dtype_requested
         self.kv_cache_dtype_resolved = self._loop.kv_cache_dtype_resolved
-        self.logits_dtype_requested = self._loop.logits_dtype_requested
-        self.logits_dtype_resolved = self._loop.logits_dtype_resolved
         self.dram_kv_tier_enabled = self._loop.dram_kv_tier_enabled
         self.dram_kv_tier_capacity_pages = (
             self._loop.dram_kv_tier_capacity_pages

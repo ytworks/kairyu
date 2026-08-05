@@ -14,7 +14,6 @@ from pathlib import Path
 
 import torch
 
-from kairyu.engine.core.logits_dtype import validate_logits_dtype
 from kairyu.engine.core.quant_config import (
     QuantMethod,
     load_checkpoint_quantization,
@@ -55,10 +54,8 @@ def build_model(
     linear_factory=None,
     *,
     dtype: torch.dtype | None = None,
-    logits_dtype: str = "model",
 ) -> DenseDecoder:
     """Registry: architecture -> module (one builder covers the dense family)."""
-    logits_dtype = validate_logits_dtype(logits_dtype)
     if config.architecture not in _SUPPORTED_BUILDERS:
         raise ValueError(f"no builder for architecture {config.architecture!r}")
     return DenseDecoder(
@@ -66,7 +63,6 @@ def build_model(
         attention_backend=attention_backend,
         linear_factory=linear_factory,
         dtype=dtype,
-        logits_dtype=logits_dtype,
     )
 
 
@@ -79,11 +75,9 @@ def load_model(
     linear_capabilities=None,
     linear_selection_policy=None,
     generation_config: GenerationConfigMode = "auto",
-    logits_dtype: str = "model",
 ) -> tuple[DenseDecoder, ModelConfig, GenerationDefaults]:
     from kairyu.quant.linear import linear_factory
 
-    logits_dtype = validate_logits_dtype(logits_dtype)
     directory = Path(path)
     config_file = directory / "config.json"
     if not config_file.is_file():
@@ -112,7 +106,6 @@ def load_model(
             selection_policy=linear_selection_policy,
         ),
         dtype=dtype,
-        logits_dtype=logits_dtype,
     )
     reader = CheckpointReader(directory)
     state: dict[str, torch.Tensor] = {}
