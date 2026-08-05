@@ -15,7 +15,7 @@
     ]
   },
   "analysis_code": {
-    "commit": "4cb9eb0def21dc5424e7961c6397d89d2eb62144",
+    "commit": "d7510befd0d9d0a6312945ab4e1f0fcf92f7bd82",
     "dirty": false,
     "untracked_files": 2,
     "source": "git"
@@ -78,10 +78,28 @@
       "scope": "evidence"
     },
     {
+      "name": "A1 model formal readiness taxonomy is exact",
+      "passed": true,
+      "detail": "expected=['amended teacher-forced verdict passes at TP1 and TP2', 'overlap ON reproduces OFF at TP1 and TP2'], missing=[], duplicated=[]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 model formal evidence-integrity criteria all pass",
+      "passed": true,
+      "detail": "integrity_checks=12",
+      "scope": "evidence"
+    },
+    {
       "name": "A1 model independently replays all formal readiness criteria",
       "passed": true,
       "detail": "PASS",
       "scope": "feature_readiness"
+    },
+    {
+      "name": "A1 model reported HF summaries match immutable raw evidence",
+      "passed": true,
+      "detail": "TP1: all retained summaries match raw evidence; TP2: all retained summaries match raw evidence",
+      "scope": "evidence"
     },
     {
       "name": "A1 model raw rows reproduce the retained agreement summaries",
@@ -132,10 +150,28 @@
       "scope": "evidence"
     },
     {
+      "name": "A1 float32 formal readiness taxonomy is exact",
+      "passed": true,
+      "detail": "expected=['amended teacher-forced verdict passes at TP1 and TP2', 'overlap ON reproduces OFF at TP1 and TP2'], missing=[], duplicated=[]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A1 float32 formal evidence-integrity criteria all pass",
+      "passed": true,
+      "detail": "integrity_checks=12",
+      "scope": "evidence"
+    },
+    {
       "name": "A1 float32 independently replays all formal readiness criteria",
       "passed": true,
       "detail": "PASS",
       "scope": "feature_readiness"
+    },
+    {
+      "name": "A1 float32 reported HF summaries match immutable raw evidence",
+      "passed": true,
+      "detail": "TP1: all retained summaries match raw evidence; TP2: all retained summaries match raw evidence",
+      "scope": "evidence"
     },
     {
       "name": "A1 float32 raw rows reproduce the retained agreement summaries",
@@ -186,10 +222,28 @@
       "scope": "evidence"
     },
     {
+      "name": "A2 model formal readiness taxonomy is exact",
+      "passed": true,
+      "detail": "expected=['TP4 and TP8 pass directly against TP2', 'every TP degree passes the amended HF-relative criteria', 'raw rows recompute both amended criteria at every TP degree'], missing=[], duplicated=[]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 model formal evidence-integrity criteria all pass",
+      "passed": true,
+      "detail": "integrity_checks=7",
+      "scope": "evidence"
+    },
+    {
       "name": "A2 model independently replays all formal readiness criteria",
       "passed": false,
       "detail": "failed=['every TP degree passes the amended HF-relative criteria', 'raw rows recompute both amended criteria at every TP degree']",
       "scope": "feature_readiness"
+    },
+    {
+      "name": "A2 model reported HF summaries match immutable raw evidence",
+      "passed": true,
+      "detail": "TP2: all retained summaries match raw evidence; TP4: all retained summaries match raw evidence; TP8: all retained summaries match raw evidence",
+      "scope": "evidence"
     },
     {
       "name": "A2 model retains the exact independently replayed comparisons",
@@ -234,10 +288,28 @@
       "scope": "evidence"
     },
     {
+      "name": "A2 float32 formal readiness taxonomy is exact",
+      "passed": true,
+      "detail": "expected=['TP4 and TP8 pass directly against TP2', 'every TP degree passes the amended HF-relative criteria', 'raw rows recompute both amended criteria at every TP degree'], missing=[], duplicated=[]",
+      "scope": "evidence"
+    },
+    {
+      "name": "A2 float32 formal evidence-integrity criteria all pass",
+      "passed": true,
+      "detail": "integrity_checks=7",
+      "scope": "evidence"
+    },
+    {
       "name": "A2 float32 independently replays all formal readiness criteria",
       "passed": false,
       "detail": "failed=['every TP degree passes the amended HF-relative criteria', 'raw rows recompute both amended criteria at every TP degree']",
       "scope": "feature_readiness"
+    },
+    {
+      "name": "A2 float32 reported HF summaries match immutable raw evidence",
+      "passed": true,
+      "detail": "TP2: all retained summaries match raw evidence; TP4: all retained summaries match raw evidence; TP8: all retained summaries match raw evidence",
+      "scope": "evidence"
     },
     {
       "name": "A2 float32 retains the exact independently replayed comparisons",
@@ -314,7 +386,7 @@
     {
       "name": "paired analysis commit is independently recorded and clean",
       "passed": true,
-      "detail": "analysis={'commit': '4cb9eb0def21dc5424e7961c6397d89d2eb62144', 'dirty': False, 'untracked_files': 2, 'source': 'git'}, measurement_commits=['ac589fb67452173f45f23d9107af313c2b79cc17'], same_commit=False",
+      "detail": "analysis={'commit': 'd7510befd0d9d0a6312945ab4e1f0fcf92f7bd82', 'dirty': False, 'untracked_files': 2, 'source': 'git'}, measurement_commits=['ac589fb67452173f45f23d9107af313c2b79cc17'], same_commit=False",
       "scope": "evidence"
     },
     {

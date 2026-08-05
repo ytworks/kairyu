@@ -49,7 +49,7 @@ treatment.
 | `a2-model-formal.json` | `febc8f62605e6744989115e4c00064ce241e0ef702440b4b7b85c685874c0195` |
 | `a2-float32-formal.json` | `aeb9acc84fa0fa8b9ac8d945de2231c86efb5e35499c80f5ed2b59a85e7c126a` |
 | `a2-main-6cff10f-tp8-control.json` | `16a3840d842dfdf237c9361388206280f37fe2ef9801660dd4519b94135c304d` |
-| `issue-364-fp32-logits-a1-a2-2026-08-05.json` | `773aab8d70672c6e5b2fc0498e0c29c0ac6cfdcce596d852a8fbe5b407a20663` |
+| `issue-364-fp32-logits-a1-a2-2026-08-05.json` | `ec8f015fe54a575e996d02adfb395bb7f883e8d26f643f233cc4237947d494e6` |
 
 The four formal artifacts are self-contained: each embeds its complete raw
 measurement inputs in addition to source-file digests. The main control is
