@@ -32,12 +32,32 @@ _EXPECTED_POSITION_KEYS = {
     for prompt in range(_PROMPTS)
     for position in range(_POSITIONS)
 }
+_TOP_LOGPROBS_K = 20
+_HISTORICAL_FIXED_THRESHOLD = 0.99
+_THRESHOLD_SOURCE = (
+    "the reference's own self-agreement (G2 A2, amended 2026-07-25)"
+)
 _ARM_CONFIG_FIELDS = frozenset(
     {"logits_dtype_requested", "logits_dtype_resolved"}
 )
 _REQUIRED_POSITIVE_CONFIG_FIELDS = ("num_pages", "page_size")
 _EVIDENCE_SCOPE = "evidence"
 _FEATURE_SCOPE = "feature_readiness"
+_FORMAL_READINESS_CHECKS = {
+    "A1": frozenset(
+        {
+            "overlap ON reproduces OFF at TP1 and TP2",
+            "amended teacher-forced verdict passes at TP1 and TP2",
+        }
+    ),
+    "A2": frozenset(
+        {
+            "every TP degree passes the amended HF-relative criteria",
+            "raw rows recompute both amended criteria at every TP degree",
+            "TP4 and TP8 pass directly against TP2",
+        }
+    ),
+}
 
 
 def _record(
@@ -195,6 +215,100 @@ def _raw_logprob_counts(
     return len(rows), complete, exact
 
 
+def _reported_hf_summary_consistency(
+    result: dict[str, Any],
+    reference: dict[str, Any],
+) -> tuple[bool, str]:
+    """Bind the retained floor/agreement/tolerance summaries to raw evidence."""
+
+    noise_floor = gate_a2._reference_noise_floor(reference)
+    tie_gap = max(
+        gate_a2._MIN_TIE_GAP,
+        noise_floor["max_gap_at_self_disagreement"],
+    )
+    score = gate_a2._recompute_hf_score(
+        result,
+        reference,
+        noise_floor["raw_self_agreement_rate"],
+        tie_gap,
+    )
+    rows = _position_map(result)
+    deltas: list[float] = []
+    for key in sorted(_EXPECTED_POSITION_KEYS):
+        row = rows.get(key) or {}
+        entry = reference.get(key[0]) or {}
+        continuations = entry.get("continuation") or []
+        reference_rows = entry.get("hf_top_logprobs") or []
+        if key[1] >= len(continuations) or key[1] >= len(reference_rows):
+            continue
+        reference_token = continuations[key[1]]
+        if row.get("engine_token") != reference_token:
+            continue
+        reference_logprob = reference_rows[key[1]].get(str(reference_token))
+        engine_logprob = row.get("engine_token_logprob")
+        if _is_finite_number(reference_logprob) and _is_finite_number(engine_logprob):
+            deltas.append(abs(float(engine_logprob) - float(reference_logprob)))
+
+    agreed = int(score["agreed"])
+    substantive = len(score.get("substantive") or [])
+    missing = score.get("missing_logprobs") or []
+    max_delta = float(score["max_abs_logprob_delta"])
+    disagreements = _EXPECTED_ROWS - agreed
+    expected_agreement = {
+        "positions": _EXPECTED_ROWS,
+        "agreed": agreed,
+        "rate": round(float(score["rate"]), 4),
+        "threshold": noise_floor["raw_self_agreement_rate"],
+        "threshold_source": _THRESHOLD_SOURCE,
+        "historical_fixed_threshold": _HISTORICAL_FIXED_THRESHOLD,
+        "verdict": (
+            "PASS"
+            if score["rate"] >= noise_floor["raw_self_agreement_rate"]
+            else "FAIL"
+        ),
+    }
+    within_delta = max_delta <= gate_a2._MAX_LOGPROB_DELTA
+    expected_tolerance = {
+        "tie_gap_nats": tie_gap,
+        "tie_gap_source": (
+            "measured from the reference's own self-disagreements"
+            if tie_gap > gate_a2._MIN_TIE_GAP
+            else "floor (bf16 logprob resolution); reference was self-consistent"
+        ),
+        "top_k": _TOP_LOGPROBS_K,
+        "agreeing_positions_max_abs_delta": round(max_delta, 5),
+        "agreeing_positions_mean_abs_delta": (
+            round(sum(deltas) / len(deltas), 5) if deltas else 0.0
+        ),
+        "disagreements": disagreements,
+        "tie_breaks": disagreements - substantive,
+        "substantive": substantive,
+        "max_abs_delta_bound": gate_a2._MAX_LOGPROB_DELTA,
+        "within_delta_bound": within_delta,
+        "expected_samples": agreed,
+        "collected_samples": len(deltas),
+        "missing_samples": missing,
+        "verdict": (
+            "PASS" if not substantive and not missing and within_delta else "FAIL"
+        ),
+    }
+    retained_noise = result.get("reference_noise_floor")
+    retained_agreement = result.get("agreement")
+    retained_tolerance = result.get("logprob_tolerance")
+    mismatches = []
+    if retained_noise != noise_floor:
+        mismatches.append("reference_noise_floor")
+    if retained_agreement != expected_agreement:
+        mismatches.append("agreement")
+    if retained_tolerance != expected_tolerance:
+        mismatches.append("logprob_tolerance")
+    return not mismatches, (
+        "all retained summaries match raw evidence"
+        if not mismatches
+        else f"mismatched={mismatches}"
+    )
+
+
 def _arm_configs(
     artifact: dict[str, Any], gate: str
 ) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
@@ -247,9 +361,10 @@ def _validate_arm(artifact: dict[str, Any], gate: str, arm: str) -> list[dict[st
     except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
         replay_error = f"{type(exc).__name__}: {exc}"
 
-    formal_ready = bool(recomputed) and all(row.get("passed") is True for row in recomputed)
-    expected_verdict = "PASS" if formal_ready else "FAIL"
-    failed = [str(row.get("name")) for row in recomputed if row.get("passed") is not True]
+    formal_passed = bool(recomputed) and all(
+        row.get("passed") is True for row in recomputed
+    )
+    expected_verdict = "PASS" if formal_passed else "FAIL"
     _record(
         checks,
         f"{gate} {arm} formal checks replay without an analysis error",
@@ -277,16 +392,91 @@ def _validate_arm(artifact: dict[str, Any], gate: str, arm: str) -> list[dict[st
         and formal_code.get("dirty") is False,
         f"formal_analysis={formal_code}",
     )
+
+    expected_readiness = _FORMAL_READINESS_CHECKS[gate]
+    formal_names = [row.get("name") for row in recomputed]
+    name_counts = {
+        name: formal_names.count(name)
+        for name in expected_readiness
+    }
+    readiness_taxonomy_valid = bool(recomputed) and all(
+        count == 1 for count in name_counts.values()
+    )
+    missing = sorted(name for name, count in name_counts.items() if count == 0)
+    duplicated = sorted(name for name, count in name_counts.items() if count > 1)
+    _record(
+        checks,
+        f"{gate} {arm} formal readiness taxonomy is exact",
+        readiness_taxonomy_valid,
+        f"expected={sorted(expected_readiness)}, missing={missing}, "
+        f"duplicated={duplicated}",
+    )
+    integrity_rows = [
+        row for row in recomputed if row.get("name") not in expected_readiness
+    ]
+    failed_integrity = [
+        str(row.get("name"))
+        for row in integrity_rows
+        if row.get("passed") is not True
+    ]
+    formal_integrity_valid = (
+        readiness_taxonomy_valid
+        and bool(integrity_rows)
+        and not failed_integrity
+    )
+    _record(
+        checks,
+        f"{gate} {arm} formal evidence-integrity criteria all pass",
+        formal_integrity_valid,
+        (
+            f"integrity_checks={len(integrity_rows)}"
+            if formal_integrity_valid
+            else f"failed={failed_integrity}, integrity_checks={len(integrity_rows)}"
+        ),
+    )
+    readiness_rows = [
+        row for row in recomputed if row.get("name") in expected_readiness
+    ]
+    failed_readiness = [
+        str(row.get("name"))
+        for row in readiness_rows
+        if row.get("passed") is not True
+    ]
+    formal_ready = (
+        readiness_taxonomy_valid
+        and len(readiness_rows) == len(expected_readiness)
+        and not failed_readiness
+    )
     _record(
         checks,
         f"{gate} {arm} independently replays all formal readiness criteria",
         formal_ready,
-        "PASS" if formal_ready else f"failed={failed}",
+        "PASS" if formal_ready else f"failed={failed_readiness}",
         scope=_FEATURE_SCOPE,
     )
 
+    reference = (evidence.get("reference") or {}).get("reference") or {}
+    summary_consistent = True
+    summary_details = []
+    for tp in (_A1_TP if gate == "A1" else _A2_TP):
+        try:
+            consistent, detail = _reported_hf_summary_consistency(
+                evidence.get(f"teacher_tp{tp}") or {},
+                reference,
+            )
+        except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+            consistent = False
+            detail = f"{type(exc).__name__}: {exc}"
+        summary_consistent = summary_consistent and consistent
+        summary_details.append(f"TP{tp}: {detail}")
+    _record(
+        checks,
+        f"{gate} {arm} reported HF summaries match immutable raw evidence",
+        summary_consistent,
+        "; ".join(summary_details),
+    )
+
     if gate == "A1":
-        reference = (evidence.get("reference") or {}).get("reference") or {}
         raw_scores: dict[int, dict[str, Any]] = {}
         raw_error: str | None = None
         try:
@@ -445,7 +635,9 @@ def _delta_summary(values: list[float]) -> dict[str, float | int | None]:
 
 
 def paired_position_summary(
-    model_result: dict[str, Any], float32_result: dict[str, Any]
+    model_result: dict[str, Any],
+    float32_result: dict[str, Any],
+    reference: dict[str, Any],
 ) -> dict[str, Any]:
     """Compare one TP cell position-by-position against its shared reference."""
 
@@ -465,8 +657,8 @@ def paired_position_summary(
     for key in sorted(set(model_rows) | set(float_rows)):
         model_row = model_rows.get(key) or {}
         float_row = float_rows.get(key) or {}
-        reference = model_row.get("reference_token")
-        if reference != float_row.get("reference_token"):
+        reference_token = model_row.get("reference_token")
+        if reference_token != float_row.get("reference_token"):
             reference_mismatches.append({"prompt": key[0], "position": key[1]})
             continue
         model_token = model_row.get("engine_token")
@@ -475,16 +667,16 @@ def paired_position_summary(
         float_missing += int(float_token is None)
         model_substantive += int(
             model_token is not None
-            and model_token != reference
+            and model_token != reference_token
             and not model_row.get("tie_break", False)
         )
         float_substantive += int(
             float_token is not None
-            and float_token != reference
+            and float_token != reference_token
             and not float_row.get("tie_break", False)
         )
-        model_hit = model_token == reference and model_token is not None
-        float_hit = float_token == reference and float_token is not None
+        model_hit = model_token == reference_token and model_token is not None
+        float_hit = float_token == reference_token and float_token is not None
         model_agreed += int(model_hit)
         float_agreed += int(float_hit)
         model_selected_logprob = model_row.get("engine_token_logprob")
@@ -543,13 +735,19 @@ def paired_position_summary(
             {
                 "prompt": key[0],
                 "position": key[1],
-                "reference_token": reference,
+                "reference_token": reference_token,
                 "model_token": model_token,
                 "float32_token": float_token,
                 "movement": movement,
             }
         )
     delta = float_agreed - model_agreed
+    noise_floor = gate_a2._reference_noise_floor(reference)
+    expected_floor = noise_floor["raw_self_agreement_rate"]
+    expected_tie_gap = max(
+        gate_a2._MIN_TIE_GAP,
+        noise_floor["max_gap_at_self_disagreement"],
+    )
     model_floor = (model_result.get("reference_noise_floor") or {}).get(
         "raw_self_agreement_rate"
     )
@@ -565,13 +763,13 @@ def paired_position_summary(
     model_top_k = (model_result.get("logprob_tolerance") or {}).get("top_k")
     float_top_k = (float32_result.get("logprob_tolerance") or {}).get("top_k")
     reference_contract_match = (
-        isinstance(model_floor, (int, float))
-        and model_floor == float_floor
-        and isinstance(model_tie_gap, (int, float))
-        and model_tie_gap == float_tie_gap
+        model_floor == expected_floor
+        and float_floor == expected_floor
+        and model_tie_gap == expected_tie_gap
+        and float_tie_gap == expected_tie_gap
         and type(model_top_k) is int
-        and model_top_k > 0
-        and model_top_k == float_top_k
+        and model_top_k == _TOP_LOGPROBS_K
+        and float_top_k == _TOP_LOGPROBS_K
     )
     return {
         "complete": complete and not reference_mismatches,
@@ -579,10 +777,10 @@ def paired_position_summary(
         "reference_mismatches": reference_mismatches,
         "reference_contract_match": reference_contract_match,
         "reference_self_agreement_floor": (
-            model_floor if reference_contract_match else None
+            expected_floor if reference_contract_match else None
         ),
-        "tie_gap_nats": model_tie_gap if reference_contract_match else None,
-        "top_logprobs_k": model_top_k if reference_contract_match else None,
+        "tie_gap_nats": expected_tie_gap if reference_contract_match else None,
+        "top_logprobs_k": _TOP_LOGPROBS_K if reference_contract_match else None,
         "model_agreed": model_agreed,
         "float32_agreed": float_agreed,
         "agreement_delta": delta,
@@ -698,11 +896,16 @@ def evaluate(
     for gate, degrees in (("A1", _A1_TP), ("A2", _A2_TP)):
         model_evidence = artifacts[(gate, "model")].get("evidence") or {}
         float_evidence = artifacts[(gate, "float32")].get("evidence") or {}
+        reference = (model_evidence.get("reference") or {}).get("reference") or {}
         for tp in degrees:
             name = f"{gate.lower()}_tp{tp}"
             model_result = model_evidence.get(f"teacher_tp{tp}") or {}
             float_result = float_evidence.get(f"teacher_tp{tp}") or {}
-            summary = paired_position_summary(model_result, float_result)
+            summary = paired_position_summary(
+                model_result,
+                float_result,
+                reference,
+            )
             model_raw, model_unique, model_exact = _raw_position_counts(
                 model_result
             )

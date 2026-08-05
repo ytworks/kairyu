@@ -38,6 +38,69 @@ def _raw_positions() -> list[dict[str, object]]:
     ]
 
 
+def _reference() -> dict[str, dict[str, object]]:
+    return {
+        f"p{prompt}": {
+            "continuation": [prompt * 16 + position for position in range(16)],
+            "hf_top_logprobs": [
+                {
+                    str(prompt * 16 + position + offset): -0.1 - offset
+                    for offset in range(20)
+                }
+                for position in range(16)
+            ],
+        }
+        for prompt in range(64)
+    }
+
+
+def _teacher_result(arm: str, tp: int) -> dict[str, object]:
+    return {
+        "config": _measurement_config(arm, tp),
+        "reference_noise_floor": {
+            "positions": 1024,
+            "self_inconsistent": 0,
+            "self_agreement_rate": 1.0,
+            "raw_self_agreement_rate": 1.0,
+            "max_gap_at_self_disagreement": 0.0,
+            "method": (
+                "HF greedy generate() vs HF teacher-forced argmax over the same "
+                "sequence: two paths through one set of weights"
+            ),
+        },
+        "agreement": {
+            "positions": 1024,
+            "agreed": 1024,
+            "rate": 1.0,
+            "threshold": 1.0,
+            "threshold_source": (
+                "the reference's own self-agreement (G2 A2, amended 2026-07-25)"
+            ),
+            "historical_fixed_threshold": 0.99,
+            "verdict": "PASS",
+        },
+        "logprob_tolerance": {
+            "tie_gap_nats": 0.125,
+            "tie_gap_source": (
+                "floor (bf16 logprob resolution); reference was self-consistent"
+            ),
+            "top_k": 20,
+            "agreeing_positions_max_abs_delta": 0.0,
+            "agreeing_positions_mean_abs_delta": 0.0,
+            "disagreements": 0,
+            "tie_breaks": 0,
+            "substantive": 0,
+            "max_abs_delta_bound": 0.25,
+            "within_delta_bound": True,
+            "expected_samples": 1024,
+            "collected_samples": 1024,
+            "missing_samples": [],
+            "verdict": "PASS",
+        },
+        "raw_positions": _raw_positions(),
+    }
+
+
 def _measurement_config(arm: str, tp: int | None = None) -> dict[str, object]:
     config: dict[str, object] = {
         "logits_dtype_requested": arm,
@@ -74,15 +137,10 @@ def _artifact(gate: str, arm: str) -> dict[str, object]:
     evidence: dict[str, object] = {
         "reference": {
             "reference_runtime": {"code": copy.deepcopy(_CODE)},
-            "reference": {},
+            "reference": _reference(),
         },
         **{
-            f"teacher_tp{tp}": {
-                "config": _measurement_config(arm, tp),
-                "reference_noise_floor": {"raw_self_agreement_rate": 1.0},
-                "logprob_tolerance": {"tie_gap_nats": 0.125, "top_k": 20},
-                "raw_positions": _raw_positions(),
-            }
+            f"teacher_tp{tp}": _teacher_result(arm, tp)
             for tp in degrees
         },
     }
@@ -109,6 +167,57 @@ def _artifacts() -> dict[str, dict[str, object]]:
         "a2_model": _artifact("A2", "model"),
         "a2_float32": _artifact("A2", "float32"),
     }
+
+
+def _a1_formal_checks(*, checkpoint_passed: bool = True) -> list[dict[str, object]]:
+    return [
+        {
+            "name": "checkpoint is Llama-3.1-8B",
+            "passed": checkpoint_passed,
+            "detail": "expected checkpoint" if checkpoint_passed else "wrong checkpoint",
+        },
+        {
+            "name": "overlap ON reproduces OFF at TP1 and TP2",
+            "passed": True,
+            "detail": "exact",
+        },
+        {
+            "name": "amended teacher-forced verdict passes at TP1 and TP2",
+            "passed": True,
+            "detail": "PASS",
+        },
+    ]
+
+
+def _a2_formal_checks(
+    *,
+    checkpoint_passed: bool = True,
+    hf_passed: bool = False,
+    raw_passed: bool = False,
+    direct_passed: bool = True,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "name": "checkpoint is Llama-3.3-70B FP8 W8A8",
+            "passed": checkpoint_passed,
+            "detail": "expected checkpoint" if checkpoint_passed else "wrong checkpoint",
+        },
+        {
+            "name": "every TP degree passes the amended HF-relative criteria",
+            "passed": hf_passed,
+            "detail": "PASS" if hf_passed else "TP4/TP8 below floor",
+        },
+        {
+            "name": "raw rows recompute both amended criteria at every TP degree",
+            "passed": raw_passed,
+            "detail": "PASS" if raw_passed else "TP4/TP8 below floor",
+        },
+        {
+            "name": "TP4 and TP8 pass directly against TP2",
+            "passed": direct_passed,
+            "detail": "PASS" if direct_passed else "direct comparison failed",
+        },
+    ]
 
 
 def _paired_checks(
@@ -297,10 +406,7 @@ def test_negative_formal_result_is_valid_but_not_feature_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifact = _artifact("A2", "float32")
-    formal_checks = [
-        {"name": "evidence is complete", "passed": True, "detail": "complete"},
-        {"name": "HF floor is met", "passed": False, "detail": "1003 < 1004"},
-    ]
+    formal_checks = _a2_formal_checks()
     comparisons = {
         "tp2_vs_hf": {"verdict": "PASS"},
         "tp4_vs_hf": {"verdict": "FAIL"},
@@ -329,7 +435,10 @@ def test_negative_formal_result_is_valid_but_not_feature_ready(
     assert by_name["A2 float32 independently replays all formal readiness criteria"] == {
         "name": "A2 float32 independently replays all formal readiness criteria",
         "passed": False,
-        "detail": "failed=['HF floor is met']",
+        "detail": (
+            "failed=['every TP degree passes the amended HF-relative criteria', "
+            "'raw rows recompute both amended criteria at every TP degree']"
+        ),
         "scope": "feature_readiness",
     }
 
@@ -338,7 +447,7 @@ def test_negative_formal_result_rejects_a_forged_pass_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifact = _artifact("A2", "float32")
-    formal_checks = [{"name": "HF floor is met", "passed": False, "detail": "1003 < 1004"}]
+    formal_checks = _a2_formal_checks()
     artifact["verdict"] = "PASS"
     artifact["checks"] = copy.deepcopy(formal_checks)
     artifact["tp_comparisons"] = {}
@@ -353,6 +462,177 @@ def test_negative_formal_result_rejects_a_forged_pass_verdict(
 
     assert evidence_valid is False
     assert feature_ready is False
+
+
+@pytest.mark.parametrize("mutation", ("missing", "duplicate", "renamed"))
+def test_formal_readiness_taxonomy_mutation_invalidates_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    artifact = _artifact("A2", "float32")
+    formal_checks = _a2_formal_checks()
+    target = "raw rows recompute both amended criteria at every TP degree"
+    target_index = next(
+        index for index, row in enumerate(formal_checks) if row["name"] == target
+    )
+    if mutation == "missing":
+        formal_checks.pop(target_index)
+    elif mutation == "duplicate":
+        formal_checks.append(copy.deepcopy(formal_checks[target_index]))
+    else:
+        formal_checks[target_index]["name"] = f"renamed: {target}"
+    artifact["verdict"] = "FAIL"
+    artifact["checks"] = copy.deepcopy(formal_checks)
+    artifact["tp_comparisons"] = {}
+    monkeypatch.setattr(
+        gate_logits_dtype.gate_a2,
+        "evaluate",
+        lambda *_args: (copy.deepcopy(formal_checks), {}),
+    )
+
+    checks = gate_logits_dtype._validate_arm(artifact, "A2", "float32")
+    evidence_valid, feature_ready = gate_logits_dtype._outcome(checks)
+
+    assert evidence_valid is False
+    assert feature_ready is False
+    by_name = {check["name"]: check for check in checks}
+    assert by_name["A2 float32 formal readiness taxonomy is exact"]["passed"] is False
+
+
+def test_a2_honest_checkpoint_failure_is_invalid_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact("A2", "float32")
+    artifact["evidence"]["reference"]["provenance"] = {
+        "checkpoint_contract": {"hidden_size": 1}
+    }
+    formal_checks = _a2_formal_checks(checkpoint_passed=False)
+    artifact["verdict"] = "FAIL"
+    artifact["checks"] = copy.deepcopy(formal_checks)
+    artifact["tp_comparisons"] = {}
+    monkeypatch.setattr(
+        gate_logits_dtype.gate_a2,
+        "evaluate",
+        lambda *_args: (copy.deepcopy(formal_checks), {}),
+    )
+
+    checks = gate_logits_dtype._validate_arm(artifact, "A2", "float32")
+    evidence_valid, feature_ready = gate_logits_dtype._outcome(checks)
+
+    assert evidence_valid is False
+    assert feature_ready is False
+    by_name = {check["name"]: check for check in checks}
+    integrity = by_name[
+        "A2 float32 formal evidence-integrity criteria all pass"
+    ]
+    assert integrity["passed"] is False
+    assert "checkpoint is Llama-3.3-70B FP8 W8A8" in integrity["detail"]
+
+
+def test_a1_honest_checkpoint_failure_is_invalid_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact("A1", "model")
+    artifact["evidence"]["continuations"]["config"]["checkpoint"] = {
+        "architecture": {"hidden_size": 1}
+    }
+    formal_checks = _a1_formal_checks(checkpoint_passed=False)
+    artifact["verdict"] = "FAIL"
+    artifact["checks"] = copy.deepcopy(formal_checks)
+    monkeypatch.setattr(
+        gate_logits_dtype.gate_a1,
+        "evaluate",
+        lambda *_args: copy.deepcopy(formal_checks),
+    )
+
+    checks = gate_logits_dtype._validate_arm(artifact, "A1", "model")
+    evidence_valid, feature_ready = gate_logits_dtype._outcome(checks)
+
+    assert evidence_valid is False
+    assert feature_ready is False
+    by_name = {check["name"]: check for check in checks}
+    integrity = by_name["A1 model formal evidence-integrity criteria all pass"]
+    assert integrity["passed"] is False
+    assert "checkpoint is Llama-3.1-8B" in integrity["detail"]
+
+
+def test_a2_reported_summary_mutation_invalidates_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact("A2", "float32")
+    formal_checks = _a2_formal_checks()
+    artifact["verdict"] = "FAIL"
+    artifact["checks"] = copy.deepcopy(formal_checks)
+    artifact["tp_comparisons"] = {}
+    monkeypatch.setattr(
+        gate_logits_dtype.gate_a2,
+        "evaluate",
+        lambda *_args: (copy.deepcopy(formal_checks), {}),
+    )
+    result = artifact["evidence"]["teacher_tp4"]
+    result["agreement"]["agreed"] = 1
+    result["agreement"]["rate"] = round(1 / 1024, 4)
+    result["agreement"]["threshold"] = 0.123
+    result["logprob_tolerance"]["agreeing_positions_max_abs_delta"] = 999.0
+    result["logprob_tolerance"]["expected_samples"] = 1
+    result["logprob_tolerance"]["collected_samples"] = 1
+
+    checks = gate_logits_dtype._validate_arm(artifact, "A2", "float32")
+    evidence_valid, feature_ready = gate_logits_dtype._outcome(checks)
+
+    assert evidence_valid is False
+    assert feature_ready is False
+    by_name = {check["name"]: check for check in checks}
+    summary_check = by_name[
+        "A2 float32 reported HF summaries match immutable raw evidence"
+    ]
+    assert summary_check["passed"] is False
+    assert "agreement" in summary_check["detail"]
+    assert "logprob_tolerance" in summary_check["detail"]
+
+
+def test_a1_false_floor_and_tie_gap_are_rejected_before_paired_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifacts = {
+        arm: _artifact("A1", arm)
+        for arm in ("model", "float32")
+    }
+    formal_checks = _a1_formal_checks()
+    monkeypatch.setattr(
+        gate_logits_dtype.gate_a1,
+        "evaluate",
+        lambda *_args: copy.deepcopy(formal_checks),
+    )
+    for artifact in artifacts.values():
+        artifact["checks"] = copy.deepcopy(formal_checks)
+        result = artifact["evidence"]["teacher_tp1"]
+        result["reference_noise_floor"]["raw_self_agreement_rate"] = 0.123
+        result["logprob_tolerance"]["tie_gap_nats"] = 999.0
+        result["agreement"]["rate"] = 0.123
+        result["logprob_tolerance"]["agreeing_positions_mean_abs_delta"] = 999.0
+
+    checks = gate_logits_dtype._validate_arm(
+        artifacts["model"],
+        "A1",
+        "model",
+    )
+    evidence_valid, _feature_ready = gate_logits_dtype._outcome(checks)
+    assert evidence_valid is False
+    by_name = {check["name"]: check for check in checks}
+    assert by_name[
+        "A1 model reported HF summaries match immutable raw evidence"
+    ]["passed"] is False
+
+    reference = artifacts["model"]["evidence"]["reference"]["reference"]
+    summary = gate_logits_dtype.paired_position_summary(
+        artifacts["model"]["evidence"]["teacher_tp1"],
+        artifacts["float32"]["evidence"]["teacher_tp1"],
+        reference,
+    )
+    assert summary["reference_contract_match"] is False
+    assert summary["reference_self_agreement_floor"] is None
+    assert summary["tie_gap_nats"] is None
 
 
 def test_cli_accepts_valid_negative_evidence_unless_readiness_is_asserted(
