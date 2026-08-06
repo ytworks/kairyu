@@ -22,6 +22,11 @@ from kairyu.bench.sampling import (
     sampling_metrics,
     sampling_summary,
 )
+from kairyu.bench.structured import (
+    structured_run_expectation,
+    structured_summary,
+    structured_summary_error,
+)
 from kairyu.bench.types import (
     SCHEMA_VERSION,
     BenchTarget,
@@ -38,6 +43,7 @@ def _scoreboard_safe_pair(
     pair: PairResult,
     *,
     expected_sampling: dict[str, object] | None = None,
+    expected_structured_run: dict[str, object] | None = None,
 ) -> PairResult:
     """Turn malformed pair metrics into a visible failed cell.
 
@@ -45,7 +51,11 @@ def _scoreboard_safe_pair(
     artifacts, bypassing ``SuiteRunner``.  Keep aggregation total and preserve
     the cell identity/policy while withholding evidence that cannot be scored.
     """
-    error = pair_result_evidence_error(pair, expected_sampling=expected_sampling)
+    error = pair_result_evidence_error(
+        pair,
+        expected_sampling=expected_sampling,
+        expected_structured_run=expected_structured_run,
+    )
     if error is None:
         return pair
     return pair.model_copy(
@@ -222,6 +232,13 @@ def build_scoreboard(
     adapters = all_adapters()
     display_names = {name: adapter.info.display_name for name, adapter in adapters.items()}
     configured_by_label = {target.label(): target for target in (target_configs or ())}
+    recorded_target_by_label = {
+        label: target
+        for target in config.get("targets", [])
+        if isinstance(target, dict)
+        and isinstance((label := target.get("name") or target.get("model")), str)
+        and label
+    }
     attempts = config.get("attempts", 1)
     grouped_chat_attempts = (
         attempts if config.get("sampling_protocol") == SAMPLING_PROTOCOL_ID else 1
@@ -245,6 +262,32 @@ def build_scoreboard(
                     ),
                 }
                 if pair.target in configured_by_label
+                else None
+            ),
+            expected_structured_run=(
+                structured_run_expectation(
+                    limit=config.get("limit"),
+                    smoke=config.get("smoke", False),
+                    selection_seed=config.get("seed", 0),
+                    extra_body_present=(
+                        pair.target in recorded_target_by_label
+                        and (
+                            recorded_target_by_label[pair.target].get("extra_body_json")
+                            is not None
+                        )
+                    )
+                    or (
+                        pair.target in configured_by_label
+                        and (
+                            configured_by_label[pair.target].extra_body_json is not None
+                        )
+                    ),
+                )
+                if pair.benchmark == "structured-output"
+                and (
+                    pair.target in configured_by_label
+                    or pair.target in recorded_target_by_label
+                )
                 else None
             ),
         )
@@ -356,6 +399,22 @@ def build_scoreboard(
                             "because the complete item-by-seed evidence did not validate"
                         )
                     )
+            structured = (
+                structured_summary(pair)
+                if benchmark == "structured-output"
+                else None
+            )
+            if (
+                benchmark == "structured-output"
+                and pair.items
+                and structured is None
+            ):
+                notes.append(
+                    footnote(
+                        f"{benchmark}/{target}: structured conformance summary withheld "
+                        "because the complete paired-arm evidence did not validate"
+                    )
+                )
             cell = {
                 "status": pair.status,
                 "score": pair.score,
@@ -376,6 +435,8 @@ def build_scoreboard(
             }
             if sensitivity is not None:
                 cell["sampling_sensitivity"] = sensitivity
+            if structured is not None:
+                cell["structured_conformance"] = structured
             cells[benchmark][target] = cell
 
     return {
@@ -645,6 +706,110 @@ def _cell_text(cell: dict, *, declared_binary: bool) -> str:
     return f"{text}{marks}"
 
 
+def _stored_structured_conformance(cell: dict) -> dict | None:
+    value = cell.get("structured_conformance")
+    if structured_summary_error(
+        value,
+        expected_score=cell.get("score"),
+        expected_total=cell.get("n"),
+        expected_status=cell.get("status"),
+    ) is not None:
+        return None
+    assert isinstance(value, dict)
+    return value
+
+
+def _percent(value: object) -> str:
+    number = _finite_number(value)
+    return "—" if number is None else f"{number * 100:.1f}%"
+
+
+def _number(value: object) -> str:
+    number = _finite_number(value)
+    return "—" if number is None else f"{number:.2f}"
+
+
+def _structured_markdown(scoreboard: dict) -> list[str]:
+    benchmark_cells = scoreboard.get("cells", {}).get("structured-output", {})
+    retained: list[tuple[str, dict]] = []
+    for target in scoreboard.get("targets", []):
+        cell = benchmark_cells.get(target)
+        if not isinstance(cell, dict):
+            continue
+        summary = _stored_structured_conformance(cell)
+        if summary is not None:
+            retained.append((target, summary))
+    if not retained:
+        return []
+
+    lines = [
+        "",
+        "## Structured-output conformance details",
+        "",
+        "Rates are recomputed from paired raw arms. Token counts are endpoint-reported; "
+        "latency is a counterbalanced retry-inclusive diagnostic, and currency cost is "
+        "not calculated.",
+        "",
+        "| Target | Arm | Accepted | Strict JSON | Schema valid | Exact task | "
+        "Malformed | Usage coverage | Prompt tokens | Completion tokens | Total tokens | "
+        "Latency (s) |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for target, summary in retained:
+        for arm_name in ("constrained", "unconstrained"):
+            arm = summary["arms"][arm_name]
+            lines.append(
+                "| "
+                + " | ".join(
+                    (
+                        target,
+                        arm_name,
+                        _percent(arm["acceptance_rate"]),
+                        _percent(arm["json_valid_rate"]),
+                        _percent(arm["schema_conformance_rate"]),
+                        _percent(arm["task_accuracy"]),
+                        _percent(arm["malformed_json_rate"]),
+                        f"{_percent(arm['usage_coverage'])} "
+                        f"({arm['usage_observations']}/{arm['accepted']})",
+                        _number(arm["mean_prompt_tokens"]),
+                        _number(arm["mean_completion_tokens"]),
+                        _number(arm["mean_total_tokens"]),
+                        _number(arm["mean_latency_s"]),
+                    )
+                )
+                + " |"
+            )
+    lines.extend(
+        (
+            "",
+            "| Target | Schema-valid Δ | Exact-task Δ | Paired usage | Prompt-token Δ | "
+            "Completion-token Δ | Total-token Δ | Latency Δ (s) | Currency |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        )
+    )
+    for target, summary in retained:
+        cost = summary["paired_cost"]
+        latency = summary["latency_diagnostic"]
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    target,
+                    _percent(summary["quality_deltas"]["schema_conformance_rate"]),
+                    _percent(summary["quality_deltas"]["task_accuracy"]),
+                    f"{cost['usage_observations']}/{summary['observations']}",
+                    _number(cost["mean_prompt_token_delta"]),
+                    _number(cost["mean_completion_token_delta"]),
+                    _number(cost["mean_total_token_delta"]),
+                    _number(latency["mean_s_delta"]),
+                    "not calculated",
+                )
+            )
+            + " |"
+        )
+    return lines
+
+
 def run_banner(scoreboard: dict) -> list[str]:
     """Loud, artifact-resident notice when no cell is a full-suite measurement.
 
@@ -714,6 +879,7 @@ def render_markdown(scoreboard: dict) -> str:
             for target in targets
         ]
         lines.append("| " + " | ".join(row) + " |")
+    lines.extend(_structured_markdown(scoreboard))
     if scoreboard["footnotes"]:
         lines.append("")
         for index, note in enumerate(scoreboard["footnotes"], start=1):

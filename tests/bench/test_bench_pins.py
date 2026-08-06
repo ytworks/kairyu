@@ -19,6 +19,7 @@ from kairyu.bench.pins import (
 )
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
+_CONTENT_SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def test_every_pin_is_a_full_commit_sha():
@@ -71,13 +72,16 @@ def test_list_checks_cache_readiness_against_all_declared_pins(monkeypatch, caps
     assert "suite core (3 slots)" in capsys.readouterr().out
 
 
-def test_every_pinned_slot_declares_a_commit_sha():
-    """`revision` is a git ref: a config name there simply cannot be fetched."""
+def test_every_pinned_slot_declares_a_source_appropriate_revision():
+    """Hub sources use Git commits; package-owned corpora use content digests."""
     for adapter in all_adapters().values():
         revision = adapter.info.hf_revision
         if revision is None:
             continue
-        assert _SHA.match(revision), f"{adapter.info.name}: {revision!r}"
+        if (adapter.info.hf_dataset or "").startswith("package:"):
+            assert _CONTENT_SHA.match(revision), f"{adapter.info.name}: {revision!r}"
+        else:
+            assert _SHA.match(revision), f"{adapter.info.name}: {revision!r}"
 
 
 def test_non_commit_declarations_are_replaced_by_the_pin():

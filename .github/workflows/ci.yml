@@ -30,6 +30,7 @@ jobs:
           --require-module torch
           --require-module transformers
           --require-module xgrammar
+          --require-module jsonschema
           --require-module zmq
           --require-module yaml
       - name: Verify benchmark entrypoints and wheel boundary

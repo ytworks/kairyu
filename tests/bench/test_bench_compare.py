@@ -286,7 +286,7 @@ async def test_fixture_run_says_its_scores_are_not_measurements(tmp_path, http_f
     markdown = (tmp_path / "results" / "test-run" / "comparison.md").read_text(
         encoding="utf-8"
     )
-    assert "synthetic offline fixtures" in markdown
+    assert "offline fixture mode lacks cache-bound dataset identity" in markdown
     assert "not measurements" in markdown
 
 
@@ -296,7 +296,10 @@ def test_run_level_reasons_cover_limit_and_fixtures(tmp_path):
     config = make_config(tmp_path, models=("m",))
     reasons = run_level_incomparable_reasons(config, 20)
     assert any("at most 20 items" in reason for reason in reasons)
-    assert any("synthetic offline fixtures" in reason for reason in reasons)
+    assert any(
+        "offline fixture mode lacks cache-bound dataset identity" in reason
+        for reason in reasons
+    )
 
     full = config.model_copy(update={"offline_fixtures": False})
     assert run_level_incomparable_reasons(full, None) == ()

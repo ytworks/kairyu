@@ -112,6 +112,17 @@ _FINGERPRINT_EXCLUSIONS = frozenset(
 )
 _SAMPLING_SENSITIVITY_FIELD = "sampling_sensitivity"
 _SAMPLING_EVALUATION_RESOURCE = ("kairyu.bench", "sampling.py")
+_STRUCTURED_CONFORMANCE_FIELD = "structured_conformance"
+_STRUCTURED_EVALUATION_RESOURCES = frozenset(
+    {
+        ("kairyu.bench.adapters", "structured_output.py"),
+        ("kairyu.bench", "structured.py"),
+        ("kairyu.bench.fixtures", "structured-output.jsonl"),
+    }
+)
+_STRUCTURED_EVALUATION_DISTRIBUTIONS = frozenset(
+    {"jsonschema", "jsonschema-specifications", "referencing", "rpds-py", "attrs"}
+)
 
 
 def _fail(message: str) -> ValueError:
@@ -535,6 +546,112 @@ def _require_sampling_evaluation_resource(adapters: Sequence[object]) -> None:
             )
 
 
+def _pair_has_structured_evidence(value: object) -> bool:
+    from kairyu.bench.types import PairResult
+
+    try:
+        pair = PairResult.model_validate(value)
+    except (TypeError, ValueError):
+        return False
+    if pair.benchmark == "structured-output":
+        return True
+    if "structured_output" in pair.methodology:
+        return True
+    return any(name.startswith("structured_") for name in pair.metrics)
+
+
+def _scoreboard_has_structured_claim(scoreboard: dict) -> bool:
+    cells = scoreboard.get("cells")
+    if not isinstance(cells, dict):
+        return False
+    return any(
+        isinstance(cell, dict) and _STRUCTURED_CONFORMANCE_FIELD in cell
+        for row in cells.values()
+        if isinstance(row, dict)
+        for cell in row.values()
+    )
+
+
+def _require_structured_evaluation_identity(
+    adapters: Sequence[object],
+    *,
+    require_installed: bool,
+) -> None:
+    from kairyu.bench.structured import (
+        CORPUS_ID,
+        CORPUS_REVISION,
+        structured_cache_sha256,
+    )
+
+    identity = next(
+        (
+            value
+            for value in adapters
+            if isinstance(value, dict) and value.get("name") == "structured-output"
+        ),
+        None,
+    )
+    if identity is None:
+        raise _fail("structured-output evidence has no adapter identity")
+    if identity.get("dataset") != CORPUS_ID or identity.get("revision") != CORPUS_REVISION:
+        raise _fail("structured-output adapter identity does not bind the fixed corpus")
+    protocol = identity.get("evaluation_protocol")
+    if not isinstance(protocol, dict):
+        raise _fail("structured-output evaluation protocol identity is missing")
+    resources = protocol.get("resources")
+    distributions = protocol.get("distributions")
+    retained_resources = (
+        {
+            (entry.get("package"), entry.get("resource"))
+            for entry in resources
+            if isinstance(entry, dict)
+        }
+        if isinstance(resources, list)
+        else set()
+    )
+    retained_distributions = (
+        {
+            entry.get("name"): entry
+            for entry in distributions
+            if isinstance(entry, dict)
+        }
+        if isinstance(distributions, list)
+        else {}
+    )
+    missing_resources = sorted(_STRUCTURED_EVALUATION_RESOURCES - retained_resources)
+    missing_distributions = sorted(
+        _STRUCTURED_EVALUATION_DISTRIBUTIONS - set(retained_distributions)
+    )
+    if missing_resources:
+        raise _fail(
+            "structured-output evaluator omits required resources: "
+            f"{missing_resources}"
+        )
+    if missing_distributions:
+        raise _fail(
+            "structured-output evaluator omits required distributions: "
+            f"{missing_distributions}"
+        )
+    if require_installed:
+        absent = sorted(
+            name
+            for name in _STRUCTURED_EVALUATION_DISTRIBUTIONS
+            if retained_distributions[name].get("installed") is not True
+        )
+        if absent:
+            raise _fail(
+                "scored structured-output evaluator requires installed distributions: "
+                f"{absent}"
+            )
+        if (
+            identity.get("sha256") != structured_cache_sha256()
+            or identity.get("assets") != []
+        ):
+            raise _fail(
+                "scored structured-output identity does not bind the exact fixed cache rows"
+            )
+
+
 def cross_run_policies(
     adapters: Sequence[Mapping[str, object]], environment: Mapping[str, object]
 ) -> dict[str, tuple[str, str | None]]:
@@ -923,6 +1040,7 @@ def _pair_result_binding(
     *,
     declared_binary: bool | None = None,
     expected_sampling: dict[str, object] | None = None,
+    expected_structured_run: dict[str, object] | None = None,
 ) -> dict:
     from kairyu.bench.aggregate import _binary_confidence_interval
     from kairyu.bench.types import PairResult, pair_result_evidence_error
@@ -938,6 +1056,7 @@ def _pair_result_binding(
     evidence_error = pair_result_evidence_error(
         result,
         expected_sampling=expected_sampling,
+        expected_structured_run=expected_structured_run,
         require_history_safe_counts=True,
     )
     if evidence_error is not None:
@@ -1042,6 +1161,45 @@ def _validate_fresh_sampling_claim(
         )
 
 
+def _recomputed_structured_conformance(pair: object, *, benchmark: str) -> dict | None:
+    if benchmark != "structured-output":
+        return None
+    from kairyu.bench.structured import structured_summary
+    from kairyu.bench.types import PairResult
+
+    try:
+        result = PairResult.model_validate(pair)
+    except (TypeError, ValueError) as error:  # pragma: no cover - bound just above
+        raise _fail("pair result does not match PairResult schema") from error
+    try:
+        return structured_summary(result)
+    except (OSError, RuntimeError, UnicodeError, ValueError) as error:
+        raise _fail(f"structured-output evaluator unavailable: {error}") from error
+
+
+def _validate_fresh_structured_claim(
+    cell: dict,
+    pair: object,
+    *,
+    benchmark: str,
+    target: str,
+) -> None:
+    field = _STRUCTURED_CONFORMANCE_FIELD
+    expected = _recomputed_structured_conformance(pair, benchmark=benchmark)
+    if expected is None:
+        if field in cell:
+            raise _fail(
+                f"scoreboard cell {benchmark!r}/{target!r} carries structured "
+                "conformance without complete raw evidence"
+            )
+        return
+    if field not in cell or _canonical_bytes(cell[field]) != _canonical_bytes(expected):
+        raise _fail(
+            f"scoreboard cell {benchmark!r}/{target!r} structured conformance "
+            "disagrees with raw pair evidence"
+        )
+
+
 def pair_result_binding(
     pair: object,
     *,
@@ -1070,6 +1228,7 @@ def _pair_bindings(
     expected_source_identity: dict,
     stored: bool,
     sampling_expectations: Mapping[tuple[str, str], dict[str, object]],
+    structured_run_expectations: Mapping[tuple[str, str], dict[str, object]],
 ) -> list[dict[str, Any]]:
     if not pairs:
         raise _fail("complete PairResult evidence is required for every scoreboard cell")
@@ -1094,6 +1253,9 @@ def _pair_bindings(
             binding = _pair_result_binding(
                 pair,
                 expected_sampling=sampling_expectations.get(
+                    (raw_benchmark, raw_target)
+                ),
+                expected_structured_run=structured_run_expectations.get(
                     (raw_benchmark, raw_target)
                 ),
             )
@@ -1124,8 +1286,19 @@ def _pair_bindings(
                     f"stored scoreboard cell {benchmark!r}/{target!r} must not carry "
                     "sampling sensitivity in index schema 1"
                 )
+            if _STRUCTURED_CONFORMANCE_FIELD in cell:
+                raise _fail(
+                    f"stored scoreboard cell {benchmark!r}/{target!r} must not carry "
+                    "structured conformance in index schema 1"
+                )
         else:
             _validate_fresh_sampling_claim(
+                cell,
+                pair,
+                benchmark=benchmark,
+                target=target,
+            )
+            _validate_fresh_structured_claim(
                 cell,
                 pair,
                 benchmark=benchmark,
@@ -1211,6 +1384,11 @@ def _validate_scoreboard(
     )
     if sampling_protocol_used:
         _require_sampling_evaluation_resource(adapters)
+    structured_protocol_used = (
+        "structured-output" in adapter_names
+        or _scoreboard_has_structured_claim(board)
+        or (not stored_pairs and any(_pair_has_structured_evidence(pair) for pair in pairs))
+    )
     configured_targets = config.get("targets")
     if not isinstance(configured_targets, list) or any(
         not isinstance(target, dict) for target in configured_targets
@@ -1231,6 +1409,16 @@ def _validate_scoreboard(
     if board.get("targets") != target_labels:
         raise _fail("scoreboard targets do not match run config target labels")
     matrix = _scoreboard_matrix(board)
+    structured_scored = any(
+        benchmark == "structured-output"
+        and board["cells"][benchmark][target]["status"] in {"completed", "partial"}
+        for benchmark, target in matrix
+    )
+    if structured_protocol_used:
+        _require_structured_evaluation_identity(
+            adapters,
+            require_installed=structured_scored,
+        )
     from kairyu.bench.adapters import all_adapters
     from kairyu.bench.adapters.base import GenerativeAdapter
 
@@ -1263,6 +1451,44 @@ def _validate_scoreboard(
         error = sampling_configuration_error(expectation)
         if error is not None:
             raise _fail(error)
+    from kairyu.bench.structured import structured_run_expectation
+    from kairyu.bench.types import (
+        SMOKE_LIMIT,
+        run_configuration_incomparable_reasons,
+    )
+
+    try:
+        structured_run_expectations = {
+            (benchmark, target): structured_run_expectation(
+                limit=config.get("limit"),
+                smoke=config.get("smoke", False),
+                selection_seed=config.get("seed", 0),
+                extra_body_present=(
+                    configured_by_label[target].get("extra_body_json") is not None
+                ),
+            )
+            for benchmark, target in matrix
+            if benchmark == "structured-output"
+        }
+    except ValueError as error:
+        raise _fail(str(error)) from error
+    configured_limit = config.get("limit")
+    configured_smoke = config.get("smoke", False)
+    if configured_limit is not None and (
+        type(configured_limit) is not int or configured_limit < 1
+    ):
+        raise _fail("run config limit must be null or a positive integer")
+    if type(configured_smoke) is not bool:
+        raise _fail("run config smoke must be a boolean")
+    effective_limit = (
+        min(configured_limit or SMOKE_LIMIT, SMOKE_LIMIT)
+        if configured_smoke
+        else configured_limit
+    )
+    required_run_reasons = run_configuration_incomparable_reasons(
+        limit=effective_limit,
+        offline_fixtures=False,
+    )
     policies = cross_run_policies(adapters, run["environment"])
     identities_by_name = {identity["name"]: identity for identity in adapters}
     for benchmark in adapter_names:
@@ -1294,6 +1520,32 @@ def _validate_scoreboard(
                     f"scoreboard cell {benchmark!r}/{target!r} cross-run policy "
                     "does not match its runtime provenance"
                 )
+            if required_run_reasons and (
+                summary["comparable"] is not False
+                or any(
+                    reason not in summary["incomparable_reasons"]
+                    for reason in required_run_reasons
+                )
+            ):
+                raise _fail(
+                    f"scoreboard cell {benchmark!r}/{target!r} omits run-level "
+                    "incomparability"
+                )
+            if benchmark == "structured-output" and summary["status"] in {
+                "completed",
+                "partial",
+            }:
+                expected_run = structured_run_expectations[(benchmark, target)]
+                if expected_run["extra_body_present"] is True:
+                    raise _fail(
+                        "scored structured-output evidence conflicts with rejected "
+                        "extra_body_json"
+                    )
+                if summary["n"] != len(expected_run["selected_ids"]):
+                    raise _fail(
+                        "structured-output cell count disagrees with the configured "
+                        "fixed-corpus selection"
+                    )
     bindings = _pair_bindings(
         board,
         matrix,
@@ -1302,6 +1554,7 @@ def _validate_scoreboard(
         expected_source_identity=source_identity(run["environment"]),
         stored=stored_pairs,
         sampling_expectations=sampling_expectations,
+        structured_run_expectations=structured_run_expectations,
     )
     if not stored_pairs:
         # Index schema 1 has no canonical pair-binding field for this derived
@@ -1310,6 +1563,7 @@ def _validate_scoreboard(
         # or attacker-rehashed pass@k value.
         for benchmark, target in matrix:
             board["cells"][benchmark][target].pop(_SAMPLING_SENSITIVITY_FIELD, None)
+            board["cells"][benchmark][target].pop(_STRUCTURED_CONFORMANCE_FIELD, None)
     return board, bindings
 
 

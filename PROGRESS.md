@@ -684,9 +684,10 @@ canonical identity of the evaluated run agree. The final portable collection
 contains 5,436 selected tests with no selected skips. The exact 1,494-test
 benchmark and 3,923-test non-benchmark runs passed, then all 19 post-run
 fail-closed hardening selections passed in focused regression; combined
-coverage measured 83.86%. The isolated wheel contains all 11 benchmark fixtures
-plus the judge-calibration fixture, the LLMBar and IFEval attribution files, and
-the installed CLI.
+coverage measured 83.86%. The isolated wheel contains 11 synthetic benchmark
+stand-ins, the fixed structured-output corpus, and the judge-calibration corpus
+(13 JSONL fixtures total), plus the LLMBar and IFEval attribution files and the
+installed CLI.
 LiveCodeBench and SciCode scoring now select one explicit, fingerprinted
 execution runner. The trusted-development local subprocess remains available;
 the unattended path uses a digest-only Docker image, completed create before
@@ -793,8 +794,9 @@ global store remain rejected. The retained decision artifact SHA-256 is
 
 Benchmark ownership is now package-enforced. The installed `kairyu.bench`
 surface owns reusable target/auth/statistics/reporting contracts, the public
-CLI, 11 benchmark fixtures plus the judge-calibration fixture, and a packaged
-registry for all 64 checkout-only wrappers. Exact existing wrapper-composition
+CLI, 11 synthetic benchmark stand-ins, the fixed structured-output conformance
+corpus, the judge-calibration corpus, and a packaged registry for all 66
+checkout-only wrappers. Exact existing wrapper-composition
 edges are frozen; new reusable dependencies, missing docs/main guards, or
 path/module CLI regressions fail validation. Historical `bench/*.py` and
 `bench/results/**` provenance paths
@@ -820,6 +822,17 @@ its raw pair before omitting that derived field from the schema-1 index; a
 durable protocol marker preserves pre-#371 agentic multi-trial history
 compatibility. SciCode reruns each problem dependency chain independently for
 every seed.
+The dedicated structured-output suite pairs identical prompt/sampling/seed
+requests with and without `response_format` over a content-addressed five-case
+Draft 2020-12 corpus covering nested, recursive, enum, pattern, and union
+schemas. Strict duplicate/non-finite-safe JSON parsing and pinned independent
+schema validation separate acceptance, syntax validity, schema conformance,
+exact task quality, malformed output, endpoint token coverage/deltas, and
+counterbalanced latency diagnostics without inventing currency cost. Raw arms,
+seed/order, usage, status, and latency are retained under each source item;
+derived scoreboard details are recomputed before display, proven against raw
+evidence, and stripped from schema-1 history after validation. The suite is
+isolated from Core and the fixed quantization task matrix.
 
 The F1b zero-failure rollout gate now freezes each clean-head gateway and mock
 image to a private archive immediately after its build, before creating the
@@ -1132,6 +1145,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-06 — [design] Structured output gains paired schema-conformance evidence
+- What: added the dedicated `structured` benchmark suite with a package-owned, SHA-256-addressed Draft 2020-12 corpus spanning nested, recursive local-reference, enum, regex-pattern, and union schemas. Each selected item and sampling seed retains one counterbalanced constrained/control pair whose wire bodies differ only by `response_format`; strict outer-response and completion JSON parsing, an independently pinned `jsonschema` evaluator, and type-sensitive exact-answer scoring separate request acceptance, JSON validity, schema conformance, task success, malformed output, endpoint-reported token coverage/deltas, and diagnostic latency. Explicit structured-schema 400/422 responses remain measured conformance failures, while unrelated HTTP/transport/malformed-envelope failures withhold the complete claim. Valid HTTP 200 refusals, content-filtered empty messages, and unexpected call payloads remain accepted non-JSON/task-failure evidence instead of becoming environment faults. Raw arms and all derived metrics are cross-validated; exact config-selected corpus IDs, rejected control constraints, fixed cache/source identities, installed evaluator distributions, and subset incomparability are rebound at runner, report, and fresh-history boundaries. Fresh scoreboards recompute the detailed claim, schema-1 history proves then strips it, and stored detached claims are rejected. The suite, wheel fixture, cache manifest, evaluator resources/dependencies, docs, and example config are isolated from the frozen Core/quantization matrices.
+- Why: the previous one-object smoke assertion did not exercise common schema features, compare enforced generation with a matched control, quantify malformed output or token cost, or retain replayable evidence capable of detecting semantic-quality and reporting regressions.
+- Refs: issue #375; `kairyu/bench/{structured,types,aggregate,history}.py`; `kairyu/bench/adapters/structured_output.py`; `kairyu/bench/fixtures/structured-output.jsonl`; `examples/bench_structured.yaml`; `tests/bench/test_bench_structured_output.py`; `docs/benchmarks.md`
 
 ### 2026-08-06 — [design] Chat evaluations gain grouped sampling-sensitivity evidence
 - What: extended generative benchmark adapters so `attempts > 1` runs one ordered consecutive-seed sweep per source item, retaining strict child outcomes beneath that item rather than flattening correlated repeats. Complete rows recompute seed means, sample SD, range, and unbiased `1-C(n-c,k)/C(n,k)` pass@k for declared binary adapters; incomplete or tampered matrices withhold the sensitivity summary, and ordinary Wilson intervals plus configuration A/B are disabled for multi-attempt evidence. Raw source-item identities, canonical parent/pair status and reason, denominators, realizable binary pass@k margins, and fresh history labels are cross-validated. Runner, report, and history boundaries also bind target seed/mode/temperature plus the attempt budget to retained methodology; schema-1 history omits the derived label after proving it against the raw pair, while a new protocol marker preserves old agentic multi-trial records. SciCode independently reruns each seed's whole sequential problem chain. Targets can select an explicit temperature or `sampling_mode: recommended`, which omits temperature/top-p/top-k/min-p/repetition-penalty so endpoint generation defaults may apply while explicitly declining remote attestation. External harnesses fail closed when those chat-only policies cannot be forwarded, and SWE-Bench Pro requires one attempt. The default single-attempt target serialization, target-config fingerprint input, temperature-zero request bytes, and absent seed remain byte-shape compatible.

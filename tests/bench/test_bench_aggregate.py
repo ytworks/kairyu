@@ -8,6 +8,7 @@ import pytest
 from kairyu.bench.adapters import (
     CORE_ROW_ORDER,
     QUANTIZATION_ROW_ORDER,
+    STRUCTURED_ROW_ORDER,
     all_adapters,
     suite_adapters,
 )
@@ -120,13 +121,22 @@ def test_quantization_suite_preserves_core_and_adds_one_reasoning_row():
     )
 
 
+def test_structured_suite_is_isolated_from_core_and_quantization():
+    assert STRUCTURED_ROW_ORDER == ("structured-output",)
+    assert [adapter.info.name for adapter in suite_adapters("structured")] == list(
+        STRUCTURED_ROW_ORDER
+    )
+    assert "structured-output" not in CORE_ROW_ORDER
+    assert "structured-output" not in QUANTIZATION_ROW_ORDER
+
+
 def test_only_and_exclude_names_are_validated_within_the_selected_suite():
     assert [adapter.info.name for adapter in suite_adapters("core")] == list(CORE_ROW_ORDER)
     with pytest.raises(ValueError, match="gpqa-diamond"):
         suite_adapters("core", only=("gpqa-diamond",))
     with pytest.raises(ValueError, match="gsm8k"):
         suite_adapters("fugu", exclude=("gsm8k",))
-    with pytest.raises(ValueError, match="available: fugu, core, quantization"):
+    with pytest.raises(ValueError, match="available: fugu, core, quantization, structured"):
         suite_adapters("unknown")
 
 
@@ -684,6 +694,7 @@ def test_only_contractually_binary_adapters_enable_wilson_intervals():
         "mmlu",
         "scicode",
         "swe-bench-pro",
+        "structured-output",
     }
 
 

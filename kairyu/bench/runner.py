@@ -44,11 +44,13 @@ from kairyu.bench.compare import build_comparison, render_comparison_markdown
 from kairyu.bench.history import cross_run_policies
 from kairyu.bench.sampling import PROTOCOL_ID as SAMPLING_PROTOCOL_ID
 from kairyu.bench.store import ResultStore
+from kairyu.bench.structured import structured_run_expectation
 from kairyu.bench.types import (
     SMOKE_LIMIT,
     BenchConfig,
     PairResult,
     pair_result_evidence_error,
+    run_configuration_incomparable_reasons,
 )
 
 # How often a running pair reports that it is still alive.
@@ -215,7 +217,7 @@ def _environment(*, execution_runner=None) -> dict:
 
 def _history_ineligibility(config: BenchConfig, environment: dict) -> str | None:
     if config.offline_fixtures:
-        return "synthetic offline fixtures are diagnostics, not measurements"
+        return "offline fixture mode lacks cache-bound dataset identity and is diagnostic only"
     if environment.get("source_kind") != "git-checkout":
         return "the loaded benchmark package is not a tracked Git checkout"
     if environment.get("source_tree_clean") is not True:
@@ -381,14 +383,10 @@ def run_level_incomparable_reasons(config: BenchConfig, ctx_limit: int | None) -
     aggregation -- so without this a 20-item smoke cell renders as a plain number
     with an unmarked delta against Fugu's full-suite result.
     """
-    reasons: list[str] = []
-    if ctx_limit is not None:
-        reasons.append(f"subset run: at most {ctx_limit} items per benchmark, not the full set")
-    if config.offline_fixtures:
-        reasons.append(
-            "synthetic offline fixtures stood in for the real datasets; scores are not measurements"
-        )
-    return tuple(reasons)
+    return run_configuration_incomparable_reasons(
+        limit=ctx_limit,
+        offline_fixtures=config.offline_fixtures,
+    )
 
 
 def _stamp_run_reasons(
@@ -440,6 +438,7 @@ def _validated_pair_evidence(
     annotations: tuple[str, ...],
     context: str,
     expected_sampling: dict[str, object],
+    expected_structured_run: dict[str, object] | None,
     require_history_safe_counts: bool,
 ) -> PairResult:
     """Return trustworthy pair evidence or a failed pair at the scheduled key."""
@@ -448,6 +447,7 @@ def _validated_pair_evidence(
         expected_benchmark=benchmark,
         expected_target=target,
         expected_sampling=expected_sampling,
+        expected_structured_run=expected_structured_run,
         require_history_safe_counts=require_history_safe_counts,
     )
     if error is None:
@@ -684,6 +684,16 @@ class SuiteRunner:
                     "top_p": target.top_p,
                     "required": isinstance(adapter, GenerativeAdapter),
                 }
+                expected_structured_run = (
+                    structured_run_expectation(
+                        limit=config.limit,
+                        smoke=config.smoke,
+                        selection_seed=config.seed,
+                        extra_body_present=target.extra_body_json is not None,
+                    )
+                    if adapter.info.name == "structured-output"
+                    else None
+                )
                 source_before = observe_source()
                 current_adapter_identity = _adapter_identity(
                     adapter,
@@ -737,6 +747,7 @@ class SuiteRunner:
                             expected_benchmark=adapter.info.name,
                             expected_target=label,
                             expected_sampling=expected_sampling,
+                            expected_structured_run=expected_structured_run,
                             require_history_safe_counts=history_candidate,
                         )
                         if existing_error is not None:
@@ -750,6 +761,7 @@ class SuiteRunner:
                                 annotations=adapter.info.annotations,
                                 context="stored pair contains invalid evidence",
                                 expected_sampling=expected_sampling,
+                                expected_structured_run=expected_structured_run,
                                 require_history_safe_counts=history_candidate,
                             )
                             store.save_pair(
@@ -830,6 +842,7 @@ class SuiteRunner:
                     annotations=adapter.info.annotations,
                     context="adapter returned invalid pair evidence",
                     expected_sampling=expected_sampling,
+                    expected_structured_run=expected_structured_run,
                     require_history_safe_counts=history_candidate,
                 )
                 source_after = observe_source()

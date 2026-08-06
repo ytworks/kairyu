@@ -28,6 +28,7 @@ FIXTURE_FILES = (
     "mmlu.jsonl",
     "mrcr-v2.jsonl",
     "scicode.jsonl",
+    "structured-output.jsonl",
 )
 FIXTURE_PREFIX = "kairyu/bench/fixtures/"
 LLMBAR_LICENSE = f"{FIXTURE_PREFIX}LLMBAR_LICENSE"
@@ -147,6 +148,7 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         "from importlib import resources; "
         "from pathlib import Path; "
         "import kairyu; "
+        "from kairyu.bench.structured import load_packaged_corpus; "
         "root=Path.cwd().resolve(); "
         "module=Path(kairyu.__file__).resolve(); "
         "assert module.is_relative_to(root), (module, root); "
@@ -159,6 +161,9 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         "[json.loads(line) for name in names "
         "for line in fixtures.joinpath(name).read_text(encoding='utf-8').splitlines() "
         "if line.strip()]; "
+        "structured=load_packaged_corpus(); "
+        "assert [row['category'] for row in structured] == "
+        "['nested', 'recursive', 'enum', 'pattern', 'union']; "
         "vendor=resources.files('kairyu.bench._vendor.ifeval'); "
         "assert 'Apache License' in vendor.joinpath('LICENSE').read_text(encoding='utf-8'); "
         "assert 'Google Research' in vendor.joinpath('NOTICE').read_text(encoding='utf-8'); "
@@ -222,6 +227,7 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
     for command, expected in (
         (["bench", "list"], "suite fugu (11 slots)"),
         (["bench", "list", "--suite", "core"], "suite core (3 slots)"),
+        (["bench", "list", "--suite", "structured"], "suite structured (1 slots)"),
     ):
         list_code = f"from kairyu.entrypoints.cli import main; main({command!r})"
         list_result = _isolated_run(

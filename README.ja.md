@@ -834,7 +834,8 @@ tokens_per_minute=200_000)}))`。
 
 `kairyu bench` は、デプロイ済みゲートウェイに対して回答品質スイートを実行します。
 既定は Fugu リリースの 11 ベンチマークで、`--suite core` は決定論的な
-GSM8K/MMLU/IFEval 回帰スイートを選択します。単一モデルとオーケストレーション
+GSM8K/MMLU/IFEval 回帰スイート、`--suite structured` は固定 5 ケースの
+JSON Schema 適合性コーパスを選択します。単一モデルとオーケストレーション
 ティアはスコアボードの列として並びます:
 
 ```bash
@@ -843,17 +844,30 @@ uv run kairyu bench run --base-url http://localhost:8000/v1 \
     --model m1 --model kairyu-auto --model kairyu-auto-max
 uv run kairyu bench run --suite core --smoke \
     --base-url http://localhost:8000/v1 --model m1
+uv run kairyu bench run --config examples/bench_structured.yaml
 ```
+
+Structured 適合性スイートは nested、recursive、enum、pattern、union の各 schema
+について、同じプロンプトと seed を `response_format` あり／なしで対にします。
+厳密な JSON 妥当性、Draft 2020-12 適合性、期待値との完全一致、malformed 出力を
+別々に報告します。acceptance/schema/task の分母は予定した全 observation、
+JSON-valid/malformed の分母は受理された HTTP 200 completion です。endpoint が
+返した token 数には usage coverage を併記し、latency は診断値として扱い、通貨
+コストは推定しません。HTTP 200 の safety refusal は実行失敗にせず、受理された
+non-JSON/task-failure 証拠として保持します。
 
 データセットは `~/.cache/kairyu/benchmarks` にダウンロードされます(コミットされま
 せん)。前提条件が満たせない場合(docker なし、ゲート付きデータセット、ジャッジなし)
 は注釈付きの `skipped` セルになるため、実行は常に完走します。サブコマンド:
 `bench run`、`bench download`、`bench report <run>`、`bench list`、
 `bench entrypoints`。詳細ガイド: [`docs/benchmarks.md`](docs/benchmarks.md)。
+structured コーパスは HF Git pin で識別するリモート dataset ではなく、内容の
+SHA-256 を厳密に検証するインストール済み package data です。
 
 wheel に含まれるのは、再利用可能な `kairyu.bench` ライブラリ、公開 CLI、
-エントリポイント台帳、11 個のベンチマーク fixture、judge calibration fixture
-です。トップレベルの `bench/*.py` 開発／正式ゲート用ラッパー、
+エントリポイント台帳、11 個の合成ベンチマーク stand-in、structured 適合性
+コーパス、judge calibration コーパス（合計 13 個の JSONL）です。トップレベルの
+`bench/*.py` 開発／正式ゲート用ラッパー、
 `bench/results/`、`tests/` はソース checkout 専用です。安定した一覧と
 互換性ポリシーは [`bench/README.md`](bench/README.md) を参照してください。
 
