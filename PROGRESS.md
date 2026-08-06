@@ -1,8 +1,7 @@
 # Progress
 
-Cross-session memory of design changes and project progress.
-Maintained per the rules in `.claude/rules/progress-log.md` (size budget:
-older Change Log entries are archived to `docs/progress/archive/change-log.md`).
+Cross-session memory. Rules: `.claude/rules/progress-log.md`.
+Older Change Log entries: `docs/progress/archive/change-log.md`.
 
 ## Product
 
@@ -91,28 +90,13 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 ## Change Log
 
-Newest first. Only recent entries are kept here; older entries are moved
-verbatim to `docs/progress/archive/change-log.md` per the archiving procedure
-in `.claude/rules/progress-log.md`.
+Newest first; only the most recent entries are kept here (see the size budget
+in `.claude/rules/progress-log.md`).
 
-### 2026-08-06 — [design] PROGRESS.md restructured with a size budget and archive
-- What: split the bloated PROGRESS.md (≈514 KB). The verbose Current Status
-  prose moved verbatim to `docs/progress/archive/status-2026-08-06.md`; all but
-  the 10 most recent Change Log entries moved verbatim to
-  `docs/progress/archive/change-log.md`. PROGRESS.md now has a compact
-  `## Product` section (product goal / target state), a budgeted
-  `## Current Status` snapshot, and a trimmed Change Log.
-  `.claude/rules/progress-log.md` gained size budgets, entry-length limits, and
-  an archiving procedure; a SessionStart hook (`.claude/settings.json` →
-  `scripts/check_progress_size.py`) now warns when budgets are exceeded so the
-  file cannot silently regrow.
-- Why: PROGRESS.md is loaded at every session start; at 514 KB it consumed the
-  context it was meant to save. A fresh agent needs the product goal, the
-  present state, and recent deltas — not the full evidence history, which
-  remains available in the archive, `bench/results/`, and `docs/design/`.
-- Refs: `docs/progress/archive/{status-2026-08-06,change-log}.md`;
-  `.claude/rules/progress-log.md`; `scripts/check_progress_size.py`;
-  `.claude/settings.json`
+### 2026-08-06 — [design] PROGRESS.md restructured for minimal session-start tokens
+- What: archived the verbose Current Status to `docs/progress/archive/status-2026-08-06.md` and all older Change Log entries to `docs/progress/archive/change-log.md` (both verbatim); PROGRESS.md now holds a compact Product/Current Status/Change Log. Size budgets and archiving live in `.claude/rules/progress-log.md` + `docs/progress/archiving.md`, enforced by a SessionStart hook running `scripts/check_progress_size.py`.
+- Why: PROGRESS.md and the progress rules are loaded every session; at ~514 KB they burned the context they were meant to save.
+- Refs: `docs/progress/archive/`; `.claude/settings.json`; `scripts/check_progress_size.py`
 
 ### 2026-08-06 — [progress] Repeated token SSE shapes bypass per-token model construction
 - What: added stream-owned byte encoders for repeated role-less Chat content, unfinished legacy Completion text, and Responses output-text deltas. Constant JSON envelope fragments and per-index prefixes are retained per stream, only the dynamic scalar is serialized per chunk, and Starlette receives bytes directly. Strict predicates keep first-role, non-string/non-integer, logprob, tool, finish, usage, trace, error, and terminal shapes on their existing serializers. Hoisted fallback exclusion sets and byte-for-byte golden tests bind field order, usage omission/null, multiple indices, empty/control/Unicode content, SSE line separators in both constants and deltas, malformed boundaries, and operation counts. Same-process 100,000-iteration diagnostics measured 7.804→0.570 µs (13.69x) for Chat, 4.625→0.569 µs (8.13x) for Completions, and 3.847→0.753 µs (5.11x) for Responses.
@@ -138,29 +122,4 @@ in `.claude/rules/progress-log.md`.
 - What: extended generative benchmark adapters so `attempts > 1` runs one ordered consecutive-seed sweep per source item, retaining strict child outcomes beneath that item rather than flattening correlated repeats. Complete rows recompute seed means, sample SD, range, and unbiased `1-C(n-c,k)/C(n,k)` pass@k for declared binary adapters; incomplete or tampered matrices withhold the sensitivity summary, and ordinary Wilson intervals plus configuration A/B are disabled for multi-attempt evidence. Raw source-item identities, canonical parent/pair status and reason, denominators, realizable binary pass@k margins, and fresh history labels are cross-validated. Runner, report, and history boundaries also bind target seed/mode/temperature plus the attempt budget to retained methodology; schema-1 history omits the derived label after proving it against the raw pair, while a new protocol marker preserves old agentic multi-trial records. SciCode independently reruns each seed's whole sequential problem chain. Targets can select an explicit temperature or `sampling_mode: recommended`, which omits temperature/top-p/top-k/min-p/repetition-penalty so endpoint generation defaults may apply while explicitly declining remote attestation. External harnesses fail closed when those chat-only policies cannot be forwarded, and SWE-Bench Pro requires one attempt. The default single-attempt target serialization, target-config fingerprint input, temperature-zero request bytes, and absent seed remain byte-shape compatible.
 - Why: one deterministic chat call cannot quantify sampling noise or pass@k, but flattening repeated seeds would understate uncertainty and corrupt paired statistics. Explicit omission is also required to measure the model-owned generation defaults added by issue #351 without falsely claiming that a remote server applied them.
 - Refs: issue #371; `docs/benchmarks.md`; `examples/bench_{fugu,core}.yaml`; `kairyu/bench/{sampling,types,aggregate,config,cli,config_ab,history}.py`; `kairyu/bench/adapters/{base,ifeval,scicode,swebench_pro,terminal_bench,tau_bench}.py`; `tests/bench/test_bench_{sampling_sensitivity,config,config_ab,history,agentic_conditions,scicode_sequential,runner}.py`
-
-### 2026-08-06 — [design] Quantization formats gain task-level accuracy gates
-- What: added the fixed `quantization` suite and `kairyu bench quant-sweep` command for dense BF16, FP8, INT8, AWQ, GPTQ, NVFP4, and dense BF16 with FP8-E4M3 KV across GSM8K, MMLU, IFEval, and GPQA Diamond. Every target declares an exact weight/compute/KV classification plus a distinct served-manifest digest; six complete configuration A/B artifacts provide the sole paired statistical core, and all 24 independently toleranced Newcombe lower-bound gates must pass without task or scheme averaging. The dedicated atomic JSON/Markdown artifact binds the clean source, hash-chain record, raw pairs, deployment declarations, comparator runtime, and versioned protocol. Reports explicitly distinguish operator declaration from remote attestation and keep FP8-E4M3 KV scoped to external or experimental deployments because native Kairyu still rejects it after the failed quality bake. Optional quantization identity serializes only when declared, preserving existing Fugu/Core fingerprints and judge-calibration reloads.
-- Why: kernel parity and throughput measurements do not establish downstream task quality, while a flat score table without exact source, deployment, item, and pair bindings could hide missing formats, incomparable requests, or post-hoc tolerance choices.
-- Refs: issue #372; `docs/design/issue-372-quantization-sweep.md`; `examples/bench_quantization.yaml`; `kairyu/bench/{quant_sweep,config_ab,cli,store,types}.py`; `tests/bench/test_bench_{quant_sweep,cli_quant_sweep,config,aggregate,runner,store}.py`
-
-### 2026-08-06 — [design] Configuration A/B gates bind deployments to paired task evidence
-- What: added `kairyu bench compare` for non-inferiority gates between two explicit served configurations. The command validates the complete scoreboard hash chain, reopens and content-binds every selected raw pair, requires identical full-data methodology, runtime, request policy, and item sets, then applies paired Newcombe method-10 intervals to independent binary outcomes, deterministic paired bootstrap intervals to bounded scores, or whole-problem clustered bootstrap intervals to SciCode's dependent sequential sub-steps. Versioned binary/cluster declarations live in the run fingerprint, and the fixed SplitMix64 sampler removes Python `randrange()` drift. Each benchmark has an independent percentage-point tolerance and one-sided 95% lower-bound verdict; candidate-owned JSON/Markdown artifacts retain the deployment, source, comparator runtime, protocol, policy, and raw-evidence hashes without changing the history index. Runs can declare the operator-owned served configuration label and SHA-256 in YAML or paired CLI flags, with the non-attestation boundary stated explicitly.
-- Why: token parity and published-number comparisons cannot quantify whether a quantization, KV-cache, expert-parallel, or speculation configuration causes a task-level regression. Paired item evidence reduces avoidable variance, while source, methodology, deployment, and raw-result bindings keep a toleranced PASS from silently comparing different experiments or anonymous redeployments.
-- Refs: issue #365; `docs/design/issue-365-config-ab.md`; `kairyu/bench/{config_ab,config_compare,history,store,cli,types,runner}.py`; `kairyu/bench/adapters/{base,scicode}.py`; `tests/bench/test_bench_{config_ab,config_compare_stats,cli_config_compare,history,store}.py`
-
-### 2026-08-06 — [design] Nightly CPU ratios gain trailing-median history
-- What: added a scheduled/manual main-only workflow that reuses the portable CPU microbenchmark report, records eight fixed same-process ratios in a canonical SHA-256-chained JSONL series, and alerts when any current ratio is at least 15% below the median of up to seven preceding records after five compatible warmup observations. Exact method/workload/runtime/policy segmentation, strict JSON and chain validation, attempt-specific Actions provenance, newest-valid recovery including failed regression runs, and upload-before-enforcement keep the baseline fail closed. Absolute timings, router/process-wire data, and sampler overlay measurements stay outside the cross-run comparator while the unchanged same-run source gate remains binding.
-- Why: one-shot CI artifacts could satisfy absolute smoke bounds while a persistent cross-commit regression went unnoticed. Same-process ratios are the portable signal available on shared CPU runners; the 15% alert intentionally remains a reproducibility prompt rather than formal product-performance or TTFT evidence, including for the observed noisy sampler-append ratio.
-- Refs: issue #377; `scripts/cpu_perf_series.py`; `.github/workflows/nightly-cpu-perf.yml`; `docs/design/issue-377-nightly-cpu-perf.md`; `tests/unit/test_cpu_perf_series.py`; `tests/unit/test_nightly_cpu_perf_workflow.py`
-
-### 2026-08-06 — [amendment] IDE tool-call compatibility fails closed without rolling back public APIs
-- What: hardened the pending IDE integration so the single-call hint merges into one existing system message, Responses does not inject it twice, and native Llama/Qwen parsing is selected by the executed server-owned template rather than the request model name while request-controlled Llama syntax branches are rejected. JSON arguments reject duplicate keys and non-finite values; Qwen XML additionally rejects duplicate parameters, residual markup, and violations of the supported top-level type/required/additional-property constraints. Only supported final upstreams receive typed `parallel_tool_calls`. The documented legacy `SamplingParams.extra_args.parallel_tool_calls` path remains supported when it is the sole source, all new public dataclass/function parameters are appended to preserve positional binding, and the unauthenticated Docker examples publish on host loopback only. Documentation now scopes multimodal and schema claims to the implemented IDE boundary.
-- Why: the original branch could manufacture a second system role rejected by valid tokenizer templates, reinterpret ordinary bare JSON as a tool call for unrelated models, accept malformed model output as executable arguments, expose unauthenticated examples beyond localhost, misstate existing multimodal support, and accidentally roll back positional and legacy Python compatibility while adding typed propagation.
-- Refs: PR #409; `kairyu/entrypoints/{chat_template,server/chat_service,server/responses_service}.py`; `kairyu/{engine,orchestration}/`; `tests/server/test_{openai_api,tool_call_protocol}.py`; `tests/unit/test_{kairyu_backend,openai_backend,orchestration_request,ide_client_examples}.py`; `docs/{deployment,ide-clients}.md`
-
-### 2026-08-05 — [progress] IDE agents complete model-native tool loops
-- What: added OpenAI-compatible `parallel_tool_calls=false` enforcement, model-native Llama and Qwen3-Coder tool-call parsing, isolated gpu02 deployment examples, and Cline/Continue configuration guidance. A Qwen3-Coder-30B-A3B-Instruct TP1 replica on gpu02 completed a real Cline 4.1.3 Act-mode `read_file` → `attempt_completion` loop through an SSH local forward; both requests returned 200. The implementation was rebased onto current `main`, retaining its tokenizer-owned template auto-discovery, and 396 focused API/template/deployment tests pass.
-- Why: IDE clients need deterministic single-call policy enforcement and must receive structured OpenAI tool calls even when a checkpoint emits its documented model-native format. Using the checkpoint's own template and protocol avoids model-ID spoofing and prompt-only heuristics, while the local forward separates API compatibility from editor SOCKS transport behavior.
-- Refs: `kairyu/entrypoints/server/{protocol,chat_service,app}.py`; `tests/server/test_openai_api.py`; `docs/ide-clients.md`; `examples/ide-client/{gpu-replica,qwen3-coder-gpu-replica}.yaml`; gpu02 request IDs `051659ecd29746a0`, `13780c2db86d437f`
 

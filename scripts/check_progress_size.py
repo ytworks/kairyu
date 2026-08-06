@@ -11,8 +11,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-MAX_TOTAL_LINES = 300
-MAX_CHANGELOG_ENTRIES = 20
+MAX_TOTAL_LINES = 200
+MAX_CHANGELOG_ENTRIES = 10
 
 
 def main() -> int:
@@ -44,10 +44,8 @@ def main() -> int:
         print(
             "PROGRESS.md is over its size budget: "
             + "; ".join(problems)
-            + ". Run the archiving procedure in .claude/rules/progress-log.md"
-            " (move the oldest Change Log entries to"
-            " docs/progress/archive/change-log.md) before other work updates"
-            " PROGRESS.md."
+            + ". Run the archiving procedure in docs/progress/archiving.md"
+            " before other work updates PROGRESS.md."
         )
         return 1
     return 0
