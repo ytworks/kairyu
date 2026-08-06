@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
+from kairyu.async_thread import run_prompt_work
 from kairyu.engine.backend import (
     CacheHint,
     EngineBackend,
@@ -20,6 +21,7 @@ from kairyu.engine.backend import (
     GenerationUsage,
     UpstreamClientError,
     validate_backend_request,
+    validate_backend_request_before_prepare,
 )
 from kairyu.engine.prompt import (
     MultimodalItem,
@@ -33,13 +35,14 @@ from kairyu.engine.prompt import (
 from kairyu.entrypoints.chat_template import (
     ChatTemplate,
     ToolCallProtocol,
-    flatten_content,
+    _iter_validated_content_parts,
     render_chat,
 )
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatMessage,
     Choice,
     ChoiceLogprobs,
     FunctionCall,
@@ -53,6 +56,7 @@ from kairyu.entrypoints.server.protocol import (
 from kairyu.outputs import CompletionOutput, TokenLogprob
 from kairyu.sampling_params import (
     GENERATION_CONFIG_SAMPLING_FIELDS,
+    PROMPT_CARRIER_EXTRA_ARGS,
     SamplingParams,
     resolve_parallel_tool_calls,
 )
@@ -125,6 +129,41 @@ class ValidatedChatRequest:
 class ExecutedChat:
     response: ChatCompletionResponse
     result: GenerationResult
+
+
+@dataclass(frozen=True)
+class _PreparedContentPart:
+    """One validated content part retained independently of Pydantic."""
+
+    type: str
+    text: str | None = None
+    image_url: str | None = None
+    detail: object | None = None
+    item_index: int | None = None
+
+
+@dataclass(frozen=True)
+class _PreparedMessage:
+    """One request-local message snapshot shared by every prompt renderer."""
+
+    text_message: dict[str, object]
+    role: str
+    content_kind: str
+    content_parts: tuple[_PreparedContentPart, ...]
+    display_content: str
+    has_images: bool
+    contains_single_tool_constraint_part: bool
+    has_tool_transcript: bool
+
+
+@dataclass(frozen=True)
+class _PreparedChatMessages:
+    messages: tuple[_PreparedMessage, ...]
+    image_urls: tuple[str, ...]
+
+    @property
+    def has_images(self) -> bool:
+        return bool(self.image_urls)
 
 
 def sampling_params_from(request: ChatCompletionRequest) -> SamplingParams:
@@ -260,44 +299,196 @@ def validate_chat_policy(
         )
 
 
+def _message_wire_shape(message: ChatMessage) -> dict[str, object]:
+    """Copy the fields present on the wire without recursively dumping models."""
+
+    fields_set = message.model_fields_set
+    wire = {
+        name: getattr(message, name)
+        for name in type(message).model_fields
+        if name in fields_set
+    }
+    wire.update(message.model_extra or {})
+    return wire
+
+
+def _prepare_message_content(
+    content: object,
+    *,
+    image_urls: list[str],
+) -> tuple[
+    str,
+    str,
+    tuple[_PreparedContentPart, ...],
+    str,
+    bool,
+    bool,
+]:
+    """Validate and snapshot content with exactly one walk over its raw parts."""
+
+    if content is None:
+        return "", "none", (), "", False, False
+    if isinstance(content, str):
+        part = _PreparedContentPart("text", text=content)
+        return content, "string", (part,), content, False, False
+
+    texts: list[str] = []
+    parts: list[_PreparedContentPart] = []
+    display: list[str] = []
+    has_images = False
+    contains_constraint = False
+    for kind, text, image_url in _iter_validated_content_parts(content):
+        if kind == "text":
+            assert text is not None
+            texts.append(text)
+            display.append(text)
+            parts.append(_PreparedContentPart("text", text=text))
+            contains_constraint = (
+                contains_constraint or _SINGLE_TOOL_CONSTRAINT in text
+            )
+            continue
+        assert image_url is not None
+        item_index = len(image_urls)
+        image_urls.append(image_url["url"])
+        parts.append(
+            _PreparedContentPart(
+                "image_url",
+                image_url=image_url["url"],
+                detail=image_url.get("detail"),
+                item_index=item_index,
+            )
+        )
+        display.append(f"<image:{item_index}>")
+        has_images = True
+
+    return (
+        "".join(texts),
+        "list" if isinstance(content, list) else "other",
+        tuple(parts),
+        "".join(display),
+        has_images,
+        contains_constraint,
+    )
+
+
+def _prepare_chat_messages(
+    request: ChatCompletionRequest,
+    *,
+    validate_message_fields: bool,
+) -> _PreparedChatMessages:
+    """Take the sole raw-content snapshot used by text and VLM rendering."""
+
+    image_urls: list[str] = []
+    prepared: list[_PreparedMessage] = []
+    for index, message in enumerate(request.messages):
+        if validate_message_fields:
+            if not message.role.strip():
+                raise ChatRequestError(
+                    f"messages[{index}].role must be a non-empty string"
+                )
+            if message.model_extra:
+                raise ChatRequestError(
+                    f"messages[{index}] has unsupported fields: "
+                    + ", ".join(sorted(message.model_extra))
+                )
+
+        wire = _message_wire_shape(message)
+        (
+            flattened_content,
+            content_kind,
+            content_parts,
+            display_content,
+            has_images,
+            contains_constraint,
+        ) = _prepare_message_content(message.content, image_urls=image_urls)
+        if "content" in wire and content_kind not in {"none", "string"}:
+            # ChatTemplate and the legacy renderer now receive the validated
+            # flattened value, so neither needs to revisit the raw part list.
+            wire["content"] = flattened_content
+        prepared.append(
+            _PreparedMessage(
+                text_message=wire,
+                role=message.role,
+                content_kind=content_kind,
+                content_parts=content_parts,
+                display_content=display_content,
+                has_images=has_images,
+                contains_single_tool_constraint_part=contains_constraint,
+                has_tool_transcript=(
+                    message.name is not None
+                    or message.tool_call_id is not None
+                    or message.tool_calls is not None
+                ),
+            )
+        )
+    return _PreparedChatMessages(tuple(prepared), tuple(image_urls))
+
+
 def _add_single_tool_constraint(
-    messages: list[dict[str, object]],
+    prepared: _PreparedChatMessages,
     *,
     insert_if_missing: bool,
-) -> None:
-    """Merge the hint into system content, optionally creating that role."""
+) -> tuple[list[dict[str, object]], bool]:
+    """Copy prepared text messages and preserve shape-sensitive hint merging."""
 
-    for message in messages:
-        if message.get("role") != "system":
+    messages = [dict(message.text_message) for message in prepared.messages]
+    for index, message in enumerate(prepared.messages):
+        if message.role != "system":
             continue
-        content = message.get("content")
-        if isinstance(content, str):
+        content = messages[index].get("content")
+        if message.content_kind == "string":
+            assert isinstance(content, str)
             if _SINGLE_TOOL_CONSTRAINT not in content:
                 separator = "\n\n" if content else ""
-                message["content"] = content + separator + _SINGLE_TOOL_CONSTRAINT
-            return
-        if content is None:
-            message["content"] = _SINGLE_TOOL_CONSTRAINT
-            return
-        if isinstance(content, list):
-            if any(
-                isinstance(part, Mapping)
-                and isinstance(part.get("text"), str)
-                and _SINGLE_TOOL_CONSTRAINT in part["text"]
-                for part in content
-            ):
-                return
-            message["content"] = [
-                *content,
-                {"type": "text", "text": _SINGLE_TOOL_CONSTRAINT},
-            ]
-            return
+                messages[index]["content"] = (
+                    content + separator + _SINGLE_TOOL_CONSTRAINT
+                )
+            return messages, False
+        if message.content_kind == "none":
+            messages[index]["content"] = _SINGLE_TOOL_CONSTRAINT
+            return messages, False
+        if message.content_kind == "list":
+            if not message.contains_single_tool_constraint_part:
+                assert isinstance(content, str)
+                messages[index]["content"] = content + _SINGLE_TOOL_CONSTRAINT
+            return messages, False
         raise ChatRequestError("system message content has an unsupported shape")
     if insert_if_missing:
         messages.insert(
             0,
             {"role": "system", "content": _SINGLE_TOOL_CONSTRAINT},
         )
+        return messages, True
+    return messages, False
+
+
+def _reject_prepared_images_in_text_renderer(
+    prepared: _PreparedChatMessages,
+    messages: Sequence[Mapping[str, object]],
+    *,
+    inserted_system_message: bool,
+    renderer: str,
+) -> None:
+    """Keep image/carrier failure ordering after raw lists are flattened."""
+
+    if not prepared.has_images:
+        return
+    offset = 1 if inserted_system_message else 0
+    for original_index, message in enumerate(prepared.messages):
+        rendered_index = original_index + offset
+        carriers = PROMPT_CARRIER_EXTRA_ARGS.intersection(
+            messages[rendered_index]
+        )
+        if carriers:
+            raise ValueError(
+                f"message {rendered_index} contains alternate prompt carriers "
+                f"{sorted(carriers)}; pass input through PromptInput"
+            )
+        if message.has_images:
+            raise ValueError(
+                f"message {rendered_index} contains image input that a text chat "
+                f"{renderer} cannot execute; use MultimodalPrompt"
+            )
 
 
 def _resolved_parallel_tool_calls(
@@ -324,18 +515,47 @@ def render_prompt(
     except ValueError as error:
         raise ChatRequestError(str(error)) from error
     template = (chat_templates or {}).get(request.model)
-    messages = []
-    for message in request.messages:
-        # Preserve the OpenAI wire shape for key-sensitive HF templates:
-        # omitted optional fields stay undefined, while an explicit null stays
-        # present. Pydantic extras remain included as sent.
-        messages.append(message.model_dump(exclude_unset=True))
+    try:
+        prepared = _prepare_chat_messages(
+            request,
+            validate_message_fields=False,
+        )
+    except Exception as error:
+        # ChatTemplate.render is a request boundary and historically wrapped
+        # malformed content there. The legacy renderer continues to expose its
+        # ValueError directly to its existing callers.
+        if template is not None:
+            raise ChatRequestError(str(error)) from error
+        raise
+    return _render_prepared_prompt(
+        request,
+        chat_templates,
+        prepared,
+        legacy_chat_models=legacy_chat_models,
+    )
+
+
+def _render_prepared_prompt(
+    request: ChatCompletionRequest,
+    chat_templates: Mapping[str, ChatTemplate] | None,
+    prepared: _PreparedChatMessages,
+    *,
+    legacy_chat_models: AbstractSet[str] | None,
+) -> str | TemplatedPrompt:
+    """Render text from a snapshot whose raw content was already consumed."""
+
+    template = (chat_templates or {}).get(request.model)
+    messages = [dict(message.text_message) for message in prepared.messages]
+    inserted_system_message = False
     if (
         _resolved_parallel_tool_calls(request) is False
         and request.tools
         and request.tool_choice != "none"
     ):
-        _add_single_tool_constraint(messages, insert_if_missing=template is None)
+        messages, inserted_system_message = _add_single_tool_constraint(
+            prepared,
+            insert_if_missing=template is None,
+        )
     tools = None if request.tool_choice == "none" else request.tools
     if template is None:
         if request.model not in (legacy_chat_models or ()):
@@ -349,8 +569,20 @@ def render_prompt(
                 f"model {request.model!r} has no Kairyu chat template; "
                 "chat_template_kwargs cannot be applied"
             )
+        _reject_prepared_images_in_text_renderer(
+            prepared,
+            messages,
+            inserted_system_message=inserted_system_message,
+            renderer="renderer",
+        )
         return render_chat(messages)
     try:
+        _reject_prepared_images_in_text_renderer(
+            prepared,
+            messages,
+            inserted_system_message=inserted_system_message,
+            renderer="template",
+        )
         return TemplatedPrompt(
             template.render(
                 messages,
@@ -369,6 +601,7 @@ def render_prompt(
 def _render_multimodal_prompt(
     request: ChatCompletionRequest,
     chat_templates: Mapping[str, ChatTemplate] | None,
+    prepared: _PreparedChatMessages,
 ) -> MultimodalPrompt:
     """Preserve roles and content-part order for a chat-capable VLM backend.
 
@@ -388,59 +621,51 @@ def _render_multimodal_prompt(
             "with image input; the VLM backend owns multimodal templating"
         )
 
-    items: list[MultimodalItem] = []
+    items = [
+        MultimodalItem(
+            modality="image",
+            encoding="uri",
+            data=image_url,
+        )
+        for image_url in prepared.image_urls
+    ]
     messages: list[MultimodalMessage] = []
     display_lines: list[str] = []
-    for message_index, message in enumerate(request.messages):
-        if (
-            message.name is not None
-            or message.tool_call_id is not None
-            or message.tool_calls is not None
-        ):
+    for message_index, message in enumerate(prepared.messages):
+        if message.has_tool_transcript:
             raise ChatRequestError(
                 f"messages[{message_index}] tool transcript fields are not "
                 "supported together with image input"
             )
-        content = message.content
         parts: list[MultimodalMessagePart] = []
-        display: list[str] = []
-        if isinstance(content, str):
-            parts.append(MultimodalMessagePart("text", text=content))
-            display.append(content)
-        elif isinstance(content, list):
-            if not content:
+        if message.content_kind == "string":
+            part = message.content_parts[0]
+            assert part.text is not None
+            parts.append(MultimodalMessagePart("text", text=part.text))
+        elif message.content_kind == "list":
+            if not message.content_parts:
                 raise ChatRequestError(
                     f"messages[{message_index}].content must not be an empty part list"
                 )
-            for part in content:
+            for part in message.content_parts:
                 if part.type == "text":
                     assert part.text is not None
                     parts.append(MultimodalMessagePart("text", text=part.text))
-                    display.append(part.text)
                     continue
-                assert part.image_url is not None
-                item_index = len(items)
-                items.append(
-                    MultimodalItem(
-                        modality="image",
-                        encoding="uri",
-                        data=part.image_url.url,
-                    )
-                )
+                assert part.item_index is not None
                 parts.append(
                     MultimodalMessagePart(
                         "item",
-                        item_index=item_index,
-                        detail=part.image_url.detail,
+                        item_index=part.item_index,
+                        detail=part.detail,
                     )
                 )
-                display.append(f"<image:{item_index}>")
         else:
             raise ChatRequestError(
                 f"messages[{message_index}].content must contain text or image parts"
             )
         messages.append(MultimodalMessage(message.role, parts))
-        display_lines.append(f"{message.role}: {''.join(display)}")
+        display_lines.append(f"{message.role}: {message.display_content}")
 
     if not items:  # Defensive: the caller detects images before entering.
         raise ChatRequestError("multimodal chat input must contain at least one image")
@@ -470,30 +695,30 @@ def validate_chat_input(
     if request.top_logprobs is not None and not 0 <= request.top_logprobs <= 20:
         raise ChatRequestError("top_logprobs must be between 0 and 20")
     _validate_response_format(request.response_format)
-    has_images = False
-    for index, message in enumerate(request.messages):
-        if not message.role.strip():
-            raise ChatRequestError(
-                f"messages[{index}].role must be a non-empty string"
-            )
-        if message.model_extra:
-            raise ChatRequestError(
-                f"messages[{index}] has unsupported fields: "
-                + ", ".join(sorted(message.model_extra))
-            )
-        _, message_has_images = flatten_content(message.content)
-        has_images = has_images or message_has_images
+    prepared = _prepare_chat_messages(
+        request,
+        validate_message_fields=True,
+    )
+    has_images = prepared.has_images
     if has_images and not allow_multimodal:
         raise ChatRequestError(f"model {request.model!r} does not support image inputs")
-    prompt: PromptInput = (
-        _render_multimodal_prompt(request, chat_templates)
-        if has_images
-        else render_prompt(
+    if has_images:
+        prompt: PromptInput = _render_multimodal_prompt(
             request,
             chat_templates,
+            prepared,
+        )
+    else:
+        try:
+            validate_chat_policy(chat_templates, legacy_chat_models)
+        except ValueError as error:
+            raise ChatRequestError(str(error)) from error
+        prompt = _render_prepared_prompt(
+            request,
+            chat_templates,
+            prepared,
             legacy_chat_models=legacy_chat_models,
         )
-    )
     return ValidatedChatInput(
         request=request,
         prompt=prompt,
@@ -515,19 +740,28 @@ def validate_chat_input(
     )
 
 
-def validate_chat_request(
+async def validate_chat_input_async(
     request: ChatCompletionRequest,
-    engines: Mapping[str, EngineBackend],
     chat_templates: Mapping[str, ChatTemplate] | None,
     *,
-    request_id: str,
-    cache_hint: CacheHint | None = None,
-    priority: int | None = None,
-    scheduling_class: str = "interactive",
-    placement_started_ns: int | None = None,
-    trace_requested: bool = False,
+    allow_multimodal: bool = False,
     legacy_chat_models: AbstractSet[str] | None = None,
-) -> ValidatedChatRequest:
+) -> ValidatedChatInput:
+    """Prepare and render one chat input on the bounded prompt CPU lane."""
+
+    return await run_prompt_work(
+        validate_chat_input,
+        request,
+        chat_templates,
+        allow_multimodal=allow_multimodal,
+        legacy_chat_models=legacy_chat_models,
+    )
+
+
+def _chat_engine(
+    request: ChatCompletionRequest,
+    engines: Mapping[str, EngineBackend],
+) -> EngineBackend:
     engine = engines.get(request.model)
     if engine is None:
         raise ChatRequestError(
@@ -535,12 +769,22 @@ def validate_chat_request(
             status_code=404,
             code="model_not_found",
         )
-    validated_input = validate_chat_input(
-        request,
-        chat_templates,
-        allow_multimodal=True,
-        legacy_chat_models=legacy_chat_models,
-    )
+    return engine
+
+
+def _finish_chat_request_validation(
+    request: ChatCompletionRequest,
+    engine: EngineBackend,
+    validated_input: ValidatedChatInput,
+    *,
+    request_id: str,
+    cache_hint: CacheHint | None = None,
+    priority: int | None = None,
+    scheduling_class: str = "interactive",
+    placement_started_ns: int | None = None,
+    trace_requested: bool = False,
+    before_prepare: bool = False,
+) -> ValidatedChatRequest:
     if request.n > 1 and getattr(engine, "supports_n", True) is False:
         raise ChatRequestError(f"model {request.model!r} does not support n > 1")
     try:
@@ -562,7 +806,10 @@ def validate_chat_request(
         tools_in_prompt=validated_input.tools_in_prompt,
     )
     try:
-        validate_backend_request(engine, generation_request)
+        if before_prepare:
+            validate_backend_request_before_prepare(engine, generation_request)
+        else:
+            validate_backend_request(engine, generation_request)
     except ValueError as error:
         raise ChatRequestError(
             str(error),
@@ -572,6 +819,77 @@ def validate_chat_request(
         input=validated_input,
         engine=engine,
         generation_request=generation_request,
+    )
+
+
+def validate_chat_request(
+    request: ChatCompletionRequest,
+    engines: Mapping[str, EngineBackend],
+    chat_templates: Mapping[str, ChatTemplate] | None,
+    *,
+    request_id: str,
+    cache_hint: CacheHint | None = None,
+    priority: int | None = None,
+    scheduling_class: str = "interactive",
+    placement_started_ns: int | None = None,
+    trace_requested: bool = False,
+    legacy_chat_models: AbstractSet[str] | None = None,
+) -> ValidatedChatRequest:
+    """Synchronous compatibility entry point for non-async callers."""
+
+    engine = _chat_engine(request, engines)
+    validated_input = validate_chat_input(
+        request,
+        chat_templates,
+        allow_multimodal=True,
+        legacy_chat_models=legacy_chat_models,
+    )
+    return _finish_chat_request_validation(
+        request,
+        engine,
+        validated_input,
+        request_id=request_id,
+        cache_hint=cache_hint,
+        priority=priority,
+        scheduling_class=scheduling_class,
+        placement_started_ns=placement_started_ns,
+        trace_requested=trace_requested,
+    )
+
+
+async def validate_chat_request_async(
+    request: ChatCompletionRequest,
+    engines: Mapping[str, EngineBackend],
+    chat_templates: Mapping[str, ChatTemplate] | None,
+    *,
+    request_id: str,
+    cache_hint: CacheHint | None = None,
+    priority: int | None = None,
+    scheduling_class: str = "interactive",
+    placement_started_ns: int | None = None,
+    trace_requested: bool = False,
+    legacy_chat_models: AbstractSet[str] | None = None,
+) -> ValidatedChatRequest:
+    """Render off-loop, then validate mutable backend state on the loop."""
+
+    engine = _chat_engine(request, engines)
+    validated_input = await validate_chat_input_async(
+        request,
+        chat_templates,
+        allow_multimodal=True,
+        legacy_chat_models=legacy_chat_models,
+    )
+    return _finish_chat_request_validation(
+        request,
+        engine,
+        validated_input,
+        request_id=request_id,
+        cache_hint=cache_hint,
+        priority=priority,
+        scheduling_class=scheduling_class,
+        placement_started_ns=placement_started_ns,
+        trace_requested=trace_requested,
+        before_prepare=True,
     )
 
 

@@ -1165,6 +1165,18 @@ the fast path to those serializers across usage, index, control, Unicode, and
 SSE line-separator cases. Same-process diagnostics measured 13.69x, 8.13x, and
 5.11x lower per-chunk encoding time for the three respective hot shapes.
 
+Issue #336 now keeps request-sized prompt preparation off the serving event
+loop. Chat and route JSON joining, decoding, Pydantic construction, content
+inspection/rendering, backend tokenization/serialization, orchestration plan
+construction, and dynamic role/MoA prompt rendering use bounded dedicated CPU
+lanes with cancellation-safe admission. A one-worker ingress lane pipelines
+independently from the four-worker TTFT-critical prompt lane so queued body
+parses cannot convoy an earlier request's render/tokenize work. Typed FastAPI
+request/OpenAPI/422 contracts, custom validation handlers, exact request reuse,
+replica placement leases, ZMQ generation ownership, and sync entrypoint
+compatibility remain bound by regression tests. Pre-placement metrics now split
+ingress, validation, routing preflight, and admission costs.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -1321,6 +1333,11 @@ E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 - What: changed the four-cell TP4 diagnostic lifecycle to stop each measured container with a bounded graceful timeout, re-attest its immutable launch ID and zero non-OOM exit, retain shutdown logs, and remove it without force. Pre-start and post-removal evidence now requires no selected-GPU compute applications, zero utilization, and memory exactly equal to a stable per-GPU run-start idle baseline, with bounded retry for transient NVML query failures. Stop or removal failures still trigger best-effort forced recovery but invalidate the cell and prevent a shard from being written.
 - Why: an interrupted trial demonstrated that `docker rm -f` could remove every visible process and allocation while two GPUs continued executing orphaned kernels at 100% utilization. Process-list-only quiescence therefore admitted contaminated subsequent cells, and a successful `docker stop` return code alone could conceal Docker's timeout SIGKILL.
 - Refs: issue #333; m8 D6; `bench/issue_333_proc_http_bench.py`; `tests/bench/test_issue_333_proc_http_bench.py`; `docs/{gpu-runbook.md,design/m8-engine-cpu.md}`
+
+### 2026-08-04 — [progress] Serving prompt preparation leaves the event loop
+- What: added separate bounded, cancellation-safe request-body and prompt CPU lanes; moved chat/route JSON and Pydantic construction, the fused content walk and render, backend tokenization/serialization, orchestration planning, and dynamic role/MoA prompt construction off-loop. Exact prepared requests now survive direct, role, MoA, replica, cancellation, and ZMQ generation boundaries without duplicate validation or stale publication. Pre-placement metrics expose ingress, validation, routing, and admission phases while typed FastAPI/OpenAPI/error and synchronous entrypoint contracts remain unchanged.
+- Why: request-sized synchronous preparation serialized concurrent serving on the event loop and inflated ingress-to-selection and TTFT p99; sharing one worker queue also allowed later body parses to convoy earlier TTFT-critical render/tokenizer work.
+- Refs: issue #336; `kairyu/async_thread.py`; `kairyu/entrypoints/server/{app,chat_service,metrics,request_body}.py`; `kairyu/engine/{backend,kairyu_backend,openai_backend,zmq_backend}.py`; `kairyu/orchestration/{orchestrator,replica,conductor,moa}.py`; `tests/{unit,server,compat}`
 
 ### 2026-08-04 — [amendment] Process-isolated TP owns and attests its complete rank tree
 - What: enabled real-model tensor parallelism in `kairyu-proc`; delayed public topology until child startup attested the configured degree; placed the non-daemon service and ranks in one private POSIX session with an API-parent lease; made the Linux API a child subreaper that confirms every forced descendant is reaped; added fatal launcher heartbeat/readiness and a 120-second worst-step timeout; bounded add/abort/heartbeat/shutdown sends; and added a fail-closed TP4 fresh-server ABBA diagnostic with exact A6 traffic, imported-source, checkpoint, GPU, backend, config, and process-tree evidence plus a predeclared report-only 0.90 TTFT-p99 ratio interpretation.

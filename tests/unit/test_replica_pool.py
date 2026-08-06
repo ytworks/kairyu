@@ -18,6 +18,7 @@ from kairyu.engine.backend import (
     UpstreamClientError,
 )
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.prompt import TokensPrompt
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.router import JsonlRouterLog
 from kairyu.sampling_params import SamplingParams
@@ -87,6 +88,52 @@ class UnkeyedValidationBackend(FlakyBackend):
         self.validation_calls += 1
 
 
+class PreparingBackend(FlakyBackend):
+    def __init__(
+        self,
+        name: str,
+        events: list[tuple[str, str]],
+        *,
+        prepare_error: Exception | None = None,
+    ) -> None:
+        super().__init__()
+        self.name = name
+        self.events = events
+        self.prepare_error = prepare_error
+
+    async def prepare_request(self, request: GenerationRequest) -> None:
+        self.events.append(("prepare", self.name))
+        if self.prepare_error is not None:
+            raise self.prepare_error
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.events.append(("generate", self.name))
+        return await super().generate(request)
+
+    async def stream(
+        self,
+        request: GenerationRequest,
+    ) -> AsyncIterator[GenerationResult]:
+        self.events.append(("stream", self.name))
+        async for chunk in super().stream(request):
+            yield chunk
+
+
+class KeyedPreparingBackend(PreparingBackend):
+    @property
+    def request_validation_key(self) -> object:
+        return ("shared-validation",)
+
+
+class PreparingAdmissionBackend(PreparingBackend):
+    def __init__(self, name, events, tokens):
+        super().__init__(name, events)
+        self.tokens = tokens
+
+    def admission_upper_bound(self, request):
+        return AdmissionUpperBound(self.tokens, True)
+
+
 class AdmissionBackend(FlakyBackend):
     def __init__(self, tokens: int, *, refundable: bool = True) -> None:
         super().__init__()
@@ -102,6 +149,12 @@ class AdmissionBackend(FlakyBackend):
     ) -> AdmissionUpperBound:
         self.admission_calls += 1
         return self._bound
+
+
+class KeyedAdmissionBackend(AdmissionBackend):
+    @property
+    def admission_upper_bound_key(self):
+        return (self._bound.tokens, self._bound.refundable_on_exact_usage)
 
 
 class BlockingShutdownBackend(FlakyBackend):
@@ -322,6 +375,474 @@ async def test_generate_delegates_and_returns_result():
     result = await pool.generate(make_request("hello"))
     assert result.text == "world"
     assert backend.prompts_seen == ("hello",)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_dispatch_prepares_every_eligible_contract_before_placement(stream):
+    events: list[tuple[str, str]] = []
+    first = PreparingBackend("first", events)
+    second = PreparingBackend("second", events)
+    pool = ReplicaPool({"first": first, "second": second})
+    request = make_request("prepared")
+
+    if stream:
+        results = [chunk async for chunk in pool.stream(request)]
+        dispatch = "stream"
+    else:
+        results = [await pool.generate(request)]
+        dispatch = "generate"
+
+    assert results[-1].finished is True
+    assert events[:2] == [("prepare", "first"), ("prepare", "second")]
+    assert len(events) == 3
+    assert events[2][0] == dispatch
+    assert pool.outstanding == (0, 0)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_prepare_failure_preserves_error_before_placement_or_dispatch(stream):
+    events: list[tuple[str, str]] = []
+    failure = RuntimeError("second preparation failed")
+    first = PreparingBackend("first", events)
+    second = PreparingBackend("second", events, prepare_error=failure)
+    pool = ReplicaPool({"first": first, "second": second})
+    request = make_request("rejected")
+
+    with pytest.raises(RuntimeError, match="second preparation failed") as raised:
+        if stream:
+            async for _chunk in pool.stream(request):
+                raise AssertionError("preparation failure dispatched a stream")
+        else:
+            await pool.generate(request)
+
+    assert raised.value is failure
+    assert events == [("prepare", "first"), ("prepare", "second")]
+    assert first.prompts_seen == ()
+    assert second.prompts_seen == ()
+    assert pool.outstanding == (0, 0)
+    assert sum(pool.decision_counts.values()) == 0
+
+
+async def test_equal_validation_keys_do_not_deduplicate_backend_preparation():
+    events: list[tuple[str, str]] = []
+    first = KeyedPreparingBackend("first", events)
+    second = KeyedPreparingBackend("second", events)
+    pool = ReplicaPool({"first": first, "second": second})
+    pool._entries["first"].outstanding = 1
+
+    result = await pool.generate(make_request("instance-preparation"))
+
+    assert result.finished is True
+    assert events == [
+        ("prepare", "first"),
+        ("prepare", "second"),
+        ("generate", "second"),
+    ]
+
+
+async def test_removed_replica_prepare_failure_does_not_reject_survivor():
+    events: list[tuple[str, str]] = []
+
+    class RemovedDuringPrepare(PreparingBackend):
+        def __init__(self) -> None:
+            super().__init__("removed", events)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def prepare_request(self, request: GenerationRequest) -> None:
+            self.events.append(("prepare", self.name))
+            self.entered.set()
+            await self.release.wait()
+            raise RuntimeError("detached backend stopped")
+
+    removed = RemovedDuringPrepare()
+    survivor = PreparingBackend("survivor", events)
+    pool = ReplicaPool({"removed": removed, "survivor": survivor})
+    request = make_request("rolling-removal")
+    preparation = asyncio.create_task(pool.prepare_request(request))
+
+    await removed.entered.wait()
+    removal = asyncio.create_task(pool.remove_replica("removed"))
+    removed.release.set()
+    await removal
+
+    assert await preparation == ("survivor",)
+    result = await pool.generate(request)
+    assert result.finished is True
+    assert events == [
+        ("prepare", "removed"),
+        ("prepare", "survivor"),
+        ("generate", "survivor"),
+    ]
+
+
+async def test_prepare_skips_later_snapshot_member_removed_during_prior_await():
+    events: list[tuple[str, str]] = []
+
+    class GatedSurvivor(PreparingBackend):
+        def __init__(self) -> None:
+            super().__init__("survivor", events)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def prepare_request(self, request: GenerationRequest) -> None:
+            self.events.append(("prepare", self.name))
+            self.entered.set()
+            await self.release.wait()
+
+    class RemovedBeforeTurn(PreparingBackend):
+        def __init__(self) -> None:
+            super().__init__("removed", events)
+            self.closed = False
+            self.prepare_after_close = False
+
+        async def prepare_request(self, request: GenerationRequest) -> None:
+            self.prepare_after_close = self.closed
+            self.events.append(("prepare", self.name))
+
+        async def shutdown(self) -> None:
+            self.closed = True
+
+    survivor = GatedSurvivor()
+    removed = RemovedBeforeTurn()
+    pool = ReplicaPool({"survivor": survivor, "removed": removed})
+    request = make_request("stale-later-prepare")
+    preparation = asyncio.create_task(pool.prepare_request(request))
+
+    await survivor.entered.wait()
+    await pool.remove_replica("removed")
+    survivor.release.set()
+
+    assert await preparation == ("survivor",)
+    assert removed.prepare_after_close is False
+    assert events == [("prepare", "survivor")]
+
+
+async def test_prepared_lease_cannot_reexpand_after_admission_shrinks_it():
+    events: list[tuple[str, str]] = []
+    first = PreparingAdmissionBackend("first", events, 10)
+    second = PreparingAdmissionBackend("second", events, 100)
+    pool = ReplicaPool({"first": first, "second": second})
+    request = make_request("monotonic-lease")
+
+    await pool.prepare_request(request)
+    pool.drain("second")
+    bound = await pool.admission_upper_bound_async(request)
+    pool.cancel_drain("second")
+    pool._entries["first"].outstanding = 1
+    result = await pool.generate(request)
+
+    assert bound.tokens == 10
+    assert result.finished is True
+    assert events == [
+        ("prepare", "first"),
+        ("prepare", "second"),
+        ("generate", "first"),
+    ]
+
+
+async def test_concurrent_prepare_is_single_flight_and_cannot_publish_newcomer():
+    events: list[tuple[str, str]] = []
+
+    class GatedBackend(PreparingAdmissionBackend):
+        def __init__(self, name: str, tokens: int) -> None:
+            super().__init__(name, events, tokens)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def prepare_request(self, request: GenerationRequest) -> None:
+            self.events.append(("prepare", self.name))
+            self.entered.set()
+            await self.release.wait()
+
+    original = GatedBackend("original", 10)
+    newcomer = GatedBackend("newcomer", 100)
+    pool = ReplicaPool({"original": original})
+    request = make_request("concurrent-preflight")
+
+    first = asyncio.create_task(pool.prepare_request(request))
+    await original.entered.wait()
+    pool.add_replica("newcomer", newcomer)
+    second = asyncio.create_task(pool.prepare_request(request))
+    await asyncio.sleep(0)
+
+    assert newcomer.entered.is_set() is False
+    original.release.set()
+    assert await asyncio.gather(first, second) == [
+        ("original",),
+        ("original",),
+    ]
+    bound = await pool.admission_upper_bound_async(request)
+    pool._entries["original"].outstanding = 1
+    result = await pool.generate(request)
+
+    assert bound.tokens == 10
+    assert result.finished is True
+    assert events == [
+        ("prepare", "original"),
+        ("generate", "original"),
+    ]
+
+
+async def test_cancelling_one_prepare_waiter_does_not_cancel_shared_flight():
+    events: list[tuple[str, str]] = []
+
+    class GatedBackend(PreparingBackend):
+        def __init__(self) -> None:
+            super().__init__("only", events)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def prepare_request(self, request: GenerationRequest) -> None:
+            self.events.append(("prepare", self.name))
+            self.entered.set()
+            await self.release.wait()
+
+    backend = GatedBackend()
+    pool = ReplicaPool({"only": backend})
+    request = make_request("cancelled-waiter")
+    cancelled = asyncio.create_task(pool.prepare_request(request))
+    survivor = asyncio.create_task(pool.prepare_request(request))
+
+    await backend.entered.wait()
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    backend.release.set()
+
+    assert await survivor == ("only",)
+    assert events == [("prepare", "only")]
+
+
+async def test_async_admission_ignores_removed_failing_member_and_rebounds_survivor():
+    events: list[tuple[str, str]] = []
+
+    class RemovedDuringBound(PreparingBackend):
+        def __init__(self) -> None:
+            super().__init__("removed", events)
+            self.bound_entered = asyncio.Event()
+            self.bound_release = asyncio.Event()
+            self.closed = False
+
+        async def admission_upper_bound_async(self, request: GenerationRequest):
+            self.bound_entered.set()
+            await self.bound_release.wait()
+            if self.closed:
+                raise RuntimeError("detached backend stopped")
+            return AdmissionUpperBound(100, True)
+
+        async def shutdown(self) -> None:
+            self.closed = True
+            self.bound_release.set()
+
+    removed = RemovedDuringBound()
+    survivor = PreparingAdmissionBackend("survivor", events, 10)
+    pool = ReplicaPool({"removed": removed, "survivor": survivor})
+    request = make_request("admission-removal")
+    await pool.prepare_request(request)
+    admission = asyncio.create_task(pool.admission_upper_bound_async(request))
+
+    await removed.bound_entered.wait()
+    await pool.remove_replica("removed")
+    bound = await admission
+    result = await pool.generate(request)
+
+    assert bound == AdmissionUpperBound(10, True)
+    assert result.finished is True
+    assert events == [
+        ("prepare", "removed"),
+        ("prepare", "survivor"),
+        ("generate", "survivor"),
+    ]
+
+
+async def test_async_admission_skips_later_member_removed_during_prior_bound():
+    class GatedSurvivor(FlakyBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+            self.calls = 0
+
+        async def admission_upper_bound_async(self, request: GenerationRequest):
+            self.calls += 1
+            self.entered.set()
+            await self.release.wait()
+            return AdmissionUpperBound(10, True)
+
+    class RemovedBeforeTurn(FlakyBackend):
+        def __init__(self) -> None:
+            super().__init__()
+            self.closed = False
+            self.bound_after_close = False
+
+        async def admission_upper_bound_async(self, request: GenerationRequest):
+            self.bound_after_close = self.closed
+            return AdmissionUpperBound(100, True)
+
+        async def shutdown(self) -> None:
+            self.closed = True
+
+    survivor = GatedSurvivor()
+    removed = RemovedBeforeTurn()
+    pool = ReplicaPool({"survivor": survivor, "removed": removed})
+    request = make_request("stale-later-bound")
+    await pool.prepare_request(request)
+    admission = asyncio.create_task(pool.admission_upper_bound_async(request))
+
+    await survivor.entered.wait()
+    await pool.remove_replica("removed")
+    survivor.release.set()
+
+    assert await admission == AdmissionUpperBound(10, True)
+    assert survivor.calls == 2
+    assert removed.bound_after_close is False
+
+
+async def test_failed_preparation_cannot_reenter_lease_after_undrain():
+    events: list[tuple[str, str]] = []
+
+    class GatedFailure(PreparingBackend):
+        def __init__(self):
+            super().__init__("bad", events)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def prepare_request(self, request):
+            self.events.append(("prepare", self.name))
+            self.entered.set()
+            await self.release.wait()
+            raise RuntimeError("not prepared")
+
+    class GatedSuccess(PreparingBackend):
+        def __init__(self):
+            super().__init__("good", events)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def prepare_request(self, request):
+            self.events.append(("prepare", self.name))
+            self.entered.set()
+            await self.release.wait()
+
+    bad = GatedFailure()
+    good = GatedSuccess()
+    pool = ReplicaPool({"bad": bad, "good": good})
+    request = make_request("failed-lease-member")
+    preparation = asyncio.create_task(pool.prepare_request(request))
+
+    await bad.entered.wait()
+    pool.drain("bad")
+    bad.release.set()
+    await good.entered.wait()
+    pool.cancel_drain("bad")
+    good.release.set()
+
+    assert await preparation == ("good",)
+    result = await pool.generate(request)
+    assert result.finished is True
+    assert events == [
+        ("prepare", "bad"),
+        ("prepare", "good"),
+        ("generate", "good"),
+    ]
+
+
+async def test_typed_prepared_lease_ignores_new_unvalidated_candidate():
+    original = KeyedValidationBackend("original")
+    newcomer = KeyedValidationBackend("newcomer", rejection="tokens rejected")
+    pool = ReplicaPool({"original": original})
+    request = GenerationRequest(
+        request_id="typed-membership-lease",
+        prompt=TokensPrompt((1, 2)),
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+
+    assert await pool.prepare_request(request) == ("original",)
+    pool.add_replica("newcomer", newcomer)
+    result = await pool.generate(request)
+
+    assert result.finished is True
+    assert original.validation_calls == 1
+    assert newcomer.validation_calls == 0
+
+
+async def test_text_prepare_revalidates_new_snapshot_member_before_leasing():
+    original = KeyedValidationBackend("original")
+    rejecting = KeyedValidationBackend("rejecting", rejection="text rejected")
+    pool = ReplicaPool({"original": original})
+    request = make_request("text-membership-validation")
+
+    pool.validate_request(request)
+    preparation = asyncio.create_task(pool.prepare_request(request))
+    pool.add_replica("rejecting", rejecting)
+
+    with pytest.raises(ValueError, match="text rejected"):
+        await preparation
+    assert original.validation_calls == 2
+    assert rejecting.validation_calls == 1
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_preflight_lease_excludes_replica_added_while_prepare_awaits(stream):
+    events: list[tuple[str, str]] = []
+
+    class GatedPreparingBackend(PreparingBackend):
+        def __init__(self):
+            super().__init__("original", events)
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def prepare_request(self, request: GenerationRequest) -> None:
+            self.events.append(("prepare", self.name))
+            self.entered.set()
+            await self.release.wait()
+
+        def admission_upper_bound(self, request):
+            return AdmissionUpperBound(10, True)
+
+    class NewcomerBackend(PreparingBackend):
+        def admission_upper_bound(self, request):
+            return AdmissionUpperBound(100, True)
+
+    original = GatedPreparingBackend()
+    newcomer = NewcomerBackend("newcomer", events)
+    pool = ReplicaPool({"original": original})
+    request = make_request("membership-race")
+    preparation = asyncio.create_task(pool.prepare_request(request))
+
+    await original.entered.wait()
+    pool.add_replica("newcomer", newcomer)
+    # A fresh least-outstanding placement would prefer the newcomer.
+    pool._entries["original"].outstanding = 1
+    original.release.set()
+    await preparation
+    bound = await pool.admission_upper_bound_async(request)
+
+    if stream:
+        result = [chunk async for chunk in pool.stream(request)][-1]
+        dispatch = "stream"
+    else:
+        result = await pool.generate(request)
+        dispatch = "generate"
+
+    assert result.finished is True
+    assert bound.tokens == 10
+    assert events == [
+        ("prepare", "original"),
+        (dispatch, "original"),
+    ]
+    assert pool.outstanding == (1, 0)
+
+
+async def test_async_admission_deduplicates_large_homogeneous_contract_pool():
+    backends = [KeyedAdmissionBackend(128) for _ in range(181)]
+    pool = ReplicaPool(backends)
+
+    bound = await pool.admission_upper_bound_async(make_request("bounded"))
+
+    assert bound.tokens == 128
+    assert sum(backend.admission_calls for backend in backends) == 1
 
 
 async def test_cancelled_remove_finishes_detached_backend_shutdown() -> None:

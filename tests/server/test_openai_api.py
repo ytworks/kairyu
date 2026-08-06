@@ -2906,6 +2906,7 @@ async def test_closing_unstarted_stream_does_not_dispatch_or_meter(
         stream = _stream_orchestrator(
             Orchestrator({"tier1": backend}),
             generation_request.prompt,
+            None,
             ChatCompletionRequest(
                 model="auto",
                 messages=[{"role": "user", "content": "unstarted"}],

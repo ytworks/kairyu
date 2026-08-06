@@ -10,6 +10,7 @@ import pytest
 
 import kairyu.engine.kairyu_backend as kairyu_backend_module
 from kairyu import SamplingParams
+from kairyu.async_thread import run_prompt_work
 from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
@@ -167,6 +168,9 @@ async def test_zero_token_prompt_is_rejected_before_backend_state():
 
     with pytest.raises(ValueError, match="at least one token"):
         backend.validate_request(request)
+    assert backend._prepared_requests == {}
+    with pytest.raises(ValueError, match="at least one token"):
+        await backend.prepare_request(request)
     with pytest.raises(ValueError, match="at least one token"):
         await backend.generate(request)
 
@@ -194,6 +198,8 @@ async def test_context_limit_rejects_before_backend_state_and_allows_boundary_re
 
     with pytest.raises(ValueError, match="exceed max_model_len"):
         backend.validate_request(oversized)
+    with pytest.raises(ValueError, match="exceed max_model_len"):
+        await backend.prepare_request(oversized)
     with pytest.raises(ValueError, match="exceed max_model_len"):
         await backend.generate(oversized)
 
@@ -223,10 +229,102 @@ class _NoEncodeTokenizer(ToyTokenizer):
 class _CountingTokenizer(ToyTokenizer):
     def __init__(self) -> None:
         self.encoded_texts: list[str] = []
+        self.encode_threads: list[int] = []
 
     def encode(self, text: str) -> tuple[int, ...]:
         self.encoded_texts.append(text)
+        self.encode_threads.append(threading.get_ident())
         return super().encode(text)
+
+
+class _GatedTokenizer(ToyTokenizer):
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        self.calls += 1
+        self.entered.set()
+        if not self.release.wait(2):
+            raise TimeoutError("test did not release prompt tokenization")
+        return super().encode(text)
+
+
+class _OverlapRejectingTokenizer(ToyTokenizer):
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._active = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        with self._guard:
+            if self._active:
+                raise RuntimeError("concurrent encode")
+            self._active = True
+        try:
+            self.calls += 1
+            self.entered.set()
+            if not self.release.wait(2):
+                raise TimeoutError("test did not release prompt tokenization")
+            return super().encode(text)
+        finally:
+            with self._guard:
+                self._active = False
+
+
+class _OptInConcurrentTokenizer(ToyTokenizer):
+    concurrent_encode_safe = True
+    concurrent_prompt_preparation_safe = True
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._active = 0
+        self.max_active = 0
+        self.two_entered = threading.Event()
+        self.release = threading.Event()
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        with self._guard:
+            self._active += 1
+            self.max_active = max(self.max_active, self._active)
+            if self._active >= 2:
+                self.two_entered.set()
+        try:
+            if not self.release.wait(2):
+                raise TimeoutError("test did not release concurrent tokenization")
+            return super().encode(text)
+        finally:
+            with self._guard:
+                self._active -= 1
+
+
+class _EncodeSafeVocabGuardTokenizer(ToyTokenizer):
+    concurrent_encode_safe = True
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._active = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def vocab(self) -> list[str]:
+        with self._guard:
+            if self._active:
+                raise RuntimeError("concurrent vocab")
+            self._active = True
+        try:
+            self.calls += 1
+            self.entered.set()
+            if not self.release.wait(2):
+                raise TimeoutError("test did not release vocabulary initialization")
+            return super().vocab()
+        finally:
+            with self._guard:
+                self._active = False
 
 
 class _LoglikelihoodBoundaryTokenizer(ToyTokenizer):
@@ -264,7 +362,7 @@ async def test_trace_metrics_survive_preflight_and_backend_result_boundary():
         trace_requested=True,
     )
 
-    backend.validate_request(request)
+    await backend.prepare_request(request)
     result = await backend.generate(request)
     metrics = {metric.stage: metric for metric in result.stage_metrics}
 
@@ -328,7 +426,7 @@ async def test_n_candidates_attribute_shared_tokenization_once(stream):
         trace_requested=True,
     )
 
-    backend.validate_request(request)
+    await backend.prepare_request(request)
     if stream:
         result = [partial async for partial in backend.stream(request)][-1]
     else:
@@ -377,8 +475,8 @@ async def test_validated_tool_request_reuses_exact_prepared_tokens_for_n_choices
         tool_choice="required",
     )
 
-    backend.validate_request(request)
-    backend.validate_request(request)
+    await backend.prepare_request(request)
+    await backend.prepare_request(request)
     result = await backend.generate(request)
 
     assert len(tokenizer.encoded_texts) == 1
@@ -390,25 +488,244 @@ async def test_validated_tool_request_reuses_exact_prepared_tokens_for_n_choices
     await backend.shutdown()
 
 
-async def test_direct_generate_without_preflight_still_tokenizes_once():
+@pytest.mark.parametrize("stream", [False, True])
+async def test_direct_public_call_without_preflight_tokenizes_off_loop_once(stream):
     tokenizer = _CountingTokenizer()
     backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    event_loop_thread = threading.get_ident()
 
-    result = await backend.generate(_request("direct", "direct request", max_tokens=1))
+    request = _request("direct", "direct request", max_tokens=1)
+    if stream:
+        result = [partial async for partial in backend.stream(request)][-1]
+    else:
+        result = await backend.generate(request)
 
     assert result.finished
     assert tokenizer.encoded_texts == ["direct request"]
+    assert tokenizer.encode_threads != [event_loop_thread]
     assert backend._prepared_requests == {}
     await backend.shutdown()
 
 
-def test_abandoned_validated_request_releases_prepared_tokens():
+async def test_concurrent_prepare_single_flights_same_request():
+    tokenizer = _GatedTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    request = _request("single-flight", "shared request", max_tokens=1)
+    first = asyncio.create_task(backend.prepare_request(request))
+    second = asyncio.create_task(backend.prepare_request(request))
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        for _ in range(100):
+            flight = backend._preparing_requests.get(id(request))
+            if flight is not None and flight.waiters == 2:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("same-request preparation did not join one flight")
+
+        tokenizer.release.set()
+        await asyncio.gather(first, second)
+
+        assert tokenizer.calls == 1
+        assert backend._peek_prepared_request(request) is not None
+        assert backend._preparing_requests == {}
+    finally:
+        tokenizer.release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_different_requests_serialize_custom_tokenizer_calls():
+    tokenizer = _OverlapRejectingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    first = asyncio.create_task(
+        backend.prepare_request(_request("serialize-a", "first", max_tokens=1))
+    )
+    second = asyncio.create_task(
+        backend.prepare_request(_request("serialize-b", "second", max_tokens=1))
+    )
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        await asyncio.sleep(0.05)
+        tokenizer.release.set()
+        await asyncio.gather(first, second)
+
+        assert tokenizer.calls == 2
+    finally:
+        tokenizer.release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_serialized_custom_tokenizer_waiters_do_not_fill_prompt_executor():
+    tokenizer = _OverlapRejectingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    preparations = [
+        asyncio.create_task(
+            backend.prepare_request(
+                _request(f"serialize-{index}", f"prompt {index}", max_tokens=1)
+            )
+        )
+        for index in range(4)
+    ]
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        assert await asyncio.wait_for(
+            run_prompt_work(lambda: "unrelated-ready"),
+            timeout=1,
+        ) == "unrelated-ready"
+
+        tokenizer.release.set()
+        await asyncio.gather(*preparations)
+        assert tokenizer.calls == 4
+    finally:
+        tokenizer.release.set()
+        await asyncio.gather(*preparations, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_explicitly_safe_custom_tokenizer_prepares_concurrently():
+    tokenizer = _OptInConcurrentTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    preparations = [
+        asyncio.create_task(
+            backend.prepare_request(
+                _request(f"parallel-{index}", f"prompt {index}", max_tokens=1)
+            )
+        )
+        for index in range(2)
+    ]
+    try:
+        assert await asyncio.to_thread(tokenizer.two_entered.wait, 1)
+        tokenizer.release.set()
+        await asyncio.gather(*preparations)
+        assert tokenizer.max_active == 2
+    finally:
+        tokenizer.release.set()
+        await asyncio.gather(*preparations, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_encode_safe_tokenizer_serializes_first_token_prompt_vocab_call():
+    tokenizer = _EncodeSafeVocabGuardTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    preparations = [
+        asyncio.create_task(
+            backend.prepare_request(
+                GenerationRequest(
+                    request_id=f"token-prompt-{index}",
+                    prompt=TokensPrompt((1, 2)),
+                    sampling_params=SamplingParams(max_tokens=1),
+                )
+            )
+        )
+        for index in range(2)
+    ]
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        await asyncio.sleep(0.05)
+        assert tokenizer.calls == 1
+        tokenizer.release.set()
+        await asyncio.gather(*preparations)
+        assert tokenizer.calls == 1
+    finally:
+        tokenizer.release.set()
+        await asyncio.gather(*preparations, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_loglikelihood_shares_custom_tokenizer_gate_with_prepare():
+    tokenizer = _OverlapRejectingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    preparation = asyncio.create_task(
+        backend.prepare_request(_request("serialize-prepare", "prompt", max_tokens=1))
+    )
+    scoring = None
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        scoring = asyncio.create_task(
+            backend.tokenize_loglikelihood_async("context", " continuation")
+        )
+        await asyncio.sleep(0.05)
+        assert tokenizer.calls == 1
+
+        tokenizer.release.set()
+        await asyncio.gather(preparation, scoring)
+        assert tokenizer.calls == 3
+    finally:
+        tokenizer.release.set()
+        pending = [preparation]
+        if scoring is not None:
+            pending.append(scoring)
+        await asyncio.gather(*pending, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_cancelled_loglikelihood_keeps_custom_tokenizer_gate():
+    tokenizer = _OverlapRejectingTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    first = asyncio.create_task(
+        backend.tokenize_loglikelihood_async("context", " continuation")
+    )
+    second = None
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        second = asyncio.create_task(
+            backend.tokenize_loglikelihood_async("context", " continuation")
+        )
+        await asyncio.sleep(0.05)
+        assert tokenizer.calls == 1
+
+        tokenizer.release.set()
+        await second
+        assert tokenizer.calls == 4
+    finally:
+        tokenizer.release.set()
+        pending = [first]
+        if second is not None:
+            pending.append(second)
+        await asyncio.gather(*pending, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_cancelled_prepare_worker_does_not_publish_cache():
+    tokenizer = _GatedTokenizer()
+    backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
+    request = _request("cancelled-prepare", "abandoned request", max_tokens=1)
+    preparation = asyncio.create_task(backend.prepare_request(request))
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        preparation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await preparation
+        assert backend._prepared_requests == {}
+
+        tokenizer.release.set()
+        for _ in range(100):
+            if not backend._preparing_requests:
+                break
+            await asyncio.sleep(0.01)
+
+        assert tokenizer.calls == 1
+        assert backend._preparing_requests == {}
+        assert backend._prepared_requests == {}
+    finally:
+        tokenizer.release.set()
+        await asyncio.gather(preparation, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_abandoned_prepared_request_releases_prepared_tokens():
     tokenizer = _CountingTokenizer()
     backend = KairyuBackend(tokenizer=tokenizer, num_pages=64)
     request = _request("abandoned-validation", "validate but never submit")
     request_ref = weakref.ref(request)
 
-    backend.validate_request(request)
+    await backend.prepare_request(request)
     assert len(backend._prepared_requests) == 1
 
     del request
@@ -416,7 +733,7 @@ def test_abandoned_validated_request_releases_prepared_tokens():
 
     assert request_ref() is None
     assert backend._prepared_requests == {}
-    backend._loop.close()
+    await backend.shutdown()
 
 
 async def test_text_and_equivalent_token_prompt_share_native_radix_cache():
@@ -485,7 +802,7 @@ def test_token_tool_suffix_and_multimodal_reject_before_backend_state():
     assert backend._scheduler.states == {}
 
 
-def test_token_id_outside_backend_vocabulary_rejects_before_state():
+async def test_token_id_outside_backend_vocabulary_rejects_before_state():
     backend = KairyuBackend(tokenizer=_ToggleTokenizer(), num_pages=64)
     request = GenerationRequest(
         request_id="out-of-vocab",
@@ -495,9 +812,12 @@ def test_token_id_outside_backend_vocabulary_rejects_before_state():
 
     with pytest.raises(ValueError, match="outside the backend tokenizer vocabulary"):
         backend.validate_request(request)
+    with pytest.raises(ValueError, match="outside the backend tokenizer vocabulary"):
+        await backend.prepare_request(request)
     assert backend._active_request_ids == set()
     assert backend._loop._active_request_ids == set()
     assert backend._scheduler.states == {}
+    await backend.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -529,11 +849,66 @@ def test_validate_request_accepts_explicit_special_token_output_policy():
     )
 
     backend.validate_request(request)
-
     assert backend._peek_prepared_request(request) is not None
     assert backend._active_request_ids == set()
     assert backend._loop._active_request_ids == set()
     assert backend._scheduler.states == {}
+
+
+async def test_derived_full_validator_is_not_bypassed_by_builtin_fast_hook():
+    class RejectingDerivedBackend(KairyuBackend):
+        def __init__(self):
+            super().__init__(num_pages=64)
+            self.validation_calls = 0
+
+        def validate_request(self, request):
+            self.validation_calls += 1
+            super().validate_request(request)
+            raise ValueError("derived rejection")
+
+    backend = RejectingDerivedBackend()
+    request = GenerationRequest(
+        request_id="derived-validator",
+        prompt="hello",
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+    try:
+        with pytest.raises(ValueError, match="derived rejection"):
+            await backend.prepare_request(request)
+        assert backend.validation_calls == 1
+        assert backend._active_request_ids == set()
+    finally:
+        await backend.shutdown()
+
+
+async def test_native_tool_surface_walk_runs_off_event_loop():
+    event_loop_thread = threading.get_ident()
+    access_threads = []
+
+    class TrackingTool(dict):
+        def get(self, key, default=None):
+            access_threads.append(threading.get_ident())
+            return super().get(key, default)
+
+    backend = KairyuBackend(num_pages=64)
+    request = GenerationRequest(
+        request_id="offloop-tool-validation",
+        prompt="hello",
+        sampling_params=SamplingParams(max_tokens=1),
+        tools=(
+            TrackingTool(
+                type="function",
+                function={"name": "lookup", "parameters": {}},
+            ),
+        ),
+        tool_choice="none",
+    )
+    try:
+        await backend.prepare_request(request)
+        assert access_threads
+        assert all(thread_id != event_loop_thread for thread_id in access_threads)
+    finally:
+        await backend.shutdown()
 
 
 def test_validate_request_rejects_native_strict_tool_semantics():
@@ -586,7 +961,7 @@ async def test_stream_coalesces_backlogged_cumulative_updates_to_terminal(
 ) -> None:
     backend = KairyuBackend(num_pages=64)
     queue: asyncio.Queue[StreamUpdate] = asyncio.Queue()
-    monkeypatch.setattr(backend, "_submit", lambda _request: queue)
+    monkeypatch.setattr(backend, "_submit", lambda _request, **_kwargs: queue)
     stream = backend.stream(_request("backlogged", "prompt", max_tokens=4))
 
     queue.put_nowait(
@@ -661,7 +1036,7 @@ async def test_stream_coalescing_never_discards_a_backlogged_error(
 ) -> None:
     backend = KairyuBackend(num_pages=64)
     queue: asyncio.Queue[StreamUpdate] = asyncio.Queue()
-    monkeypatch.setattr(backend, "_submit", lambda _request: queue)
+    monkeypatch.setattr(backend, "_submit", lambda _request, **_kwargs: queue)
     stream = backend.stream(_request("backlogged-error", "prompt", max_tokens=3))
 
     queue.put_nowait(StreamUpdate((7,), "a", False, None))
@@ -709,7 +1084,7 @@ async def test_stream_coalescing_stops_at_success_before_a_later_failure(
 ) -> None:
     backend = KairyuBackend(num_pages=64)
     queue: asyncio.Queue[StreamUpdate] = asyncio.Queue()
-    monkeypatch.setattr(backend, "_submit", lambda _request: queue)
+    monkeypatch.setattr(backend, "_submit", lambda _request, **_kwargs: queue)
     stream = backend.stream(_request("terminal-boundary", "prompt", max_tokens=2))
     queue.put_nowait(StreamUpdate((7,), "d", False, None))
     queue.put_nowait(StreamUpdate((7, 8), "done", True, "length"))

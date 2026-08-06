@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 from dataclasses import replace
 
@@ -128,6 +129,27 @@ class PullThroughBackend:
     async def shutdown(self) -> None:
         return None
 
+
+async def test_role_prompt_render_runs_off_event_loop(monkeypatch):
+    backend = MockBackend()
+    conductor = Conductor(
+        roles=(RoleSpec(name="worker", worker="w", prompt="answer: {query}"),),
+        workers={"w": backend},
+    )
+    event_loop_thread = threading.get_ident()
+    render_threads = []
+    original = conductor._render
+
+    def tracked_render(*args):
+        render_threads.append(threading.get_ident())
+        return original(*args)
+
+    monkeypatch.setattr(conductor, "_render", tracked_render)
+
+    await conductor.run("q")
+
+    assert render_threads
+    assert all(thread_id != event_loop_thread for thread_id in render_threads)
 
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_conductor_rejects_templated_query_before_derivation(streaming):

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+import threading
 
 import httpx
 import pytest
 
+from kairyu.async_thread import run_prompt_work
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.prompt import TokensPrompt
 from kairyu.orchestration.orchestrator import Orchestrator
@@ -113,6 +116,29 @@ class _OrdinaryBackend:
         return None
 
 
+class _OverlapRejectingScoringBackend(_ScoringBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self._guard = threading.Lock()
+        self._active = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def tokenize_loglikelihood(self, context: str, continuation: str):
+        with self._guard:
+            if self._active:
+                raise RuntimeError("concurrent tokenizer call")
+            self._active = True
+        try:
+            self.entered.set()
+            if not self.release.wait(2):
+                raise TimeoutError("test did not release tokenizer")
+            return super().tokenize_loglikelihood(context, continuation)
+        finally:
+            with self._guard:
+                self._active = False
+
+
 async def test_continuation_loglikelihood_dispatches_exact_forced_tokens():
     backend = _ScoringBackend()
     app = create_legacy_app(engines={"score": backend})
@@ -159,6 +185,39 @@ async def test_continuation_loglikelihood_dispatches_exact_forced_tokens():
             "continuation_token_ids": [21, 22],
         }
     ]
+
+
+async def test_sync_compat_tokenizer_calls_are_serialized_before_executor():
+    backend = _OverlapRejectingScoringBackend()
+    app = create_legacy_app(engines={"score": backend})
+
+    async with _client(app) as client:
+        first = asyncio.create_task(
+            client.post("/v1/completions", json=_valid_body())
+        )
+        requests = [first]
+        try:
+            assert await asyncio.to_thread(backend.entered.wait, 1)
+            requests.extend(
+                asyncio.create_task(
+                    client.post("/v1/completions", json=_valid_body())
+                )
+                for _ in range(3)
+            )
+            await asyncio.sleep(0.05)
+            assert backend.tokenize_calls == 0
+            assert await asyncio.wait_for(
+                run_prompt_work(lambda: "unrelated-ready"),
+                timeout=1,
+            ) == "unrelated-ready"
+
+            backend.release.set()
+            responses = await asyncio.gather(*requests)
+            assert [response.status_code for response in responses] == [200] * 4
+            assert backend.tokenize_calls == 4
+        finally:
+            backend.release.set()
+            await asyncio.gather(*requests, return_exceptions=True)
 
 
 async def test_ordinary_completion_wire_shape_is_unchanged():

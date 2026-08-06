@@ -62,6 +62,7 @@ _prepared_image_cache_lock = threading.RLock()
 class _PreparedImageInput:
     data_urls: tuple[str, ...]
     decoded: tuple[tuple[str, bytes], ...]
+    verified: bool = False
 
 
 _prepared_image_cache: dict[
@@ -499,11 +500,30 @@ class ImageInputPolicy:
         """Fully decode and canonicalize images before an upstream dispatch."""
 
         prepared = self._prepare_prompt(prompt)
+        if prepared.verified:
+            return prepared.data_urls
         for index, (mime, data) in enumerate(prepared.decoded):
             verification_key = _raster_verification_key(mime, data)
             if not _raster_was_verified(verification_key):
                 self._verify_raster(data, mime=mime, index=index)
                 _remember_verified_raster(verification_key)
+        prepared = _PreparedImageInput(
+            data_urls=prepared.data_urls,
+            decoded=prepared.decoded,
+            verified=True,
+        )
+        self._remember_preparation(prompt, prepared)
+        return prepared.data_urls
+
+    def cached_validated_prompt(
+        self,
+        prompt: MultimodalPrompt,
+    ) -> tuple[str, ...] | None:
+        """Return a fully verified exact-prompt result without decoding work."""
+
+        prepared = self._cached_preparation(prompt)
+        if prepared is None or not prepared.verified:
+            return None
         return prepared.data_urls
 
 

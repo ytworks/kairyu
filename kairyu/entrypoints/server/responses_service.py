@@ -21,14 +21,22 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from kairyu.engine.backend import CacheHint, GenerationResult, admission_upper_bound
+from kairyu.engine.backend import (
+    CacheHint,
+    GenerationResult,
+    UpstreamClientError,
+    backend_admission_upper_bound_async,
+    prepare_backend_request,
+)
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     ExecutedChat,
     ValidatedChatRequest,
+    chat_error_from_upstream_client_error,
     execute_chat,
-    validate_chat_request,
+    validate_chat_request_async,
 )
+from kairyu.entrypoints.server.errors import upstream_error
 from kairyu.entrypoints.server.metering import (
     record_state_usage,
     resolve_cached_tokens,
@@ -1187,6 +1195,14 @@ def add_responses_route(
     @app.post("/v1/responses")
     async def responses(request: ResponsesRequest, http_request: Request):
         http_request.state.model = request.model
+        metrics = getattr(http_request.app.state, "metrics", None)
+        ingress_ns = getattr(http_request.state, "placement_started_ns", None)
+        if metrics is not None and type(ingress_ns) is int:
+            metrics.record_preplacement_phase(
+                "responses",
+                "ingress_to_handler",
+                max(0, time.perf_counter_ns() - ingress_ns),
+            )
         try:
             _validate_request_surface(request)
         except ChatRequestError as error:
@@ -1205,6 +1221,7 @@ def add_responses_route(
             if previous is None:
                 return _request_error("previous response not found", status_code=404)
             context.extend(previous)
+        validation_started_ns = time.perf_counter_ns()
         try:
             current_items = _canonical_input(request.input)
             all_items = context + current_items
@@ -1223,7 +1240,7 @@ def add_responses_route(
                     if transported in {"interactive", "batch"}
                     else "interactive"
                 )
-            validated = validate_chat_request(
+            validated = await validate_chat_request_async(
                 chat_request,
                 engines,
                 chat_templates,
@@ -1241,17 +1258,50 @@ def add_responses_route(
             )
         except ChatRequestError as error:
             return _chat_error(error)
+        finally:
+            if metrics is not None:
+                metrics.record_preplacement_phase(
+                    "responses",
+                    "request_validation",
+                    max(0, time.perf_counter_ns() - validation_started_ns),
+                )
+        prepare_started_ns = time.perf_counter_ns()
         try:
-            bound = admission_upper_bound(validated.generation_request)
+            await prepare_backend_request(
+                validated.engine,
+                validated.generation_request,
+            )
+        except UpstreamClientError as error:
+            return _chat_error(chat_error_from_upstream_client_error(error))
         except ValueError as error:
             return _request_error(str(error))
+        except RuntimeError as error:
+            return upstream_error(error)
+        finally:
+            if metrics is not None:
+                metrics.record_preplacement_phase(
+                    "responses",
+                    "backend_prepare",
+                    max(0, time.perf_counter_ns() - prepare_started_ns),
+                )
+        admission_started_ns = time.perf_counter_ns()
+        try:
+            bound = await backend_admission_upper_bound_async(
+                validated.engine,
+                validated.generation_request,
+            )
+        except ValueError as error:
+            return _request_error(str(error))
+        except RuntimeError as error:
+            return upstream_error(error)
+        admission_ns = max(0, time.perf_counter_ns() - admission_started_ns)
+        reserve_started_ns = time.perf_counter_ns()
         admission = getattr(http_request.state, "tenant_admission", None)
         if admission is not None:
             admitted = admission.reserve_tokens(
                 bound.tokens,
                 refundable_on_exact_usage=bound.refundable_on_exact_usage,
             )
-            metrics = getattr(http_request.app.state, "metrics", None)
             if metrics is not None:
                 metrics.record_tenant_admission(
                     owner,
@@ -1276,8 +1326,13 @@ def add_responses_route(
                         }
                     },
                 )
-        metrics = getattr(http_request.app.state, "metrics", None)
+        admission_ns += max(0, time.perf_counter_ns() - reserve_started_ns)
         if metrics is not None:
+            metrics.record_preplacement_phase(
+                "responses",
+                "admission",
+                admission_ns,
+            )
             metrics.record_priority(
                 validated.generation_request.scheduling_class,
                 source="http",

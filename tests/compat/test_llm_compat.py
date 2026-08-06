@@ -117,6 +117,68 @@ def test_generation_request_rechecks_prompt_authority_after_low_level_mutation()
     assert backend.prompts_seen == ()
 
 
+def test_batch_prepares_every_request_in_input_order_before_any_dispatch():
+    class PreparingBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def validate_request(self, request):
+            self.events.append(("validate", request.prompt))
+            super().validate_request(request)
+
+        async def prepare_request(self, request):
+            self.events.append(("prepare", request.prompt))
+
+        async def generate(self, request):
+            self.events.append(("generate", request.prompt))
+            return await super().generate(request)
+
+    backend = PreparingBackend()
+    local_llm = LLM(model="mock-model", backend=backend)
+
+    outputs = local_llm.generate(["first", "second", "third"])
+
+    assert [output.prompt for output in outputs] == ["first", "second", "third"]
+    assert backend.events[:6] == [
+        ("validate", "first"),
+        ("validate", "second"),
+        ("validate", "third"),
+        ("prepare", "first"),
+        ("prepare", "second"),
+        ("prepare", "third"),
+    ]
+    assert [event for event in backend.events if event[0] == "generate"] == [
+        ("generate", "first"),
+        ("generate", "second"),
+        ("generate", "third"),
+    ]
+
+
+def test_batch_prepare_failure_stops_in_order_before_any_dispatch():
+    failure = ValueError("second prepare failed")
+
+    class RejectingPrepareBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.prepared = []
+
+        async def prepare_request(self, request):
+            self.prepared.append(request.prompt)
+            if request.prompt == "second":
+                raise failure
+
+    backend = RejectingPrepareBackend()
+    local_llm = LLM(model="mock-model", backend=backend)
+
+    with pytest.raises(ValueError, match="second prepare failed") as raised:
+        local_llm.generate(["first", "second", "third"])
+
+    assert raised.value is failure
+    assert backend.prepared == ["first", "second"]
+    assert backend.prompts_seen == ()
+
+
 @pytest.mark.parametrize(
     "prompt",
     [

@@ -26,12 +26,13 @@ import threading
 import time
 import uuid
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
 from typing import TypeVar
 
+from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
 from kairyu.engine.backend import (
     EngineReadiness,
     GenerationRequest,
@@ -39,7 +40,9 @@ from kairyu.engine.backend import (
     GenerationStageMetric,
     GenerationUsage,
     prompt_with_tool_intent,
+    validate_backend_request_before_prepare,
     validate_native_request_surface,
+    validate_native_request_surface_before_prepare,
 )
 from kairyu.engine.core.attention_selector import AttentionBackendDecision
 from kairyu.engine.core.engine_service import (
@@ -54,6 +57,7 @@ from kairyu.engine.core.sampling_types import stable_request_seed
 from kairyu.engine.engine_loop import _validate_max_model_len
 from kairyu.engine.prompt import (
     PromptInput,
+    TemplatedPrompt,
     TokensPrompt,
     prompt_kind,
     prompt_text,
@@ -65,6 +69,7 @@ from kairyu.engine.tokenizer import (
     Tokenizer,
     resolve_tokenizer,
     tokenize_loglikelihood_continuation,
+    tokenizer_encode_is_concurrent_safe,
 )
 from kairyu.models.generation import (
     GenerationConfigMode,
@@ -839,6 +844,15 @@ class _PreparedProcPrompt:
     tokenize_duration_ns: int | None = None
 
 
+@dataclass
+class _ProcPromptPreparationFlight:
+    """One pure parent-preflight computation shared by async callers."""
+
+    request_ref: weakref.ReferenceType[GenerationRequest]
+    task: asyncio.Task[_PreparedProcPrompt]
+    waiters: int = 0
+
+
 def _import_deps():
     try:
         import msgpack
@@ -1067,6 +1081,12 @@ class ZmqEngineBackend:
             tuple[weakref.ReferenceType[GenerationRequest], _PreparedProcPrompt],
         ] = {}
         self._prepared_requests_lock = threading.Lock()
+        # Unknown compatibility tokenizers queue on the event loop, leaving
+        # prompt executor threads available to other backends while they wait.
+        self._prompt_tokenizer_gate = asyncio.Lock()
+        # Event-loop-owned single flights.  Workers only compute; a live
+        # waiter publishes into `_prepared_requests` after a successful await.
+        self._preparing_requests: dict[int, _ProcPromptPreparationFlight] = {}
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -1273,10 +1293,24 @@ class ZmqEngineBackend:
             and self._live_generation is not None
         )
 
-    def _retire_unreliable_transport(self) -> None:
+    def _retire_unreliable_transport(
+        self,
+        expected_generation: int | None = None,
+        expected_socket: object | None = None,
+    ) -> None:
         """Stop a generation after a data-plane send has unknown delivery."""
 
         if self._closed:
+            return
+        if (
+            expected_generation is not None
+            and self._live_generation != expected_generation
+        ) or (
+            expected_socket is not None
+            and self._socket is not expected_socket
+        ):
+            # A replacement generation must never be killed for an uncertain
+            # send owned by its already-retired predecessor.
             return
         self._service_failure_type = "EngineServiceError"
         process = self._process
@@ -1573,6 +1607,15 @@ class ZmqEngineBackend:
             _wait_process_tree_exit(process, _FORCED_REAP_TIMEOUT_S)
 
     async def _shutdown_impl(self) -> None:
+        preparation_tasks = tuple(
+            flight.task for flight in self._preparing_requests.values()
+        )
+        if preparation_tasks:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in preparation_tasks),
+                return_exceptions=True,
+            )
+        self._preparing_requests.clear()
         async with self._start_lock:
             generation = self._live_generation
             self._live_generation = None
@@ -1721,8 +1764,14 @@ class ZmqEngineBackend:
     def _prepare_request(
         self,
         request: GenerationRequest,
-        prompt: PromptInput,
+        *,
+        validate_surface: bool = True,
+        prompt: PromptInput | None = None,
     ) -> _PreparedProcPrompt:
+        if validate_surface:
+            validate_native_request_surface(request)
+        if prompt is None:
+            prompt = prompt_with_tool_intent(request)
         max_model_len = self._max_model_len
         if max_model_len is None:
             return _PreparedProcPrompt(prompt)
@@ -1764,6 +1813,84 @@ class ZmqEngineBackend:
             tokenize_duration_ns=tokenize_duration_ns,
         )
 
+    def _discard_finished_preparation(
+        self,
+        key: int,
+        flight: _ProcPromptPreparationFlight,
+        task: asyncio.Task[_PreparedProcPrompt],
+    ) -> None:
+        if not task.cancelled():
+            task.exception()
+        if (
+            flight.waiters == 0
+            and self._preparing_requests.get(key) is flight
+        ):
+            self._preparing_requests.pop(key, None)
+
+    async def prepare_request(self, request: GenerationRequest) -> None:
+        """Run parent tokenization off-loop and publish only to a live caller."""
+
+        if self._closed:
+            raise EngineServiceError("kairyu-proc backend is shut down")
+        validate_backend_request_before_prepare(self, request)
+        if self._peek_prepared_request(request) is not None:
+            return
+
+        key = id(request)
+        flight = self._preparing_requests.get(key)
+        if flight is not None and flight.request_ref() is not request:
+            self._preparing_requests.pop(key, None)
+            flight = None
+        if flight is None:
+            task = asyncio.create_task(
+                self._run_tokenizer_work(self._prepare_request, request)
+            )
+            flight = _ProcPromptPreparationFlight(weakref.ref(request), task)
+            self._preparing_requests[key] = flight
+            task.add_done_callback(
+                lambda done, key=key, flight=flight: self._discard_finished_preparation(
+                    key,
+                    flight,
+                    done,
+                )
+            )
+
+        flight.waiters += 1
+        try:
+            prepared = await asyncio.shield(flight.task)
+            if self._closed:
+                raise EngineServiceError("kairyu-proc backend is shut down")
+            self._retain_prepared_request(request, prepared)
+        finally:
+            flight.waiters -= 1
+            if (
+                flight.task.done()
+                and flight.waiters == 0
+                and self._preparing_requests.get(key) is flight
+            ):
+                self._preparing_requests.pop(key, None)
+
+    def _preflight_tokenizer_concurrent_encode_safe(self) -> bool:
+        tokenizer = self._preflight_tokenizer
+        return tokenizer is not None and tokenizer_encode_is_concurrent_safe(tokenizer)
+
+    async def _run_tokenizer_work(
+        self,
+        function: Callable[..., _T],
+        /,
+        *args: object,
+    ) -> _T:
+        """Run tokenizer work with unknown implementations serialized off-lane."""
+
+        if self._preflight_tokenizer_concurrent_encode_safe():
+            return await run_prompt_work(function, *args)
+        return await run_serialized_prompt_work(
+            self._prompt_tokenizer_gate,
+            lambda: not self._preflight_tokenizer_concurrent_encode_safe(),
+            function,
+            *args,
+        )
+
     def _get_preflight_tokenizer(self) -> Tokenizer:
         tokenizer = self._preflight_tokenizer
         if tokenizer is not None:
@@ -1788,19 +1915,62 @@ class ZmqEngineBackend:
             continuation,
         )
 
-    def validate_request(self, request: GenerationRequest) -> None:
-        validate_native_request_surface(request)
-        prompt = prompt_with_tool_intent(request)
-        if prompt_kind(prompt) == "multimodal":
+    async def tokenize_loglikelihood_async(
+        self,
+        context: str,
+        continuation: str,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Tokenize scoring input through the shared async tokenizer gate."""
+
+        return await self._run_tokenizer_work(
+            self.tokenize_loglikelihood,
+            context,
+            continuation,
+        )
+
+    def validate_request_before_prepare(self, request: GenerationRequest) -> None:
+        """Validate native surface/shape without parent tokenizer CPU work."""
+
+        validate_native_request_surface_before_prepare(request)
+        kind = prompt_kind(request.prompt)
+        if (
+            request.tools
+            and not request.tools_in_prompt
+            and request.tool_choice != "none"
+        ):
+            if isinstance(request.prompt, TemplatedPrompt):
+                raise ValueError(
+                    "templated prompts cannot receive an implicit "
+                    "tool-instruction suffix; render tools inside the chat "
+                    "template and set tools_in_prompt=true"
+                )
+            if kind != "text":
+                raise ValueError(
+                    f"{kind} prompts cannot receive an implicit "
+                    "tool-instruction suffix; render tools before tokenization "
+                    "and set tools_in_prompt=true"
+                )
+        if kind == "multimodal":
             raise ValueError(
                 "kairyu-proc does not support multimodal prompts; "
                 "no modality processor is configured"
             )
+
+    def validate_request(self, request: GenerationRequest) -> None:
+        """Preserve synchronous parent preflight and exact prepared cache."""
+
+        ZmqEngineBackend.validate_request_before_prepare(self, request)
+        validate_native_request_surface(request)
+        prompt = prompt_with_tool_intent(request)
         if (
             self._max_model_len is not None
             and self._peek_prepared_request(request) is None
         ):
-            prepared = self._prepare_request(request, prompt)
+            prepared = self._prepare_request(
+                request,
+                validate_surface=False,
+                prompt=prompt,
+            )
             self._retain_prepared_request(request, prepared)
 
     def _reserve_request_id(self, request_id: str) -> None:
@@ -1948,14 +2118,59 @@ class ZmqEngineBackend:
                 return
         queue.put_nowait(event)
 
+    @staticmethod
+    def _pack_add_message(
+        request: GenerationRequest,
+        prepared_prompt: PromptInput | None,
+        generation_defaults: GenerationDefaults,
+        wire_request_id: str,
+        stream_id: str | None,
+        wire_version: int,
+    ) -> bytes:
+        """Build the request-sized process frame on the prompt CPU lane."""
+
+        _, msgpack = _import_deps()
+        sampling = sampling_params_to_wire(
+            generation_defaults.apply(request.sampling_params)
+        )
+        if sampling["seed"] is None:
+            # The child schedules by the generation-unique wire ID. Make the
+            # historical public-ID default seed explicit so process splitting
+            # and request retries remain output-identical.
+            sampling["seed"] = stable_request_seed(request.request_id)
+        prompt = (
+            prepared_prompt
+            if prepared_prompt is not None
+            else prompt_with_tool_intent(request)
+        )
+        message = {
+            "op": "add",
+            "request_id": wire_request_id,
+            "prompt": prompt_to_wire(prompt),
+            "sampling": sampling,
+            "priority": request.priority,
+            "scheduling_class": request.scheduling_class,
+        }
+        if type(prompt) is not str:
+            message["prompt_wire_version"] = _PROMPT_WIRE_VERSION
+        if wire_version == WIRE_VERSION:
+            # Per-request negotiation keeps rolling upgrades bidirectionally
+            # compatible: an old service ignores these additive fields.
+            message["wire_version"] = WIRE_VERSION
+            message["stream_id"] = stream_id
+            if request.trace_requested:
+                message["trace_requested"] = True
+        return msgpack.packb(message)
+
     async def _submit(self, request: GenerationRequest) -> asyncio.Queue:
-        self.validate_request(request)
+        self.validate_request_before_prepare(request)
+        await self.prepare_request(request)
         await self._ensure_started()
         assert self._socket is not None
+        socket = self._socket
         service_generation = self._live_generation
         if service_generation is None:
             raise EngineServiceError("engine service stopped while submitting the request")
-        _, msgpack = _import_deps()
         queue: asyncio.Queue = asyncio.Queue()
         stream_generation = uuid.uuid4().hex
         wire_request_id = f"wire-{stream_generation}"
@@ -1972,50 +2187,42 @@ class ZmqEngineBackend:
                 raise EngineServiceError(
                     "engine generation defaults are unavailable after startup"
                 )
-            sampling = sampling_params_to_wire(
-                generation_defaults.apply(request.sampling_params)
-            )
-            if sampling["seed"] is None:
-                # The child schedules by the generation-unique wire ID. Make
-                # the historical public-ID default seed explicit so process
-                # splitting and request retries remain output-identical.
-                sampling["seed"] = stable_request_seed(request.request_id)
             prepared = self._take_prepared_request(request)
-            if prepared is None:
-                prompt = prompt_with_tool_intent(request)
-            else:
-                prompt = prepared.prompt
+            if prepared is not None:
                 if prepared.tokenize_duration_ns is not None:
                     self._parent_tokenize_durations_ns[request.request_id] = (
                         prepared.tokenize_duration_ns
                     )
-            message = {
-                "op": "add",
-                "request_id": wire_request_id,
-                "prompt": prompt_to_wire(prompt),
-                "sampling": sampling,
-                "priority": request.priority,
-                "scheduling_class": request.scheduling_class,
-            }
-            if type(prompt) is not str:
-                message["prompt_wire_version"] = _PROMPT_WIRE_VERSION
-            if self._wire_version == WIRE_VERSION:
-                # Per-request negotiation keeps rolling upgrades
-                # bidirectionally compatible: an old service ignores these
-                # fields; a new service defaults absent fields to v1.
-                message["wire_version"] = WIRE_VERSION
-                message["stream_id"] = stream_id
-                if request.trace_requested:
-                    # Omission keeps trace-off bytes and old-client behavior
-                    # unchanged; an old service ignores this additive key.
-                    message["trace_requested"] = True
+            packed = await run_prompt_work(
+                self._pack_add_message,
+                request,
+                prepared.prompt if prepared is not None else None,
+                generation_defaults,
+                wire_request_id,
+                stream_id,
+                self._wire_version,
+            )
+            if (
+                self._socket is not socket
+                or self._live_generation != service_generation
+                or self._closed
+                or self._service_failure_type is not None
+                or (self._receiver is not None and self._receiver.done())
+                or (
+                    self._process is not None
+                    and not self._process.is_alive()
+                )
+            ):
+                raise EngineServiceError(
+                    "engine service changed while packing the request"
+                )
             try:
-                await _send_control(self._socket, msgpack.packb(message))
+                await _send_control(socket, packed)
             except BaseException as error:
                 # Cancellation of a ZMQ send cannot prove whether the add
                 # reached the child. Retire the generation so an unowned ghost
                 # request cannot keep consuming GPU work.
-                self._retire_unreliable_transport()
+                self._retire_unreliable_transport(service_generation, socket)
                 if isinstance(error, TimeoutError):
                     raise EngineServiceError(
                         "engine service request send timed out"
@@ -2031,13 +2238,15 @@ class ZmqEngineBackend:
     async def _abort(self, request_id: str) -> None:
         if self._socket is None:
             return
+        socket = self._socket
+        service_generation = self._queue_generations.get(request_id)
         wire_request_id = self._wire_request_ids.get(request_id)
         if wire_request_id is None:
             return
         _, msgpack = _import_deps()
         try:
             await _send_control(
-                self._socket,
+                socket,
                 msgpack.packb(
                     {
                         "op": "abort",
@@ -2047,13 +2256,13 @@ class ZmqEngineBackend:
                 ),
             )
         except asyncio.CancelledError:
-            self._retire_unreliable_transport()
+            self._retire_unreliable_transport(service_generation, socket)
             raise
         except Exception:
             # Stream finalization must release its route even when the service
             # transport is wedged. Abort delivery is then unknown, so retire
             # the generation instead of leaving an unowned request running.
-            self._retire_unreliable_transport()
+            self._retire_unreliable_transport(service_generation, socket)
             pass
 
     def _release_wire_route(self, request_id: str) -> None:

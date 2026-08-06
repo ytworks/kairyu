@@ -1,16 +1,19 @@
 import asyncio
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
 
 from kairyu import SamplingParams
+from kairyu.engine import openai_backend as openai_backend_module
 from kairyu.engine import vision as vision_module
 from kairyu.engine.backend import (
     GenerationRequest,
     GenerationStageMetric,
     UpstreamClientError,
+    validate_backend_request_before_prepare,
 )
 from kairyu.engine.openai_backend import OpenAICompatBackend, _stage_metrics_from_trace
 from kairyu.engine.openai_capabilities import (
@@ -27,6 +30,7 @@ from kairyu.engine.prompt import (
     TokensPrompt,
 )
 from kairyu.engine.vision import ImageInputPolicy
+from kairyu.orchestration.replica import ReplicaPool
 from kairyu.outputs import TokenLogprob
 from kairyu.sampling_params import GENERATION_CONFIG_SAMPLING_FIELDS
 
@@ -154,6 +158,136 @@ def test_prerendered_chat_prompt_is_rejected_before_upstream_dispatch():
 
     with pytest.raises(ValueError, match="pre-rendered chat prompt.*template boundary"):
         backend.validate_request(_request(TemplatedPrompt("<BOS>hello")))
+
+
+async def test_payload_validation_is_offloop_and_reused_by_dispatch(monkeypatch):
+    calls: list[tuple[int, bool]] = []
+    encode_threads: list[int] = []
+    original = openai_backend_module._validated_request_payload
+
+    def tracked(request, capabilities, *, validate_json=True):
+        calls.append((threading.get_ident(), validate_json))
+        return original(
+            request,
+            capabilities,
+            validate_json=validate_json,
+        )
+
+    monkeypatch.setattr(
+        openai_backend_module,
+        "_validated_request_payload",
+        tracked,
+    )
+    captured: dict = {}
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport(captured),
+        upstream="openai",
+    )
+    original_encode = backend._encode_payload
+
+    def tracked_encode(*args):
+        encode_threads.append(threading.get_ident())
+        return original_encode(*args)
+
+    monkeypatch.setattr(backend, "_encode_payload", tracked_encode)
+    request = _request(
+        sampling_params=SamplingParams(
+            max_tokens=8,
+            extra_args={
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "answer",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "answer": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        )
+    )
+    event_loop_thread = threading.get_ident()
+
+    validate_backend_request_before_prepare(backend, request)
+    await backend.prepare_request(request)
+    await backend.generate(request)
+
+    assert [validate_json for _thread, validate_json in calls] == [False]
+    assert calls[-1][0] != event_loop_thread
+    assert len(encode_threads) == 1
+    assert encode_threads[0] != event_loop_thread
+    assert captured["body"]["response_format"]["type"] == "json_schema"
+
+
+async def test_derived_full_validator_is_not_bypassed_by_builtin_fast_hook():
+    class RejectingDerivedBackend(OpenAICompatBackend):
+        def __init__(self):
+            super().__init__(
+                base_url="https://api.example.com/v1",
+                model="m",
+                api_key_env=None,
+                transport=httpx.MockTransport(
+                    lambda _request: pytest.fail("request was dispatched")
+                ),
+                upstream="openai",
+            )
+            self.validation_calls = 0
+
+        def validate_request(self, request):
+            self.validation_calls += 1
+            super().validate_request(request)
+            raise ValueError("derived rejection")
+
+    backend = RejectingDerivedBackend()
+
+    with pytest.raises(ValueError, match="derived rejection"):
+        await backend.prepare_request(_request())
+
+    assert backend.validation_calls == 1
+
+
+async def test_concurrent_payload_preparation_is_single_flight_and_shielded(
+    monkeypatch,
+):
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_ok_transport({}),
+    )
+    request = _request("single flight")
+    started = threading.Event()
+    release = threading.Event()
+    calls = 0
+    original = backend._dispatch_preflight
+
+    def gated(candidate):
+        nonlocal calls
+        calls += 1
+        started.set()
+        assert release.wait(timeout=2)
+        return original(candidate)
+
+    monkeypatch.setattr(backend, "_dispatch_preflight", gated)
+    cancelled = asyncio.create_task(backend.prepare_request(request))
+    survivor = asyncio.create_task(backend.prepare_request(request))
+    while not started.is_set():
+        await asyncio.sleep(0)
+
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+    await survivor
+    await backend.generate(request)
+
+    assert calls == 1
 
 
 def _ok_transport(captured: dict) -> httpx.MockTransport:
@@ -1445,7 +1579,9 @@ async def test_token_based_multimodal_prompt_is_rejected_before_media_or_transpo
 async def test_multimodal_full_decode_runs_once_off_the_event_loop(monkeypatch):
     vision_module._clear_verified_raster_cache()
     decode_threads: list[int] = []
+    validation_calls = 0
     original_verify = ImageInputPolicy._verify_raster
+    original_validate = ImageInputPolicy.validate_prompt
 
     def recording_verify(data, *, mime, index):
         decode_threads.append(threading.get_ident())
@@ -1456,6 +1592,13 @@ async def test_multimodal_full_decode_runs_once_off_the_event_loop(monkeypatch):
         "_verify_raster",
         staticmethod(recording_verify),
     )
+
+    def recording_validate(self, prompt):
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validate(self, prompt)
+
+    monkeypatch.setattr(ImageInputPolicy, "validate_prompt", recording_validate)
     backend = OpenAICompatBackend(
         base_url="http://vlm:8000/v1",
         model="vlm",
@@ -1490,10 +1633,132 @@ async def test_multimodal_full_decode_runs_once_off_the_event_loop(monkeypatch):
     backend.validate_request(request)
     assert decode_threads == []
 
+    await backend.prepare_request(request)
     await backend.generate(request)
 
+    assert validation_calls == 1
     assert len(decode_threads) == 1
     assert decode_threads[0] != threading.get_ident()
+
+
+async def test_blocked_image_validation_does_not_occupy_default_executor(
+    monkeypatch,
+):
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(
+        ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-default")
+    )
+    validation_started = threading.Event()
+    release_validation = threading.Event()
+    validation_lock = threading.Lock()
+    validation_threads: list[str] = []
+    original_validate = ImageInputPolicy.validate_prompt
+
+    def blocking_validate(self, prompt):
+        with validation_lock:
+            validation_threads.append(threading.current_thread().name)
+            if len(validation_threads) == 2:
+                validation_started.set()
+        assert release_validation.wait(2)
+        return original_validate(self, prompt)
+
+    monkeypatch.setattr(ImageInputPolicy, "validate_prompt", blocking_validate)
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="vlm",
+        api_key_env=None,
+        upstream="vllm",
+        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        image_input_policy={"max_images": 1},
+    )
+    preparations = [
+        asyncio.create_task(backend.prepare_request(_request(_multimodal_prompt())))
+        for _ in range(2)
+    ]
+
+    async def wait_until_validation_starts() -> None:
+        while not validation_started.is_set():
+            await asyncio.sleep(0)
+
+    try:
+        await asyncio.wait_for(wait_until_validation_starts(), timeout=1)
+        default_thread = await asyncio.wait_for(
+            asyncio.to_thread(lambda: threading.current_thread().name),
+            timeout=0.5,
+        )
+
+        assert default_thread.startswith("test-default")
+        assert all(name.startswith("kairyu-prompt") for name in validation_threads)
+        assert all(not preparation.done() for preparation in preparations)
+    finally:
+        release_validation.set()
+        preparation_results = await asyncio.gather(
+            *preparations,
+            return_exceptions=True,
+        )
+        await backend.shutdown()
+    assert preparation_results == [None, None]
+
+
+async def test_replica_prepares_each_instance_but_validates_shared_image_once(
+    monkeypatch,
+):
+    vision_module._clear_verified_raster_cache()
+    validation_calls = 0
+    original_validate = ImageInputPolicy.validate_prompt
+    transport_calls: list[str] = []
+
+    def recording_validate(self, prompt):
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validate(self, prompt)
+
+    def transport(name):
+        def handler(request):
+            transport_calls.append(name)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": name},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 37, "completion_tokens": 1},
+                },
+            )
+
+        return httpx.MockTransport(handler)
+
+    monkeypatch.setattr(ImageInputPolicy, "validate_prompt", recording_validate)
+    backends = {
+        name: OpenAICompatBackend(
+            base_url=f"http://{name}:8000/v1",
+            model="vlm",
+            api_key_env=None,
+            transport=transport(name),
+            upstream="vllm",
+            capabilities={"allow_prompt_kinds": ["multimodal"]},
+            image_input_policy={"max_images": 1},
+        )
+        for name in ("first", "second")
+    }
+    pool = ReplicaPool(backends)
+    request = _request(_multimodal_prompt())
+    try:
+        await pool.prepare_request(request)
+        assert all(backend._peek_prepared_image_urls(request) for backend in backends.values())
+        pool._entries["first"].outstanding = 1
+
+        result = await pool.generate(request)
+
+        assert result.text == "second"
+        assert validation_calls == 1
+        assert transport_calls == ["second"]
+    finally:
+        await pool.shutdown()
 
 
 async def test_multimodal_remote_url_is_400_before_http_client_or_transport():
@@ -1631,8 +1896,17 @@ def _chunked_sse_transport(*chunks: bytes) -> httpx.MockTransport:
     )
 
 
-async def test_multimodal_stream_requires_and_returns_exact_final_usage():
+async def test_multimodal_stream_requires_and_returns_exact_final_usage(monkeypatch):
     captured: dict = {}
+    validation_calls = 0
+    original_validate = ImageInputPolicy.validate_prompt
+
+    def recording_validate(self, prompt):
+        nonlocal validation_calls
+        validation_calls += 1
+        return original_validate(self, prompt)
+
+    monkeypatch.setattr(ImageInputPolicy, "validate_prompt", recording_validate)
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["body"] = json.loads(request.content)
@@ -1659,11 +1933,11 @@ async def test_multimodal_stream_requires_and_returns_exact_final_usage():
         image_input_policy={"max_images": 1},
     )
 
-    results = [
-        result
-        async for result in backend.stream(_request(_multimodal_prompt()))
-    ]
+    request = _request(_multimodal_prompt())
+    await backend.prepare_request(request)
+    results = [result async for result in backend.stream(request)]
 
+    assert validation_calls == 1
     assert captured["body"]["stream_options"] == {"include_usage": True}
     assert captured["body"]["messages"][1]["content"][1]["type"] == "image_url"
     assert results[-1].finished is True

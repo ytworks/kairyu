@@ -8,18 +8,33 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import email.message
 import json
 import logging
 import math
+import threading
 import time
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import EndpointContext, RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from fastapi.routing import APIRoute, _extract_endpoint_context
+from pydantic import BaseModel
+from starlette.exceptions import HTTPException
 
+from kairyu.async_thread import (
+    run_prompt_work,
+    run_request_body_work,
+    run_serialized_prompt_work,
+)
 from kairyu.engine.backend import (
     AdmissionUpperBound,
     CacheHint,
@@ -29,10 +44,9 @@ from kairyu.engine.backend import (
     GenerationStageMetric,
     GenerationUsage,
     UpstreamClientError,
-    admission_upper_bound,
-    backend_admission_upper_bound,
+    backend_admission_upper_bound_async,
     prepare_backend_request,
-    validate_backend_request,
+    validate_backend_request_before_prepare,
 )
 from kairyu.engine.prompt import PromptInput, TokensPrompt
 from kairyu.entrypoints.chat_template import ChatTemplate
@@ -46,9 +60,9 @@ from kairyu.entrypoints.server.chat_service import (
     parallel_tool_calls_is_satisfied,
     sampling_params_from,
     tool_choice_is_satisfied,
-    validate_chat_input,
+    validate_chat_input_async,
     validate_chat_policy,
-    validate_chat_request,
+    validate_chat_request_async,
 )
 from kairyu.entrypoints.server.chat_service import (
     render_prompt as render_prompt,
@@ -101,6 +115,7 @@ from kairyu.entrypoints.server.protocol import (
     RoutingResponse,
     Usage,
 )
+from kairyu.entrypoints.server.request_body import reuse_prevalidated_model
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.sse_encode import (
     ChatContentSSEEncoder,
@@ -128,6 +143,225 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True, slots=True)
+class _PreparedRequestBody:
+    """A body joined, decoded, and validated on the bounded ingress lane."""
+
+    body: bytes
+    value: BaseModel | None = None
+    json_value: object = None
+    error_response: Response | None = None
+    validation_errors: list[dict[str, Any]] | None = None
+    validation_body: object = None
+    validation_exception: Exception | None = None
+    body_parse_exception: Exception | None = None
+
+
+def _validation_error_response(errors: list[dict[str, Any]]) -> Response:
+    """Render FastAPI's standard 422 body without returning work to the loop."""
+
+    return JSONResponse(
+        status_code=422,
+        content={"detail": jsonable_encoder(errors)},
+    )
+
+
+def _prepare_request_body(
+    chunks: tuple[bytes, ...],
+    body_field: Any,
+    *,
+    parse_json: bool,
+) -> _PreparedRequestBody:
+    """Mirror FastAPI body parsing while keeping request-sized CPU off-loop."""
+
+    body = b"".join(chunks)
+    value: object = None
+    if body:
+        if parse_json:
+            try:
+                value = json.loads(body)
+            except json.JSONDecodeError as error:
+                errors = [
+                    {
+                        "type": "json_invalid",
+                        "loc": ("body", error.pos),
+                        "msg": "JSON decode error",
+                        "input": {},
+                        "ctx": {"error": error.msg},
+                    }
+                ]
+                return _PreparedRequestBody(
+                    body=body,
+                    error_response=_validation_error_response(errors),
+                    validation_errors=errors,
+                    validation_body=error.doc,
+                    validation_exception=error,
+                )
+            except Exception as error:
+                return _PreparedRequestBody(
+                    body=body,
+                    body_parse_exception=error,
+                )
+        else:
+            value = body
+
+    if value is None:
+        errors = [
+            {
+                "type": "missing",
+                "loc": ("body",),
+                "msg": "Field required",
+                "input": None,
+            }
+        ]
+        return _PreparedRequestBody(
+            body=body,
+            error_response=_validation_error_response(errors),
+            validation_errors=errors,
+            validation_body=None,
+        )
+
+    validated, errors = body_field.validate(value, {}, loc=("body",))
+    if errors:
+        return _PreparedRequestBody(
+            body=body,
+            error_response=_validation_error_response(errors),
+            validation_errors=errors,
+            validation_body=value,
+        )
+    if not isinstance(validated, BaseModel):
+        raise RuntimeError("offloaded request body validator returned a non-model")
+    return _PreparedRequestBody(
+        body=body,
+        value=validated,
+        json_value=value,
+    )
+
+
+def _strict_content_type_enabled(value: object) -> bool:
+    return bool(getattr(value, "value", value))
+
+
+def _request_body_is_json(request: Request, *, strict: bool) -> bool:
+    content_type = request.headers.get("content-type")
+    if not content_type:
+        return not strict
+    message = email.message.Message()
+    message["content-type"] = content_type
+    if message.get_content_maintype() != "application":
+        return False
+    subtype = message.get_content_subtype()
+    return subtype == "json" or subtype.endswith("+json")
+
+
+class _OffloadedRequestBodyRoute(APIRoute):
+    """Pre-cache large chat/route models without changing their public schema."""
+
+    def get_route_handler(self):
+        original = super().get_route_handler()
+        body_field = self.body_field
+        dependant = self.dependant
+        body_model = (
+            None
+            if body_field is None or not dependant.body_params
+            else dependant.body_params[0].field_info.annotation
+        )
+        supported = (
+            body_field is not None
+            and len(dependant.body_params) == 1
+            and not self._embed_body_fields
+            and body_model in {ChatCompletionRequest, RoutePreviewRequest}
+        )
+        strict = _strict_content_type_enabled(self.strict_content_type)
+
+        async def route_handler(request: Request) -> Response:
+            if not supported:
+                return await original(request)
+
+            chunks: list[bytes] = []
+            try:
+                async for chunk in request.stream():
+                    chunks.append(chunk)
+            except HTTPException:
+                raise
+            except Exception as error:
+                raise HTTPException(
+                    status_code=400,
+                    detail="There was an error parsing the body",
+                ) from error
+            prepared = await run_request_body_work(
+                _prepare_request_body,
+                tuple(chunks),
+                body_field,
+                parse_json=_request_body_is_json(request, strict=strict),
+            )
+            # Preserve Starlette's body/json cache contract for FastAPI's
+            # typed dependency path; the request-local validator reuses the
+            # exact model without reconstructing its nested message graph.
+            request._body = prepared.body
+            if prepared.body_parse_exception is not None:
+                parse_error = HTTPException(
+                    status_code=400,
+                    detail="There was an error parsing the body",
+                )
+                # FastAPI raises from inside the parse ``except`` block. The
+                # worker boundary preserves both links for custom handlers.
+                parse_error.__context__ = prepared.body_parse_exception
+                raise parse_error from prepared.body_parse_exception
+            if prepared.error_response is not None:
+                handler = request.app.exception_handlers.get(RequestValidationError)
+                if handler is request_validation_exception_handler:
+                    return prepared.error_response
+                assert prepared.validation_errors is not None
+                endpoint_ctx = EndpointContext(_extract_endpoint_context(dependant.call))
+                if dependant.path:
+                    mount_path = request.scope.get("root_path", "").rstrip("/")
+                    endpoint_ctx["path"] = f"{request.method} {mount_path}{dependant.path}"
+                validation_error = RequestValidationError(
+                    prepared.validation_errors,
+                    body=prepared.validation_body,
+                    endpoint_ctx=endpoint_ctx,
+                )
+                if prepared.validation_exception is not None:
+                    validation_error.__context__ = prepared.validation_exception
+                    raise validation_error from prepared.validation_exception
+                raise validation_error
+            assert prepared.value is not None
+            request._json = prepared.json_value
+            with reuse_prevalidated_model(
+                prepared.json_value,
+                prepared.value,
+            ):
+                return await original(request)
+
+        return route_handler
+
+
+_loglikelihood_gates: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[int, weakref.ReferenceType[asyncio.Lock]],
+] = weakref.WeakKeyDictionary()
+_loglikelihood_gates_lock = threading.Lock()
+
+
+def _loglikelihood_gate_for_running_loop(engine: object) -> asyncio.Lock:
+    """Return a loop-local gate for one compatibility backend tokenizer."""
+
+    loop = asyncio.get_running_loop()
+    key = id(engine)
+    with _loglikelihood_gates_lock:
+        loop_gates = _loglikelihood_gates.setdefault(loop, {})
+        gate_ref = loop_gates.get(key)
+        gate = gate_ref() if gate_ref is not None else None
+        if gate is None:
+            gate = asyncio.Lock()
+            # Locks bind to a loop when contended; retaining only a weak value
+            # prevents the global weak-key registry from retaining that loop.
+            loop_gates[key] = weakref.ref(gate)
+    return gate
+
+
 AUTO_MODEL = "kairyu-auto"
 _KAIRYU_CHAT_EXTENSION_FIELDS = frozenset(
     {
@@ -136,9 +370,7 @@ _KAIRYU_CHAT_EXTENSION_FIELDS = frozenset(
         "kairyu_route",
     }
 )
-_CHAT_CHUNK_EXCLUDE_USAGE_FIELDS = _KAIRYU_CHAT_EXTENSION_FIELDS | frozenset(
-    {"usage"}
-)
+_CHAT_CHUNK_EXCLUDE_USAGE_FIELDS = _KAIRYU_CHAT_EXTENSION_FIELDS | frozenset({"usage"})
 _COMPLETION_CHUNK_EXCLUDE_USAGE_FIELDS = frozenset({"usage"})
 
 
@@ -208,7 +440,7 @@ def _validate_generation_request(
     engine: EngineBackend, request: GenerationRequest
 ) -> JSONResponse | None:
     try:
-        validate_backend_request(engine, request)
+        validate_backend_request_before_prepare(engine, request)
     except ValueError as error:
         return invalid_request(str(error))
     return None
@@ -224,9 +456,7 @@ def _tenant_limit_response(tenant: str, reason: str) -> JSONResponse:
         headers={"Retry-After": "1"},
         content={
             "error": {
-                "message": (
-                    f"tenant {tenant!r} admission limit exceeded ({reason})"
-                ),
+                "message": (f"tenant {tenant!r} admission limit exceeded ({reason})"),
                 "type": "rate_limit_error",
                 "code": "tenant_rate_limited",
             }
@@ -306,14 +536,8 @@ def _sse_chunk(
     )
     # OpenAI contract: usage key omitted unless include_usage; then explicit
     # null on non-final chunks, populated on the final choices-less chunk
-    exclude = (
-        _KAIRYU_CHAT_EXTENSION_FIELDS
-        if include_usage
-        else _CHAT_CHUNK_EXCLUDE_USAGE_FIELDS
-    )
-    serialized = escape_json_line_separators(
-        payload.model_dump_json(exclude=exclude)
-    )
+    exclude = _KAIRYU_CHAT_EXTENSION_FIELDS if include_usage else _CHAT_CHUNK_EXCLUDE_USAGE_FIELDS
+    serialized = escape_json_line_separators(payload.model_dump_json(exclude=exclude))
     return f"data: {serialized}\n\n"
 
 
@@ -331,12 +555,7 @@ def _chat_content_sse_chunk(
 ) -> str | bytes:
     """Use the byte encoder only for the exact repeated content shape."""
 
-    if (
-        not is_first
-        and type(index) is int
-        and type(content) is str
-        and logprobs is None
-    ):
+    if not is_first and type(index) is int and type(content) is str and logprobs is None:
         return encoder.encode(index, content)
     return _sse_chunk(
         response_id,
@@ -395,9 +614,7 @@ def _orchestrator_metadata_chunk(
         exclude.update(_KAIRYU_CHAT_EXTENSION_FIELDS)
     elif trace is None:
         exclude.add("kairyu_trace_v2")
-    serialized = escape_json_line_separators(
-        payload.model_dump_json(exclude=exclude)
-    )
+    serialized = escape_json_line_separators(payload.model_dump_json(exclude=exclude))
     return f"data: {serialized}\n\n"
 
 
@@ -467,9 +684,7 @@ def _direct_trace_lines(
 ) -> list[str]:
     stage_metrics = _merge_stage_metrics(stage_metrics)
     return [
-        "stage:"
-        f"{metric.stage} duration_ns={metric.duration_ns} "
-        f"occurrences={metric.occurrences}"
+        f"stage:{metric.stage} duration_ns={metric.duration_ns} occurrences={metric.occurrences}"
         for metric in stage_metrics
     ]
 
@@ -645,6 +860,7 @@ async def _stream_engine(
 async def _stream_orchestrator(
     orchestrator,
     call: OrchestrationRequest | str,
+    prepared,
     request: ChatCompletionRequest,
     include_usage: bool,
     want_trace: bool,
@@ -725,6 +941,7 @@ async def _stream_orchestrator(
                 call,
                 stream=True,
                 usage_observer=observe_internal_usage,
+                prepared=prepared,
             )
             async for event in stream:
                 if event.kind == "status":
@@ -903,11 +1120,7 @@ async def _stream_choices(
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
     include_usage = usage is not None
-    direct_trace = (
-        want_trace
-        and orchestration_result is None
-        and trace_started_at is not None
-    )
+    direct_trace = want_trace and orchestration_result is None and trace_started_at is not None
     sse_write_ns = 0
     sse_write_count = 0
     for choice in choices:
@@ -1014,9 +1227,7 @@ def _completion_logprobs(completion: CompletionOutput) -> CompletionLogprobs | N
         # when it is available; malformed third-party bytes fall back safely.
         try:
             contribution = (
-                bytes(entry.bytes_).decode("utf-8")
-                if entry.bytes_ is not None
-                else entry.token
+                bytes(entry.bytes_).decode("utf-8") if entry.bytes_ is not None else entry.token
             )
         except (TypeError, UnicodeDecodeError, ValueError):
             contribution = entry.token
@@ -1091,36 +1302,60 @@ def _loglikelihood_token_ids(
     tokenize = getattr(engine, "tokenize_loglikelihood", None)
     if not callable(tokenize):
         raise AttributeError("tokenize_loglikelihood")
-    tokenized = tokenize(context, continuation)
+    return _validated_loglikelihood_token_ids(tokenize(context, continuation))
+
+
+def _validated_loglikelihood_token_ids(
+    tokenized: object,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Copy and validate tokenizer-owned boundary evidence."""
+
     if type(tokenized) is not tuple or len(tokenized) != 2:
-        raise RuntimeError(
-            "tokenize_loglikelihood must return a pair of token-ID sequences"
-        )
+        raise RuntimeError("tokenize_loglikelihood must return a pair of token-ID sequences")
 
     validated: list[tuple[int, ...]] = []
-    for label, values in zip(
-        ("context", "continuation"), tokenized, strict=True
-    ):
-        if isinstance(values, (str, bytes, bytearray)) or not isinstance(
-            values, Sequence
-        ):
-            raise RuntimeError(
-                f"tokenize_loglikelihood returned invalid {label} token IDs"
-            )
+    for label, values in zip(("context", "continuation"), tokenized, strict=True):
+        if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Sequence):
+            raise RuntimeError(f"tokenize_loglikelihood returned invalid {label} token IDs")
         copied = tuple(values)
         if not copied:
-            raise RuntimeError(
-                f"tokenize_loglikelihood returned empty {label} token IDs"
-            )
+            raise RuntimeError(f"tokenize_loglikelihood returned empty {label} token IDs")
         if any(
-            type(token_id) is not int or not 0 <= token_id <= (1 << 64) - 1
-            for token_id in copied
+            type(token_id) is not int or not 0 <= token_id <= (1 << 64) - 1 for token_id in copied
         ):
-            raise RuntimeError(
-                f"tokenize_loglikelihood returned invalid {label} token IDs"
-            )
+            raise RuntimeError(f"tokenize_loglikelihood returned invalid {label} token IDs")
         validated.append(copied)
     return validated[0], validated[1]
+
+
+async def _loglikelihood_token_ids_async(
+    engine: EngineBackend,
+    context: str,
+    continuation: str,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Use a backend tokenizer gate when one is available."""
+
+    tokenize_async = getattr(engine, "tokenize_loglikelihood_async", None)
+    if callable(tokenize_async):
+        tokenized = await tokenize_async(context, continuation)
+        return _validated_loglikelihood_token_ids(tokenized)
+    if getattr(engine, "concurrent_tokenize_loglikelihood_safe", False) is True:
+        return await run_prompt_work(
+            _loglikelihood_token_ids,
+            engine,
+            context,
+            continuation,
+        )
+    # The compatibility Protocol never promised a thread-safe tokenizer. Queue
+    # before entering the bounded executor so waiters cannot consume its lanes.
+    return await run_serialized_prompt_work(
+        _loglikelihood_gate_for_running_loop(engine),
+        None,
+        _loglikelihood_token_ids,
+        engine,
+        context,
+        continuation,
+    )
 
 
 def _loglikelihood_choice(
@@ -1160,9 +1395,7 @@ def _loglikelihood_choice(
     if returned_token_ids != continuation_ids:
         raise RuntimeError("loglikelihood backend did not return the forced token IDs")
     if completion.finish_reason != "length":
-        raise RuntimeError(
-            "loglikelihood backend did not finish the complete forced continuation"
-        )
+        raise RuntimeError("loglikelihood backend did not finish the complete forced continuation")
     content = completion.logprob_content
     if content is None or len(content) != len(continuation_ids):
         raise RuntimeError("loglikelihood backend returned missing token logprobs")
@@ -1175,9 +1408,7 @@ def _loglikelihood_choice(
         try:
             parsed = float(value)
         except (OverflowError, ValueError) as error:
-            raise RuntimeError(
-                "loglikelihood backend returned an invalid token logprob"
-            ) from error
+            raise RuntimeError("loglikelihood backend returned an invalid token logprob") from error
         if not math.isfinite(parsed) or parsed > 0.0:
             raise RuntimeError("loglikelihood backend returned an invalid token logprob")
 
@@ -1225,9 +1456,7 @@ async def _stream_completions(
             usage=usage,
         )
         exclude = None if include_usage else _COMPLETION_CHUNK_EXCLUDE_USAGE_FIELDS
-        serialized = escape_json_line_separators(
-            payload.model_dump_json(exclude=exclude)
-        )
+        serialized = escape_json_line_separators(payload.model_dump_json(exclude=exclude))
         return f"data: {serialized}\n\n"
 
     try:
@@ -1242,11 +1471,7 @@ async def _stream_completions(
                         continue
                     sent[completion.index] = len(completion.text)
                     finish = (completion.finish_reason or "stop") if partial.finished else None
-                    if (
-                        finish is None
-                        and type(completion.index) is int
-                        and type(delta) is str
-                    ):
+                    if finish is None and type(completion.index) is int and type(delta) is str:
                         yield text_encoder.encode(completion.index, delta)
                     else:
                         yield _chunk(
@@ -1325,6 +1550,34 @@ def _scheduling_class(http_request: Request) -> str:
     return transported if transported in {"interactive", "batch"} else "interactive"
 
 
+def _record_preplacement_phase(
+    http_request: Request,
+    endpoint: str,
+    phase: str,
+    started_ns: int,
+) -> None:
+    """Publish a bounded phase without changing the placement total clock."""
+
+    metrics = getattr(http_request.app.state, "metrics", None)
+    if metrics is not None:
+        metrics.record_preplacement_phase(
+            endpoint,
+            phase,
+            max(0, time.perf_counter_ns() - started_ns),
+        )
+
+
+def _record_ingress_to_handler(http_request: Request, endpoint: str) -> None:
+    ingress_ns = getattr(http_request.state, "placement_started_ns", None)
+    if type(ingress_ns) is int:
+        _record_preplacement_phase(
+            http_request,
+            endpoint,
+            "ingress_to_handler",
+            ingress_ns,
+        )
+
+
 def create_app(
     engines: Mapping[str, EngineBackend],
     orchestrator: Orchestrator | None = None,
@@ -1361,6 +1614,7 @@ def create_app(
         version="0.1.0",
         lifespan=_with_usage_ledger_cleanup(lifespan),
     )
+    app.router.route_class = _OffloadedRequestBodyRoute
     served_engines = dict(engines)
     # m11 D2: tiered auto models; the single-orchestrator kwarg is a shim
     auto_models: dict[str, Orchestrator] = dict(orchestrators or {})
@@ -1589,26 +1843,42 @@ def create_app(
         return ModelList(data=[ModelCard(id=name) for name in names])
 
     @app.post("/v1/route", response_model=RoutePreviewResponse)
-    async def preview_route(request: RoutePreviewRequest, http_request: Request):
+    async def preview_route(
+        request: RoutePreviewRequest,
+        http_request: Request,
+    ):
         http_request.state.model = request.model
+        _record_ingress_to_handler(http_request, "route")
         selected = auto_models.get(request.model)
         if selected is not None:
             chat_request = ChatCompletionRequest(
                 model=request.model,
                 messages=request.messages,
             )
+            validation_started_ns = time.perf_counter_ns()
             try:
-                prompt = validate_chat_input(
-                    chat_request,
-                    chat_templates,
-                    legacy_chat_models=legacy_chat_models,
+                prompt = (
+                    await validate_chat_input_async(
+                        chat_request,
+                        chat_templates,
+                        legacy_chat_models=legacy_chat_models,
+                    )
                 ).prompt
-                decision = selected.preview_route(prompt)
             except ChatRequestError as error:
                 return JSONResponse(
                     status_code=error.status_code,
                     content={"error": error.payload()},
                 )
+            finally:
+                _record_preplacement_phase(
+                    http_request,
+                    "route",
+                    "request_validation",
+                    validation_started_ns,
+                )
+            routing_started_ns = time.perf_counter_ns()
+            try:
+                decision = await selected.preview_route_async(prompt)
             except PreviewNotSupportedError as error:
                 return JSONResponse(
                     status_code=409,
@@ -1619,6 +1889,13 @@ def create_app(
                             "code": "preview_not_supported",
                         }
                     },
+                )
+            finally:
+                _record_preplacement_phase(
+                    http_request,
+                    "route",
+                    "routing_preflight",
+                    routing_started_ns,
                 )
             payload = _route_payload(decision)
             descriptor = selected.describe_routing()
@@ -1639,13 +1916,18 @@ def create_app(
         )
 
     @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-    async def chat_completions(request: ChatCompletionRequest, http_request: Request):
+    async def chat_completions(
+        request: ChatCompletionRequest,
+        http_request: Request,
+    ):
         http_request.state.model = request.model  # label for the metrics middleware
+        _record_ingress_to_handler(http_request, "chat")
         want_trace = http_request.headers.get("x-kairyu-trace") == "1"
         trace_started_at = utc_now_iso() if want_trace else None
         if request.model in auto_models:
+            validation_started_ns = time.perf_counter_ns()
             try:
-                validated_input = validate_chat_input(
+                validated_input = await validate_chat_input_async(
                     request,
                     chat_templates,
                     legacy_chat_models=legacy_chat_models,
@@ -1654,29 +1936,60 @@ def create_app(
                 return JSONResponse(
                     status_code=error.status_code, content={"error": error.payload()}
                 )
+            finally:
+                _record_preplacement_phase(
+                    http_request,
+                    "chat",
+                    "request_validation",
+                    validation_started_ns,
+                )
             prompt = validated_input.prompt
             normalized_tool_choice = validated_input.normalized_tool_choice
             include_usage = validated_input.include_usage
+            routing_started_ns = time.perf_counter_ns()
             try:
-                sampling = sampling_params_from(request)
-            except ValueError as error:
-                return invalid_request(str(error))
-            orchestration_request = OrchestrationRequest(
-                prompt=prompt,
-                sampling_params=sampling,
-                tools=tuple(request.tools or ()),
-                tool_choice=request.tool_choice,
-                parallel_tool_calls=request.parallel_tool_calls,
-                tools_in_prompt=validated_input.tools_in_prompt,
-                response_format=request.response_format,
-            )
-            selected = auto_models[request.model]
-            try:
-                selected.validate_request(orchestration_request)
-                bound = selected.admission_upper_bound(orchestration_request)
-            except ValueError as error:
-                return invalid_request(str(error))
+                try:
+                    sampling = sampling_params_from(request)
+                except ValueError as error:
+                    return invalid_request(str(error))
+                orchestration_request = OrchestrationRequest(
+                    prompt=prompt,
+                    sampling_params=sampling,
+                    tools=tuple(request.tools or ()),
+                    tool_choice=request.tool_choice,
+                    parallel_tool_calls=request.parallel_tool_calls,
+                    tools_in_prompt=validated_input.tools_in_prompt,
+                    response_format=request.response_format,
+                )
+                selected = auto_models[request.model]
+                try:
+                    prepared_orchestration = await selected.prepare_request(orchestration_request)
+                    bound = await selected.admission_upper_bound_async(orchestration_request)
+                except UpstreamClientError as error:
+                    chat_error = chat_error_from_upstream_client_error(error)
+                    return JSONResponse(
+                        status_code=chat_error.status_code,
+                        content={"error": chat_error.payload()},
+                    )
+                except ValueError as error:
+                    return invalid_request(str(error))
+                except RuntimeError as error:
+                    return upstream_error(error)
+            finally:
+                _record_preplacement_phase(
+                    http_request,
+                    "chat",
+                    "routing_preflight",
+                    routing_started_ns,
+                )
+            admission_started_ns = time.perf_counter_ns()
             reservation_error = _reserve_tenant_work(http_request, bound)
+            _record_preplacement_phase(
+                http_request,
+                "chat",
+                "admission",
+                admission_started_ns,
+            )
             if reservation_error is not None:
                 return reservation_error
             # Tool choices must be validated across every final choice before
@@ -1688,6 +2001,7 @@ def create_app(
                     _stream_orchestrator(
                         selected,
                         orchestration_request,
+                        prepared_orchestration,
                         request,
                         include_usage,
                         want_trace,
@@ -1696,7 +2010,10 @@ def create_app(
                 )
             try:
                 _mark_tenant_dispatched(http_request)
-                result = await selected.run(orchestration_request)
+                result = await selected.run(
+                    orchestration_request,
+                    prepared=prepared_orchestration,
+                )
             except OrchestratorExecutionError as error:
                 logger.exception("orchestrator backend error")
                 result = error.result
@@ -1794,8 +2111,7 @@ def create_app(
                     usage_exact=False,
                 )
                 error = ChatRequestError(
-                    "upstream model emitted multiple calls while "
-                    "parallel_tool_calls=false",
+                    "upstream model emitted multiple calls while parallel_tool_calls=false",
                     status_code=502,
                     code="parallel_tool_calls_not_satisfied",
                     error_type="upstream_error",
@@ -1834,8 +2150,9 @@ def create_app(
             return JSONResponse(content=_chat_response_payload(response))
 
         session_id = _session_id(request, http_request)
+        validation_started_ns = time.perf_counter_ns()
         try:
-            validated = validate_chat_request(
+            validated = await validate_chat_request_async(
                 request,
                 served_engines,
                 chat_templates,
@@ -1848,27 +2165,33 @@ def create_app(
                 cache_hint=CacheHint(session_id=session_id) if session_id else None,
                 priority=getattr(http_request.state, "priority", None),
                 scheduling_class=_scheduling_class(http_request),
-                placement_started_ns=getattr(
-                    http_request.state, "placement_started_ns", None
-                ),
+                placement_started_ns=getattr(http_request.state, "placement_started_ns", None),
                 trace_requested=want_trace,
                 legacy_chat_models=legacy_chat_models,
             )
         except ChatRequestError as error:
             return JSONResponse(status_code=error.status_code, content={"error": error.payload()})
-        try:
-            bound = backend_admission_upper_bound(
-                validated.engine,
-                validated.generation_request,
+        finally:
+            _record_preplacement_phase(
+                http_request,
+                "chat",
+                "request_validation",
+                validation_started_ns,
             )
-        except ValueError as error:
-            return invalid_request(str(error))
-        except RuntimeError as error:
-            return upstream_error(error)
+        prepare_started_ns = time.perf_counter_ns()
         try:
             await prepare_backend_request(
                 validated.engine,
                 validated.generation_request,
+            )
+        except ValueError as error:
+            chat_error = ChatRequestError(
+                str(error),
+                code=getattr(error, "code", "invalid_request"),
+            )
+            return JSONResponse(
+                status_code=chat_error.status_code,
+                content={"error": chat_error.payload()},
             )
         except UpstreamClientError as error:
             chat_error = chat_error_from_upstream_client_error(error)
@@ -1878,7 +2201,33 @@ def create_app(
             )
         except RuntimeError as error:
             return upstream_error(error)
+        finally:
+            _record_preplacement_phase(
+                http_request,
+                "chat",
+                "backend_prepare",
+                prepare_started_ns,
+            )
+        admission_started_ns = time.perf_counter_ns()
+        try:
+            bound = await backend_admission_upper_bound_async(
+                validated.engine,
+                validated.generation_request,
+            )
+        except ValueError as error:
+            return invalid_request(str(error))
+        except RuntimeError as error:
+            return upstream_error(error)
+        admission_ns = max(0, time.perf_counter_ns() - admission_started_ns)
+        reserve_started_ns = time.perf_counter_ns()
         reservation_error = _reserve_tenant_work(http_request, bound)
+        admission_ns += max(0, time.perf_counter_ns() - reserve_started_ns)
+        if metrics is not None:
+            metrics.record_preplacement_phase(
+                "chat",
+                "admission",
+                admission_ns,
+            )
         if reservation_error is not None:
             return reservation_error
         if metrics is not None:
@@ -1936,9 +2285,7 @@ def create_app(
         payload = _chat_response_payload(response)
         if want_trace:
             assert trace_started_at is not None
-            payload["kairyu_trace"] = _direct_trace_lines(
-                executed.result.stage_metrics
-            )
+            payload["kairyu_trace"] = _direct_trace_lines(executed.result.stage_metrics)
             payload["kairyu_trace_v2"] = _direct_stage_trace(
                 response.id,
                 started_at=trace_started_at,
@@ -1949,6 +2296,8 @@ def create_app(
     @app.post("/v1/completions")
     async def completions(request: CompletionRequest, http_request: Request):
         http_request.state.model = request.model
+        _record_ingress_to_handler(http_request, "completions")
+        validation_started_ns = time.perf_counter_ns()
         is_loglikelihood = request.kairyu_continuation is not None
         extra = request.model_extra or {}
         for unsupported in ("echo", "suffix", "best_of"):
@@ -1985,8 +2334,7 @@ def create_app(
         if engine is None:
             if is_loglikelihood and request.model in auto_models:
                 return invalid_request(
-                    "kairyu_continuation is not supported by model "
-                    f"{request.model!r}"
+                    f"kairyu_continuation is not supported by model {request.model!r}"
                 )
             return model_not_found(request.model)
         if request.n > 1 and getattr(engine, "supports_n", True) is False:
@@ -1996,10 +2344,10 @@ def create_app(
         prompts: list[PromptInput]
         if is_loglikelihood:
             tokenize = getattr(engine, "tokenize_loglikelihood", None)
-            if not callable(tokenize):
+            tokenize_async = getattr(engine, "tokenize_loglikelihood_async", None)
+            if not callable(tokenize) and not callable(tokenize_async):
                 return invalid_request(
-                    "kairyu_continuation is not supported by model "
-                    f"{request.model!r}"
+                    f"kairyu_continuation is not supported by model {request.model!r}"
                 )
             assert type(request.prompt) is str
             assert request.kairyu_continuation is not None
@@ -2007,7 +2355,7 @@ def create_app(
                 (
                     loglikelihood_context_ids,
                     loglikelihood_continuation_ids,
-                ) = _loglikelihood_token_ids(
+                ) = await _loglikelihood_token_ids_async(
                     engine,
                     request.prompt,
                     request.kairyu_continuation,
@@ -2020,18 +2368,13 @@ def create_app(
                 )
             except Exception as error:
                 return upstream_error(error)
-            prompts = [
-                TokensPrompt(loglikelihood_context_ids, prompt=request.prompt)
-            ]
+            prompts = [TokensPrompt(loglikelihood_context_ids, prompt=request.prompt)]
         elif type(request.prompt) is str:
             prompts = [request.prompt]
         elif text_batch:
             prompts = list(request.prompt)
         elif token_batch:
-            prompts = [
-                TokensPrompt(tuple(token_ids))
-                for token_ids in request.prompt
-            ]
+            prompts = [TokensPrompt(tuple(token_ids)) for token_ids in request.prompt]
         else:
             prompts = [TokensPrompt(tuple(request.prompt))]
         try:
@@ -2052,11 +2395,7 @@ def create_app(
                     top_k=request.top_k,
                     min_p=request.min_p,
                     n=request.n,
-                    max_tokens=(
-                        request.max_tokens
-                        if request.max_tokens is not None
-                        else 16
-                    ),
+                    max_tokens=(request.max_tokens if request.max_tokens is not None else 16),
                     stop=request.stop,
                     stop_token_ids=request.stop_token_ids,
                     min_tokens=request.min_tokens,
@@ -2078,8 +2417,7 @@ def create_app(
             return invalid_request(str(error))
 
         base_request_id = (
-            getattr(http_request.state, "request_id", None)
-            or f"http-{uuid.uuid4().hex[:12]}"
+            getattr(http_request.state, "request_id", None) or f"http-{uuid.uuid4().hex[:12]}"
         )
 
         def _generation_request(
@@ -2094,16 +2432,13 @@ def create_app(
                 ),
                 prompt=prompt,
                 sampling_params=sampling,
-                placement_started_ns=getattr(
-                    http_request.state, "placement_started_ns", None
-                ),
+                placement_started_ns=getattr(http_request.state, "placement_started_ns", None),
                 priority=getattr(http_request.state, "priority", request.priority),
                 scheduling_class=_scheduling_class(http_request),
             )
 
         generation_requests = [
-            _generation_request(prompt, prompt_index)
-            for prompt_index, prompt in enumerate(prompts)
+            _generation_request(prompt, prompt_index) for prompt_index, prompt in enumerate(prompts)
         ]
         for generation_request in generation_requests:
             if is_loglikelihood:
@@ -2117,27 +2452,102 @@ def create_app(
                     except ValueError as error:
                         return invalid_request(str(error))
             else:
-                validation_error = _validate_generation_request(
-                    engine, generation_request
-                )
+                validation_error = _validate_generation_request(engine, generation_request)
                 if validation_error is not None:
                     return validation_error
+        _record_preplacement_phase(
+            http_request,
+            "completions",
+            "request_validation",
+            validation_started_ns,
+        )
+        prepare_started_ns = time.perf_counter_ns()
+        preparation_tasks = [
+            asyncio.create_task(prepare_backend_request(engine, generation_request))
+            for generation_request in generation_requests
+        ]
         try:
-            bounds = [
-                admission_upper_bound(generation_request)
-                for generation_request in generation_requests
-            ]
+            try:
+                preparation_results = await asyncio.gather(
+                    *preparation_tasks,
+                    return_exceptions=True,
+                )
+            except BaseException:
+                for task in preparation_tasks:
+                    task.cancel()
+                await asyncio.gather(*preparation_tasks, return_exceptions=True)
+                raise
+            for result in preparation_results:
+                if isinstance(result, BaseException):
+                    raise result
         except ValueError as error:
             return invalid_request(str(error))
+        except UpstreamClientError as error:
+            chat_error = chat_error_from_upstream_client_error(error)
+            return JSONResponse(
+                status_code=chat_error.status_code,
+                content={"error": chat_error.payload()},
+            )
+        except RuntimeError as error:
+            return upstream_error(error)
+        finally:
+            _record_preplacement_phase(
+                http_request,
+                "completions",
+                "backend_prepare",
+                prepare_started_ns,
+            )
+        admission_started_ns = time.perf_counter_ns()
+        bound_tasks = [
+            asyncio.create_task(
+                backend_admission_upper_bound_async(
+                    engine,
+                    generation_request,
+                )
+            )
+            for generation_request in generation_requests
+        ]
+        try:
+            try:
+                bound_results = await asyncio.gather(
+                    *bound_tasks,
+                    return_exceptions=True,
+                )
+            except BaseException:
+                for task in bound_tasks:
+                    task.cancel()
+                await asyncio.gather(*bound_tasks, return_exceptions=True)
+                raise
+            for result in bound_results:
+                if isinstance(result, BaseException):
+                    raise result
+            bounds = bound_results
+        except ValueError as error:
+            return invalid_request(str(error))
+        except UpstreamClientError as error:
+            chat_error = chat_error_from_upstream_client_error(error)
+            return JSONResponse(
+                status_code=chat_error.status_code,
+                content={"error": chat_error.payload()},
+            )
+        except RuntimeError as error:
+            return upstream_error(error)
+        admission_ns = max(0, time.perf_counter_ns() - admission_started_ns)
+        reserve_started_ns = time.perf_counter_ns()
         reservation_error = _reserve_tenant_work(
             http_request,
             AdmissionUpperBound(
                 tokens=sum(bound.tokens for bound in bounds),
-                refundable_on_exact_usage=all(
-                    bound.refundable_on_exact_usage for bound in bounds
-                ),
+                refundable_on_exact_usage=all(bound.refundable_on_exact_usage for bound in bounds),
             ),
         )
+        admission_ns += max(0, time.perf_counter_ns() - reserve_started_ns)
+        if metrics is not None:
+            metrics.record_preplacement_phase(
+                "completions",
+                "admission",
+                admission_ns,
+            )
         if reservation_error is not None:
             return reservation_error
         if metrics is not None:
@@ -2161,10 +2571,7 @@ def create_app(
             # run the prompt array concurrently (latency = max, not sum); order is
             # restored by prompt_index below so the response is unchanged (P-perf)
             _mark_tenant_dispatched(http_request)
-            tasks = [
-                asyncio.create_task(engine.generate(item))
-                for item in generation_requests
-            ]
+            tasks = [asyncio.create_task(engine.generate(item)) for item in generation_requests]
             try:
                 results = await asyncio.gather(*tasks)
             except BaseException:
@@ -2220,11 +2627,7 @@ def create_app(
             completions=(),
             usage_exact=all(result.usage is not None for result in results),
         )
-        response_type = (
-            LogLikelihoodCompletionResponse
-            if is_loglikelihood
-            else CompletionResponse
-        )
+        response_type = LogLikelihoodCompletionResponse if is_loglikelihood else CompletionResponse
         return response_type(
             id=f"cmpl-{uuid.uuid4().hex[:16]}",
             created=int(time.time()),

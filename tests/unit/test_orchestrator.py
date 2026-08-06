@@ -1,7 +1,11 @@
 import asyncio
+import copy
+import threading
+from dataclasses import replace
 
 import pytest
 
+from kairyu.engine.backend import GenerationRequest, UpstreamClientError
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
@@ -11,7 +15,9 @@ from kairyu.orchestration.orchestrator import (
     Orchestrator,
     PreviewNotSupportedError,
 )
+from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.request import OrchestrationRequest
+from kairyu.orchestration.router import RuleRouter
 from kairyu.sampling_params import SamplingParams
 
 SIMPLE = "What is 2?"
@@ -37,6 +43,75 @@ class _StartupBackend(MockBackend):
 
     async def startup(self) -> None:
         self.startup_count += 1
+
+
+class _PreparingBackend(MockBackend):
+    def __init__(
+        self,
+        name: str,
+        events: list[tuple[str, str]],
+        *,
+        prepare_failures: dict[str, BaseException] | None = None,
+        validation_error: str | None = None,
+    ) -> None:
+        super().__init__()
+        self.name = name
+        self.events = events
+        self.prepare_failures = dict(prepare_failures or {})
+        self.validation_error = validation_error
+        self.validated: list[GenerationRequest] = []
+        self.prepared: list[GenerationRequest] = []
+        self.generated: list[GenerationRequest] = []
+        self.streamed: list[GenerationRequest] = []
+
+    def validate_request(self, request: GenerationRequest) -> None:
+        self.validated.append(request)
+        if self.validation_error is not None:
+            raise ValueError(self.validation_error)
+        super().validate_request(request)
+
+    async def prepare_request(self, request: GenerationRequest) -> None:
+        self.events.append((self.name, request.request_id))
+        self.prepared.append(request)
+        failure = self.prepare_failures.get(
+            request.request_id,
+            next(
+                (
+                    candidate
+                    for pattern, candidate in self.prepare_failures.items()
+                    if pattern != "*"
+                    and pattern.endswith("*")
+                    and request.request_id.startswith(pattern[:-1])
+                ),
+                self.prepare_failures.get("*"),
+            ),
+        )
+        if failure is not None:
+            raise failure
+
+    async def generate(self, request: GenerationRequest):
+        self.generated.append(request)
+        return await super().generate(request)
+
+    async def stream(self, request: GenerationRequest):
+        self.streamed.append(request)
+        async for result in super().stream(request):
+            yield result
+
+
+class _CountingRouter:
+    def __init__(self) -> None:
+        self._delegate = RuleRouter()
+        self.preview_calls = 0
+        self.route_calls = 0
+
+    def preview(self, query: str, context: dict | None = None):
+        self.preview_calls += 1
+        return self._delegate.preview(query, context)
+
+    def route(self, query: str, context: dict | None = None):
+        self.route_calls += 1
+        return self._delegate.route(query, context)
 
 
 def _orchestrator(**kwargs) -> Orchestrator:
@@ -153,6 +228,571 @@ def test_auto_admission_bound_accounts_for_final_tool_and_response_schemas() -> 
     # Both final schemas are serialized into each of the three candidate
     # prefills, so their 8,192-byte growth must be charged three times.
     assert large - small >= 3 * 8_192
+
+
+async def test_async_prepare_binds_one_route_and_preserves_final_intent() -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = _PreparingBackend("tier2", events)
+    router = _CountingRouter()
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+        router=router,
+        shared_prefix="[shared] ",
+    )
+    tool = {
+        "type": "function",
+        "function": {"name": "lookup", "parameters": {}},
+    }
+    call = OrchestrationRequest(
+        prompt=SIMPLE,
+        sampling_params=SamplingParams(n=2, max_tokens=7),
+        tools=(tool,),
+        tool_choice="required",
+        tools_in_prompt=True,
+        parallel_tool_calls=False,
+    )
+
+    prepared_call = await orchestrator.prepare_request(call)
+
+    assert (router.preview_calls, router.route_calls) == (0, 1)
+    assert len(events) == 1
+    assert events[0][0] == "tier1"
+    assert events[0][1].startswith("direct-")
+    assert tier2.prepared == []
+    prepared = tier1.prepared[0]
+    assert prepared.prompt == f"[shared] {SIMPLE}"
+    assert prepared.sampling_params is call.sampling_params
+    assert prepared.tools == (tool,)
+    assert prepared.tool_choice == "required"
+    assert prepared.tools_in_prompt is True
+    assert prepared.parallel_tool_calls is False
+
+    result = await orchestrator.run(call, prepared=prepared_call)
+
+    assert result.completions
+    assert tier1.generated == [prepared]
+    assert (router.preview_calls, router.route_calls) == (0, 1)
+
+
+async def test_async_prepare_builds_request_sized_plan_off_event_loop(
+    monkeypatch,
+) -> None:
+    events: list[tuple[str, str]] = []
+    orchestrator = _orchestrator(
+        engines={
+            "tier1": _PreparingBackend("tier1", events),
+            "tier2": _PreparingBackend("tier2", events),
+        },
+    )
+    event_loop_thread = threading.get_ident()
+    plan_threads = []
+    plan_started = threading.Event()
+    release_plan = threading.Event()
+    original = orchestrator._build_preparation_plan
+
+    def gated_plan(*args):
+        plan_threads.append(threading.get_ident())
+        plan_started.set()
+        assert release_plan.wait(timeout=5)
+        return original(*args)
+
+    monkeypatch.setattr(orchestrator, "_build_preparation_plan", gated_plan)
+    preparation = asyncio.create_task(orchestrator.prepare_request(COMPLEX * 1000))
+    try:
+        assert await asyncio.wait_for(
+            asyncio.to_thread(plan_started.wait, 1),
+            timeout=2,
+        )
+        assert not preparation.done()
+        assert plan_threads != [event_loop_thread]
+    finally:
+        release_plan.set()
+    await preparation
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_prepared_handle_is_bound_to_its_owning_orchestrator(stream) -> None:
+    events: list[tuple[str, str]] = []
+    first_backend = _PreparingBackend("first", events)
+    second_backend = _PreparingBackend("second", events)
+    first = _orchestrator(
+        engines={"tier1": first_backend, "tier2": MockBackend()},
+    )
+    second = _orchestrator(
+        engines={"tier1": second_backend, "tier2": MockBackend()},
+    )
+    call = OrchestrationRequest(
+        prompt=SIMPLE,
+        sampling_params=SamplingParams(max_tokens=2),
+    )
+
+    prepared = await first.prepare_request(call)
+    exact_request = first_backend.prepared[0]
+    if stream:
+        foreign_stream = await second.run_chat(
+            call,
+            stream=True,
+            prepared=prepared,
+        )
+        assert [event async for event in foreign_stream][-1].kind == "result"
+        assert second_backend.streamed[0] is not exact_request
+    else:
+        await second.run(call, prepared=prepared)
+        assert second_backend.generated[0] is not exact_request
+    assert prepared.consumed is False
+
+    await first.run(call, prepared=prepared)
+    assert first_backend.generated == [exact_request]
+
+
+async def test_prepared_handle_copies_share_one_dispatch_capability() -> None:
+    events: list[tuple[str, str]] = []
+    backend = _PreparingBackend("tier1", events)
+    orchestrator = _orchestrator(
+        engines={"tier1": backend, "tier2": MockBackend()},
+    )
+    call = OrchestrationRequest(
+        prompt=SIMPLE,
+        sampling_params=SamplingParams(max_tokens=2),
+    )
+    prepared = await orchestrator.prepare_request(call)
+    exact_request = backend.prepared[0]
+    aliases = (
+        prepared,
+        copy.copy(prepared),
+        copy.deepcopy(prepared),
+        replace(prepared),
+    )
+
+    await asyncio.gather(
+        *(orchestrator.run(call, prepared=alias) for alias in aliases)
+    )
+
+    assert sum(request is exact_request for request in backend.generated) == 1
+    assert len({request.request_id for request in backend.generated}) == 4
+    assert prepared.consumed is True
+
+
+async def test_async_prepare_direct_stream_reuses_exact_request_and_unique_ids() -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": MockBackend()},
+    )
+    first = OrchestrationRequest(
+        prompt=SIMPLE,
+        sampling_params=SamplingParams(max_tokens=2),
+    )
+    second = OrchestrationRequest(
+        prompt=SIMPLE,
+        sampling_params=SamplingParams(max_tokens=2),
+    )
+
+    first_prepared, second_prepared = await asyncio.gather(
+        orchestrator.prepare_request(first),
+        orchestrator.prepare_request(second),
+    )
+    first_request, second_request = tier1.prepared
+
+    assert first_request.request_id.startswith("direct-")
+    assert second_request.request_id.startswith("direct-")
+    assert first_request.request_id != second_request.request_id
+
+    stream = await orchestrator.run_chat(
+        first,
+        stream=True,
+        prepared=first_prepared,
+    )
+    events_seen = [event async for event in stream]
+
+    assert events_seen[-1].kind == "result"
+    assert tier1.streamed == [first_request]
+    assert second_prepared.call is second
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_string_prepare_handle_reuses_bound_route_and_exact_request(stream) -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    router = _CountingRouter()
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": MockBackend()},
+        router=router,
+    )
+
+    prepared = await orchestrator.prepare_request(SIMPLE)
+    exact_request = tier1.prepared[0]
+    if stream:
+        result_stream = await orchestrator.run_chat(
+            SIMPLE,
+            stream=True,
+            prepared=prepared,
+        )
+        result_events = [event async for event in result_stream]
+        assert result_events[-1].kind == "result"
+        assert tier1.streamed == [exact_request]
+    else:
+        result = await orchestrator.run(SIMPLE, prepared=prepared)
+        assert result.completions
+        assert tier1.generated == [exact_request]
+    assert (router.preview_calls, router.route_calls) == (0, 1)
+
+
+async def test_async_prepare_binds_actual_route_instead_of_nonbinding_preview() -> None:
+    class PreviewTier1RouteTier2:
+        def preview(self, query, context=None):
+            return RuleRouter().preview(SIMPLE)
+
+        def route(self, query, context=None):
+            return RuleRouter().preview("x" * 600)
+
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = _PreparingBackend("tier2", events)
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+        router=PreviewTier1RouteTier2(),
+    )
+    call = OrchestrationRequest(
+        prompt=SIMPLE,
+        sampling_params=SamplingParams(max_tokens=2),
+    )
+
+    prepared = await orchestrator.prepare_request(call)
+    tier2_request = tier2.prepared[0]
+    await orchestrator.run(call, prepared=prepared)
+
+    assert tier1.prepared == []
+    assert tier1.generated == []
+    assert tier2.generated == [tier2_request]
+
+
+async def test_async_prepare_covers_every_multi_agent_final_and_internal_intent() -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = _PreparingBackend("tier2", events)
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+        sampling_params=SamplingParams(max_tokens=5),
+    )
+    call = OrchestrationRequest(
+        prompt=COMPLEX,
+        sampling_params=SamplingParams(n=2, max_tokens=20),
+    )
+
+    await orchestrator.prepare_request(call)
+
+    assert [name for name, _request_id in events] == [
+        "tier2",
+        "tier1",
+        "tier2",
+        "tier2",
+    ]
+    assert events[0][1].startswith("preflight-tier2-")
+    assert events[1][1].startswith("preflight-internal-tier1-")
+    assert events[2][1].startswith("preflight-internal-tier2-")
+    assert events[3][1].startswith("preflight-role-planner-")
+    assert len({request_id.rsplit("-", 1)[-1] for _, request_id in events}) == 1
+    final = tier2.prepared[0]
+    internal_tier1 = tier1.prepared[0]
+    internal_tier2 = tier2.prepared[1]
+    initial_planner = tier2.prepared[2]
+    assert final.sampling_params is call.sampling_params
+    assert final.sampling_params.n == 2
+    for internal in (internal_tier1, internal_tier2):
+        assert internal.prompt == COMPLEX
+        assert internal.sampling_params.n == 1
+        assert internal.sampling_params.max_tokens == 5
+        assert internal.tools == ()
+        assert internal.tool_choice is None
+    assert initial_planner.prompt == (
+        "[planner] Break the task into a short actionable plan.\n"
+        f"Task: {COMPLEX}"
+    )
+    assert initial_planner.sampling_params.n == 1
+    assert initial_planner.sampling_params.max_tokens == 5
+
+
+async def test_async_prepare_rejects_exact_initial_role_prompt_before_dispatch() -> None:
+    events: list[tuple[str, str]] = []
+
+    class PromptLimitBackend(_PreparingBackend):
+        async def prepare_request(self, request: GenerationRequest) -> None:
+            await super().prepare_request(request)
+            if len(request.prompt) > 32:
+                raise ValueError("rendered prompt too long")
+
+    class MultiAgentRoute:
+        def route(self, query, context=None):
+            return RuleRouter().route(COMPLEX)
+
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = PromptLimitBackend("tier2", events)
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+        router=MultiAgentRoute(),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^initial orchestration intent is unsupported: "
+            r"tier2: rendered prompt too long$"
+        ),
+    ):
+        await orchestrator.prepare_request("x")
+
+    assert [name for name, _request_id in events] == [
+        "tier2",
+        "tier1",
+        "tier2",
+        "tier2",
+    ]
+    assert tier2.prepared[-1].prompt == (
+        "[planner] Break the task into a short actionable plan.\nTask: x"
+    )
+    assert tier1.generated == []
+    assert tier2.generated == []
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_async_prepare_reuses_exact_initial_role_request(stream) -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = _PreparingBackend("tier2", events)
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+    )
+
+    prepared = await orchestrator.prepare_request(COMPLEX)
+    initial_planner = next(
+        request
+        for request in tier2.prepared
+        if request.request_id.startswith("preflight-role-planner-")
+    )
+
+    if stream:
+        result_stream = await orchestrator.run_chat(
+            COMPLEX,
+            stream=True,
+            prepared=prepared,
+        )
+        result_events = [event async for event in result_stream]
+        assert result_events[-1].kind == "result"
+    else:
+        result = await orchestrator.run(COMPLEX, prepared=prepared)
+        assert result.completions
+
+    assert tier2.generated[0] is initial_planner
+    assert initial_planner.cache_hint is not None
+    assert all(
+        request.cache_hint is None
+        or request.cache_hint.session_id == initial_planner.cache_hint.session_id
+        for request in tier1.generated
+        + tier1.streamed
+        + tier2.generated
+        + tier2.streamed
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_async_prepare_reuses_exact_moa_proposal_requests(stream) -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = _PreparingBackend("tier2", events)
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+        moa_samples=2,
+    )
+
+    prepared = await orchestrator.prepare_request(COMPLEX)
+    proposals = tuple(tier1.prepared)
+    assert len(proposals) == 2
+    assert [request.sampling_params.seed for request in proposals] == [0, 1]
+
+    if stream:
+        result_stream = await orchestrator.run_chat(
+            COMPLEX,
+            stream=True,
+            prepared=prepared,
+        )
+        assert [event async for event in result_stream][-1].kind == "result"
+    else:
+        result = await orchestrator.run(COMPLEX, prepared=prepared)
+        assert result.completions
+
+    assert tuple(tier1.generated) == proposals
+
+
+async def test_async_prepare_rejects_exact_moa_seed_before_dispatch() -> None:
+    events: list[tuple[str, str]] = []
+
+    class RejectSeedBackend(_PreparingBackend):
+        async def prepare_request(self, request: GenerationRequest) -> None:
+            await super().prepare_request(request)
+            if request.sampling_params.seed is not None:
+                raise ValueError("seed unsupported")
+
+    tier1 = RejectSeedBackend("tier1", events)
+    tier2 = _PreparingBackend("tier2", events)
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+        moa_samples=2,
+    )
+
+    with pytest.raises(ValueError, match="seed unsupported"):
+        await orchestrator.prepare_request(COMPLEX)
+
+    assert [request.sampling_params.seed for request in tier1.prepared] == [0, 1]
+    assert tier1.generated == []
+    assert tier2.generated == []
+
+
+async def test_async_prepare_aggregates_value_errors_in_stable_phase_key_order() -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend(
+        "tier1",
+        events,
+        prepare_failures={
+            "preflight-tier1-*": ValueError("final one"),
+            "preflight-internal-tier1-*": ValueError("internal one"),
+        },
+    )
+    tier2 = _PreparingBackend(
+        "tier2",
+        events,
+        prepare_failures={
+            "preflight-tier2-*": ValueError("final two"),
+            "preflight-internal-tier2-*": ValueError("internal two"),
+        },
+    )
+
+    class RouteOnly:
+        def route(self, query, context=None):
+            return RuleRouter().route(COMPLEX)
+
+    orchestrator = _orchestrator(
+        engines={"tier2": tier2, "tier1": tier1},
+        router=RouteOnly(),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^final orchestration intent is unsupported: "
+            r"tier2: final two; "
+            r"internal orchestration intent is unsupported: "
+            r"tier1: internal one; tier2: internal two$"
+        ),
+    ):
+        await orchestrator.prepare_request(SIMPLE)
+
+    assert [name for name, _request_id in events] == [
+        "tier2",
+        "tier1",
+        "tier2",
+        "tier2",
+    ]
+    assert events[0][1].startswith("preflight-tier2-")
+    assert events[1][1].startswith("preflight-internal-tier1-")
+    assert events[2][1].startswith("preflight-internal-tier2-")
+    assert events[3][1].startswith("preflight-role-planner-")
+
+
+async def test_concurrent_multi_agent_preflight_ids_are_unique() -> None:
+    class RejectDuplicateIds(_PreparingBackend):
+        def __init__(self, name, events):
+            super().__init__(name, events)
+            self.seen_ids: set[str] = set()
+
+        async def prepare_request(self, request: GenerationRequest) -> None:
+            if request.request_id in self.seen_ids:
+                raise RuntimeError(f"duplicate request ID: {request.request_id}")
+            self.seen_ids.add(request.request_id)
+            await super().prepare_request(request)
+
+    events: list[tuple[str, str]] = []
+    tier1 = RejectDuplicateIds("tier1", events)
+    tier2 = RejectDuplicateIds("tier2", events)
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+    )
+
+    await asyncio.gather(
+        orchestrator.prepare_request(COMPLEX),
+        orchestrator.prepare_request(COMPLEX),
+    )
+
+    request_ids = [request_id for _name, request_id in events]
+    assert len(request_ids) == 8
+    assert len(request_ids) == len(set(request_ids))
+
+
+async def test_async_prepare_keeps_sync_validation_error_and_runs_no_prepare() -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend(
+        "tier1",
+        events,
+        validation_error="semantic rejection",
+    )
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": MockBackend()},
+    )
+    expected = (
+        "final orchestration intent is unsupported: tier1: semantic rejection"
+    )
+
+    with pytest.raises(ValueError, match=f"^{expected}$"):
+        orchestrator.validate_request(SIMPLE)
+    with pytest.raises(ValueError, match=f"^{expected}$"):
+        await orchestrator.prepare_request(SIMPLE)
+
+    assert events == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("backend unavailable"),
+        UpstreamClientError("upstream rejected", status_code=409),
+    ],
+    ids=("runtime", "upstream-client"),
+)
+async def test_async_prepare_does_not_relabel_non_validation_failures(failure) -> None:
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend(
+        "tier1",
+        events,
+        prepare_failures={"*": failure},
+    )
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": MockBackend()},
+    )
+
+    with pytest.raises(type(failure)) as raised:
+        await orchestrator.prepare_request(SIMPLE)
+
+    assert raised.value is failure
+
+
+async def test_async_prepare_reaches_every_distinct_replica_contract() -> None:
+    events: list[tuple[str, str]] = []
+    first = _PreparingBackend("replica-a", events)
+    second = _PreparingBackend("replica-b", events)
+    pool = ReplicaPool({"a": first, "b": second})
+    orchestrator = _orchestrator(
+        engines={"tier1": pool, "tier2": MockBackend()},
+    )
+
+    await orchestrator.prepare_request(SIMPLE)
+
+    assert [name for name, _request_id in events] == [
+        "replica-a",
+        "replica-b",
+    ]
+    assert all(request_id.startswith("direct-") for _name, request_id in events)
+    assert first.prepared[0] is second.prepared[0]
 
 
 def _track_budget_releases(monkeypatch):

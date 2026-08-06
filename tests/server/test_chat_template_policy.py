@@ -15,7 +15,11 @@ from kairyu.entrypoints.server.chat_service import (
     render_prompt,
     validate_chat_input,
 )
-from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.entrypoints.server.protocol import (
+    ChatCompletionRequest,
+    ChatMessage,
+    ContentPart,
+)
 from kairyu.orchestration.orchestrator import Orchestrator
 
 
@@ -361,3 +365,222 @@ def test_multimodal_chat_bypasses_strict_local_text_template_policy():
     )
 
     assert isinstance(validated.prompt, MultimodalPrompt)
+
+
+def test_text_preparation_avoids_message_dump_and_visits_parts_once(monkeypatch):
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hel"},
+                        {"type": "text", "text": "lo"},
+                    ],
+                },
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"q":"tokyo"}',
+                            },
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+    raw_parts = request.messages[0].content
+    assert isinstance(raw_parts, list)
+    expected_part_ids = [id(part) for part in raw_parts]
+    dumped_part_ids: list[int] = []
+    original_part_dump = ContentPart.model_dump
+
+    def fail_message_dump(*_args, **_kwargs):
+        raise AssertionError("ChatMessage.model_dump must not be used")
+
+    def record_part_dump(self, *args, **kwargs):
+        dumped_part_ids.append(id(self))
+        return original_part_dump(self, *args, **kwargs)
+
+    monkeypatch.setattr(ChatMessage, "model_dump", fail_message_dump)
+    monkeypatch.setattr(ContentPart, "model_dump", record_part_dump)
+    template = ChatTemplate(
+        "{{ messages[0].content }}|"
+        "{% if messages[1].content is defined %}CONTENT{% else %}NO_CONTENT{% endif %}|"
+        "{{ messages[1].tool_calls[0].function.arguments | tojson }}"
+    )
+
+    validated = validate_chat_input(request, {"m": template})
+
+    assert validated.prompt == 'hello|NO_CONTENT|{"q": "tokyo"}'
+    assert isinstance(validated.prompt, TemplatedPrompt)
+    assert dumped_part_ids == expected_part_ids
+
+
+def test_multimodal_preparation_visits_parts_once_and_keeps_global_item_indices(
+    monkeypatch,
+):
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "vlm",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,first",
+                                "detail": "low",
+                            },
+                        },
+                        {"type": "text", "text": " then "},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "next "},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,second",
+                                "detail": "high",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+    )
+    raw_parts = [
+        part
+        for message in request.messages
+        for part in (message.content if isinstance(message.content, list) else [])
+    ]
+    expected_part_ids = [id(part) for part in raw_parts]
+    dumped_part_ids: list[int] = []
+    original_part_dump = ContentPart.model_dump
+
+    def fail_message_dump(*_args, **_kwargs):
+        raise AssertionError("ChatMessage.model_dump must not be used")
+
+    def record_part_dump(self, *args, **kwargs):
+        dumped_part_ids.append(id(self))
+        return original_part_dump(self, *args, **kwargs)
+
+    monkeypatch.setattr(ChatMessage, "model_dump", fail_message_dump)
+    monkeypatch.setattr(ContentPart, "model_dump", record_part_dump)
+
+    validated = validate_chat_input(request, None, allow_multimodal=True)
+
+    prompt = validated.prompt
+    assert isinstance(prompt, MultimodalPrompt)
+    assert [item.data for item in prompt.items] == [
+        "data:image/png;base64,first",
+        "data:image/png;base64,second",
+    ]
+    assert [
+        (part.type, part.text, part.item_index, part.detail)
+        for message in prompt.messages
+        for part in message.content
+    ] == [
+        ("item", None, 0, "low"),
+        ("text", " then ", None, None),
+        ("text", "next ", None, None),
+        ("item", None, 1, "high"),
+    ]
+    assert prompt.base.prompt == "user: <image:0> then \nuser: next <image:1>"
+    assert dumped_part_ids == expected_part_ids
+
+
+@pytest.mark.parametrize(
+    ("system_content", "expected"),
+    [
+        (
+            "Keep the original instruction.",
+            "Keep the original instruction.\n\n"
+            "Call at most one function in this response.",
+        ),
+        (
+            [{"type": "text", "text": "Keep the original instruction."}],
+            "Keep the original instruction."
+            "Call at most one function in this response.",
+        ),
+        (None, "Call at most one function in this response."),
+    ],
+)
+def test_single_tool_constraint_preserves_original_content_shape(
+    system_content,
+    expected,
+):
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "m",
+            "messages": [{"role": "system", "content": system_content}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "lookup", "parameters": {}},
+                }
+            ],
+            "parallel_tool_calls": False,
+        }
+    )
+
+    prompt = render_prompt(
+        request,
+        {"m": ChatTemplate("{{ messages[0].content }}")},
+    )
+
+    assert prompt == expected
+
+
+@pytest.mark.parametrize(
+    ("template_kwargs", "templates", "expected"),
+    [
+        (
+            {"enable_thinking": True},
+            {"vlm": ChatTemplate("ok")},
+            "upstream-owned multimodal",
+        ),
+        (None, {"vlm": ChatTemplate("ok")}, "cannot combine"),
+        (None, None, "tool transcript fields"),
+    ],
+)
+def test_multimodal_errors_keep_template_then_message_order(
+    template_kwargs,
+    templates,
+    expected,
+):
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "vlm",
+            "messages": [
+                {"role": "assistant", "content": [], "tool_calls": []},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,image"},
+                        }
+                    ],
+                },
+            ],
+            "chat_template_kwargs": template_kwargs,
+        }
+    )
+
+    with pytest.raises(ChatRequestError, match=expected):
+        validate_chat_input(
+            request,
+            templates,
+            allow_multimodal=True,
+        )

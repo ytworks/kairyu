@@ -33,7 +33,7 @@ from kairyu.batch.store import (
 from kairyu.engine.backend import (
     EngineBackend,
     UpstreamClientError,
-    backend_admission_upper_bound,
+    backend_admission_upper_bound_async,
     prepare_backend_request,
 )
 from kairyu.entrypoints.chat_template import ChatTemplate
@@ -43,7 +43,7 @@ from kairyu.entrypoints.server.chat_service import (
     chat_error_from_upstream_client_error,
     execute_chat,
     validate_chat_policy,
-    validate_chat_request,
+    validate_chat_request_async,
 )
 from kairyu.entrypoints.server.errors import (
     invalid_request_payload,
@@ -292,15 +292,29 @@ class BatchWorker:
         quota_accounted = False
         metric_admitted = False
         try:
-            validated = validate_chat_request(
-                request,
-                self._engines,
-                self._chat_templates,
-                request_id=f"batch-{uuid.uuid4().hex[:12]}",
-                priority=self._tenant_config.limits_for(tenant).batch_priority,
-                scheduling_class="batch",
-                legacy_chat_models=self._legacy_chat_models,
+            record_preplacement = getattr(
+                self._metrics,
+                "record_preplacement_phase",
+                None,
             )
+            validation_started_ns = time.perf_counter_ns()
+            try:
+                validated = await validate_chat_request_async(
+                    request,
+                    self._engines,
+                    self._chat_templates,
+                    request_id=f"batch-{uuid.uuid4().hex[:12]}",
+                    priority=self._tenant_config.limits_for(tenant).batch_priority,
+                    scheduling_class="batch",
+                    legacy_chat_models=self._legacy_chat_models,
+                )
+            finally:
+                if callable(record_preplacement):
+                    record_preplacement(
+                        "batch",
+                        "request_validation",
+                        max(0, time.perf_counter_ns() - validation_started_ns),
+                    )
             admission = None
             acquire = getattr(self._tenant_limiter, "acquire", None)
             if callable(acquire):
@@ -334,8 +348,32 @@ class BatchWorker:
                             "code": "tenant_rate_limited",
                         },
                     )
+                prepare_started_ns = time.perf_counter_ns()
                 try:
-                    bound = backend_admission_upper_bound(
+                    await prepare_backend_request(
+                        validated.engine,
+                        validated.generation_request,
+                    )
+                except UpstreamClientError as error:
+                    raise chat_error_from_upstream_client_error(error) from error
+                except ValueError as error:
+                    raise ChatRequestError(
+                        str(error),
+                        code=getattr(error, "code", "invalid_request"),
+                    ) from error
+                finally:
+                    if callable(record_preplacement):
+                        record_preplacement(
+                            "batch",
+                            "backend_prepare",
+                            max(
+                                0,
+                                time.perf_counter_ns() - prepare_started_ns,
+                            ),
+                        )
+                admission_started_ns = time.perf_counter_ns()
+                try:
+                    bound = await backend_admission_upper_bound_async(
                         validated.engine,
                         validated.generation_request,
                     )
@@ -344,13 +382,11 @@ class BatchWorker:
                         str(error),
                         code=getattr(error, "code", "invalid_request"),
                     ) from error
-                try:
-                    await prepare_backend_request(
-                        validated.engine,
-                        validated.generation_request,
-                    )
-                except UpstreamClientError as error:
-                    raise chat_error_from_upstream_client_error(error) from error
+                admission_ns = max(
+                    0,
+                    time.perf_counter_ns() - admission_started_ns,
+                )
+                reserve_started_ns = time.perf_counter_ns()
                 reserve = (
                     getattr(admission, "reserve_tokens", None)
                     if admission is not None
@@ -391,6 +427,16 @@ class BatchWorker:
                         reason=admission.reason,
                     )
                     metric_admitted = True
+                admission_ns += max(
+                    0,
+                    time.perf_counter_ns() - reserve_started_ns,
+                )
+                if callable(record_preplacement):
+                    record_preplacement(
+                        "batch",
+                        "admission",
+                        admission_ns,
+                    )
                 if self._metrics is not None:
                     self._metrics.record_priority(
                         validated.generation_request.scheduling_class,
