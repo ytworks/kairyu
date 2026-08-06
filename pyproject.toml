@@ -85,6 +85,7 @@ bench = [
     "h5py>=3.11",  # SciCode golden data (test_data.h5)
     "tiktoken>=0.7",  # official o200k_base bins for the MRCRv2 slice
     "tqdm>=4.66",  # interactive progress bars; absence degrades to log lines
+    "jsonschema==4.26.0",  # pinned Draft 2020-12 structured-output scoring semantics
 ]
 # Official agentic harnesses (SWE-Bench Pro, Terminal-Bench 2.1); need docker.
 # Official tau-three v1.x retains the tau2 package/CLI name and is not on PyPI;
@@ -117,6 +118,7 @@ dev = [
     "langdetect==1.0.9",
     "nltk==3.9.2",
     "pillow>=10",
+    "jsonschema==4.26.0",
 ]
 
 [project.scripts]

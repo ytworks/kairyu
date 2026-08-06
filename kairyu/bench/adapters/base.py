@@ -38,6 +38,7 @@ from kairyu.bench.sampling import (
 )
 from kairyu.bench.targets import normalize_base_url, target_api_key
 from kairyu.bench.types import (
+    JSON_SAFE_INTEGER_MAX,
     BenchItem,
     BenchTarget,
     ChatRequestSpec,
@@ -462,6 +463,214 @@ def excerpt(text: str | None) -> str | None:
     return text[:_EXCERPT_CHARS]
 
 
+def chat_request_body(
+    target: BenchTarget,
+    request: ChatRequestSpec,
+    *,
+    sampling_seed: int | None = None,
+    response_format: dict | None = None,
+) -> dict:
+    """Build the shared chat body while preserving the legacy key order."""
+
+    body = {
+        "model": target.model,
+        "messages": list(request.messages),
+    }
+    if target.sampling_mode == "adapter":
+        body["temperature"] = (
+            request.temperature if target.temperature is None else target.temperature
+        )
+    body["stream"] = False
+    if request.max_tokens is not None:
+        body["max_tokens"] = request.max_tokens
+    body.update(target.wire_overrides())
+    if sampling_seed is not None:
+        body["seed"] = sampling_seed
+    if response_format is not None:
+        body["response_format"] = response_format
+    return body
+
+
+@dataclass(frozen=True)
+class ChatCompletionEvidence:
+    """Strict standard fields retained by evidence-bearing chat adapters."""
+
+    content: str | None
+    refusal: str | None
+    message_auxiliary: str | None
+    finish_reason: str
+    usage: tuple[int, int, int] | None
+
+
+def _invalid_chat_response(message: str) -> RequestFailed:
+    return RequestFailed(200, f"invalid chat completion response: {message}")
+
+
+def _strict_chat_response(response: httpx.Response) -> ChatCompletionEvidence:
+    raw = response.content
+    if len(raw) > 1_048_576:
+        raise _invalid_chat_response("HTTP body exceeds 1048576 bytes")
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite constant {value!r}")
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict:
+        result: dict = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate object key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        text = raw.decode("utf-8", errors="strict")
+        data = json.loads(
+            text,
+            parse_constant=reject_constant,
+            object_pairs_hook=unique_object,
+        )
+    except (RecursionError, UnicodeError, ValueError) as error:
+        raise _invalid_chat_response(f"strict JSON parse failed: {error}") from error
+    stack = [(data, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if depth > 256:
+            raise _invalid_chat_response("JSON nesting exceeds 256 levels")
+        if isinstance(value, dict):
+            stack.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list):
+            stack.extend((child, depth + 1) for child in value)
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise _invalid_chat_response("JSON contains a non-finite number")
+    if not isinstance(data, dict):
+        raise _invalid_chat_response("top-level value is not an object")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1:
+        raise _invalid_chat_response("choices must contain exactly one item")
+    choice = choices[0]
+    if not isinstance(choice, dict) or type(choice.get("index")) is not int:
+        raise _invalid_chat_response("choice must carry integer index 0")
+    if choice["index"] != 0:
+        raise _invalid_chat_response("choice index must be 0")
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise _invalid_chat_response("choice message must be an object")
+    content_value = message.get("content")
+    refusal_value = message.get("refusal")
+    if content_value is not None and not isinstance(content_value, str):
+        raise _invalid_chat_response("choice message content must be a string or null")
+    if refusal_value is not None and (
+        not isinstance(refusal_value, str) or not refusal_value
+    ):
+        raise _invalid_chat_response("choice message refusal must be null or non-empty text")
+    auxiliary_value: dict[str, object] = {}
+    if message.get("tool_calls") is not None:
+        if not isinstance(message["tool_calls"], list):
+            raise _invalid_chat_response("choice message tool_calls must be a list")
+        if message["tool_calls"]:
+            auxiliary_value["tool_calls"] = message["tool_calls"]
+    if message.get("function_call") is not None:
+        if not isinstance(message["function_call"], dict) or not message["function_call"]:
+            raise _invalid_chat_response(
+                "choice message function_call must be a non-empty object"
+            )
+        auxiliary_value["function_call"] = message["function_call"]
+    if refusal_value is not None and (
+        content_value is not None or auxiliary_value
+    ):
+        raise _invalid_chat_response(
+            "choice refusal cannot coexist with content or call payloads"
+        )
+    finish_reason = choice.get("finish_reason")
+    if not isinstance(finish_reason, str) or not finish_reason:
+        raise _invalid_chat_response("choice finish_reason must be a non-empty string")
+    content = content_value
+    refusal = refusal_value
+    message_auxiliary = (
+        json.dumps(
+            auxiliary_value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        if auxiliary_value
+        else None
+    )
+    if content is not None and len(content) > 262_144:
+        raise _invalid_chat_response("choice content exceeds 262144 characters")
+    if refusal is not None and len(refusal) > 262_144:
+        raise _invalid_chat_response("choice refusal exceeds 262144 characters")
+    if message_auxiliary is not None and len(message_auxiliary) > 262_144:
+        raise _invalid_chat_response("choice call payload exceeds 262144 characters")
+
+    usage_value = data.get("usage")
+    usage: tuple[int, int, int] | None = None
+    if usage_value is not None:
+        if not isinstance(usage_value, dict):
+            raise _invalid_chat_response("usage must be an object or null")
+        names = ("prompt_tokens", "completion_tokens", "total_tokens")
+        counts = tuple(usage_value.get(name) for name in names)
+        if any(
+            type(value) is not int or not 0 <= value <= JSON_SAFE_INTEGER_MAX
+            for value in counts
+        ):
+            raise _invalid_chat_response(
+                "usage token counts must be JSON-safe non-negative integers"
+            )
+        prompt_tokens, completion_tokens, total_tokens = counts
+        if total_tokens != prompt_tokens + completion_tokens:
+            raise _invalid_chat_response("usage total does not equal prompt plus completion")
+        usage = (prompt_tokens, completion_tokens, total_tokens)
+    return ChatCompletionEvidence(
+        content=content,
+        refusal=refusal,
+        message_auxiliary=message_auxiliary,
+        finish_reason=finish_reason,
+        usage=usage,
+    )
+
+
+async def call_chat_evidence(
+    client: httpx.AsyncClient,
+    target: BenchTarget,
+    request: ChatRequestSpec,
+    *,
+    response_format: dict | None,
+    retries: int,
+    timeout_s: float,
+    api_key: str | None = None,
+    sampling_seed: int | None = None,
+) -> ChatCompletionEvidence:
+    """Call Chat Completions and validate the evidence-bearing 200 envelope."""
+
+    url = f"{normalize_base_url(target.base_url)}/chat/completions"
+    body = chat_request_body(
+        target,
+        request,
+        sampling_seed=sampling_seed,
+        response_format=response_format,
+    )
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    attempt = 0
+    while True:
+        try:
+            response = await client.post(url, json=body, headers=headers, timeout=timeout_s)
+        except httpx.HTTPError as error:
+            if attempt >= retries:
+                raise RequestFailed(0, f"transport error: {type(error).__name__}") from error
+            await asyncio.sleep(0.5 * 2**attempt)
+            attempt += 1
+            continue
+        if response.status_code == 200:
+            return _strict_chat_response(response)
+        if response.status_code in _RETRYABLE_STATUS and attempt < retries:
+            await asyncio.sleep(0.5 * 2**attempt)
+            attempt += 1
+            continue
+        raise RequestFailed(response.status_code, response.text)
+
+
 async def call_chat(
     client: httpx.AsyncClient,
     target: BenchTarget,
@@ -474,24 +683,7 @@ async def call_chat(
 ) -> str:
     """Non-streaming POST /v1/chat/completions with backoff on 429/5xx/timeouts."""
     url = f"{normalize_base_url(target.base_url)}/chat/completions"
-    body = {
-        "model": target.model,
-        "messages": list(request.messages),
-    }
-    if target.sampling_mode == "adapter":
-        body["temperature"] = (
-            request.temperature if target.temperature is None else target.temperature
-        )
-    # Preserve the legacy default body order.  Besides making byte-level
-    # fixtures stable, this keeps pre-#371 request captures directly diffable.
-    body["stream"] = False
-    if request.max_tokens is not None:
-        body["max_tokens"] = request.max_tokens
-    # Endpoint-level sampling policy (reasoning effort, top_p, seed, vendor
-    # knobs) applies to every slot; reserved keys are rejected at config load.
-    body.update(target.wire_overrides())
-    if sampling_seed is not None:
-        body["seed"] = sampling_seed
+    body = chat_request_body(target, request, sampling_seed=sampling_seed)
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     attempt = 0

@@ -1005,7 +1005,8 @@ returns `invoice_ledger_invalid` instead of a partial invoice.
 `kairyu bench` runs answer-quality suites against any deployed gateway — single
 models and orchestration tiers become scoreboard columns. The default is the
 11-benchmark Fugu-release suite; `--suite core` selects the deterministic
-GSM8K/MMLU/IFEval regression suite:
+GSM8K/MMLU/IFEval regression suite; and `--suite structured` selects the fixed
+five-case JSON-Schema conformance corpus:
 
 ```bash
 uv run kairyu serve examples/deploy_multi_orchestrator.yaml &
@@ -1013,7 +1014,17 @@ uv run kairyu bench run --base-url http://localhost:8000/v1 \
     --model m1 --model kairyu-auto --model kairyu-auto-max
 uv run kairyu bench run --suite core --smoke \
     --base-url http://localhost:8000/v1 --model m1
+uv run kairyu bench run --config examples/bench_structured.yaml
 ```
+
+Structured conformance pairs the same prompt and seed with and without
+`response_format` across nested, recursive, enum, pattern, and union schemas.
+It separately reports strict JSON validity, Draft 2020-12 conformance, exact
+task accuracy, and malformed output. Acceptance/schema/task rates use all
+scheduled observations; JSON-valid/malformed rates use accepted HTTP 200
+completions. Endpoint token counts include explicit usage coverage, latency is
+diagnostic, and no currency cost is inferred. HTTP 200 safety refusals remain
+accepted non-JSON/task-failure evidence rather than execution failures.
 
 The core MMLU row ranks the exact teacher-forced continuations `" A"` through
 `" D"` by raw token log-likelihood through Kairyu's native completions
@@ -1027,9 +1038,12 @@ Datasets download to `~/.cache/kairyu/benchmarks` (never committed); unmet preco
 (no docker, gated dataset, no judge) become annotated `skipped` cells, so the run always
 completes. Subcommands: `bench run`, `bench download`, `bench report <run>`, `bench list`,
 and `bench entrypoints`. Full guide: [`docs/benchmarks.md`](docs/benchmarks.md).
+The structured corpus is installed package data verified by its exact content
+SHA-256, rather than a remotely downloaded dataset identified by an HF Git pin.
 
 The wheel includes the reusable `kairyu.bench` library, public CLI, entrypoint
-manifest, 11 benchmark fixtures, and the judge-calibration fixture. Top-level
+manifest, 11 synthetic benchmark stand-ins, the structured conformance corpus,
+and the judge-calibration corpus (13 JSONL resources total). Top-level
 `bench/*.py` developer/formal wrappers, `bench/results/`, and `tests/` remain
 checkout-only; their stable inventory and compatibility policy are in
 [`bench/README.md`](bench/README.md).

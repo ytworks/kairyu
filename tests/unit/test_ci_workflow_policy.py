@@ -183,7 +183,7 @@ def test_ci_jobs_are_bounded_and_uv_uses_the_committed_lockfile() -> None:
         workflow["jobs"]["test"],
         "Verify required test dependencies",
     )["run"]
-    for module in ("torch", "transformers", "xgrammar", "zmq", "yaml"):
+    for module in ("jsonschema", "torch", "transformers", "xgrammar", "zmq", "yaml"):
         assert f"--require-module {module}" in dependency_check
     test_command = _named_step(
         workflow["jobs"]["test"],

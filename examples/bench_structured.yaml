@@ -1,0 +1,28 @@
+# Fixed five-case JSON-Schema conformance corpus. Each source item sends a
+# matched pair: the same prompt, sampling policy, and seed, with response_format
+# applied only to the constrained arm. Install the scorer dependency first:
+#
+#   uv sync --extra bench
+#   kairyu bench run --config examples/bench_structured.yaml
+suite: structured
+
+targets:
+  - name: local-model
+    base_url: http://localhost:8000/v1
+    model: m1
+    # Optional stochastic sweeps must remain paired by seed. For example:
+    # temperature: 0.6
+    # seed: 100
+    # If attempts is set to 4 below, both arms use seeds 100..103 for every case.
+    # extra_body_json is intentionally unsupported by this suite because an
+    # unknown vendor field could silently constrain the control arm.
+
+# The root seed controls deterministic source-item selection for --limit; it
+# does not replace the target request seed above. A full one-attempt run makes
+# ten endpoint calls: five corpus cases x two arms.
+seed: 0
+attempts: 1
+concurrency: 4
+results_dir: bench/results/structured
+
+# cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE

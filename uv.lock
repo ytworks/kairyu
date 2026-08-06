@@ -1675,6 +1675,7 @@ bench = [
     { name = "h5py" },
     { name = "huggingface-hub" },
     { name = "immutabledict" },
+    { name = "jsonschema" },
     { name = "langdetect" },
     { name = "nltk" },
     { name = "pillow" },
@@ -1724,6 +1725,7 @@ vision = [
 dev = [
     { name = "datasets" },
     { name = "immutabledict" },
+    { name = "jsonschema" },
     { name = "langdetect" },
     { name = "msgpack" },
     { name = "nltk" },
@@ -1758,6 +1760,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'bench'", specifier = ">=0.26" },
     { name = "immutabledict", marker = "extra == 'bench'", specifier = ">=4.2" },
     { name = "jinja2", specifier = ">=3.1" },
+    { name = "jsonschema", marker = "extra == 'bench'", specifier = "==4.26.0" },
     { name = "langdetect", marker = "extra == 'bench'", specifier = "==1.0.9" },
     { name = "mini-swe-agent", marker = "extra == 'bench-agentic'", specifier = ">=2" },
     { name = "msgpack", marker = "extra == 'fleet'", specifier = ">=1.0" },
@@ -1793,6 +1796,7 @@ provides-extras = ["hf", "engine", "embeddings", "vision", "otel", "gpu", "flash
 dev = [
     { name = "datasets", specifier = ">=3.2" },
     { name = "immutabledict", specifier = ">=4.2" },
+    { name = "jsonschema", specifier = "==4.26.0" },
     { name = "langdetect", specifier = "==1.0.9" },
     { name = "msgpack", specifier = ">=1.0" },
     { name = "nltk", specifier = "==3.9.2" },

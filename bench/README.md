@@ -12,7 +12,7 @@ preserving the affected command and evidence paths.
 |---|---|---|
 | Reusable config, target types, credential resolution, statistics, atomic reporting, adapters, and runners | `kairyu/bench/` | Installed in the Kairyu wheel; may be imported by both the public CLI and checkout-only wrappers |
 | Public benchmark CLI | `kairyu bench` | Installed console surface: `run`, `download`, `report`, `compare-runs`, `compare`, `quant-sweep`, `calibrate-judge`, `list`, and `entrypoints` |
-| Offline benchmark/calibration fixtures | `kairyu/bench/fixtures/` | Installed package data; all 12 JSONL files must be readable through `importlib.resources` |
+| Offline benchmark/calibration fixtures | `kairyu/bench/fixtures/` | Installed package data: 11 synthetic stand-ins, one fixed structured-output corpus, and one judge-calibration corpus; all 13 JSONL files must be readable through `importlib.resources` |
 | Entrypoint inventory | `kairyu/bench/entrypoints.toml` | Installed, machine-readable source of truth for every supported top-level wrapper |
 | Gate, comparison, operator, and microbenchmark executables | `bench/*.py` | Repository-only; the inventory declares a path form and, where supported, an optional module form; B7 and A12 evidence are path-only |
 | Measurement and decision artifacts | `bench/results/` | Repository-only and never shipped in a wheel; routine output is ignored, while explicitly reviewed formal evidence may be retained by Git |
@@ -20,9 +20,11 @@ preserving the affected command and evidence paths.
 
 The default Fugu result location remains `bench/results/fugu/` for command
 compatibility; Core defaults to `bench/results/core/`, and the fixed seven-arm
-task-accuracy suite defaults to `bench/results/quantization/`. For an installed
-CLI used outside this repository, these are paths relative to the caller's
-working directory; they do not mean the top-level `bench/` tree is installed.
+task-accuracy suite defaults to `bench/results/quantization/`. The dedicated
+structured-output suite defaults to `bench/results/structured/`. For an
+installed CLI used outside this repository, these are paths relative to the
+caller's working directory; they do not mean the top-level `bench/` tree is
+installed.
 
 `kairyu bench quant-sweep` is package-owned composition, not another top-level
 wrapper. It reloads a complete indexed `quantization` run and reuses the public
@@ -31,6 +33,17 @@ NVFP4, and experimental FP8-KV arms. The dedicated aggregate JSON/Markdown
 artifacts are eligible for Git retention; routine raw pair directories remain
 ignored. See `docs/design/issue-372-quantization-sweep.md` for the identity,
 support, evidence, and exit-status boundaries.
+
+`kairyu bench run --suite structured` is likewise wholly package-owned. It
+loads the fixed nested/recursive/enum/pattern/union corpus, sends paired
+constrained and unconstrained chat requests that differ only by
+`response_format`, and reports strict JSON validity, Draft 2020-12 conformance,
+exact-task accuracy, malformed-JSON rate, endpoint token-usage coverage, and
+diagnostic latency. Rate denominators remain explicit; paired token deltas use
+only observations with usage from both arms, and no currency cost is inferred.
+HTTP 200 refusals and other valid non-text completions are retained as accepted
+non-JSON/task-failure evidence instead of malformed API envelopes.
+See `docs/benchmarks.md` and `examples/bench_structured.yaml`.
 
 Installed `kairyu` code must not import the repository-only `bench` namespace.
 If two wrappers need the same config, type, statistics, result writer, or
@@ -863,9 +876,10 @@ or GPU result. The complete contract is in
 
 ## Fixtures, results, and wheel verification
 
-The 11 installed benchmark fixtures are synthetic plumbing inputs, never
-substitutes for publishable benchmark measurements. The twelfth JSONL is the
-separately licensed published-gold judge calibration set:
+The 11 installed benchmark stand-ins are synthetic plumbing inputs, never
+substitutes for publishable benchmark measurements. The package also contains
+the fixed five-row structured-output conformance corpus and the separately
+licensed published-gold judge-calibration corpus, for 13 JSONL resources total:
 
 ```text
 charxiv-reasoning.jsonl
@@ -880,7 +894,15 @@ long-context-reasoning.jsonl
 mmlu.jsonl
 mrcr-v2.jsonl
 scicode.jsonl
+structured-output.jsonl
 ```
+
+The structured corpus is score-bearing package data rather than an offline
+stand-in. Its exact bytes are checked against its package SHA-256 before every
+load. That content digest is not an HF Git pin: downloaded benchmark datasets
+use immutable repository commit revisions to identify their upstream snapshot,
+while the package digest identifies the exact JSONL bytes installed in the
+wheel.
 
 Routine measurements go under `bench/results/` and remain ignored. Retain an
 artifact only when a goal or design decision explicitly requires reviewable
@@ -889,7 +911,7 @@ summary number.
 
 The packaging gate builds a real wheel, inspects its contents, and imports it
 from an isolated temporary directory. It proves that the console dispatch,
-entrypoint manifest, all 12 fixtures, the LLMBar license, and the vendored
+entrypoint manifest, all 13 fixtures, the LLMBar license, and the vendored
 IFEval `LICENSE`/`NOTICE` are present, while the top-level `bench/`,
 `bench/results/`, and `tests/` trees are absent:
 

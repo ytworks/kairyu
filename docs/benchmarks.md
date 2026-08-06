@@ -6,9 +6,11 @@ footnoted scoreboard. The default `fugu` suite runs every benchmark from
 Sakana's Fugu release table
 ([sakana.ai/fugu-release](https://sakana.ai/fugu-release/)) against a deployed
 gateway. The `core` suite provides judge-free, Docker-free GSM8K, MMLU, and
-IFEval regression checks. This implements goal G6 gate P-C1 ("one command →
-dated scoreboard") and the roadmap §6 evidence rules (per-item results,
-methodology, config committed next to every number).
+IFEval regression checks. The `structured` suite pairs enforced JSON-Schema
+generation with an otherwise identical unconstrained control over a fixed
+five-category corpus. This implements goal G6 gate P-C1 ("one command → dated
+scoreboard") and the roadmap §6 evidence rules (per-item results, methodology,
+config committed next to every number).
 
 The perf and formal-gate harnesses in the top-level `bench/` directory are a
 separate, checkout-only surface; this installed suite measures answer quality.
@@ -19,8 +21,9 @@ The complete ownership policy and wrapper inventory live in
 
 `kairyu/bench/` is the single owner of reusable benchmark config, target types,
 credential resolution, statistics, atomic reporting, adapters, the public
-`kairyu bench` CLI, 11 synthetic benchmark fixtures, and the published-gold
-judge calibration fixture. All of those ship in the wheel.
+`kairyu bench` CLI, 11 synthetic benchmark stand-ins, the fixed structured
+conformance corpus, and the published-gold judge calibration corpus. All 13
+JSONL resources ship in the wheel.
 `kairyu/bench/entrypoints.toml` is also packaged and records every supported
 repository-only benchmark executable.
 
@@ -47,7 +50,7 @@ After the declared development dependencies are synced, the first verifier
 exercises all 66 registered wrappers through their 130 declared `--help` forms
 without executing workloads or contacting external runtimes.
 The last command builds and imports a real wheel from an isolated temporary
-directory. It verifies the public CLI dispatch, packaged manifest and all 12
+directory. It verifies the public CLI dispatch, packaged manifest and all 13
 JSONL fixtures, and rejects accidental inclusion of top-level benchmark
 scripts, results, or tests. Gate-specific code stays in its stable wrapper;
 semantics shared by the installed CLI and gate scripts belong in
@@ -124,6 +127,11 @@ kairyu bench run --suite core --smoke \
     --base-url http://localhost:8000/v1 --model m1
 # or: kairyu bench run --config examples/bench_core.yaml --smoke
 
+# five fixed JSON-Schema cases, paired constrained/control (10 calls):
+kairyu bench run --config examples/bench_structured.yaml
+# or: kairyu bench run --suite structured \
+#         --base-url http://localhost:8000/v1 --model m1
+
 # full seven-arm quantization sweep (use the example's real manifest digests):
 kairyu bench run --config examples/bench_quantization.yaml \
     --run-id qwen3-quant-accuracy
@@ -147,9 +155,10 @@ quantization-sweep.json                       # seven-arm task-accuracy artifact
 quantization-sweep.md                         # scheme-major accuracy/gate report
 ```
 
-Core results default to `bench/results/core/<run_id>/`; quantization results
-default to `bench/results/quantization/<run_id>/`. Both contain the same run,
-pair, and scoreboard artifacts. They intentionally omit
+Core results default to `bench/results/core/<run_id>/`; structured results
+default to `bench/results/structured/<run_id>/`; and quantization results
+default to `bench/results/quantization/<run_id>/`. All three contain the same
+run, pair, and scoreboard artifacts. They intentionally omit
 `comparison.json` and `comparison.md`: the published reference table is a Fugu
 contract, not a generic benchmark baseline. A completed quantization run adds
 its dedicated `quantization-sweep.{json,md}` only after the strict sweep command
@@ -239,6 +248,9 @@ kairyu bench list --suite core
 kairyu bench download --suite core
 kairyu bench report --suite core <run_id>
 kairyu bench compare-runs --suite core BASE CANDIDATE
+kairyu bench list --suite structured
+kairyu bench download --suite structured --strict
+kairyu bench report --suite structured <run_id>
 ```
 
 `compare-runs` reads only validated index snapshots and never modifies either
@@ -406,6 +418,86 @@ drift. Full design and source identities are recorded in
 [`docs/design/issue-367-core-evals.md`](design/issue-367-core-evals.md) and the
 exact likelihood transport/scoring contract is recorded in
 [`docs/design/issue-368-loglikelihood.md`](design/issue-368-loglikelihood.md).
+
+## Structured-output conformance suite
+
+The dedicated `structured` suite tests the OpenAI-compatible `response_format`
+contract independently of the general answer-quality rows. Its package-owned
+corpus contains exactly one Draft 2020-12 schema in each of five categories:
+
+| Category | Contract exercised |
+|---|---|
+| Nested | required nested objects and a typed array |
+| Recursive | a tree expressed through local `$defs` and `$ref` only |
+| Enum | selection from a closed string set |
+| Pattern | a string constrained by a regular expression |
+| Union | an `anyOf` value with type-sensitive expected output |
+
+Every source item produces a matched pair. Both arms receive the same prompt,
+including the same schema text, and use the same target sampling policy and
+seed. Only the constrained arm receives `response_format: {type:
+"json_schema", ...}`; the control arm omits that field. The arm sent first is
+alternated over the item-major/seed-minor matrix to reduce ordering bias. An
+any supplied `extra_body_json` is rejected for this suite because it could constrain
+the nominal control. With `attempts > 1`, each source item retains one paired
+observation under every scheduled seed rather than counting repeated attempts
+as new independent tasks.
+
+Scoring keeps syntax, conformance, and usefulness separate. The strict JSON
+parser accepts exactly one value and rejects duplicate object keys and
+`NaN`/`Infinity`. A pinned `jsonschema` Draft 2020-12 validator then checks the
+parsed value, and task correctness requires type-sensitive canonical JSON
+equality with the corpus answer. Both arms report the following rates:
+
+| Metric | Numerator | Denominator |
+|---|---|---|
+| Request acceptance | completed HTTP 200 responses | all scheduled paired observations |
+| JSON validity | strictly parseable responses | accepted HTTP 200 completions |
+| Schema conformance | independently schema-valid responses | all scheduled paired observations |
+| Exact-task accuracy | schema-valid exact expected values | all scheduled paired observations |
+| Malformed JSON | accepted responses that fail strict parsing | accepted HTTP 200 completions |
+
+A recognized constrained-schema rejection at HTTP 400 or 422 is a measured
+zero for acceptance, schema conformance, and task accuracy; it is not called
+malformed model output. Transport failures, retry-exhausted server failures,
+and malformed API envelopes are execution failures, and the complete derived
+conformance summary is withheld rather than changing its population.
+An OpenAI-compatible HTTP 200 safety refusal (`content: null` plus non-empty
+`refusal`), content-filtered empty message, or unexpected call payload is
+retained as raw accepted evidence and counted as non-JSON and task-incorrect,
+so over-refusal cannot disappear into an environment failure.
+Constrained-minus-control deltas are shown separately from each arm's absolute
+rates. The headline cell score is constrained exact-task accuracy.
+
+Endpoint-reported prompt, completion, and total token counts are retained when
+present. The report states usage coverage over accepted completions and computes
+paired token deltas only where both arms supplied usage; these fields show what
+the endpoint reported and do not attest its tokenizer or accounting. Client
+latency is retry-inclusive, counterbalanced, and diagnostic. No per-token price
+is configured, so the suite deliberately reports no currency cost.
+
+The corpus is not fetched from Hugging Face. Its installed bytes are bound by
+the package revision
+`sha256:a40b41e1f91f6f33803a55ab4967c75d610dc82d2c14fc11d03c19ace45b05be`,
+and loading fails if that digest changes. This content SHA-256 is deliberately a
+different provenance mechanism from the immutable HF Git commit pins used by
+downloaded Fugu/Core datasets: a Git revision identifies a repository snapshot,
+whereas this digest identifies the exact JSONL bytes shipped in the wheel. Both
+the corpus and the `jsonschema` evaluator distribution are included in the run
+identity and fresh-history validation.
+
+```bash
+uv sync --extra bench
+kairyu bench download --suite structured --strict
+kairyu bench run --config examples/bench_structured.yaml \
+    --run-id structured-conformance
+kairyu bench report --suite structured structured-conformance
+```
+
+A full one-attempt run schedules five source items, two endpoint calls per
+item, and ten calls in total. `--limit` remains useful for plumbing but creates
+an explicit subset. No GPU, judge, Docker runner, or remote dataset is required;
+the deployed target must implement the chat `response_format` contract.
 
 ## Quantization x task-accuracy suite
 
@@ -697,7 +789,9 @@ SHA-256 fingerprint in `run.json`. The identity contains:
   HLE and CharXiv additionally carry the logical judge-template name, variant,
   and SHA-256 of the exact UTF-8 template used for scoring. Each core adapter
   carries package/resource/SHA-256 identities for its complete score-bearing
-  source; IFEval binds both the adapter and every vendored checker module; and
+  source; IFEval binds both the adapter and every vendored checker module. The
+  structured adapter binds its exact package-corpus SHA-256, paired protocol,
+  evaluator resources, and score-time `jsonschema` dependency set; and
 - the output-affecting `BenchConfig` fields `suite`, `targets`, `judge`,
   `execution`, `limit`, `smoke`, `offline_fixtures`, `only`, `exclude`, `seed`,
   `attempts`, `concurrency`, `request_timeout_s`, and `retries`. `targets`
@@ -735,7 +829,9 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
 - Cache dir: `--cache-dir` > `$KAIRYU_BENCH_CACHE` > `~/.cache/kairyu/benchmarks`.
   Datasets are normalized to JSONL once at download; nothing is committed to
   the repo (`bench/results/` and `bench/data/` are git-ignored; the committed
-  fixtures are tiny synthetic stand-ins for offline testing).
+  fixture set contains 11 tiny synthetic stand-ins for offline testing, one
+  fixed five-row structured conformance corpus, and one judge-calibration
+  corpus).
 - A cache entry is ready only when `manifest.json` and `data.jsonl` exist, the
   manifest contains a well-formed lowercase SHA-256, a streaming hash of the
   current JSONL bytes matches it, and any requested dataset id/revision pins
@@ -767,6 +863,10 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   Refreshing a pin changes the run fingerprint, so stored runs are refused for
   resume rather than silently reinterpreted — the procedure is in that module's
   docstring.
+  The structured corpus is package-owned instead: its `sha256:...` revision is
+  recomputed directly from the installed JSONL before parsing, so it neither
+  claims nor needs an HF Git pin. A package content digest and an HF repository
+  commit are intentionally not presented as interchangeable provenance.
   The **agentic** slots are the exception: mini-swe-agent, Harbor and the τ
   harness fetch their own datasets and expose no revision knob, so SWE-Bench Pro
   in particular tracks upstream (which has had post-release test fixes). That is
@@ -843,12 +943,16 @@ source item and seed: the ordered seeds are `target.seed + 0 .. N-1`, or
 `100, 101, 102, 103`. Other unset endpoint knobs remain absent. Use
 `reasoning_effort` only with an endpoint that documents support for it.
 
-`extra_body_json` is merged **last**, so it is validated at load time: it must be
-a JSON object, and it may not override `model`, `messages`, `stream`,
-`temperature`, `max_tokens`, `reasoning_effort`, `top_p`, or `seed`. Those come
-from the adapter's request and this endpoint's typed policy — the values the run
+`extra_body_json` is validated at load time and applied only to unreserved
+endpoint extension fields: it must be a JSON object, and it may not override
+`model`, `messages`, `stream`,
+`temperature`, `max_tokens`, `reasoning_effort`, `top_p`, `seed`, or
+the other typed request fields. Those come from the adapter's request and this endpoint's typed policy — the values the run
 fingerprint and methodology record — so letting them through would make the
 effective request disagree with the recorded configuration.
+General chat suites may use `response_format` as an endpoint extension; the
+paired structured suite rejects the entire `extra_body_json` escape hatch so
+the control arm cannot inherit a hidden constraint.
 
 This policy reaches every slot that issues its own chat requests. The three
 external-harness slots (SWE-Bench Pro, Terminal-Bench, τ³) drive a separate CLI,
@@ -1104,8 +1208,9 @@ trial semantics. For quick runs:
 - `--smoke` — deterministic ≤20-item subset per benchmark (CI uses this).
 - `--limit N` — cap items per benchmark (seeded, comparable across runs).
 - `--only`/`--exclude` — comma-separated slot names.
-- `--offline-fixtures` — committed synthetic fixtures, no network at all
-  (used to verify the plumbing end-to-end).
+- `--offline-fixtures` — committed package fixtures/data, with no dataset
+  network access (a diagnostic mode without cache-bound dataset identity, used
+  to verify plumbing end-to-end).
 
 ## Execution runners and threat model
 

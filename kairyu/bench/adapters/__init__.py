@@ -45,6 +45,8 @@ QUANTIZATION_ROW_ORDER: tuple[str, ...] = (
     "gpqa-diamond",
 )
 
+STRUCTURED_ROW_ORDER: tuple[str, ...] = ("structured-output",)
+
 SUITES: dict[str, SuiteInfo] = {
     "fugu": SuiteInfo(
         name="fugu",
@@ -61,6 +63,11 @@ SUITES: dict[str, SuiteInfo] = {
         name="quantization",
         display_name="Quantization",
         row_order=QUANTIZATION_ROW_ORDER,
+    ),
+    "structured": SuiteInfo(
+        name="structured",
+        display_name="Structured Output",
+        row_order=STRUCTURED_ROW_ORDER,
     ),
 }
 
@@ -98,6 +105,7 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
     from kairyu.bench.adapters.mmlu import MmluAdapter
     from kairyu.bench.adapters.mrcr import MrcrAdapter
     from kairyu.bench.adapters.scicode import SciCodeAdapter
+    from kairyu.bench.adapters.structured_output import StructuredOutputAdapter
     from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
     from kairyu.bench.adapters.tau_bench import TauBenchBankingAdapter
     from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter
@@ -114,6 +122,7 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
         MrcrAdapter(),
         MmluAdapter(),
         SciCodeAdapter(),
+        StructuredOutputAdapter(),
         SweBenchProAdapter(),
         TauBenchBankingAdapter(),
         TerminalBenchAdapter(),

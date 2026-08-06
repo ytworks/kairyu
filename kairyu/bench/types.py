@@ -29,11 +29,12 @@ SCHEMA_VERSION = 1
 JSON_SAFE_INTEGER_MAX = (1 << 53) - 1
 
 # `extra_body` is an escape hatch for vendor knobs, not a way to silently
-# retarget or reshape the benchmark request. It is merged LAST, so anything
-# built elsewhere would win if it were allowed through: the adapter's prompt and
-# token budget (`messages`, `max_tokens`, `temperature`) and the typed sampling
-# fields below. Allowing those would let the effective request disagree with the
-# configuration that the run fingerprint and methodology record.
+# retarget or reshape the benchmark request. The adapter's prompt and token
+# budget (`messages`, `max_tokens`, `temperature`) and typed sampling fields
+# below are reserved because allowing those would let the effective request
+# disagree with the configuration that the run fingerprint and methodology
+# record. Adapter-specific fields remain available to ordinary chat suites;
+# suites that own such a field must reject it at their own precondition boundary.
 _RESERVED_BODY_KEYS = frozenset(
     {
         "model",
@@ -411,7 +412,7 @@ class ExecutionConfig(BaseModel):
 class BenchConfig(BaseModel):
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
-    suite: Literal["fugu", "core", "quantization"] = "fugu"
+    suite: Literal["fugu", "core", "quantization", "structured"] = "fugu"
     targets: tuple[BenchTarget, ...] = Field(min_length=1)
     judge: JudgeConfig = JudgeConfig()
     execution: ExecutionConfig = ExecutionConfig()
@@ -460,6 +461,26 @@ class BenchConfig(BaseModel):
 
 
 SMOKE_LIMIT = 20
+
+
+def run_configuration_incomparable_reasons(
+    *,
+    limit: int | None,
+    offline_fixtures: bool,
+) -> tuple[str, ...]:
+    """Return the run-wide reasons every pair and scoreboard cell must retain."""
+
+    reasons: list[str] = []
+    if limit is not None:
+        reasons.append(
+            f"subset run: at most {limit} items per benchmark, not the full set"
+        )
+    if offline_fixtures:
+        reasons.append(
+            "offline fixture mode lacks cache-bound dataset identity; scores are "
+            "diagnostics, not measurements"
+        )
+    return tuple(reasons)
 
 
 class BenchItem(BaseModel):
@@ -621,6 +642,201 @@ class SkipItem(BaseModel):
 ItemStatus = Literal["completed", "failed", "unjudged", "skipped"]
 
 
+class StructuredTokenUsage(BaseModel):
+    """Strict token accounting retained from one Chat Completions arm."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+    @field_validator("prompt_tokens", "completion_tokens", "total_tokens", mode="before")
+    @classmethod
+    def _require_safe_count(cls, value, info):
+        if type(value) is not int or not 0 <= value <= JSON_SAFE_INTEGER_MAX:
+            raise ValueError(f"structured usage {info.field_name} must be a safe count")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_total(self) -> StructuredTokenUsage:
+        if self.total_tokens != self.prompt_tokens + self.completion_tokens:
+            raise ValueError("structured usage total_tokens must equal prompt plus completion")
+        return self
+
+
+class StructuredArmEvidence(BaseModel):
+    """Raw, score-replayable evidence for one constrained or control request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    arm: Literal["constrained", "unconstrained"]
+    outcome: Literal["completed", "schema_rejected", "failed"]
+    http_status: int
+    content: str | None = None
+    refusal: str | None = None
+    message_auxiliary: str | None = None
+    finish_reason: str | None = None
+    usage: StructuredTokenUsage | None = None
+    latency_s: float
+    error: str | None = None
+
+    @field_validator("http_status", mode="before")
+    @classmethod
+    def _validate_http_status(cls, value):
+        if type(value) is not int or not 0 <= value <= 599:
+            raise ValueError("structured arm http_status must be an integer from 0 to 599")
+        return value
+
+    @field_validator("latency_s", mode="before")
+    @classmethod
+    def _validate_latency(cls, value):
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError("structured arm latency_s must be finite and non-negative")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def _bound_content(cls, value: str | None) -> str | None:
+        if value is not None and len(value) > 262_144:
+            raise ValueError("structured arm content exceeds the retained evidence bound")
+        return value
+
+    @field_validator("refusal")
+    @classmethod
+    def _bound_refusal(cls, value: str | None) -> str | None:
+        if value is not None and (not value or len(value) > 262_144):
+            raise ValueError("structured arm refusal must be non-empty and bounded")
+        return value
+
+    @field_validator("message_auxiliary")
+    @classmethod
+    def _bound_message_auxiliary(cls, value: str | None) -> str | None:
+        if value is not None and (not value or len(value) > 262_144):
+            raise ValueError("structured arm auxiliary message payload is invalid")
+        if value is not None:
+            try:
+                parsed = json.loads(value)
+                canonical = json.dumps(
+                    parsed,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+            except (RecursionError, TypeError, ValueError) as error:
+                raise ValueError(
+                    "structured arm auxiliary message payload is not canonical JSON"
+                ) from error
+            if (
+                not isinstance(parsed, dict)
+                or not parsed
+                or not set(parsed) <= {"tool_calls", "function_call"}
+                or (
+                    "tool_calls" in parsed
+                    and (
+                        not isinstance(parsed["tool_calls"], list)
+                        or not parsed["tool_calls"]
+                    )
+                )
+                or (
+                    "function_call" in parsed
+                    and (
+                        not isinstance(parsed["function_call"], dict)
+                        or not parsed["function_call"]
+                    )
+                )
+                or canonical != value
+            ):
+                raise ValueError(
+                    "structured arm auxiliary message payload is not canonical JSON"
+                )
+        return value
+
+    @field_validator("error")
+    @classmethod
+    def _bound_error(cls, value: str | None) -> str | None:
+        if value is not None and (not value or len(value) > 2_000):
+            raise ValueError("structured arm error must be non-empty and bounded")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_outcome_shape(self) -> StructuredArmEvidence:
+        if self.outcome == "completed":
+            if (
+                self.http_status != 200
+                or (
+                    self.refusal is not None
+                    and (self.content is not None or self.message_auxiliary is not None)
+                )
+                or not self.finish_reason
+                or self.error is not None
+            ):
+                raise ValueError("completed structured arm has inconsistent response evidence")
+            return self
+        if self.outcome == "schema_rejected":
+            if (
+                self.arm != "constrained"
+                or self.http_status not in {400, 422}
+                or self.content is not None
+                or self.refusal is not None
+                or self.message_auxiliary is not None
+                or self.finish_reason is not None
+                or self.usage is not None
+                or self.error is None
+            ):
+                raise ValueError("schema-rejected structured arm has inconsistent evidence")
+            return self
+        if (
+            self.content is not None
+            or self.refusal is not None
+            or self.message_auxiliary is not None
+            or self.finish_reason is not None
+            or self.usage is not None
+            or self.error is None
+        ):
+            raise ValueError("failed structured arm has inconsistent response evidence")
+        return self
+
+
+class StructuredOutputEvidence(BaseModel):
+    """The paired constrained/control observation retained beneath one item."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
+
+    protocol: Literal["paired-json-schema-v1"] = "paired-json-schema-v1"
+    seed: int | None
+    order: tuple[
+        Literal["constrained", "unconstrained"],
+        Literal["constrained", "unconstrained"],
+    ]
+    constrained: StructuredArmEvidence
+    unconstrained: StructuredArmEvidence
+
+    @field_validator("seed", mode="before")
+    @classmethod
+    def _validate_seed(cls, value):
+        if value is not None and (
+            type(value) is not int or abs(value) > JSON_SAFE_INTEGER_MAX
+        ):
+            raise ValueError("structured paired seed must be a JSON-safe integer or null")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_arm_identities(self) -> StructuredOutputEvidence:
+        if set(self.order) != {"constrained", "unconstrained"}:
+            raise ValueError("structured arm order must contain each arm exactly once")
+        if self.constrained.arm != "constrained":
+            raise ValueError("structured constrained evidence has the wrong arm identity")
+        if self.unconstrained.arm != "unconstrained":
+            raise ValueError("structured unconstrained evidence has the wrong arm identity")
+        return self
+
+
 class ItemResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", revalidate_instances="always")
 
@@ -634,6 +850,8 @@ class ItemResult(BaseModel):
     # Single: {model, correct, raw_excerpt}; panels add aggregation + ordered votes.
     judge: dict | None = None
     latency_s: float | None = None
+    # Raw paired-arm evidence for the structured-output conformance adapter.
+    structured_output: StructuredOutputEvidence | None = None
     # Multi-seed chat evidence stays grouped under its source dataset item.
     # Flattening attempts into ``PairResult.items`` would make Wilson and
     # paired-comparison code falsely treat correlated trials as independent.
@@ -667,7 +885,26 @@ class ItemResult(BaseModel):
     def _validate_sampling_attempts(self) -> ItemResult:
         attempts = self.sampling_attempts
         if attempts is None:
+            if self.structured_output is not None:
+                failed = any(
+                    arm.outcome == "failed"
+                    for arm in (
+                        self.structured_output.constrained,
+                        self.structured_output.unconstrained,
+                    )
+                )
+                if failed:
+                    if self.status != "failed" or self.score is not None or not self.error:
+                        raise ValueError(
+                            "failed structured arms require a failed unscored item"
+                        )
+                elif self.status != "completed" or self.score is None or self.error is not None:
+                    raise ValueError(
+                        "complete structured arms require a completed scored item"
+                    )
             return self
+        if self.structured_output is not None:
+            raise ValueError("sampling parents cannot duplicate structured arm evidence")
         if not attempts:
             raise ValueError("sampling_attempts must be non-empty when present")
         expected = list(range(1, len(attempts) + 1))
@@ -734,6 +971,8 @@ class ItemResult(BaseModel):
         serialized = handler(self)
         if self.sampling_attempts is None:
             serialized.pop("sampling_attempts", None)
+        if self.structured_output is None:
+            serialized.pop("structured_output", None)
         return serialized
 
 
@@ -988,6 +1227,7 @@ def pair_result_evidence_error(
     expected_benchmark: str | None = None,
     expected_target: str | None = None,
     expected_sampling: dict[str, object] | None = None,
+    expected_structured_run: dict[str, object] | None = None,
     require_history_safe_counts: bool = False,
 ) -> str | None:
     """Explain why adapter/stored pair evidence is unsafe, or return ``None``.
@@ -1247,6 +1487,39 @@ def pair_result_evidence_error(
                 or methodology_temperature != wire_temperature
             ):
                 return "sampling methodology temperature disagrees with target config"
+
+    def has_structured_item(item: ItemResult) -> bool:
+        if item.structured_output is not None:
+            return True
+        return bool(
+            item.sampling_attempts
+            and any(
+                attempt.result.structured_output is not None
+                for attempt in item.sampling_attempts
+            )
+        )
+
+    structured_claimed = (
+        value.benchmark == "structured-output"
+        or "structured_output" in value.methodology
+        or any(name.startswith("structured_") for name in value.metrics)
+        or any(has_structured_item(item) for item in value.items)
+    )
+    if structured_claimed:
+        if value.benchmark != "structured-output":
+            return "structured-output evidence is attached to another benchmark"
+        from kairyu.bench.structured import structured_pair_evidence_error
+
+        try:
+            structured_error = structured_pair_evidence_error(
+                value,
+                expected_sampling=expected_sampling,
+                expected_run=expected_structured_run,
+            )
+        except (BenchExtrasMissing, OSError, UnicodeError, ValueError) as error:
+            return f"structured evidence validator unavailable: {error}"
+        if structured_error is not None:
+            return structured_error
 
     tree_error = _json_evidence_error(
         value,
