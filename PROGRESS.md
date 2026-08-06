@@ -1157,6 +1157,14 @@ coverage drift while continuing to ignore routine and untracked local output;
 the catalog remains discovery metadata rather than a replacement for formal
 artifact replay.
 
+Outgoing Chat Completions, legacy Completions, and Responses token streams now
+encode their repeated text-only SSE shapes directly as bytes from one
+stream-owned prefix/suffix template. First-role, logprob, tool, finish, usage,
+trace, and error shapes retain the typed serializers; golden-wire coverage binds
+the fast path to those serializers across usage, index, control, Unicode, and
+SSE line-separator cases. Same-process diagnostics measured 13.69x, 8.13x, and
+5.11x lower per-chunk encoding time for the three respective hot shapes.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -1164,6 +1172,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-06 — [progress] Repeated token SSE shapes bypass per-token model construction
+- What: added stream-owned byte encoders for repeated role-less Chat content, unfinished legacy Completion text, and Responses output-text deltas. Constant JSON envelope fragments and per-index prefixes are retained per stream, only the dynamic scalar is serialized per chunk, and Starlette receives bytes directly. Strict predicates keep first-role, non-string/non-integer, logprob, tool, finish, usage, trace, error, and terminal shapes on their existing serializers. Hoisted fallback exclusion sets and byte-for-byte golden tests bind field order, usage omission/null, multiple indices, empty/control/Unicode content, SSE line separators in both constants and deltas, malformed boundaries, and operation counts. Same-process 100,000-iteration diagnostics measured 7.804→0.570 µs (13.69x) for Chat, 4.625→0.569 µs (8.13x) for Completions, and 3.847→0.753 µs (5.11x) for Responses.
+- Why: constructing and validating nested Pydantic models plus serializing the complete roughly 200-byte envelope for every small token delta imposed avoidable CPU work and allocations on all dominant streaming paths.
+- Refs: issue #334; `kairyu/entrypoints/server/{sse_encode,app,responses_service}.py`; `tests/server/test_sse_encode.py`
 
 ### 2026-08-06 — [progress] Retained benchmark evidence gains a strict tracked catalog
 - What: added `bench/results/index.json` with one path-sorted record for all 63 Git-tracked top-level artifacts, including nullable recorded gate/date/source-commit/hardware/verdict metadata and authoritative bundle summaries. A package-owned strict parser and checkout validator reject duplicate/non-finite/non-canonical JSON, schema or slug drift, unsafe or symlinked paths, untracked summaries, and missing/stale Git coverage while excluding ignored and untracked runtime output. The read-only verifier now runs in portable CI alongside the entrypoint and wheel-boundary checks.
