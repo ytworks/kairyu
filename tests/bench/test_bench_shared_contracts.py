@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+import kairyu.bench.reporting as reporting
 from kairyu.bench.adapters.base import (
     normalize_base_url as legacy_normalize_base_url,
 )
@@ -172,3 +174,73 @@ def test_atomic_reporting_replaces_text_and_json_without_temp_files(
         "score": 1,
     }
     assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_atomic_reporting_can_publish_without_replacing_existing_evidence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "report.json"
+    atomic_write_json(path, {"winner": 1}, overwrite=False, allow_nan=False)
+
+    with pytest.raises(FileExistsError):
+        atomic_write_json(path, {"winner": 2}, overwrite=False, allow_nan=False)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"winner": 1}
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_atomic_reporting_can_reject_non_strict_json_before_publication(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "report.json"
+
+    with pytest.raises(ValueError):
+        atomic_write_json(path, {"value": float("nan")}, allow_nan=False)
+
+    assert not path.exists()
+
+
+def test_exclusive_reporting_rejects_a_swapped_source_symlink(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "report.json"
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"attacker": true}', encoding="utf-8")
+    real_link = os.link
+
+    def swapped_link(source, target, *args, **kwargs):
+        Path(source).unlink()
+        Path(source).symlink_to(outside)
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(reporting.os, "link", swapped_link)
+
+    with pytest.raises(OSError):
+        atomic_write_json(path, {"trusted": True}, overwrite=False, allow_nan=False)
+
+    assert not path.exists()
+    assert json.loads(outside.read_text(encoding="utf-8")) == {"attacker": True}
+
+
+def test_exclusive_reporting_cleanup_failure_does_not_reclassify_publication(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "report.json"
+    real_unlink_if_identity = reporting._unlink_if_identity
+
+    def fail_private_cleanup(candidate: Path, expected: tuple[int, int]) -> bool:
+        if candidate != path and candidate.name.endswith(".tmp"):
+            raise OSError("simulated private-temp cleanup failure")
+        return real_unlink_if_identity(candidate, expected)
+
+    monkeypatch.setattr(reporting, "_unlink_if_identity", fail_private_cleanup)
+
+    assert atomic_write_json(
+        path,
+        {"published": True},
+        overwrite=False,
+        allow_nan=False,
+    ) == path
+    assert json.loads(path.read_text(encoding="utf-8")) == {"published": True}

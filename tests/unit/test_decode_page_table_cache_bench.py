@@ -16,6 +16,10 @@ assert _SPEC is not None and _SPEC.loader is not None
 BENCH = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(BENCH)
 
+
+def test_formal_source_contract_binds_transitive_shared_profiler():
+    assert "kairyu/bench/profiling.py" in BENCH.IMPLEMENTATION_FILES
+
 _SOURCE = {"bound": "source"}
 _CHECKPOINT = {"bound": "checkpoint"}
 _HARDWARE = {"bound": "hardware"}

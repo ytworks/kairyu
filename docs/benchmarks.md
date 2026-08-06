@@ -84,6 +84,32 @@ retained events without invalidating the rest of an otherwise valid envelope.
 The flag is off by default so diagnostic instrumentation does not contaminate
 ordinary Kairyu/vLLM/SGLang comparisons.
 
+`bench/serving_bench.py --profile` is a separate, local diagnostic. It wraps
+only the benchmark client's measured request wave in a CPU-only
+`torch.profiler` scope; it cannot observe the target server, remote GPUs,
+Kairyu engine subprocesses, vLLM, or SGLang. The option therefore requires
+PyTorch from the `engine` extra or development dependencies and a non-empty
+`--results-dir`. Server-process Python/CUDA diagnosis remains owned by
+`scripts/profile_server.py`, while `--stage-trace` remains the target-reported
+structured timing contract. The two serving flags may be combined, but their
+evidence is never relabeled or merged.
+
+Each profiled run creates one UTC-microsecond `*-serving.json` result and one
+same-stem `*.client.pt.trace.json` sidecar. The result binds the trace basename,
+format, byte length, SHA-256, CPU activity, local-client scope, and the facts
+that the target process is excluded and timings are diagnostic-only. Trace
+publication is private (`0600`), bounded to 64 MiB, strict-JSON validated, and
+exclusive: an existing file, directory, symlink, unsafe path, failed export,
+or concurrent publisher fails rather than replacing evidence. These checks run
+before target traffic where possible, and an export failure cannot leave a
+successful result JSON. Result publication is also exclusive; if it loses a
+race, only the exact trace just published by that run is rolled back. Profiling
+is off by default and imports no PyTorch on the normal or `--help` path. Raw
+Chrome traces can contain operator names and local runtime metadata; inspect
+them before sharing. Profiled TTFT, TPOT, throughput, and goodput must not be
+compared with ordinary runs. The example Qwen multi-GPU serving reporter skips
+profiled result files and reports them as rejected diagnostics.
+
 `bench/proc_wire_bench.py` is a deterministic process-boundary complexity
 gate. It encodes the same cumulative generation trace through the legacy and
 versioned-delta `kairyu-proc` msgpack paths, retains every frame size, and

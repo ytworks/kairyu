@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from kairyu.bench.profiling import profile_scope
 from kairyu.kernels.rms_norm_gpu import try_joint_qk_rms_norm
 from kairyu.models.layers import RMSNorm
 
@@ -45,11 +46,13 @@ def test_cuda_rms_norm_is_bit_exact_to_explicit_reference(shape):
     # Exclude one-time dispatcher/kernel loading from the structural profile.
     layer(hidden)
     torch.cuda.synchronize()
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ]
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
+        acc_events=False,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
     ) as profile:
         actual = layer(hidden)
     expected = _reference(hidden, layer.weight, layer.eps)
@@ -105,11 +108,13 @@ def test_joint_qk_rms_norm_is_one_bit_exact_launch_for_packed_tp4_views(
         1e-6,
     ) is not None
     torch.cuda.synchronize()
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ]
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
+        acc_events=False,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
     ) as profile:
         result = try_joint_qk_rms_norm(
             query,

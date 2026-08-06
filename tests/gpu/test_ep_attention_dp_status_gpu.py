@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from kairyu.bench.profiling import profile_scope
 from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.engine.core.scheduler import ScheduledChunk
@@ -14,8 +15,6 @@ pytestmark = pytest.mark.gpu
 
 
 def test_attention_dp_fast_status_does_not_synchronize_cuda_event() -> None:
-    from torch.profiler import ProfilerActivity, profile
-
     if not torch.cuda.is_available():  # pragma: no cover - CPU box
         pytest.skip("attention-DP fast status profiler gate needs CUDA")
 
@@ -72,9 +71,13 @@ def test_attention_dp_fast_status_does_not_synchronize_cuda_event() -> None:
     # Keep the producer stream busy so an accidental event resolution is both
     # observable as cudaEventSynchronize and expensive enough not to race away.
     torch.cuda._sleep(20_000_000)
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
         acc_events=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
     ) as prof:
         output = worker_module._ep_attention_dp_deferred_packet_output(
             gathered,
@@ -95,8 +98,6 @@ def test_attention_dp_fast_status_does_not_synchronize_cuda_event() -> None:
 
 
 def test_attention_dp_packet_status_does_not_synchronize_the_cuda_stream() -> None:
-    from torch.profiler import ProfilerActivity, profile
-
     if not torch.cuda.is_available():  # pragma: no cover - CPU box
         pytest.skip("attention-DP packet profiler gate needs CUDA")
 
@@ -150,9 +151,13 @@ def test_attention_dp_packet_status_does_not_synchronize_the_cuda_stream() -> No
     # Initialize the allocator and kernels outside the measured steady path.
     build_packet()
     torch.cuda.synchronize()
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
         acc_events=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
     ) as prof:
         packet = build_packet()
         torch.cuda.synchronize()

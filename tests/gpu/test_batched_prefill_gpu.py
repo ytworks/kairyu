@@ -7,6 +7,7 @@ import gc
 import pytest
 import torch
 
+from kairyu.bench.profiling import profile_scope
 from kairyu.engine.core.prefill import PrefillSequence, build_prefill_batch
 
 pytestmark = pytest.mark.gpu
@@ -104,8 +105,6 @@ def _cuda_event_count(profile) -> int:
 
 def test_single_prefill_partial_write_avoids_dynamic_mask_host_sync(cuda):
     """Host chunk metadata must avoid scalar reads and dynamic CUDA masks."""
-    from torch.profiler import ProfilerActivity, profile
-
     from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.models.config import parse_model_config
@@ -167,10 +166,13 @@ def test_single_prefill_partial_write_avoids_dynamic_mask_host_sync(cuda):
     )
     torch.cuda.synchronize()
 
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        with_stack=True,
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
         acc_events=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=True,
     ) as candidate:
         actual = model.forward_tokens(
             token_ids,
@@ -348,12 +350,13 @@ def test_real_flashinfer_ragged_prefill_matches_sequential_and_reduces_launches(
     model.forward_prefill_batch(batch, batched_pool)
     torch.cuda.synchronize()
 
-    activities = [
-        torch.profiler.ProfilerActivity.CPU,
-        torch.profiler.ProfilerActivity.CUDA,
-    ]
-    with torch.profiler.profile(
-        activities=activities, acc_events=True
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
+        acc_events=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
     ) as sequential_profile:
         for row in rows:
             model.forward_tokens(
@@ -365,8 +368,13 @@ def test_real_flashinfer_ragged_prefill_matches_sequential_and_reduces_launches(
                 write_from=row.write_from,
             )
         torch.cuda.synchronize()
-    with torch.profiler.profile(
-        activities=activities, acc_events=True
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
+        acc_events=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
     ) as batched_profile:
         model.forward_prefill_batch(batch, batched_pool)
         torch.cuda.synchronize()

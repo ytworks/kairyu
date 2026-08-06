@@ -9,6 +9,8 @@ import math
 import pytest
 import torch
 
+from kairyu.bench.profiling import profile_scope
+
 transformers = pytest.importorskip("transformers")
 
 pytestmark = pytest.mark.gpu
@@ -357,8 +359,6 @@ def test_structured_sampling_keeps_the_reviewed_cpu_matcher_path():
 def test_steady_decode_feedback_profiler_has_no_host_scalar_sync(
     llama_dir, monkeypatch
 ):
-    from torch.profiler import ProfilerActivity, profile
-
     from kairyu.engine.core.engine_core import token_ids
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.model_runner import PagedModelRunner
@@ -412,10 +412,13 @@ def test_steady_decode_feedback_profiler_has_no_host_scalar_sync(
         return original_item(tensor, *args, **kwargs)
 
     monkeypatch.setattr(torch.Tensor, "item", forbid_device_item)
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        with_stack=True,
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
         acc_events=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=True,
     ) as prof:
         deferred = runner.execute(decode.scheduled, scheduler.states)
     monkeypatch.undo()

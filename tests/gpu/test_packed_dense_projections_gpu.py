@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from kairyu.bench.profiling import profile_scope
 from kairyu.models.config import parse_model_config
 from kairyu.models.llama import DenseDecoder
 
@@ -66,11 +67,13 @@ def test_qkv_is_one_linear_at_binding_decode_shape(actual_shape_layer):
     # Warm dispatcher/cuBLAS selection before observing the structural call.
     layer.self_attn._project_qkv(hidden)
     torch.cuda.synchronize()
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ]
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
+        acc_events=False,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
     ) as qkv_profile:
         actual_qkv = layer.self_attn._project_qkv(hidden)
         torch.cuda.synchronize()

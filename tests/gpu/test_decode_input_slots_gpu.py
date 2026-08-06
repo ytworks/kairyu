@@ -9,6 +9,8 @@ waited on. Device-sampled token IDs bypass H2D and patch the same slots D2D.
 import pytest
 import torch
 
+from kairyu.bench.profiling import profile_scope
+
 transformers = pytest.importorskip("transformers")
 
 pytestmark = pytest.mark.gpu
@@ -125,8 +127,6 @@ def test_in_flight_staging_grows_the_pool_without_waiting(llama_dir):
 
 def test_device_token_batch_uses_one_slot_update_kernel(llama_dir):
     """Thirty-two future-token views use one CUDA kernel and no device allocation."""
-    from torch.profiler import ProfilerActivity, profile
-
     _require_cuda()
     runner, _cache = _runner(llama_dir)
     packet = torch.arange(4 * 33, dtype=torch.long, device="cuda:0").reshape(
@@ -139,10 +139,13 @@ def test_device_token_batch_uses_one_slot_update_kernel(llama_dir):
     # Initialize the cat kernel and staging pool outside the measured range.
     runner._decode_input_slots(sources, positions)
     torch.cuda.synchronize()
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
         acc_events=True,
+        record_shapes=False,
         profile_memory=True,
+        with_stack=False,
     ) as prof:
         tokens, decoded_positions = runner._decode_input_slots(
             sources, positions

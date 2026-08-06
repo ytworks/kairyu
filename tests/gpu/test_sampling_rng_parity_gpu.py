@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from kairyu.bench.profiling import profile_scope
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import EngineSampling, mix_seed
 from kairyu.kernels.sampling_gpu import (
@@ -111,12 +112,17 @@ def test_full_width_counter_words_match_exactly_on_cpu_and_cuda() -> None:
 
 
 def test_gumbel_primitive_keeps_result_on_cuda_without_scalar_sync() -> None:
-    from torch.profiler import ProfilerActivity, profile
-
     log_weights = torch.log_softmax(_logits().cuda(), dim=-1)
     stateless_gumbel_argmax(log_weights, mix_seed(354, 0))
 
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as trace:
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
+        acc_events=False,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+    ) as trace:
         token = stateless_gumbel_argmax(log_weights, mix_seed(354, 1))
 
     scalar_reads = sum(

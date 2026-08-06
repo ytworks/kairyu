@@ -14,6 +14,10 @@ bench = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bench)
 
 
+def test_formal_source_contract_binds_shared_profiler_dependency():
+    assert "kairyu/bench/profiling.py" in bench.IMPLEMENTATION_FILES
+
+
 def _stats(rank: int, enabled: bool):
     requests, layers = 8, 64
     return {

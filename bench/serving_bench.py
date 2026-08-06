@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import datetime as _datetime
 import json
+import math
 import re
 import statistics
 import sys
@@ -30,6 +31,14 @@ from pathlib import Path
 
 import httpx
 
+from kairyu.bench.profiling import (
+    profile_scope,
+    profile_trace_path,
+    record_function_scope,
+    remove_trace_artifact,
+    validate_trace_artifact_path,
+    write_trace_artifact,
+)
 from kairyu.bench.reporting import (
     PERCENTILE_METHOD,
     atomic_write_json,
@@ -77,6 +86,8 @@ _TRACE_DURATION_NAMES = (
     "post_first_ms",
     "total_ms",
 )
+_CLIENT_PROFILE_SCOPE = "client"
+_CLIENT_PROFILE_RANGE = "kairyu.bench.serving.client-measurement"
 
 
 @dataclass(frozen=True)
@@ -591,11 +602,77 @@ def build_run_config(args: argparse.Namespace) -> dict:
         "min_tokens": args.min_tokens,
         "ignore_eos": args.ignore_eos,
         "stage_trace": getattr(args, "stage_trace", False),
+        "profile": getattr(args, "profile", False),
         "ttft_slo_s": args.ttft_slo_s,
         "tensor_parallel": args.tensor_parallel,
         "dp_replicas": args.dp_replicas,
         "pd": args.pd,
     }
+
+
+def serving_artifact_paths(
+    args: argparse.Namespace,
+    *,
+    now: _datetime.datetime | None = None,
+) -> tuple[Path | None, Path | None]:
+    """Preflight one result/trace pair before any target request is sent."""
+
+    _validate_run_args(args)
+    profiling = getattr(args, "profile", False)
+    if type(profiling) is not bool:
+        raise ValueError("profile enablement must be a boolean")
+    if profiling and not args.results_dir:
+        raise ValueError("--profile requires a non-empty --results-dir")
+    if not args.results_dir:
+        return None, None
+
+    moment = now or _datetime.datetime.now(_datetime.UTC)
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError("artifact timestamp must be timezone-aware")
+    stamp = moment.astimezone(_datetime.UTC).strftime("%Y-%m-%dT%H%M%S.%fZ")
+    results_dir = Path(args.results_dir)
+    result = results_dir / f"{stamp}-serving.json"
+    if result.exists() or result.is_symlink():
+        raise FileExistsError(f"serving result already exists: {result}")
+    if not profiling:
+        return result, None
+    trace = profile_trace_path(result, scope=_CLIENT_PROFILE_SCOPE)
+    validated = validate_trace_artifact_path(trace, artifact_root=results_dir)
+    return result, validated
+
+
+def _validate_run_args(args: argparse.Namespace) -> None:
+    for name in (
+        "num_requests",
+        "concurrency",
+        "max_tokens",
+        "tensor_parallel",
+        "dp_replicas",
+    ):
+        value = getattr(args, name)
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"--{name.replace('_', '-')} must be a positive integer")
+    for name in ("ttft_slo_s", "timeout"):
+        value = getattr(args, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"--{name.replace('_', '-')} must be finite")
+        if not math.isfinite(float(value)) or float(value) <= 0.0:
+            raise ValueError(f"--{name.replace('_', '-')} must be finite and positive")
+    temperature = args.temperature
+    if temperature is not None and (
+        isinstance(temperature, bool)
+        or not isinstance(temperature, (int, float))
+        or not math.isfinite(float(temperature))
+        or float(temperature) < 0.0
+    ):
+        raise ValueError("--temperature must be finite and non-negative")
+    min_tokens = args.min_tokens
+    if min_tokens is not None and (
+        type(min_tokens) is not int
+        or min_tokens < 0
+        or min_tokens > args.max_tokens
+    ):
+        raise ValueError("--min-tokens must be between zero and --max-tokens")
 
 
 def summarize_results(
@@ -763,6 +840,7 @@ def summarize_results(
 
 
 async def run_benchmark(args: argparse.Namespace) -> None:
+    result_path, trace_path = serving_artifact_paths(args)
     target = resolve_target(args)
     api_key = resolve_api_key(args, target)
     if getattr(args, "api_key", None) is not None:
@@ -770,6 +848,13 @@ async def run_benchmark(args: argparse.Namespace) -> None:
             "warning: --api-key is deprecated because command-line arguments may "
             "be visible to other processes; use --api-key-env or --target "
             f"{TARGET_SPEC_FORMAT}",
+            file=sys.stderr,
+        )
+    if getattr(args, "profile", False):
+        print(
+            "warning: --profile records only the local serving_bench CPU driver; "
+            "it excludes the target server and makes this run diagnostic, not "
+            "timing-comparable",
             file=sys.stderr,
         )
     print(f"config={json.dumps(build_run_config(args))}")
@@ -798,9 +883,21 @@ async def run_benchmark(args: argparse.Namespace) -> None:
                     request_trace=getattr(args, "stage_trace", False),
                 )
 
-        wall_start_ns = time.perf_counter_ns()
-        results = await asyncio.gather(*(bounded(p) for p in prompts))
-        wall_ns = time.perf_counter_ns() - wall_start_ns
+        with profile_scope(
+            enabled=getattr(args, "profile", False),
+            activities=("cpu",),
+            acc_events=True,
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,
+        ) as profiler:
+            with record_function_scope(
+                profiler is not None,
+                _CLIENT_PROFILE_RANGE,
+            ):
+                wall_start_ns = time.perf_counter_ns()
+                results = await asyncio.gather(*(bounded(p) for p in prompts))
+                wall_ns = time.perf_counter_ns() - wall_start_ns
 
     summary, samples = summarize_results(
         results,
@@ -861,19 +958,59 @@ async def run_benchmark(args: argparse.Namespace) -> None:
         f"output={summary['output_tokens_per_s']} token/s; "
         f"goodput(TTFT<={args.ttft_slo_s}s)={summary['goodput_rps']} req/s"
     )
-    if args.results_dir:
-        stamp = _datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
-        results_dir = Path(args.results_dir)
-        out = results_dir / f"{stamp}-serving.json"  # timestamped: same-day safe
-        atomic_write_json(
-            out,
-            {
-                "config": build_run_config(args),
-                "summary": summary,
-                "samples": samples,
-            },
-        )
-        print(f"results written to {out}")
+    if result_path is not None:
+        payload = {
+            "config": build_run_config(args),
+            "summary": summary,
+            "samples": samples,
+        }
+        # Prove the measured payload is strict JSON before publishing either
+        # member of the profile/result pair.
+        json.dumps(payload, allow_nan=False)
+        profile_artifact = None
+        if profiler is not None:
+            assert trace_path is not None and args.results_dir
+            profile_artifact = write_trace_artifact(
+                profiler,
+                trace_path,
+                artifact_root=Path(args.results_dir),
+            )
+        if profile_artifact is not None:
+            payload["artifacts"] = {
+                "torch_profile": {
+                    "path": profile_artifact.path.name,
+                    "format": profile_artifact.format,
+                    "size_bytes": profile_artifact.size_bytes,
+                    "sha256": profile_artifact.sha256,
+                    "producer": "torch.profiler",
+                    "scope": "local-client-process",
+                    "activities": ["cpu"],
+                    "range": _CLIENT_PROFILE_RANGE,
+                    "target_process_included": False,
+                    "diagnostic_only": True,
+                    "timing_comparable": False,
+                }
+            }
+        try:
+            atomic_write_json(
+                result_path,
+                payload,
+                allow_nan=False,
+                overwrite=False,
+            )
+        except BaseException as error:
+            if profile_artifact is not None:
+                try:
+                    remove_trace_artifact(profile_artifact)
+                except BaseException as cleanup_error:
+                    raise ExceptionGroup(
+                        "serving result publication and trace rollback both failed",
+                        [error, cleanup_error],
+                    ) from error
+            raise
+        if profile_artifact is not None:
+            print(f"client profile written to {profile_artifact.path}")
+        print(f"results written to {result_path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -918,6 +1055,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage-trace",
         action="store_true",
         help="request and report Kairyu structured stage timing (opt-in)",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "write a CPU-only PyTorch Chrome trace for the local benchmark "
+            "client (diagnostic; requires torch and --results-dir)"
+        ),
     )
     auth = parser.add_mutually_exclusive_group()
     auth.add_argument(

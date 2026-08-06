@@ -7,6 +7,8 @@ actually run under, and that the pool write lands in the same slots there too.
 import pytest
 import torch
 
+from kairyu.bench.profiling import profile_scope
+
 transformers = pytest.importorskip("transformers")
 
 pytestmark = pytest.mark.gpu
@@ -124,8 +126,6 @@ def test_tensor_decode_profiler_has_no_row_scalar_reads(
 ):
     """`aten::_local_scalar_dense` is PyTorch's profiler-visible device scalar
     extraction. Its count stays exactly zero instead of growing with B."""
-    from torch.profiler import ProfilerActivity, profile
-
     model, config = model_and_config
     _require_cuda()
     pool = _pool(config, seed=17 + batch)
@@ -141,7 +141,14 @@ def test_tensor_decode_profiler_has_no_row_scalar_reads(
         tokens, positions, pool, tables, seq_lens, write_from
     )
     torch.cuda.synchronize()
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as legacy:
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
+        acc_events=False,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+    ) as legacy:
         model.forward_decode_batch(
             tokens,
             positions,
@@ -152,7 +159,14 @@ def test_tensor_decode_profiler_has_no_row_scalar_reads(
             position_values=[2] * batch,
         )
         torch.cuda.synchronize()
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as trace:
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
+        acc_events=False,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+    ) as trace:
         model.forward_decode_tensors(
             tokens, positions, pool, tables, seq_lens, write_from
         )
