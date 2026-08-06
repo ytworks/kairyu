@@ -7,8 +7,10 @@ so that every agent records design changes and progress identically.
 ## Purpose
 
 `PROGRESS.md` is the cross-session memory of this project. A fresh agent session must be
-able to read it and immediately know: where the project stands, what has been decided,
-and what changed since the design docs were written.
+able to read it and immediately know: what the product is aiming to be, where the
+project stands, and what changed recently. It is loaded at every session start, so it
+must stay small — detail lives in `docs/design/`, `bench/results/`, and the archive
+(`docs/progress/archive/`), not here.
 
 ## When to update PROGRESS.md
 
@@ -24,17 +26,26 @@ Routine refactors, typo fixes, and small doc edits do NOT require an entry.
 
 ## Structure of PROGRESS.md
 
-Exactly two sections:
+Exactly three sections:
+
+### `## Product`
+
+What Kairyu is aiming to be: the product goal, target hardware profiles, target model
+classes, and the layering contract. This is a compact digest of `docs/roadmap.md` and
+`docs/goals/` — update it only when the roadmap or goals themselves change, and keep it
+under ~25 lines.
 
 ### `## Current Status`
 
 A snapshot that is OVERWRITTEN in place to always reflect the present state:
-per-milestone status, what currently works, and active blockers. Keep it short —
-a table or bullet list, no history.
+per-milestone status, formal-gate status, what currently works, and active blockers.
+Tables and one-line bullets only — no history, no per-run evidence (agreement counts,
+hashes, artifact paths); point to `bench/results/` and `docs/design/` instead.
+Keep it under ~80 lines.
 
 ### `## Change Log`
 
-APPEND-ONLY, newest entry first. Entry format:
+Newest entry first. Entry format:
 
 ```markdown
 ### YYYY-MM-DD — [design|progress|amendment] short headline
@@ -48,10 +59,45 @@ Entry types:
 - `progress` — milestone/implementation progress, blockers appearing or clearing
 - `amendment` — changes resulting from a design review
 
+Keep each entry under ~15 lines: What/Why state the decision and rationale, not the
+full evidence chain — Refs point to the design doc, issue, or artifact that has it.
+
+Only the most recent entries stay in `PROGRESS.md` (see the size budget below);
+older entries live in `docs/progress/archive/change-log.md`.
+
+## Size budget and archiving
+
+`PROGRESS.md` has a hard size budget so it never again grows into a context sink:
+
+- Total file: ≤ 300 lines.
+- `## Change Log`: ≤ 20 entries.
+
+The harness enforces this: a SessionStart hook (`.claude/settings.json`) runs
+`scripts/check_progress_size.py` at every session start and injects a warning into the
+session when the budget is exceeded. When you see that warning (or the script fails
+when run manually), run the archiving procedure below in the same session, as its own
+commit, BEFORE other work updates `PROGRESS.md`.
+
+### Archiving procedure
+
+1. Cut the oldest Change Log entries from `PROGRESS.md` until at most 10 entries
+   remain, keeping each removed entry byte-for-byte verbatim.
+2. Insert the removed entries into `docs/progress/archive/change-log.md` directly
+   below the `ARCHIVE-INSERT-POINT` marker (above the previously archived entries),
+   preserving their order. The archive stays newest-first across the whole file.
+3. If `## Current Status` or `## Product` is over budget, rewrite it more compactly
+   in place (they are snapshots, not history — no archiving needed). If a verbose
+   status is worth preserving, snapshot it to
+   `docs/progress/archive/status-YYYY-MM-DD.md` first.
+4. Verify with `python3 scripts/check_progress_size.py` and commit the trim as its
+   own commit (message: `docs(progress): archive old change log entries`).
+
 ## Hard rules
 
-- NEVER rewrite or delete past Change Log entries. If an entry was wrong, append a
-  correction entry that references it.
+- NEVER rewrite or delete past Change Log entries, in `PROGRESS.md` or in the archive.
+  Moving entries verbatim to the archive per the procedure above is the ONLY allowed
+  relocation. If an entry was wrong, append a correction entry that references it.
+- NEVER edit archived files except to insert trimmed entries at the marker.
 - Keep `Current Status` consistent with the `Status:` lines in `docs/design/m*.md`;
   if they diverge, fix both in the same commit.
 - Write entries in English (matching the rest of `docs/`).

@@ -15,6 +15,7 @@ milestone status, and blockers.
 ## Where things live
 
 - Design decisions and rationale (D-IDs, review amendments): `docs/design/m1..m4-*.md`
+- Archived progress history (old Change Log entries, status snapshots): `docs/progress/archive/`
 - GPU-day execution plan: `docs/gpu-runbook.md`
 - Implementation plans: `docs/superpowers/plans/`
 - Dev commands: `uv sync --group dev`, `uv run pytest`, `uv run ruff check .`
