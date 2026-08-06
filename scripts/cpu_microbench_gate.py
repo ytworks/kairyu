@@ -5,6 +5,12 @@ The gate compares optimized and legacy implementations inside the same child
 process wherever possible.  Ratios are intentionally loose: this is a smoke
 alarm for large hot-path regressions on shared CI runners, not formal
 performance evidence.
+
+A benchmark whose only failing checks are timing ratios is re-run (up to
+``MAX_BENCHMARK_ATTEMPTS`` total attempts) before the gate fails: shared
+runners jitter individual ratios, while a real hot-path regression keeps
+failing on every attempt.  Structural (equality) failures and benchmark
+errors are never retried.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCHMARK_TIMEOUT_SECONDS = 45
+MAX_BENCHMARK_ATTEMPTS = 3
 PROC_WIRE_LENGTHS = (128, 256, 512, 1024)
 PROC_WIRE_EXPECTED_CHECKS = frozenset(
     {
@@ -460,6 +467,34 @@ def evaluate_results(results: Mapping[str, Mapping[str, Any]]) -> tuple[Check, .
     return tuple(checks)
 
 
+_TIMING_RELATIONS = frozenset({">=", "<"})
+_CHECK_PREFIX_TO_BENCHMARK = {
+    "scheduler": "scheduler_queue",
+    "radix": "radix_eviction",
+    "op_queue": "op_queue",
+    "sampler": "sampler_penalty_state",
+    "proc_wire": "proc_wire",
+    "router": "router_latency",
+}
+
+
+def retryable_benchmarks(failed: Sequence[Check]) -> frozenset[str]:
+    """Benchmarks whose failing checks are all timing ratios.
+
+    Any structural (equality) failure or unknown check name disables retries
+    entirely: those indicate a real contract violation, not runner noise.
+    """
+    names: set[str] = set()
+    for check in failed:
+        if check.passed:
+            continue
+        benchmark = _CHECK_PREFIX_TO_BENCHMARK.get(check.name.split(".", 1)[0])
+        if benchmark is None or check.relation not in _TIMING_RELATIONS:
+            return frozenset()
+        names.add(benchmark)
+    return frozenset(names)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -473,23 +508,53 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
 
+    specs = {spec.name: spec for spec in BENCHMARKS}
     results: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
-    for spec in BENCHMARKS:
-        print(f"running {spec.name}...", file=sys.stderr, flush=True)
-        try:
-            results[spec.name] = run_benchmark(spec)
-        except BenchmarkFailure as error:
-            if error.result is not None:
-                results[spec.name] = error.result
-            errors[spec.name] = str(error)
+    attempts = dict.fromkeys(specs, 0)
 
-    checks: tuple[Check, ...] = ()
-    if set(results) == {spec.name for spec in BENCHMARKS}:
+    def run_specs(names: Sequence[str]) -> None:
+        for name in names:
+            attempts[name] += 1
+            suffix = f" (attempt {attempts[name]})" if attempts[name] > 1 else ""
+            print(f"running {name}{suffix}...", file=sys.stderr, flush=True)
+            try:
+                results[name] = run_benchmark(specs[name])
+                errors.pop(name, None)
+            except BenchmarkFailure as error:
+                if error.result is not None:
+                    results[name] = error.result
+                errors[name] = str(error)
+
+    def evaluated() -> tuple[Check, ...]:
+        if set(results) != set(specs):
+            return ()
         try:
-            checks = evaluate_results(results)
+            return evaluate_results(results)
         except BenchmarkFailure as error:
             errors["evaluation"] = str(error)
+            return ()
+
+    run_specs(list(specs))
+    checks = evaluated()
+    while not errors:
+        failed = tuple(check for check in checks if not check.passed)
+        if not failed:
+            break
+        stale = sorted(
+            name
+            for name in retryable_benchmarks(failed)
+            if attempts[name] < MAX_BENCHMARK_ATTEMPTS
+        )
+        if not stale:
+            break
+        print(
+            "retrying after timing-ratio noise: " + ", ".join(stale),
+            file=sys.stderr,
+            flush=True,
+        )
+        run_specs(stale)
+        checks = evaluated()
     report = {
         "schema_version": 1,
         "cpu_only": True,
