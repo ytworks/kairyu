@@ -493,6 +493,7 @@ def _sampling_owner_probe_worker(
     finally:
         if dist.is_initialized():
             dist.destroy_process_group(groups.model)
+            dist.destroy_process_group(groups.startup_control)
             dist.destroy_process_group(groups.control)
             dist.destroy_process_group()
 

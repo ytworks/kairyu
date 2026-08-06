@@ -174,6 +174,95 @@ def test_preplacement_phase_metrics_are_bounded_and_rendered():
         metrics.record_preplacement_phase("chat", "attacker-phase", 1)
 
 
+def test_metrics_exposes_live_cuda_graph_eager_fallback_counter() -> None:
+    class _GraphEngine:
+        @staticmethod
+        def decode_graph_metadata_snapshot():
+            return {"cuda_graph_eager_fallbacks": 7}
+
+    metrics = ServerMetrics()
+    metrics.track_cuda_graph("qwen", _GraphEngine())
+
+    rendered = metrics.render()[0].decode()
+    assert (
+        'kairyu_cuda_graph_eager_fallbacks_total{model="qwen"} 7.0'
+        in rendered
+    )
+
+
+async def test_pooled_cuda_graph_counter_survives_resets_and_membership() -> None:
+    class _GraphEngine:
+        def __init__(self, count: int) -> None:
+            self.count = count
+            self.generation = 1
+            self.fail_snapshot = False
+
+        def decode_graph_metadata_snapshot(self):
+            if self.fail_snapshot:
+                raise RuntimeError("temporary child-process metric failure")
+            return {"cuda_graph_eager_fallbacks": self.count}
+
+        def decode_graph_metric_generation_snapshot(self):
+            return self.generation
+
+        async def shutdown(self) -> None:
+            return None
+
+    first = _GraphEngine(2)
+    second = _GraphEngine(3)
+    pool = ReplicaPool({"first": first, "second": second})
+    metrics = ServerMetrics()
+    metrics.track_cuda_graph("pooled", pool)
+
+    assert (
+        'kairyu_cuda_graph_eager_fallbacks_total{model="pooled"} 5.0'
+        in metrics.render()[0].decode()
+    )
+
+    # Service generation, rather than a raw-value heuristic, detects child
+    # restarts even when the replacement reaches the same or a greater value
+    # before the next scrape.
+    first.generation = 2
+    assert (
+        'kairyu_cuda_graph_eager_fallbacks_total{model="pooled"} 7.0'
+        in metrics.render()[0].decode()
+    )
+    first.generation = 3
+    first.count = 4
+    assert (
+        'kairyu_cuda_graph_eager_fallbacks_total{model="pooled"} 11.0'
+        in metrics.render()[0].decode()
+    )
+
+    # A decrease inside one declared generation is still treated as a reset,
+    # preserving compatibility with metric sources that lack generation IDs.
+    first.count = 1
+    assert (
+        'kairyu_cuda_graph_eager_fallbacks_total{model="pooled"} 12.0'
+        in metrics.render()[0].decode()
+    )
+
+    # Removing a replica retires its last value instead of decreasing the pool
+    # total. Re-adding the same public id has a fresh generation and accumulates.
+    await pool.remove_replica("second")
+    assert (
+        'kairyu_cuda_graph_eager_fallbacks_total{model="pooled"} 12.0'
+        in metrics.render()[0].decode()
+    )
+    replacement = _GraphEngine(4)
+    pool.add_replica("second", replacement)
+    assert (
+        'kairyu_cuda_graph_eager_fallbacks_total{model="pooled"} 16.0'
+        in metrics.render()[0].decode()
+    )
+
+    first.fail_snapshot = True
+    assert (
+        'kairyu_cuda_graph_eager_fallbacks_total{model="pooled"} 16.0'
+        in metrics.render()[0].decode()
+    )
+
+
 async def test_metrics_disabled_by_settings():
     from kairyu.entrypoints.server.settings import ServerSettings
 

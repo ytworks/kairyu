@@ -50,6 +50,7 @@ from kairyu.engine.core.sampler import DeviceSample, Sampler
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.core.step_executor import (
+    DecodeGraphCapturePlan,
     DecodePageTableCache,
     DecodeRowOwner,
     GraphDecodeDecision,
@@ -718,6 +719,26 @@ class PagedModelRunner:
         )
         return self._model.logits(hidden)
 
+    def capture_decode_graphs(self) -> tuple[int, ...]:
+        """Warm every configured decode bucket before readiness is published."""
+
+        if self._graph is None:
+            return ()
+        return self._graph.capture_all()
+
+    def synchronize_decode_graph_capture(self) -> None:
+        """Wait for startup capture work before readiness can become visible."""
+
+        if self._graph is not None and self._device.type == "cuda":
+            torch.cuda.synchronize(self._device)
+
+    def decode_graph_capture_plan(self) -> DecodeGraphCapturePlan | None:
+        """Return a side-effect-free identity for distributed preflight."""
+
+        if self._graph is None:
+            return None
+        return self._graph.capture_plan()
+
     def invalidate_graphs(self) -> None:
         """Weight swap or pool resize: every capture is stale (m17 D2)."""
         if self._graph is not None:
@@ -837,7 +858,7 @@ class PagedModelRunner:
             "cuda_graph_buckets": self._graph.configured_buckets,
             "cuda_graph_captures": len(captured),
             "cuda_graph_replays": stats["graph_executions"],
-            "cuda_graph_eager_fallbacks": stats["eager_fallbacks"],
+            "cuda_graph_eager_fallbacks": self._graph.eager_fallbacks_total,
         }
 
     def required_decode_model_forward_count(

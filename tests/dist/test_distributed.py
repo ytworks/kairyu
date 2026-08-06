@@ -251,6 +251,11 @@ def test_serving_groups_separate_idle_control_and_fail_fast_model_timeouts(tmp_p
         control = (
             groups.control._get_backend(host).options._timeout.total_seconds()
         )
+        readiness = (
+            groups.startup_control
+            ._get_backend(host)
+            .options._timeout.total_seconds()
+        )
         model = groups.model._get_backend(host).options._timeout.total_seconds()
         startup = (
             dist.distributed_c10d._get_default_group()
@@ -259,9 +264,10 @@ def test_serving_groups_separate_idle_control_and_fail_fast_model_timeouts(tmp_p
         )
         assert startup == worker_module._STARTUP_TIMEOUT_S == 1800.0
         assert model == worker_module._SERVE_OP_TIMEOUT_S == 120.0
+        assert readiness == worker_module._SERVE_OP_TIMEOUT_S
         assert control == worker_module._CONTROL_IDLE_TIMEOUT_S
-        assert groups.control is not groups.model
-        assert model < startup < control
+        assert len({groups.control, groups.startup_control, groups.model}) == 3
+        assert model == readiness < startup < control
     finally:
         dist.destroy_process_group()
 

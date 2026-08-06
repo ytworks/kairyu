@@ -53,6 +53,30 @@ def test_native_cuda_graph_without_model_is_rejected_before_import():
 
 
 @pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
+def test_native_auto_graph_defaults_pass_static_preflight(backend):
+    validate_backend_options(backend, {"decode_mode": None})
+    validate_backend_options(backend, {})
+
+
+@pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"cuda_graph_max_batch": 0},
+        {"cuda_graph_max_pages": 0},
+        {"num_pages": 8, "cuda_graph_max_pages": 8},
+        {"cuda_graph_warmup_iters": -1},
+    ],
+)
+def test_native_explicit_graph_limits_validate_in_every_decode_mode(
+    backend,
+    options,
+):
+    with pytest.raises(ValueError, match="cuda_graph"):
+        validate_backend_options(backend, options)
+
+
+@pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
 @pytest.mark.parametrize("mode", ["auto", "vllm", "none"])
 def test_native_generation_config_modes_pass_static_preflight(backend, mode):
     validate_backend_options(backend, {"generation_config": mode})
@@ -182,6 +206,21 @@ def test_attention_dp_cuda_graph_passes_static_preflight() -> None:
             "cuda_graph_max_batch": 8,
             "cuda_graph_max_pages": 512,
             "cuda_graph_warmup_iters": 2,
+        },
+    )
+
+
+def test_attention_dp_graph_pages_may_cover_full_scheduler_namespace() -> None:
+    validate_backend_options(
+        "kairyu",
+        {
+            "model_path": "/models/qwen3-235b",
+            "expert_parallel_size": 4,
+            "expert_parallel_attention_dp": True,
+            "kv_cache_dtype": "bfloat16",
+            "decode_mode": "cuda_graph",
+            "num_pages": 8,
+            "cuda_graph_max_pages": 8,
         },
     )
 

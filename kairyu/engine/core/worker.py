@@ -20,7 +20,10 @@ from threading import Lock
 
 from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
-from kairyu.engine.core.step_executor import GraphDecodeDecision
+from kairyu.engine.core.step_executor import (
+    DecodeGraphCapturePlan,
+    GraphDecodeDecision,
+)
 from kairyu.engine.core.step_input import RequestSnapshot, StateSync, StepDelta
 from kairyu.engine.tokenizer import GrammarVocabulary
 
@@ -116,6 +119,39 @@ class _SamplingOwnershipReply:
 
     rank: int
     row: dict[str, object] | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _CaptureDecodeGraphs:
+    """Startup-only command that warms every rank's configured graph buckets."""
+
+    attention_dp: bool = False
+
+
+@dataclass(frozen=True)
+class _DecodeGraphCapturePlanReply:
+    """Rank-local graph identity gathered before model collectives begin."""
+
+    rank: int
+    plan: DecodeGraphCapturePlan | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _DecodeGraphCapturePreparationReply:
+    """Rank-local ACK after any attention-DP layout queue is armed."""
+
+    rank: int
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _CaptureDecodeGraphsReply:
+    """Rank-local graph warmup result kept on the host control group."""
+
+    rank: int
+    buckets: tuple[int, ...] | None = None
     error: str | None = None
 
 
@@ -367,6 +403,387 @@ def _sampling_ownership_reply(
             rank=rank,
             error=(f"{type(error).__name__}: {error}")[:1024],
         )
+
+
+def _validate_decode_graph_capture_plan(plan: object) -> DecodeGraphCapturePlan:
+    if not isinstance(plan, DecodeGraphCapturePlan):
+        raise RuntimeError(
+            f"runner returned malformed decode-graph capture plan: {plan!r}"
+        )
+    buckets = plan.buckets
+    pending = plan.pending_buckets
+    if (
+        not buckets
+        or any(type(bucket) is not int or bucket < 1 for bucket in buckets)
+        or tuple(sorted(set(buckets))) != buckets
+        or any(type(bucket) is not int for bucket in pending)
+        or tuple(bucket for bucket in buckets if bucket in set(pending)) != pending
+        or type(plan.max_pages) is not int
+        or plan.max_pages < 1
+        or type(plan.scratch_page) is not int
+        or plan.scratch_page < 0
+        or type(plan.capture_model_forward_count) is not int
+        or plan.capture_model_forward_count < 1
+    ):
+        raise RuntimeError(
+            f"runner returned malformed decode-graph capture plan: {plan!r}"
+        )
+    return plan
+
+
+def _decode_graph_capture_plan_reply(
+    control_comm,
+    local_runner,
+) -> _DecodeGraphCapturePlanReply:
+    """Read one rank's immutable graph identity without touching CUDA state."""
+
+    rank = control_comm.rank
+    try:
+        getter = getattr(local_runner, "decode_graph_capture_plan", None)
+        if not callable(getter):
+            raise RuntimeError("runner exposes no decode-graph startup plan")
+        plan = _validate_decode_graph_capture_plan(getter())
+        return _DecodeGraphCapturePlanReply(rank=rank, plan=plan)
+    except BaseException as error:
+        return _DecodeGraphCapturePlanReply(
+            rank=rank,
+            error=(f"{type(error).__name__}: {error}")[:1024],
+        )
+
+
+def _validate_decode_graph_capture_plan_replies(
+    gathered: object,
+    *,
+    world_size: int,
+) -> DecodeGraphCapturePlan:
+    """Reject rank skew before any process enters graph model collectives."""
+
+    if not isinstance(gathered, (tuple, list)) or len(gathered) != world_size:
+        raise RuntimeError(
+            "decode-graph startup preflight gathered malformed rank count: "
+            f"expected {world_size}, got "
+            f"{len(gathered) if isinstance(gathered, (tuple, list)) else type(gathered).__name__}"
+        )
+    by_rank: dict[int, _DecodeGraphCapturePlanReply] = {}
+    for slot, reply in enumerate(gathered):
+        if (
+            not isinstance(reply, _DecodeGraphCapturePlanReply)
+            or type(reply.rank) is not int
+            or not 0 <= reply.rank < world_size
+            or reply.rank in by_rank
+            or (reply.plan is None) == (reply.error is None)
+        ):
+            raise RuntimeError(
+                "decode-graph startup preflight slot "
+                f"{slot} returned a malformed reply: {reply!r}"
+            )
+        by_rank[reply.rank] = reply
+    if set(by_rank) != set(range(world_size)):
+        missing = sorted(set(range(world_size)) - set(by_rank))
+        raise RuntimeError(
+            f"decode-graph startup preflight is incomplete: missing={missing}"
+        )
+    failures = tuple(
+        f"rank {rank}: {by_rank[rank].error}"
+        for rank in range(world_size)
+        if by_rank[rank].error is not None
+    )
+    if failures:
+        raise RuntimeError(
+            "decode-graph startup preflight failures: " + "; ".join(failures)
+        )
+    plans = tuple(by_rank[rank].plan for rank in range(world_size))
+    if len(set(plans)) != 1:
+        raise RuntimeError(
+            "decode-graph startup configuration differs across ranks: "
+            f"{plans!r}"
+        )
+    plan = plans[0]
+    assert plan is not None
+    return plan
+
+
+def _prepare_decode_graph_capture_reply(
+    control_comm,
+    local_runner,
+    plan: DecodeGraphCapturePlan,
+    *,
+    attention_dp: bool,
+) -> _DecodeGraphCapturePreparationReply:
+    """Arm all capture-time MoE layouts, reporting failure before NCCL work."""
+
+    rank = control_comm.rank
+    try:
+        local = _decode_graph_capture_plan_reply(control_comm, local_runner)
+        if local.error is not None or local.plan != plan:
+            raise RuntimeError(
+                "decode-graph startup plan changed after preflight: "
+                f"expected={plan!r}, local={local!r}"
+            )
+        if attention_dp:
+            from kairyu.models.moe_parallel import (
+                assert_attention_dp_layouts_idle,
+                prepare_attention_dp_layouts,
+            )
+
+            model = getattr(local_runner, "_model", None)
+            if model is None:
+                raise RuntimeError(
+                    "attention-DP graph runner exposes no rank-local model"
+                )
+            layouts = tuple(
+                (bucket,) * control_comm.world_size
+                for bucket in plan.pending_buckets
+                for _ in range(plan.capture_model_forward_count)
+            )
+            if layouts:
+                prepare_attention_dp_layouts(model, layouts)
+            else:
+                assert_attention_dp_layouts_idle(model)
+        return _DecodeGraphCapturePreparationReply(rank=rank)
+    except BaseException as error:
+        return _DecodeGraphCapturePreparationReply(
+            rank=rank,
+            error=(f"{type(error).__name__}: {error}")[:1024],
+        )
+
+
+def _validate_decode_graph_capture_preparation_replies(
+    gathered: object,
+    *,
+    world_size: int,
+) -> None:
+    if not isinstance(gathered, (tuple, list)) or len(gathered) != world_size:
+        raise RuntimeError(
+            "decode-graph startup preparation gathered malformed rank count"
+        )
+    by_rank: dict[int, _DecodeGraphCapturePreparationReply] = {}
+    for reply in gathered:
+        if (
+            not isinstance(reply, _DecodeGraphCapturePreparationReply)
+            or type(reply.rank) is not int
+            or not 0 <= reply.rank < world_size
+            or reply.rank in by_rank
+            or (
+                reply.error is not None
+                and (not isinstance(reply.error, str) or not reply.error)
+            )
+        ):
+            raise RuntimeError(
+                "decode-graph startup preparation returned a malformed reply"
+            )
+        by_rank[reply.rank] = reply
+    if set(by_rank) != set(range(world_size)):
+        raise RuntimeError("decode-graph startup preparation ranks are incomplete")
+    failures = tuple(
+        f"rank {rank}: {by_rank[rank].error}"
+        for rank in range(world_size)
+        if by_rank[rank].error is not None
+    )
+    if failures:
+        raise RuntimeError(
+            "decode-graph startup preparation failures: " + "; ".join(failures)
+        )
+
+
+def _capture_decode_graphs_reply(
+    control_comm,
+    local_runner,
+    plan: DecodeGraphCapturePlan,
+    *,
+    attention_dp: bool,
+) -> _CaptureDecodeGraphsReply:
+    """Warm one rank and preserve convergence through the status gather."""
+
+    rank = control_comm.rank
+    try:
+        capture = getattr(local_runner, "capture_decode_graphs", None)
+        if not callable(capture):
+            raise RuntimeError("runner exposes no decode-graph startup warmup")
+        buckets = capture()
+        if (
+            not isinstance(buckets, tuple)
+            or not buckets
+            or any(type(bucket) is not int or bucket < 1 for bucket in buckets)
+            or tuple(sorted(set(buckets))) != buckets
+        ):
+            raise RuntimeError(
+                f"runner returned malformed captured buckets: {buckets!r}"
+            )
+        if buckets != plan.buckets:
+            raise RuntimeError(
+                "runner captured buckets that disagree with preflight: "
+                f"expected={plan.buckets!r}, got={buckets!r}"
+            )
+        after = _decode_graph_capture_plan_reply(control_comm, local_runner)
+        expected_after = DecodeGraphCapturePlan(
+            buckets=plan.buckets,
+            pending_buckets=(),
+            max_pages=plan.max_pages,
+            scratch_page=plan.scratch_page,
+            capture_model_forward_count=plan.capture_model_forward_count,
+        )
+        if after.error is not None or after.plan != expected_after:
+            raise RuntimeError(
+                "decode-graph startup did not finish every planned bucket: "
+                f"expected={expected_after!r}, local={after!r}"
+            )
+        if attention_dp:
+            from kairyu.models.moe_parallel import (
+                assert_attention_dp_layouts_consumed,
+                assert_attention_dp_layouts_idle,
+            )
+
+            model = getattr(local_runner, "_model", None)
+            if plan.pending_buckets:
+                assert_attention_dp_layouts_consumed(model)
+            else:
+                assert_attention_dp_layouts_idle(model)
+        synchronize = getattr(
+            local_runner,
+            "synchronize_decode_graph_capture",
+            None,
+        )
+        if not callable(synchronize):
+            raise RuntimeError(
+                "runner exposes no decode-graph startup synchronization"
+            )
+        synchronize()
+        return _CaptureDecodeGraphsReply(rank=rank, buckets=buckets)
+    except BaseException as error:
+        return _CaptureDecodeGraphsReply(
+            rank=rank,
+            error=(f"{type(error).__name__}: {error}")[:1024],
+        )
+
+
+def _validate_capture_decode_graphs_replies(
+    gathered: object,
+    *,
+    world_size: int,
+) -> tuple[int, ...]:
+    """Require complete, successful, identical startup capture on every rank."""
+
+    if not isinstance(gathered, (tuple, list)) or len(gathered) != world_size:
+        raise RuntimeError(
+            "decode-graph startup gathered malformed rank count: "
+            f"expected {world_size}, got "
+            f"{len(gathered) if isinstance(gathered, (tuple, list)) else type(gathered).__name__}"
+        )
+    by_rank: dict[int, _CaptureDecodeGraphsReply] = {}
+    for slot, reply in enumerate(gathered):
+        if (
+            not isinstance(reply, _CaptureDecodeGraphsReply)
+            or type(reply.rank) is not int
+            or not 0 <= reply.rank < world_size
+            or reply.rank in by_rank
+            or (reply.buckets is None) == (reply.error is None)
+        ):
+            raise RuntimeError(
+                "decode-graph startup gather slot "
+                f"{slot} returned a malformed reply: {reply!r}"
+            )
+        by_rank[reply.rank] = reply
+    missing = sorted(set(range(world_size)) - set(by_rank))
+    if missing:
+        raise RuntimeError(
+            f"decode-graph startup replies are incomplete: missing={missing}"
+        )
+    failures = tuple(
+        f"rank {rank}: {by_rank[rank].error}"
+        for rank in range(world_size)
+        if by_rank[rank].error is not None
+    )
+    if failures:
+        raise RuntimeError(
+            "decode-graph startup rank failures: " + "; ".join(failures)
+        )
+    bucket_sets = tuple(by_rank[rank].buckets for rank in range(world_size))
+    if len(set(bucket_sets)) != 1:
+        raise RuntimeError(
+            "decode-graph startup captured different buckets across ranks: "
+            f"{bucket_sets!r}"
+        )
+    buckets = bucket_sets[0]
+    assert buckets is not None
+    return buckets
+
+
+def _capture_decode_graphs_transaction(
+    control_comm,
+    local_runner,
+    *,
+    attention_dp: bool,
+) -> tuple[int, ...]:
+    """Run the rank-symmetric startup transaction on a bounded host group."""
+
+    plan_reply = _decode_graph_capture_plan_reply(control_comm, local_runner)
+    plan = _validate_decode_graph_capture_plan_replies(
+        control_comm.all_gather(plan_reply),
+        world_size=control_comm.world_size,
+    )
+    preparation = _prepare_decode_graph_capture_reply(
+        control_comm,
+        local_runner,
+        plan,
+        attention_dp=attention_dp,
+    )
+    _validate_decode_graph_capture_preparation_replies(
+        control_comm.all_gather(preparation),
+        world_size=control_comm.world_size,
+    )
+    local = _capture_decode_graphs_reply(
+        control_comm,
+        local_runner,
+        plan,
+        attention_dp=attention_dp,
+    )
+    return _validate_capture_decode_graphs_replies(
+        control_comm.all_gather(local),
+        world_size=control_comm.world_size,
+    )
+
+
+def _bind_ep_model_communicator(
+    deferred_comm,
+    model_comm,
+    startup_control_comm,
+    *,
+    attention_dp: bool,
+) -> None:
+    """Publish model-group ownership before bounded direct-NCCL setup.
+
+    Direct-NCCL construction performs several host collectives before the
+    launcher can report ready, and every live ragged-layout agreement reuses the
+    supplied communicator.  Neither operation may run on the ordinary control
+    group: workers legitimately wait inside that group's receive while idle, so
+    its timeout spans the server lifetime rather than one bounded transaction.
+    Binding first also makes a partially initialized serving communicator
+    reachable by the launcher's non-collective abandon path if setup raises.
+    """
+
+    deferred_comm.bind(model_comm)
+    if attention_dp:
+        model_comm.enable_attention_dp_direct_nccl(startup_control_comm)
+
+
+def _abort_ep_worker_model_communicator(comm, device: str) -> None:
+    """Best-effort non-collective cleanup after an asymmetric worker failure."""
+
+    import contextlib
+
+    import torch
+
+    with contextlib.suppress(Exception):
+        comm.abort_direct_nccl()
+    group = getattr(comm, "group", None)
+    if group is None:
+        return
+    with contextlib.suppress(Exception):
+        backend = group._get_backend(torch.device(device))
+        abort = getattr(backend, "abort", None) or getattr(backend, "_abort", None)
+        if abort is not None:
+            abort()
 
 
 _EP_KERNEL_INVENTORY_FIELDS = frozenset(
@@ -3027,6 +3444,59 @@ class DistTPModelRunner:
     def fatal_error(self) -> Exception | None:
         return self._fatal_error
 
+    @_serialized_protocol
+    def capture_decode_graphs(
+        self,
+        *,
+        attention_dp: bool = False,
+    ) -> tuple[int, ...]:
+        """Warm every rank before the launcher can publish readiness."""
+
+        if type(attention_dp) is not bool:
+            raise TypeError("attention_dp graph warmup flag must be bool")
+        if self._fatal_error is not None:
+            raise RuntimeError(
+                f"{self._parallelism_display} runner is unavailable after a fatal "
+                "step failure"
+            ) from self._fatal_error
+        try:
+            payload = _CaptureDecodeGraphs(attention_dp=attention_dp)
+            delivered = self._broadcast_control(payload)
+            if delivered != payload:
+                raise RuntimeError(
+                    "decode-graph startup broadcast returned a malformed payload"
+                )
+            return _capture_decode_graphs_transaction(
+                self._control_comm,
+                self._local,
+                attention_dp=attention_dp,
+            )
+        except Exception as error:
+            self._fatal_error = error
+            raise
+
+    def decode_graph_metadata(self) -> dict[str, object]:
+        """Read rank 0 counters without a collective or protocol-lock wait.
+
+        The in-process runner exposes the same lock-free diagnostic snapshot.
+        Startup capture guarantees the bucket set no longer mutates while
+        serving; integer dispatch counters are safe to sample between Python
+        bytecodes.  Taking ``_protocol_lock`` here would let a metrics scrape or
+        process-wire event wait behind later pipelined inference and delay TTFT.
+        """
+
+        getter = getattr(self._local, "decode_graph_metadata", None)
+        if not callable(getter):
+            raise RuntimeError(
+                f"{self._parallelism_display} runner exposes no graph metadata"
+            )
+        metadata = getter()
+        if not isinstance(metadata, Mapping):
+            raise RuntimeError(
+                f"{self._parallelism_display} runner returned malformed graph metadata"
+            )
+        return dict(metadata)
+
     def _dram_kv_collect(self, payload: _DramKVControl) -> tuple[_DramKVAck, ...]:
         """Run one already-serialized all-rank tier transaction."""
         if self._fatal_error is not None:
@@ -5199,6 +5669,13 @@ def worker_step_loop(
                 )
                 control_comm.all_gather(local)
                 continue
+            if isinstance(payload, _CaptureDecodeGraphs):
+                _capture_decode_graphs_transaction(
+                    control_comm,
+                    local_runner,
+                    attention_dp=payload.attention_dp,
+                )
+                continue
             if isinstance(payload, _EPKernelInventoryProbe):
                 local = _ep_kernel_inventory_reply(control_comm, local_runner)
                 control_comm.all_gather(local)
@@ -5386,17 +5863,20 @@ class _DeferredComm:
 
 @dataclass(frozen=True)
 class ServingGroups:
-    """Operational groups with control and model collectives kept disjoint.
+    """Operational groups with idle, readiness, and model work disjoint.
 
     ``broadcast_object_list`` is not one NCCL operation: it broadcasts metadata
     and payload tensors, then receivers copy the payload back to the host before
     deserializing it.  A source rank can therefore enqueue the following model
     all-reduce while peers are still completing the object broadcast.  Keeping
     the Python control protocol on gloo makes that hand-off blocking and leaves
-    the NCCL group with tensor collectives only.
+    the NCCL group with tensor collectives only.  Startup graph status uses a
+    second Gloo group with the same fail-fast bound as model work; the ordinary
+    control group must remain able to wait for traffic indefinitely.
     """
 
     control: object
+    startup_control: object
     model: object
 
 
@@ -5420,14 +5900,18 @@ def serving_groups(
     control_timeout_s: float = _CONTROL_IDLE_TIMEOUT_S,
     model_timeout_s: float = _SERVE_OP_TIMEOUT_S,
 ) -> ServingGroups:
-    """Create control/model groups in the same order on every rank.
+    """Create idle-control/readiness/model groups in the same rank order.
 
     The control timeout must cover the server's idle lifetime because workers
-    wait *inside* its receive. The model group has no pending operation while
-    idle, so it keeps the short fail-fast bound.
+    wait *inside* its receive. Readiness and model groups have no pending
+    operation while idle, so both keep the short fail-fast bound.
     """
     return ServingGroups(
         control=serving_group("gloo", timeout_s=control_timeout_s),
+        startup_control=serving_group(
+            "gloo",
+            timeout_s=model_timeout_s,
+        ),
         model=serving_group(model_backend, timeout_s=model_timeout_s),
     )
 
@@ -5859,7 +6343,14 @@ def _tp_worker_entry(
     groups = serving_groups(placement.backend)
     comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
     control_comm = TorchDistCommunicator(group=groups.control)
+    startup_control_comm = TorchDistCommunicator(group=groups.startup_control)
     try:
+        if graph_scratch_page is not None:
+            _capture_decode_graphs_transaction(
+                startup_control_comm,
+                runner,
+                attention_dp=False,
+            )
         worker_step_loop(control_comm, runner, comm)
     finally:
         import torch.distributed as dist
@@ -5876,6 +6367,7 @@ def _tp_worker_entry(
             torch.cuda.synchronize()
             comm.barrier()
         dist.destroy_process_group(comm.group)
+        dist.destroy_process_group(startup_control_comm.group)
         dist.destroy_process_group(control_comm.group)
         dist.destroy_process_group()
 
@@ -5968,33 +6460,56 @@ def _ep_worker_entry(
     )
     groups = serving_groups(placement.backend)
     control_comm = TorchDistCommunicator(group=groups.control)
+    startup_control_comm = TorchDistCommunicator(group=groups.startup_control)
     model_comm = TorchDistCommunicator(group=groups.model, device=placement.device)
-    if attention_dp:
-        model_comm.enable_attention_dp_direct_nccl(control_comm)
-    comm.bind(model_comm)
+    clean_shutdown = False
     try:
+        _bind_ep_model_communicator(
+            comm,
+            model_comm,
+            startup_control_comm,
+            attention_dp=attention_dp,
+        )
+        if decode_mode == "cuda_graph":
+            _capture_decode_graphs_transaction(
+                startup_control_comm,
+                runner,
+                attention_dp=attention_dp,
+            )
         worker_step_loop(
             control_comm,
             runner,
             comm,
             parallelism_prefix="EP",
         )
+        clean_shutdown = True
     finally:
         import contextlib
 
         import torch.distributed as dist
 
         invalidate = getattr(runner, "invalidate_graphs", None)
+        invalidation_error: Exception | None = None
         if callable(invalidate):
-            invalidate()
-        if placement.backend == "nccl":
-            torch.cuda.synchronize()
-            comm.barrier()
-        with contextlib.suppress(Exception):
-            comm.close_direct_nccl()
-        dist.destroy_process_group(comm.group)
-        dist.destroy_process_group(control_comm.group)
-        dist.destroy_process_group()
+            try:
+                invalidate()
+            except Exception as error:
+                if clean_shutdown:
+                    invalidation_error = error
+        if not clean_shutdown:
+            _abort_ep_worker_model_communicator(comm, placement.device)
+        else:
+            if placement.backend == "nccl":
+                torch.cuda.synchronize()
+                comm.barrier()
+            with contextlib.suppress(Exception):
+                comm.close_direct_nccl()
+            dist.destroy_process_group(comm.group)
+            dist.destroy_process_group(startup_control_comm.group)
+            dist.destroy_process_group(control_comm.group)
+            dist.destroy_process_group()
+            if invalidation_error is not None:
+                raise invalidation_error
 
 
 class DistTPLauncher:
@@ -6158,7 +6673,16 @@ class DistTPLauncher:
             groups = serving_groups(placement.backend)
             self._comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
             self._control_comm = TorchDistCommunicator(group=groups.control)
+            self._startup_control_comm = TorchDistCommunicator(
+                group=groups.startup_control
+            )
             self.runner = DistTPModelRunner(self._control_comm, runner, self._comm)
+            if graph_scratch_page is not None:
+                _capture_decode_graphs_transaction(
+                    self._startup_control_comm,
+                    runner,
+                    attention_dp=False,
+                )
         except BaseException:
             self._abandon_start()
             raise
@@ -6183,6 +6707,19 @@ class DistTPLauncher:
 
         import torch.distributed as dist
 
+        # A rank can finish startup capture successfully while a peer reports
+        # a final capture/sync/layout failure.  Drop rank 0's graph objects
+        # before aborting their NCCL communicator: graph executables retain
+        # communicator registrations even though the distributed runner has
+        # already been marked fatal.  Reach through the EP wrapper deliberately
+        # here; its public invalidation guard protects live serving, whereas an
+        # abandoned launcher can never serve another step.
+        distributed_runner = getattr(self, "runner", None)
+        local_runner = getattr(distributed_runner, "_local", None)
+        invalidate = getattr(local_runner, "invalidate_graphs", None)
+        if callable(invalidate):
+            with contextlib.suppress(Exception):
+                invalidate()
         if dist.is_initialized():
             with contextlib.suppress(Exception):
                 self._abort_communicator()
@@ -6290,6 +6827,7 @@ class DistTPLauncher:
             # order on every rank.  Reverse creation order keeps the graph-owning
             # NCCL subgroup ahead of the gloo control and startup groups.
             dist.destroy_process_group(self._comm.group)
+            dist.destroy_process_group(self._startup_control_comm.group)
             dist.destroy_process_group(self._control_comm.group)
             dist.destroy_process_group()
         self._ctx.join()
@@ -6370,10 +6908,10 @@ class DistEPLauncher(_DistLauncherLifecycle):
                     f"got {graph_scratch_page!r}, expected "
                     f"{expected_graph_scratch}"
                 )
-            if graph_max_pages >= num_pages:
+            if graph_max_pages > num_pages:
                 raise ValueError(
-                    "request-owned attention-DP graph_max_pages must be smaller "
-                    "than scheduler-visible num_pages"
+                    "request-owned attention-DP graph_max_pages must not exceed "
+                    "scheduler-visible num_pages"
                 )
         self.expert_parallel_size = expert_parallel_size
         self.attention_dp = attention_dp
@@ -6477,13 +7015,19 @@ class DistEPLauncher(_DistLauncherLifecycle):
             )
             groups = serving_groups(placement.backend)
             self._control_comm = TorchDistCommunicator(group=groups.control)
+            self._startup_control_comm = TorchDistCommunicator(
+                group=groups.startup_control
+            )
             model_comm = TorchDistCommunicator(
                 group=groups.model,
                 device=placement.device,
             )
-            if attention_dp:
-                model_comm.enable_attention_dp_direct_nccl(self._control_comm)
-            self._comm.bind(model_comm)
+            _bind_ep_model_communicator(
+                self._comm,
+                model_comm,
+                self._startup_control_comm,
+                attention_dp=attention_dp,
+            )
             self.runner = DistEPModelRunner(
                 self._control_comm,
                 runner,
@@ -6498,6 +7042,12 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 graph_max_pages=graph_max_pages,
                 graph_warmup_iters=graph_warmup_iters,
             )
+            if decode_mode == "cuda_graph":
+                _capture_decode_graphs_transaction(
+                    self._startup_control_comm,
+                    runner,
+                    attention_dp=attention_dp,
+                )
         except BaseException:
             self._abandon_start()
             raise

@@ -260,6 +260,52 @@ class ReplicaPool:
     def replica_ids(self) -> tuple[str, ...]:
         return tuple(self._entries)
 
+    def decode_graph_metric_sources_snapshot(
+        self,
+    ) -> tuple[tuple[str, str, int | str | None, dict[str, object] | None], ...]:
+        """Return generation-stable CUDA graph metric sources in this pool.
+
+        The serve metrics collector owns counter continuity across backend
+        restarts and membership changes.  Keeping the replica generation next
+        to each snapshot lets it distinguish a restarted/re-added backend from
+        the prior process without exposing mutable pool entries.  A source that
+        temporarily fails to answer remains present with a ``None`` snapshot so
+        one failed scrape cannot retire its last observed counter value.
+        """
+
+        sources: list[
+            tuple[str, str, int | str | None, dict[str, object] | None]
+        ] = []
+        for replica_id, entry in tuple(self._entries.items()):
+            getter = getattr(entry.backend, "decode_graph_metadata_snapshot", None)
+            if not callable(getter):
+                continue
+            generation_getter = getattr(
+                entry.backend,
+                "decode_graph_metric_generation_snapshot",
+                None,
+            )
+            service_generation: int | str | None = None
+            if callable(generation_getter):
+                service_generation = generation_getter()
+                if (
+                    service_generation is not None
+                    and type(service_generation) not in (int, str)
+                ):
+                    raise TypeError("invalid graph metric service generation")
+            try:
+                snapshot = getter()
+            except Exception:
+                snapshot = None
+            if isinstance(snapshot, Mapping):
+                snapshot = dict(snapshot)
+            else:
+                snapshot = None
+            sources.append(
+                (replica_id, entry.generation, service_generation, snapshot)
+            )
+        return tuple(sources)
+
     def add_replica(
         self,
         replica_id: str,

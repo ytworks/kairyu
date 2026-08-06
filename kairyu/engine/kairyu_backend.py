@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import weakref
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -76,6 +77,88 @@ _DECODE_MODES = frozenset({"eager", "cuda_graph"})
 _EXPERT_PARALLEL_SIZES = frozenset({1, 2, 4})
 logger = logging.getLogger(__name__)
 _TokenizerWorkT = TypeVar("_TokenizerWorkT")
+
+
+def _resolve_decode_mode(
+    requested: str | None,
+    *,
+    model_path: str | None,
+    runner: object | None,
+    tensor_parallel_size: int,
+    pd_separation: bool,
+    expert_parallel: bool,
+    expert_parallel_attention_dp: bool,
+) -> str:
+    """Resolve the hardware-aware default without changing explicit policy.
+
+    CUDA graphs are the normal dense-model serving path.  Model-less/custom,
+    P-D and replicated-attention EP topologies retain eager execution because
+    they either have no capturable model or own a narrower execution contract.
+    A model capability gap also resolves to eager only for this automatic
+    policy; an explicit ``cuda_graph`` request remains fail-closed later.
+    """
+
+    if requested is not None:
+        if requested not in _DECODE_MODES:
+            known = ", ".join(sorted(_DECODE_MODES))
+            raise ValueError(
+                f"unknown decode_mode {requested!r}; choose one of: {known}"
+            )
+        return requested
+    if (
+        model_path is None
+        or runner is not None
+        or (
+            tensor_parallel_size > 1
+            and bool(os.environ.get("KAIRYU_TP_FORCE_CPU"))
+        )
+        or pd_separation
+        or (expert_parallel and not expert_parallel_attention_dp)
+    ):
+        return "eager"
+    config_path = Path(model_path) / "config.json"
+    if config_path.is_file():
+        raw_config = json.loads(config_path.read_text())
+        from kairyu.models.config import parse_model_config
+
+        if parse_model_config(raw_config).is_mla:
+            return "eager"
+    from kairyu.engine.core.hw_profile import probe
+
+    return "cuda_graph" if probe().arch == "cuda" else "eager"
+
+
+def _default_cuda_graph_max_pages(
+    *,
+    num_pages: int,
+    page_size: int,
+    max_model_len: int | None,
+    model_path: str | None,
+    graph_page_capacity: int,
+) -> int:
+    """Cover the configured context, bounded by physically usable KV pages."""
+
+    if type(page_size) is not int or page_size < 1:
+        raise ValueError("page_size must be a positive integer")
+    if type(num_pages) is not int or num_pages < 1:
+        raise ValueError("num_pages must be a positive integer")
+    if (
+        type(graph_page_capacity) is not int
+        or not 1 <= graph_page_capacity <= num_pages
+    ):
+        raise ValueError("graph_page_capacity must fit the scheduler KV namespace")
+    context_tokens = max_model_len
+    if context_tokens is None and model_path is not None:
+        config_path = Path(model_path) / "config.json"
+        if config_path.is_file():
+            raw = json.loads(config_path.read_text())
+            configured = raw.get("max_position_embeddings")
+            if type(configured) is int and configured > 0:
+                context_tokens = configured
+    if context_tokens is None:
+        context_tokens = graph_page_capacity * page_size
+    required = (context_tokens + page_size - 1) // page_size
+    return min(required, graph_page_capacity)
 
 
 @dataclass
@@ -347,9 +430,9 @@ def build_engine_loop(
     pd_decode_device: str | None = None,
     pd_defer_handoff: bool = True,
     pipeline_depth: int = 1,
-    decode_mode: str = "eager",
-    cuda_graph_max_batch: int = 8,
-    cuda_graph_max_pages: int = 512,
+    decode_mode: str | None = None,
+    cuda_graph_max_batch: int | None = None,
+    cuda_graph_max_pages: int | None = None,
     cuda_graph_warmup_iters: int = 3,
     kv_cache_dtype: str = "auto",
     dram_kv_tier_capacity_pages: int = 0,
@@ -398,32 +481,96 @@ def build_engine_loop(
         raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
     if speculative is not None and speculative != "ngram":
         raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
-    if decode_mode not in _DECODE_MODES:
-        known = ", ".join(sorted(_DECODE_MODES))
-        raise ValueError(f"unknown decode_mode {decode_mode!r}; choose one of: {known}")
     if runner is not None and model_path is None and tensor_parallel_size > 1:
         raise ValueError(
             "custom runner with tensor_parallel_size > 1 is unsupported: "
             "tensor parallelism needs one distinct rank-local runner per rank; "
             "use model_path for real TP or set tensor_parallel_size=1"
         )
+    if model_path is not None and runner is not None:
+        raise ValueError("model_path and runner are mutually exclusive")
+    decode_mode = _resolve_decode_mode(
+        decode_mode,
+        model_path=model_path,
+        runner=runner,
+        tensor_parallel_size=tensor_parallel_size,
+        pd_separation=pd_separation,
+        expert_parallel=expert_parallel,
+        expert_parallel_attention_dp=expert_parallel_attention_dp,
+    )
     graph_decode = decode_mode == "cuda_graph"
-    if graph_decode:
-        if model_path is None:
-            raise ValueError("decode_mode='cuda_graph' needs a real model_path")
-        if cuda_graph_max_batch < 1 or cuda_graph_max_pages < 1:
-            raise ValueError("cuda_graph_max_batch and cuda_graph_max_pages must be >= 1")
-        if cuda_graph_warmup_iters < 0:
-            raise ValueError("cuda_graph_warmup_iters must be >= 0")
-        if num_pages < 2:
-            raise ValueError("CUDA graph decode needs at least 2 KV pages")
-        if cuda_graph_max_pages >= num_pages:
+    graph_scratch_outside_scheduler = (
+        expert_parallel and expert_parallel_attention_dp
+    )
+    graph_page_capacity = num_pages - int(
+        not graph_scratch_outside_scheduler
+    )
+    if (
+        cuda_graph_max_batch is not None
+        and (
+            type(cuda_graph_max_batch) is not int
+            or cuda_graph_max_batch < 1
+        )
+    ):
+        raise ValueError("cuda_graph_max_batch must be a positive integer")
+    if (
+        cuda_graph_max_pages is not None
+        and (
+            type(cuda_graph_max_pages) is not int
+            or cuda_graph_max_pages < 1
+        )
+    ):
+        raise ValueError("cuda_graph_max_pages must be a positive integer")
+    if (
+        cuda_graph_max_pages is not None
+        and cuda_graph_max_pages > graph_page_capacity
+    ):
+        if not graph_scratch_outside_scheduler:
             raise ValueError(
                 f"cuda_graph_max_pages={cuda_graph_max_pages} must be smaller "
                 f"than num_pages={num_pages} so one page can remain scratch"
             )
-    if model_path is not None and runner is not None:
-        raise ValueError("model_path and runner are mutually exclusive")
+        raise ValueError(
+            f"cuda_graph_max_pages={cuda_graph_max_pages} exceeds graph page "
+            f"capacity={graph_page_capacity} for this topology"
+        )
+    if type(cuda_graph_warmup_iters) is not int or cuda_graph_warmup_iters < 0:
+        raise ValueError("cuda_graph_warmup_iters must be >= 0")
+    if graph_decode:
+        if model_path is None:
+            raise ValueError("decode_mode='cuda_graph' needs a real model_path")
+        if graph_page_capacity < 1:
+            raise ValueError("CUDA graph decode needs at least 2 KV pages")
+        if cuda_graph_max_batch is None:
+            cuda_graph_max_batch = max_num_seqs
+        assert cuda_graph_max_batch is not None
+        if cuda_graph_max_pages is None:
+            cuda_graph_max_pages = _default_cuda_graph_max_pages(
+                num_pages=num_pages,
+                page_size=page_size,
+                max_model_len=max_model_len,
+                model_path=model_path,
+                graph_page_capacity=graph_page_capacity,
+            )
+        assert cuda_graph_max_pages is not None
+        if cuda_graph_max_pages > graph_page_capacity:
+            if not graph_scratch_outside_scheduler:
+                raise ValueError(
+                    f"cuda_graph_max_pages={cuda_graph_max_pages} must be smaller "
+                    f"than num_pages={num_pages} so one page can remain scratch"
+                )
+            raise ValueError(
+                f"cuda_graph_max_pages={cuda_graph_max_pages} exceeds graph "
+                f"page capacity={graph_page_capacity} for this topology"
+            )
+    else:
+        # Keep downstream builder arguments concrete even though eager paths
+        # never allocate graph state.  Explicit values remain available for a
+        # later operator-selected mode without changing their meaning.
+        if cuda_graph_max_batch is None:
+            cuda_graph_max_batch = max_num_seqs
+        if cuda_graph_max_pages is None:
+            cuda_graph_max_pages = 1
     kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
     if kv_cache_dtype != "auto" and model_path is None:
         raise ValueError(
@@ -708,6 +855,13 @@ def build_engine_loop(
             cache=cache,
             **graph_options,
         )
+        # Model weights and the final attention backend are now resident.  In
+        # the single-rank path there is no communicator rebinding left to do,
+        # so capture every configured bucket before this builder can return to
+        # the server and advertise readiness.
+        if graph_decode:
+            runner.capture_decode_graphs()
+            runner.synchronize_decode_graph_capture()
         if dram_kv_binding is not None:
             runner.dram_kv_tier = dram_kv_binding.tier
             runner.dram_kv_policy = dram_kv_binding.policy
@@ -1082,9 +1236,9 @@ class KairyuBackend:
         model_path: str | None = None,
         pd_separation: bool = False,
         pipeline_depth: int = 1,
-        decode_mode: str = "eager",
-        cuda_graph_max_batch: int = 8,
-        cuda_graph_max_pages: int = 512,
+        decode_mode: str | None = None,
+        cuda_graph_max_batch: int | None = None,
+        cuda_graph_max_pages: int | None = None,
         cuda_graph_warmup_iters: int = 3,
         pd_prefill_device: str | None = None,
         pd_decode_device: str | None = None,
@@ -1187,6 +1341,20 @@ class KairyuBackend:
             metadata = getter()
             return dict(metadata) if isinstance(metadata, Mapping) else None
         metadata = self.parallelism_metadata
+        return dict(metadata) if isinstance(metadata, Mapping) else None
+
+    def decode_graph_metadata_snapshot(self) -> dict[str, object] | None:
+        """Return live structural graph counters for metrics/introspection."""
+
+        runner = getattr(self._loop, "_runner", None)
+        getter = getattr(runner, "decode_graph_metadata", None)
+        if not callable(getter):
+            return None
+        try:
+            metadata = getter()
+        except Exception:
+            # Metrics and /backends must not turn a diagnostic gap into a 500.
+            return None
         return dict(metadata) if isinstance(metadata, Mapping) else None
 
     def tokenize_loglikelihood(

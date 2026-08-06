@@ -149,6 +149,139 @@ class _SchedulerCollector:
         yield high_watermark
 
 
+class _CudaGraphCollector:
+    """Monotonic scrape-time counters from native model runners and pools."""
+
+    def __init__(self) -> None:
+        self._engines: dict[str, object] = {}
+        self._source_counters: dict[
+            str,
+            dict[tuple[str, str, str, str], tuple[int, int]],
+        ] = {}
+        self._retired_totals: dict[str, int] = {}
+        self._ever_supported: set[str] = set()
+
+    def add(self, name: str, engine: object) -> None:
+        if callable(
+            getattr(engine, "decode_graph_metadata_snapshot", None)
+        ) or callable(getattr(engine, "decode_graph_metric_sources_snapshot", None)):
+            self._engines[name] = engine
+
+    @staticmethod
+    def _snapshots(
+        engine: object,
+    ) -> tuple[
+        tuple[tuple[str, str, str, str], dict[str, object] | None], ...
+    ] | None:
+        pool_getter = getattr(engine, "decode_graph_metric_sources_snapshot", None)
+        if callable(pool_getter):
+            try:
+                rows = pool_getter()
+            except Exception:
+                return None
+            if not isinstance(rows, tuple):
+                return None
+            snapshots: list[
+                tuple[tuple[str, str, str, str], dict[str, object] | None]
+            ] = []
+            for row in rows:
+                if (
+                    not isinstance(row, tuple)
+                    or len(row) != 4
+                    or not isinstance(row[0], str)
+                    or not isinstance(row[1], str)
+                    or (row[2] is not None and type(row[2]) not in (int, str))
+                    or (row[3] is not None and not isinstance(row[3], dict))
+                ):
+                    return None
+                snapshots.append(
+                    (
+                        ("replica", row[0], row[1], repr(row[2])),
+                        row[3],
+                    )
+                )
+            return tuple(snapshots)
+
+        getter = getattr(engine, "decode_graph_metadata_snapshot", None)
+        if not callable(getter):
+            return ()
+        generation_getter = getattr(
+            engine,
+            "decode_graph_metric_generation_snapshot",
+            None,
+        )
+        try:
+            service_generation = (
+                generation_getter() if callable(generation_getter) else None
+            )
+            if (
+                service_generation is not None
+                and type(service_generation) not in (int, str)
+            ):
+                return None
+            snapshot = getter()
+        except Exception:
+            return None
+        if not isinstance(snapshot, dict):
+            snapshot = None
+        return (
+            (
+                ("engine", "", str(id(engine)), repr(service_generation)),
+                snapshot,
+            ),
+        )
+
+    def collect(self) -> Iterator[Metric]:
+        fallbacks = CounterMetricFamily(
+            "kairyu_cuda_graph_eager_fallbacks",
+            "Decode batches that exceeded a configured CUDA graph shape",
+            labels=["model"],
+        )
+        for model, engine in self._engines.items():
+            snapshots = self._snapshots(engine)
+            states = self._source_counters.setdefault(model, {})
+            if snapshots is None:
+                if model in self._ever_supported:
+                    fallbacks.add_metric(
+                        [model],
+                        self._retired_totals.get(model, 0)
+                        + sum(offset + raw for raw, offset in states.values()),
+                    )
+                continue
+
+            active_sources: set[tuple[str, str, str, str]] = set()
+            for source, snapshot in snapshots:
+                active_sources.add(source)
+                if snapshot is None:
+                    continue
+                count = snapshot.get("cuda_graph_eager_fallbacks")
+                if type(count) is not int or count < 0:
+                    continue
+                self._ever_supported.add(model)
+                prior = states.get(source)
+                if prior is None:
+                    states[source] = (count, 0)
+                    continue
+                prior_raw, offset = prior
+                if count < prior_raw:
+                    offset += prior_raw
+                states[source] = (count, offset)
+
+            retired = self._retired_totals.get(model, 0)
+            for source in tuple(states):
+                if source in active_sources:
+                    continue
+                raw, offset = states.pop(source)
+                retired += offset + raw
+            self._retired_totals[model] = retired
+            if model in self._ever_supported:
+                fallbacks.add_metric(
+                    [model],
+                    retired + sum(offset + raw for raw, offset in states.values()),
+                )
+        yield fallbacks
+
+
 class _TenantLimiterCollector:
     """Scrape-time view of reservations not yet settled or consumed."""
 
@@ -245,9 +378,11 @@ class ServerMetrics:
         )
         self._pool_collector = _PoolCollector()
         self._scheduler_collector = _SchedulerCollector()
+        self._cuda_graph_collector = _CudaGraphCollector()
         self._tenant_limiter_collector = _TenantLimiterCollector()
         self.registry.register(self._pool_collector)
         self.registry.register(self._scheduler_collector)
+        self.registry.register(self._cuda_graph_collector)
         self.registry.register(self._tenant_limiter_collector)
 
     def track_pool(self, name: str, pool: ReplicaPool) -> None:
@@ -255,6 +390,9 @@ class ServerMetrics:
 
     def track_scheduler(self, name: str, engine: object) -> None:
         self._scheduler_collector.add(name, engine)
+
+    def track_cuda_graph(self, name: str, engine: object) -> None:
+        self._cuda_graph_collector.add(name, engine)
 
     def track_tenant_limiter(self, limiter: object) -> None:
         self._tenant_limiter_collector.set(limiter)

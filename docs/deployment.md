@@ -171,19 +171,32 @@ engines:
       max_num_seqs: 16       # bound active sequences
       priority_age_s: 60.0   # null = FIFO; 0 = strict priority; >0 = aging
       pipeline_depth: 2        # unified schedule/device overlap; default 1
-      decode_mode: cuda_graph   # explicit opt-in; eager is the safe default
-      cuda_graph_max_batch: 8
-      cuda_graph_max_pages: 64
+      # decode_mode: eager      # optional rollback; supported CUDA defaults to graph
+      # cuda_graph_max_batch: 8 # optional override; default max_num_seqs
+      # cuda_graph_max_pages: 64 # optional override; default context/page_size
 ```
 
 `pipeline_depth: 1` reproduces the synchronous serving path. Depth 2 or greater
 submits immutable request snapshots ahead of the oldest commit while preserving
 the same streaming, stop, grammar, speculative, preemption, and chunked-prefill
-commit path. CUDA-graph decode reserves one KV page for padding rows and captures buckets up
-to the configured batch and page-table limits. Oversized decode steps fall back
-to eager execution. Invalid modes, CPU placement, unsupported attention/model
-paths, or a page limit that leaves no scratch page fail during startup rather
-than after traffic arrives.
+commit path. A graph-capable real CUDA model defaults to CUDA-graph decode;
+CPU, custom/toy, P-D, replicated-attention EP, and current MLA paths default to
+eager. Explicit `decode_mode: eager` is the rollback and an explicit
+`cuda_graph` request remains fail-closed when unsupported. The default graph
+batch tracks `max_num_seqs`; the page width covers `max_model_len / page_size`
+(or all usable KV pages when no context limit is set). Dense and TP execution
+reserve one scheduler KV page for padding writes; attention-DP keeps its graph
+scratch outside the scheduler namespace and can cover every scheduler page.
+Every bucket is captured after weights and serving communicators are ready but
+before readiness is published. Distributed startup agreement and attention-DP
+direct-NCCL/layout agreement use a bounded host control group distinct from the
+long-idle request protocol.
+Oversized live steps fall back to eager and increment
+`kairyu_cuda_graph_eager_fallbacks_total{model=...}`. Local replica pools expose
+the monotonic sum across replica generations, including child restarts and
+membership replacement. Invalid modes, explicit
+CPU graph placement, unsupported attention/model paths, or a page limit that
+leaves no scratch page fail during startup rather than after traffic arrives.
 
 For native `kairyu` and `kairyu-proc` engines, `generation_config: auto`
 loads `temperature`, `top_p`, `top_k`, `min_p`, and `repetition_penalty` from

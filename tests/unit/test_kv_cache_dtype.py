@@ -248,6 +248,7 @@ def test_single_rank_passes_resolved_dtype_to_pool(monkeypatch):
         model_path="/model",
         tokenizer=ToyTokenizer(),
         kv_cache_dtype="bfloat16",
+        decode_mode="eager",
     )
 
     assert seen["pool"]["dtype"] is torch.bfloat16

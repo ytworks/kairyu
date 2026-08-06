@@ -4,11 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 from types import MethodType, SimpleNamespace
 
 import pytest
+import torch
 
 from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
+from kairyu.engine.core.step_executor import DecodeGraphCapturePlan
 from kairyu.engine.core.step_input import RequestSnapshot
 
 
@@ -52,6 +54,33 @@ class _AttentionDPRunner:
 
     def invalidate_graphs(self) -> None:
         self.graph_invalidations += 1
+
+
+class _AttentionDPGraphWarmupRunner(_AttentionDPRunner):
+    def __init__(self, rank: int) -> None:
+        super().__init__(rank)
+        self.buckets = (1, 2, 4, 8)
+        self.pending = self.buckets
+        self.capture_calls = 0
+        self.synchronize_calls = 0
+
+    def decode_graph_capture_plan(self) -> DecodeGraphCapturePlan:
+        return DecodeGraphCapturePlan(
+            buckets=self.buckets,
+            pending_buckets=self.pending,
+            max_pages=32,
+            scratch_page=74,
+            capture_model_forward_count=3,
+        )
+
+    def capture_decode_graphs(self) -> tuple[int, ...]:
+        if self.pending:
+            self.capture_calls += 1
+        self.pending = ()
+        return self.buckets
+
+    def synchronize_decode_graph_capture(self) -> None:
+        self.synchronize_calls += 1
 
 
 class _MalformedPacketRunner(_AttentionDPRunner):
@@ -485,6 +514,203 @@ def test_attention_dp_accepts_fully_reserved_cuda_graph_envelope() -> None:
         graph_max_pages=32,
         graph_warmup_iters=2,
     )
+
+
+def test_attention_dp_direct_nccl_binds_before_bounded_startup_setup() -> None:
+    calls: list[tuple[str, object]] = []
+    deferred = SimpleNamespace(
+        bind=lambda target: calls.append(("bind", target)),
+    )
+    model = SimpleNamespace(
+        enable_attention_dp_direct_nccl=lambda control: calls.append(
+            ("enable", control)
+        )
+    )
+    idle_control = object()
+    startup_control = object()
+
+    worker_module._bind_ep_model_communicator(
+        deferred,
+        model,
+        startup_control,
+        attention_dp=True,
+    )
+
+    assert calls == [("bind", model), ("enable", startup_control)]
+    assert calls != [("bind", model), ("enable", idle_control)]
+
+    worker_module._bind_ep_model_communicator(
+        deferred,
+        model,
+        startup_control,
+        attention_dp=False,
+    )
+    assert calls == [
+        ("bind", model),
+        ("enable", startup_control),
+        ("bind", model),
+    ]
+
+
+def test_attention_dp_setup_failure_keeps_model_group_owned_for_abort() -> None:
+    serving_group = object()
+    deferred = worker_module._DeferredComm(SimpleNamespace(group="startup"))
+
+    class _BrokenModelComm:
+        group = serving_group
+
+        @staticmethod
+        def enable_attention_dp_direct_nccl(_control) -> None:
+            raise RuntimeError("injected direct-NCCL setup failure")
+
+    with pytest.raises(RuntimeError, match="setup failure"):
+        worker_module._bind_ep_model_communicator(
+            deferred,
+            _BrokenModelComm(),
+            object(),
+            attention_dp=True,
+        )
+
+    assert deferred.group is serving_group
+
+
+def test_failed_ep_worker_setup_aborts_without_a_graceful_barrier() -> None:
+    events: list[str] = []
+
+    class _Backend:
+        @staticmethod
+        def abort() -> None:
+            events.append("abort-model-group")
+
+    class _Group:
+        @staticmethod
+        def _get_backend(device):
+            assert str(device) == "cuda:3"
+            return _Backend()
+
+    comm = SimpleNamespace(
+        group=_Group(),
+        abort_direct_nccl=lambda: events.append("abort-direct-nccl"),
+        barrier=lambda: events.append("graceful-barrier"),
+    )
+
+    worker_module._abort_ep_worker_model_communicator(comm, "cuda:3")
+
+    assert events == ["abort-direct-nccl", "abort-model-group"]
+
+
+def test_attention_dp_launcher_allows_graph_pages_equal_scheduler_capacity(
+    monkeypatch,
+) -> None:
+    class ReachedSpawn(RuntimeError):
+        pass
+
+    monkeypatch.setattr(
+        worker_module,
+        "_ep_placement",
+        lambda _size, rank: SimpleNamespace(
+            backend="nccl",
+            device=f"cuda:{rank}",
+            dtype=torch.bfloat16,
+        ),
+    )
+    monkeypatch.setattr(
+        torch.multiprocessing,
+        "spawn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ReachedSpawn()),
+    )
+
+    with pytest.raises(ReachedSpawn):
+        worker_module.DistEPLauncher(
+            "/model",
+            4,
+            64,
+            16,
+            vocab=["token"],
+            attention_dp=True,
+            pipeline_depth=5,
+            decode_mode="cuda_graph",
+            kv_cache_dtype="bfloat16",
+            graph_scratch_page=74,
+            graph_max_batch=8,
+            graph_max_pages=64,
+            graph_warmup_iters=2,
+        )
+
+
+def test_attention_dp_startup_prepares_every_capture_forward_on_every_rank(
+    monkeypatch,
+) -> None:
+    from kairyu.models import moe_parallel
+
+    def prepare(model, layouts):
+        assert not hasattr(model, "startup_layouts")
+        model.startup_layouts = layouts
+        model.prepared.append(layouts)
+
+    def consumed(model):
+        assert hasattr(model, "startup_layouts")
+        del model.startup_layouts
+
+    def idle(model):
+        assert not hasattr(model, "startup_layouts")
+        model.idle_checks = getattr(model, "idle_checks", 0) + 1
+
+    monkeypatch.setattr(moe_parallel, "prepare_attention_dp_layouts", prepare)
+    monkeypatch.setattr(
+        moe_parallel,
+        "assert_attention_dp_layouts_consumed",
+        consumed,
+    )
+    monkeypatch.setattr(moe_parallel, "assert_attention_dp_layouts_idle", idle)
+
+    world_size = 4
+    control = FakeCommunicator.create_group(world_size)
+    model = FakeCommunicator.create_group(world_size)
+    local = tuple(
+        _AttentionDPGraphWarmupRunner(rank) for rank in range(world_size)
+    )
+    driver = worker_module.DistEPModelRunner(
+        control[0],
+        local[0],
+        model[0],
+        expert_parallel_size=world_size,
+        attention_dp=True,
+        pipeline_depth=5,
+        decode_mode="cuda_graph",
+        graph_scratch_page=74,
+        graph_max_batch=8,
+        graph_max_pages=32,
+        graph_warmup_iters=2,
+    )
+    expected_layouts = tuple(
+        (bucket,) * world_size
+        for bucket in (1, 2, 4, 8)
+        for _ in range(3)
+    )
+
+    with ThreadPoolExecutor(max_workers=world_size - 1) as pool:
+        workers = tuple(
+            pool.submit(
+                worker_module.worker_step_loop,
+                control[rank],
+                local[rank],
+                model[rank],
+                parallelism_prefix="EP",
+            )
+            for rank in range(1, world_size)
+        )
+        assert driver.capture_decode_graphs(attention_dp=True) == (1, 2, 4, 8)
+        assert driver.capture_decode_graphs(attention_dp=True) == (1, 2, 4, 8)
+        driver.shutdown()
+        assert [worker.result(timeout=2) for worker in workers] == [0, 0, 0]
+
+    assert [runner._model.prepared for runner in local] == [
+        [expected_layouts],
+    ] * world_size
+    assert [runner.capture_calls for runner in local] == [1] * world_size
+    assert [runner.synchronize_calls for runner in local] == [2] * world_size
+    assert [runner._model.idle_checks for runner in local] == [2] * world_size
 
 
 @pytest.mark.parametrize(

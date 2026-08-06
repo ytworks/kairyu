@@ -50,6 +50,23 @@ class GraphDecodeDecision:
 
 
 @dataclass(frozen=True)
+class DecodeGraphCapturePlan:
+    """Immutable startup identity for one rank's decode-graph cache.
+
+    Distributed launchers compare this object on the host control group before
+    any rank enters capture-time model collectives.  ``pending_buckets`` makes
+    the preflight sensitive to partial or asymmetric warmup state as well as
+    to static configuration skew.
+    """
+
+    buckets: tuple[int, ...]
+    pending_buckets: tuple[int, ...]
+    max_pages: int
+    scratch_page: int
+    capture_model_forward_count: int
+
+
+@dataclass(frozen=True)
 class DecodeRowOwner:
     """Stable ownership identity for one row of decode metadata.
 
@@ -603,6 +620,10 @@ class GraphStepExecutor:
         self._pending_page_clears: dict[int, set[int]] = {}
         self._graph_executions = 0
         self._eager_fallbacks = 0
+        # Prometheus reads this process-lifetime counter. Verification and
+        # benchmark windows may reset ``_eager_fallbacks`` independently, but a
+        # CounterMetricFamily must never decrease within the serving process.
+        self._eager_fallbacks_total = 0
         self._page_table_graph_executions = 0
         self._page_table_eager_fallbacks = 0
         self._page_table_rows_copied = 0
@@ -742,6 +763,12 @@ class GraphStepExecutor:
             self._eager_fallbacks = 0
         return result
 
+    @property
+    def eager_fallbacks_total(self) -> int:
+        """Process-lifetime fallback count, intentionally excluded from resets."""
+
+        return self._eager_fallbacks_total
+
     def page_table_execution_stats(
         self, *, reset: bool = False
     ) -> dict[str, int]:
@@ -783,12 +810,57 @@ class GraphStepExecutor:
             self._page_table_eager_fallbacks = 0
         return result
 
+    def capture_plan(self) -> DecodeGraphCapturePlan:
+        """Describe the exact startup work without allocating CUDA state."""
+
+        count = getattr(self._backend, "capture_model_forward_count", None)
+        if type(count) is not int or count < 1:
+            raise RuntimeError(
+                "graph backend must expose a positive integer "
+                "capture_model_forward_count for startup capture"
+            )
+        return DecodeGraphCapturePlan(
+            buckets=self._buckets,
+            pending_buckets=tuple(
+                bucket for bucket in self._buckets if bucket not in self._captured
+            ),
+            max_pages=self._max_pages,
+            scratch_page=self._scratch_page,
+            capture_model_forward_count=count,
+        )
+
+    def capture_all(self) -> tuple[int, ...]:
+        """Capture every configured bucket before the executor serves traffic.
+
+        Capture is intentionally explicit rather than part of ``__init__``:
+        distributed runners must first replace their load-time communicator
+        with the serving communicator that the recorded collectives will own.
+        The operation is idempotent so startup coordinators can safely verify
+        an already-warmed runner.  A partial failure invalidates the complete
+        set; serving with a mixture of old and newly captured graphs would make
+        startup success depend on which batch size arrives first.
+        """
+
+        if self._coordinated_decision is not None:
+            raise RuntimeError(
+                "cannot pre-capture CUDA graphs while a decode decision is armed"
+            )
+        try:
+            for bucket in self._buckets:
+                if bucket not in self._captured:
+                    self._capture(bucket)
+        except BaseException:
+            self.invalidate()
+            raise
+        return tuple(sorted(self._captured))
+
     def execute_decode(self, batch: DecodeBatch) -> torch.Tensor:
         coordinated = self._coordinated_decision
         self._coordinated_decision = None
         if coordinated is not None:
             if coordinated.kind == "eager_fallback":
                 self._eager_fallbacks += 1
+                self._eager_fallbacks_total += 1
                 self._page_table_eager_fallbacks += 1
                 self._plan(batch)
                 return self._decode_fn(batch)
@@ -812,6 +884,7 @@ class GraphStepExecutor:
         # never crash, run eager (D2)
         if bucket is None or batch.max_pages > self._max_pages:
             self._eager_fallbacks += 1
+            self._eager_fallbacks_total += 1
             self._page_table_eager_fallbacks += 1
             self._plan(batch)  # eager still needs a live plan for THESE buffers
             return self._decode_fn(batch)

@@ -17,7 +17,8 @@ Wire protocol (msgpack maps):
                     ``delta`` events carrying only new token IDs, visible text,
                     and logprob metadata. Trace-enabled events additionally
                     carry one sanitized cumulative ``stage_metrics`` list. The
-                    first event carries ``num_prompt_tokens``.
+                    first event carries ``num_prompt_tokens``. Native runners
+                    may add live ``decode_graph_metadata`` counters.
   service → legacy client: the historical cumulative per-step event.
                     New clients accept both forms, so a rolling upgrade works
                     in either order.
@@ -38,7 +39,7 @@ import contextlib
 import logging
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -368,6 +369,31 @@ def _attention_backend_decision_to_wire(decision) -> dict | None:
     }
 
 
+def _decode_graph_metadata_to_wire(engine_loop) -> dict | None:
+    """Best-effort live graph counters for startup and request event frames."""
+
+    runner = getattr(engine_loop, "_runner", None)
+    getter = getattr(runner, "decode_graph_metadata", None)
+    if not callable(getter):
+        return None
+    try:
+        metadata = getter()
+    except Exception:
+        return None
+    if not isinstance(metadata, Mapping):
+        return None
+    return {
+        "decode_mode": metadata.get("decode_mode"),
+        "cuda_graph_decode": metadata.get("cuda_graph_decode"),
+        "cuda_graph_buckets": list(metadata.get("cuda_graph_buckets", ())),
+        "cuda_graph_captures": metadata.get("cuda_graph_captures"),
+        "cuda_graph_replays": metadata.get("cuda_graph_replays"),
+        "cuda_graph_eager_fallbacks": metadata.get(
+            "cuda_graph_eager_fallbacks"
+        ),
+    }
+
+
 def _parallel_failure_frame(engine_loop) -> dict | None:
     """Return one sanitized fatal frame for an unusable parallel group."""
 
@@ -411,6 +437,7 @@ def _startup_ready_frame(engine_loop) -> dict:
         "attention_backend_decision": _attention_backend_decision_to_wire(
             getattr(engine_loop, "attention_backend_decision", None)
         ),
+        "decode_graph_metadata": _decode_graph_metadata_to_wire(engine_loop),
         "kv_cache_dtype_requested": getattr(
             engine_loop, "kv_cache_dtype_requested", None
         ),
@@ -705,6 +732,9 @@ def run_engine_service(
                         continue
                     if owner.stream_id is not None:
                         event["stream_id"] = owner.stream_id
+                    graph_metadata = _decode_graph_metadata_to_wire(engine_loop)
+                    if graph_metadata is not None:
+                        event["decode_graph_metadata"] = graph_metadata
                     socket.send_multipart([owner.identity, msgpack.packb(event)])
                     if update.finished:
                         del owners[request_id]

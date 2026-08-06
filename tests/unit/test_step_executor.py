@@ -6,6 +6,7 @@ import torch
 from kairyu.engine.core.graph_buckets import bucket_for, decode_buckets
 from kairyu.engine.core.step_executor import (
     DecodeBatch,
+    DecodeGraphCapturePlan,
     DecodePageTableCache,
     DecodeRowOwner,
     EagerStepExecutor,
@@ -335,6 +336,60 @@ class TestBuckets:
 
 
 class TestGraphStepExecutor:
+    def test_capture_all_warms_every_bucket_once_before_replay(self):
+        backend = FakeGraphBackend()
+        executor = GraphStepExecutor(
+            _decode_fn,
+            backend,
+            max_batch=8,
+            scratch_page=SCRATCH,
+        )
+
+        assert executor.capture_plan() == DecodeGraphCapturePlan(
+            buckets=(1, 2, 4, 8),
+            pending_buckets=(1, 2, 4, 8),
+            max_pages=1,
+            scratch_page=SCRATCH,
+            capture_model_forward_count=1,
+        )
+        assert executor.capture_all() == (1, 2, 4, 8)
+        assert backend.captures == 4
+        assert backend.replays == 0
+        assert executor.execution_stats() == {
+            "graph_executions": 0,
+            "eager_fallbacks": 0,
+            "captured_buckets": (1, 2, 4, 8),
+        }
+        assert executor.capture_plan().pending_buckets == ()
+
+        # Startup coordination may verify an already-warmed runner.  Neither
+        # that verification nor the first real request may capture again.
+        assert executor.capture_all() == (1, 2, 4, 8)
+        executor.execute_decode(_batch(3))
+        assert backend.captures == 4
+        assert backend.replays == 1
+
+    def test_capture_all_rolls_back_a_partial_startup_failure(self):
+        class _FailingBackend(FakeGraphBackend):
+            def capture(self, fn, static_batch):
+                if self.captures == 2:
+                    raise RuntimeError("synthetic capture failure")
+                return super().capture(fn, static_batch)
+
+        backend = _FailingBackend()
+        executor = GraphStepExecutor(
+            _decode_fn,
+            backend,
+            max_batch=8,
+            scratch_page=SCRATCH,
+        )
+
+        with pytest.raises(RuntimeError, match="synthetic capture failure"):
+            executor.capture_all()
+
+        assert executor.execution_stats()["captured_buckets"] == ()
+        assert executor.capture_plan().pending_buckets == (1, 2, 4, 8)
+
     def test_captures_once_per_bucket_and_replays(self):
         backend = FakeGraphBackend()
         executor = GraphStepExecutor(_decode_fn, backend, max_batch=32, scratch_page=SCRATCH)
@@ -373,6 +428,10 @@ class TestGraphStepExecutor:
         out = executor.execute_decode(_batch(6))
         assert backend.captures == 0  # never captured
         assert out.shape[0] == 6
+        assert executor.eager_fallbacks_total == 1
+        assert executor.execution_stats(reset=True)["eager_fallbacks"] == 1
+        assert executor.execution_stats()["eager_fallbacks"] == 0
+        assert executor.eager_fallbacks_total == 1
 
     def test_wide_page_table_falls_back_to_eager(self):
         # a page table wider than the captured static buffer runs eager, never
