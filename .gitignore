@@ -226,6 +226,7 @@ __marimo__/
 # again. `bench/results/*` keeps the directory itself walkable so the negation
 # below can take effect.
 bench/results/*
+!bench/results/index.json
 bench/data/
 # Cross-commit quality history is the only tracked suite-owned result. Per-run
 # directories under each suite remain ignored.
