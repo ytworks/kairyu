@@ -181,6 +181,28 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
     if not module_path.is_relative_to(extracted.resolve()):
         raise VerificationError(f"isolated fixture check imported outside the wheel: {module_path}")
 
+    optional_profile_code = (
+        "import sys; "
+        "sys.modules['torch']=None; "
+        "from kairyu.bench.profiling import profile_scope; "
+        "scope=profile_scope(False); "
+        "value=scope.__enter__(); "
+        "assert value is None; "
+        "scope.__exit__(None,None,None); "
+        "print('torch-optional profile import ok')"
+    )
+    optional_profile_result = _isolated_run(
+        extracted,
+        dependency_site,
+        optional_profile_code,
+        cache_dir=scratch / "cache",
+    )
+    if optional_profile_result.stdout.strip() != "torch-optional profile import ok":
+        raise VerificationError(
+            "isolated profiling helper did not preserve torch optionality: "
+            f"{optional_profile_result.stdout!r}"
+        )
+
     entrypoint_code = (
         "from kairyu.entrypoints.cli import main; main(['bench', 'entrypoints', '--json'])"
     )

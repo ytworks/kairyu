@@ -974,6 +974,16 @@ nearest-rank p50/p99 plus per-stage observed/missing denominators, distinguishin
 complete, partial, missing, invalid, and unrequested evidence. Trace-disabled
 engine and benchmark paths retain their prior timing hot paths.
 
+In-process benchmark profiling now has one package-owned, torch-optional
+context and one bounded, strict, non-overwriting Chrome-trace publisher. The
+two checkout benchmarks and all GPU tests that previously constructed
+`torch.profiler` directly retain their exact warm-up, synchronization, option,
+and measured-region contracts through that helper. `serving_bench.py --profile`
+emits a SHA-256-bound CPU trace for only the local HTTP client; artifacts state
+that the remote target/server/GPU is excluded and that profiled timing is not
+comparable. The example serving reporter excludes those diagnostic runs from
+performance tables. Normal imports and `--help` remain torch-free.
+
 External serving diagnosis now has one bounded, non-overwriting process-tree
 launcher for py-spy and Nsight Systems. It profiles the exact locked Python
 interpreter running `kairyu serve`, follows process-isolated engines and TP
@@ -1145,6 +1155,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-06 — [progress] Benchmark profiling gains shared, bound trace artifacts
+- What: added a lazy `kairyu.bench.profiling` context that preserves caller-owned warm-up, synchronization, and measured scopes while mapping explicit CPU/CUDA activities without fallback. Migrated the two checkout benchmark users and all nine GPU-test users from direct profiler construction. `serving_bench.py --profile` now records one CPU-only local-client range and publishes a private, strict-JSON, 64 MiB-bounded `*.client.pt.trace.json` sidecar through same-filesystem temporary export and exclusive hard-link publication; the paired UTC-microsecond result binds its relative name, format, size, SHA-256, activity, local scope, target exclusion, and diagnostic-only status. Both members publish without overwriting a concurrent winner, and result-publication failure rolls back only its exact untampered trace. The example serving reporter rejects profiled diagnostics rather than mixing them into timing comparisons. Disabled/help/core-wheel paths do not import torch, and missing torch, unavailable CUDA, unsafe or colliding paths, invalid exports, and publish races fail closed.
+- Why: ad hoc profiler setup had divergent options and no common artifact identity or overwrite policy, while a serving-client trace could otherwise be misrepresented as remote server or GPU evidence.
+- Refs: issue #380; `kairyu/bench/profiling.py`; `bench/{serving_bench,future_token_bench,batched_prefill_qwen}.py`; `tests/{unit/test_bench_profiling.py,gpu}`; `docs/benchmarks.md`; `bench/README.md`; `docs/gpu-runbook.md`
 
 ### 2026-08-06 — [design] Structured output gains paired schema-conformance evidence
 - What: added the dedicated `structured` benchmark suite with a package-owned, SHA-256-addressed Draft 2020-12 corpus spanning nested, recursive local-reference, enum, regex-pattern, and union schemas. Each selected item and sampling seed retains one counterbalanced constrained/control pair whose wire bodies differ only by `response_format`; strict outer-response and completion JSON parsing, an independently pinned `jsonschema` evaluator, and type-sensitive exact-answer scoring separate request acceptance, JSON validity, schema conformance, task success, malformed output, endpoint-reported token coverage/deltas, and diagnostic latency. Explicit structured-schema 400/422 responses remain measured conformance failures, while unrelated HTTP/transport/malformed-envelope failures withhold the complete claim. Valid HTTP 200 refusals, content-filtered empty messages, and unexpected call payloads remain accepted non-JSON/task-failure evidence instead of becoming environment faults. Raw arms and all derived metrics are cross-validated; exact config-selected corpus IDs, rejected control constraints, fixed cache/source identities, installed evaluator distributions, and subset incomparability are rebound at runner, report, and fresh-history boundaries. Fresh scoreboards recompute the detailed claim, schema-1 history proves then strips it, and stored detached claims are rejected. The suite, wheel fixture, cache manifest, evaluator resources/dependencies, docs, and example config are isolated from the frozen Core/quantization matrices.

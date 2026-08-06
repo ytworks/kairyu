@@ -65,6 +65,7 @@ PROMPT_SPECS = (
 )
 
 IMPLEMENTATION_FILES = (
+    "kairyu/bench/profiling.py",
     "kairyu/engine/core/draft.py",
     "kairyu/engine/core/engine_core.py",
     "kairyu/engine/core/model_runner.py",

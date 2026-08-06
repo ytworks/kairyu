@@ -27,12 +27,22 @@ def _load_runs(
             summary = payload.get("summary")
             if not isinstance(config, dict) or not isinstance(summary, dict):
                 raise ValueError("expected object fields 'config' and 'summary'")
+            profile = config.get("profile", False)
+            if type(profile) is not bool:
+                raise ValueError("config.profile must be a boolean when present")
+            if profile:
+                raise ValueError(
+                    "profiled local-client diagnostics are not timing-comparable"
+                )
         except (OSError, ValueError, json.JSONDecodeError) as error:
             rejected.append(f"{path.name}: {error}")
             continue
         runs.append((path, config, summary))
     if not runs:
-        raise ValueError(f"no *-serving.json files found in {results_dir}")
+        detail = f"; rejected: {'; '.join(rejected)}" if rejected else ""
+        raise ValueError(
+            f"no timing-comparable *-serving.json files found in {results_dir}{detail}"
+        )
     return runs, rejected
 
 

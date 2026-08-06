@@ -60,6 +60,13 @@ performance evidence. Reproduce any proposed improvement without a profiler
 using the unchanged owning gate. The helper is also not a substitute for the
 separate per-Torch-operator profiler workflow.
 
+Conversely, `bench/serving_bench.py --profile` is only the local HTTP client's
+CPU `torch.profiler` sidecar; it cannot see this launched server, its engine/TP
+children, or their GPUs. `serving_bench.py --stage-trace` is a third contract:
+privacy-minimized timing reported by the target itself. Keep all three sources
+separately labeled. Do not nest the client torch trace around this py-spy/Nsight
+launcher and then interpret the result as one server trace.
+
 The commands were checked with py-spy 0.4.2 and Nsight Systems 2026.1.3. Keep
 py-spy outside the project environment so profiling does not change `uv.lock`:
 

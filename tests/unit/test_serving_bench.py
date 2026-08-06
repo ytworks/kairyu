@@ -1,8 +1,11 @@
 """m9 D5: serving_bench honesty — token-granularity TPOT via include_usage."""
 
+import asyncio
+import datetime as dt
 import importlib.util
 import json
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import httpx
@@ -203,6 +206,7 @@ def test_shared_target_form_normalizes_url_and_uses_env_secret(monkeypatch):
     assert config["api_key_env"] == "SERVING_API_KEY"
     assert config["api_key_source"] == "environment"
     assert config["stage_trace"] is False
+    assert config["profile"] is False
     assert "private-value" not in str(config)
 
 
@@ -211,6 +215,77 @@ def test_stage_trace_is_an_explicit_recorded_opt_in():
 
     assert args.stage_trace is True
     assert serving_bench.build_run_config(args)["stage_trace"] is True
+
+
+def test_client_profile_is_an_independent_recorded_opt_in():
+    args = serving_bench.build_parser().parse_args(["--profile", "--stage-trace"])
+    config = serving_bench.build_run_config(args)
+
+    assert args.profile is True
+    assert config["profile"] is True
+    assert config["stage_trace"] is True
+    help_text = serving_bench.build_parser().format_help()
+    assert "local" in help_text
+    assert "benchmark client" in help_text
+
+
+def test_client_profile_requires_results_before_target_or_network_work():
+    args = serving_bench.build_parser().parse_args(
+        ["--profile", "--results-dir", ""]
+    )
+
+    with pytest.raises(ValueError, match="--profile.*--results-dir"):
+        serving_bench.serving_artifact_paths(args)
+
+
+def test_client_profile_uses_one_utc_microsecond_result_stem(tmp_path: Path):
+    args = serving_bench.build_parser().parse_args(
+        ["--profile", "--results-dir", str(tmp_path)]
+    )
+    result, trace = serving_bench.serving_artifact_paths(
+        args,
+        now=dt.datetime(2026, 8, 6, 2, 3, 4, 5678, tzinfo=dt.UTC),
+    )
+
+    assert result == tmp_path / "2026-08-06T020304.005678Z-serving.json"
+    assert trace == (
+        tmp_path / "2026-08-06T020304.005678Z-serving.client.pt.trace.json"
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--num-requests", "0"],
+        ["--concurrency", "0"],
+        ["--max-tokens", "0"],
+        ["--tensor-parallel", "0"],
+        ["--dp-replicas", "0"],
+        ["--ttft-slo-s", "nan"],
+        ["--ttft-slo-s", "inf"],
+        ["--ttft-slo-s", "0"],
+        ["--timeout", "nan"],
+        ["--timeout", "-1"],
+        ["--temperature", "nan"],
+        ["--temperature", "inf"],
+        ["--temperature", "-1"],
+        ["--min-tokens", "-1"],
+        ["--max-tokens", "4", "--min-tokens", "5"],
+    ],
+)
+def test_invalid_run_arguments_fail_before_artifact_creation(
+    tmp_path: Path,
+    arguments: list[str],
+):
+    results_dir = tmp_path / "results"
+    args = serving_bench.build_parser().parse_args(
+        [*arguments, "--results-dir", str(results_dir)]
+    )
+
+    with pytest.raises(ValueError):
+        serving_bench.serving_artifact_paths(args)
+
+    assert not results_dir.exists()
 
 
 def test_shared_target_refuses_conflicting_legacy_endpoint_flags():
@@ -804,3 +879,298 @@ def test_summary_aggregates_stage_percentiles_and_keeps_missing_invalid_distinct
         "version": None,
         "stages": [],
     }
+
+
+def test_profiled_run_writes_bound_client_trace_without_secrets(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    events: list[str] = []
+    captured_client: dict[str, object] = {}
+    secret = "profile-api-key-canary"
+    prompt = "profile-prompt-canary"
+
+    class FakeProfiler:
+        def export_chrome_trace(self, path: str) -> None:
+            events.append("export")
+            Path(path).write_text(
+                json.dumps(
+                    {
+                        "traceEvents": [
+                            {
+                                "name": "kairyu.bench.serving.client-measurement",
+                                "ph": "X",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+    @contextmanager
+    def fake_profile_scope(**kwargs):
+        assert kwargs == {
+            "enabled": True,
+            "activities": ("cpu",),
+            "acc_events": True,
+            "record_shapes": False,
+            "profile_memory": False,
+            "with_stack": False,
+        }
+        events.append("profile-enter")
+        try:
+            yield FakeProfiler()
+        finally:
+            events.append("profile-exit")
+
+    @contextmanager
+    def fake_record_function(enabled: bool, name: str):
+        assert enabled is True
+        assert name == "kairyu.bench.serving.client-measurement"
+        events.append("range-enter")
+        try:
+            yield
+        finally:
+            events.append("range-exit")
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            captured_client.update(kwargs)
+
+        async def __aenter__(self):
+            events.append("client-enter")
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            del exc_type, exc, traceback
+            events.append("client-exit")
+
+    async def fake_run_one(*args, **kwargs):
+        del args, kwargs
+        events.append("request")
+        return serving_bench.RequestMetrics(
+            ttft_s=0.01,
+            total_s=0.02,
+            output_chunks=2,
+            completion_tokens=3,
+        )
+
+    ticks = iter((1_000_000_000, 2_000_000_000))
+    monkeypatch.setattr(serving_bench, "profile_scope", fake_profile_scope)
+    monkeypatch.setattr(
+        serving_bench,
+        "record_function_scope",
+        fake_record_function,
+    )
+    monkeypatch.setattr(serving_bench.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(serving_bench, "run_one", fake_run_one)
+    monkeypatch.setattr(
+        serving_bench,
+        "load_prompts",
+        lambda dataset, count: ([prompt], "synthetic"),
+    )
+    monkeypatch.setattr(serving_bench.time, "perf_counter_ns", lambda: next(ticks))
+    args = serving_bench.build_parser().parse_args(
+        [
+            "--profile",
+            "--api-key",
+            secret,
+            "--num-requests",
+            "1",
+            "--concurrency",
+            "1",
+            "--results-dir",
+            str(tmp_path),
+        ]
+    )
+
+    asyncio.run(serving_bench.run_benchmark(args))
+
+    result_paths = list(tmp_path.glob("*-serving.json"))
+    trace_paths = list(tmp_path.glob("*-serving.client.pt.trace.json"))
+    assert len(result_paths) == 1
+    assert len(trace_paths) == 1
+    result = json.loads(result_paths[0].read_text(encoding="utf-8"))
+    trace_bytes = trace_paths[0].read_bytes()
+    metadata = result["artifacts"]["torch_profile"]
+    assert metadata["path"] == trace_paths[0].name
+    assert metadata["scope"] == "local-client-process"
+    assert metadata["activities"] == ["cpu"]
+    assert metadata["target_process_included"] is False
+    assert metadata["diagnostic_only"] is True
+    assert metadata["timing_comparable"] is False
+    assert metadata["size_bytes"] == len(trace_bytes)
+    assert result["config"]["profile"] is True
+    assert captured_client["headers"] == {"Authorization": f"Bearer {secret}"}
+    assert events == [
+        "client-enter",
+        "profile-enter",
+        "range-enter",
+        "request",
+        "range-exit",
+        "profile-exit",
+        "client-exit",
+        "export",
+    ]
+    retained = result_paths[0].read_text(encoding="utf-8") + trace_bytes.decode()
+    assert secret not in retained
+    assert prompt not in retained
+    console = capsys.readouterr()
+    assert secret not in console.out + console.err
+    assert "excludes the target server" in console.err
+
+
+def test_profile_export_failure_does_not_publish_success_result(
+    tmp_path: Path,
+    monkeypatch,
+):
+    @contextmanager
+    def fake_profile_scope(**kwargs):
+        assert kwargs["enabled"] is True
+        yield object()
+
+    @contextmanager
+    def fake_record_function(enabled: bool, name: str):
+        assert enabled is True
+        assert name == "kairyu.bench.serving.client-measurement"
+        yield
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            del exc_type, exc, traceback
+
+    async def fake_run_one(*args, **kwargs):
+        del args, kwargs
+        return serving_bench.RequestMetrics(
+            ttft_s=0.01,
+            total_s=0.02,
+            output_chunks=2,
+            completion_tokens=3,
+        )
+
+    ticks = iter((1_000_000_000, 2_000_000_000))
+    monkeypatch.setattr(serving_bench, "profile_scope", fake_profile_scope)
+    monkeypatch.setattr(
+        serving_bench,
+        "record_function_scope",
+        fake_record_function,
+    )
+    monkeypatch.setattr(serving_bench.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(serving_bench, "run_one", fake_run_one)
+    monkeypatch.setattr(
+        serving_bench,
+        "load_prompts",
+        lambda dataset, count: (["prompt"], "synthetic"),
+    )
+    monkeypatch.setattr(serving_bench.time, "perf_counter_ns", lambda: next(ticks))
+
+    def fail_export(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("profile export failed")
+
+    monkeypatch.setattr(serving_bench, "write_trace_artifact", fail_export)
+    args = serving_bench.build_parser().parse_args(
+        [
+            "--profile",
+            "--num-requests",
+            "1",
+            "--results-dir",
+            str(tmp_path),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="profile export failed"):
+        asyncio.run(serving_bench.run_benchmark(args))
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_profiled_result_publish_race_preserves_winner_and_rolls_back_trace(
+    tmp_path: Path,
+    monkeypatch,
+):
+    class FakeProfiler:
+        def export_chrome_trace(self, path: str) -> None:
+            Path(path).write_text(
+                json.dumps({"traceEvents": [{"name": "client", "ph": "X"}]}),
+                encoding="utf-8",
+            )
+
+    @contextmanager
+    def fake_profile_scope(**kwargs):
+        assert kwargs["enabled"] is True
+        yield FakeProfiler()
+
+    @contextmanager
+    def fake_record_function(enabled: bool, name: str):
+        assert enabled is True
+        assert name == "kairyu.bench.serving.client-measurement"
+        yield
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            del exc_type, exc, traceback
+
+    async def fake_run_one(*args, **kwargs):
+        del args, kwargs
+        return serving_bench.RequestMetrics(
+            ttft_s=0.01,
+            total_s=0.02,
+            output_chunks=2,
+            completion_tokens=3,
+        )
+
+    ticks = iter((1_000_000_000, 2_000_000_000))
+    monkeypatch.setattr(serving_bench, "profile_scope", fake_profile_scope)
+    monkeypatch.setattr(serving_bench, "record_function_scope", fake_record_function)
+    monkeypatch.setattr(serving_bench.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(serving_bench, "run_one", fake_run_one)
+    monkeypatch.setattr(
+        serving_bench,
+        "load_prompts",
+        lambda dataset, count: (["prompt"], "synthetic"),
+    )
+    monkeypatch.setattr(serving_bench.time, "perf_counter_ns", lambda: next(ticks))
+    real_atomic_write_json = serving_bench.atomic_write_json
+
+    def lose_result_publication_race(path, payload, **kwargs):
+        Path(path).write_text("race winner", encoding="utf-8")
+        return real_atomic_write_json(path, payload, **kwargs)
+
+    monkeypatch.setattr(
+        serving_bench,
+        "atomic_write_json",
+        lose_result_publication_race,
+    )
+    args = serving_bench.build_parser().parse_args(
+        [
+            "--profile",
+            "--num-requests",
+            "1",
+            "--concurrency",
+            "1",
+            "--results-dir",
+            str(tmp_path),
+        ]
+    )
+
+    with pytest.raises(FileExistsError):
+        asyncio.run(serving_bench.run_benchmark(args))
+
+    retained = list(tmp_path.iterdir())
+    assert len(retained) == 1
+    assert retained[0].name.endswith("-serving.json")
+    assert retained[0].read_text(encoding="utf-8") == "race winner"

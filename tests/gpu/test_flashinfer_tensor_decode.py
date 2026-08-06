@@ -14,6 +14,8 @@ whose replay picks up an in-place page-table change once the step is re-planned.
 import pytest
 import torch
 
+from kairyu.bench.profiling import profile_scope
+
 pytestmark = pytest.mark.gpu
 
 PAGE_SIZE = 16
@@ -147,8 +149,6 @@ def test_a_captured_graph_replays_against_the_current_pages():
 def test_fast_replay_plan_has_no_stream_sync_or_nonzero_and_keeps_parity():
     """Steady replay planning is device-only apart from CPU scheduler inputs."""
 
-    from torch.profiler import ProfilerActivity, profile
-
     from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
     from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend
 
@@ -187,9 +187,13 @@ def test_fast_replay_plan_has_no_stream_sync_or_nonzero_and_keeps_parity():
         )
     )
     lengths.copy_(torch.tensor([16, 17, 47], dtype=torch.int32, device="cuda:0"))
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
         acc_events=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
     ) as prof:
         backend.plan_decode(
             pool,

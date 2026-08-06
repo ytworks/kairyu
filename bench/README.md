@@ -212,6 +212,27 @@ definitions were identical. Formal gate wrappers retain their versioned,
 source-bound artifact schemas; those embedded methods are gate contracts, not
 alternative reusable reporting helpers.
 
+`kairyu.bench.profiling` owns the optional in-process PyTorch profiler contract
+for checkout benchmarks and GPU gates. It imports torch only for an enabled
+scope, maps explicit CPU/CUDA activities without fallback, and deliberately
+does not add warm-up, synchronization, schedules, or profiler steps. The two
+benchmark wrappers and all GPU tests that consume torch profiler events use
+this helper while retaining their original measurement boundaries.
+
+`bench/serving_bench.py --profile` records only a CPU trace of the local HTTP
+load-generator process. It does not profile the target server or CUDA work; use
+`scripts/profile_server.py` for the bounded py-spy/Nsight process-tree capture,
+and use `--stage-trace` for target-reported request stages. A profiled run needs
+PyTorch and a non-empty results directory, writes a paired UTC-microsecond
+`*-serving.json` plus `*.client.pt.trace.json`, and records the sidecar's
+relative name, size, SHA-256, format, activity, and diagnostic-only scope.
+Trace export is strict, 64 MiB-bounded, private, and non-overwriting. Any path,
+collision, export failure, or result-publication failure cannot leave a
+successful or unbound pair. The example multi-GPU serving reporter excludes
+profiled files from performance tables. The default path does not import torch,
+and profiled latency/goodput is not comparable to an ordinary run. Inspect raw
+traces for local operator/runtime metadata before sharing them.
+
 The human-readable path index below mirrors the manifest. Kind, prerequisites,
 and documentation metadata are authoritative in the TOML and in the
 `entrypoints --json` output.

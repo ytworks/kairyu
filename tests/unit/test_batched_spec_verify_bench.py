@@ -13,6 +13,10 @@ bench = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bench)
 
 
+def test_formal_source_contract_binds_transitive_shared_profiler():
+    assert "kairyu/bench/profiling.py" in bench.IMPLEMENTATION_FILES
+
+
 class _FixtureTokenizer:
     def __init__(self) -> None:
         self.fragments = {

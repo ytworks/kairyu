@@ -29,6 +29,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+from kairyu.bench.profiling import profile_scope
+
 
 def _git_value(*args: str) -> str | None:
     try:
@@ -164,7 +166,6 @@ def _feedback_profile(
     page_size: int,
 ) -> dict:
     import torch
-    from torch.profiler import ProfilerActivity, profile
 
     from kairyu.engine.core.engine_core import token_ids
     from kairyu.engine.core.radix_kv import RadixKVCache
@@ -184,9 +185,13 @@ def _feedback_profile(
     first = runner.execute(prefill.scheduled, scheduler.states)
     scheduler.update(token_ids(first))
     decode = scheduler.schedule()
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
         acc_events=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
     ) as prof:
         deferred = runner.execute(decode.scheduled, scheduler.states)
 
