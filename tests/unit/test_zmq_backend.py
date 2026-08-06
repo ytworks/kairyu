@@ -2784,10 +2784,12 @@ async def test_cancelled_submit_send_retires_unknown_delivery_generation(monkeyp
     submit = asyncio.create_task(
         backend._submit(_request("cancelled-add", "prompt", max_tokens=2))
     )
-    for _ in range(100):
+    # The prompt worker thread needs wall-clock time before the send starts;
+    # bare loop yields are not enough on a loaded runner.
+    for _ in range(500):
         if socket.send_started:
             break
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
     assert socket.send_started is True
 
     submit.cancel()

@@ -270,6 +270,128 @@ def test_main_retains_one_complete_report(
     assert "benchmarks" not in summary
 
 
+def test_retryable_benchmarks_names_only_timing_ratio_failures() -> None:
+    checks = gate.evaluate_results(_passing_results())
+    assert gate.retryable_benchmarks(checks) == frozenset()
+
+    noisy = deepcopy(_passing_results())
+    noisy["scheduler_queue"]["priority_full_drain"]["median_speedup"] = 0.85
+    noisy["router_latency"]["p99_seconds"] = 0.011
+    failed = tuple(
+        check for check in gate.evaluate_results(noisy) if not check.passed
+    )
+    assert {check.relation for check in failed} <= {">=", "<"}
+    assert gate.retryable_benchmarks(failed) == frozenset(
+        {"scheduler_queue", "router_latency"}
+    )
+
+    structural = deepcopy(_passing_results())
+    structural["scheduler_queue"]["priority_full_drain"]["median_speedup"] = 0.85
+    structural["op_queue"]["producers"] = 2
+    failed = tuple(
+        check for check in gate.evaluate_results(structural) if not check.passed
+    )
+    assert gate.retryable_benchmarks(failed) == frozenset()
+
+
+def test_main_retries_timing_ratio_noise_and_recovers(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _passing_results()
+    calls: list[str] = []
+
+    def fake_run(spec: gate.BenchmarkSpec) -> dict[str, object]:
+        calls.append(spec.name)
+        result = deepcopy(results[spec.name])
+        if spec.name == "scheduler_queue" and calls.count("scheduler_queue") == 1:
+            result["priority_full_drain"]["median_speedup"] = 0.85
+        return result
+
+    monkeypatch.setattr(gate, "run_benchmark", fake_run)
+
+    assert gate.main([]) == 0
+    assert calls.count("scheduler_queue") == 2
+    assert all(
+        calls.count(spec.name) == 1
+        for spec in gate.BENCHMARKS
+        if spec.name != "scheduler_queue"
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["all_passed"] is True
+    assert report["errors"] == {}
+
+
+def test_main_fails_after_exhausting_retry_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _passing_results()
+    calls: list[str] = []
+
+    def fake_run(spec: gate.BenchmarkSpec) -> dict[str, object]:
+        calls.append(spec.name)
+        result = deepcopy(results[spec.name])
+        if spec.name == "scheduler_queue":
+            result["priority_full_drain"]["median_speedup"] = 0.85
+        return result
+
+    monkeypatch.setattr(gate, "run_benchmark", fake_run)
+
+    assert gate.main([]) == 1
+    assert calls.count("scheduler_queue") == gate.MAX_BENCHMARK_ATTEMPTS
+    report = json.loads(capsys.readouterr().out)
+    assert report["all_passed"] is False
+    failed = [check for check in report["checks"] if not check["passed"]]
+    assert [check["name"] for check in failed] == ["scheduler.priority_speedup"]
+
+
+def test_main_does_not_retry_structural_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _passing_results()
+    calls: list[str] = []
+
+    def fake_run(spec: gate.BenchmarkSpec) -> dict[str, object]:
+        calls.append(spec.name)
+        result = deepcopy(results[spec.name])
+        if spec.name == "op_queue":
+            result["producers"] = 2
+        if spec.name == "scheduler_queue":
+            result["priority_full_drain"]["median_speedup"] = 0.85
+        return result
+
+    monkeypatch.setattr(gate, "run_benchmark", fake_run)
+
+    assert gate.main([]) == 1
+    assert calls == [spec.name for spec in gate.BENCHMARKS]
+    assert json.loads(capsys.readouterr().out)["all_passed"] is False
+
+
+def test_report_top_level_schema_is_frozen_for_the_nightly_series(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _passing_results()
+    monkeypatch.setattr(
+        gate,
+        "run_benchmark",
+        lambda spec: deepcopy(results[spec.name]),
+    )
+
+    assert gate.main([]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert set(report) == {
+        "all_passed",
+        "benchmarks",
+        "checks",
+        "cpu_only",
+        "errors",
+        "schema_version",
+    }
+
+
 def test_main_runs_every_benchmark_after_one_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
