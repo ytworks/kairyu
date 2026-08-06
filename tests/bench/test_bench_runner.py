@@ -306,6 +306,7 @@ def test_core_evaluators_are_content_bound_to_adapter_identity(tmp_path, monkeyp
         ("kairyu.bench", "aggregate.py"),
         ("kairyu.bench", "cache.py"),
         ("kairyu.bench", "runner.py"),
+        ("kairyu.bench", "sampling.py"),
         ("kairyu.bench", "types.py"),
         ("kairyu.bench", "targets.py"),
     }
@@ -342,7 +343,7 @@ def test_every_builtin_adapter_binds_its_implementation_and_shared_aggregator(tm
         assert ("kairyu.bench.adapters", "base.py") in resources
 
 
-@pytest.mark.parametrize("resource", ["runner.py", "cache.py"])
+@pytest.mark.parametrize("resource", ["runner.py", "cache.py", "sampling.py"])
 def test_shared_score_bearing_runtime_changes_fingerprint(tmp_path, monkeypatch, resource):
     from kairyu.bench.adapters import all_adapters
     from kairyu.bench.adapters import base as adapter_base

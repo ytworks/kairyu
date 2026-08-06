@@ -14,8 +14,10 @@ from pathlib import Path
 import pytest
 
 from kairyu.bench import history
+from kairyu.bench.aggregate import build_scoreboard
+from kairyu.bench.sampling import combine_attempts, sampling_metrics, sampling_summary
 from kairyu.bench.store import ResultStore
-from kairyu.bench.types import ItemResult, PairResult
+from kairyu.bench.types import ItemResult, PairResult, SamplingAttemptResult
 
 
 def _canonical(value: object) -> bytes:
@@ -185,6 +187,22 @@ def _refresh_metadata_identity(metadata: dict) -> None:
     metadata["fingerprint"] = _fingerprint(metadata["identity"])
 
 
+def _sampling_metadata() -> dict:
+    metadata = _metadata()
+    metadata["config"]["attempts"] = 2
+    metadata["config"]["sampling_protocol"] = "grouped-chat-seeds-v1"
+    metadata["identity"]["adapters"][0]["binary_outcomes"] = True
+    metadata["identity"]["adapters"][0]["evaluation_protocol"]["resources"].append(
+        {
+            "package": "kairyu.bench",
+            "resource": "sampling.py",
+            "sha256": hashlib.sha256(b"kairyu.bench/sampling.py").hexdigest(),
+        }
+    )
+    _refresh_metadata_identity(metadata)
+    return metadata
+
+
 def _pair(
     metadata: dict,
     *,
@@ -200,6 +218,70 @@ def _pair(
         status=status,
         reason=reason,
         metrics={"score": score, "n_total": 2, "n_scored": 2},
+    )
+
+
+def _sampling_pair(metadata: dict) -> PairResult:
+    seeds = (0, 1)
+    items = tuple(
+        combine_attempts(
+            item_id,
+            tuple(
+                SamplingAttemptResult(
+                    attempt=index + 1,
+                    seed=seed,
+                    result=ItemResult(
+                        item_id=item_id,
+                        status="completed",
+                        score=score,
+                    ),
+                )
+                for index, (seed, score) in enumerate(zip(seeds, scores, strict=True))
+            ),
+        )
+        for item_id, scores in (("item-a", (1.0, 0.0)), ("item-b", (1.0, 1.0)))
+    )
+    summary = sampling_summary(items, seeds=seeds, declared_binary=True)
+    return PairResult(
+        benchmark="gsm8k",
+        target="target-a",
+        run_fingerprint=metadata["fingerprint"],
+        source_identity=history.source_identity(metadata["environment"]),
+        status="completed",
+        metrics={
+            "score": summary["mean"],
+            "n_total": len(items),
+            "n_scored": len(items),
+            "n_unjudged": 0,
+            "n_skipped": 0,
+            "n_failed": 0,
+            "sampling_complete": 1,
+            **sampling_metrics(summary),
+        },
+        items=items,
+        methodology={
+            "temperature": 0.0,
+            "sampling": {
+                "mode": "adapter",
+                "attempts": len(seeds),
+                "seeds": list(seeds),
+                "seed_source": "generated from zero",
+                "wire_omitted": [],
+                "recommended_defaults_attested": False,
+            }
+        },
+    )
+
+
+def _sampling_scoreboard(metadata: dict, pair: PairResult) -> dict:
+    return build_scoreboard(
+        run_id=metadata["run_id"],
+        suite=metadata["config"]["suite"],
+        config=metadata["config"],
+        environment=metadata["environment"],
+        fingerprint=metadata["fingerprint"],
+        pairs=[pair],
+        targets=["target-a"],
     )
 
 
@@ -258,6 +340,208 @@ def test_append_load_find_and_canonical_framing(tmp_path):
     assert entry["previous_record_sha256"] is None
     assert store.find_scoreboard_entry("run-1") == entry
     assert store.find_scoreboard_entry("absent") is None
+
+
+def test_fresh_sampling_claim_is_recomputed_then_omitted_from_schema1_index(tmp_path):
+    metadata = _sampling_metadata()
+    pair = _sampling_pair(metadata)
+    board = _sampling_scoreboard(metadata, pair)
+    cell = board["cells"]["gsm8k"]["target-a"]
+    assert "sampling_sensitivity" in cell
+
+    store = ResultStore(tmp_path, "run-1")
+    store.append_scoreboard_index(board, metadata, (pair,))
+    entry = store.load_scoreboard_index()[0]
+
+    assert "sampling_sensitivity" in cell  # caller-owned board was not mutated
+    assert "sampling_sensitivity" not in entry["scoreboard"]["cells"]["gsm8k"]["target-a"]
+    assert set(entry["pairs"][0]) == history._PAIR_FIELDS
+
+
+@pytest.mark.parametrize("mutation", ["missing", "forged-pass-at-k", "forged-spread"])
+def test_fresh_history_rejects_sampling_claim_that_disagrees_with_raw_pair(
+    tmp_path, mutation
+):
+    metadata = _sampling_metadata()
+    pair = _sampling_pair(metadata)
+    board = _sampling_scoreboard(metadata, pair)
+    cell = board["cells"]["gsm8k"]["target-a"]
+    if mutation == "missing":
+        del cell["sampling_sensitivity"]
+    elif mutation == "forged-pass-at-k":
+        cell["sampling_sensitivity"]["pass_at_k"][0]["estimate"] = 0.0
+    else:
+        cell["sampling_sensitivity"]["sample_sd"] = 0.0
+
+    with pytest.raises(ValueError, match="sampling sensitivity"):
+        ResultStore(tmp_path, "run-1").append_scoreboard_index(board, metadata, (pair,))
+    assert not (tmp_path / history.INDEX_NAME).exists()
+
+
+def test_stored_schema1_rejects_rehashed_detached_sampling_claim(tmp_path):
+    metadata = _sampling_metadata()
+    pair = _sampling_pair(metadata)
+    board = _sampling_scoreboard(metadata, pair)
+    entry = history.build_entry(
+        board,
+        metadata,
+        pairs=(pair,),
+        previous_record_sha256=None,
+    )
+    entry["scoreboard"]["cells"]["gsm8k"]["target-a"]["sampling_sensitivity"] = {
+        "pass_at_k": [{"k": 1, "estimate": 0.0}]
+    }
+    _rehash(entry)
+    path = tmp_path / history.INDEX_NAME
+    _rewrite_entries(path, [entry])
+
+    with pytest.raises(ValueError, match="stored scoreboard cell .* sampling sensitivity"):
+        ResultStore(tmp_path, "reader").load_scoreboard_index()
+
+
+@pytest.mark.parametrize("trigger", ["marker", "target-policy", "raw-evidence"])
+def test_fresh_sampling_protocol_requires_sampling_evaluator_identity(tmp_path, trigger):
+    metadata = _metadata()
+    if trigger == "marker":
+        metadata["config"]["attempts"] = 2
+        metadata["config"]["sampling_protocol"] = "grouped-chat-seeds-v1"
+        _refresh_metadata_identity(metadata)
+        pair = _pair(metadata)
+        board = _scoreboard(metadata)
+    elif trigger == "target-policy":
+        metadata["config"]["targets"][0]["temperature"] = 0.6
+        _refresh_metadata_identity(metadata)
+        pair = _pair(metadata)
+        board = _scoreboard(metadata)
+    else:
+        metadata["config"]["attempts"] = 1
+        _refresh_metadata_identity(metadata)
+        pair = _sampling_pair(metadata)
+        board = _sampling_scoreboard(metadata, pair)
+
+    with pytest.raises(ValueError, match="sampling evaluator resource.*sampling.py"):
+        ResultStore(tmp_path, "run-1").append_scoreboard_index(board, metadata, (pair,))
+
+
+def test_legacy_agentic_multi_trial_history_does_not_require_sampling_evaluator(tmp_path):
+    metadata = _metadata()
+    metadata["config"]["attempts"] = 4
+    metadata["config"]["only"] = ["mmlu"]
+    metadata["identity"]["adapters"][0]["name"] = "mmlu"
+    metadata["identity"]["adapters"][0]["dataset"] = "fixture/mmlu"
+    _refresh_metadata_identity(metadata)
+    pair = _pair(metadata).model_copy(update={"benchmark": "mmlu"})
+    board = _scoreboard(metadata)
+    board["benchmarks"] = ["mmlu"]
+    board["display_names"] = {"mmlu": "MMLU"}
+    board["cells"] = {"mmlu": board["cells"].pop("gsm8k")}
+
+    entry = history.build_entry(
+        board,
+        metadata,
+        pairs=(pair,),
+        previous_record_sha256=None,
+    )
+    _rewrite_entries(tmp_path / history.INDEX_NAME, [entry])
+
+    assert ResultStore(tmp_path, "reader").load_scoreboard_index() == (entry,)
+
+
+def test_legacy_unmarked_multi_trial_history_keeps_ordinary_generative_pairs(tmp_path):
+    metadata = _metadata()
+    metadata["config"]["attempts"] = 4
+    _refresh_metadata_identity(metadata)
+    pair = _pair(metadata)
+    board = _scoreboard(metadata)
+
+    entry = history.build_entry(
+        board,
+        metadata,
+        pairs=(pair,),
+        previous_record_sha256=None,
+    )
+    _rewrite_entries(tmp_path / history.INDEX_NAME, [entry])
+
+    assert ResultStore(tmp_path, "reader").load_scoreboard_index() == (entry,)
+
+
+@pytest.mark.parametrize("mutation", ["attempts", "seed", "mode"])
+def test_fresh_history_binds_sampling_methodology_to_run_target_config(
+    tmp_path, mutation
+):
+    metadata = _sampling_metadata()
+    if mutation == "attempts":
+        metadata["config"]["attempts"] = 4
+    elif mutation == "seed":
+        metadata["config"]["targets"][0]["seed"] = 10
+    else:
+        metadata["config"]["targets"][0]["sampling_mode"] = "recommended"
+    _refresh_metadata_identity(metadata)
+    pair = _sampling_pair(metadata)
+
+    with pytest.raises(ValueError, match="sampling methodology .*run config|target config"):
+        history.build_entry(
+            _sampling_scoreboard(metadata, pair),
+            metadata,
+            pairs=(pair,),
+            previous_record_sha256=None,
+        )
+
+
+def test_fresh_history_rejects_impossible_recommended_target_policy():
+    metadata = _sampling_metadata()
+    target = metadata["config"]["targets"][0]
+    target["sampling_mode"] = "recommended"
+    target["temperature"] = 0.7
+    _refresh_metadata_identity(metadata)
+    pair = _sampling_pair(metadata)
+
+    with pytest.raises(ValueError, match="expected sampling configuration is invalid"):
+        history.build_entry(
+            _sampling_scoreboard(metadata, pair),
+            metadata,
+            pairs=(pair,),
+            previous_record_sha256=None,
+        )
+
+
+def test_stored_multi_attempt_record_requires_sampling_evaluator_identity(tmp_path):
+    metadata = _sampling_metadata()
+    pair = _sampling_pair(metadata)
+    entry = history.build_entry(
+        _sampling_scoreboard(metadata, pair),
+        metadata,
+        pairs=(pair,),
+        previous_record_sha256=None,
+    )
+    resources = entry["run"]["identity"]["adapters"][0]["evaluation_protocol"]["resources"]
+    resources[:] = [resource for resource in resources if resource["resource"] != "sampling.py"]
+    fingerprint = _fingerprint(entry["run"]["identity"])
+    entry["fingerprint"] = fingerprint
+    entry["run"]["fingerprint"] = fingerprint
+    entry["scoreboard"]["fingerprint"] = fingerprint
+    entry["pairs"][0]["run_fingerprint"] = fingerprint
+    _rehash(entry)
+    _rewrite_entries(tmp_path / history.INDEX_NAME, [entry])
+
+    with pytest.raises(ValueError, match="sampling evaluator resource.*sampling.py"):
+        ResultStore(tmp_path, "reader").load_scoreboard_index()
+
+
+def test_stored_sampling_field_requires_sampling_evaluator_identity(tmp_path):
+    metadata = _metadata()
+    entry = history.build_entry(
+        _scoreboard(metadata),
+        metadata,
+        pairs=(_pair(metadata),),
+        previous_record_sha256=None,
+    )
+    entry["scoreboard"]["cells"]["gsm8k"]["target-a"]["sampling_sensitivity"] = {}
+    _rehash(entry)
+    _rewrite_entries(tmp_path / history.INDEX_NAME, [entry])
+
+    with pytest.raises(ValueError, match="sampling evaluator resource.*sampling.py"):
+        ResultStore(tmp_path, "reader").load_scoreboard_index()
 
 
 def _persist_indexed_pair(tmp_path):

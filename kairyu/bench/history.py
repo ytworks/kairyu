@@ -24,6 +24,8 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
 
+from kairyu.bench.sampling import PROTOCOL_ID as SAMPLING_PROTOCOL_ID
+
 INDEX_SCHEMA_VERSION = 1
 INDEX_NAME = "scoreboards.jsonl"
 LOCK_NAME = ".scoreboards.jsonl.lock"
@@ -108,6 +110,8 @@ _RESOLVED_EXECUTION_FIELDS = (
 _FINGERPRINT_EXCLUSIONS = frozenset(
     {"run_id", "results_dir", "cache_dir", "rerun", "download", "progress"}
 )
+_SAMPLING_SENSITIVITY_FIELD = "sampling_sensitivity"
+_SAMPLING_EVALUATION_RESOURCE = ("kairyu.bench", "sampling.py")
 
 
 def _fail(message: str) -> ValueError:
@@ -477,6 +481,58 @@ def _validate_methodology_identity(value: object) -> None:
             protocol["executables"], adapter=name, distributions=distributions
         )
         _dataset_identity_is_content_bound(identity, adapter=name)
+
+
+def _pair_has_sampling_evidence(value: object) -> bool:
+    """Detect fresh pair evidence that depends on the sampling evaluator."""
+
+    from kairyu.bench.types import PairResult
+
+    try:
+        pair = PairResult.model_validate(value)
+    except (TypeError, ValueError):
+        return False  # the ordinary pair validator reports the schema failure later
+    if isinstance(pair.methodology.get("sampling"), dict):
+        return True
+    if any(item.sampling_attempts is not None for item in pair.items):
+        return True
+    return any(name.startswith("sampling_") for name in pair.metrics)
+
+
+def _scoreboard_has_sampling_claim(scoreboard: dict) -> bool:
+    cells = scoreboard.get("cells")
+    if not isinstance(cells, dict):
+        return False
+    return any(
+        isinstance(cell, dict) and _SAMPLING_SENSITIVITY_FIELD in cell
+        for row in cells.values()
+        if isinstance(row, dict)
+        for cell in row.values()
+    )
+
+
+def _require_sampling_evaluation_resource(adapters: Sequence[object]) -> None:
+    """Require sampling.py only for records that use the post-#371 protocol."""
+
+    package, resource = _SAMPLING_EVALUATION_RESOURCE
+    for identity in adapters:
+        if not isinstance(identity, dict):  # validated by the caller
+            continue
+        protocol = identity.get("evaluation_protocol")
+        resources = protocol.get("resources") if isinstance(protocol, dict) else None
+        retained = set()
+        if isinstance(resources, list):
+            retained = {
+                (entry.get("package"), entry.get("resource"))
+                for entry in resources
+                if isinstance(entry, dict)
+            }
+        if _SAMPLING_EVALUATION_RESOURCE not in retained:
+            name = identity.get("name")
+            raise _fail(
+                f"benchmark {name!r} omits shared sampling evaluator resource "
+                f"{package}/{resource}"
+            )
 
 
 def cross_run_policies(
@@ -866,6 +922,7 @@ def _pair_result_binding(
     pair: object,
     *,
     declared_binary: bool | None = None,
+    expected_sampling: dict[str, object] | None = None,
 ) -> dict:
     from kairyu.bench.aggregate import _binary_confidence_interval
     from kairyu.bench.types import PairResult, pair_result_evidence_error
@@ -880,6 +937,7 @@ def _pair_result_binding(
         raise _fail("pair result does not match PairResult schema") from error
     evidence_error = pair_result_evidence_error(
         result,
+        expected_sampling=expected_sampling,
         require_history_safe_counts=True,
     )
     if evidence_error is not None:
@@ -937,6 +995,53 @@ def _pair_result_binding(
     }
 
 
+def _recomputed_sampling_sensitivity(pair: object, *, benchmark: str) -> dict | None:
+    """Rebuild a fresh sampling claim without extending index schema 1.
+
+    Sampling sensitivity is a derived scoreboard label rather than one of the
+    schema-1 pair-binding fields.  Fresh history construction must nevertheless
+    prove that label against the complete raw ``PairResult`` before discarding
+    it from the durable scoreboard snapshot.
+    """
+
+    from kairyu.bench.adapters import all_adapters
+    from kairyu.bench.aggregate import _sampling_sensitivity
+    from kairyu.bench.types import PairResult
+
+    try:
+        result = PairResult.model_validate(pair)
+    except (TypeError, ValueError) as error:  # pragma: no cover - bound just above
+        raise _fail("pair result does not match PairResult schema") from error
+    adapter = all_adapters().get(benchmark)
+    declared_binary = bool(adapter is not None and adapter.info.binary_outcomes)
+    return _sampling_sensitivity(result, declared_binary=declared_binary)
+
+
+def _validate_fresh_sampling_claim(
+    cell: dict,
+    pair: object,
+    *,
+    benchmark: str,
+    target: str,
+) -> None:
+    """Require exact agreement between a fresh cell and raw sampling evidence."""
+
+    field = _SAMPLING_SENSITIVITY_FIELD
+    expected = _recomputed_sampling_sensitivity(pair, benchmark=benchmark)
+    if expected is None:
+        if field in cell:
+            raise _fail(
+                f"scoreboard cell {benchmark!r}/{target!r} carries sampling "
+                "sensitivity without complete raw evidence"
+            )
+        return
+    if field not in cell or _canonical_bytes(cell[field]) != _canonical_bytes(expected):
+        raise _fail(
+            f"scoreboard cell {benchmark!r}/{target!r} sampling sensitivity "
+            "disagrees with raw pair evidence"
+        )
+
+
 def pair_result_binding(
     pair: object,
     *,
@@ -964,6 +1069,7 @@ def _pair_bindings(
     fingerprint: str,
     expected_source_identity: dict,
     stored: bool,
+    sampling_expectations: Mapping[tuple[str, str], dict[str, object]],
 ) -> list[dict[str, Any]]:
     if not pairs:
         raise _fail("complete PairResult evidence is required for every scoreboard cell")
@@ -975,7 +1081,22 @@ def _pair_bindings(
                 raise _fail("pair binding fields do not match index schema 1")
             binding = _snapshot(pair)
         else:
-            binding = _pair_result_binding(pair)
+            raw_benchmark = (
+                pair.benchmark
+                if hasattr(pair, "benchmark")
+                else pair.get("benchmark") if isinstance(pair, Mapping) else None
+            )
+            raw_target = (
+                pair.target
+                if hasattr(pair, "target")
+                else pair.get("target") if isinstance(pair, Mapping) else None
+            )
+            binding = _pair_result_binding(
+                pair,
+                expected_sampling=sampling_expectations.get(
+                    (raw_benchmark, raw_target)
+                ),
+            )
         benchmark = binding.get("benchmark")
         target = binding.get("target")
         pair_fingerprint = binding.get("run_fingerprint")
@@ -996,9 +1117,23 @@ def _pair_bindings(
             raise _fail(
                 f"pair {benchmark!r}/{target!r} does not carry the clean run source identity"
             )
+        cell = scoreboard["cells"][benchmark][target]
+        if stored:
+            if _SAMPLING_SENSITIVITY_FIELD in cell:
+                raise _fail(
+                    f"stored scoreboard cell {benchmark!r}/{target!r} must not carry "
+                    "sampling sensitivity in index schema 1"
+                )
+        else:
+            _validate_fresh_sampling_claim(
+                cell,
+                pair,
+                benchmark=benchmark,
+                target=target,
+            )
         summary = _cell_summary(binding, field=f"pair binding {benchmark!r}/{target!r}")
         expected_summary = _cell_summary(
-            scoreboard["cells"][benchmark][target],
+            cell,
             field=f"scoreboard cell {benchmark!r}/{target!r}",
         )
         if _canonical_bytes(summary) != _canonical_bytes(expected_summary):
@@ -1056,17 +1191,39 @@ def _validate_scoreboard(
     adapter_names = [adapter["name"] for adapter in adapters]
     if len(adapter_names) != len(set(adapter_names)):
         raise _fail("run identity adapter names must be unique")
+    protocol_marker = config.get("sampling_protocol")
+    if protocol_marker is not None and protocol_marker != SAMPLING_PROTOCOL_ID:
+        raise _fail("run config carries an unknown sampling protocol marker")
+    raw_targets = config.get("targets")
+    target_sampling_policy_used = isinstance(raw_targets, list) and any(
+        isinstance(target, dict)
+        and (
+            target.get("temperature") is not None
+            or target.get("sampling_mode") == "recommended"
+        )
+        for target in raw_targets
+    )
+    sampling_protocol_used = (
+        protocol_marker == SAMPLING_PROTOCOL_ID
+        or target_sampling_policy_used
+        or _scoreboard_has_sampling_claim(board)
+        or (not stored_pairs and any(_pair_has_sampling_evidence(pair) for pair in pairs))
+    )
+    if sampling_protocol_used:
+        _require_sampling_evaluation_resource(adapters)
     configured_targets = config.get("targets")
     if not isinstance(configured_targets, list) or any(
         not isinstance(target, dict) for target in configured_targets
     ):
         raise _fail("run config targets must disclose ordered target identities")
     target_labels: list[str] = []
+    configured_by_label: dict[str, dict] = {}
     for target in configured_targets:
         label = target.get("name") or target.get("model")
         if not isinstance(label, str) or not label:
             raise _fail("each run config target requires a non-empty label or model")
         target_labels.append(label)
+        configured_by_label[label] = target
     if len(target_labels) != len(set(target_labels)):
         raise _fail("run config target labels must be unique")
     if board.get("benchmarks") != adapter_names:
@@ -1074,6 +1231,38 @@ def _validate_scoreboard(
     if board.get("targets") != target_labels:
         raise _fail("scoreboard targets do not match run config target labels")
     matrix = _scoreboard_matrix(board)
+    from kairyu.bench.adapters import all_adapters
+    from kairyu.bench.adapters.base import GenerativeAdapter
+
+    registered = all_adapters()
+    grouped_chat_attempts = (
+        config.get("attempts", 1)
+        if protocol_marker == SAMPLING_PROTOCOL_ID
+        else 1
+    )
+    sampling_expectations = {
+        (benchmark, target): {
+            # ``attempts`` was added after index schema 1. Missing legacy
+            # records are the original one-attempt protocol.
+            "attempts": (
+                grouped_chat_attempts
+                if isinstance(registered.get(benchmark), GenerativeAdapter)
+                else config.get("attempts", 1)
+            ),
+            "seed": configured_by_label[target].get("seed"),
+            "mode": configured_by_label[target].get("sampling_mode", "adapter"),
+            "temperature": configured_by_label[target].get("temperature"),
+            "top_p": configured_by_label[target].get("top_p"),
+            "required": isinstance(registered.get(benchmark), GenerativeAdapter),
+        }
+        for benchmark, target in matrix
+    }
+    from kairyu.bench.types import sampling_configuration_error
+
+    for expectation in sampling_expectations.values():
+        error = sampling_configuration_error(expectation)
+        if error is not None:
+            raise _fail(error)
     policies = cross_run_policies(adapters, run["environment"])
     identities_by_name = {identity["name"]: identity for identity in adapters}
     for benchmark in adapter_names:
@@ -1112,7 +1301,15 @@ def _validate_scoreboard(
         fingerprint=run["fingerprint"],
         expected_source_identity=source_identity(run["environment"]),
         stored=stored_pairs,
+        sampling_expectations=sampling_expectations,
     )
+    if not stored_pairs:
+        # Index schema 1 has no canonical pair-binding field for this derived
+        # claim.  It was proven against the raw PairResult above; omit it from
+        # the durable board so later index validation can never trust a detached
+        # or attacker-rehashed pass@k value.
+        for benchmark, target in matrix:
+            board["cells"][benchmark][target].pop(_SAMPLING_SENSITIVITY_FIELD, None)
     return board, bindings
 
 

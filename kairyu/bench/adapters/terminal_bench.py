@@ -18,6 +18,7 @@ from kairyu.bench.adapters.base import (
     AdapterInfo,
     DownloadContext,
     RunContext,
+    external_harness_sampling_incompatibility,
     normalize_base_url,
     skipped_pair,
     summarize_items,
@@ -149,10 +150,12 @@ class TerminalBenchAdapter:
             f"agent scaffold: {_AGENT} via the Harbor harness, "
             f"max_turns={_MAX_TURNS} (Fugu's condition)",
             "one attempt per task by default (--attempts); the official "
-            "leaderboard requires at least five",
-            "the target's sampling policy (reasoning effort, top_p, seed) is NOT "
+            "leaderboard requires at least five; Harbor -k is a harness trial "
+            "count, not grouped chat seed-sweep sensitivity",
+            "target reasoning_effort, top_p, seed, and vendor extra_body are NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
-            "documents no sampling passthrough",
+            "documents no sampling passthrough; explicit temperature and "
+            "recommended sampling are rejected",
             "score is Harbor's Mean over EVERY trial, errored trials as zero",
         ),
         evaluation_distributions=("harbor",),
@@ -171,7 +174,13 @@ class TerminalBenchAdapter:
             detail=f"{_DATASET} tasks are fetched by the Harbor harness at run time",
         )
 
-    def _preconditions(self, ctx: RunContext) -> str | None:
+    def _preconditions(self, target: BenchTarget, ctx: RunContext) -> str | None:
+        sampling_reason = external_harness_sampling_incompatibility(
+            target,
+            harness="Harbor/terminus-2",
+        )
+        if sampling_reason is not None:
+            return sampling_reason
         available, reason = ctx.docker
         if not available:
             return reason
@@ -204,7 +213,7 @@ class TerminalBenchAdapter:
 
     async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:
         started_at = utc_now()
-        reason = self._preconditions(ctx)
+        reason = self._preconditions(target, ctx)
         if reason is not None:
             return skipped_pair(
                 self.info.name, target.label(), reason, annotations=self.info.annotations

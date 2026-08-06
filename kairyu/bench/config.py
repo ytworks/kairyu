@@ -25,11 +25,24 @@ def parse_target_flag(spec: str, **sampling) -> BenchTarget:
 
 def _cli_sampling(args) -> dict:
     """CLI target overrides, applied to every CLI-declared target."""
+    recommended = bool(getattr(args, "recommended_sampling", False))
+    temperature = getattr(args, "temperature", None)
+    top_p = getattr(args, "top_p", None)
+    if recommended and (temperature is not None or top_p is not None):
+        raise ValueError(
+            "--recommended-sampling cannot be combined with --temperature or --top-p"
+        )
     options = {
         "reasoning_effort": getattr(args, "reasoning_effort", None),
-        "top_p": getattr(args, "top_p", None),
+        "top_p": top_p,
         "seed": getattr(args, "sampling_seed", None),
         "extra_body_json": getattr(args, "extra_body", None),
+        "temperature": temperature,
+        "sampling_mode": (
+            "recommended"
+            if recommended
+            else ("adapter" if temperature is not None or top_p is not None else None)
+        ),
         # only ever narrows the default; `--no-vision` absent means "unspecified"
         "supports_vision": False if getattr(args, "no_vision", False) else None,
     }
@@ -140,10 +153,17 @@ def build_config(args) -> BenchConfig:
         # CLI beats YAML: sampling flags also apply to YAML-declared targets.
         sampling = _cli_sampling(args)
         if sampling:
-            data["targets"] = [
-                {**target, **sampling} if isinstance(target, dict) else target
-                for target in data.get("targets") or []
-            ]
+            targets = []
+            for target in data.get("targets") or []:
+                if not isinstance(target, dict):
+                    targets.append(target)
+                    continue
+                target = dict(target)
+                if sampling.get("sampling_mode") == "recommended":
+                    target.pop("temperature", None)
+                    target.pop("top_p", None)
+                targets.append({**target, **sampling})
+            data["targets"] = targets
 
     if served_config is not None:
         served_config_data = served_config.model_dump()

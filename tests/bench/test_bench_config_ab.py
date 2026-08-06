@@ -44,6 +44,7 @@ def _adapter_identity(name: str) -> dict:
         ("kairyu.bench", "aggregate.py"),
         ("kairyu.bench", "cache.py"),
         ("kairyu.bench", "runner.py"),
+        ("kairyu.bench", "sampling.py"),
         ("kairyu.bench", "targets.py"),
         ("kairyu.bench", "types.py"),
     ]
@@ -85,6 +86,7 @@ def _run(
     item_ids: tuple[str, ...] | None = None,
     model: str = "model-a",
     max_output_tokens: int = 8192,
+    attempts: int = 1,
     comparable: bool = True,
     incomparable_reasons: tuple[str, ...] = (),
 ) -> tuple[dict, PairResult]:
@@ -101,10 +103,11 @@ def _run(
         else ExecutionConfig()
     )
     config = BenchConfig(
-        suite="core" if benchmark == "gsm8k" else "fugu",
+        suite="core" if benchmark in {"gsm8k", "mmlu"} else "fugu",
         targets=(target,),
         only=(benchmark,),
         run_id=run_id,
+        attempts=attempts,
         download=False,
         progress=False,
         execution=execution,
@@ -478,6 +481,33 @@ def test_configuration_and_methodology_provenance_fail_closed(mutation, message)
         )
 
     with pytest.raises(ConfigComparisonError, match=message):
+        _compare(baseline_entry, baseline_pair, candidate_entry, candidate_pair)
+
+
+def test_multi_attempt_sampling_evidence_is_not_accepted_as_config_ab():
+    baseline_entry, baseline_pair = _run(
+        "base",
+        "baseline-arm",
+        "bf16",
+        "1" * 64,
+        (1, 1, 1, 0, 0, 0),
+        attempts=2,
+        benchmark="mmlu",
+    )
+    candidate_entry, candidate_pair = _run(
+        "candidate",
+        "candidate-arm",
+        "fp8",
+        "2" * 64,
+        (1, 1, 0, 1, 0, 0),
+        attempts=2,
+        benchmark="mmlu",
+    )
+
+    with pytest.raises(
+        ConfigComparisonError,
+        match=r"baseline configuration A/B requires attempts=1; got 2",
+    ):
         _compare(baseline_entry, baseline_pair, candidate_entry, candidate_pair)
 
 

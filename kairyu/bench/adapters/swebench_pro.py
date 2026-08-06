@@ -20,6 +20,7 @@ from kairyu.bench.adapters.base import (
     AdapterInfo,
     DownloadContext,
     RunContext,
+    external_harness_sampling_incompatibility,
     normalize_base_url,
     skipped_pair,
     summarize_items,
@@ -82,9 +83,12 @@ class SweBenchProAdapter:
         annotations=(
             "scaffold: mini-swe-agent (matches Fugu's published methodology), "
             f"agent.step_limit={_STEP_LIMIT}",
-            "the target's named sampling fields are forwarded as "
-            "model.model_kwargs.*; vendor extra_body has no harness equivalent "
-            "and is NOT forwarded",
+            "target reasoning_effort, top_p, and seed are forwarded as "
+            "model.model_kwargs.*; explicit temperature and recommended sampling "
+            "are rejected because this wrapper has no verified passthrough",
+            "vendor extra_body has no harness equivalent and is NOT forwarded",
+            "--attempts must remain 1; this wrapper has no verified repeated-trial "
+            "or grouped chat seed-sweep path",
         ),
         evaluation_distributions=("mini-swe-agent", "swebench"),
         evaluation_executables=("mini-extra",),
@@ -102,7 +106,18 @@ class SweBenchProAdapter:
             detail="instances and images are fetched by the swebench harness at run time",
         )
 
-    def _preconditions(self, ctx: RunContext) -> str | None:
+    def _preconditions(self, target: BenchTarget, ctx: RunContext) -> str | None:
+        sampling_reason = external_harness_sampling_incompatibility(
+            target,
+            harness="mini-swe-agent",
+        )
+        if sampling_reason is not None:
+            return sampling_reason
+        if ctx.attempts != 1:
+            return (
+                "mini-swe-agent has no verified --attempts passthrough; "
+                "SWE-Bench Pro requires attempts=1"
+            )
         available, reason = ctx.docker
         if not available:
             return reason
@@ -158,7 +173,7 @@ class SweBenchProAdapter:
 
     async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:
         started_at = utc_now()
-        reason = self._preconditions(ctx)
+        reason = self._preconditions(target, ctx)
         if reason is not None:
             return skipped_pair(
                 self.info.name, target.label(), reason, annotations=self.info.annotations

@@ -110,7 +110,7 @@ async def test_unset_sampling_leaves_the_body_untouched():
             retries=0,
             timeout_s=5,
         )
-    assert set(seen[0]) == {"model", "messages", "temperature", "stream"}
+    assert list(seen[0]) == ["model", "messages", "temperature", "stream"]
 
 
 async def test_judge_sends_its_own_reasoning_effort():

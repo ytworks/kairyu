@@ -39,6 +39,7 @@ from kairyu.bench.adapters.base import (
     target_api_key,
     utc_now,
 )
+from kairyu.bench.sampling import combine_attempts, seed_schedule
 from kairyu.bench.types import (
     BenchItem,
     BenchTarget,
@@ -46,6 +47,7 @@ from kairyu.bench.types import (
     DatasetUnavailable,
     ItemResult,
     PairResult,
+    SamplingAttemptResult,
     SkipItem,
 )
 
@@ -431,12 +433,21 @@ class SciCodeAdapter(GenerativeAdapter):
         groups = select_problem_groups(
             group_by_problem(self.load_items(ctx)), ctx.limit, ctx.seed
         )
+        seeds = seed_schedule(target.seed, ctx.attempts)
+        scored_items = sum(
+            not item.payload.get("excluded") for group in groups for item in group
+        )
+        ctx.progress.items_total(scored_items * ctx.attempts)
         semaphore = asyncio.Semaphore(ctx.concurrency)
         api_key = target_api_key(target)
 
         async with ctx.http_factory() as client:
 
-            async def run_problem(steps: list[BenchItem]) -> list[ItemResult]:
+            async def run_problem(
+                steps: list[BenchItem],
+                *,
+                sampling_seed: int | None = None,
+            ) -> list[ItemResult]:
                 results: list[ItemResult] = []
                 prior: list[str] = []
                 history: list[dict] = []
@@ -465,42 +476,83 @@ class SciCodeAdapter(GenerativeAdapter):
                                 item_id=item.id, status="skipped", error=request.reason
                             )
                         )
+                        ctx.progress.item_done()
                         continue
-                    async with semaphore:
-                        attempt = await attempt_item(
-                            client,
-                            target,
-                            request,
-                            item_id=item.id,
-                            ctx=ctx,
-                            api_key=api_key,
+                    try:
+                        async with semaphore:
+                            attempt = await attempt_item(
+                                client,
+                                target,
+                                request,
+                                item_id=item.id,
+                                ctx=ctx,
+                                api_key=api_key,
+                                sampling_seed=sampling_seed,
+                            )
+                        if attempt.failure is not None:
+                            results.append(attempt.failure)
+                            continue
+                        text = attempt.text or ""
+                        code = extract_code_block(text)
+                        if code is not None:
+                            # carried forward pass or fail: SciCode measures the
+                            # cascade, so a wrong step stays in the context.
+                            prior.append(code)
+                            history.append({**item.payload, "code": code})
+                        result = await self.score(staged, text, ctx)
+                        results.append(
+                            result.model_copy(
+                                update={
+                                    "item_id": item.id,
+                                    "latency_s": round(attempt.latency_s, 3),
+                                }
+                            )
                         )
-                    if attempt.failure is not None:
-                        results.append(attempt.failure)
-                        continue
-                    text = attempt.text or ""
-                    code = extract_code_block(text)
-                    if code is not None:
-                        # carried forward pass or fail: SciCode measures the
-                        # cascade, so a wrong step stays in the context.
-                        prior.append(code)
-                        history.append({**item.payload, "code": code})
-                    result = await self.score(staged, text, ctx)
-                    results.append(
-                        result.model_copy(update={"latency_s": round(attempt.latency_s, 3)})
-                    )
+                    finally:
+                        ctx.progress.item_done()
                 return results
 
-            gathered = await asyncio.gather(*(run_problem(group) for group in groups))
+            if ctx.attempts == 1:
+                gathered = await asyncio.gather(*(run_problem(group) for group in groups))
+                results = [result for group in gathered for result in group]
+            else:
+                gathered = await asyncio.gather(
+                    *(
+                        run_problem(group, sampling_seed=int(seed))
+                        for seed in seeds
+                        for group in groups
+                    )
+                )
+                per_attempt: list[list[ItemResult]] = []
+                for attempt_index in range(ctx.attempts):
+                    start = attempt_index * len(groups)
+                    selected = gathered[start : start + len(groups)]
+                    per_attempt.append(
+                        [result for group_results in selected for result in group_results]
+                    )
+                if any(len(row) != len(per_attempt[0]) for row in per_attempt):
+                    raise RuntimeError("SciCode sampling attempts produced different item sets")
+                results = []
+                for item_index, first in enumerate(per_attempt[0]):
+                    retained = tuple(
+                        SamplingAttemptResult(
+                            attempt=attempt_index + 1,
+                            seed=int(seeds[attempt_index]),
+                            result=per_attempt[attempt_index][item_index],
+                        )
+                        for attempt_index in range(ctx.attempts)
+                    )
+                    results.append(combine_attempts(first.item_id, retained))
 
-        return summarize_items(
+        pair = summarize_items(
             self.info.name,
             target.label(),
-            [result for group in gathered for result in group],
-            methodology=self.methodology(ctx),
+            results,
+            methodology=self.pair_methodology(target, ctx),
             annotations=self.info.annotations,
             started_at=started_at,
         )
+        return self._attach_sampling_metrics(pair, target, ctx)
 
     def _needs_golden(self, tests: list[str]) -> bool:
         return any("target" in test for test in tests)

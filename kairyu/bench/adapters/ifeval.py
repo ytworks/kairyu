@@ -529,11 +529,20 @@ class IfevalAdapter(GenerativeAdapter):
 
     async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:
         result = await super().run(target, ctx)
-        scored_details = [
-            item.details
-            for item in result.items
-            if item.status == "completed" and isinstance(item.details, dict)
-        ]
+        scored_details: list[dict] = []
+        for item in result.items:
+            if item.status != "completed":
+                continue
+            if item.sampling_attempts is None:
+                if isinstance(item.details, dict):
+                    scored_details.append(item.details)
+                continue
+            scored_details.extend(
+                attempt.result.details
+                for attempt in item.sampling_attempts
+                if attempt.result.status == "completed"
+                and isinstance(attempt.result.details, dict)
+            )
         if not scored_details:
             return result
 
