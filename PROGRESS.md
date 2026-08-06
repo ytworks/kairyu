@@ -1148,6 +1148,15 @@ coexists with the pre-existing `SamplingParams.extra_args` compatibility path,
 while ambiguous double specification is rejected. IDE Docker examples publish
 unauthenticated replicas only on the host loopback interface.
 
+Retained benchmark evidence now has one strict machine-readable catalog at
+`bench/results/index.json`. Its 63 path-sorted records cover every Git-tracked
+top-level result root, preserve unknown or multi-source historical metadata as
+`null`, and link each evidence bundle to its authoritative summary. Checkout
+validation rejects schema, canonical-JSON, path/symlink, summary, and tracked
+coverage drift while continuing to ignore routine and untracked local output;
+the catalog remains discovery metadata rather than a replacement for formal
+artifact replay.
+
 Active blockers: RTX 6000 Pro units are now partially available — M2/E1 GPU phase is
 unblocked on the PCIe profile (H100 boxes still wanted for NVLink-profile gates);
 execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procurement
@@ -1155,6 +1164,11 @@ execution plan is `docs/gpu-runbook.md` + `docs/roadmap.md` §4. Hardware procur
 E1's measured P2P matrix. Human sign-off pending on M2–M4 design reviews.
 
 ## Change Log
+
+### 2026-08-06 — [progress] Retained benchmark evidence gains a strict tracked catalog
+- What: added `bench/results/index.json` with one path-sorted record for all 63 Git-tracked top-level artifacts, including nullable recorded gate/date/source-commit/hardware/verdict metadata and authoritative bundle summaries. A package-owned strict parser and checkout validator reject duplicate/non-finite/non-canonical JSON, schema or slug drift, unsafe or symlinked paths, untracked summaries, and missing/stale Git coverage while excluding ignored and untracked runtime output. The read-only verifier now runs in portable CI alongside the entrypoint and wheel-boundary checks.
+- Why: retained flat files and bundles were discoverable only through narrative documentation, so trend tooling and evidence audits could silently miss new roots or invent provenance for heterogeneous historical artifacts.
+- Refs: issue #383; `bench/results/index.json`; `kairyu/bench/results_index.py`; `scripts/verify_bench_results_index.py`; `tests/bench/test_bench_results_index.py`; `bench/README.md`; `docs/benchmarks.md`
 
 ### 2026-08-06 — [progress] Benchmark profiling gains shared, bound trace artifacts
 - What: added a lazy `kairyu.bench.profiling` context that preserves caller-owned warm-up, synchronization, and measured scopes while mapping explicit CPU/CUDA activities without fallback. Migrated the two checkout benchmark users and all nine GPU-test users from direct profiler construction. `serving_bench.py --profile` now records one CPU-only local-client range and publishes a private, strict-JSON, 64 MiB-bounded `*.client.pt.trace.json` sidecar through same-filesystem temporary export and exclusive hard-link publication; the paired UTC-microsecond result binds its relative name, format, size, SHA-256, activity, local scope, target exclusion, and diagnostic-only status. Both members publish without overwriting a concurrent winner, and result-publication failure rolls back only its exact untampered trace. The example serving reporter rejects profiled diagnostics rather than mixing them into timing comparisons. Disabled/help/core-wheel paths do not import torch, and missing torch, unavailable CUDA, unsafe or colliding paths, invalid exports, and publish races fail closed.

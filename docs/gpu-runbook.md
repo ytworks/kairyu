@@ -22,7 +22,9 @@ command-level plan for the first GPU session. Est. scope: 2–4 focused days.
 > `kairyu.bench` helpers are recorded by the artifact. Before a GPU session, run
 > `uv run --frozen kairyu bench entrypoints --check-repo .`. Result artifacts
 > remain under the checkout-only `bench/results/` path so G2/G4/G5/G6 provenance
-> and historical replay commands do not change.
+> and historical replay commands do not change. A PR that retains or removes a
+> top-level result artifact must update `bench/results/index.json` in the same
+> change and pass `scripts/verify_bench_results_index.py`.
 
 > Note (2026-07-04): §1/§3 below predate M8/M12/M13 — the tokenizer seam,
 > `PagedModelRunner`, the `AttentionBackend`/`FlashInferBackend` seam, and quant

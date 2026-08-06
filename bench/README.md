@@ -89,6 +89,33 @@ edges are allowlisted in the manifest's
 `[compatibility_imports]` table; checkout validation fails on any undeclared,
 removed, or redirected edge.
 
+The machine-readable catalog of retained evidence is
+`bench/results/index.json`. It has one path-sorted record for every Git-tracked
+top-level artifact, including its gate, recorded date, measured source commit,
+hardware class, verdict, and the authoritative summary path for bundles. A
+historical value that neither the retained content nor its canonical artifact
+label records remains `null`; the catalog never substitutes the Git import date
+or commit for measurement provenance. Add or remove a retained artifact and
+update the catalog in the same change, then run:
+
+`artifact_path` and an optional bundle `summary_path` are repository-relative;
+`gate_id` and `hardware` are lowercase grouping slugs. `date` is the ISO calendar
+label explicitly recorded by the content or canonical artifact path; it does
+not reconstruct a missing time zone. `commit` is the full 40-character lowercase
+primary measured-source SHA, and stays `null` when one artifact has no single
+primary source. `verdict` is `pass`, `fail`, `accepted-deviation`, `diagnostic`,
+`discarded`, `reference`, `not-applicable`, or `null` when the artifact has no
+single recorded verdict.
+
+```bash
+uv run --frozen python scripts/verify_bench_results_index.py
+```
+
+The verifier compares the catalog with `git ls-files`, so ignored routine output
+and untracked local measurements stay outside the inventory. Catalog verdicts
+are discovery metadata, not a replacement for each gate's source-bound replay
+or integrity verifier.
+
 ### CPU microbenchmark CI smoke gate
 
 Pull requests run six source-checkout-only CPU benchmarks in one dedicated
@@ -938,6 +965,7 @@ IFEval `LICENSE`/`NOTICE` are present, while the top-level `bench/`,
 
 ```bash
 uv run --frozen python scripts/verify_bench_entrypoints.py
+uv run --frozen python scripts/verify_bench_results_index.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 

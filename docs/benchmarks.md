@@ -36,6 +36,13 @@ checkout-only: routine outputs are ignored, while explicitly reviewed formal
 evidence can be retained. Neither wrappers, result artifacts, nor `tests/` are
 included in the wheel.
 
+Retained top-level evidence is discoverable through the checkout-only
+`bench/results/index.json`. Its strict validator proves exact coverage of
+Git-tracked result roots and points bundle records at their authoritative
+summary, without treating ignored or untracked runtime output as published
+evidence. Missing historical measurement metadata stays `null`, and the index
+verdict never replaces the owning artifact's replay or integrity check.
+
 Inspect the packaged inventory or validate a checkout with:
 
 ```bash
@@ -43,6 +50,7 @@ kairyu bench entrypoints
 kairyu bench entrypoints --json
 kairyu bench entrypoints --check-repo .
 uv run --frozen python scripts/verify_bench_entrypoints.py
+uv run --frozen python scripts/verify_bench_results_index.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 

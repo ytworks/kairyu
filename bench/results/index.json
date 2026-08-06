@@ -1,0 +1,572 @@
+{
+  "artifacts": [
+    {
+      "artifact_path": "bench/results/attention-backends-qwen3-32b-sm120-2026-07-29.json",
+      "commit": "b6d358b2409b9aa47d54556e4fc89cfb79a70fab",
+      "date": "2026-07-29",
+      "gate_id": "qwen3-32b-sm120-attention-prefill-ab",
+      "hardware": "nvidia-rtx-pro-6000-blackwell-sm120",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/attention-backends-serving-qwen3-32b-sm120-2026-07-29.json",
+      "commit": "b6d358b2409b9aa47d54556e4fc89cfb79a70fab",
+      "date": "2026-07-29",
+      "gate_id": "qwen3-32b-sm120-attention-serving-proof",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell-sm120-pcie",
+      "summary_path": null,
+      "verdict": "diagnostic"
+    },
+    {
+      "artifact_path": "bench/results/auto-params-qwen3-32b-tp8-2026-07-28.json",
+      "commit": null,
+      "date": "2026-07-28",
+      "gate_id": null,
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/cuda-graph-qwen3-32b-tp8-2026-07-26.json",
+      "commit": null,
+      "date": "2026-07-26",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/decode-row-sync-qwen3-32b-tp8-2026-07-26.json",
+      "commit": null,
+      "date": "2026-07-26",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/env-2026-07-23.json",
+      "commit": null,
+      "date": "2026-07-23",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell-sm120-pcie",
+      "summary_path": null,
+      "verdict": "not-applicable"
+    },
+    {
+      "artifact_path": "bench/results/env-2026-07-25.json",
+      "commit": null,
+      "date": "2026-07-25",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell-sm120-pcie",
+      "summary_path": null,
+      "verdict": "not-applicable"
+    },
+    {
+      "artifact_path": "bench/results/env-2026-07-30.json",
+      "commit": null,
+      "date": "2026-07-30",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell-sm120-pcie",
+      "summary_path": null,
+      "verdict": "not-applicable"
+    },
+    {
+      "artifact_path": "bench/results/f1c-three-gateway",
+      "commit": "be40b97d6580768d2d1b0d81cce9d64226ab1991",
+      "date": "2026-07-28",
+      "gate_id": "g5-f1c-three-gateway-shared-batchstore",
+      "hardware": null,
+      "summary_path": "bench/results/f1c-three-gateway/manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f2a-prefix-routing-500-2026-07-28",
+      "commit": "c067cb8a6d1aa661c82a56a007fc325011426459",
+      "date": "2026-07-28",
+      "gate_id": "g5-f2a",
+      "hardware": null,
+      "summary_path": "bench/results/f2a-prefix-routing-500-2026-07-28/prefix-routing-f2a-manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f2b-kv-event-retained",
+      "commit": "f3838065bacd986db497419e5bc5c25219ce3ec1",
+      "date": null,
+      "gate_id": "g5-f2b",
+      "hardware": null,
+      "summary_path": "bench/results/f2b-kv-event-retained/kv-event-f2b-manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29",
+      "commit": "80b039b5d429c656871a480c2740740951b29b97",
+      "date": "2026-07-29",
+      "gate_id": "g5-f2c",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/f2c-kv-aware-ttft-qwen3-32b-2026-07-29/kv-aware-ttft-f2c-manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f2d-prefix-weight-replay-2026-07-29",
+      "commit": "86dde278d0f2a093bde64f5d1d9cba9aca9e1221",
+      "date": "2026-07-29",
+      "gate_id": "g5-f2d",
+      "hardware": null,
+      "summary_path": "bench/results/f2d-prefix-weight-replay-2026-07-29/prefix-weight-f2d-manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f4c-global-kv-pool-decision-2026-07-31.json",
+      "commit": null,
+      "date": "2026-07-31",
+      "gate_id": "g5-f4c",
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f5a-priority-overload-cpu-2026-07-28.json",
+      "commit": "b1de63b2fe9f9351b3d0e61d3e16754f79608e7b",
+      "date": "2026-07-28",
+      "gate_id": "g5-f5a",
+      "hardware": "cpu",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f5a-priority-overload-qwen3-32b-tp8-2026-07-28.json",
+      "commit": "1a2bc56c69d8ee4e3140fd00d1396948eb2d6af1",
+      "date": "2026-07-28",
+      "gate_id": "g5-f5a",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f5b-noisy-neighbor-cpu-2026-07-28.json",
+      "commit": "0d8d091452fcc068e50a5bab1f426ce3830e794f",
+      "date": "2026-07-28",
+      "gate_id": "g5-f5b",
+      "hardware": "cpu",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f5b-noisy-neighbor-qwen3-32b-tp8-2026-07-28.json",
+      "commit": "0d8d091452fcc068e50a5bab1f426ce3830e794f",
+      "date": "2026-07-28",
+      "gate_id": "g5-f5b",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/f5c-slo-admission-cpu-2026-07-28.json",
+      "commit": "dac6980ec27e02c6616d02ebac64252458acccf3",
+      "date": "2026-07-28",
+      "gate_id": "g5-f5c",
+      "hardware": "cpu",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/fleet-usage-ledger-gateway-a-2026-07-27.jsonl",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": "g5-f5e",
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "not-applicable"
+    },
+    {
+      "artifact_path": "bench/results/fleet-usage-ledger-gateway-b-2026-07-27.jsonl",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": "g5-f5e",
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "not-applicable"
+    },
+    {
+      "artifact_path": "bench/results/fleet-usage-ledger-gateway-c-2026-07-27.jsonl",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": "g5-f5e",
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "not-applicable"
+    },
+    {
+      "artifact_path": "bench/results/fleet-usage-reconciliation-2026-07-27.json",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": "g5-f5e",
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/fleet-usage-request-log-2026-07-27.jsonl",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": "g5-f5e",
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "not-applicable"
+    },
+    {
+      "artifact_path": "bench/results/future-token-qwen3-32b-tp8-2026-07-27.json",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/g2-a1-llama31-8b-rtxpro6000-2026-07-26.json",
+      "commit": "a5453cc2d4fc516f2fb49afb30dee4426f60a256",
+      "date": "2026-07-26",
+      "gate_id": "g2-a1",
+      "hardware": "2x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json",
+      "commit": "4c9bd4d5fea2b8faeaee4dda2be30709fbaeb05c",
+      "date": "2026-07-27",
+      "gate_id": "g2-a2",
+      "hardware": "nvidia-rtx-pro-6000-blackwell-tp2-tp4-tp8",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29",
+      "commit": "b5bcaf10df99ee60e92a291afd4a2764c232a1f2",
+      "date": "2026-07-29",
+      "gate_id": "g2-a7",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/g2-a7-kv-hit-qwen3-32b-rtxpro6000-2026-07-29/tp-kv-hit-g2-a7-manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31",
+      "commit": "4924b4d71b8fae0af087979908819aed6939a871",
+      "date": "2026-07-31",
+      "gate_id": "g2-a8",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31/g2-a8-dp-scaling-manifest.json",
+      "verdict": "fail"
+    },
+    {
+      "artifact_path": "bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31-ssefix",
+      "commit": "86d49223ffcdba6052428474bf0d9094c6791fed",
+      "date": "2026-07-31",
+      "gate_id": "g2-a8",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/g2-a8-dp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/g2-a8-dp-scaling-manifest.json",
+      "verdict": "fail"
+    },
+    {
+      "artifact_path": "bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix",
+      "commit": null,
+      "date": "2026-07-31",
+      "gate_id": "g2-a9",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-2026-07-31-ssefix/g2-a9-dp-tp-crossover-manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-fail-2026-07-31",
+      "commit": "81bf8e037b44f3d0b28d2306faa230a2de85dd23",
+      "date": "2026-07-31",
+      "gate_id": "g4-e-kv",
+      "hardware": "nvidia-rtx-pro-6000-blackwell-sm120",
+      "summary_path": "bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-fail-2026-07-31/fp8-kv-g4-ekv-manifest.json",
+      "verdict": "fail"
+    },
+    {
+      "artifact_path": "bench/results/g4-ma2-ep-kv-qwen3-235b-rtxpro6000-2026-08-02",
+      "commit": "d2d33e0472fb3101b680f4085d22e80a4ac7ceca",
+      "date": "2026-08-02",
+      "gate_id": "g4-ma2",
+      "hardware": "4x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/g4-ma2-ep-kv-qwen3-235b-rtxpro6000-2026-08-02/g4-ma2-qwen3-235b-ep-kv-manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01",
+      "commit": "edd535f7018695fc03c479a86fbd690174cca5ef",
+      "date": "2026-08-01",
+      "gate_id": "g5-f4a",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/g5-f4a-dram-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/dram-kv-tier-qwen3-32b-manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/g5-f4b-agentic-kv-tier-qwen3-32b-rtxpro6000-2026-08-01",
+      "commit": "9af5d7a4b30502c8ca95bcbafc6e6ae65d521ba1",
+      "date": "2026-08-01",
+      "gate_id": "g5-f4b",
+      "hardware": "nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/g5-f4b-agentic-kv-tier-qwen3-32b-rtxpro6000-2026-08-01/agentic-kv-tier-f4b-manifest.json",
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/gate1-hf-parity-tp1-2026-07-26.json",
+      "commit": null,
+      "date": "2026-07-26",
+      "gate_id": null,
+      "hardware": "nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/gate1-hf-parity-tp8-2026-07-26.json",
+      "commit": null,
+      "date": "2026-07-26",
+      "gate_id": null,
+      "hardware": "nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/hf-reference-llama33-70b-fp8-2026-07-27.json",
+      "commit": "4463dfba9b1af03c7a935338b85972b0175a6e21",
+      "date": "2026-07-27",
+      "gate_id": null,
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "reference"
+    },
+    {
+      "artifact_path": "bench/results/hf-reference-qwen3-32b.json",
+      "commit": null,
+      "date": null,
+      "gate_id": null,
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "reference"
+    },
+    {
+      "artifact_path": "bench/results/issue-150-qwen3-32b-tp8-livecodebench-2026-07-26.json",
+      "commit": null,
+      "date": "2026-07-26",
+      "gate_id": "issue-150",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json",
+      "commit": "b8971cbe89e14002749e72f40fa1f33bf65bbc87",
+      "date": "2026-07-31",
+      "gate_id": "issue-203",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/issue-215-batched-spec-verify-qwen3-32b-tp8-2026-07-30.json",
+      "commit": "5dc7dd1591b37b8685fa7c6df6a94c8b8481574d",
+      "date": "2026-07-30",
+      "gate_id": "issue-215",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/issue-223-pd-overlap-qwen3-32b-rtxpro6000-2026-07-30.json",
+      "commit": "a08c416eedb22b04ec19fe682753df64513ef027",
+      "date": "2026-07-30",
+      "gate_id": "issue-223",
+      "hardware": "2x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/issue-224-batched-prefill-qwen3-32b-tp8-2026-07-30.json",
+      "commit": "2fcd9be748e9869e6c22839be8b21adc15608eed",
+      "date": "2026-07-30",
+      "gate_id": "issue-224",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/issue-225-tp-sampling-comm-rtxpro6000-2026-07-30.json",
+      "commit": "dcd641ac3584e03706d4e5cdb250888f0ccf29da",
+      "date": "2026-07-30",
+      "gate_id": "issue-225",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/issue-225-tp-sampling-qwen3-32b-rtxpro6000-2026-07-30.json",
+      "commit": "70b887f957b5224d2da8fb29b5b01d1dfd5af111",
+      "date": "2026-07-30",
+      "gate_id": "issue-225",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/issue-227-typed-prompt-qwen3-32b-tp8-2026-07-30.json",
+      "commit": "62bd57fa782154455dbaa6445a1e48e373601122",
+      "date": "2026-07-30",
+      "gate_id": "issue-227",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/issue-229-page-table-cache-qwen3-32b-tp8-2026-07-30.json",
+      "commit": "78d87a5a902edf4876901d2fd1c3ae3880393cc6",
+      "date": "2026-07-30",
+      "gate_id": "issue-229",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/issue-234-draft-quant-qwen3-32b-rtxpro6000-2026-07-31.json",
+      "commit": "d8dbdba86903435812b10e1b3947c005e47d293a",
+      "date": "2026-07-31",
+      "gate_id": "issue-234",
+      "hardware": "nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05",
+      "commit": "65ba4779c118d534f1e34a1a4dcb1b579cbcfe73",
+      "date": "2026-08-05",
+      "gate_id": "issue-333",
+      "hardware": "4x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05/artifact/issue-333-proc-http-manifest.json",
+      "verdict": "diagnostic"
+    },
+    {
+      "artifact_path": "bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-discarded-v1-2026-08-05",
+      "commit": "ad11a322b77337547ac34dc1717586c40f76fd8b",
+      "date": "2026-08-05",
+      "gate_id": "issue-333",
+      "hardware": "4x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-discarded-v1-2026-08-05/artifact/issue-333-proc-http-manifest.json",
+      "verdict": "discarded"
+    },
+    {
+      "artifact_path": "bench/results/issue-364-fp32-logits-a1-a2-2026-08-05",
+      "commit": "ac589fb67452173f45f23d9107af313c2b79cc17",
+      "date": "2026-08-05",
+      "gate_id": "issue-364",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/issue-364-fp32-logits-a1-a2-2026-08-05/issue-364-fp32-logits-a1-a2-2026-08-05.json",
+      "verdict": "fail"
+    },
+    {
+      "artifact_path": "bench/results/orchestration-stream-qwen3-32b-tp8-2026-07-27.json",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": null,
+      "hardware": null,
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/parity-tp-qwen3-32b-2026-07-26.json",
+      "commit": "ea0acfed6775403d064073fa7e0bd826342c9a76",
+      "date": "2026-07-26",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/proc-wire-delta-2026-07-29.json",
+      "commit": "5c634eeb7e50bc7bad519fc5c594fe6a137f9a36",
+      "date": "2026-07-29",
+      "gate_id": null,
+      "hardware": null,
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/quant-gemm-rtxpro6000-2026-07-27.json",
+      "commit": "1e3b7ec8874adaeb0f049ffe4cc7647cd645b13a",
+      "date": "2026-07-27",
+      "gate_id": null,
+      "hardware": "nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/quant-vllm-rtxpro6000-2026-07-27.json",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": null,
+      "hardware": "nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/reduce-scatter-2026-07-25.json",
+      "commit": null,
+      "date": "2026-07-25",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/responses-codex-qwen3-32b-tp8-2026-07-28.json",
+      "commit": "982ad522cf10cfa2183dae9104fb57c6c93d586a",
+      "date": "2026-07-28",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/tiered-auto-qwen3-32b-tp8-2026-07-27.json",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": "issue-198",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/tiered-auto-qwen3-32b-tp8-2026-07-28.json",
+      "commit": null,
+      "date": "2026-07-28",
+      "gate_id": "issue-198",
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": "pass"
+    },
+    {
+      "artifact_path": "bench/results/unified-loop-qwen3-32b-tp8-2026-07-27.json",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": null,
+      "hardware": "8x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": null,
+      "verdict": null
+    },
+    {
+      "artifact_path": "bench/results/usage-architecture-2026-07-27.json",
+      "commit": null,
+      "date": "2026-07-27",
+      "gate_id": null,
+      "hardware": null,
+      "summary_path": null,
+      "verdict": null
+    }
+  ],
+  "schema_version": 1
+}
