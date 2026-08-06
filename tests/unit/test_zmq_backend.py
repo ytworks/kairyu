@@ -2753,11 +2753,7 @@ async def test_submit_does_not_send_old_frame_to_replacement_generation(
     submit = asyncio.create_task(
         backend._submit(_request("generation-swap", "prompt", max_tokens=2))
     )
-    for _ in range(100):
-        if pack_started.is_set():
-            break
-        await asyncio.sleep(0)
-    assert pack_started.is_set()
+    assert await asyncio.to_thread(pack_started.wait, 5)
 
     backend._socket = new_socket
     backend._live_generation = 2
