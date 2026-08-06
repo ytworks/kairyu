@@ -18,10 +18,12 @@ import json
 import logging
 import threading
 import weakref
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import replace
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TypeVar
 
+from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
 from kairyu.engine.backend import (
     EngineReadiness,
     GenerationRequest,
@@ -29,7 +31,9 @@ from kairyu.engine.backend import (
     GenerationStageMetric,
     GenerationUsage,
     prompt_with_tool_intent,
+    validate_backend_request_before_prepare,
     validate_native_request_surface,
+    validate_native_request_surface_before_prepare,
 )
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.kv_cache_dtype import (
@@ -49,7 +53,11 @@ from kairyu.engine.engine_loop import (
     StreamUpdate,
     _validate_max_model_len,
 )
-from kairyu.engine.prompt import supplied_prompt_token_ids
+from kairyu.engine.prompt import (
+    TemplatedPrompt,
+    prompt_kind,
+    supplied_prompt_token_ids,
+)
 from kairyu.engine.registry import register_backend
 from kairyu.engine.tokenizer import (
     Tokenizer,
@@ -67,6 +75,16 @@ _VOCAB_SIZE = 50_000
 _DECODE_MODES = frozenset({"eager", "cuda_graph"})
 _EXPERT_PARALLEL_SIZES = frozenset({1, 2, 4})
 logger = logging.getLogger(__name__)
+_TokenizerWorkT = TypeVar("_TokenizerWorkT")
+
+
+@dataclass
+class _PromptPreparationFlight:
+    """One pure prompt computation shared by same-object async callers."""
+
+    request_ref: weakref.ReferenceType[GenerationRequest]
+    task: asyncio.Task[PreparedPrompt]
+    waiters: int = 0
 
 
 class _StreamUpdateQueue(asyncio.Queue[StreamUpdate]):
@@ -1152,6 +1170,13 @@ class KairyuBackend:
             tuple[weakref.ReferenceType[GenerationRequest], PreparedPrompt],
         ] = {}
         self._prepared_requests_lock = threading.Lock()
+        # Unknown compatibility tokenizers have no thread-safety promise.
+        # Their callers queue on the event loop so they do not occupy prompt
+        # executor threads while waiting for the shared tokenizer instance.
+        self._prompt_tokenizer_gate = asyncio.Lock()
+        # Event-loop-owned single flights.  The worker task only computes a
+        # PreparedPrompt; a live waiter publishes it after a successful await.
+        self._preparing_requests: dict[int, _PromptPreparationFlight] = {}
 
     def parallelism_metadata_snapshot(self) -> dict[str, object] | None:
         """Refresh topology counters for diagnostics without a rank collective."""
@@ -1172,6 +1197,19 @@ class KairyuBackend:
         """Tokenize a teacher-forced continuation with native model ownership."""
 
         return self._loop.tokenize_loglikelihood(context, continuation)
+
+    async def tokenize_loglikelihood_async(
+        self,
+        context: str,
+        continuation: str,
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Tokenize scoring input through the shared async tokenizer gate."""
+
+        return await self._run_tokenizer_work(
+            self.tokenize_loglikelihood,
+            context,
+            continuation,
+        )
 
     def _peek_prepared_request(
         self,
@@ -1229,11 +1267,115 @@ class KairyuBackend:
         return None
 
     def _prepare_request(self, request: GenerationRequest) -> PreparedPrompt:
+        validate_native_request_surface(request)
         return self._loop.prepare_prompt(
             prompt_with_tool_intent(request),
             request.sampling_params,
             trace_requested=request.trace_requested,
         )
+
+    def _discard_finished_preparation(
+        self,
+        key: int,
+        flight: _PromptPreparationFlight,
+        task: asyncio.Task[PreparedPrompt],
+    ) -> None:
+        # Retrieve an abandoned failure so a cancelled sole waiter cannot leave
+        # a "Task exception was never retrieved" warning behind.
+        if not task.cancelled():
+            task.exception()
+        if (
+            flight.waiters == 0
+            and self._preparing_requests.get(key) is flight
+        ):
+            self._preparing_requests.pop(key, None)
+
+    async def prepare_request(self, request: GenerationRequest) -> None:
+        """Tokenize off-loop and retain only after a live await succeeds."""
+
+        if self._shutdown_started:
+            raise RuntimeError("Kairyu backend is shut down")
+        validate_backend_request_before_prepare(self, request)
+        if self._peek_prepared_request(request) is not None:
+            return
+
+        key = id(request)
+        flight = self._preparing_requests.get(key)
+        if flight is not None and flight.request_ref() is not request:
+            # Defensive against object-ID reuse after an already-finished task.
+            self._preparing_requests.pop(key, None)
+            flight = None
+        if flight is None:
+            task = asyncio.create_task(
+                self._run_request_preparation(request)
+            )
+            flight = _PromptPreparationFlight(weakref.ref(request), task)
+            self._preparing_requests[key] = flight
+            task.add_done_callback(
+                lambda done, key=key, flight=flight: self._discard_finished_preparation(
+                    key,
+                    flight,
+                    done,
+                )
+            )
+
+        flight.waiters += 1
+        try:
+            prepared = await asyncio.shield(flight.task)
+            if self._shutdown_started:
+                raise RuntimeError("Kairyu backend is shut down")
+            self._retain_prepared_request(request, prepared)
+        finally:
+            flight.waiters -= 1
+            if (
+                flight.task.done()
+                and flight.waiters == 0
+                and self._preparing_requests.get(key) is flight
+            ):
+                self._preparing_requests.pop(key, None)
+
+    async def _run_tokenizer_work(
+        self,
+        function: Callable[..., _TokenizerWorkT],
+        /,
+        *args: object,
+    ) -> _TokenizerWorkT:
+        """Run tokenizer work without parking prompt workers on a lock."""
+
+        if self._loop.tokenizer_concurrent_encode_safe:
+            return await run_prompt_work(function, *args)
+        return await run_serialized_prompt_work(
+            self._prompt_tokenizer_gate,
+            None,
+            function,
+            *args,
+        )
+
+    def _request_preparation_requires_serialization(self) -> bool:
+        return not self._loop.tokenizer_concurrent_prompt_preparation_safe
+
+    async def _run_request_preparation(
+        self,
+        request: GenerationRequest,
+    ) -> PreparedPrompt:
+        if not self._request_preparation_requires_serialization():
+            return await run_prompt_work(self._prepare_request, request)
+        return await run_serialized_prompt_work(
+            self._prompt_tokenizer_gate,
+            self._request_preparation_requires_serialization,
+            self._prepare_request,
+            request,
+        )
+
+    async def _prepare_for_submit(
+        self,
+        request: GenerationRequest,
+    ) -> PreparedPrompt:
+        await self.prepare_request(request)
+        prepared = self._take_prepared_request(request)
+        if prepared is None:  # The request is strongly held across both calls.
+            raise RuntimeError("prepared prompt was lost before submit")
+        return prepared
 
     def _take_or_prepare_request(
         self,
@@ -1244,8 +1386,38 @@ class KairyuBackend:
             return prepared
         return self._prepare_request(request)
 
+    def validate_request_before_prepare(self, request: GenerationRequest) -> None:
+        """Validate native surface/shape without tokenizer CPU work."""
+
+        validate_native_request_surface_before_prepare(request)
+        kind = prompt_kind(request.prompt)
+        if (
+            request.tools
+            and not request.tools_in_prompt
+            and request.tool_choice != "none"
+        ):
+            if isinstance(request.prompt, TemplatedPrompt):
+                raise ValueError(
+                    "templated prompts cannot receive an implicit "
+                    "tool-instruction suffix; render tools inside the chat "
+                    "template and set tools_in_prompt=true"
+                )
+            if kind != "text":
+                raise ValueError(
+                    f"{kind} prompts cannot receive an implicit "
+                    "tool-instruction suffix; render tools before tokenization "
+                    "and set tools_in_prompt=true"
+                )
+        if kind == "multimodal":
+            raise ValueError(
+                "Kairyu backend does not support multimodal prompts; "
+                "no modality processor is configured"
+            )
+
     def validate_request(self, request: GenerationRequest) -> None:
-        validate_native_request_surface(request)
+        """Preserve the synchronous API's exact tokenizer validation/cache."""
+
+        KairyuBackend.validate_request_before_prepare(self, request)
         if self._peek_prepared_request(request) is None:
             prepared = self._prepare_request(request)
             self._retain_prepared_request(request, prepared)
@@ -1712,13 +1884,23 @@ class KairyuBackend:
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         if request.sampling_params.n <= 1:
-            return await self._generate_one(request)
+            request_ids = (request.request_id,)
+            self._reserve_request_ids(request_ids)
+            try:
+                prepared_prompt = await self._prepare_for_submit(request)
+                return await self._generate_one(
+                    request,
+                    pre_reserved=True,
+                    prepared_prompt=prepared_prompt,
+                )
+            finally:
+                self._release_request_ids(request_ids)
         subs = self._sub_requests(request)
         request_ids = tuple(sub.request_id for sub in subs)
         self._reserve_request_ids(request_ids)
         tasks: list[asyncio.Task] = []
         try:
-            prepared_prompt = self._take_or_prepare_request(request)
+            prepared_prompt = await self._prepare_for_submit(request)
             tasks = [
                 asyncio.create_task(
                     self._generate_one(
@@ -1758,8 +1940,18 @@ class KairyuBackend:
         }
         return self._merged(request, latest, finished=True)
 
-    async def _stream_one(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
-        queue = self._submit(request)
+    async def _stream_one(
+        self,
+        request: GenerationRequest,
+        *,
+        pre_reserved: bool = False,
+        prepared_prompt: PreparedPrompt | None = None,
+    ) -> AsyncIterator[GenerationResult]:
+        queue = self._submit(
+            request,
+            pre_reserved=pre_reserved,
+            prepared_prompt=prepared_prompt,
+        )
         emitted = -1
         finished_cleanly = False
         pump_failed = False
@@ -1790,12 +1982,23 @@ class KairyuBackend:
             if not finished_cleanly and not pump_failed:
                 self._abort(request.request_id)
             self._remove_queue(request.request_id, queue)
-            self._release_request_ids((request.request_id,))
+            if not pre_reserved:
+                self._release_request_ids((request.request_id,))
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         if request.sampling_params.n <= 1:
-            async for result in self._stream_one(request):
-                yield result
+            request_ids = (request.request_id,)
+            self._reserve_request_ids(request_ids)
+            try:
+                prepared_prompt = await self._prepare_for_submit(request)
+                async for result in self._stream_one(
+                    request,
+                    pre_reserved=True,
+                    prepared_prompt=prepared_prompt,
+                ):
+                    yield result
+            finally:
+                self._release_request_ids(request_ids)
             return
         # merged n>1 stream: every partial is the cumulative snapshot of ALL
         # completions seen so far (MockBackend semantics — the SSE layer emits
@@ -1810,7 +2013,7 @@ class KairyuBackend:
         first_token_seen: set[int] = set()
         pump_failed = False
         try:
-            prepared_prompt = self._take_or_prepare_request(request)
+            prepared_prompt = await self._prepare_for_submit(request)
             for index, sub in enumerate(subs):
                 queues[index] = self._submit(
                     sub,
@@ -1872,6 +2075,14 @@ class KairyuBackend:
             self._release_request_ids(request_ids)
 
     async def _shutdown_impl(self) -> None:
+        preparation_tasks = tuple(
+            flight.task for flight in self._preparing_requests.values()
+        )
+        if preparation_tasks:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in preparation_tasks),
+                return_exceptions=True,
+            )
         pump = self._pump_task
         try:
             try:
@@ -1884,6 +2095,7 @@ class KairyuBackend:
             finally:
                 await asyncio.to_thread(self._loop.close)
         finally:
+            self._preparing_requests.clear()
             with self._prepared_requests_lock:
                 self._prepared_requests.clear()
             # Stop spawned distributed ranks even if settling the pump or loop fails.

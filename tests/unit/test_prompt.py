@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine.backend import (
+    AdmissionUpperBound,
     CacheHint,
     GenerationRequest,
     admission_upper_bound,
+    backend_admission_upper_bound_async,
 )
 from kairyu.engine.prompt import (
     MultimodalItem,
@@ -293,6 +297,29 @@ def test_immutable_sampling_extensions_remain_admission_serializable():
     )
 
     assert admission_upper_bound(request).tokens > 0
+
+
+async def test_backend_admission_override_runs_off_event_loop():
+    class AdmissionBackend:
+        def __init__(self):
+            self.thread_id = None
+
+        def admission_upper_bound(self, request):
+            self.thread_id = threading.get_ident()
+            return AdmissionUpperBound(tokens=7, refundable_on_exact_usage=True)
+
+    backend = AdmissionBackend()
+    request = GenerationRequest(
+        request_id="async-admission",
+        prompt="hello",
+        sampling_params=SamplingParams(max_tokens=1),
+    )
+    event_loop_thread = threading.get_ident()
+
+    bound = await backend_admission_upper_bound_async(backend, request)
+
+    assert bound.tokens == 7
+    assert backend.thread_id != event_loop_thread
 
 
 def test_multimodal_admission_never_guesses_processor_token_count():

@@ -22,6 +22,19 @@ from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, Metri
 
 from kairyu.orchestration.replica import ReplicaPool
 
+_PREPLACEMENT_ENDPOINTS = frozenset(
+    {"chat", "completions", "responses", "route", "batch"}
+)
+_PREPLACEMENT_PHASES = frozenset(
+    {
+        "ingress_to_handler",
+        "request_validation",
+        "routing_preflight",
+        "backend_prepare",
+        "admission",
+    }
+)
+
 
 class _PoolCollector:
     """Scrape-time view over tracked ReplicaPools (no background sampling)."""
@@ -185,6 +198,15 @@ class ServerMetrics:
             ["path"],
             registry=self.registry,
         )
+        self.preplacement_phase_seconds = Histogram(
+            "kairyu_preplacement_phase_seconds",
+            (
+                "Request ingress-to-placement work split into bounded serving "
+                "phases"
+            ),
+            ["endpoint", "phase"],
+            registry=self.registry,
+        )
         self.batch_jobs_total = Counter(
             "kairyu_batch_jobs",
             "Batch jobs by terminal state",
@@ -236,6 +258,25 @@ class ServerMetrics:
 
     def track_tenant_limiter(self, limiter: object) -> None:
         self._tenant_limiter_collector.set(limiter)
+
+    def record_preplacement_phase(
+        self,
+        endpoint: str,
+        phase: str,
+        duration_ns: int,
+    ) -> None:
+        """Record one bounded-cardinality pre-placement phase observation."""
+
+        if endpoint not in _PREPLACEMENT_ENDPOINTS:
+            raise ValueError(f"invalid preplacement endpoint {endpoint!r}")
+        if phase not in _PREPLACEMENT_PHASES:
+            raise ValueError(f"invalid preplacement phase {phase!r}")
+        if type(duration_ns) is not int or duration_ns < 0:
+            raise ValueError("preplacement duration_ns must be a non-negative integer")
+        self.preplacement_phase_seconds.labels(
+            endpoint=endpoint,
+            phase=phase,
+        ).observe(duration_ns / 1_000_000_000)
 
     def record_priority(self, request_class: str, *, source: str) -> None:
         """Record an explicit bounded class without labeling priority integers."""

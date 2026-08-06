@@ -237,6 +237,85 @@ async def test_batch_line_uses_backend_specific_admission_bound(tmp_path):
     assert backend.prompts_seen == ()
 
 
+@pytest.mark.asyncio
+async def test_batch_line_awaits_prepare_before_reservation_and_dispatch(tmp_path):
+    events: list[str] = []
+
+    class OrderedBackend(MockBackend):
+        def validate_request(self, request):
+            events.append("validate")
+            super().validate_request(request)
+
+        def admission_upper_bound(self, request):
+            events.append("bound")
+            return AdmissionUpperBound(
+                tokens=7,
+                refundable_on_exact_usage=True,
+            )
+
+        async def prepare_request(self, request):
+            events.append("prepare-start")
+            await asyncio.sleep(0)
+            events.append("prepare-end")
+
+        async def generate(self, request):
+            events.append("generate")
+            return self._result_for(request)
+
+    class OrderedAdmission:
+        admitted = True
+        reason = "quota_available"
+
+        def reserve_tokens(self, tokens, *, refundable_on_exact_usage=True):
+            assert tokens == 7
+            assert refundable_on_exact_usage is True
+            events.append("reserve")
+            return True
+
+        def mark_dispatched(self):
+            events.append("dispatch")
+
+        def settle_tokens(self, tokens, *, exact=True):
+            assert tokens >= 0
+            events.append("settle")
+
+        def release(self):
+            events.append("release")
+
+    class OrderedLimiter:
+        def acquire(self, tenant):
+            assert tenant == "default"
+            return OrderedAdmission()
+
+    backend = OrderedBackend()
+    worker = LegacyBatchWorker(
+        BatchStore(tmp_path / "batch"),
+        {"m": backend},
+        tenant_limiter=OrderedLimiter(),
+    )
+
+    output, error, usage = await worker._run_line(
+        json.loads(_batch_line("line-1", "hello")),
+        "/v1/chat/completions",
+        set(),
+    )
+
+    assert output is not None
+    assert error is None
+    assert usage is not None
+    assert events == [
+        "validate",
+        "prepare-start",
+        "prepare-end",
+        "bound",
+        "reserve",
+        "dispatch",
+        "generate",
+        "settle",
+        "release",
+    ]
+
+
 async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
     """The batch worker never exceeds its own cap (strictly below the server's)."""
 

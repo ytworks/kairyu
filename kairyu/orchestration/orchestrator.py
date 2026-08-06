@@ -5,15 +5,18 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
+from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
 from kairyu.engine.backend import (
     AdmissionUpperBound,
     EngineBackend,
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    prepare_backend_request,
     shutdown_all,
+    validate_backend_request_before_prepare,
 )
 from kairyu.engine.backend import (
     admission_upper_bound as generation_admission_upper_bound,
@@ -28,6 +31,7 @@ from kairyu.orchestration.conductor import (
     RoleSpec,
     zero_cost,
 )
+from kairyu.orchestration.moa import _build_moa_setup, _MoASetup
 from kairyu.orchestration.request import (
     OrchestrationRequest,
     default_orchestration_request,
@@ -142,6 +146,59 @@ class EngineDescriptor:
         return {"backend_type": self.backend_type, "model": self.model}
 
 
+@dataclass(frozen=True)
+class _IntentRequest:
+    engine_key: str
+    request: GenerationRequest
+    role_name: str | None = None
+
+
+@dataclass
+class _PreparedDispatchState:
+    """One alias-shared single-use capability for prepared dispatch."""
+
+    final_requests: tuple[_IntentRequest, ...]
+    initial_requests: tuple[_IntentRequest, ...] = ()
+    conductor_session: str | None = None
+    moa_setup: _MoASetup | None = None
+    consumed: bool = False
+
+    def __deepcopy__(self, _memo):
+        return self
+
+
+@dataclass(frozen=True)
+class _PreparedOrchestration:
+    """Request-local preflight plan that may be consumed by direct dispatch."""
+
+    source_request: str | OrchestrationRequest
+    owner_token: object
+    call: OrchestrationRequest
+    decision: RouteDecision | None
+    dispatch: _PreparedDispatchState
+
+    @property
+    def consumed(self) -> bool:
+        return self.dispatch.consumed
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, _memo):
+        return self
+
+
+@dataclass(frozen=True)
+class _OrchestrationPreparationPlan:
+    call: OrchestrationRequest
+    decision: RouteDecision
+    final_requests: tuple[_IntentRequest, ...]
+    internal_requests: tuple[_IntentRequest, ...]
+    initial_requests: tuple[_IntentRequest, ...]
+    conductor_session: str | None
+    moa_setup: _MoASetup | None
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -159,10 +216,10 @@ class Orchestrator:
             raise ValueError("Orchestrator requires at least one engine")
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
-                "orchestration shared_prefix cannot be a tokenizer-owned "
-                "pre-rendered chat prompt"
+                "orchestration shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
             )
         self._engines = dict(engines)
+        self._owner_token = object()
         supplied_descriptors = dict(engine_descriptors or {})
         self._engine_descriptors = {
             name: supplied_descriptors.get(
@@ -172,6 +229,7 @@ class Orchestrator:
             for name, engine in self._engines.items()
         }
         self._router = router or RuleRouter()
+        self._router_gate = asyncio.Lock()
         self._roles = roles or _DEFAULT_ROLES
         self._budget = budget or Budget()
         self._shared_prefix = shared_prefix
@@ -208,8 +266,7 @@ class Orchestrator:
     def preview_route(self, prompt: str) -> RouteDecision:
         if isinstance(prompt, TemplatedPrompt):
             raise ValueError(
-                "orchestration cannot safely derive prompts from an already "
-                "rendered chat template"
+                "orchestration cannot safely derive prompts from an already rendered chat template"
             )
         preview = getattr(self._router, "preview", None)
         if preview is None:
@@ -220,6 +277,16 @@ class Orchestrator:
             return preview(prompt)
         except NotImplementedError as error:
             raise PreviewNotSupportedError(str(error)) from error
+
+    async def preview_route_async(self, prompt: str) -> RouteDecision:
+        """Run request-sized preview work without blocking the serving loop."""
+
+        return await run_serialized_prompt_work(
+            self._router_gate,
+            None,
+            self.preview_route,
+            prompt,
+        )
 
     def _resolved_engine_descriptor(self, key: str) -> dict[str, object]:
         configured = key in self._engines
@@ -291,10 +358,24 @@ class Orchestrator:
             call = default_orchestration_request(request, self._sampling_params)
         if isinstance(call.prompt, TemplatedPrompt):
             raise ValueError(
-                "orchestration cannot safely derive prompts from an already "
-                "rendered chat template"
+                "orchestration cannot safely derive prompts from an already rendered chat template"
             )
         return call
+
+    def _route(self, prompt: str) -> RouteDecision:
+        """Invoke a potentially stateful synchronous router serially off-loop."""
+
+        return self._router.route(prompt)
+
+    async def _route_async(self, prompt: str) -> RouteDecision:
+        """Queue before the executor so a stateful router occupies one lane."""
+
+        return await run_serialized_prompt_work(
+            self._router_gate,
+            None,
+            self._route,
+            prompt,
+        )
 
     def _internal_sampling_params(
         self,
@@ -321,7 +402,9 @@ class Orchestrator:
         else:
             keys = {decision.target}
         fallback = next(iter(self._engines))
-        return tuple(key if key in self._engines else fallback for key in sorted(keys))
+        return tuple(
+            dict.fromkeys(key if key in self._engines else fallback for key in sorted(keys))
+        )
 
     def _internal_engine_keys(
         self,
@@ -333,13 +416,11 @@ class Orchestrator:
             keys = {"tier1"}
         else:
             final_role = self._conductor_final_role()
-            keys = {
-                role.worker
-                for role in self._roles
-                if role.name != final_role.name
-            }
+            keys = {role.worker for role in self._roles if role.name != final_role.name}
         fallback = next(iter(self._engines))
-        return tuple(key if key in self._engines else fallback for key in sorted(keys))
+        return tuple(
+            dict.fromkeys(key if key in self._engines else fallback for key in sorted(keys))
+        )
 
     def _validate_call(
         self,
@@ -371,62 +452,158 @@ class Orchestrator:
                 "n > 1 is not supported by final orchestration engine(s): " + ", ".join(unsupported)
             )
 
+    def _final_intent_requests(
+        self,
+        call: OrchestrationRequest,
+        decision: RouteDecision | None,
+    ) -> tuple[_IntentRequest, ...]:
+        requests: list[_IntentRequest] = []
+        for key in self._final_engine_keys(decision):
+            requests.append(
+                _IntentRequest(
+                    key,
+                    GenerationRequest(
+                        request_id=f"preflight-{key}",
+                        prompt=f"{self._shared_prefix}{call.prompt}",
+                        sampling_params=call.sampling_params,
+                        tools=call.tools,
+                        tool_choice=call.tool_choice,
+                        tools_in_prompt=call.tools_in_prompt,
+                        parallel_tool_calls=call.parallel_tool_calls,
+                    ),
+                )
+            )
+        return tuple(requests)
+
+    def _direct_generation_request(
+        self,
+        call: OrchestrationRequest,
+        request_id: str,
+    ) -> GenerationRequest:
+        """Build a direct request without copying its prompt on the loop."""
+
+        return GenerationRequest(
+            request_id=request_id,
+            prompt=f"{self._shared_prefix}{call.prompt}",
+            sampling_params=call.sampling_params,
+            # No random session: route by shared-prefix overlap and load.
+            cache_hint=None,
+            tools=call.tools,
+            tool_choice=call.tool_choice,
+            tools_in_prompt=call.tools_in_prompt,
+            parallel_tool_calls=call.parallel_tool_calls,
+        )
+
+    def _internal_intent_requests(
+        self,
+        call: OrchestrationRequest,
+        decision: RouteDecision | None,
+    ) -> tuple[_IntentRequest, ...]:
+        sampling_params = self._internal_sampling_params(call)
+        if self._moa_samples > 0 and (decision is None or decision.target == "multi_agent"):
+            setup = _build_moa_setup(
+                call.prompt,
+                self._moa_samples,
+                sampling_params,
+                call.sampling_params,
+                self._shared_prefix,
+                session="validation-moa",
+            )
+            key = self._internal_engine_keys(decision)[0]
+            return tuple(_IntentRequest(key, request) for request in setup.proposal_requests)
+        requests: list[_IntentRequest] = []
+        for key in self._internal_engine_keys(decision):
+            requests.append(
+                _IntentRequest(
+                    key,
+                    GenerationRequest(
+                        request_id=f"preflight-internal-{key}",
+                        prompt=f"{self._shared_prefix}{call.prompt}",
+                        sampling_params=sampling_params,
+                    ),
+                )
+            )
+        return tuple(requests)
+
+    def _initial_role_intent_requests(
+        self,
+        call: OrchestrationRequest,
+        decision: RouteDecision | None,
+        *,
+        request_id_suffix: str,
+    ) -> tuple[_IntentRequest, ...]:
+        """Return exact first-wave Conductor prompts for role orchestration."""
+
+        if self._moa_samples > 0 or (decision is not None and decision.target != "multi_agent"):
+            return ()
+        conductor = self._new_conductor(call, [])
+        fallback = next(iter(self._engines))
+        return tuple(
+            _IntentRequest(
+                spec.worker if spec.worker in self._engines else fallback,
+                request,
+                spec.name,
+            )
+            for spec, request in conductor.initial_requests(
+                call.prompt,
+                request_id_suffix=request_id_suffix,
+            )
+        )
+
+    @staticmethod
+    def _intent_failure_message(kind: str, failures: list[str]) -> str:
+        return f"{kind} orchestration intent is unsupported: " + "; ".join(failures)
+
+    def _validate_intent_requests(
+        self,
+        kind: str,
+        requests: tuple[_IntentRequest, ...],
+        *,
+        before_prepare: bool = False,
+    ) -> None:
+        failures: list[str] = []
+        for intent in requests:
+            try:
+                engine = self._engines[intent.engine_key]
+                if before_prepare:
+                    validate_backend_request_before_prepare(
+                        engine,
+                        intent.request,
+                    )
+                else:
+                    validate = getattr(engine, "validate_request", None)
+                    if validate is None:
+                        continue
+                    validate(intent.request)
+            except ValueError as error:
+                failures.append(f"{intent.engine_key}: {error}")
+        if failures:
+            raise ValueError(self._intent_failure_message(kind, failures))
+
     def _validate_final_intent(
         self,
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> None:
-        failures: list[str] = []
-        for key in self._final_engine_keys(decision):
-            validate = getattr(self._engines[key], "validate_request", None)
-            if validate is None:
-                continue
-            request = GenerationRequest(
-                request_id=f"preflight-{key}",
-                prompt=f"{self._shared_prefix}{call.prompt}",
-                sampling_params=call.sampling_params,
-                tools=call.tools,
-                tool_choice=call.tool_choice,
-                tools_in_prompt=call.tools_in_prompt,
-                parallel_tool_calls=call.parallel_tool_calls,
-            )
-            try:
-                validate(request)
-            except ValueError as error:
-                failures.append(f"{key}: {error}")
-        if failures:
-            raise ValueError(
-                "final orchestration intent is unsupported: " + "; ".join(failures)
-            )
+        self._validate_intent_requests(
+            "final",
+            self._final_intent_requests(call, decision),
+        )
 
     def _validate_internal_intent(
         self,
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> None:
-        failures: list[str] = []
-        sampling_params = self._internal_sampling_params(call)
-        for key in self._internal_engine_keys(decision):
-            validate = getattr(self._engines[key], "validate_request", None)
-            if validate is None:
-                continue
-            request = GenerationRequest(
-                request_id=f"preflight-internal-{key}",
-                prompt=f"{self._shared_prefix}{call.prompt}",
-                sampling_params=sampling_params,
-            )
-            try:
-                validate(request)
-            except ValueError as error:
-                failures.append(f"{key}: {error}")
-        if failures:
-            raise ValueError(
-                "internal orchestration intent is unsupported: " + "; ".join(failures)
-            )
+        self._validate_intent_requests(
+            "internal",
+            self._internal_intent_requests(call, decision),
+        )
 
-    def validate_request(self, request: str | OrchestrationRequest) -> None:
-        """Preflight capability checks without dispatching generation."""
-
+    def _preflight_call(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> tuple[OrchestrationRequest, RouteDecision | None]:
         call = self._request(request)
         preview = getattr(self._router, "preview", None)
         if preview is None:
@@ -437,8 +614,295 @@ class Orchestrator:
             except NotImplementedError:
                 decision = None
         self._validate_call(call, decision)
+        return call, decision
+
+    def validate_request(self, request: str | OrchestrationRequest) -> None:
+        """Preflight capability checks without dispatching generation."""
+
+        call, decision = self._preflight_call(request)
         self._validate_final_intent(call, decision)
         self._validate_internal_intent(call, decision)
+        self._validate_intent_requests(
+            "initial",
+            self._initial_role_intent_requests(
+                call,
+                decision,
+                request_id_suffix="validation",
+            ),
+        )
+
+    def validate_request_before_prepare(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> None:
+        """Keep only bounded orchestration shape checks on the event loop."""
+
+        self._request(request)
+
+    def _build_preparation_plan(
+        self,
+        call: OrchestrationRequest,
+        suffix: str,
+        decision: RouteDecision,
+    ) -> _OrchestrationPreparationPlan:
+        """Route, render, and validate request-sized intents off-loop."""
+
+        self._validate_call(call, decision)
+        final_requests = self._final_intent_requests(call, decision)
+        if decision.target != "multi_agent":
+            final_requests = tuple(
+                _IntentRequest(
+                    intent.engine_key,
+                    replace(
+                        intent.request,
+                        request_id=f"direct-{suffix}-{intent.engine_key}",
+                    ),
+                )
+                for intent in final_requests
+            )
+        else:
+            final_requests = tuple(
+                _IntentRequest(
+                    intent.engine_key,
+                    replace(
+                        intent.request,
+                        request_id=f"{intent.request.request_id}-{suffix}",
+                    ),
+                )
+                for intent in final_requests
+            )
+        moa_setup = None
+        if decision.target == "multi_agent" and self._moa_samples > 0:
+            moa_setup = _build_moa_setup(
+                call.prompt,
+                self._moa_samples,
+                self._internal_sampling_params(call),
+                call.sampling_params,
+                self._shared_prefix,
+                session=f"preflight-moa-{suffix}",
+            )
+            proposal_key = self._internal_engine_keys(decision)[0]
+            internal_requests = tuple(
+                _IntentRequest(proposal_key, request) for request in moa_setup.proposal_requests
+            )
+        else:
+            internal_requests = tuple(
+                _IntentRequest(
+                    intent.engine_key,
+                    replace(
+                        intent.request,
+                        request_id=f"{intent.request.request_id}-{suffix}",
+                    ),
+                )
+                for intent in self._internal_intent_requests(call, decision)
+            )
+        initial_requests = self._initial_role_intent_requests(
+            call,
+            decision,
+            request_id_suffix=suffix,
+        )
+        return _OrchestrationPreparationPlan(
+            call=call,
+            decision=decision,
+            final_requests=final_requests,
+            internal_requests=internal_requests,
+            initial_requests=initial_requests,
+            conductor_session=(Conductor.preflight_session(suffix) if initial_requests else None),
+            moa_setup=moa_setup,
+        )
+
+    async def prepare_request(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> _PreparedOrchestration:
+        """Run semantic and backend-owned prompt preflight before dispatch."""
+
+        call = self._request(request)
+        suffix = uuid.uuid4().hex[:12]
+        decision = await self._route_async(call.prompt)
+        plan = await run_prompt_work(
+            self._build_preparation_plan,
+            call,
+            suffix,
+            decision,
+        )
+        # Backend state and ReplicaPool membership are event-loop owned.  The
+        # request-sized strings are already built, so these bounded fast hooks
+        # stay atomic with respect to membership mutation.
+        self._validate_intent_requests(
+            "final",
+            plan.final_requests,
+            before_prepare=True,
+        )
+        self._validate_intent_requests(
+            "internal",
+            plan.internal_requests,
+            before_prepare=True,
+        )
+        self._validate_intent_requests(
+            "initial",
+            plan.initial_requests,
+            before_prepare=True,
+        )
+
+        failure_groups: list[str] = []
+        for kind, intents in (
+            ("final", plan.final_requests),
+            ("internal", plan.internal_requests),
+            ("initial", plan.initial_requests),
+        ):
+            failures: list[str] = []
+            for intent in intents:
+                try:
+                    await prepare_backend_request(
+                        self._engines[intent.engine_key],
+                        intent.request,
+                    )
+                except ValueError as error:
+                    failures.append(f"{intent.engine_key}: {error}")
+            if failures:
+                failure_groups.append(self._intent_failure_message(kind, failures))
+        if failure_groups:
+            raise ValueError("; ".join(failure_groups))
+        return _PreparedOrchestration(
+            source_request=request,
+            owner_token=self._owner_token,
+            call=plan.call,
+            decision=plan.decision,
+            dispatch=_PreparedDispatchState(
+                final_requests=plan.final_requests,
+                initial_requests=plan.initial_requests,
+                conductor_session=plan.conductor_session,
+                moa_setup=plan.moa_setup,
+            ),
+        )
+
+    def _call_with_prepared_handle(
+        self,
+        request: str | OrchestrationRequest,
+        prepared: _PreparedOrchestration | None,
+    ) -> OrchestrationRequest:
+        if (
+            prepared is not None
+            and prepared.owner_token is self._owner_token
+            and (
+                request is prepared.call
+                or request is prepared.source_request
+                or (
+                    type(request) is str
+                    and type(prepared.source_request) is str
+                    and request == prepared.source_request
+                )
+            )
+        ):
+            return prepared.call
+        return self._request(request)
+
+    def _take_prepared_decision(
+        self,
+        prepared: _PreparedOrchestration | None,
+        call: OrchestrationRequest,
+    ) -> RouteDecision | None:
+        """Consume the route decision bound by exact-call async preflight."""
+
+        if (
+            prepared is None
+            or prepared.owner_token is not self._owner_token
+            or prepared.call is not call
+            or prepared.dispatch.consumed
+        ):
+            return None
+        prepared.dispatch.consumed = True
+        assert prepared.decision is not None
+        if prepared.decision.target == "multi_agent":
+            # Multi-agent prompts evolve after each stage, so synthetic final
+            # preparation is validation-only and cannot be dispatched exactly.
+            prepared.dispatch.final_requests = ()
+        return prepared.decision
+
+    def _prepared_direct_request(
+        self,
+        prepared: _PreparedOrchestration | None,
+        call: OrchestrationRequest,
+        decision: RouteDecision,
+        engine_name: str,
+    ) -> GenerationRequest | None:
+        """Reuse exact direct preflight work when preview and route agree."""
+
+        if (
+            prepared is None
+            or prepared.owner_token is not self._owner_token
+            or prepared.call is not call
+            or prepared.decision is None
+            or prepared.decision.target != decision.target
+            or decision.target == "multi_agent"
+        ):
+            return None
+        request = next(
+            (
+                intent.request
+                for intent in prepared.dispatch.final_requests
+                if intent.engine_key == engine_name
+            ),
+            None,
+        )
+        # The request ID is unique but backend active-ID contracts still make
+        # the handle single-use. A repeated caller safely falls back to fresh
+        # preparation instead of racing the same GenerationRequest.
+        prepared.dispatch.final_requests = ()
+        return request
+
+    def _take_prepared_initial_roles(
+        self,
+        prepared: _PreparedOrchestration | None,
+        call: OrchestrationRequest,
+        decision: RouteDecision,
+    ) -> tuple[str | None, dict[str, GenerationRequest] | None]:
+        """Consume exact dependency-free role requests bound by preflight."""
+
+        if (
+            prepared is None
+            or prepared.owner_token is not self._owner_token
+            or prepared.call is not call
+            or not prepared.dispatch.consumed
+            or prepared.decision is None
+            or prepared.decision.target != decision.target
+            or decision.target != "multi_agent"
+            or not prepared.dispatch.initial_requests
+            or prepared.dispatch.conductor_session is None
+        ):
+            return None, None
+        requests = {
+            intent.role_name: intent.request
+            for intent in prepared.dispatch.initial_requests
+            if intent.role_name is not None
+        }
+        session = prepared.dispatch.conductor_session
+        prepared.dispatch.initial_requests = ()
+        prepared.dispatch.conductor_session = None
+        return session, requests
+
+    def _take_prepared_moa_setup(
+        self,
+        prepared: _PreparedOrchestration | None,
+        call: OrchestrationRequest,
+        decision: RouteDecision,
+    ) -> _MoASetup | None:
+        """Consume the exact proposal request set prepared for one MoA run."""
+
+        if (
+            prepared is None
+            or prepared.owner_token is not self._owner_token
+            or prepared.call is not call
+            or not prepared.dispatch.consumed
+            or prepared.decision is None
+            or prepared.decision.target != decision.target
+            or decision.target != "multi_agent"
+        ):
+            return None
+        setup = prepared.dispatch.moa_setup
+        prepared.dispatch.moa_setup = None
+        return setup
 
     def admission_upper_bound(
         self,
@@ -468,9 +932,7 @@ class Orchestrator:
         )
         role_prompt = largest_role_prompt.prompt if largest_role_prompt else ""
         role_bytes = len(role_prompt.encode("utf-8"))
-        supplied_bytes = len(
-            f"{self._shared_prefix}{call.prompt}".encode()
-        )
+        supplied_bytes = len(f"{self._shared_prefix}{call.prompt}".encode())
         stage_prompt = max(1, supplied_bytes + role_bytes + 256)
         internal_output = internal.max_tokens
         private_steps = max(0, steps - 1)
@@ -498,9 +960,41 @@ class Orchestrator:
             refundable_on_exact_usage=False,
         )
 
+    async def admission_upper_bound_async(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> AdmissionUpperBound:
+        """Serialize tool/response intent on the bounded prompt CPU lane."""
+
+        return await run_prompt_work(self.admission_upper_bound, request)
+
     def _conductor_workers(self, notes: list[str]) -> dict[str, EngineBackend]:
         needed = {role.worker for role in self._roles}
         return {name: self._resolve_engine(name, notes) for name in needed}
+
+    def _new_conductor(
+        self,
+        call: OrchestrationRequest,
+        notes: list[str],
+        *,
+        usage_observer: Callable[[GenerationUsage], None] | None = None,
+    ) -> Conductor:
+        """Construct the one exact role execution contract used by preflight/run."""
+
+        return Conductor(
+            roles=self._roles,
+            workers=self._conductor_workers(notes),
+            shared_prefix=self._shared_prefix,
+            sampling_params=self._internal_sampling_params(call),
+            final_sampling_params=call.sampling_params,
+            final_tools=call.tools,
+            final_tool_choice=call.tool_choice,
+            final_tools_in_prompt=call.tools_in_prompt,
+            final_parallel_tool_calls=call.parallel_tool_calls,
+            cost_model=self._cost_model,
+            worker_trace=self._conductor_worker_trace(),
+            usage_observer=usage_observer,
+        )
 
     def _conductor_worker_trace(self) -> dict[str, WorkerTraceIdentity]:
         fallback_name = next(iter(self._engines))
@@ -541,25 +1035,24 @@ class Orchestrator:
         )
 
     async def _run_direct(
-        self, call: OrchestrationRequest, tier: str, notes: list[str]
+        self,
+        call: OrchestrationRequest,
+        tier: str,
+        notes: list[str],
+        *,
+        prepared_request: GenerationRequest | None = None,
     ) -> tuple[GenerationResult, tuple[int, int, int], TraceEvent]:
         queued_at = utc_now_iso()
         engine_name = self._resolve_engine_name(tier, notes)
         engine = self._engines[engine_name]
         descriptor = self._engine_descriptors[engine_name]
-        request = GenerationRequest(
-            request_id=f"direct-{uuid.uuid4().hex[:12]}",
-            prompt=f"{self._shared_prefix}{call.prompt}",
-            sampling_params=call.sampling_params,
-            # no random per-request session (M2): a fresh uuid forces uniform HRW
-            # placement and defeats prefix + least-outstanding routing. With no
-            # hint the pool routes by shared-prefix overlap and load instead.
-            cache_hint=None,
-            tools=call.tools,
-            tool_choice=call.tool_choice,
-            tools_in_prompt=call.tools_in_prompt,
-            parallel_tool_calls=call.parallel_tool_calls,
-        )
+        request = prepared_request
+        if request is None:
+            request = await run_prompt_work(
+                self._direct_generation_request,
+                call,
+                f"direct-{uuid.uuid4().hex[:12]}",
+            )
         started_at = utc_now_iso()
         try:
             result = await engine.generate(request)
@@ -625,8 +1118,10 @@ class Orchestrator:
     async def run(
         self,
         request: str | OrchestrationRequest,
+        *,
+        prepared: _PreparedOrchestration | None = None,
     ) -> OrchestratorResult:
-        call = self._request(request)
+        call = self._call_with_prepared_handle(request, prepared)
         query = call.prompt
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
         trace_started_at = utc_now_iso()
@@ -637,7 +1132,9 @@ class Orchestrator:
             "kairyu.route",
             {"kairyu.request_id": request_id},
         ) as route_span:
-            decision = self._router.route(query)
+            decision = self._take_prepared_decision(prepared, call)
+            if decision is None:
+                decision = await self._route_async(query)
             self._validate_call(call, decision)
             if route_span is not None:
                 route_span.set_attribute("kairyu.route.target", decision.target)
@@ -678,7 +1175,11 @@ class Orchestrator:
 
         if decision.target == "multi_agent":
             if self._moa_samples > 0:  # m11 A4: the deep tier's MoA route
-                from kairyu.orchestration.moa import MoAExecutionError, run_moa
+                from kairyu.orchestration.moa import (
+                    MoAExecutionError,
+                    _reuse_prepared_moa_setup,
+                    run_moa,
+                )
 
                 moa_queued_at = utc_now_iso()
                 budget_before = BudgetState(budget=self._budget)
@@ -710,20 +1211,26 @@ class Orchestrator:
                 synthesizer_descriptor = self._engine_descriptors[synthesizer_engine_name]
                 moa_started_at = utc_now_iso()
                 moa = None
+                prepared_moa = self._take_prepared_moa_setup(
+                    prepared,
+                    call,
+                    decision,
+                )
                 try:
-                    moa = await run_moa(
-                        self._engines[proposal_engine_name],
-                        query,
-                        n_samples=self._moa_samples,
-                        synthesizer=self._engines[synthesizer_engine_name],
-                        sampling_params=self._internal_sampling_params(call),
-                        final_sampling_params=call.sampling_params,
-                        final_tools=call.tools,
-                        final_tool_choice=call.tool_choice,
-                        final_tools_in_prompt=call.tools_in_prompt,
-                        final_parallel_tool_calls=call.parallel_tool_calls,
-                        shared_prefix=self._shared_prefix,
-                    )
+                    with _reuse_prepared_moa_setup(prepared_moa):
+                        moa = await run_moa(
+                            self._engines[proposal_engine_name],
+                            query,
+                            n_samples=self._moa_samples,
+                            synthesizer=self._engines[synthesizer_engine_name],
+                            sampling_params=self._internal_sampling_params(call),
+                            final_sampling_params=call.sampling_params,
+                            final_tools=call.tools,
+                            final_tool_choice=call.tool_choice,
+                            final_tools_in_prompt=call.tools_in_prompt,
+                            final_parallel_tool_calls=call.parallel_tool_calls,
+                            shared_prefix=self._shared_prefix,
+                        )
                     # M3: the deep MoA tier was invisible to the cost model / budget.
                     # Reconcile proposals + synthesis with the actual result cost;
                     # one admitted operation may visibly cross a result-priced cap.
@@ -899,20 +1406,16 @@ class Orchestrator:
                     completion_tokens=moa.usage[1],
                     cached_tokens=moa.cached_tokens,
                 )
-            conductor = Conductor(
-                roles=self._roles,
-                workers=self._conductor_workers(notes),
-                shared_prefix=self._shared_prefix,
-                sampling_params=self._internal_sampling_params(call),
-                final_sampling_params=call.sampling_params,
-                final_tools=call.tools,
-                final_tool_choice=call.tool_choice,
-                final_tools_in_prompt=call.tools_in_prompt,
-                final_parallel_tool_calls=call.parallel_tool_calls,
-                cost_model=self._cost_model,
-                worker_trace=self._conductor_worker_trace(),
+            conductor = self._new_conductor(call, notes)
+            conductor_session, initial_requests = self._take_prepared_initial_roles(
+                prepared, call, decision
             )
-            result = await conductor.run(query, budget=self._budget)
+            result = await conductor.run(
+                query,
+                budget=self._budget,
+                session=conductor_session,
+                prepared_initial_requests=initial_requests,
+            )
             notes.extend(f"{event.node}: {event.kind} {event.detail}" for event in result.trace)
             trace_events.extend(result.trace)
             return result_with_trace(
@@ -923,10 +1426,19 @@ class Orchestrator:
                 cached_tokens=result.cached_tokens,
             )
         try:
+            engine_name = (
+                decision.target if decision.target in self._engines else next(iter(self._engines))
+            )
             direct_result, usage, direct_event = await self._run_direct(
                 call,
                 decision.target,
                 notes,
+                prepared_request=self._prepared_direct_request(
+                    prepared,
+                    call,
+                    decision,
+                    engine_name,
+                ),
             )
         except _DirectExecutionError as error:
             trace_events.append(error.event)
@@ -948,6 +1460,8 @@ class Orchestrator:
         request: str | OrchestrationRequest,
         stream: bool = False,
         usage_observer: Callable[[GenerationUsage], None] | None = None,
+        *,
+        prepared: _PreparedOrchestration | None = None,
     ):
         """The m11 D1 surface: pre-rendered prompt in (A4), events out.
 
@@ -957,10 +1471,11 @@ class Orchestrator:
         worker/synthesizer, then one result event.
         """
         if not stream:
-            return await self.run(request)
+            return await self.run(request, prepared=prepared)
         return self._run_chat_stream(
-            self._request(request),
+            self._call_with_prepared_handle(request, prepared),
             usage_observer=usage_observer,
+            prepared=prepared,
         )
 
     async def _with_initial_keepalives(self, stream) -> AsyncIterator[object | None]:
@@ -1001,6 +1516,7 @@ class Orchestrator:
         call: OrchestrationRequest,
         *,
         usage_observer: Callable[[GenerationUsage], None] | None,
+        prepared: _PreparedOrchestration | None,
     ):
         prompt = call.prompt
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
@@ -1012,7 +1528,9 @@ class Orchestrator:
             "kairyu.route",
             {"kairyu.request_id": request_id},
         ) as route_span:
-            decision = self._router.route(prompt)
+            decision = self._take_prepared_decision(prepared, call)
+            if decision is None:
+                decision = await self._route_async(prompt)
             self._validate_call(call, decision)
             if route_span is not None:
                 route_span.set_attribute("kairyu.route.target", decision.target)
@@ -1056,16 +1574,18 @@ class Orchestrator:
             engine_name = self._resolve_engine_name(decision.target, notes)
             engine = self._engines[engine_name]
             descriptor = self._engine_descriptors[engine_name]
-            request = GenerationRequest(
-                request_id=f"direct-{uuid.uuid4().hex[:12]}",
-                prompt=f"{self._shared_prefix}{prompt}",
-                sampling_params=call.sampling_params,
-                cache_hint=None,  # M2: no random session — route by prefix + load
-                tools=call.tools,
-                tool_choice=call.tool_choice,
-                tools_in_prompt=call.tools_in_prompt,
-                parallel_tool_calls=call.parallel_tool_calls,
+            request = self._prepared_direct_request(
+                prepared,
+                call,
+                decision,
+                engine_name,
             )
+            if request is None:
+                request = await run_prompt_work(
+                    self._direct_generation_request,
+                    call,
+                    f"direct-{uuid.uuid4().hex[:12]}",
+                )
             emitted = 0
             last = None
             latest_usage = None
@@ -1192,7 +1712,11 @@ class Orchestrator:
         # Conductor/MoA without a queue bridge.
         yield OrchestratorEvent(kind="status", text=f"routing: {decision.target}")
         if self._moa_samples > 0:
-            from kairyu.orchestration.moa import MoAExecutionError, stream_moa
+            from kairyu.orchestration.moa import (
+                MoAExecutionError,
+                _reuse_prepared_moa_setup,
+                stream_moa,
+            )
 
             moa_queued_at = utc_now_iso()
             budget_before = BudgetState(budget=self._budget)
@@ -1231,6 +1755,11 @@ class Orchestrator:
             moa_result = None
             latest_usage = GenerationUsage()
             first_token_at = None
+            prepared_moa = self._take_prepared_moa_setup(
+                prepared,
+                call,
+                decision,
+            )
 
             def observe_moa_usage(usage: GenerationUsage) -> None:
                 nonlocal latest_usage
@@ -1239,20 +1768,21 @@ class Orchestrator:
                     usage_observer(usage)
 
             try:
-                moa_stream = stream_moa(
-                    self._engines[proposal_engine_name],
-                    prompt,
-                    n_samples=self._moa_samples,
-                    synthesizer=self._engines[synthesizer_engine_name],
-                    sampling_params=self._internal_sampling_params(call),
-                    final_sampling_params=call.sampling_params,
-                    final_tools=call.tools,
-                    final_tool_choice=call.tool_choice,
-                    final_tools_in_prompt=call.tools_in_prompt,
-                    final_parallel_tool_calls=call.parallel_tool_calls,
-                    shared_prefix=self._shared_prefix,
-                    usage_observer=observe_moa_usage,
-                )
+                with _reuse_prepared_moa_setup(prepared_moa):
+                    moa_stream = stream_moa(
+                        self._engines[proposal_engine_name],
+                        prompt,
+                        n_samples=self._moa_samples,
+                        synthesizer=self._engines[synthesizer_engine_name],
+                        sampling_params=self._internal_sampling_params(call),
+                        final_sampling_params=call.sampling_params,
+                        final_tools=call.tools,
+                        final_tool_choice=call.tool_choice,
+                        final_tools_in_prompt=call.tools_in_prompt,
+                        final_parallel_tool_calls=call.parallel_tool_calls,
+                        shared_prefix=self._shared_prefix,
+                        usage_observer=observe_moa_usage,
+                    )
                 async for event in self._with_initial_keepalives(moa_stream):
                     if event is None:
                         yield OrchestratorEvent(kind="status", text="working")
@@ -1465,24 +1995,25 @@ class Orchestrator:
             )
             return
 
-        conductor = Conductor(
-            roles=self._roles,
-            workers=self._conductor_workers(notes),
-            shared_prefix=self._shared_prefix,
-            sampling_params=self._internal_sampling_params(call),
-            final_sampling_params=call.sampling_params,
-            final_tools=call.tools,
-            final_tool_choice=call.tool_choice,
-            final_tools_in_prompt=call.tools_in_prompt,
-            final_parallel_tool_calls=call.parallel_tool_calls,
-            cost_model=self._cost_model,
-            worker_trace=self._conductor_worker_trace(),
+        conductor = self._new_conductor(
+            call,
+            notes,
             usage_observer=usage_observer,
+        )
+        conductor_session, initial_requests = self._take_prepared_initial_roles(
+            prepared,
+            call,
+            decision,
         )
         conductor_result = None
         try:
             async for event in self._with_initial_keepalives(
-                conductor.stream(prompt, budget=self._budget)
+                conductor.stream(
+                    prompt,
+                    budget=self._budget,
+                    session=conductor_session,
+                    prepared_initial_requests=initial_requests,
+                )
             ):
                 if event is None:
                     yield OrchestratorEvent(kind="status", text="working")

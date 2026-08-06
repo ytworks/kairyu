@@ -156,14 +156,9 @@ def _strftime_now(fmt: str) -> str:
     return datetime.now().strftime(fmt)
 
 
-def flatten_content(content) -> tuple[str, bool]:
-    """Content-parts -> (text, has_images) without dropping unknown payloads."""
-    if content is None:
-        return "", False
-    if isinstance(content, str):
-        return content, False
-    texts: list[str] = []
-    has_images = False
+def _iter_validated_content_parts(content):
+    """Yield normalized tagged parts after applying the shared strict checks."""
+
     allowed_fields = {"type", "text", "image_url"}
     for index, part in enumerate(content):
         if isinstance(part, Mapping):
@@ -188,7 +183,7 @@ def flatten_content(content) -> tuple[str, bool]:
                 raise ValueError(
                     f"content part {index} type 'text' requires only a string text payload"
                 )
-            texts.append(text)
+            yield "text", text, None
         elif kind == "image_url":
             image_url = data.get("image_url")
             if (
@@ -201,9 +196,25 @@ def flatten_content(content) -> tuple[str, bool]:
                     f"content part {index} type 'image_url' requires only a "
                     "non-empty URL payload"
                 )
-            has_images = True
+            yield "image_url", None, image_url
         else:
             raise ValueError(f"content part {index} has unsupported type {kind!r}")
+
+
+def flatten_content(content) -> tuple[str, bool]:
+    """Content-parts -> (text, has_images) without dropping unknown payloads."""
+    if content is None:
+        return "", False
+    if isinstance(content, str):
+        return content, False
+    texts: list[str] = []
+    has_images = False
+    for kind, text, _image_url in _iter_validated_content_parts(content):
+        if kind == "text":
+            assert text is not None
+            texts.append(text)
+        else:
+            has_images = True
     return "".join(texts), has_images
 
 

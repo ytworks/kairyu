@@ -16,7 +16,8 @@ from pathlib import Path
 from kairyu.engine.backend import (
     EngineBackend,
     GenerationRequest,
-    validate_backend_request,
+    prepare_backend_request,
+    validate_backend_request_before_prepare,
 )
 from kairyu.engine.prompt import (
     MultimodalPrompt,
@@ -268,7 +269,9 @@ class LLM:
             )
         ]
         for request in requests:
-            validate_backend_request(self.backend, request)
+            validate_backend_request_before_prepare(self.backend, request)
+        for request in requests:
+            await prepare_backend_request(self.backend, request)
         results = await asyncio.gather(*(self.backend.generate(r) for r in requests))
         return [
             RequestOutput(

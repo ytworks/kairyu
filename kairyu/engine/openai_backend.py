@@ -19,11 +19,15 @@ import asyncio
 import json
 import os
 import re
+import threading
+import weakref
 from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
 
+from kairyu.async_thread import run_prompt_work
 from kairyu.engine.backend import (
     AdmissionUpperBound,
     GenerationRequest,
@@ -31,6 +35,7 @@ from kairyu.engine.backend import (
     GenerationStageMetric,
     GenerationUsage,
     UpstreamClientError,
+    validate_backend_request_before_prepare,
 )
 from kairyu.engine.backend import (
     admission_upper_bound as default_admission_upper_bound,
@@ -76,6 +81,34 @@ _MAX_TRACE_OCCURRENCES = (1 << 31) - 1
 _TRACE_TIMESTAMP_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z"
 )
+
+
+@dataclass
+class _ImagePreparationFlight:
+    """One exact-request image validation shared by concurrent waiters."""
+
+    request_ref: weakref.ReferenceType[GenerationRequest]
+    task: asyncio.Task[tuple[str, ...]]
+    waiters: int = 0
+
+
+@dataclass
+class _PayloadPreparationFlight:
+    """One exact-request payload validation shared by concurrent waiters."""
+
+    request_ref: weakref.ReferenceType[GenerationRequest]
+    task: asyncio.Task[bytes]
+    waiters: int = 0
+
+
+_SHARED_PREPARED_PAYLOADS: dict[
+    int,
+    tuple[
+        weakref.ReferenceType[GenerationRequest],
+        dict[tuple[object, ...], bytes],
+    ],
+] = {}
+_SHARED_PREPARED_PAYLOADS_LOCK = threading.Lock()
 
 
 async def _await_task_cancellation_safe(task: asyncio.Task[None]) -> None:
@@ -326,6 +359,8 @@ def _validate_sampling_values(
 def _sampling_payload(
     params: SamplingParams,
     capabilities: OpenAIRequestCapabilities,
+    *,
+    validate_json: bool = True,
 ) -> dict[str, object]:
     extra_args = params.extra_args
     if not isinstance(extra_args, Mapping):
@@ -401,13 +436,14 @@ def _sampling_payload(
             f"does not allow vendor extension fields: {fields}",
         )
     payload.update(vendor_args)
-    try:
-        json.dumps(payload)
-    except (TypeError, ValueError) as error:
-        raise _client_error(
-            capabilities.upstream,
-            f"requires JSON-serializable request fields: {error}",
-        ) from error
+    if validate_json:
+        try:
+            json.dumps(payload, allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise _client_error(
+                capabilities.upstream,
+                f"requires JSON-serializable request fields: {error}",
+            ) from error
     return payload
 
 
@@ -429,6 +465,8 @@ def _validate_tools(
 def _validated_request_payload(
     request: GenerationRequest,
     capabilities: OpenAIRequestCapabilities,
+    *,
+    validate_json: bool = True,
 ) -> dict[str, object]:
     kind = prompt_kind(request.prompt)
     if kind not in capabilities.prompt_kinds:
@@ -442,7 +480,11 @@ def _validated_request_payload(
             capabilities.upstream,
             "does not support request field: priority",
         )
-    payload = _sampling_payload(request.sampling_params, capabilities)
+    payload = _sampling_payload(
+        request.sampling_params,
+        capabilities,
+        validate_json=validate_json,
+    )
     parallel_tool_calls = resolve_parallel_tool_calls(
         request.parallel_tool_calls,
         request.sampling_params.extra_args,
@@ -536,6 +578,18 @@ class OpenAICompatBackend:
         self._owns_client = client is None
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
+        self._prepared_payloads: dict[
+            int,
+            tuple[weakref.ReferenceType[GenerationRequest], bytes],
+        ] = {}
+        self._prepared_payloads_lock = threading.Lock()
+        self._preparing_payloads: dict[int, _PayloadPreparationFlight] = {}
+        self._prepared_image_urls: dict[
+            int,
+            tuple[weakref.ReferenceType[GenerationRequest], tuple[str, ...]],
+        ] = {}
+        self._prepared_image_urls_lock = threading.Lock()
+        self._preparing_images: dict[int, _ImagePreparationFlight] = {}
 
     @property
     def base_url(self) -> str:
@@ -567,16 +621,32 @@ class OpenAICompatBackend:
             return None
         return self._capabilities, self._image_input_policy
 
-    def validate_request(self, request: GenerationRequest) -> None:
-        """Fail unsupported intent before dispatch, metering, or client creation."""
+    @property
+    def admission_upper_bound_key(self) -> tuple[
+        OpenAIRequestCapabilities,
+        ImageInputPolicy | None,
+    ] | None:
+        """Identity for replicas with exactly equivalent admission ceilings."""
 
+        if type(self) is not OpenAICompatBackend:
+            return None
+        return self._capabilities, self._image_input_policy
+
+    def _validate_request_structure(self, request: GenerationRequest) -> None:
+        """Validate prompt structure without request-sized JSON serialization."""
+
+        kind = prompt_kind(request.prompt)
+        if kind not in self._capabilities.prompt_kinds:
+            raise _client_error(
+                self._capabilities.upstream,
+                f"does not support prompt kind: {kind}",
+            )
         if isinstance(request.prompt, TemplatedPrompt):
             raise _client_error(
                 self._capabilities.upstream,
                 "cannot preserve a tokenizer-owned pre-rendered chat prompt through "
                 "an upstream /chat/completions template boundary",
             )
-        _validated_request_payload(request, self._capabilities)
         if isinstance(request.prompt, MultimodalPrompt):
             if type(request.prompt.base) is not str and not isinstance(
                 request.prompt.base,
@@ -589,13 +659,28 @@ class OpenAICompatBackend:
             assert self._image_input_policy is not None
             self._image_input_policy.validate_prompt_headers(request.prompt)
 
+    def validate_request(self, request: GenerationRequest) -> None:
+        """Fail unsupported intent before dispatch, metering, or client creation."""
+
+        self._validate_request_structure(request)
+        _validated_request_payload(request, self._capabilities)
+
+    def validate_request_before_prepare(self, request: GenerationRequest) -> None:
+        """Keep only bounded structural checks on the serving event loop."""
+
+        self._validate_request_structure(request)
+
     def _dispatch_preflight(
         self,
         request: GenerationRequest,
     ) -> dict[str, object]:
         try:
-            self.validate_request(request)
-            return _validated_request_payload(request, self._capabilities)
+            self._validate_request_structure(request)
+            return _validated_request_payload(
+                request,
+                self._capabilities,
+                validate_json=False,
+            )
         except InvalidImageInput as error:
             raise UpstreamClientError(
                 str(error),
@@ -720,6 +805,201 @@ class OpenAICompatBackend:
                 raise RuntimeError("client_factory returned a closed HTTP client")
         return self._client
 
+    def _peek_prepared_payload(
+        self,
+        request: GenerationRequest,
+    ) -> bytes | None:
+        key = id(request)
+        with self._prepared_payloads_lock:
+            cached = self._prepared_payloads.get(key)
+            if cached is None:
+                return None
+            if cached[0]() is request:
+                return cached[1]
+            self._prepared_payloads.pop(key, None)
+        return None
+
+    def _shared_payload_contract(self) -> tuple[object, ...] | None:
+        """Exact builtin contract whose immutable wire bytes are shareable."""
+
+        if type(self) is not OpenAICompatBackend:
+            return None
+        return (
+            self._capabilities,
+            self._image_input_policy,
+            self._model,
+            self._request_stream_usage,
+        )
+
+    def _peek_shared_prepared_payload(
+        self,
+        request: GenerationRequest,
+    ) -> bytes | None:
+        contract = self._shared_payload_contract()
+        if contract is None:
+            return None
+        key = id(request)
+        with _SHARED_PREPARED_PAYLOADS_LOCK:
+            cached = _SHARED_PREPARED_PAYLOADS.get(key)
+            if cached is None:
+                return None
+            if cached[0]() is request:
+                return cached[1].get(contract)
+            _SHARED_PREPARED_PAYLOADS.pop(key, None)
+        return None
+
+    def _retain_shared_prepared_payload(
+        self,
+        request: GenerationRequest,
+        payload: bytes,
+    ) -> bytes:
+        contract = self._shared_payload_contract()
+        if contract is None:
+            return payload
+        key = id(request)
+
+        def discard(reference: weakref.ReferenceType[GenerationRequest]) -> None:
+            with _SHARED_PREPARED_PAYLOADS_LOCK:
+                current = _SHARED_PREPARED_PAYLOADS.get(key)
+                if current is not None and current[0] is reference:
+                    _SHARED_PREPARED_PAYLOADS.pop(key, None)
+
+        with _SHARED_PREPARED_PAYLOADS_LOCK:
+            cached = _SHARED_PREPARED_PAYLOADS.get(key)
+            if cached is None or cached[0]() is not request:
+                cached = (weakref.ref(request, discard), {})
+                _SHARED_PREPARED_PAYLOADS[key] = cached
+            return cached[1].setdefault(contract, payload)
+
+    def _retain_prepared_payload(
+        self,
+        request: GenerationRequest,
+        payload: bytes,
+    ) -> bytes:
+        key = id(request)
+        backend_ref = weakref.ref(self)
+
+        def discard(reference: weakref.ReferenceType[GenerationRequest]) -> None:
+            backend = backend_ref()
+            if backend is None:
+                return
+            with backend._prepared_payloads_lock:
+                current = backend._prepared_payloads.get(key)
+                if current is not None and current[0] is reference:
+                    backend._prepared_payloads.pop(key, None)
+
+        request_ref = weakref.ref(request, discard)
+        with self._prepared_payloads_lock:
+            cached = self._prepared_payloads.get(key)
+            if cached is not None and cached[0]() is request:
+                return cached[1]
+            self._prepared_payloads[key] = (request_ref, payload)
+        return payload
+
+    def _take_prepared_payload(
+        self,
+        request: GenerationRequest,
+    ) -> bytes | None:
+        key = id(request)
+        with self._prepared_payloads_lock:
+            cached = self._prepared_payloads.get(key)
+            if cached is None:
+                return None
+            self._prepared_payloads.pop(key, None)
+            if cached[0]() is request:
+                return cached[1]
+        return None
+
+    def _discard_finished_payload_preparation(
+        self,
+        key: int,
+        flight: _PayloadPreparationFlight,
+        task: asyncio.Task[bytes],
+    ) -> None:
+        if not task.cancelled():
+            task.exception()
+        if flight.waiters == 0 and self._preparing_payloads.get(key) is flight:
+            self._preparing_payloads.pop(key, None)
+
+    async def _prepare_payload(self, request: GenerationRequest) -> None:
+        if self._closed:
+            raise RuntimeError(f"backend {self._base_url} is shut down")
+        if self._peek_prepared_payload(request) is not None:
+            return
+        shared = self._peek_shared_prepared_payload(request)
+        if shared is not None:
+            if isinstance(request.prompt, MultimodalPrompt):
+                await self._prepare_image_urls(request)
+            self._retain_prepared_payload(request, shared)
+            return
+        try:
+            validate_backend_request_before_prepare(self, request)
+        except InvalidImageInput as error:
+            raise UpstreamClientError(
+                str(error),
+                status_code=400,
+                code=error.code,
+                public_message=str(error),
+            ) from error
+        except OpenAIRequestValidationError as error:
+            raise UpstreamClientError(
+                str(error),
+                status_code=400,
+                public_message=str(error),
+            ) from error
+        key = id(request)
+        flight = self._preparing_payloads.get(key)
+        if flight is not None and flight.request_ref() is not request:
+            self._preparing_payloads.pop(key, None)
+            flight = None
+        if flight is None:
+            task = asyncio.create_task(
+                self._build_wire_payload(request)
+            )
+            flight = _PayloadPreparationFlight(weakref.ref(request), task)
+            self._preparing_payloads[key] = flight
+            task.add_done_callback(
+                lambda done, key=key, flight=flight: (
+                    self._discard_finished_payload_preparation(key, flight, done)
+                )
+            )
+
+        flight.waiters += 1
+        try:
+            payload = await asyncio.shield(flight.task)
+            if self._closed:
+                raise RuntimeError(f"backend {self._base_url} is shut down")
+            payload = self._retain_shared_prepared_payload(request, payload)
+            self._retain_prepared_payload(request, payload)
+        finally:
+            flight.waiters -= 1
+            if (
+                flight.task.done()
+                and flight.waiters == 0
+                and self._preparing_payloads.get(key) is flight
+            ):
+                self._preparing_payloads.pop(key, None)
+
+    async def _payload_for_dispatch(
+        self,
+        request: GenerationRequest,
+        *,
+        stream: bool,
+    ) -> bytes:
+        await self._prepare_payload(request)
+        payload = self._take_prepared_payload(request)
+        if payload is None:
+            raise RuntimeError("prepared OpenAI request payload was lost before dispatch")
+        if isinstance(request.prompt, MultimodalPrompt):
+            self._take_prepared_image_urls(request)
+        if not stream:
+            return payload
+        return await run_prompt_work(
+            self._stream_wire_payload,
+            payload,
+            self._request_stream_usage,
+        )
+
     async def _validated_image_urls(
         self,
         request: GenerationRequest,
@@ -729,10 +1009,13 @@ class OpenAICompatBackend:
             return None
         assert self._image_input_policy is not None
         try:
+            cached = self._image_input_policy.cached_validated_prompt(prompt)
+            if cached is not None:
+                return cached
             # Pillow must decompress the complete raster to reject truncated
             # or malicious compressed inputs. Keep that bounded CPU work off
-            # the server event loop and do it once, after tenant admission.
-            return await asyncio.to_thread(
+            # the server event loop and do it once, before admission/headers.
+            return await run_prompt_work(
                 self._image_input_policy.validate_prompt,
                 prompt,
             )
@@ -744,11 +1027,124 @@ class OpenAICompatBackend:
                 public_message=str(error),
             ) from error
 
-    async def prepare_request(self, request: GenerationRequest) -> None:
-        """Fully verify media once before quota debit or streaming headers."""
+    def _peek_prepared_image_urls(
+        self,
+        request: GenerationRequest,
+    ) -> tuple[str, ...] | None:
+        key = id(request)
+        with self._prepared_image_urls_lock:
+            cached = self._prepared_image_urls.get(key)
+            if cached is None:
+                return None
+            if cached[0]() is request:
+                return cached[1]
+            self._prepared_image_urls.pop(key, None)
+        return None
 
-        self._dispatch_preflight(request)
-        await self._validated_image_urls(request)
+    def _retain_prepared_image_urls(
+        self,
+        request: GenerationRequest,
+        image_urls: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        key = id(request)
+        backend_ref = weakref.ref(self)
+
+        def discard(reference: weakref.ReferenceType[GenerationRequest]) -> None:
+            backend = backend_ref()
+            if backend is None:
+                return
+            with backend._prepared_image_urls_lock:
+                current = backend._prepared_image_urls.get(key)
+                if current is not None and current[0] is reference:
+                    backend._prepared_image_urls.pop(key, None)
+
+        request_ref = weakref.ref(request, discard)
+        with self._prepared_image_urls_lock:
+            cached = self._prepared_image_urls.get(key)
+            if cached is not None and cached[0]() is request:
+                return cached[1]
+            self._prepared_image_urls[key] = (request_ref, image_urls)
+        return image_urls
+
+    def _take_prepared_image_urls(
+        self,
+        request: GenerationRequest,
+    ) -> tuple[str, ...] | None:
+        key = id(request)
+        with self._prepared_image_urls_lock:
+            cached = self._prepared_image_urls.get(key)
+            if cached is None:
+                return None
+            self._prepared_image_urls.pop(key, None)
+            if cached[0]() is request:
+                return cached[1]
+        return None
+
+    def _discard_finished_image_preparation(
+        self,
+        key: int,
+        flight: _ImagePreparationFlight,
+        task: asyncio.Task[tuple[str, ...]],
+    ) -> None:
+        if not task.cancelled():
+            task.exception()
+        if (
+            flight.waiters == 0
+            and self._preparing_images.get(key) is flight
+        ):
+            self._preparing_images.pop(key, None)
+
+    async def _prepare_image_urls(self, request: GenerationRequest) -> None:
+        if self._closed:
+            raise RuntimeError(f"backend {self._base_url} is shut down")
+        if self._peek_prepared_image_urls(request) is not None:
+            return
+        key = id(request)
+        flight = self._preparing_images.get(key)
+        if flight is not None and flight.request_ref() is not request:
+            self._preparing_images.pop(key, None)
+            flight = None
+        if flight is None:
+            task = asyncio.create_task(self._validated_image_urls(request))
+            flight = _ImagePreparationFlight(weakref.ref(request), task)
+            self._preparing_images[key] = flight
+            task.add_done_callback(
+                lambda done, key=key, flight=flight: (
+                    self._discard_finished_image_preparation(key, flight, done)
+                )
+            )
+
+        flight.waiters += 1
+        try:
+            image_urls = await asyncio.shield(flight.task)
+            if self._closed:
+                raise RuntimeError(f"backend {self._base_url} is shut down")
+            self._retain_prepared_image_urls(request, image_urls)
+        finally:
+            flight.waiters -= 1
+            if (
+                flight.task.done()
+                and flight.waiters == 0
+                and self._preparing_images.get(key) is flight
+            ):
+                self._preparing_images.pop(key, None)
+
+    async def _image_urls_for_dispatch(
+        self,
+        request: GenerationRequest,
+    ) -> tuple[str, ...] | None:
+        if not isinstance(request.prompt, MultimodalPrompt):
+            return None
+        await self._prepare_image_urls(request)
+        image_urls = self._take_prepared_image_urls(request)
+        if image_urls is None:
+            raise RuntimeError("prepared image input was lost before dispatch")
+        return image_urls
+
+    async def prepare_request(self, request: GenerationRequest) -> None:
+        """Validate payload/media once before quota debit or streaming headers."""
+
+        await self._prepare_payload(request)
 
     def _payload(
         self,
@@ -798,6 +1194,69 @@ class OpenAICompatBackend:
                 payload["tool_choice"] = request.tool_choice
         return payload
 
+    def _encode_payload(
+        self,
+        request: GenerationRequest,
+        validated: dict[str, object],
+        image_urls: tuple[str, ...] | None,
+    ) -> bytes:
+        """Build and encode the complete upstream body on the prompt lane."""
+
+        try:
+            return json.dumps(
+                self._payload(
+                    request,
+                    validated=validated,
+                    image_urls=image_urls,
+                ),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode()
+        except (TypeError, ValueError) as serialization_error:
+            error = _client_error(
+                self._capabilities.upstream,
+                "requires JSON-serializable request fields: "
+                f"{serialization_error}",
+            )
+            raise UpstreamClientError(
+                str(error),
+                status_code=400,
+                public_message=str(error),
+            ) from serialization_error
+
+    async def _build_wire_payload(self, request: GenerationRequest) -> bytes:
+        validated = await run_prompt_work(self._dispatch_preflight, request)
+        image_urls = None
+        if isinstance(request.prompt, MultimodalPrompt):
+            await self._prepare_image_urls(request)
+            image_urls = self._peek_prepared_image_urls(request)
+            if image_urls is None:
+                raise RuntimeError("prepared image input was lost before payload encoding")
+        return await run_prompt_work(
+            self._encode_payload,
+            request,
+            validated,
+            image_urls,
+        )
+
+    @staticmethod
+    def _stream_wire_payload(payload: bytes, include_usage: bool) -> bytes:
+        """Append stream-only primitive fields without reserializing the body."""
+
+        if not payload.endswith(b"}"):
+            raise RuntimeError("prepared OpenAI request payload is not a JSON object")
+        suffix = b',"stream":true'
+        if include_usage:
+            suffix += b',"stream_options":{"include_usage":true}'
+        return payload[:-1] + suffix + b"}"
+
+    def _json_headers(self, request: GenerationRequest) -> dict[str, str]:
+        return {
+            **self._headers(request),
+            "Content-Type": "application/json",
+        }
+
     @staticmethod
     def _require_exact_multimodal_usage(
         request: GenerationRequest,
@@ -812,17 +1271,14 @@ class OpenAICompatBackend:
             )
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
-        validated = self._dispatch_preflight(request)
-        image_urls = await self._validated_image_urls(request)
-        payload = self._payload(
+        payload = await self._payload_for_dispatch(
             request,
-            validated=validated,
-            image_urls=image_urls,
+            stream=False,
         )
         response = await self._get_client().post(
             f"{self._base_url}/chat/completions",
-            json=payload,
-            headers=self._headers(request),
+            content=payload,
+            headers=self._json_headers(request),
             timeout=self._timeout_s,
         )
         if response.status_code != 200:
@@ -911,20 +1367,15 @@ class OpenAICompatBackend:
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
         """Real SSE streaming: yields cumulative partials, then the final result."""
-        validated = self._dispatch_preflight(request)
-        image_urls = await self._validated_image_urls(request)
-        payload = self._payload(
+        payload = await self._payload_for_dispatch(
             request,
-            validated=validated,
-            image_urls=image_urls,
-        ) | {"stream": True}
-        if self._request_stream_usage:
-            payload["stream_options"] = {"include_usage": True}
+            stream=True,
+        )
         async with self._get_client().stream(
             "POST",
             f"{self._base_url}/chat/completions",
-            json=payload,
-            headers=self._headers(request),
+            content=payload,
+            headers=self._json_headers(request),
             timeout=self._timeout_s,
         ) as response:
             if response.status_code != 200:
@@ -1036,12 +1487,27 @@ class OpenAICompatBackend:
         )
 
     async def _shutdown_impl(self) -> None:
-        if not self._owns_client:
-            return
-        client = self._client
-        if client is not None and not client.is_closed:
-            await client.aclose()
-        self._client = None
+        preparation_tasks = tuple(
+            flight.task for flight in self._preparing_images.values()
+        ) + tuple(
+            flight.task for flight in self._preparing_payloads.values()
+        )
+        if preparation_tasks:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in preparation_tasks),
+                return_exceptions=True,
+            )
+        self._preparing_images.clear()
+        self._preparing_payloads.clear()
+        with self._prepared_payloads_lock:
+            self._prepared_payloads.clear()
+        with self._prepared_image_urls_lock:
+            self._prepared_image_urls.clear()
+        if self._owns_client:
+            client = self._client
+            if client is not None and not client.is_closed:
+                await client.aclose()
+            self._client = None
 
     async def shutdown(self) -> None:
         task = self._close_task

@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
+from kairyu.async_thread import run_prompt_work
 from kairyu.engine.backend import (
     CacheHint,
     EngineBackend,
@@ -132,6 +133,9 @@ class _RunState:
     usage: list[int] = field(default_factory=lambda: [0, 0])
     cached_tokens: int = 0
     final_completions: tuple[CompletionOutput, ...] = ()
+    prepared_initial_requests: dict[str, GenerationRequest] = field(
+        default_factory=dict
+    )
 
 
 class _BudgetRefused(Exception):
@@ -315,6 +319,118 @@ class Conductor:
             prefix_fingerprint=self._prefix_fingerprint,
         )
 
+    @staticmethod
+    def preflight_session(request_id_suffix: str) -> str:
+        """Return the execution session bound to an initial-request plan."""
+
+        return f"preflight-{request_id_suffix}"
+
+    def initial_requests(
+        self,
+        query: str,
+        *,
+        request_id_suffix: str,
+    ) -> tuple[tuple[RoleSpec, GenerationRequest], ...]:
+        """Build the exact dependency-free role intents used by the first wave.
+
+        Orchestration preflight uses these requests before an HTTP stream is
+        opened. Later role prompts depend on generated outputs and therefore
+        cannot be rendered exactly in advance, but the first wave can and must
+        include its static role envelope rather than validating only ``query``.
+        """
+
+        if isinstance(query, TemplatedPrompt):
+            raise ValueError(
+                "Conductor cannot derive role prompts from a tokenizer-owned "
+                "pre-rendered chat prompt"
+            )
+        session = self.preflight_session(request_id_suffix)
+        requests: list[tuple[RoleSpec, GenerationRequest]] = []
+        for spec in self._units:
+            if self._unit_deps[spec.name]:
+                continue
+            sampling_params, tools, tool_choice, tools_in_prompt, parallel_tool_calls = (
+                self._request_intent(spec)
+            )
+            requests.append(
+                (
+                    spec,
+                    GenerationRequest(
+                        request_id=f"preflight-role-{spec.name}-{request_id_suffix}",
+                        prompt=self._render(spec.prompt, query, {}),
+                        sampling_params=sampling_params,
+                        cache_hint=self._cache_hint(session),
+                        tools=tools,
+                        tool_choice=tool_choice,
+                        tools_in_prompt=tools_in_prompt,
+                        parallel_tool_calls=parallel_tool_calls,
+                    ),
+                )
+            )
+        return tuple(requests)
+
+    def _generation_request(
+        self,
+        run: _RunState,
+        session: str,
+        spec: RoleSpec,
+        prompt: str,
+        attempt: int,
+    ) -> GenerationRequest:
+        """Consume an exact first-wave preflight request when one is bound."""
+
+        sampling_params, tools, tool_choice, tools_in_prompt, parallel_tool_calls = (
+            self._request_intent(spec)
+        )
+        candidate = GenerationRequest(
+            request_id=f"{session}-{spec.name}-{attempt}",
+            prompt=prompt,
+            sampling_params=sampling_params,
+            cache_hint=self._cache_hint(session),
+            tools=tools,
+            tool_choice=tool_choice,
+            tools_in_prompt=tools_in_prompt,
+            parallel_tool_calls=parallel_tool_calls,
+        )
+        if attempt != 0:
+            return candidate
+        prepared = run.prepared_initial_requests.pop(spec.name, None)
+        if prepared is None:
+            return candidate
+        if replace(prepared, request_id=candidate.request_id) != candidate:
+            raise RuntimeError(
+                f"prepared initial role request {spec.name!r} no longer matches "
+                "the execution contract"
+            )
+        return prepared
+
+    @staticmethod
+    def _prepared_initial_prompt(
+        run: _RunState,
+        spec: RoleSpec,
+    ) -> str | None:
+        prepared = run.prepared_initial_requests.get(spec.name)
+        if prepared is None:
+            return None
+        text = prompt_text(prepared.prompt)
+        if text is None:
+            raise RuntimeError(
+                f"prepared initial role request {spec.name!r} is not text"
+            )
+        return text
+
+    @staticmethod
+    def _refinement_prompt(
+        base_prompt: str,
+        text: str,
+        verdict: str,
+    ) -> str:
+        return (
+            f"{base_prompt}\n\nPrevious attempt:\n{text}\n\n"
+            f"Verifier feedback:\n{verdict}\n\n"
+            "Revise the answer addressing the feedback."
+        )
+
     def _trace_event(
         self,
         spec: RoleSpec,
@@ -363,18 +479,12 @@ class Conductor:
     ) -> _GenerationObservation:
         event_spec = spec or RoleSpec(name=node, worker=worker, prompt="")
         backend = self._workers[worker]
-        sampling_params, tools, tool_choice, tools_in_prompt, parallel_tool_calls = (
-            self._request_intent(event_spec)
-        )
-        request = GenerationRequest(
-            request_id=f"{session}-{node}-{attempt}",
-            prompt=prompt,
-            sampling_params=sampling_params,
-            cache_hint=self._cache_hint(session),
-            tools=tools,
-            tool_choice=tool_choice,
-            tools_in_prompt=tools_in_prompt,
-            parallel_tool_calls=parallel_tool_calls,
+        request = self._generation_request(
+            run,
+            session,
+            event_spec,
+            prompt,
+            attempt,
         )
         queued_at = utc_now_iso()
         budget_before = run.budget
@@ -473,7 +583,14 @@ class Conductor:
                 )
             )
             return
-        base_prompt = self._render(spec.prompt, query, run.outputs)
+        base_prompt = self._prepared_initial_prompt(run, spec)
+        if base_prompt is None:
+            base_prompt = await run_prompt_work(
+                self._render,
+                spec.prompt,
+                query,
+                dict(run.outputs),
+            )
         verifier = self._verifier_for.get(spec.name)
         prompt = base_prompt
         depth = 0
@@ -523,7 +640,12 @@ class Conductor:
             )
             if verifier is None:
                 break
-            verifier_prompt = self._render(verifier.prompt, query, run.outputs)
+            verifier_prompt = await run_prompt_work(
+                self._render,
+                verifier.prompt,
+                query,
+                dict(run.outputs),
+            )
             try:
                 verifier_observed = await self._generate(
                     run,
@@ -568,9 +690,11 @@ class Conductor:
             if passed or not run.budget.can_refine(depth):
                 break
             depth += 1
-            prompt = (
-                f"{base_prompt}\n\nPrevious attempt:\n{text}\n\n"
-                f"Verifier feedback:\n{verdict}\n\nRevise the answer addressing the feedback."
+            prompt = await run_prompt_work(
+                self._refinement_prompt,
+                base_prompt,
+                text,
+                verdict,
             )
         run.completion_order.append(spec.name)
 
@@ -662,21 +786,16 @@ class Conductor:
             )
             return
 
-        prompt = self._render(spec.prompt, query, run.outputs)
+        prompt = self._prepared_initial_prompt(run, spec)
+        if prompt is None:
+            prompt = await run_prompt_work(
+                self._render,
+                spec.prompt,
+                query,
+                dict(run.outputs),
+            )
         backend = self._workers[spec.worker]
-        sampling_params, tools, tool_choice, tools_in_prompt, parallel_tool_calls = (
-            self._request_intent(spec)
-        )
-        request = GenerationRequest(
-            request_id=f"{session}-{spec.name}-0",
-            prompt=prompt,
-            sampling_params=sampling_params,
-            cache_hint=self._cache_hint(session),
-            tools=tools,
-            tool_choice=tool_choice,
-            tools_in_prompt=tools_in_prompt,
-            parallel_tool_calls=parallel_tool_calls,
-        )
+        request = self._generation_request(run, session, spec, prompt, 0)
         queued_at = utc_now_iso()
         budget_before = run.budget
         unknown_cost = run.budget.budget.max_cost_usd is not None
@@ -820,14 +939,26 @@ class Conductor:
         run.completion_order.append(spec.name)
         run.final_completions = last_result.completions
 
-    async def run(self, query: str, budget: Budget | None = None) -> ConductorResult:
+    async def run(
+        self,
+        query: str,
+        budget: Budget | None = None,
+        *,
+        session: str | None = None,
+        prepared_initial_requests: Mapping[str, GenerationRequest] | None = None,
+    ) -> ConductorResult:
         if isinstance(query, TemplatedPrompt):
             raise ValueError(
                 "Conductor cannot derive role prompts from a tokenizer-owned "
                 "pre-rendered chat prompt"
             )
-        run = _RunState(budget=BudgetState(budget=budget or Budget()))
-        session = uuid.uuid4().hex[:12]
+        if prepared_initial_requests and session is None:
+            raise ValueError("prepared initial requests require their bound session")
+        run = _RunState(
+            budget=BudgetState(budget=budget or Budget()),
+            prepared_initial_requests=dict(prepared_initial_requests or {}),
+        )
+        session = session or uuid.uuid4().hex[:12]
         await self._run_pending(run, session, query)
         return ConductorResult(
             final_text=self._final_text(run),
@@ -840,7 +971,12 @@ class Conductor:
         )
 
     async def stream(
-        self, query: str, budget: Budget | None = None
+        self,
+        query: str,
+        budget: Budget | None = None,
+        *,
+        session: str | None = None,
+        prepared_initial_requests: Mapping[str, GenerationRequest] | None = None,
     ) -> AsyncIterator[ConductorEvent]:
         """Run pre-final DAG waves, then pull final backend deltas directly.
 
@@ -855,8 +991,13 @@ class Conductor:
                 "Conductor cannot derive role prompts from a tokenizer-owned "
                 "pre-rendered chat prompt"
             )
-        run = _RunState(budget=BudgetState(budget=budget or Budget()))
-        session = uuid.uuid4().hex[:12]
+        if prepared_initial_requests and session is None:
+            raise ValueError("prepared initial requests require their bound session")
+        run = _RunState(
+            budget=BudgetState(budget=budget or Budget()),
+            prepared_initial_requests=dict(prepared_initial_requests or {}),
+        )
+        session = session or uuid.uuid4().hex[:12]
         final = self._stream_final_unit()
         await self._run_pending(
             run,

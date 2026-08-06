@@ -31,10 +31,12 @@ Placement is pure hashing plus one optional JSONL append. No background tasks.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import time
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -45,9 +47,13 @@ from kairyu.engine.backend import (
     GenerationResult,
     UpstreamClientError,
     backend_admission_upper_bound,
+    backend_admission_upper_bound_async,
+    backend_admission_upper_bound_key,
+    prepare_backend_request,
     shutdown_all,
     shutdown_all_cancellation_safe,
     validate_backend_request,
+    validate_backend_request_before_prepare,
 )
 from kairyu.engine.prompt import prompt_kind, prompt_text
 from kairyu.orchestration.kv_routing import KvRoutingIndex, PreparedKvRouting
@@ -131,6 +137,18 @@ class _ReplicaEntry:
         return self.manual_draining or bool(self.drain_leases)
 
 
+@dataclass
+class _PreparedPlacement:
+    request_ref: weakref.ReferenceType[GenerationRequest]
+    candidates: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class _PreparationFlight:
+    request_ref: weakref.ReferenceType[GenerationRequest]
+    task: asyncio.Task[tuple[str, ...]]
+
+
 class DrainLease:
     """Opaque ownership token for one independently reversible pool drain."""
 
@@ -211,6 +229,14 @@ class ReplicaPool:
             "prefix_match": 0,
             "kv_event_match": 0,
         }
+        # Request-identity placement leases bind a successful async preflight
+        # to the exact eligible generations it covered. Newly eligible members
+        # cannot slip into placement after HTTP headers are committed.
+        self._prepared_placements: dict[int, _PreparedPlacement] = {}
+        # Exact-request preparation is single-flight. Besides avoiding duplicate
+        # tokenizer work, this prevents a later concurrent snapshot from
+        # overwriting an already narrowed placement lease with new members.
+        self._preparation_flights: dict[int, _PreparationFlight] = {}
         # m13: cached /backends payload of one replica for the gateway's own
         # /backends aggregation. Only successful probes are cached (a process's
         # attention backend is constant for its lifetime); None stays uncached.
@@ -588,14 +614,44 @@ class ReplicaPool:
         per-replica validation.
         """
 
+        self._validate_request_candidates(request, self._eligible_ids())
+
+    def validate_request_before_prepare(self, request: GenerationRequest) -> None:
+        """Validate the current replica intersection without deep CPU work."""
+
+        self._validate_request_candidates(
+            request,
+            self._eligible_ids(),
+            before_prepare=True,
+        )
+
+    def _validate_request_candidates(
+        self,
+        request: GenerationRequest,
+        candidates: tuple[str, ...],
+        *,
+        before_prepare: bool = False,
+    ) -> None:
+        """Validate against one immutable pre-placement membership snapshot."""
+
         failures: list[tuple[str, ValueError]] = []
         validated_keys: set[tuple[type, object]] = set()
-        for replica_id in self._eligible_ids():
+        for replica_id in candidates:
             backend = self._entries[replica_id].backend
             validate = getattr(backend, "validate_request", None)
-            if validate is None:
+            fast_validate = getattr(
+                backend,
+                "validate_request_before_prepare",
+                None,
+            )
+            if not callable(validate) and not (
+                before_prepare and callable(fast_validate)
+            ):
                 try:
-                    validate_backend_request(backend, request)
+                    if before_prepare:
+                        validate_backend_request_before_prepare(backend, request)
+                    else:
+                        validate_backend_request(backend, request)
                 except ValueError as error:
                     failures.append((replica_id, error))
                 continue
@@ -611,7 +667,10 @@ class ReplicaPool:
                     # Validate this backend independently instead.
                     pass
             try:
-                validate(request)
+                if before_prepare:
+                    validate_backend_request_before_prepare(backend, request)
+                else:
+                    validate(request)
             except ValueError as error:
                 failures.append((replica_id, error))
         if failures:
@@ -640,17 +699,19 @@ class ReplicaPool:
     def admission_upper_bound(self, request: GenerationRequest) -> AdmissionUpperBound:
         """Return the safe maximum across every currently placeable replica."""
 
-        eligible = self._eligible_ids()
+        prepared = self._prepared_placement(request, consume=False)
+        eligible = self._eligible_ids() if prepared is None else prepared
         if not eligible:
             raise RuntimeError(
                 f"ReplicaPool: none of the {len(self._entries)} replicas are eligible"
             )
+        backends = self._admission_backends(eligible)
         bounds = [
             backend_admission_upper_bound(
-                self._entries[replica_id].backend,
+                backend,
                 request,
             )
-            for replica_id in eligible
+            for backend in backends
         ]
         return AdmissionUpperBound(
             tokens=max(bound.tokens for bound in bounds),
@@ -659,30 +720,266 @@ class ReplicaPool:
             ),
         )
 
-    async def prepare_request(self, request: GenerationRequest) -> None:
-        """Prepare every distinct placeable contract before placement."""
+    async def admission_upper_bound_async(
+        self,
+        request: GenerationRequest,
+    ) -> AdmissionUpperBound:
+        """Bound the monotonic prepared lease despite rolling membership changes."""
+
+        if self._prepared_placement(request, consume=False) is None:
+            await self.prepare_request(request)
+
+        # Every restart strictly shrinks the prepared lease. A removed,
+        # replaced, or drained representative may fail while its async bound is
+        # running; that failure cannot reject a request which still has a
+        # prepared survivor. Recompute from the survivor contracts instead.
+        while True:
+            eligible = self._prepared_placement(request, consume=False)
+            if not eligible:
+                raise RuntimeError(
+                    f"ReplicaPool: none of the {len(self._entries)} replicas are eligible"
+                )
+            members = self._admission_members(eligible)
+            bounds: list[AdmissionUpperBound] = []
+            restart = False
+            for replica_id, entry, backend in members:
+                current = self._prepared_placement(request, consume=False)
+                if current != eligible or self._entries.get(replica_id) is not entry:
+                    restart = True
+                    break
+                try:
+                    bound = await backend_admission_upper_bound_async(
+                        backend,
+                        request,
+                    )
+                except asyncio.CancelledError:
+                    current_task = asyncio.current_task()
+                    if current_task is not None and current_task.cancelling():
+                        raise
+                    surviving = self._prepared_placement(request, consume=False)
+                    if (
+                        surviving is not None
+                        and replica_id in surviving
+                        and self._entries.get(replica_id) is entry
+                    ):
+                        raise
+                    restart = True
+                    break
+                except Exception:
+                    surviving = self._prepared_placement(request, consume=False)
+                    if (
+                        surviving is not None
+                        and replica_id in surviving
+                        and self._entries.get(replica_id) is entry
+                    ):
+                        raise
+                    restart = True
+                    break
+
+                surviving = self._prepared_placement(request, consume=False)
+                if surviving != eligible:
+                    restart = True
+                    break
+                bounds.append(bound)
+            if restart:
+                continue
+            return AdmissionUpperBound(
+                tokens=max(bound.tokens for bound in bounds),
+                refundable_on_exact_usage=all(
+                    bound.refundable_on_exact_usage for bound in bounds
+                ),
+            )
+
+    def _admission_backends(
+        self,
+        eligible: tuple[str, ...],
+    ) -> tuple[EngineBackend, ...]:
+        """Keep one representative per explicit immutable bound contract."""
+
+        representatives: list[EngineBackend] = []
+        seen: set[object] = set()
+        for replica_id in eligible:
+            backend = self._entries[replica_id].backend
+            key = backend_admission_upper_bound_key(backend)
+            if key is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
+            representatives.append(backend)
+        return tuple(representatives)
+
+    def _admission_members(
+        self,
+        eligible: tuple[str, ...],
+    ) -> tuple[tuple[str, _ReplicaEntry, EngineBackend], ...]:
+        """Retain representative identity so async bounds can revalidate it."""
+
+        representatives: list[tuple[str, _ReplicaEntry, EngineBackend]] = []
+        seen: set[object] = set()
+        for replica_id in eligible:
+            entry = self._entries[replica_id]
+            backend = entry.backend
+            key = backend_admission_upper_bound_key(backend)
+            if key is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
+            representatives.append((replica_id, entry, backend))
+        return tuple(representatives)
+
+    def _prepared_placement(
+        self,
+        request: GenerationRequest,
+        *,
+        consume: bool,
+    ) -> tuple[str, ...] | None:
+        key = id(request)
+        prepared = self._prepared_placements.get(key)
+        if prepared is None or prepared.request_ref() is not request:
+            self._prepared_placements.pop(key, None)
+            return None
+        surviving = tuple(
+            (replica_id, generation)
+            for replica_id, generation in prepared.candidates
+            if (
+                (entry := self._entries.get(replica_id)) is not None
+                and entry.generation == generation
+                and self._is_eligible(entry)
+            )
+        )
+        # A lease may shrink as members leave eligibility, but the exact same
+        # generation can never re-enter after admission observed it absent.
+        prepared.candidates = surviving
+        if consume:
+            self._prepared_placements.pop(key, None)
+        return tuple(replica_id for replica_id, _generation in surviving)
+
+    def _retain_prepared_placement(
+        self,
+        request: GenerationRequest,
+        candidates: tuple[tuple[str, str], ...],
+    ) -> None:
+        key = id(request)
+
+        def discard(reference: weakref.ReferenceType[GenerationRequest]) -> None:
+            retained = self._prepared_placements.get(key)
+            if retained is not None and retained.request_ref is reference:
+                self._prepared_placements.pop(key, None)
+
+        retained = self._prepared_placements.get(key)
+        if retained is not None and retained.request_ref() is request:
+            candidate_set = set(candidates)
+            # A late preflight result may only confirm members which remain in
+            # the lease; it can never re-add a member admission already removed.
+            retained.candidates = tuple(
+                candidate
+                for candidate in retained.candidates
+                if candidate in candidate_set
+            )
+            return
+        self._prepared_placements[key] = _PreparedPlacement(
+            weakref.ref(request, discard),
+            candidates,
+        )
+
+    async def prepare_request(
+        self,
+        request: GenerationRequest,
+    ) -> tuple[str, ...]:
+        """Single-flight preparation of exact replica generations."""
+
+        cached = self._prepared_placement(request, consume=False)
+        if cached is not None:
+            return cached
+        key = id(request)
+        flight = self._preparation_flights.get(key)
+        if flight is None or flight.request_ref() is not request:
+            self._preparation_flights.pop(key, None)
+            task = asyncio.create_task(self._prepare_request_once(request))
+            reference = weakref.ref(request)
+            flight = _PreparationFlight(reference, task)
+            self._preparation_flights[key] = flight
+
+            def finish(completed: asyncio.Task[tuple[str, ...]]) -> None:
+                current = self._preparation_flights.get(key)
+                if current is not None and current.task is completed:
+                    self._preparation_flights.pop(key, None)
+                # A sole waiter may be cancelled while shielded preparation
+                # safely finishes. Retrieve any exception in that case.
+                if not completed.cancelled():
+                    completed.exception()
+
+            task.add_done_callback(finish)
+        return await asyncio.shield(flight.task)
+
+    async def _prepare_request_once(
+        self,
+        request: GenerationRequest,
+    ) -> tuple[str, ...]:
+        """Prepare one immutable membership snapshot and publish its lease."""
 
         eligible = self._eligible_ids()
         if not eligible:
             raise RuntimeError(
-                f"ReplicaPool: none of the {len(self._entries)} replicas are eligible"
+                f"ReplicaPool: none of the {len(self._entries)} replicas are eligible "
+                f"(unvalidated, unhealthy after >= {self._unhealthy_after} consecutive "
+                "failures, or draining); call probe() once a replica recovers"
             )
-        prepared_keys: set[tuple[type, object]] = set()
-        for replica_id in eligible:
-            backend = self._entries[replica_id].backend
+        snapshot = tuple(
+            (replica_id, self._entries[replica_id])
+            for replica_id in eligible
+        )
+        self._validate_request_candidates(
+            request,
+            eligible,
+            before_prepare=True,
+        )
+        prepared_entries: list[tuple[str, _ReplicaEntry]] = []
+        for _replica_id, entry in snapshot:
+            if (
+                self._entries.get(_replica_id) is not entry
+                or not self._is_eligible(entry)
+            ):
+                continue
+            backend = entry.backend
             prepare = getattr(backend, "prepare_request", None)
             if not callable(prepare):
+                prepared_entries.append((_replica_id, entry))
                 continue
-            validation_key = getattr(backend, "request_validation_key", None)
-            if validation_key is not None:
-                typed_key = (type(backend), validation_key)
-                try:
-                    if typed_key in prepared_keys:
-                        continue
-                    prepared_keys.add(typed_key)
-                except TypeError:
-                    pass
-            await prepare(request)
+            try:
+                await prepare_backend_request(backend, request)
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    raise
+                if (
+                    self._entries.get(_replica_id) is entry
+                    and self._is_eligible(entry)
+                ):
+                    raise
+            except Exception:
+                if (
+                    self._entries.get(_replica_id) is entry
+                    and self._is_eligible(entry)
+                ):
+                    raise
+            else:
+                prepared_entries.append((_replica_id, entry))
+        candidates = tuple(
+            (replica_id, entry.generation)
+            for replica_id, entry in prepared_entries
+            if (
+                self._entries.get(replica_id) is entry
+                and self._is_eligible(entry)
+            )
+        )
+        if not candidates:
+            raise RuntimeError(
+                "ReplicaPool: every replica eligible at preflight became "
+                "unavailable before placement"
+            )
+        self._retain_prepared_placement(request, candidates)
+        return tuple(replica_id for replica_id, _generation in candidates)
 
     def _least_outstanding(self, candidates: Sequence[str]) -> str:
         # ``candidates`` is already in insertion order and ``min`` keeps the
@@ -695,9 +992,10 @@ class ReplicaPool:
         *,
         prefix_keys: str | Sequence[str] | PreparedKvRouting | None = None,
         track_prefix: bool | None = None,
+        eligible: tuple[str, ...] | None = None,
     ) -> tuple[str, str, str | None]:
         """Pick a replica; returns (replica_id, reason, session_id). Pure hashing."""
-        eligible = self._eligible_ids()
+        eligible = self._eligible_ids() if eligible is None else eligible
         if not eligible:
             raise RuntimeError(
                 f"ReplicaPool: none of the {len(self._entries)} replicas are eligible "
@@ -909,6 +1207,8 @@ class ReplicaPool:
     def _place_prepared(
         self,
         request: GenerationRequest,
+        *,
+        eligible: tuple[str, ...] | None = None,
     ) -> tuple[
         str,
         str,
@@ -917,6 +1217,12 @@ class ReplicaPool:
     ]:
         """Select/log once and retain request-local prefix work for completion."""
         from kairyu.telemetry import traced_span
+
+        eligible = self._eligible_ids() if eligible is None else eligible
+        if not eligible:
+            raise RuntimeError(
+                "ReplicaPool: no preflighted replica generation remains eligible"
+            )
 
         started_ns = (
             request.placement_started_ns
@@ -941,13 +1247,14 @@ class ReplicaPool:
             {
                 "kairyu.request_id": request.request_id,
                 "kairyu.pool.size": len(self._entries),
-                "kairyu.pool.eligible_size": len(self._eligible_snapshot),
+                "kairyu.pool.eligible_size": len(eligible),
             },
         ) as span:
             replica_id, reason, session_id = self._select(
                 request,
                 prefix_keys=prefix_keys,
                 track_prefix=track_prefix,
+                eligible=eligible,
             )
             selected_at_ns = time.perf_counter_ns()
             placement_latency_ns = max(0, selected_at_ns - started_ns)
@@ -975,7 +1282,7 @@ class ReplicaPool:
                 placement_started_ns=started_ns,
                 selected_at_ns=selected_at_ns,
                 pool_size=len(self._entries),
-                eligible_size=len(self._eligible_snapshot),
+                eligible_size=len(eligible),
             )
         return replica_id, reason, prefix_keys, track_prefix
 
@@ -1017,9 +1324,14 @@ class ReplicaPool:
         # already crossed normal server/offline preflight. Typed variants need
         # an in-pool check as well so direct EngineBackend use cannot bypass the
         # intersection contract. Avoid re-tokenizing text across the fleet.
-        if type(request.prompt) is not str:
-            self.validate_request(request)
-        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(request)
+        await self.prepare_request(request)
+        eligible = self._prepared_placement(request, consume=True)
+        if eligible is None:  # Request is strongly held across both calls.
+            raise RuntimeError("prepared replica placement lease was lost")
+        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(
+            request,
+            eligible=eligible,
+        )
         entry = self._entries[replica_id]
         entry.outstanding += 1
         try:
@@ -1067,9 +1379,14 @@ class ReplicaPool:
             self._finish(entry)
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
-        if type(request.prompt) is not str:
-            self.validate_request(request)
-        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(request)
+        await self.prepare_request(request)
+        eligible = self._prepared_placement(request, consume=True)
+        if eligible is None:
+            raise RuntimeError("prepared replica placement lease was lost")
+        replica_id, reason, prefix_keys, track_prefix = self._place_prepared(
+            request,
+            eligible=eligible,
+        )
         entry = self._entries[replica_id]
         entry.outstanding += 1  # streams stay in-flight until generator close (A2)
         try:
@@ -1115,7 +1432,18 @@ class ReplicaPool:
             self._finish(entry)
 
     async def shutdown(self) -> None:
+        preparation_tasks = tuple(
+            flight.task for flight in self._preparation_flights.values()
+        )
+        for task in preparation_tasks:
+            task.cancel()
+        if preparation_tasks:
+            await asyncio.gather(*preparation_tasks, return_exceptions=True)
+        self._preparation_flights.clear()
         resources = [entry.backend for entry in self._entries.values()]
         if self._log is not None:
             resources.append(self._log)
-        await shutdown_all(resources, "ReplicaPool")
+        try:
+            await shutdown_all(resources, "ReplicaPool")
+        finally:
+            self._prepared_placements.clear()

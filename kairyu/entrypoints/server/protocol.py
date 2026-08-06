@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from kairyu.entrypoints.server.request_body import prevalidated_model_for
+
 
 class ImageURL(BaseModel):
     """One strict OpenAI image reference."""
@@ -79,6 +81,14 @@ class RouteDecisionPayload(BaseModel):
 class RoutePreviewRequest(BaseModel):
     model: str
     messages: list[ChatMessage] = Field(min_length=1)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _reuse_prevalidated(cls, value, handler):
+        prepared = prevalidated_model_for(cls, value)
+        if prepared is not None:
+            return prepared
+        return handler(value)
 
 
 class RoutePreviewResponse(BaseModel):
@@ -211,6 +221,14 @@ class ChatCompletionRequest(BaseModel):
     # vLLM-compatible scheduling priority. A configured gateway replaces this
     # untrusted client value with the authenticated tenant's class.
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _reuse_prevalidated(cls, value, handler):
+        prepared = prevalidated_model_for(cls, value)
+        if prepared is not None:
+            return prepared
+        return handler(value)
 
 
 class FunctionCall(BaseModel):
@@ -428,9 +446,7 @@ class CompletionRequest(BaseModel):
         if all(type(item) is list for item in value):
             for index, token_ids in enumerate(value):
                 if not token_ids:
-                    raise ValueError(
-                        f"prompt[{index}] token-ID array must not be empty"
-                    )
+                    raise ValueError(f"prompt[{index}] token-ID array must not be empty")
                 cls._validate_token_ids(token_ids, f"prompt[{index}]")
             return value
         raise ValueError(
@@ -444,8 +460,7 @@ class CompletionRequest(BaseModel):
         for index, token_id in enumerate(token_ids):
             if type(token_id) is not int:
                 raise ValueError(
-                    f"{location}[{index}] must be an integer token ID (booleans "
-                    "are not token IDs)"
+                    f"{location}[{index}] must be an integer token ID (booleans are not token IDs)"
                 )
             if not 0 <= token_id <= maximum:
                 raise ValueError(

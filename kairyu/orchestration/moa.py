@@ -8,10 +8,13 @@ sees all numbered proposals. Prompts share ``shared_prefix`` for KV affinity
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 
+from kairyu.async_thread import run_prompt_work
 from kairyu.engine.backend import (
     CacheHint,
     EngineBackend,
@@ -74,6 +77,101 @@ class MoAExecutionError(RuntimeError):
         self.final_text = final_text
 
 
+@dataclass(frozen=True)
+class _MoASetup:
+    session: str
+    proposal_requests: tuple[GenerationRequest, ...]
+    synthesis_params: SamplingParams
+    cache_hint: CacheHint
+
+
+_prepared_setup: contextvars.ContextVar[_MoASetup | None] = contextvars.ContextVar(
+    "kairyu_prepared_moa_setup",
+    default=None,
+)
+
+
+@contextmanager
+def _reuse_prepared_moa_setup(setup: _MoASetup | None):
+    """Bind an exact internal setup without changing the public MoA ABI."""
+
+    token = _prepared_setup.set(setup)
+    try:
+        yield
+    finally:
+        _prepared_setup.reset(token)
+
+
+def _build_moa_setup(
+    query: str,
+    n_samples: int,
+    sampling_params: SamplingParams | None,
+    final_sampling_params: SamplingParams | None,
+    shared_prefix: str,
+    session: str | None = None,
+) -> _MoASetup:
+    """Build request-sized proposal prompts on the prompt CPU lane."""
+
+    if isinstance(query, TemplatedPrompt):
+        raise ValueError(
+            "MoA cannot derive proposal prompts from a tokenizer-owned pre-rendered chat prompt"
+        )
+    if isinstance(shared_prefix, TemplatedPrompt):
+        raise ValueError("MoA shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt")
+    if n_samples < 1:
+        raise ValueError(f"n_samples must be >= 1, got {n_samples}")
+    public_params = sampling_params or SamplingParams(
+        temperature=_PROPOSAL_TEMPERATURE,
+        max_tokens=1024,
+    )
+    synthesis_params = final_sampling_params or public_params.clone(
+        temperature=0.3,
+        seed=None,
+    )
+    internal_extra_args = dict(public_params.extra_args)
+    internal_extra_args.pop(PARALLEL_TOOL_CALLS_EXTRA_ARG, None)
+    params = public_params.clone(extra_args=internal_extra_args)
+    session = session or uuid.uuid4().hex[:12]
+    hint = CacheHint(session_id=session)
+    requests = tuple(
+        GenerationRequest(
+            request_id=f"{session}-propose-{index}",
+            prompt=(f"{shared_prefix}[proposer {index}] Answer the question: {query}"),
+            sampling_params=params.clone(
+                seed=index if params.seed is None else params.seed + index
+            ),
+            cache_hint=hint,
+        )
+        for index in range(n_samples)
+    )
+    return _MoASetup(session, requests, synthesis_params, hint)
+
+
+def _build_synthesis_request(
+    query: str,
+    proposals: tuple[str, ...],
+    setup: _MoASetup,
+    shared_prefix: str,
+    final_tools: tuple[Mapping[str, object], ...],
+    final_tool_choice: str | Mapping[str, object] | None,
+    final_tools_in_prompt: bool,
+    final_parallel_tool_calls: bool | None,
+) -> GenerationRequest:
+    numbered = "\n\n".join(
+        f"Candidate {index + 1}:\n{proposal}" for index, proposal in enumerate(proposals)
+    )
+    return GenerationRequest(
+        request_id=f"{setup.session}-synthesize",
+        prompt=(shared_prefix + _SYNTHESIS_TEMPLATE.format(query=query, proposals=numbered)),
+        sampling_params=setup.synthesis_params,
+        cache_hint=setup.cache_hint,
+        tools=final_tools,
+        tool_choice=final_tool_choice,
+        tools_in_prompt=final_tools_in_prompt,
+        parallel_tool_calls=final_parallel_tool_calls,
+    )
+
+
 async def _prepare_moa(
     backend: EngineBackend,
     query: str,
@@ -87,30 +185,18 @@ async def _prepare_moa(
     final_parallel_tool_calls: bool | None,
     shared_prefix: str,
     usage_observer: Callable[[GenerationUsage], None] | None,
+    prepared_setup: _MoASetup | None,
 ) -> tuple[tuple[str, ...], list[int], GenerationRequest]:
-    if isinstance(query, TemplatedPrompt):
-        raise ValueError(
-            "MoA cannot derive proposal prompts from a tokenizer-owned "
-            "pre-rendered chat prompt"
+    setup = prepared_setup
+    if setup is None:
+        setup = await run_prompt_work(
+            _build_moa_setup,
+            query,
+            n_samples,
+            sampling_params,
+            final_sampling_params,
+            shared_prefix,
         )
-    if isinstance(shared_prefix, TemplatedPrompt):
-        raise ValueError(
-            "MoA shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
-        )
-    if n_samples < 1:
-        raise ValueError(f"n_samples must be >= 1, got {n_samples}")
-    public_params = sampling_params or SamplingParams(
-        temperature=_PROPOSAL_TEMPERATURE, max_tokens=1024
-    )
-    synthesis_params = final_sampling_params or public_params.clone(
-        temperature=0.3,
-        seed=None,
-    )
-    internal_extra_args = dict(public_params.extra_args)
-    internal_extra_args.pop(PARALLEL_TOOL_CALLS_EXTRA_ARG, None)
-    params = public_params.clone(extra_args=internal_extra_args)
-    session = uuid.uuid4().hex[:12]
-    hint = CacheHint(session_id=session)
 
     usage_totals = [0, 0, 0]
 
@@ -132,18 +218,11 @@ async def _prepare_moa(
             _observe()
         return result.text
 
-    async def propose(index: int) -> str:
-        proposal_seed = index if params.seed is None else params.seed + index
-        request = GenerationRequest(
-            request_id=f"{session}-propose-{index}",
-            prompt=f"{shared_prefix}[proposer {index}] Answer the question: {query}",
-            sampling_params=params.clone(seed=proposal_seed),
-            cache_hint=hint,
-        )
+    async def propose(request: GenerationRequest) -> str:
         return _account(await backend.generate(request))
 
     proposal_results = await asyncio.gather(
-        *(propose(i) for i in range(n_samples)),
+        *(propose(request) for request in setup.proposal_requests),
         return_exceptions=True,
     )
     proposals_list: list[str] = []
@@ -165,18 +244,16 @@ async def _prepare_moa(
             usage=(usage_totals[0], usage_totals[1]),
             cached_tokens=usage_totals[2],
         ) from first_error
-    numbered = "\n\n".join(
-        f"Candidate {i + 1}:\n{proposal}" for i, proposal in enumerate(proposals)
-    )
-    synthesis_request = GenerationRequest(
-        request_id=f"{session}-synthesize",
-        prompt=shared_prefix + _SYNTHESIS_TEMPLATE.format(query=query, proposals=numbered),
-        sampling_params=synthesis_params,
-        cache_hint=hint,
-        tools=final_tools,
-        tool_choice=final_tool_choice,
-        tools_in_prompt=final_tools_in_prompt,
-        parallel_tool_calls=final_parallel_tool_calls,
+    synthesis_request = await run_prompt_work(
+        _build_synthesis_request,
+        query,
+        proposals,
+        setup,
+        shared_prefix,
+        final_tools,
+        final_tool_choice,
+        final_tools_in_prompt,
+        final_parallel_tool_calls,
     )
     return proposals, usage_totals, synthesis_request
 
@@ -207,6 +284,7 @@ async def run_moa(
         final_parallel_tool_calls=final_parallel_tool_calls,
         shared_prefix=shared_prefix,
         usage_observer=usage_observer,
+        prepared_setup=_prepared_setup.get(),
     )
     synthesis_backend = synthesizer or backend
     try:
@@ -240,7 +318,7 @@ async def run_moa(
     )
 
 
-async def stream_moa(
+def stream_moa(
     backend: EngineBackend,
     query: str,
     n_samples: int = _DEFAULT_N_SAMPLES,
@@ -253,6 +331,41 @@ async def stream_moa(
     shared_prefix: str = "",
     usage_observer: Callable[[GenerationUsage], None] | None = None,
     final_parallel_tool_calls: bool | None = None,
+) -> AsyncIterator[MoAEvent]:
+    """Capture any exact internal setup before returning the public iterator."""
+
+    return _stream_moa(
+        backend,
+        query,
+        n_samples=n_samples,
+        synthesizer=synthesizer,
+        sampling_params=sampling_params,
+        final_sampling_params=final_sampling_params,
+        final_tools=final_tools,
+        final_tool_choice=final_tool_choice,
+        final_tools_in_prompt=final_tools_in_prompt,
+        shared_prefix=shared_prefix,
+        usage_observer=usage_observer,
+        final_parallel_tool_calls=final_parallel_tool_calls,
+        prepared_setup=_prepared_setup.get(),
+    )
+
+
+async def _stream_moa(
+    backend: EngineBackend,
+    query: str,
+    *,
+    n_samples: int,
+    synthesizer: EngineBackend | None,
+    sampling_params: SamplingParams | None,
+    final_sampling_params: SamplingParams | None,
+    final_tools: tuple[Mapping[str, object], ...],
+    final_tool_choice: str | Mapping[str, object] | None,
+    final_tools_in_prompt: bool,
+    shared_prefix: str,
+    usage_observer: Callable[[GenerationUsage], None] | None,
+    final_parallel_tool_calls: bool | None,
+    prepared_setup: _MoASetup | None,
 ) -> AsyncIterator[MoAEvent]:
     """Generate proposals concurrently and pull synthesis deltas through.
 
@@ -273,6 +386,7 @@ async def stream_moa(
         final_parallel_tool_calls=final_parallel_tool_calls,
         shared_prefix=shared_prefix,
         usage_observer=usage_observer,
+        prepared_setup=prepared_setup,
     )
     synthesis_backend = synthesizer or backend
     emitted = 0

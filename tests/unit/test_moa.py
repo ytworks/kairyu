@@ -1,8 +1,10 @@
+import threading
 import time
 from dataclasses import replace
 
 import pytest
 
+import kairyu.orchestration.moa as moa_module
 from kairyu.engine.backend import GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.prompt import TemplatedPrompt
@@ -46,6 +48,29 @@ async def test_moa_collects_n_proposals_and_synthesizes():
     synthesis_prompt = backend.prompts_seen[-1]
     for proposal in result.proposals:
         assert proposal in synthesis_prompt
+
+
+async def test_moa_prompt_construction_runs_off_event_loop(monkeypatch):
+    event_loop_thread = threading.get_ident()
+    build_threads = []
+    original_setup = moa_module._build_moa_setup
+    original_synthesis = moa_module._build_synthesis_request
+
+    def tracked_setup(*args):
+        build_threads.append(threading.get_ident())
+        return original_setup(*args)
+
+    def tracked_synthesis(*args):
+        build_threads.append(threading.get_ident())
+        return original_synthesis(*args)
+
+    monkeypatch.setattr(moa_module, "_build_moa_setup", tracked_setup)
+    monkeypatch.setattr(moa_module, "_build_synthesis_request", tracked_synthesis)
+
+    await run_moa(MockBackend(), "q", n_samples=2)
+
+    assert len(build_threads) == 2
+    assert all(thread_id != event_loop_thread for thread_id in build_threads)
 
 
 async def test_moa_proposals_run_concurrently():

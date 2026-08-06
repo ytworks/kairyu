@@ -38,6 +38,8 @@ from kairyu.engine.tokenizer import (
     IncrementalDetokenizer,
     Tokenizer,
     tokenize_loglikelihood_continuation,
+    tokenizer_encode_is_concurrent_safe,
+    tokenizer_prompt_preparation_is_concurrent_safe,
 )
 from kairyu.models.generation import GenerationDefaults
 from kairyu.outputs import TokenLogprob
@@ -427,6 +429,18 @@ class EngineLoop:
         self._tracked[request_id] = track
         if track.trace_requested:
             self._traced_requests += 1
+
+    @property
+    def tokenizer_concurrent_encode_safe(self) -> bool:
+        """Whether request-local encode calls may overlap across workers."""
+
+        return tokenizer_encode_is_concurrent_safe(self._tokenizer)
+
+    @property
+    def tokenizer_concurrent_prompt_preparation_safe(self) -> bool:
+        """Whether complete request preparation may overlap across workers."""
+
+        return tokenizer_prompt_preparation_is_concurrent_safe(self._tokenizer)
 
     def _remove_track(self, request_id: str) -> _RequestTrack | None:
         track = self._tracked.pop(request_id, None)

@@ -116,6 +116,33 @@ class Tokenizer(Protocol):
     def vocab(self) -> list[str]: ...
 
 
+def tokenizer_encode_is_concurrent_safe(tokenizer: Tokenizer) -> bool:
+    """Return whether separate requests may call ``encode`` concurrently.
+
+    The built-in implementations are backed by immutable Python state or the
+    thread-safe Hugging Face Rust tokenizer.  Compatibility tokenizers remain
+    serialized unless they explicitly opt in with
+    ``concurrent_encode_safe = True``.  Exact-type checks deliberately avoid
+    treating an arbitrary subclass of a built-in tokenizer as thread-safe.
+    """
+
+    return type(tokenizer) in {ToyTokenizer, HFTokenizer} or (
+        getattr(tokenizer, "concurrent_encode_safe", False) is True
+    )
+
+
+def tokenizer_prompt_preparation_is_concurrent_safe(tokenizer: Tokenizer) -> bool:
+    """Return whether all tokenizer calls made by prompt prep may overlap.
+
+    Custom implementations need a broader opt-in than encode-only safety
+    because token-ID prompts can lazily call ``vocab``.
+    """
+
+    return type(tokenizer) in {ToyTokenizer, HFTokenizer} or (
+        getattr(tokenizer, "concurrent_prompt_preparation_safe", False) is True
+    )
+
+
 def tokenize_loglikelihood_continuation(
     tokenizer: Tokenizer,
     context: str,

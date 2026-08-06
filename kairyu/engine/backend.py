@@ -234,6 +234,48 @@ def validate_backend_request(backend: object, request: GenerationRequest) -> Non
         )
 
 
+def validate_backend_request_before_prepare(
+    backend: object,
+    request: GenerationRequest,
+) -> None:
+    """Run cheap synchronous checks before bounded async preparation.
+
+    Most backends use their ordinary validator. A backend whose complete
+    validation contains request-sized pure CPU work may expose
+    ``validate_request_before_prepare`` for structural/state checks and finish
+    the expensive validation in ``prepare_request`` off the event loop.
+    """
+
+    validate = getattr(backend, "validate_request_before_prepare", None)
+    if callable(validate):
+        backend_type = type(backend)
+
+        def owner(name: str) -> type | None:
+            return next(
+                (
+                    candidate
+                    for candidate in backend_type.__mro__
+                    if name in candidate.__dict__
+                ),
+                None,
+            )
+
+        fast_owner = owner("validate_request_before_prepare")
+        full_owner = owner("validate_request")
+        # An inherited builtin fast hook cannot bypass a more-derived custom
+        # validator. Subclasses opt into the split only by overriding the fast
+        # hook at least as specifically as their full validator.
+        if (
+            fast_owner is None
+            or full_owner is None
+            or backend_type.__mro__.index(fast_owner)
+            <= backend_type.__mro__.index(full_owner)
+        ):
+            validate(request)
+            return
+    validate_backend_request(backend, request)
+
+
 @dataclass(frozen=True)
 class AdmissionUpperBound:
     """Worst-case shared-engine work reserved before dispatch."""
@@ -289,12 +331,15 @@ def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
     return TextPrompt(rendered) if isinstance(request.prompt, TextPrompt) else rendered
 
 
-def validate_native_request_surface(request: GenerationRequest) -> None:
-    """Reject fields the native engine cannot honor instead of dropping them.
+def validate_native_request_surface_before_prepare(
+    request: GenerationRequest,
+) -> None:
+    """Reject fixed-size native fields without walking request collections.
 
-    Both native process layouts consume the same ``EngineLoop`` sampling
-    surface. Keeping this check transport-neutral prevents the in-process and
-    ZMQ entry points from silently diverging when the public API gains a field.
+    Tool schemas and vendor ``extra_args`` can be arbitrarily large.  Their
+    complete validation belongs in the bounded prompt worker alongside prompt
+    rendering/tokenization, while these scalar checks remain safe to run on
+    the serving event loop.
     """
 
     params = request.sampling_params
@@ -305,12 +350,28 @@ def validate_native_request_surface(request: GenerationRequest) -> None:
         unsupported.append("prompt_logprobs")
     if not isinstance(params.extra_args, Mapping):
         unsupported.append("extra_args")
-    else:
-        unsupported.extend(
-            f"extra_args.{key}"
-            for key in params.extra_args
-            if key not in STRUCTURED_OUTPUT_EXTRA_ARGS
+    if unsupported:
+        raise ValueError(
+            "Kairyu backend does not support request fields: "
+            + ", ".join(sorted(unsupported))
         )
+
+
+def validate_native_request_surface(request: GenerationRequest) -> None:
+    """Reject fields the native engine cannot honor instead of dropping them.
+
+    Both native process layouts consume the same ``EngineLoop`` sampling
+    surface. Keeping this check transport-neutral prevents the in-process and
+    ZMQ entry points from silently diverging when the public API gains a field.
+    """
+
+    validate_native_request_surface_before_prepare(request)
+    params = request.sampling_params
+    unsupported = [
+        f"extra_args.{key}"
+        for key in params.extra_args
+        if key not in STRUCTURED_OUTPUT_EXTRA_ARGS
+    ]
     for index, tool in enumerate(request.tools):
         function = tool.get("function")
         if isinstance(function, Mapping) and function.get("strict") is True:
@@ -391,6 +452,15 @@ def backend_admission_upper_bound(
 
     resolve = getattr(backend, "admission_upper_bound", None)
     bound = resolve(request) if callable(resolve) else admission_upper_bound(request)
+    return _validated_admission_upper_bound(backend, bound)
+
+
+def _validated_admission_upper_bound(
+    backend: object,
+    bound: object,
+) -> AdmissionUpperBound:
+    """Validate one optional backend admission result at every call boundary."""
+
     if not isinstance(bound, AdmissionUpperBound):
         raise TypeError(
             f"{type(backend).__name__}.admission_upper_bound must return "
@@ -399,6 +469,57 @@ def backend_admission_upper_bound(
     if type(bound.tokens) is not int or bound.tokens < 1:
         raise ValueError("backend admission bound must contain a positive token count")
     return bound
+
+
+async def backend_admission_upper_bound_async(
+    backend: object,
+    request: GenerationRequest,
+) -> AdmissionUpperBound:
+    """Resolve admission while keeping generic prompt serialization off-loop.
+
+    Stateful composite backends can expose ``admission_upper_bound_async`` and
+    snapshot their routing state on the event loop.  Synchronous overrides are
+    already required to be I/O-free configured-policy calculations, so their
+    request-sized serialization shares the bounded prompt lane with the pure
+    transport-neutral fallback.
+    """
+
+    resolve_async = getattr(backend, "admission_upper_bound_async", None)
+    if callable(resolve_async):
+        bound = await resolve_async(request)
+        return _validated_admission_upper_bound(backend, bound)
+    resolve = getattr(backend, "admission_upper_bound", None)
+    from kairyu.async_thread import run_prompt_work
+
+    calculate = resolve if callable(resolve) else admission_upper_bound
+    bound = await run_prompt_work(calculate, request)
+    return _validated_admission_upper_bound(backend, bound)
+
+
+_GENERIC_ADMISSION_CONTRACT = object()
+
+
+def backend_admission_upper_bound_key(backend: object) -> object | None:
+    """Return an explicit immutable key for equivalent admission semantics.
+
+    The generic fallback depends only on ``GenerationRequest`` and therefore
+    shares one process-wide contract. A backend override must opt in with its
+    own immutable key; unknown or unhashable declarations are never deduped.
+    """
+
+    resolve_async = getattr(backend, "admission_upper_bound_async", None)
+    resolve = getattr(backend, "admission_upper_bound", None)
+    if not callable(resolve_async) and not callable(resolve):
+        return _GENERIC_ADMISSION_CONTRACT
+    key = getattr(backend, "admission_upper_bound_key", None)
+    if key is None:
+        return None
+    typed_key = (type(backend), key)
+    try:
+        hash(typed_key)
+    except TypeError:
+        return None
+    return typed_key
 
 
 async def prepare_backend_request(

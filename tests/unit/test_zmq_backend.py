@@ -362,10 +362,79 @@ def _request(
 class _CountingTokenizer(ToyTokenizer):
     def __init__(self) -> None:
         self.encoded: list[str] = []
+        self.encode_threads: list[int] = []
 
     def encode(self, text: str) -> tuple[int, ...]:
         self.encoded.append(text)
+        self.encode_threads.append(threading.get_ident())
         return super().encode(text)
+
+
+class _GatedTokenizer(ToyTokenizer):
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        self.calls += 1
+        self.entered.set()
+        if not self.release.wait(2):
+            raise TimeoutError("test did not release parent tokenization")
+        return super().encode(text)
+
+
+class _OverlapRejectingTokenizer(ToyTokenizer):
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._active = False
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def encode(self, text: str) -> tuple[int, ...]:
+        with self._guard:
+            if self._active:
+                raise RuntimeError("concurrent encode")
+            self._active = True
+        try:
+            self.calls += 1
+            self.entered.set()
+            if not self.release.wait(2):
+                raise TimeoutError("test did not release parent tokenization")
+            return super().encode(text)
+        finally:
+            with self._guard:
+                self._active = False
+
+
+async def test_direct_public_calls_parent_tokenize_off_loop_once_each():
+    tokenizer = _CountingTokenizer()
+    backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
+    backend._preflight_tokenizer = tokenizer
+    event_loop_thread = threading.get_ident()
+    try:
+        generated = await backend.generate(
+            _request("direct-generate", "direct generate", max_tokens=1)
+        )
+        streamed = [
+            partial
+            async for partial in backend.stream(
+                _request("direct-stream", "direct stream", max_tokens=1)
+            )
+        ][-1]
+
+        assert generated.finished
+        assert streamed.finished
+        assert tokenizer.encoded == ["direct generate", "direct stream"]
+        assert len(tokenizer.encode_threads) == 2
+        assert all(
+            thread_id != event_loop_thread
+            for thread_id in tokenizer.encode_threads
+        )
+        assert backend._prepared_requests == {}
+    finally:
+        await backend.shutdown()
 
 
 async def test_generate_parity_with_in_process(zmq_backend):
@@ -1350,6 +1419,29 @@ async def test_native_process_layouts_reject_the_same_unsupported_surface(
         await process_split.shutdown()
 
 
+async def test_derived_full_validator_is_not_bypassed_by_builtin_fast_hook():
+    class RejectingDerivedBackend(ZmqEngineBackend):
+        def __init__(self):
+            super().__init__(num_pages=64)
+            self.validation_calls = 0
+
+        def validate_request(self, request):
+            self.validation_calls += 1
+            super().validate_request(request)
+            raise ValueError("derived rejection")
+
+    backend = RejectingDerivedBackend()
+    try:
+        with pytest.raises(ValueError, match="derived rejection"):
+            await backend.prepare_request(
+                _request("derived-validator", "hello", max_tokens=1)
+            )
+        assert backend.validation_calls == 1
+        assert backend._process is None
+    finally:
+        await backend.shutdown()
+
+
 async def test_native_process_layouts_accept_response_format_extension():
     request = _request(
         "response-format-parity",
@@ -1362,6 +1454,34 @@ async def test_native_process_layouts_accept_response_format_extension():
     try:
         in_process.validate_request(request)
         process_split.validate_request(request)
+    finally:
+        await in_process.shutdown()
+        await process_split.shutdown()
+
+
+async def test_native_sync_validation_rejects_unserializable_tool_schema():
+    request = GenerationRequest(
+        request_id="unserializable-tool",
+        prompt="surface parity",
+        sampling_params=SamplingParams(max_tokens=1),
+        tools=(
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"invalid": object()},
+                },
+            },
+        ),
+        tool_choice="required",
+    )
+    in_process = KairyuBackend(num_pages=64)
+    process_split = ZmqEngineBackend(num_pages=64)
+    try:
+        for backend in (in_process, process_split):
+            with pytest.raises(TypeError, match="JSON serializable"):
+                backend.validate_request(request)
+        assert process_split._process is None
     finally:
         await in_process.shutdown()
         await process_split.shutdown()
@@ -1430,6 +1550,8 @@ async def test_parent_preflight_enforces_context_limit_without_starting_child():
     try:
         with pytest.raises(ValueError, match="exceed max_model_len"):
             backend.validate_request(oversized)
+        with pytest.raises(ValueError, match="exceed max_model_len"):
+            await backend.prepare_request(oversized)
 
         assert backend._process is None
         assert backend._active_request_ids == set()
@@ -1453,7 +1575,7 @@ async def test_parent_preflight_enforces_context_limit_without_starting_child():
 async def test_abandoned_parent_preflight_does_not_retain_request():
     backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
     request = _request("abandoned-preflight", "fits", max_tokens=1)
-    backend.validate_request(request)
+    await backend.prepare_request(request)
     request_ref = weakref.ref(request)
 
     assert len(backend._prepared_requests) == 1
@@ -1463,6 +1585,124 @@ async def test_abandoned_parent_preflight_does_not_retain_request():
     assert request_ref() is None
     assert backend._prepared_requests == {}
     await backend.shutdown()
+
+
+async def test_concurrent_parent_prepare_single_flights_same_request():
+    tokenizer = _GatedTokenizer()
+    backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
+    backend._preflight_tokenizer = tokenizer
+    request = _request("parent-single-flight", "shared request", max_tokens=1)
+    first = asyncio.create_task(backend.prepare_request(request))
+    second = asyncio.create_task(backend.prepare_request(request))
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        for _ in range(100):
+            flight = backend._preparing_requests.get(id(request))
+            if flight is not None and flight.waiters == 2:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("same-request parent preflight did not join one flight")
+
+        tokenizer.release.set()
+        await asyncio.gather(first, second)
+
+        assert tokenizer.calls == 1
+        assert backend._peek_prepared_request(request) is not None
+        assert backend._preparing_requests == {}
+        assert backend._process is None
+    finally:
+        tokenizer.release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_different_parent_requests_serialize_custom_tokenizer_calls():
+    tokenizer = _OverlapRejectingTokenizer()
+    backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
+    backend._preflight_tokenizer = tokenizer
+    first = asyncio.create_task(
+        backend.prepare_request(
+            _request("serialize-parent-a", "first", max_tokens=1)
+        )
+    )
+    second = asyncio.create_task(
+        backend.prepare_request(
+            _request("serialize-parent-b", "second", max_tokens=1)
+        )
+    )
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        await asyncio.sleep(0.05)
+        tokenizer.release.set()
+        await asyncio.gather(first, second)
+
+        assert tokenizer.calls == 2
+        assert backend._process is None
+    finally:
+        tokenizer.release.set()
+        await asyncio.gather(first, second, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_parent_loglikelihood_shares_custom_tokenizer_gate_with_prepare():
+    tokenizer = _OverlapRejectingTokenizer()
+    backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
+    backend._preflight_tokenizer = tokenizer
+    preparation = asyncio.create_task(
+        backend.prepare_request(
+            _request("serialize-parent-prepare", "prompt", max_tokens=1)
+        )
+    )
+    scoring = None
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        scoring = asyncio.create_task(
+            backend.tokenize_loglikelihood_async("context", " continuation")
+        )
+        await asyncio.sleep(0.05)
+        assert tokenizer.calls == 1
+
+        tokenizer.release.set()
+        await asyncio.gather(preparation, scoring)
+        assert tokenizer.calls == 3
+        assert backend._process is None
+    finally:
+        tokenizer.release.set()
+        pending = [preparation]
+        if scoring is not None:
+            pending.append(scoring)
+        await asyncio.gather(*pending, return_exceptions=True)
+        await backend.shutdown()
+
+
+async def test_cancelled_parent_prepare_worker_does_not_publish_cache():
+    tokenizer = _GatedTokenizer()
+    backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
+    backend._preflight_tokenizer = tokenizer
+    request = _request("cancelled-parent-prepare", "abandoned", max_tokens=1)
+    preparation = asyncio.create_task(backend.prepare_request(request))
+    try:
+        assert await asyncio.to_thread(tokenizer.entered.wait, 1)
+        preparation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await preparation
+        assert backend._prepared_requests == {}
+
+        tokenizer.release.set()
+        for _ in range(100):
+            if not backend._preparing_requests:
+                break
+            await asyncio.sleep(0.01)
+
+        assert tokenizer.calls == 1
+        assert backend._preparing_requests == {}
+        assert backend._prepared_requests == {}
+        assert backend._process is None
+    finally:
+        tokenizer.release.set()
+        await asyncio.gather(preparation, return_exceptions=True)
+        await backend.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -1506,6 +1746,8 @@ async def test_parent_preflight_tokenizes_tool_prompt_once_and_submits_tokens(
     monkeypatch,
 ):
     import msgpack
+
+    event_loop_thread = threading.get_ident()
 
     class CapturingSocket:
         payload = None
@@ -1553,14 +1795,15 @@ async def test_parent_preflight_tokenizes_tool_prompt_once_and_submits_tokens(
     backend._socket = socket
     backend._live_generation = 1
 
-    backend.validate_request(request)
-    backend.validate_request(request)
+    await backend.prepare_request(request)
+    await backend.prepare_request(request)
     queue = await backend._submit(request)
 
     assert socket.payload is not None
     message = msgpack.unpackb(socket.payload)
     assert message["prompt"]["kind"] == "tokens"
     assert len(tokenizer.encoded) == 1
+    assert tokenizer.encode_threads != [event_loop_thread]
     assert "Available functions:" in tokenizer.encoded[0]
     assert "You must call one of the available functions." in tokenizer.encoded[0]
     assert message["prompt"]["prompt"] == tokenizer.encoded[0]
@@ -1604,6 +1847,15 @@ async def test_templated_text_uses_versioned_prompt_wire_without_parent_tokenize
 
     backend = ZmqEngineBackend(num_pages=64)
     backend.generation_defaults = GenerationDefaults()
+    event_loop_thread = threading.get_ident()
+    pack_threads = []
+    original_pack = backend._pack_add_message
+
+    def tracked_pack(*args):
+        pack_threads.append(threading.get_ident())
+        return original_pack(*args)
+
+    monkeypatch.setattr(backend, "_pack_add_message", tracked_pack)
     socket = CapturingSocket()
     backend._socket = socket
     backend._live_generation = 1
@@ -1626,6 +1878,7 @@ async def test_templated_text_uses_versioned_prompt_wire_without_parent_tokenize
         "kind": "templated_text",
         "prompt": "<BOS>user hello<ASSISTANT>",
     }
+    assert pack_threads and pack_threads != [event_loop_thread]
     assert backend._queues.pop(request.request_id) is queue
     backend._release_wire_route(request.request_id)
     backend._socket = None
@@ -2465,6 +2718,61 @@ async def test_submit_send_is_bounded_and_releases_its_route(monkeypatch):
     assert "bounded-add" not in backend._queue_generations
     assert backend.readiness().fatal is True
     backend._socket = None
+
+
+async def test_submit_does_not_send_old_frame_to_replacement_generation(
+    monkeypatch,
+):
+    class CapturingSocket:
+        def __init__(self):
+            self.payloads = []
+
+        async def send(self, payload):
+            self.payloads.append(payload)
+
+    backend = ZmqEngineBackend(num_pages=64)
+    backend.generation_defaults = GenerationDefaults()
+    old_socket = CapturingSocket()
+    new_socket = CapturingSocket()
+    backend._socket = old_socket
+    backend._live_generation = 1
+    pack_started = threading.Event()
+    release_pack = threading.Event()
+    original_pack = backend._pack_add_message
+
+    async def already_started():
+        return None
+
+    def blocked_pack(*args):
+        pack_started.set()
+        assert release_pack.wait(timeout=5)
+        return original_pack(*args)
+
+    monkeypatch.setattr(backend, "_ensure_started", already_started)
+    monkeypatch.setattr(backend, "_pack_add_message", blocked_pack)
+    submit = asyncio.create_task(
+        backend._submit(_request("generation-swap", "prompt", max_tokens=2))
+    )
+    for _ in range(100):
+        if pack_started.is_set():
+            break
+        await asyncio.sleep(0)
+    assert pack_started.is_set()
+
+    backend._socket = new_socket
+    backend._live_generation = 2
+    release_pack.set()
+
+    with pytest.raises(EngineServiceError, match="changed while packing"):
+        await submit
+    assert old_socket.payloads == []
+    assert new_socket.payloads == []
+    assert "generation-swap" not in backend._queues
+    assert "generation-swap" not in backend._wire_request_ids
+    assert backend._live_generation == 2
+    backend._socket = None
+    backend._live_generation = None
+    await backend.shutdown()
 
 
 async def test_cancelled_submit_send_retires_unknown_delivery_generation(monkeypatch):

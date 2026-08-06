@@ -1,10 +1,12 @@
 """/health, /readyz, /metrics (goal G3 gate C6)."""
 
 import httpx
+import pytest
 
 from kairyu.deploy.prober import HealthProber
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.mock import MockBackend
+from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.sampling_params import SamplingParams
 from tests.server._legacy_chat import create_legacy_app
@@ -138,9 +140,38 @@ async def test_metrics_exposes_request_and_pool_series():
     # M1: an unknown model collapses to "unknown" (bounded cardinality)
     assert 'kairyu_requests_total{code="404",model="unknown"} 1.0' in text
     assert "kairyu_request_duration_seconds_bucket" in text
+    for phase in (
+        "ingress_to_handler",
+        "request_validation",
+        "backend_prepare",
+        "admission",
+    ):
+        assert (
+            'kairyu_preplacement_phase_seconds_count{endpoint="chat",'
+            f'phase="{phase}"}}'
+        ) in text
     assert 'kairyu_replica_healthy{pool="pooled",replica="0"} 1.0' in text
     assert 'kairyu_replica_outstanding{pool="pooled",replica="0"} 0.0' in text
     assert 'kairyu_pool_decisions_total{pool="pooled",reason="least_outstanding"} 1.0' in text
+
+
+def test_preplacement_phase_metrics_are_bounded_and_rendered():
+    metrics = ServerMetrics()
+    metrics.record_preplacement_phase("chat", "request_validation", 2_000_000)
+
+    rendered = metrics.render()[0].decode()
+    assert (
+        'kairyu_preplacement_phase_seconds_count{endpoint="chat",'
+        'phase="request_validation"} 1.0'
+    ) in rendered
+    assert (
+        'kairyu_preplacement_phase_seconds_sum{endpoint="chat",'
+        'phase="request_validation"} 0.002'
+    ) in rendered
+    with pytest.raises(ValueError, match="invalid preplacement endpoint"):
+        metrics.record_preplacement_phase("attacker-model", "admission", 1)
+    with pytest.raises(ValueError, match="invalid preplacement phase"):
+        metrics.record_preplacement_phase("chat", "attacker-phase", 1)
 
 
 async def test_metrics_disabled_by_settings():
