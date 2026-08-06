@@ -93,6 +93,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-06 — [progress] Offloaded-route endpoint context no longer trusts FastAPI's id cache
+- What: `_OffloadedRequestBodyRoute` now computes the validation-error endpoint context once from the live endpoint at route build instead of calling FastAPI's `_extract_endpoint_context`, and the flaky ZMQ cancelled-submit test waits on wall-clock time for the prompt worker thread.
+- Why: FastAPI 0.139.0 caches endpoint context by `id(func)` without holding a reference, so a garbage-collected endpoint's recycled address serves a stale context (observed as `chat_completions` reported for `probe` in CI); the ZMQ test's bare loop yields gave the worker thread no time on loaded runners.
+- Refs: PR #423; `kairyu/entrypoints/server/app.py`; `tests/server/test_prompt_offload.py`; `tests/unit/test_zmq_backend.py`
+
 ### 2026-08-06 — [progress] CPU microbenchmark gate retries timing-ratio noise
 - What: the same-run CPU gate re-runs a benchmark (≤3 attempts total) when its only failing checks are timing ratios; structural failures and benchmark errors still fail immediately, and thresholds plus the report schema consumed by the nightly series are unchanged.
 - Why: shared-runner jitter tripped `scheduler.priority_speedup` (0.87 vs the 0.9 floor) on a docs-only PR; a real hot-path regression keeps failing on every attempt, so retries preserve the smoke alarm while removing the flake.
