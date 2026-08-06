@@ -102,6 +102,10 @@ from kairyu.entrypoints.server.protocol import (
     Usage,
 )
 from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.sse_encode import (
+    ChatContentSSEEncoder,
+    CompletionTextSSEEncoder,
+)
 from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.orchestration.orchestrator import (
     Orchestrator,
@@ -125,11 +129,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AUTO_MODEL = "kairyu-auto"
-_KAIRYU_CHAT_EXTENSION_FIELDS = {
-    "kairyu_trace",
-    "kairyu_trace_v2",
-    "kairyu_route",
-}
+_KAIRYU_CHAT_EXTENSION_FIELDS = frozenset(
+    {
+        "kairyu_trace",
+        "kairyu_trace_v2",
+        "kairyu_route",
+    }
+)
+_CHAT_CHUNK_EXCLUDE_USAGE_FIELDS = _KAIRYU_CHAT_EXTENSION_FIELDS | frozenset(
+    {"usage"}
+)
+_COMPLETION_CHUNK_EXCLUDE_USAGE_FIELDS = frozenset({"usage"})
 
 
 def _route_payload(decision) -> RouteDecisionPayload:
@@ -296,13 +306,47 @@ def _sse_chunk(
     )
     # OpenAI contract: usage key omitted unless include_usage; then explicit
     # null on non-final chunks, populated on the final choices-less chunk
-    exclude = set(_KAIRYU_CHAT_EXTENSION_FIELDS)
-    if not include_usage:
-        exclude.add("usage")
+    exclude = (
+        _KAIRYU_CHAT_EXTENSION_FIELDS
+        if include_usage
+        else _CHAT_CHUNK_EXCLUDE_USAGE_FIELDS
+    )
     serialized = escape_json_line_separators(
         payload.model_dump_json(exclude=exclude)
     )
     return f"data: {serialized}\n\n"
+
+
+def _chat_content_sse_chunk(
+    encoder: ChatContentSSEEncoder,
+    response_id: str,
+    created: int,
+    model: str,
+    index: int,
+    content: str,
+    *,
+    is_first: bool,
+    include_usage: bool,
+    logprobs: ChoiceLogprobs | None,
+) -> str | bytes:
+    """Use the byte encoder only for the exact repeated content shape."""
+
+    if (
+        not is_first
+        and type(index) is int
+        and type(content) is str
+        and logprobs is None
+    ):
+        return encoder.encode(index, content)
+    return _sse_chunk(
+        response_id,
+        created,
+        model,
+        index,
+        ChunkDelta(role="assistant" if is_first else None, content=content),
+        include_usage=include_usage,
+        logprobs=logprobs,
+    )
 
 
 def _usage_chunk(response_id: str, created: int, model: str, usage: Usage) -> str:
@@ -465,10 +509,16 @@ async def _stream_engine(
     http_request: Request,
     *,
     trace_started_at: str | None = None,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[str | bytes]:
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
     include_usage = bool(request.stream_options and request.stream_options.include_usage)
+    content_encoder = ChatContentSSEEncoder(
+        response_id,
+        created,
+        model,
+        include_usage=include_usage,
+    )
     sent: dict[int, int] = {}
     logprobs_sent: dict[int, int] = {}
     last = None
@@ -514,15 +564,14 @@ async def _stream_engine(
                         if fresh:
                             chunk_logprobs = ChoiceLogprobs(content=_logprob_entries(fresh))
                     write_started_ns = time.perf_counter_ns() if want_trace else None
-                    yield _sse_chunk(
+                    yield _chat_content_sse_chunk(
+                        content_encoder,
                         response_id,
                         created,
                         model,
                         completion.index,
-                        ChunkDelta(
-                            role="assistant" if is_first else None,
-                            content=delta_text,
-                        ),
+                        delta_text,
+                        is_first=is_first,
                         include_usage=include_usage,
                         logprobs=chunk_logprobs,
                     )
@@ -600,7 +649,7 @@ async def _stream_orchestrator(
     include_usage: bool,
     want_trace: bool,
     http_request: Request,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[str | bytes]:
     """AUTO-model SSE (m11 D1/A2): status keep-alives ride SSE COMMENT lines
     (the OpenAI SDK parses every data: payload as a chunk), deltas and the
     final chunk are standard chat chunks."""
@@ -615,6 +664,12 @@ async def _stream_orchestrator(
         )
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
+    content_encoder = ChatContentSSEEncoder(
+        response_id,
+        created,
+        request.model,
+        include_usage=include_usage,
+    )
     first = True
     sent: dict[int, int] = {}
     logprobs_sent: dict[int, int] = {}
@@ -654,10 +709,8 @@ async def _stream_orchestrator(
                 logprobs_sent[completion.index] = len(completion.logprob_content)
             yield (
                 completion.index,
-                ChunkDelta(
-                    role="assistant" if is_first else None,
-                    content=delta_text,
-                ),
+                delta_text,
+                is_first,
                 (
                     ChoiceLogprobs(content=_logprob_entries(fresh_logprobs))
                     if fresh_logprobs
@@ -680,13 +733,17 @@ async def _stream_orchestrator(
                     if event.completions:
                         completions = event.completions
                         owner.observe(None, completions)
-                        for index, delta, chunk_logprobs in fresh_chunks(completions):
-                            yield _sse_chunk(
+                        for index, delta_text, is_first, chunk_logprobs in fresh_chunks(
+                            completions
+                        ):
+                            yield _chat_content_sse_chunk(
+                                content_encoder,
                                 response_id,
                                 created,
                                 request.model,
                                 index,
-                                delta,
+                                delta_text,
+                                is_first=is_first,
                                 include_usage=include_usage,
                                 logprobs=chunk_logprobs,
                             )
@@ -701,19 +758,18 @@ async def _stream_orchestrator(
                             ),
                         )
                         owner.observe(None, completions)
-                        delta = (
-                            ChunkDelta(role="assistant", content=event.text)
-                            if first
-                            else ChunkDelta(content=event.text)
-                        )
+                        is_first = first
                         first = False
-                        yield _sse_chunk(
+                        yield _chat_content_sse_chunk(
+                            content_encoder,
                             response_id,
                             created,
                             request.model,
                             0,
-                            delta,
+                            event.text,
+                            is_first=is_first,
                             include_usage=include_usage,
+                            logprobs=None,
                         )
                 elif event.kind in {"result", "error"}:
                     final_result = event.result
@@ -727,13 +783,17 @@ async def _stream_orchestrator(
                                 finish_reason="stop",
                             ),
                         )
-                        for index, delta, chunk_logprobs in fresh_chunks(completions):
-                            yield _sse_chunk(
+                        for index, delta_text, is_first, chunk_logprobs in fresh_chunks(
+                            completions
+                        ):
+                            yield _chat_content_sse_chunk(
+                                content_encoder,
                                 response_id,
                                 created,
                                 request.model,
                                 index,
-                                delta,
+                                delta_text,
+                                is_first=is_first,
                                 include_usage=include_usage,
                                 logprobs=chunk_logprobs,
                             )
@@ -1141,11 +1201,17 @@ async def _stream_completions(
     generation_request: GenerationRequest,
     request: CompletionRequest,
     http_request: Request,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[str | bytes]:
     """Legacy text_completion stream: cumulative text deltas, not delta objects."""
     response_id = f"cmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
     include_usage = bool(request.stream_options and request.stream_options.include_usage)
+    text_encoder = CompletionTextSSEEncoder(
+        response_id,
+        created,
+        request.model,
+        include_usage=include_usage,
+    )
     sent: dict[int, int] = {}
     last = None
     owner = _stream_usage_owner(http_request, request.model, generation_request.prompt)
@@ -1158,7 +1224,7 @@ async def _stream_completions(
             choices=choices,
             usage=usage,
         )
-        exclude = None if include_usage else {"usage"}
+        exclude = None if include_usage else _COMPLETION_CHUNK_EXCLUDE_USAGE_FIELDS
         serialized = escape_json_line_separators(
             payload.model_dump_json(exclude=exclude)
         )
@@ -1176,15 +1242,22 @@ async def _stream_completions(
                         continue
                     sent[completion.index] = len(completion.text)
                     finish = (completion.finish_reason or "stop") if partial.finished else None
-                    yield _chunk(
-                        [
-                            CompletionChoice(
-                                index=completion.index,
-                                text=delta,
-                                finish_reason=finish,
-                            )
-                        ]
-                    )
+                    if (
+                        finish is None
+                        and type(completion.index) is int
+                        and type(delta) is str
+                    ):
+                        yield text_encoder.encode(completion.index, delta)
+                    else:
+                        yield _chunk(
+                            [
+                                CompletionChoice(
+                                    index=completion.index,
+                                    text=delta,
+                                    finish_reason=finish,
+                                )
+                            ]
+                        )
         except Exception as error:
             logger.exception("upstream backend error")
             payload = {  # M3: only the class name, no raw backend message

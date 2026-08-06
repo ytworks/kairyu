@@ -36,6 +36,7 @@ from kairyu.entrypoints.server.metering import (
     stream_usage_owner_from_state,
 )
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
 from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.sse import escape_json_line_separators
 
@@ -967,8 +968,9 @@ async def _live_text_events(
     store: ResponseStore,
     owner: str,
     http_request: Request,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[str | bytes]:
     message_id = f"msg_{uuid.uuid4().hex[:24]}"
+    text_delta_encoder = ResponsesTextDeltaSSEEncoder(message_id)
     in_progress = _response_envelope(
         request,
         response_id=response_id,
@@ -1033,15 +1035,18 @@ async def _live_text_events(
                 sent = len(completion.text)
                 if not delta:
                     continue
-                yield _sse(
-                    "response.output_text.delta",
-                    sequence,
-                    item_id=message_id,
-                    output_index=0,
-                    content_index=0,
-                    delta=delta,
-                    logprobs=[],
-                )
+                if type(delta) is str:
+                    yield text_delta_encoder.encode(sequence, delta)
+                else:
+                    yield _sse(
+                        "response.output_text.delta",
+                        sequence,
+                        item_id=message_id,
+                        output_index=0,
+                        content_index=0,
+                        delta=delta,
+                        logprobs=[],
+                    )
                 sequence += 1
         except Exception as error:
             logger.exception("Responses API upstream stream failed")
