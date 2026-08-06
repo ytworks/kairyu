@@ -28,7 +28,14 @@ TINY = dict(
 @pytest.fixture(autouse=True)
 def _force_torch_attention_for_cpu_fixture(monkeypatch):
     """Keep this CPU-safe fixture independent of host CUDA availability."""
+    from kairyu.engine.core import hw_profile
+
     monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "torch")
+    monkeypatch.setattr(
+        hw_profile,
+        "probe",
+        lambda: hw_profile.HardwareProfile(arch="cpu"),
+    )
 
 
 @pytest.fixture(scope="module")

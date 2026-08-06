@@ -674,6 +674,7 @@ def control_idle_wait(
         time.sleep(idle_s)
     payload = control.broadcast({"after_idle": True} if rank == 0 else None, src=0)
     dist.destroy_process_group(groups.model)
+    dist.destroy_process_group(groups.startup_control)
     dist.destroy_process_group(groups.control)
     _finish(
         out_dir,
@@ -904,3 +905,263 @@ def direct_nccl_graph_workspace_growth(
         if direct is not None:
             direct.close()
         dist.destroy_process_group()
+
+
+def ep4_attention_dp_cuda_graph_startup_replay(
+    rank: int,
+    world_size: int,
+    init_file: str,
+    out_dir: str,
+) -> None:
+    """Capture EP4 attention-DP before readiness, then replay its first decode.
+
+    The topology, layout lifecycle, CUDA graph, and direct-NCCL transport are
+    production objects.  Tiny CUDA tensor shims replace only the checkpoint-
+    owned NVFP4 kernels so this gate needs neither Qwen3-235B weights nor
+    FlashInfer.
+    """
+
+    from types import SimpleNamespace
+
+    import torch.distributed as dist
+
+    from kairyu.engine.core import worker as worker_module
+    from kairyu.engine.core.cuda_graph_gpu import CudaGraphBackend
+    from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+    from kairyu.engine.core.step_executor import GraphStepExecutor, build_decode_batch
+    from kairyu.kernels import nvfp4_moe_gpu
+    from kairyu.models.moe_parallel import (
+        EpMoeBlock,
+        assert_attention_dp_layouts_idle,
+    )
+
+    if world_size != 4:
+        raise ValueError(f"attention-DP CUDA graph startup requires EP4, got {world_size}")
+    device = torch.device("cuda", rank)
+    torch.cuda.set_device(device)
+    groups = None
+    deferred = None
+    executor = None
+    result: dict[str, object] | None = None
+    clean_shutdown = False
+    try:
+        init_distributed(
+            rank,
+            world_size,
+            f"file://{init_file}",
+            backend="nccl",
+            timeout_s=60,
+        )
+        startup_comm = TorchDistCommunicator(device=device)
+        deferred = worker_module._DeferredComm(startup_comm)
+
+        base = _NcclTinyMoeBlock().to(device)
+        base.route = torch.tensor([rank], dtype=torch.int64, device=device)
+        block = EpMoeBlock(
+            base,
+            deferred,
+            ep_rank=rank,
+            ep_size=world_size,
+            attention_dp=True,
+        )
+        object.__setattr__(
+            block,
+            "_prepared_nvfp4_moe",
+            SimpleNamespace(
+                fc1_act_scale=torch.tensor(
+                    1.0,
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                local_expert_start=rank,
+            ),
+        )
+        model = torch.nn.ModuleList([block])
+
+        def fake_quantize(
+            hidden: torch.Tensor,
+            _scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            return (
+                hidden[:, : hidden.shape[1] // 2].to(torch.uint8).contiguous(),
+                torch.zeros(
+                    hidden.shape[0],
+                    hidden.shape[1] // 16,
+                    dtype=torch.uint8,
+                    device=hidden.device,
+                ),
+            )
+
+        def fake_interleave(scale_rows: torch.Tensor) -> torch.Tensor:
+            return scale_rows.reshape(-1).contiguous()
+
+        def fake_fused(
+            packed_hidden: torch.Tensor,
+            _input_sf: torch.Tensor,
+            selected_experts: torch.Tensor,
+            routing_weights: torch.Tensor,
+            prepared: SimpleNamespace,
+            *,
+            output: torch.Tensor,
+            ep_size: int,
+            ep_rank: int,
+        ) -> torch.Tensor:
+            if ep_size != 4 or ep_rank != prepared.local_expert_start:
+                raise AssertionError("synthetic EP ownership drift")
+            selected = (selected_experts[:, :1] == ep_rank).to(output.dtype)
+            values = (
+                packed_hidden[:, :1].to(output.dtype)
+                * float(ep_rank + 1)
+                * routing_weights[:, :1].to(output.dtype)
+            )
+            output.copy_((selected * values).expand_as(output))
+            return output
+
+        # EpMoeBlock imports these names inside every Python forward.  Child
+        # processes own the replacements, and graph replay never re-enters them.
+        nvfp4_moe_gpu.quantize_moe_input = fake_quantize
+        nvfp4_moe_gpu.interleave_moe_input_scales = fake_interleave
+        nvfp4_moe_gpu.fused_moe_forward_quantized = fake_fused
+
+        groups = worker_module.serving_groups(
+            "nccl",
+            control_timeout_s=60,
+            model_timeout_s=60,
+        )
+        if groups.control is groups.startup_control:
+            raise AssertionError("startup capture reused the long-idle control group")
+        startup_control = TorchDistCommunicator(group=groups.startup_control)
+        model_comm = TorchDistCommunicator(group=groups.model, device=device)
+        worker_module._bind_ep_model_communicator(
+            deferred,
+            model_comm,
+            startup_control,
+            attention_dp=True,
+        )
+        direct_metadata = model_comm.attention_dp_collective_metadata()
+        if direct_metadata.get("direct_nccl_active") is not True:
+            raise RuntimeError(f"direct NCCL unavailable: {direct_metadata!r}")
+
+        forward_calls = [0]
+        backend = CudaGraphBackend(warmup_iters=1)
+
+        def decode(batch) -> torch.Tensor:
+            forward_calls[0] += 1
+            hidden = batch.token_ids.to(torch.bfloat16).unsqueeze(1).expand(-1, 16).contiguous()
+            return block(hidden)
+
+        executor = GraphStepExecutor(
+            decode,
+            backend,
+            max_batch=1,
+            scratch_page=7,
+            max_pages=1,
+            device=device,
+        )
+
+        class _TinyGraphRunner:
+            def __init__(self) -> None:
+                self._model = model
+
+            def decode_graph_capture_plan(self):
+                return executor.capture_plan()
+
+            def capture_decode_graphs(self):
+                return executor.capture_all()
+
+            def synchronize_decode_graph_capture(self) -> None:
+                torch.cuda.synchronize(device)
+
+            def invalidate_graphs(self) -> None:
+                executor.invalidate()
+
+        captured = worker_module._capture_decode_graphs_transaction(
+            startup_control,
+            _TinyGraphRunner(),
+            attention_dp=True,
+        )
+        ready_stats = executor.execution_stats()
+        ready_layout = block.attention_dp_metadata()
+        direct = model_comm._attention_dp_direct_nccl
+        if direct is None:
+            raise AssertionError("direct NCCL metadata was active without a communicator")
+        ready = {
+            "captured": captured,
+            "backend_captures": backend.captures,
+            "backend_replays": backend.replays,
+            "graph_executions": ready_stats["graph_executions"],
+            "fallbacks": ready_stats["eager_fallbacks"],
+            "forward_calls": forward_calls[0],
+            "completed_layout_steps": ready_layout["completed_layout_steps"],
+            "layout_queue_depth": ready_layout["layout_queue_depth"],
+            "direct_gather_capture_buffers": len(direct._captured_gather_workspaces),
+            "direct_scatter_capture_buffers": len(direct._captured_reduce_scatter_workspaces),
+        }
+
+        token = rank + 2
+        batch = build_decode_batch(
+            token_ids=[token],
+            positions=[0],
+            page_lists=[[0]],
+            seq_lens=[1],
+            max_pages=1,
+            scratch_page=7,
+            device=device,
+        )
+        decision = executor.decode_decision(batch_size=1, max_pages=1)
+        if decision.kind != "replay":
+            raise AssertionError(f"first live decode was not a replay: {decision!r}")
+        executor.coordinate_next_decode(decision)
+        output = executor.execute_decode(batch)
+        executor.assert_coordinated_decode_consumed()
+        torch.cuda.synchronize(device)
+        assert_attention_dp_layouts_idle(model)
+        after_stats = executor.execution_stats()
+        expected = torch.full_like(output, float(token * (rank + 1)))
+        result = {
+            "rank": rank,
+            "device": str(device),
+            "direct_active": True,
+            "startup_control_distinct": True,
+            "ready": ready,
+            "first_decision": decision.kind,
+            "after_backend_captures": backend.captures,
+            "after_backend_replays": backend.replays,
+            "after_graph_executions": after_stats["graph_executions"],
+            "after_fallbacks": after_stats["eager_fallbacks"],
+            "after_forward_calls": forward_calls[0],
+            "after_completed_layout_steps": block.attention_dp_metadata()["completed_layout_steps"],
+            "max_error": float((output - expected).abs().max().item()),
+        }
+        clean_shutdown = True
+    finally:
+        invalidation_error: Exception | None = None
+        if executor is not None:
+            try:
+                executor.invalidate()
+            except Exception as error:
+                invalidation_error = error
+        if clean_shutdown and deferred is not None and groups is not None:
+            torch.cuda.synchronize(device)
+            deferred.barrier()
+            deferred.close_direct_nccl()
+            if deferred.attention_dp_direct_nccl_active:
+                raise AssertionError("normal teardown left direct NCCL active")
+            dist.destroy_process_group(deferred.group)
+            dist.destroy_process_group(groups.startup_control)
+            dist.destroy_process_group(groups.control)
+            dist.destroy_process_group()
+            if invalidation_error is not None:
+                raise invalidation_error
+        elif deferred is not None:
+            worker_module._abort_ep_worker_model_communicator(deferred, str(device))
+
+    if result is None:
+        raise AssertionError("EP4 startup replay completed without a result")
+    result["direct_closed"] = not deferred.attention_dp_direct_nccl_active
+    result["distributed_destroyed"] = not dist.is_initialized()
+    result["normal_teardown"] = True
+    Path(out_dir, f"rank{rank}.json").write_text(
+        json.dumps(result),
+        encoding="utf-8",
+    )

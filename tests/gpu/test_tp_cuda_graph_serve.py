@@ -43,9 +43,12 @@ def llama_dir(tmp_path_factory):
     return str(path)
 
 
-def _generate(model_dir: str, decode_mode: str):
+def _generate(model_dir: str, decode_mode: str | None):
     from kairyu.engine.kairyu_backend import build_engine_loop
 
+    mode_options = (
+        {"decode_mode": decode_mode} if decode_mode is not None else {}
+    )
     loop, cache, _scheduler = build_engine_loop(
         model_path=model_dir,
         tokenizer=_Tokenizer(),
@@ -53,14 +56,16 @@ def _generate(model_dir: str, decode_mode: str):
         num_pages=64,
         page_size=16,
         max_num_batched_tokens=64,
-        decode_mode=decode_mode,
-        cuda_graph_max_batch=4,
-        cuda_graph_max_pages=4,
+        max_num_seqs=4,
+        max_model_len=64,
         cuda_graph_warmup_iters=1,
+        **mode_options,
     )
     try:
+        rank0_local = loop.tp_launcher.runner._local
+        startup = rank0_local.decode_graph_metadata()
         loop.submit(
-            f"tp-{decode_mode}",
+            f"tp-{decode_mode or 'auto'}",
             "prompt",
             SamplingParams(max_tokens=6, temperature=0.0, ignore_eos=True),
         )
@@ -71,12 +76,8 @@ def _generate(model_dir: str, decode_mode: str):
             if final is not None and final.finished:
                 break
         assert final is not None and final.finished
-        rank0_local = loop.tp_launcher.runner._local
-        stats = None
-        if rank0_local._graph is not None:
-            backend = rank0_local._graph._backend
-            stats = (backend.captures, backend.replays)
-        return final.outputs, stats, cache.num_free_pages
+        after = rank0_local.decode_graph_metadata()
+        return final.outputs, startup, after, cache.num_free_pages
     finally:
         loop.tp_launcher.shutdown()
 
@@ -88,13 +89,21 @@ def test_production_tp_cuda_graph_matches_eager(llama_dir, monkeypatch):
         pytest.skip(f"need 2 CUDA devices, found {torch.cuda.device_count()}")
     monkeypatch.setenv("KAIRYU_ATTENTION_BACKEND", "torch")
 
-    eager, eager_stats, eager_free = _generate(llama_dir, "eager")
-    graphed, graph_stats, graph_free = _generate(llama_dir, "cuda_graph")
+    eager, eager_startup, eager_after, eager_free = _generate(llama_dir, "eager")
+    graphed, graph_startup, graph_after, graph_free = _generate(llama_dir, None)
 
     assert graphed == eager
-    assert eager_stats is None
-    assert graph_stats is not None
-    captures, replays = graph_stats
-    assert captures > 0
-    assert replays > captures
+    assert eager_startup["decode_mode"] == "eager"
+    assert eager_after["cuda_graph_captures"] == 0
+    assert graph_startup == {
+        "decode_mode": "cuda_graph",
+        "cuda_graph_decode": True,
+        "cuda_graph_buckets": (1, 2, 4),
+        "cuda_graph_captures": 3,
+        "cuda_graph_replays": 0,
+        "cuda_graph_eager_fallbacks": 0,
+    }
+    assert graph_after["cuda_graph_captures"] == 3
+    assert graph_after["cuda_graph_replays"] > 0
+    assert graph_after["cuda_graph_eager_fallbacks"] == 0
     assert graph_free == eager_free - 1

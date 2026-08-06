@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import json
 import threading
 import time
 import weakref
@@ -2207,6 +2208,192 @@ def test_context_limit_crosses_distributed_and_pd_builders(
     assert result is sentinel
     assert captured is not None
     assert captured["max_model_len"] == 8192
+
+
+@pytest.mark.parametrize(
+    ("arch", "expected_graph", "expected_pages"),
+    (("cuda", True, 5), ("cpu", False, 1)),
+)
+def test_auto_decode_mode_resolves_hardware_and_tracks_serving_limits(
+    monkeypatch,
+    tmp_path,
+    arch,
+    expected_graph,
+    expected_pages,
+) -> None:
+    from kairyu.engine.core import hw_profile
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["LlamaForCausalLM"],
+                "hidden_size": 64,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "intermediate_size": 128,
+                "vocab_size": 256,
+            }
+        )
+    )
+    monkeypatch.setattr(
+        hw_profile,
+        "probe",
+        lambda: hw_profile.HardwareProfile(arch=arch),
+    )
+    captured = None
+    sentinel = (object(), object(), object())
+
+    def fake_builder(**kwargs):
+        nonlocal captured
+        captured = kwargs
+        return sentinel
+
+    monkeypatch.setattr(kairyu_backend_module, "_build_dist_tp_loop", fake_builder)
+
+    result = build_engine_loop(
+        model_path=str(tmp_path),
+        tensor_parallel_size=2,
+        num_pages=64,
+        page_size=16,
+        max_num_seqs=13,
+        max_model_len=65,
+    )
+
+    assert result is sentinel
+    assert captured is not None
+    assert captured["graph_decode"] is expected_graph
+    assert captured["graph_max_batch"] == 13
+    assert captured["graph_max_pages"] == expected_pages
+
+
+def test_auto_decode_mode_keeps_mla_on_eager(monkeypatch, tmp_path) -> None:
+    from kairyu.engine.core import hw_profile
+    from kairyu.models import config as model_config
+
+    (tmp_path / "config.json").write_text("{}")
+    monkeypatch.setattr(
+        model_config,
+        "parse_model_config",
+        lambda _raw: type("Config", (), {"is_mla": True})(),
+    )
+    monkeypatch.setattr(
+        hw_profile,
+        "probe",
+        lambda: hw_profile.HardwareProfile(arch="cuda"),
+    )
+
+    assert (
+        kairyu_backend_module._resolve_decode_mode(
+            None,
+            model_path=str(tmp_path),
+            runner=None,
+            tensor_parallel_size=1,
+            pd_separation=False,
+            expert_parallel=False,
+            expert_parallel_attention_dp=False,
+        )
+        == "eager"
+    )
+
+
+def test_auto_tp_decode_mode_honors_force_cpu_on_a_cuda_host(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from kairyu.engine.core import hw_profile
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["LlamaForCausalLM"],
+                "hidden_size": 64,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "intermediate_size": 128,
+                "vocab_size": 256,
+            }
+        )
+    )
+    monkeypatch.setenv("KAIRYU_TP_FORCE_CPU", "1")
+    monkeypatch.setattr(
+        hw_profile,
+        "probe",
+        lambda: hw_profile.HardwareProfile(arch="cuda", device_count=8),
+    )
+    captured = None
+    sentinel = (object(), object(), object())
+
+    def fake_builder(**kwargs):
+        nonlocal captured
+        captured = kwargs
+        return sentinel
+
+    monkeypatch.setattr(kairyu_backend_module, "_build_dist_tp_loop", fake_builder)
+
+    result = build_engine_loop(
+        model_path=str(tmp_path),
+        tensor_parallel_size=2,
+        num_pages=64,
+        page_size=16,
+    )
+
+    assert result is sentinel
+    assert captured is not None
+    assert captured["graph_decode"] is False
+
+
+def test_auto_attention_dp_graph_covers_full_scheduler_page_capacity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from kairyu.engine.core import hw_profile
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["LlamaForCausalLM"],
+                "hidden_size": 64,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "intermediate_size": 128,
+                "vocab_size": 256,
+            }
+        )
+    )
+    monkeypatch.setattr(
+        hw_profile,
+        "probe",
+        lambda: hw_profile.HardwareProfile(arch="cuda"),
+    )
+    captured = None
+    sentinel = (object(), object(), object())
+
+    def fake_builder(**kwargs):
+        nonlocal captured
+        captured = kwargs
+        return sentinel
+
+    monkeypatch.setattr(kairyu_backend_module, "_build_dist_ep_loop", fake_builder)
+
+    result = build_engine_loop(
+        model_path=str(tmp_path),
+        expert_parallel_size=4,
+        expert_parallel_attention_dp=True,
+        kv_cache_dtype="bfloat16",
+        num_pages=64,
+        page_size=16,
+        max_num_seqs=8,
+        max_model_len=64 * 16,
+    )
+
+    assert result is sentinel
+    assert captured is not None
+    assert captured["decode_mode"] == "cuda_graph"
+    assert captured["cuda_graph_max_batch"] == 8
+    assert captured["cuda_graph_max_pages"] == 64
 
 
 def test_dist_ep_builder_assembles_topology_neutral_serving_loop(

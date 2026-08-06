@@ -111,11 +111,20 @@ def test_production_builder_reaches_capture_and_replay(llama_dir, monkeypatch):
         num_pages=128,
         page_size=16,
         max_num_batched_tokens=64,
-        decode_mode="cuda_graph",
-        cuda_graph_max_batch=8,
-        cuda_graph_max_pages=8,
+        max_num_seqs=8,
+        max_model_len=128,
         cuda_graph_warmup_iters=1,
     )
+    runner = loop._runner
+    startup = runner.decode_graph_metadata()
+    assert startup == {
+        "decode_mode": "cuda_graph",
+        "cuda_graph_decode": True,
+        "cuda_graph_buckets": (1, 2, 4, 8),
+        "cuda_graph_captures": 4,
+        "cuda_graph_replays": 0,
+        "cuda_graph_eager_fallbacks": 0,
+    }
     loop.submit(
         "production-graph",
         "prompt",
@@ -129,12 +138,12 @@ def test_production_builder_reaches_capture_and_replay(llama_dir, monkeypatch):
         if final is not None and final.finished:
             break
 
-    runner = loop._runner
-    graph_backend = runner._graph._backend
+    after = runner.decode_graph_metadata()
     assert final is not None and final.finished
     assert len(final.outputs) == 6
-    assert graph_backend.captures > 0
-    assert graph_backend.replays > graph_backend.captures
+    assert after["cuda_graph_captures"] == 4
+    assert after["cuda_graph_replays"] > 0
+    assert after["cuda_graph_eager_fallbacks"] == 0
 
 
 def test_padding_rows_never_write_kv_into_an_allocatable_page(llama_dir):

@@ -1678,6 +1678,7 @@ def create_app(
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
             metrics.track_scheduler(name, engine)
+            metrics.track_cuda_graph(name, engine)
     api_keys = settings.resolve_api_keys() if resolved_api_keys is None else resolved_api_keys
     admin_keys = (
         settings.resolve_admin_keys() if resolved_admin_keys is None else resolved_admin_keys

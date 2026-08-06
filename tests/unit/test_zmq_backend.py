@@ -48,6 +48,7 @@ from kairyu.engine.zmq_backend import (
     EngineServiceError,
     ZmqEngineBackend,
     _decision_from_startup_frame,
+    _decode_graph_metadata_from_wire,
     _ensure_child_subreaper,
     _generation_defaults_from_startup_frame,
     _kill_and_reap_process,
@@ -1152,6 +1153,72 @@ async def test_receiver_transport_failure_marks_readiness_fatal_and_sanitized(
     backend._receiver = None
 
 
+async def test_receiver_updates_live_decode_graph_metadata_without_dropping_events(
+    caplog,
+):
+    class LiveProcess:
+        pid = None
+
+        def is_alive(self):
+            return True
+
+    valid = {
+        "decode_mode": "cuda_graph",
+        "cuda_graph_decode": True,
+        "cuda_graph_buckets": [1, 2],
+        "cuda_graph_captures": 2,
+        "cuda_graph_replays": 4,
+        "cuda_graph_eager_fallbacks": 1,
+    }
+    malformed = {**valid, "cuda_graph_eager_fallbacks": -1}
+
+    class Socket:
+        def __init__(self):
+            self.messages = [
+                msgpack.packb(
+                    {
+                        "request_id": "wire",
+                        "finished": False,
+                        "decode_graph_metadata": valid,
+                    }
+                ),
+                msgpack.packb(
+                    {
+                        "request_id": "wire",
+                        "finished": True,
+                        "decode_graph_metadata": malformed,
+                    }
+                ),
+            ]
+
+        async def recv(self):
+            if self.messages:
+                return self.messages.pop(0)
+            await asyncio.Future()
+
+    backend = ZmqEngineBackend(num_pages=64)
+    backend._live_generation = 23
+    backend._public_request_ids["wire"] = "public"
+    backend._queues["public"] = asyncio.Queue()
+    receiver = asyncio.create_task(
+        backend._receive_loop(23, Socket(), LiveProcess())
+    )
+    try:
+        first = await asyncio.wait_for(backend._queues["public"].get(), 0.5)
+        second = await asyncio.wait_for(backend._queues["public"].get(), 0.5)
+        assert first["finished"] is False
+        assert second["finished"] is True
+        assert backend.decode_graph_metadata_snapshot() == {
+            **valid,
+            "cuda_graph_buckets": (1, 2),
+        }
+        assert "ignored malformed decode-graph metadata" in caplog.text
+    finally:
+        receiver.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await receiver
+
+
 async def test_receiver_heartbeat_timeout_fails_generation_and_readiness(
     monkeypatch,
 ):
@@ -2051,6 +2118,81 @@ async def test_startup_ready_frame_round_trips_generation_defaults():
     )
 
     assert _generation_defaults_from_startup_frame(frame) == expected
+
+
+async def test_startup_ready_frame_round_trips_decode_graph_metadata():
+    expected = {
+        "decode_mode": "cuda_graph",
+        "cuda_graph_decode": True,
+        "cuda_graph_buckets": (1, 2, 4),
+        "cuda_graph_captures": 3,
+        "cuda_graph_replays": 7,
+        "cuda_graph_eager_fallbacks": 2,
+    }
+    frame = _startup_ready_frame(
+        types.SimpleNamespace(
+            _runner=types.SimpleNamespace(
+                decode_graph_metadata=lambda: expected
+            )
+        )
+    )
+
+    assert _decode_graph_metadata_from_wire(
+        frame["decode_graph_metadata"]
+    ) == expected
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"decode_mode": "cuda_graph"},
+        {
+            "decode_mode": "cuda_graph",
+            "cuda_graph_decode": True,
+            "cuda_graph_buckets": [1, 4, 2],
+            "cuda_graph_captures": 3,
+            "cuda_graph_replays": 0,
+            "cuda_graph_eager_fallbacks": 0,
+        },
+        {
+            "decode_mode": "cuda_graph",
+            "cuda_graph_decode": True,
+            "cuda_graph_buckets": [1, 2],
+            "cuda_graph_captures": 1,
+            "cuda_graph_replays": 0,
+            "cuda_graph_eager_fallbacks": 0,
+        },
+        {
+            "decode_mode": "eager",
+            "cuda_graph_decode": False,
+            "cuda_graph_buckets": [],
+            "cuda_graph_captures": 0,
+            "cuda_graph_replays": 0,
+            "cuda_graph_eager_fallbacks": -1,
+        },
+    ],
+)
+async def test_decode_graph_metadata_wire_validation_fails_closed(metadata):
+    with pytest.raises(EngineServiceError, match="decode-graph metadata"):
+        _decode_graph_metadata_from_wire(metadata)
+
+
+async def test_decode_graph_metadata_snapshot_is_a_copy():
+    backend = ZmqEngineBackend(num_pages=64)
+    backend._live_generation = 23
+    backend._decode_graph_metadata = {
+        "decode_mode": "cuda_graph",
+        "cuda_graph_decode": True,
+        "cuda_graph_buckets": (1, 2),
+        "cuda_graph_captures": 2,
+        "cuda_graph_replays": 3,
+        "cuda_graph_eager_fallbacks": 1,
+    }
+
+    snapshot = backend.decode_graph_metadata_snapshot()
+    assert snapshot == backend._decode_graph_metadata
+    assert snapshot is not backend._decode_graph_metadata
+    assert backend.decode_graph_metric_generation_snapshot() == 23
 
 
 async def test_submit_resolves_omissions_but_preserves_explicit_neutrals(

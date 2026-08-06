@@ -284,6 +284,43 @@ output (DeepSeek convention).
   wiring EAGLE/MTP proposal state into `ModelDraftSource` remains the existing
   G4 runtime milestone and is not implied by the standalone trained-head gate.
 
+### 2026-08-06 startup-capture amendment
+
+- **A26 (resolved default and coverage):** omission of `decode_mode` selects
+  CUDA graphs for a graph-capable real CUDA model in single-rank, TP, and
+  request-owned attention-DP EP serving. CPU, model-less/custom, P-D,
+  explicitly force-CPU TP, replicated-attention EP, and current MLA paths
+  resolve to eager; an explicit `cuda_graph` request remains fail-closed. An
+  omitted graph batch limit tracks
+  `max_num_seqs`. An omitted page limit covers
+  `ceil(max_model_len / page_size)`, capped by scheduler-visible KV capacity;
+  when no context limit is declared it covers every non-scratch KV page.
+- **A27 (readiness and distributed convergence):** every configured bucket is
+  captured after weights and the final serving communicator are resident but
+  before the engine builder or distributed launcher can publish readiness.
+  TP/EP first compare bucket, pending-state, page-width, scratch-page, and
+  capture-forward identities on a dedicated bounded host control group (the
+  long-idle serving control group is not used). Attention-DP also constructs
+  direct NCCL and performs both startup probes and live ragged-layout agreement
+  on that bounded group; no readiness-critical or live per-step collective is
+  allowed onto the group whose receive may legitimately idle for the server
+  lifetime. It then arms one uniform row layout per warmup/capture forward and
+  gathers preparation ACKs before any rank enters model collectives. Partial
+  capture invalidates the complete local graph set; all ranks synchronize CUDA
+  and gather final ACKs. The first live request therefore replays an existing
+  bucket rather than recording it inline. A checkpoint-independent EP4 GPU gate
+  executes this exact readiness transaction with real CUDA graphs and real
+  direct-NCCL mixed-dtype gather/reduce-scatter, then proves the first decode
+  replays without another Python forward, capture, layout step, or fallback.
+- **A28 (fallback observability):** the existing structural eager-fallback
+  count is exported at Prometheus scrape time as
+  `kairyu_cuda_graph_eager_fallbacks_total{model=...}`. The counter increments
+  only when a live decode batch or page table exceeds configured graph shape;
+  startup capture itself does not increment replay or fallback counters. A
+  local replica pool exports the model-level sum; replica generations and raw
+  child-process resets are accumulated so removal, replacement, restart, or a
+  temporarily failed scrape can never decrease the Prometheus counter.
+
 - **Measurement:** Qwen3-32B on 8x RTX PRO 6000 Blackwell, TP8, 8 concurrent
   synthetic requests x 32 output tokens, torch attention: tensor eager wall
   8.844 s, TPOT 192.075 ms/token, 0.90 req/s; CUDA graph wall 7.196 s,

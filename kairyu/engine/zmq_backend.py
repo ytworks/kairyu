@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
@@ -423,6 +423,47 @@ def _tensor_parallel_size_from_startup_frame(frame) -> int | None:
     return value
 
 
+def _decode_graph_metadata_from_wire(raw) -> dict[str, object] | None:
+    """Validate optional startup/live graph counters from the child."""
+
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise EngineServiceError("engine decode-graph metadata must be a map or null")
+    decode_mode = raw.get("decode_mode")
+    graph_decode = raw.get("cuda_graph_decode")
+    buckets = raw.get("cuda_graph_buckets")
+    captures = raw.get("cuda_graph_captures")
+    replays = raw.get("cuda_graph_replays")
+    fallbacks = raw.get("cuda_graph_eager_fallbacks")
+    if (
+        decode_mode not in {"eager", "cuda_graph"}
+        or type(graph_decode) is not bool
+        or graph_decode != (decode_mode == "cuda_graph")
+        or not isinstance(buckets, (tuple, list))
+        or any(type(bucket) is not int or bucket < 1 for bucket in buckets)
+        or tuple(buckets) != tuple(sorted(set(buckets)))
+        or any(
+            type(count) is not int or count < 0
+            for count in (captures, replays, fallbacks)
+        )
+        or (graph_decode and (not buckets or captures != len(buckets)))
+        or (
+            not graph_decode
+            and (bool(buckets) or captures != 0 or replays != 0 or fallbacks != 0)
+        )
+    ):
+        raise EngineServiceError("engine decode-graph metadata is malformed")
+    return {
+        "decode_mode": decode_mode,
+        "cuda_graph_decode": graph_decode,
+        "cuda_graph_buckets": tuple(buckets),
+        "cuda_graph_captures": captures,
+        "cuda_graph_replays": replays,
+        "cuda_graph_eager_fallbacks": fallbacks,
+    }
+
+
 def _validate_startup_tensor_parallel_identity(
     configured: int,
     actual: int | None,
@@ -619,6 +660,7 @@ def _recv_optional_startup_frame(
     dict[str, object] | None,
     GenerationDefaults | None,
     int | None,
+    dict[str, object] | None,
 ]:
     """Receive a new child's second frame; EOF from a live child means legacy."""
 
@@ -627,7 +669,7 @@ def _recv_optional_startup_frame(
     except EOFError:
         if process.is_alive():
             # Old services close the Pipe immediately after the integer port.
-            return None, None, None, None, None, None
+            return None, None, None, None, None, None, None
         raise EngineServiceError(
             "engine service exited before reporting startup metadata"
         ) from None
@@ -636,6 +678,9 @@ def _recv_optional_startup_frame(
     dram_kv_tier = _dram_kv_tier_from_startup_frame(frame)
     generation_defaults = _generation_defaults_from_startup_frame(frame)
     tensor_parallel_size = _tensor_parallel_size_from_startup_frame(frame)
+    graph_metadata = _decode_graph_metadata_from_wire(
+        frame.get("decode_graph_metadata")
+    )
     return (
         decision,
         requested,
@@ -643,6 +688,7 @@ def _recv_optional_startup_frame(
         dram_kv_tier,
         generation_defaults,
         tensor_parallel_size,
+        graph_metadata,
     )
 
 
@@ -891,9 +937,9 @@ class ZmqEngineBackend:
         death_timeout_s: float = 120.0,
         model_path: str | None = None,
         pipeline_depth: int = 1,
-        decode_mode: str = "eager",
-        cuda_graph_max_batch: int = 8,
-        cuda_graph_max_pages: int = 512,
+        decode_mode: str | None = None,
+        cuda_graph_max_batch: int | None = None,
+        cuda_graph_max_pages: int | None = None,
         cuda_graph_warmup_iters: int = 3,
         max_model_len: int | None = None,
         kv_cache_dtype: str = "auto",
@@ -1013,6 +1059,7 @@ class ZmqEngineBackend:
         self._wire_version = WIRE_VERSION
         self._active_request_ids: set[str] = set()
         self.attention_backend_decision: AttentionBackendDecision | None = None
+        self._decode_graph_metadata: dict[str, object] | None = None
         self._configured_generation_defaults: GenerationDefaults | None = (
             GenerationDefaults(
                 mode=generation_config,
@@ -1193,6 +1240,7 @@ class ZmqEngineBackend:
                 dram_kv_tier,
                 generation_defaults,
                 actual_tensor_parallel_size,
+                graph_metadata,
             ) = (
                 _recv_optional_startup_frame(parent_pipe, process)
             )
@@ -1238,6 +1286,7 @@ class ZmqEngineBackend:
                 raise EngineServiceError("engine service startup ownership was lost")
         except BaseException as error:
             self.attention_backend_decision = None
+            self._decode_graph_metadata = None
             self.tensor_parallel_size = None
             self.kv_cache_dtype_resolved = None
             self.dram_kv_tier_profile_sha256 = None
@@ -1260,6 +1309,7 @@ class ZmqEngineBackend:
         finally:
             parent_pipe.close()
         self.attention_backend_decision = decision
+        self._decode_graph_metadata = graph_metadata
         self.tensor_parallel_size = (
             actual_tensor_parallel_size
             if actual_tensor_parallel_size is not None
@@ -1345,6 +1395,17 @@ class ZmqEngineBackend:
                 fatal=True,
             )
         return EngineReadiness(True)
+
+    def decode_graph_metadata_snapshot(self) -> dict[str, object] | None:
+        """Return the latest graph counters reported by the live child."""
+
+        metadata = self._decode_graph_metadata
+        return dict(metadata) if isinstance(metadata, Mapping) else None
+
+    def decode_graph_metric_generation_snapshot(self) -> int | None:
+        """Identify the child-service generation that owns graph counters."""
+
+        return self._live_generation
 
     def _fail_generation_once(
         self,
@@ -1490,6 +1551,7 @@ class ZmqEngineBackend:
         generation = self._live_generation
         self._live_generation = None
         self.attention_backend_decision = None
+        self._decode_graph_metadata = None
         self.tensor_parallel_size = None
         self.kv_cache_dtype_resolved = None
         self.dram_kv_tier_profile_sha256 = None
@@ -1620,6 +1682,7 @@ class ZmqEngineBackend:
             generation = self._live_generation
             self._live_generation = None
             self.attention_backend_decision = None
+            self._decode_graph_metadata = None
             self.tensor_parallel_size = None
             self.kv_cache_dtype_resolved = None
             self.dram_kv_tier_profile_sha256 = None
@@ -1669,6 +1732,7 @@ class ZmqEngineBackend:
             finally:
                 self._close_transport_locked()
                 self.attention_backend_decision = None
+                self._decode_graph_metadata = None
                 self.tensor_parallel_size = None
                 self.kv_cache_dtype_resolved = None
                 self.dram_kv_tier_profile_sha256 = None
@@ -2039,6 +2103,22 @@ class ZmqEngineBackend:
                         f" for ranks {ranks}"
                     )
                     raise EngineServiceError(detail)
+                if "decode_graph_metadata" in event:
+                    try:
+                        graph_metadata = _decode_graph_metadata_from_wire(
+                            event["decode_graph_metadata"]
+                        )
+                    except EngineServiceError as error:
+                        # Metrics are diagnostic. A malformed additive field
+                        # must not discard an otherwise valid request event.
+                        logging.warning(
+                            "kairyu-proc ignored malformed decode-graph "
+                            "metadata: %r",
+                            error,
+                        )
+                    else:
+                        if graph_metadata is not None:
+                            self._decode_graph_metadata = graph_metadata
                 try:
                     self._deliver_event(event)
                 except Exception as error:
@@ -2057,6 +2137,7 @@ class ZmqEngineBackend:
                 self._live_generation = None
                 self._service_failure_type = type(failure).__name__
                 self.attention_backend_decision = None
+                self._decode_graph_metadata = None
                 self.tensor_parallel_size = None
                 self.kv_cache_dtype_resolved = None
                 self.dram_kv_tier_profile_sha256 = None

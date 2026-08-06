@@ -246,6 +246,7 @@ def _validate_native_common(
     tensor_parallel_size: int,
     runner: object | None,
     pd_separation: bool,
+    graph_scratch_outside_scheduler: bool = False,
 ) -> None:
     validate_generation_config_mode(options.get("generation_config", "auto"))
     num_pages = _require_int_at_least(
@@ -298,8 +299,8 @@ def _validate_native_common(
             options.get("speculative_tokens", 4),
             0,
         )
-    decode_mode = options.get("decode_mode", "eager")
-    if decode_mode not in _DECODE_MODES:
+    decode_mode = options.get("decode_mode")
+    if decode_mode is not None and decode_mode not in _DECODE_MODES:
         raise ValueError("native backend decode_mode is unsupported")
     model_path = options.get("model_path")
     if model_path is not None and not isinstance(model_path, (str, PathLike)):
@@ -345,31 +346,47 @@ def _validate_native_common(
                 "native backend DRAM KV tier does not support P-D separation"
             )
     graph_decode = decode_mode == "cuda_graph"
-    if graph_decode:
-        if model_path is None:
-            raise ValueError("native backend cuda_graph decode requires model_path")
+    graph_batch = options.get("cuda_graph_max_batch")
+    if graph_batch is not None:
         _require_int_at_least(
             backend,
             "cuda_graph_max_batch",
-            options.get("cuda_graph_max_batch", 8),
+            graph_batch,
             1,
         )
+    graph_pages = options.get("cuda_graph_max_pages")
+    if graph_pages is not None:
         graph_pages = _require_int_at_least(
             backend,
             "cuda_graph_max_pages",
-            options.get("cuda_graph_max_pages", 512),
+            graph_pages,
             1,
         )
+        graph_page_capacity = num_pages - int(
+            not graph_scratch_outside_scheduler
+        )
+        if graph_pages > graph_page_capacity:
+            if graph_scratch_outside_scheduler:
+                raise ValueError(
+                    "native backend cuda_graph_max_pages exceeds the "
+                    "scheduler-visible graph page capacity"
+                )
+            raise ValueError(
+                "native backend cuda_graph_max_pages must be smaller than num_pages"
+            )
+    graph_warmups = options.get("cuda_graph_warmup_iters")
+    if graph_warmups is not None:
         _require_int_at_least(
             backend,
             "cuda_graph_warmup_iters",
-            options.get("cuda_graph_warmup_iters", 3),
+            graph_warmups,
             0,
         )
-        if num_pages < 2:
+    if graph_decode:
+        if model_path is None:
+            raise ValueError("native backend cuda_graph decode requires model_path")
+        if num_pages < 2 and not graph_scratch_outside_scheduler:
             raise ValueError("native backend cuda_graph decode requires at least two pages")
-        if graph_pages >= num_pages:
-            raise ValueError("native backend cuda_graph_max_pages must be smaller than num_pages")
 
     if pd_separation:
         if model_path is None:
@@ -458,6 +475,7 @@ def _validate_kairyu(options: Mapping[str, object]) -> None:
         tensor_parallel_size=tensor_parallel_size,
         runner=options.get("runner"),
         pd_separation=pd_separation,
+        graph_scratch_outside_scheduler=expert_parallel_attention_dp,
     )
     if expert_parallel:
         if options.get("model_path") is None:
@@ -473,7 +491,7 @@ def _validate_kairyu(options: Mapping[str, object]) -> None:
                 "requires pipeline_depth=1"
             )
         if (
-            options.get("decode_mode", "eager") != "eager"
+            options.get("decode_mode") == "cuda_graph"
             and not expert_parallel_attention_dp
         ):
             raise ValueError(

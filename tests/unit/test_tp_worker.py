@@ -11,6 +11,7 @@ import torch
 from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.comm import FakeCommunicator
 from kairyu.engine.core.scheduler import ScheduledChunk
+from kairyu.engine.core.step_executor import DecodeGraphCapturePlan
 from kairyu.engine.core.step_input import RequestSnapshot, StepDelta
 from kairyu.engine.core.worker import (
     DistTPModelRunner,
@@ -38,6 +39,53 @@ class _ReleaseRunner:
 
     def release(self, request_id: str) -> None:
         self.released.append(request_id)
+
+
+class _GraphWarmupRunner(_ReleaseRunner):
+    def __init__(
+        self,
+        buckets: tuple[int, ...],
+        *,
+        max_pages: int = 32,
+        scratch_page: int = 63,
+        forward_count: int = 4,
+    ) -> None:
+        super().__init__()
+        self.buckets = buckets
+        self.max_pages = max_pages
+        self.scratch_page = scratch_page
+        self.forward_count = forward_count
+        self.pending = buckets
+        self.capture_calls = 0
+        self.synchronize_calls = 0
+
+    def decode_graph_capture_plan(self) -> DecodeGraphCapturePlan:
+        return DecodeGraphCapturePlan(
+            buckets=self.buckets,
+            pending_buckets=self.pending,
+            max_pages=self.max_pages,
+            scratch_page=self.scratch_page,
+            capture_model_forward_count=self.forward_count,
+        )
+
+    def capture_decode_graphs(self) -> tuple[int, ...]:
+        if self.pending:
+            self.capture_calls += 1
+        self.pending = ()
+        return self.buckets
+
+    def synchronize_decode_graph_capture(self) -> None:
+        self.synchronize_calls += 1
+
+    def decode_graph_metadata(self) -> dict[str, object]:
+        return {
+            "decode_mode": "cuda_graph",
+            "cuda_graph_decode": True,
+            "cuda_graph_buckets": self.buckets,
+            "cuda_graph_captures": len(self.buckets) - len(self.pending),
+            "cuda_graph_replays": 0,
+            "cuda_graph_eager_fallbacks": 0,
+        }
 
 
 class _AuthorityRunner(_ReleaseRunner):
@@ -161,10 +209,12 @@ def test_serving_groups_keep_control_off_the_model_backend(monkeypatch):
 
     assert created == [
         ("gloo", worker_module._CONTROL_IDLE_TIMEOUT_S),
+        ("gloo", worker_module._SERVE_OP_TIMEOUT_S),
         ("nccl", worker_module._SERVE_OP_TIMEOUT_S),
     ]
     assert groups.control == "group-1-gloo"
-    assert groups.model == "group-2-nccl"
+    assert groups.startup_control == "group-2-gloo"
+    assert groups.model == "group-3-nccl"
 
 
 def _backend_identity(
@@ -491,6 +541,60 @@ def test_dist_release_reaches_driver_and_idle_worker():
         assert worker.result(timeout=2) == 0
     assert local[0].released == ["finished"]
     assert local[1].released == ["finished"]
+
+
+def test_dist_startup_warms_identical_graph_buckets_on_every_rank():
+    comms = FakeCommunicator.create_group(2)
+    local = (
+        _GraphWarmupRunner((1, 2, 4, 8)),
+        _GraphWarmupRunner((1, 2, 4, 8)),
+    )
+    driver = DistTPModelRunner(comms[0], local[0])
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker = pool.submit(worker_step_loop, comms[1], local[1])
+        assert driver.capture_decode_graphs() == (1, 2, 4, 8)
+        assert driver.decode_graph_metadata()["cuda_graph_captures"] == 4
+        driver.shutdown()
+        assert worker.result(timeout=2) == 0
+
+    assert [runner.capture_calls for runner in local] == [1, 1]
+    assert [runner.synchronize_calls for runner in local] == [1, 1]
+
+
+def test_dist_graph_metadata_does_not_wait_for_serving_protocol_lock():
+    (comm,) = FakeCommunicator.create_group(1)
+    driver = DistTPModelRunner(comm, _GraphWarmupRunner((1, 2)))
+
+    driver._protocol_lock.acquire()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            snapshot = pool.submit(driver.decode_graph_metadata).result(
+                timeout=0.5
+            )
+    finally:
+        driver._protocol_lock.release()
+
+    assert snapshot["cuda_graph_buckets"] == (1, 2)
+
+
+def test_dist_startup_rejects_graph_skew_before_any_rank_captures():
+    comms = FakeCommunicator.create_group(2)
+    local = (
+        _GraphWarmupRunner((1, 2, 4, 8), max_pages=32),
+        _GraphWarmupRunner((1, 2, 4, 8), max_pages=31),
+    )
+    driver = DistTPModelRunner(comms[0], local[0])
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker = pool.submit(worker_step_loop, comms[1], local[1])
+        with pytest.raises(RuntimeError, match="configuration differs across ranks"):
+            driver.capture_decode_graphs()
+        with pytest.raises(RuntimeError, match="configuration differs across ranks"):
+            worker.result(timeout=2)
+
+    assert [runner.capture_calls for runner in local] == [0, 0]
+    assert [runner.synchronize_calls for runner in local] == [0, 0]
 
 
 def test_idle_shutdown_batches_and_deduplicates_releases_exactly_once():
@@ -1257,6 +1361,33 @@ def test_dist_runner_marks_a_failed_step_fatal_and_stops_collectives():
 
     assert comm.broadcasts == 1
     assert local.released == ["queued-before-failure", "request"]
+
+
+def test_launcher_abandon_drops_local_graphs_before_communicator_abort(
+    monkeypatch,
+    tmp_path,
+):
+    events = []
+
+    class LocalRunner:
+        def invalidate_graphs(self):
+            events.append("invalidate")
+
+    launcher = object.__new__(worker_module.DistTPLauncher)
+    launcher.runner = SimpleNamespace(_local=LocalRunner())
+    launcher._ctx = SimpleNamespace(processes=())
+    launcher._init_file = str(tmp_path / "missing-init-file")
+    launcher._abort_communicator = lambda: events.append("abort")
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        torch.distributed,
+        "destroy_process_group",
+        lambda: events.append("destroy"),
+    )
+
+    launcher._abandon_start()
+
+    assert events == ["invalidate", "abort", "destroy"]
 
 
 class _BrokenTensorComm:

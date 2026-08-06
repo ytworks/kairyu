@@ -68,7 +68,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 ### What works today
 
 - `kairyu serve --tp N` on real hardware: Qwen3-32B TP8, Llama-3.1-8B, Llama-3.3-70B FP8, Qwen3-VL-32B (via vLLM replica)
-- Attention backends: `auto`/torch/FlashInfer/FA3/FA4 with `/backends` reporting; CUDA-graph decode opt-in
+- Attention backends: `auto`/torch/FlashInfer/FA3/FA4 with `/backends` reporting; capable CUDA models pre-capture decode graphs before readiness
 - Quantized serving: FP8/INT8/AWQ/GPTQ/NVFP4 without full dequantization; opt-in FP8 EAGLE/MTP draft loading
 - Fully device-side sampling, penalties, spec verification, page-table caching; incremental detokenization and stop matching
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
@@ -92,6 +92,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-06 — [amendment] CUDA graph coverage moves to readiness-time defaults
+- What: supported real CUDA models now resolve omitted decode policy to CUDA graphs, size graph batch/page coverage from serving limits, pre-capture every bucket before single/TP/attention-DP EP readiness with bounded rank preflight and rollback, and export monotonic single/process/pool eager fallbacks to Prometheus; CPU, P-D, replicated EP, custom, and MLA paths stay eager by capability.
+- Why: lazy first-use capture blocked live traffic and the former batch/page defaults left common requests permanently eager without an operator-visible counter.
+- Refs: issue #320; m17 A26-A28; `kairyu/engine/{kairyu_backend,core/{step_executor,model_runner,worker}}.py`; `kairyu/entrypoints/server/metrics.py`; `tests/gpu/test_ep_attention_dp_cuda_graph_startup_gpu.py`
 
 ### 2026-08-06 — [progress] Offloaded-route endpoint context no longer trusts FastAPI's id cache
 - What: `_OffloadedRequestBodyRoute` now computes the validation-error endpoint context once from the live endpoint at route build instead of calling FastAPI's `_extract_endpoint_context`, and the flaky ZMQ cancelled-submit test waits on wall-clock time for the prompt worker thread.
@@ -132,4 +137,3 @@ in `.claude/rules/progress-log.md`).
 - What: extended generative benchmark adapters so `attempts > 1` runs one ordered consecutive-seed sweep per source item, retaining strict child outcomes beneath that item rather than flattening correlated repeats. Complete rows recompute seed means, sample SD, range, and unbiased `1-C(n-c,k)/C(n,k)` pass@k for declared binary adapters; incomplete or tampered matrices withhold the sensitivity summary, and ordinary Wilson intervals plus configuration A/B are disabled for multi-attempt evidence. Raw source-item identities, canonical parent/pair status and reason, denominators, realizable binary pass@k margins, and fresh history labels are cross-validated. Runner, report, and history boundaries also bind target seed/mode/temperature plus the attempt budget to retained methodology; schema-1 history omits the derived label after proving it against the raw pair, while a new protocol marker preserves old agentic multi-trial records. SciCode independently reruns each seed's whole sequential problem chain. Targets can select an explicit temperature or `sampling_mode: recommended`, which omits temperature/top-p/top-k/min-p/repetition-penalty so endpoint generation defaults may apply while explicitly declining remote attestation. External harnesses fail closed when those chat-only policies cannot be forwarded, and SWE-Bench Pro requires one attempt. The default single-attempt target serialization, target-config fingerprint input, temperature-zero request bytes, and absent seed remain byte-shape compatible.
 - Why: one deterministic chat call cannot quantify sampling noise or pass@k, but flattening repeated seeds would understate uncertainty and corrupt paired statistics. Explicit omission is also required to measure the model-owned generation defaults added by issue #351 without falsely claiming that a remote server applied them.
 - Refs: issue #371; `docs/benchmarks.md`; `examples/bench_{fugu,core}.yaml`; `kairyu/bench/{sampling,types,aggregate,config,cli,config_ab,history}.py`; `kairyu/bench/adapters/{base,ifeval,scicode,swebench_pro,terminal_bench,tau_bench}.py`; `tests/bench/test_bench_{sampling_sensitivity,config,config_ab,history,agentic_conditions,scicode_sequential,runner}.py`
-

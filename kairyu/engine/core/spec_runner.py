@@ -70,6 +70,16 @@ class SpeculativeRunner:
         if release is not None:
             release(request_id)
 
+    def decode_graph_metadata(self) -> object:
+        """Forward live graph counters from the wrapped target runner."""
+
+        getter = getattr(self._runner, "decode_graph_metadata", None)
+        if not callable(getter):
+            raise RuntimeError(
+                f"{type(self._runner).__name__} exposes no decode-graph metadata"
+            )
+        return getter()
+
     def set_batched_verification_enabled(self, enabled: bool) -> None:
         """Forward the matched-A/B and rollback switch to the target runner."""
         setter = getattr(self._runner, "set_batched_verification_enabled", None)
