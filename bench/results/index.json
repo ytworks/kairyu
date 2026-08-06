@@ -442,6 +442,15 @@
       "verdict": "pass"
     },
     {
+      "artifact_path": "bench/results/issue-318-pipeline-depth-qwen3-32b-rtxpro6000-2026-08-06",
+      "commit": "5d40e37a25f3c089bc9c69561930ea57e8c7bbf7",
+      "date": "2026-08-06",
+      "gate_id": "issue-318",
+      "hardware": "4x-nvidia-rtx-pro-6000-blackwell",
+      "summary_path": "bench/results/issue-318-pipeline-depth-qwen3-32b-rtxpro6000-2026-08-06/summary.json",
+      "verdict": "diagnostic"
+    },
+    {
       "artifact_path": "bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-2026-08-05",
       "commit": "65ba4779c118d534f1e34a1a4dcb1b579cbcfe73",
       "date": "2026-08-05",

@@ -1,0 +1,371 @@
+{
+  "artifact_sha256": {
+    "raw/issue318-candidate-depth2-r0.json": "7c5f7855141d84808927eb9f2e34bf854e382c9550a7ef590e33f899be085787",
+    "raw/issue318-candidate-r2.json": "6e7f6f364d9f8f66403ce27e2cf146edd9d3fefa1ddf94f6f140b059031ad8ce",
+    "raw/issue318-candidate-r3.json": "41980b7eedf259f9b36a2aa18349f8e644cc4fa44dd062ce099138867e18d223",
+    "raw/issue318-candidate-r4.json": "4798f087dab974076ad75d27df236dfe9174dbfe6e0a25b773ff0de8c0c12906",
+    "raw/issue318-main-r0.json": "444071839dfd33802004d3f84373feeb60d5f18f8a49132699834adbc1e6fc59",
+    "raw/issue318-main-r1.json": "59e54648c0bce0c9ab8afc5bf34d3ed965932d61bbd8d2ed02aad93f968d2fe3",
+    "raw/issue318-main-r2.json": "f49962c5a67d2a498fc71d342ff08e122729881c748bf21f073058b532b9fdaa",
+    "raw/issue318-main-r3.json": "432f3edbab5c2e996c69962e05bea3150077c8c7d21ed4447362f31ea940692a",
+    "raw/issue318-refined-candidate-r0.json": "117ef5bd6f8315bb6b0023f7de8338db9c35a606af4f7f68fd14f737230264cc",
+    "raw/issue318-refined-candidate-r1.json": "23b4cd27a05059365808e8ebab785ce8d3793bc20962cc33fbfebf120d2926eb",
+    "raw/issue318-refined-main-r0.json": "25e008d8e12021f457dda284ef0333805b0329ad2283e6a6de15702bf15ee077",
+    "raw/issue318-refined-main-r1.json": "6430df51339cb066d198c73c156d402e12d4202cb935384fd53d73fb5e0a2298"
+  },
+  "comparisons_percent": {
+    "candidate_depth2_vs_adjacent_main_r3": {
+      "output_tokens_per_s": -0.256511,
+      "tpot_p50": -1.993311,
+      "tpot_p99": 0.970856,
+      "ttft_p50": -1.220102,
+      "ttft_p99": 0.608655
+    },
+    "initial_candidate_vs_all_main_mean": {
+      "output_tokens_per_s": -3.620746,
+      "tpot_p50": 1.524566,
+      "tpot_p99": 3.170249,
+      "ttft_p50": 4.729504,
+      "ttft_p99": 4.037492
+    },
+    "initial_candidate_vs_primary_main_mean": {
+      "output_tokens_per_s": -4.010386,
+      "tpot_p50": 2.128053,
+      "tpot_p99": 3.411943,
+      "ttft_p50": 5.379566,
+      "ttft_p99": 4.477821
+    },
+    "initial_candidate_vs_primary_main_median": {
+      "output_tokens_per_s": -3.350837,
+      "tpot_p50": 0.994988,
+      "tpot_p99": 2.404461,
+      "ttft_p50": 4.020985,
+      "ttft_p99": 3.716014
+    },
+    "refined_candidate_vs_refined_main_aggregate": {
+      "output_tokens_per_s": -0.095928,
+      "tpot_p50": 0.944445,
+      "tpot_p99": 1.114617,
+      "ttft_p50": 0.265628,
+      "ttft_p99": 0.163674
+    },
+    "refined_candidate_vs_refined_main_r0": {
+      "output_tokens_per_s": -1.995146,
+      "tpot_p50": 3.203923,
+      "tpot_p99": 5.084812,
+      "ttft_p50": 2.257132,
+      "ttft_p99": 2.107335
+    },
+    "refined_candidate_vs_refined_main_r1": {
+      "output_tokens_per_s": 1.871560,
+      "tpot_p50": -1.221192,
+      "tpot_p99": -2.759402,
+      "ttft_p50": -1.690560,
+      "ttft_p99": -1.711910
+    }
+  },
+  "cpu_replay": {
+    "initial_candidate_reported_diagnostic": {
+      "candidate": {
+        "fragmented_plans": 213,
+        "mean_rows": 15.241187,
+        "submissions": 1078
+      },
+      "legacy": {
+        "fragmented_plans": 81,
+        "mean_rows": 15.767754318618042,
+        "submissions": 1042
+      },
+      "shape": "varied",
+      "shared_device_tokens": 77150,
+      "shared_rows": 16430
+    },
+    "refined_candidate_reproduced_diagnostic": {
+      "candidate": {
+        "fragmented_plans": 81,
+        "mean_rows": 15.767754318618042,
+        "submissions": 1042
+      },
+      "legacy": {
+        "fragmented_plans": 81,
+        "mean_rows": 15.767754318618042,
+        "submissions": 1042
+      },
+      "shape": "varied",
+      "shared_device_tokens": 77150,
+      "shared_rows": 16430
+    },
+    "timings_are_performance_evidence": false
+  },
+  "date": "2026-08-06",
+  "diagnostic_only": true,
+  "disposition": "retain_existing_depth_two_admission_horizon",
+  "groups": {
+    "all_main_sensitivity": {
+      "files": [
+        "raw/issue318-main-r0.json",
+        "raw/issue318-main-r1.json",
+        "raw/issue318-main-r2.json",
+        "raw/issue318-main-r3.json"
+      ],
+      "metrics": {
+        "output_tokens_per_s": {
+          "maximum": 543.769754,
+          "mean": 532.835231,
+          "median": 530.612288,
+          "minimum": 526.346596
+        },
+        "tpot_p50_ms": {
+          "maximum": 28.838603,
+          "mean": 28.336276,
+          "median": 28.386963,
+          "minimum": 27.732575
+        },
+        "tpot_p99_ms": {
+          "maximum": 30.148528,
+          "mean": 29.811685,
+          "median": 30.007791,
+          "minimum": 29.082629
+        },
+        "ttft_p50_ms": {
+          "maximum": 12623.070291,
+          "mean": 12393.708551,
+          "median": 12472.359291,
+          "minimum": 12007.045332
+        },
+        "ttft_p99_ms": {
+          "maximum": 27770.131439,
+          "mean": 27423.398309,
+          "median": 27578.685436,
+          "minimum": 26766.090924
+        }
+      },
+      "n": 4
+    },
+    "candidate_depth2": {
+      "files": [
+        "raw/issue318-candidate-depth2-r0.json"
+      ],
+      "metrics": {
+        "output_tokens_per_s": 524.996460,
+        "tpot_p50_ms": 28.263760,
+        "tpot_p99_ms": 30.312170,
+        "ttft_p50_ms": 12469.055966,
+        "ttft_p99_ms": 27939.155777
+      },
+      "n": 1
+    },
+    "initial_candidate_depth5": {
+      "files": [
+        "raw/issue318-candidate-r2.json",
+        "raw/issue318-candidate-r3.json",
+        "raw/issue318-candidate-r4.json"
+      ],
+      "metrics": {
+        "output_tokens_per_s": {
+          "maximum": 515.566465,
+          "mean": 513.542621,
+          "median": 514.201331,
+          "minimum": 510.860066
+        },
+        "tpot_p50_ms": {
+          "maximum": 29.108006,
+          "mean": 28.768281,
+          "median": 28.623043,
+          "minimum": 28.573795
+        },
+        "tpot_p99_ms": {
+          "maximum": 31.209398,
+          "mean": 30.756789,
+          "median": 30.716085,
+          "minimum": 30.344885
+        },
+        "ttft_p50_ms": {
+          "maximum": 13145.760605,
+          "mean": 12979.869525,
+          "median": 12930.828903,
+          "minimum": 12863.019068
+        },
+        "ttft_p99_ms": {
+          "maximum": 28611.658562,
+          "mean": 28530.615827,
+          "median": 28592.059517,
+          "minimum": 28388.129403
+        }
+      },
+      "n": 3
+    },
+    "main_r3_drift_control": {
+      "files": [
+        "raw/issue318-main-r3.json"
+      ],
+      "metrics": {
+        "output_tokens_per_s": 526.346596,
+        "tpot_p50_ms": 28.838603,
+        "tpot_p99_ms": 30.020712,
+        "ttft_p50_ms": 12623.070291,
+        "ttft_p99_ms": 27770.131439
+      },
+      "n": 1
+    },
+    "primary_main": {
+      "files": [
+        "raw/issue318-main-r0.json",
+        "raw/issue318-main-r1.json",
+        "raw/issue318-main-r2.json"
+      ],
+      "metrics": {
+        "output_tokens_per_s": {
+          "maximum": 543.769754,
+          "mean": 534.998110,
+          "median": 532.028745,
+          "minimum": 529.195830
+        },
+        "tpot_p50_ms": {
+          "maximum": 28.432873,
+          "mean": 28.168834,
+          "median": 28.341053,
+          "minimum": 27.732575
+        },
+        "tpot_p99_ms": {
+          "maximum": 30.148528,
+          "mean": 29.742009,
+          "median": 29.994870,
+          "minimum": 29.082629
+        },
+        "ttft_p50_ms": {
+          "maximum": 12513.737565,
+          "mean": 12317.254638,
+          "median": 12430.981017,
+          "minimum": 12007.045332
+        },
+        "ttft_p99_ms": {
+          "maximum": 27589.728675,
+          "mean": 27307.820599,
+          "median": 27567.642197,
+          "minimum": 26766.090924
+        }
+      },
+      "n": 3
+    },
+    "refined_candidate": {
+      "files": [
+        "raw/issue318-refined-candidate-r0.json",
+        "raw/issue318-refined-candidate-r1.json"
+      ],
+      "metrics": {
+        "output_tokens_per_s": {
+          "maximum": 534.011475,
+          "mean": 533.110415,
+          "median": 533.110415,
+          "minimum": 532.209355
+        },
+        "tpot_p50_ms": {
+          "maximum": 28.255138,
+          "mean": 28.235308,
+          "median": 28.235308,
+          "minimum": 28.215478
+        },
+        "tpot_p99_ms": {
+          "maximum": 31.438569,
+          "mean": 30.626290,
+          "median": 30.626290,
+          "minimum": 29.814011
+        },
+        "ttft_p50_ms": {
+          "maximum": 12601.486805,
+          "mean": 12467.603494,
+          "median": 12467.603494,
+          "minimum": 12333.720182
+        },
+        "ttft_p99_ms": {
+          "maximum": 27431.093365,
+          "mean": 27397.277350,
+          "median": 27397.277350,
+          "minimum": 27363.461334
+        }
+      },
+      "n": 2
+    },
+    "refined_main": {
+      "files": [
+        "raw/issue318-refined-main-r0.json",
+        "raw/issue318-refined-main-r1.json"
+      ],
+      "metrics": {
+        "output_tokens_per_s": {
+          "maximum": 543.043873,
+          "mean": 533.622307,
+          "median": 533.622307,
+          "minimum": 524.200742
+        },
+        "tpot_p50_ms": {
+          "maximum": 28.564303,
+          "mean": 27.971136,
+          "median": 27.971136,
+          "minimum": 27.377969
+        },
+        "tpot_p99_ms": {
+          "maximum": 30.660045,
+          "mean": 30.288687,
+          "median": 30.288687,
+          "minimum": 29.917329
+        },
+        "ttft_p50_ms": {
+          "maximum": 12545.814654,
+          "mean": 12434.573765,
+          "median": 12434.573765,
+          "minimum": 12323.332876
+        },
+        "ttft_p99_ms": {
+          "maximum": 27840.057962,
+          "mean": 27352.508272,
+          "median": 27352.508272,
+          "minimum": 26864.958581
+        }
+      },
+      "n": 2
+    }
+  },
+  "integrity": {
+    "all_raw_aggregates_recomputed": true,
+    "all_request_identity_sha256": "c83938d2806e933be8db8b37bbe85db593619c96bd77ad83dd6163d02dc389c0",
+    "completion_tokens_per_run": 16384,
+    "measurement_requests_per_run": 128,
+    "measurement_successes_per_run": 128,
+    "prompt_tokens_per_run": 16311,
+    "source_commit": "5d40e37a25f3c089bc9c69561930ea57e8c7bbf7",
+    "source_tree": "95f262343bfc282aaaf9161213bce1c11158e9f6",
+    "total_tokens_per_run": 32695
+  },
+  "issue": 318,
+  "limitations": [
+    "The initial eight schema-v1 artifacts do not bind the config, trace, measurement script, image, container, process tree, or continuous GPU telemetry.",
+    "The intended depth-2 diagnostic identifies depth only by its label and campaign config; the artifact does not independently bind that override.",
+    "The initial CPU replay counts are reported diagnostics; its raw output and exact candidate diff were not retained for independent reproduction.",
+    "Dirty candidate artifacts retain diff hashes but not diff bodies or resulting tree hashes, so those source trees are not independently reconstructible.",
+    "The abandoned final experimental diff 694fa13324398b5052fd01052bd3deb694239b25c70e9f198f4befdacefd63b5 has no GPU measurement and differs from both measured candidate diffs.",
+    "The initial order M0,M1,M2,C2,C3,C4,M3,D2 is not randomized; M3 is explicitly labeled drift.",
+    "The refined C0,M0,M1,C1 sequence has only two pairs and reverses direction between pairs.",
+    "The retained trace request identities match, but its formal A6 metadata declares pipeline depth 1; these runs are an issue-318 diagnostic override, not a formal A6 result.",
+    "No artifact records pending-depth or plan/graph-transaction geometry; the candidate counters are non-causal.",
+    "This 128-request closed burst is not a long-duration open-loop or SLO-goodput gate."
+  ],
+  "provenance": {
+    "initial_candidate_diff_sha256": "54612e3d25d050e328dc550d84189785229d7badcca5591a2a36e5cf011327c5",
+    "main_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "refined_candidate_diff_sha256": "0c49c0ca1a4a816d391c5ded17b75e260276c476f23d09197ad038fc53ccc512",
+    "refined_config_sha256": "f9d17cdf4e7a311d915395d6fb25a01e68c130a0cccd282af17ac473e4cdd648",
+    "refined_image_id": "sha256:325e97d3f51ce576e8b175e2eb3b4e02ee8c72b3c7da0915b1744cb095898145",
+    "refined_measurement_script_sha256": "7cf2f2bb8ab6679d0cb4f3d7f6f13357a031591574dd42aa05500a4fcbd084de",
+    "refined_trace_sha256": "93fafd75917980b220a418608635b478868b999861e45c33aff8026234578c6d",
+    "scripts": {
+      "configs/issue318-depth2.yaml": "0217141e47ac9c18d1aa624529daaee480bcc252a40905eda3aaa16068e21783",
+      "scripts/issue318_ab_run.sh": "657ab105509e4d46af0c64f817b2681e1ffd35c8b2ba39322662c72786bb8639",
+      "scripts/issue318_cpu_probe.py": "bde4bdae795e6b0a2fd63666b8543f5614d92a92d3974668bb5e47f50f69c10c",
+      "scripts/issue318_measure.py": "7cf2f2bb8ab6679d0cb4f3d7f6f13357a031591574dd42aa05500a4fcbd084de"
+    }
+  },
+  "schema_version": "kairyu.issue-318.pipeline-depth-negative.v1",
+  "verdict": "no_measured_benefit_depth_gt_2"
+}
