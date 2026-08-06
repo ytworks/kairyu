@@ -276,6 +276,41 @@ async def test_custom_request_validation_handler_receives_parsed_body():
     }
 
 
+async def test_endpoint_context_survives_poisoned_fastapi_id_cache(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # FastAPI's _extract_endpoint_context caches by id(func) without keeping
+    # the function alive, so a recycled address can serve a stale context of a
+    # dead endpoint. The offloaded route must not consult that cache.
+    from fastapi import routing as fastapi_routing
+
+    app = FastAPI()
+    app.router.route_class = server_app._OffloadedRequestBodyRoute
+
+    @app.exception_handler(RequestValidationError)
+    async def custom_handler(_request, error):
+        return JSONResponse(
+            status_code=499,
+            content={"function": error.endpoint_ctx.get("function")},
+        )
+
+    @app.post("/probe")
+    async def probe(body: ChatCompletionRequest):
+        return body
+
+    monkeypatch.setitem(
+        fastapi_routing._endpoint_context_cache,
+        id(probe),
+        {"function": "stale_recycled_endpoint"},
+    )
+
+    async with _client(app) as client:
+        response = await client.post("/probe", json={"model": "m"})
+
+    assert response.status_code == 499
+    assert response.json() == {"function": "probe"}
+
+
 async def test_custom_body_parse_handler_receives_original_exception_cause():
     app = FastAPI()
     app.router.route_class = server_app._OffloadedRequestBodyRoute

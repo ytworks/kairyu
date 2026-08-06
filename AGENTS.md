@@ -17,6 +17,7 @@ shared with Claude Code via `CLAUDE.md` — do not duplicate or diverge from the
 ## Where things live
 
 - Design decisions and rationale (D-IDs, review amendments): `docs/design/m1..m4-*.md`
+- Archived progress history (old Change Log entries, status snapshots): `docs/progress/archive/`
 - GPU-day execution plan: `docs/gpu-runbook.md`
 - Implementation plans: `docs/superpowers/plans/`
 - Dev commands: `uv sync --extra dev`, `uv run pytest`, `uv run ruff check .`

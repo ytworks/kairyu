@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import email.message
+import inspect
 import json
 import logging
 import math
@@ -26,7 +27,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import EndpointContext, RequestValidationError
 from fastapi.responses import JSONResponse, Response
-from fastapi.routing import APIRoute, _extract_endpoint_context
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 
@@ -255,6 +256,23 @@ def _request_body_is_json(request: Request, *, strict: bool) -> bool:
     return subtype == "json" or subtype.endswith("+json")
 
 
+def _endpoint_context(func: Any) -> EndpointContext:
+    # FastAPI's _extract_endpoint_context caches by id(func) without holding a
+    # reference, so a garbage-collected endpoint can poison the cache for a new
+    # endpoint reusing the same address; compute from the live function instead.
+    ctx = EndpointContext()
+    try:
+        if (source_file := inspect.getsourcefile(func)) is not None:
+            ctx["file"] = source_file
+        if (line_number := inspect.getsourcelines(func)[1]) is not None:
+            ctx["line"] = line_number
+        if (func_name := getattr(func, "__name__", None)) is not None:
+            ctx["function"] = func_name
+    except Exception:
+        ctx = EndpointContext()
+    return ctx
+
+
 class _OffloadedRequestBodyRoute(APIRoute):
     """Pre-cache large chat/route models without changing their public schema."""
 
@@ -262,6 +280,7 @@ class _OffloadedRequestBodyRoute(APIRoute):
         original = super().get_route_handler()
         body_field = self.body_field
         dependant = self.dependant
+        base_endpoint_ctx = _endpoint_context(dependant.call)
         body_model = (
             None
             if body_field is None or not dependant.body_params
@@ -314,7 +333,7 @@ class _OffloadedRequestBodyRoute(APIRoute):
                 if handler is request_validation_exception_handler:
                     return prepared.error_response
                 assert prepared.validation_errors is not None
-                endpoint_ctx = EndpointContext(_extract_endpoint_context(dependant.call))
+                endpoint_ctx = EndpointContext(base_endpoint_ctx)
                 if dependant.path:
                     mount_path = request.scope.get("root_path", "").rstrip("/")
                     endpoint_ctx["path"] = f"{request.method} {mount_path}{dependant.path}"
