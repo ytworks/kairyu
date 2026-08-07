@@ -82,7 +82,9 @@ original_max_position_embeddings), `max_position_embeddings`,
   are imported once rather than inside per-layer calls. Q/K joint-fusion type,
   epsilon, and module identity are cached with dense packs, while hooks and
   instance forward overrides remain dynamically checked so module semantics
-  are unchanged.
+  are unchanged. Native real-model admission defaults an omitted
+  `max_model_len` to this table limit and rejects a larger override at startup,
+  so no CPU index error or CUDA device assert can occur past the resident table.
 - Computation dtype: fp32 on CPU for parity tests; the module honors
   `torch_dtype` for load (bf16 weights cast to fp32 compute on CPU — recorded;
   GPU keeps native dtype).

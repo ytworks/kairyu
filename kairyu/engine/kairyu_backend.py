@@ -168,6 +168,30 @@ def _default_cuda_graph_max_pages(
     return min(required, graph_page_capacity)
 
 
+def _resolve_model_max_model_len(
+    model_path: str,
+    max_model_len: int | None,
+) -> int | None:
+    """Bind native admission to the resident precomputed RoPE table."""
+
+    config_path = Path(model_path) / "config.json"
+    if not config_path.is_file():
+        return max_model_len
+    raw = json.loads(config_path.read_text())
+    position_limit = raw.get("max_position_embeddings", 4096)
+    if type(position_limit) is not int or position_limit < 1:
+        raise ValueError("max_position_embeddings must be an integer >= 1")
+    if max_model_len is None:
+        return position_limit
+    if max_model_len > position_limit:
+        raise ValueError(
+            f"max_model_len={max_model_len} exceeds the model's "
+            f"max_position_embeddings={position_limit}; the precomputed RoPE "
+            "table cannot serve positions beyond the model limit"
+        )
+    return max_model_len
+
+
 @dataclass
 class _PromptPreparationFlight:
     """One pure prompt computation shared by same-object async callers."""
@@ -497,6 +521,11 @@ def build_engine_loop(
         )
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
+    if model_path is not None:
+        max_model_len = _resolve_model_max_model_len(
+            model_path,
+            max_model_len,
+        )
     decode_mode = _resolve_decode_mode(
         decode_mode,
         model_path=model_path,

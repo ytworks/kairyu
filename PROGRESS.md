@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Native admission is bounded by the RoPE table
+- What: real-model builders default an omitted `max_model_len` to `max_position_embeddings` and reject a larger override before loading or serving, across single-rank, TP, EP, P-D, and process-split paths.
+- Why: a fixed resident RoPE table must fail cleanly at admission rather than let an out-of-range gather raise on CPU or poison a CUDA context.
+- Refs: issue #332; m12 D2; `kairyu/engine/kairyu_backend.py`; `tests/unit/test_model_loader_backend.py`
+
 ### 2026-08-07 — [amendment] Model and stream hot paths avoid repeated setup
 - What: rotary cos/sin is precomputed to the model position limit and gathered per step; scaled dense RoPE uses the fused kernel; invariant Q/K guards and kernel imports leave layer loops; tokenless nonterminal updates and wire materialization are skipped; sampler conversion makes one mutable copy.
 - Why: decode repeatedly launched position/trig kernels, evaluated invariant guards/imports, and constructed cumulative output work even when no request produced a token.
