@@ -391,6 +391,22 @@ class ServerMetrics:
             ["endpoint", "phase"],
             registry=self.registry,
         )
+        self.admission_active_requests = Gauge(
+            "kairyu_admission_active_requests",
+            "Requests holding backend-aware HTTP admission slots",
+            registry=self.registry,
+        )
+        self.admission_waiting_requests = Gauge(
+            "kairyu_admission_waiting_requests",
+            "Requests waiting for backend-aware HTTP admission slots",
+            registry=self.registry,
+        )
+        self.admission_rejections_total = Counter(
+            "kairyu_admission_rejections",
+            "Backend-aware HTTP admission rejections by bounded reason",
+            ["reason"],
+            registry=self.registry,
+        )
         self.batch_jobs_total = Counter(
             "kairyu_batch_jobs",
             "Batch jobs by terminal state",
@@ -452,6 +468,15 @@ class ServerMetrics:
 
     def track_slo_admission(self, controller: object) -> None:
         self._slo_admission_collector.set(controller)
+
+    def set_admission_depth(self, *, active: int, waiting: int) -> None:
+        self.admission_active_requests.set(active)
+        self.admission_waiting_requests.set(waiting)
+
+    def record_admission_rejection(self, reason: str) -> None:
+        if reason not in {"overflow", "timeout"}:
+            raise ValueError(f"invalid admission rejection reason {reason!r}")
+        self.admission_rejections_total.labels(reason=reason).inc()
 
     def record_preplacement_phase(
         self,

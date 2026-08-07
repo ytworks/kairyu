@@ -75,9 +75,10 @@ async def test_constructor_preserves_legacy_tokenizer_positional_slot():
 
 
 async def test_constructor_forwards_partial_prefill_limit_to_child_config():
-    backend = ZmqEngineBackend(max_num_partial_prefills=7)
+    backend = ZmqEngineBackend(max_num_partial_prefills=7, max_num_seqs=13)
 
     assert backend._config["max_num_partial_prefills"] == 7
+    assert backend.sequence_budget == 13
 
 
 async def test_validation_key_uses_effective_tokenizer_and_context_contract():

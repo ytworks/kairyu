@@ -102,6 +102,7 @@ def test_validation_key_uses_effective_tokenizer_and_context_contract() -> None:
     )
     first, equivalent, different_limit, custom_tokenizer, subclass = backends
     try:
+        assert first.sequence_budget == 256
         assert first.request_validation_key == (None, "toy", 32)
         assert first.request_validation_key == equivalent.request_validation_key
         assert first.request_validation_key != different_limit.request_validation_key

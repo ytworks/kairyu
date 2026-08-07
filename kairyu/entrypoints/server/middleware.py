@@ -7,6 +7,7 @@ full streamed response (design m7 D4/D5/D8).
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -131,40 +132,134 @@ class AuthMiddleware:
 
 
 class ConcurrencyLimitMiddleware:
-    """Global in-flight cap on /v1/*; saturation returns 429 + Retry-After (m7 D5).
+    """Bound active and queued /v1/* work; saturation returns 429 (m7 D5).
 
     Fine-grained per-client rate limiting is the edge WAF/LB's job — this guard
     only protects the process from overload.
     """
 
-    def __init__(self, app: _ASGIApp, *, limit: int) -> None:
+    def __init__(
+        self,
+        app: _ASGIApp,
+        *,
+        limit: int,
+        total_limit: int,
+        wait_timeout_s: float | None,
+        metrics=None,
+    ) -> None:
+        if not 1 <= limit <= total_limit:
+            raise ValueError("active limit must be within the total concurrency limit")
+        if wait_timeout_s is not None and wait_timeout_s <= 0:
+            raise ValueError("admission wait timeout must be positive")
+        if total_limit > limit and wait_timeout_s is None:
+            raise ValueError("an admission queue requires a wait timeout")
         self.app = app
         self._limit = limit
+        self._total_limit = total_limit
+        self._queue_limit = total_limit - limit
+        self._wait_timeout_s = wait_timeout_s
+        self._metrics = metrics
         self._active = 0
+        self._waiters: deque[asyncio.Future[None]] = deque()
+
+    def _publish_depth(self) -> None:
+        if self._metrics is not None:
+            self._metrics.set_admission_depth(
+                active=self._active,
+                waiting=len(self._waiters),
+            )
+
+    def _record_rejection(self, reason: str) -> None:
+        if self._metrics is not None:
+            self._metrics.record_admission_rejection(reason)
+
+    def _discard_waiter(self, waiter: asyncio.Future[None]) -> None:
+        try:
+            self._waiters.remove(waiter)
+        except ValueError:
+            return
+        self._publish_depth()
+
+    def _release_slot(self) -> None:
+        while self._waiters:
+            waiter = self._waiters.popleft()
+            if waiter.done():
+                continue
+            self._publish_depth()
+            waiter.set_result(None)
+            return
+        self._active -= 1
+        self._publish_depth()
+
+    async def _reject(self, send: Callable, message: str) -> None:
+        await _send_json(
+            send,
+            429,
+            {
+                "error": {
+                    "message": message,
+                    "type": "rate_limit_error",
+                    "code": "concurrency_exceeded",
+                }
+            },
+            {"retry-after": "1"},
+        )
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http" or not scope["path"].startswith(_GUARDED_PREFIX):
             await self.app(scope, receive, send)
             return
-        if self._active >= self._limit:
-            await _send_json(
-                send,
-                429,
-                {
-                    "error": {
-                        "message": f"server is at max concurrency ({self._limit})",
-                        "type": "rate_limit_error",
-                        "code": "concurrency_exceeded",
-                    }
-                },
-                {"retry-after": "1"},
-            )
-            return
-        self._active += 1
+        acquired = False
+        if self._active >= self._limit or self._waiters:
+            if len(self._waiters) >= self._queue_limit:
+                message = (
+                    f"server is at max concurrency ({self._limit})"
+                    if self._queue_limit == 0
+                    else f"server admission queue is full ({self._total_limit})"
+                )
+                self._record_rejection("overflow")
+                await self._reject(
+                    send,
+                    message,
+                )
+                return
+            waiter = asyncio.get_running_loop().create_future()
+            self._waiters.append(waiter)
+            self._publish_depth()
+            try:
+                assert self._wait_timeout_s is not None
+                await asyncio.wait_for(
+                    waiter,
+                    timeout=self._wait_timeout_s,
+                )
+                acquired = True
+            except TimeoutError:
+                if waiter.done() and not waiter.cancelled():
+                    acquired = True
+                else:
+                    self._discard_waiter(waiter)
+                    self._record_rejection("timeout")
+                    await self._reject(
+                        send,
+                        "server admission queue wait timed out",
+                    )
+                    return
+            except asyncio.CancelledError:
+                if waiter.done() and not waiter.cancelled():
+                    self._release_slot()
+                else:
+                    waiter.cancel()
+                    self._discard_waiter(waiter)
+                raise
+        else:
+            self._active += 1
+            acquired = True
+            self._publish_depth()
+        assert acquired
         try:
             await self.app(scope, receive, send)
         finally:
-            self._active -= 1
+            self._release_slot()
 
 
 class ChatBodyLimitMiddleware:

@@ -377,6 +377,7 @@ def expected_kairyu_config(tp: int) -> dict[str, object]:
             "api_keys_env": None,
             "access_log": False,
             "max_concurrency": SHAREGPT_CONCURRENCY,
+            "admission_wait_timeout_s": DEFAULT_TIMEOUT_S,
         },
         "engines": {
             "qwen3-32b": {

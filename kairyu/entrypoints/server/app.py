@@ -46,6 +46,7 @@ from kairyu.engine.backend import (
     GenerationUsage,
     UpstreamClientError,
     backend_admission_upper_bound_async,
+    backend_sequence_budget,
     backend_supports_slo_defer,
     prepare_backend_request,
     validate_backend_request_before_prepare,
@@ -1649,6 +1650,12 @@ def _record_ingress_to_handler(http_request: Request, endpoint: str) -> None:
         )
 
 
+def _server_sequence_budget(engines: Mapping[str, EngineBackend]) -> int | None:
+    if len(engines) != 1:
+        return None
+    return backend_sequence_budget(next(iter(engines.values())))
+
+
 def create_app(
     engines: Mapping[str, EngineBackend],
     orchestrator: Orchestrator | None = None,
@@ -1771,7 +1778,31 @@ def create_app(
     if metrics is not None:
         app.add_middleware(MetricsMiddleware, metrics=metrics)
     if settings.max_concurrency is not None:
-        app.add_middleware(ConcurrencyLimitMiddleware, limit=settings.max_concurrency)
+        sequence_budget = (
+            _server_sequence_budget(served_engines)
+            if settings.admission_wait_timeout_s is not None
+            and not auto_models
+            and not served_embedding_backends
+            else None
+        )
+        if settings.admission_wait_timeout_s is not None and sequence_budget is None:
+            logger.warning(
+                "backend-aware admission queue disabled: serve exactly one "
+                "generation backend with an advertised sequence budget and "
+                "no orchestrated or embedding models"
+            )
+        active_limit = (
+            min(settings.max_concurrency, sequence_budget)
+            if sequence_budget is not None
+            else settings.max_concurrency
+        )
+        app.add_middleware(
+            ConcurrencyLimitMiddleware,
+            limit=active_limit,
+            total_limit=settings.max_concurrency,
+            wait_timeout_s=settings.admission_wait_timeout_s,
+            metrics=metrics,
+        )
     if tenant_config is not None:
         from kairyu.entrypoints.server.tenancy import (
             TenantLimiter,

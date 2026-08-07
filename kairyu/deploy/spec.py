@@ -182,7 +182,19 @@ class ServerSection(BaseModel):
     max_concurrency: int | None = Field(
         default=None,
         ge=1,
-        description="Global in-flight cap on /v1/* requests; None disables the guard.",
+        description=(
+            "Global active-plus-queued cap on /v1/* requests; None disables "
+            "the guard."
+        ),
+    )
+    admission_wait_timeout_s: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Maximum wait for a backend-aware active request slot; None "
+            "preserves immediate saturation rejection."
+        ),
     )
     ttft_slo_s: float | None = Field(
         default=None,
@@ -227,12 +239,21 @@ class ServerSection(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _admission_queue_requires_total_bound(self) -> ServerSection:
+        if self.admission_wait_timeout_s is not None and self.max_concurrency is None:
+            raise ValueError(
+                "admission_wait_timeout_s requires max_concurrency"
+            )
+        return self
+
     def to_server_settings(self) -> ServerSettings:
         """Translate the deployment vocabulary to runtime settings explicitly."""
 
         return ServerSettings(
             api_keys_env=self.api_keys_env,
             max_concurrency=self.max_concurrency,
+            admission_wait_timeout_s=self.admission_wait_timeout_s,
             ttft_slo_s=self.ttft_slo_s,
             max_chat_body_bytes=self.max_chat_body_bytes,
             metrics=self.metrics,

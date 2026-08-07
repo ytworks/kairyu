@@ -119,10 +119,12 @@ def _capturing_backend(monkeypatch) -> tuple[VLLMBackend, _CapturingEngine]:
 
 def test_tensor_parallel_size_reaches_vllm_engine_args(monkeypatch):
     captured = _install_fake_vllm(monkeypatch)
-    VLLMBackend(model="m", tensor_parallel_size=4)
+    backend = VLLMBackend(model="m", tensor_parallel_size=4, max_num_seqs=13)
     assert captured["model"] == "m"
     assert captured["tensor_parallel_size"] == 4
+    assert captured["max_num_seqs"] == 13
     assert captured["scheduling_policy"] == "priority"
+    assert backend.sequence_budget == 13
 
 
 def test_vllm_backend_rejects_fcfs_that_would_ignore_priority(monkeypatch):

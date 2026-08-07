@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ServerSettings(BaseModel):
@@ -24,7 +24,19 @@ class ServerSettings(BaseModel):
     max_concurrency: int | None = Field(
         default=None,
         ge=1,
-        description="Global in-flight cap on /v1/* requests; None disables the guard.",
+        description=(
+            "Global active-plus-queued cap on /v1/* requests; None disables "
+            "the guard."
+        ),
+    )
+    admission_wait_timeout_s: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "Maximum wait for a backend-aware active request slot; None "
+            "preserves immediate saturation rejection."
+        ),
     )
     ttft_slo_s: float | None = Field(
         default=None,
@@ -66,6 +78,14 @@ class ServerSettings(BaseModel):
             "data-plane key cannot take the node out of service (S5)."
         ),
     )
+
+    @model_validator(mode="after")
+    def _admission_queue_requires_total_bound(self) -> ServerSettings:
+        if self.admission_wait_timeout_s is not None and self.max_concurrency is None:
+            raise ValueError(
+                "admission_wait_timeout_s requires max_concurrency"
+            )
+        return self
 
     def resolve_api_keys(self) -> frozenset[str]:
         """Read keys from the configured env var; fail loud on an empty var."""

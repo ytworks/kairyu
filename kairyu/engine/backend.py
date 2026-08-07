@@ -577,6 +577,17 @@ class EngineBackend(Protocol):
     async def shutdown(self) -> None: ...
 
 
+def backend_sequence_budget(backend: object) -> int | None:
+    """Return an optional backend-advertised active sequence budget."""
+
+    budget = getattr(backend, "sequence_budget", None)
+    if budget is None:
+        return None
+    if type(budget) is not int or budget < 1:
+        raise TypeError("backend sequence_budget must be a positive integer")
+    return budget
+
+
 def backend_supports_slo_defer(
     backend: object,
     request: GenerationRequest | None = None,

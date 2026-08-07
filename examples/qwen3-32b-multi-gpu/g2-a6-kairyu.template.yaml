@@ -6,6 +6,9 @@ server:
   # G2 A6 measures a fixed 128-client serving trace. Requests beyond the
   # engine's active-sequence budget must queue rather than being rejected.
   max_concurrency: 128
+  # The formal trace already owns a 600-second per-request timeout. Keep the
+  # frontend admission queue inside that same declared bound.
+  admission_wait_timeout_s: 600
 
 engines:
   qwen3-32b:
