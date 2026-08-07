@@ -166,6 +166,7 @@ def test_batched_sampler_matches_scalar_for_mixed_processors() -> None:
 class _RoutingSampler:
     def __init__(self) -> None:
         self.batch_ids: tuple[str, ...] = ()
+        self.batch_outputs = ()
         self.scalar_ids: list[str] = []
 
     def can_argmax_logits(self, *_args, **_kwargs) -> bool:
@@ -173,6 +174,7 @@ class _RoutingSampler:
 
     def sample_batch_device(self, rows, logits):
         self.batch_ids = tuple(row.request_id for row in rows)
+        self.batch_outputs = tuple(row.outputs for row in rows)
         return tuple(
             DeviceSample(torch.tensor(10 + index, device=logits.device))
             for index in range(len(rows))
@@ -194,7 +196,7 @@ def _state(request_id: str, sampling: EngineSampling):
             stop_token_ids=(),
             min_tokens=0,
         ),
-        outputs=(2,),
+        outputs=[2],
         output_epoch=0,
     )
 
@@ -221,6 +223,8 @@ def test_mixed_grammar_batch_only_routes_grammar_row_to_scalar_sampler() -> None
     records = runner._sample_rows(chunks, states, logits)
 
     assert sampler.batch_ids == ("a", "c")
+    assert sampler.batch_outputs[0] is states["a"].outputs
+    assert sampler.batch_outputs[1] is states["c"].outputs
     assert sampler.scalar_ids == ["b"]
     assert isinstance(records[0], _PendingDeviceToken)
     assert isinstance(records[1], SampledToken)

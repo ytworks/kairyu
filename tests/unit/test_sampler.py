@@ -5,6 +5,7 @@ import math
 import pytest
 import torch
 
+from kairyu.engine.core import sampler as sampler_module
 from kairyu.engine.core.sampler import (
     DeviceSamplingInput,
     Sampler,
@@ -320,6 +321,79 @@ def test_bounded_top_p_batch_uses_one_topk_and_no_full_sort(monkeypatch):
 
     assert tokens.shape == (3,)
     assert topk_calls == 1
+
+
+def test_bounded_top_p_exact_k_prefix_is_explicit_for_boundary_ties(monkeypatch):
+    captured: list[torch.Tensor] = []
+
+    def capture_support(log_weights, _seeds):
+        captured.append(log_weights)
+        return torch.argmax(log_weights, dim=-1).to(torch.int64)
+
+    monkeypatch.setattr(
+        sampler_module,
+        "stateless_gumbel_argmax_batched",
+        capture_support,
+    )
+
+    Sampler._sample_scaled_batch_device(
+        torch.zeros((1, VOCAB)),
+        (EngineSampling(temperature=1.0, top_k=3, top_p=0.5),),
+        (1,),
+        (2,),
+    )
+
+    assert len(captured) == 1
+    assert torch.isfinite(captured[0]).sum().item() == 2
+
+
+def test_large_scaled_batch_chunks_the_transient_gumbel_work(monkeypatch):
+    logits = torch.stack(tuple(_logits(seed) for seed in range(5)))
+    samplings = tuple(
+        EngineSampling(temperature=0.8, top_k=7, top_p=0.9, seed=index)
+        for index in range(5)
+    )
+    seeds = tuple(range(5))
+    positions = tuple(range(5))
+    expected = torch.stack(
+        tuple(
+            Sampler._sample_scaled_device(
+                logits[index],
+                samplings[index],
+                seeds[index],
+                positions[index],
+            )
+            for index in range(5)
+        )
+    )
+    original = sampler_module.stateless_gumbel_argmax_batched
+    calls = 0
+
+    def count_draws(log_weights, draw_seeds):
+        nonlocal calls
+        calls += 1
+        return original(log_weights, draw_seeds)
+
+    monkeypatch.setattr(
+        sampler_module,
+        "_MAX_BATCHED_SAMPLING_ELEMENTS",
+        2 * VOCAB,
+    )
+    monkeypatch.setattr(
+        sampler_module,
+        "stateless_gumbel_argmax_batched",
+        count_draws,
+    )
+
+    actual = Sampler._sample_scaled_batch_device(
+        logits,
+        samplings,
+        seeds,
+        positions,
+    )
+
+    assert torch.equal(actual, expected)
+    assert calls == 3
 
 
 def test_batched_device_sampler_matches_individual_mixed_rows():

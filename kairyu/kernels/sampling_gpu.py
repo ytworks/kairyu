@@ -77,16 +77,7 @@ def stateless_gumbel_argmax(log_weights: torch.Tensor, seed: int) -> torch.Tenso
     """
     if log_weights.ndim != 1:
         raise ValueError(f"log_weights must be 1D, got {tuple(log_weights.shape)}")
-
-    size = log_weights.numel()
-    if log_weights.device.type == "cpu" and size <= _MAX_CACHED_CPU_OFFSETS:
-        offsets = _cached_cpu_offsets(size)
-    else:
-        offsets = torch.arange(size, dtype=torch.int64, device=log_weights.device)
-    values = _stateless_random_words(offsets, seed)
-    uniform = _uniform_from_words(values)
-    noise = -torch.log(-torch.log1p(-uniform))
-    return torch.argmax(log_weights.to(torch.float64) + noise).to(torch.int64)
+    return stateless_gumbel_argmax_batched(log_weights.unsqueeze(0), (seed,))[0]
 
 
 def stateless_gumbel_argmax_batched(

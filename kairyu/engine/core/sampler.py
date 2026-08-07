@@ -43,6 +43,8 @@ from kairyu.engine.core.structured import XGrammarEnforcer
 from kairyu.engine.tokenizer import GrammarVocabulary
 from kairyu.kernels.sampling_gpu import stateless_gumbel_argmax_batched
 
+_MAX_BATCHED_SAMPLING_ELEMENTS = 1 << 22
+
 
 @dataclass(frozen=True)
 class DeviceSample:
@@ -67,8 +69,8 @@ class DeviceSamplingInput:
     sampling: EngineSampling
     position: int
     prompt: tuple[int, ...] = ()
-    outputs: tuple[int, ...] = ()
-    pending_outputs: tuple[torch.Tensor, ...] = ()
+    outputs: Sequence[int] = ()
+    pending_outputs: Sequence[torch.Tensor] = ()
     history_epoch: int | None = None
     eos_token_id: int | None = None
     stop_token_ids: tuple[int, ...] = ()
@@ -1085,12 +1087,27 @@ class Sampler:
         if logits.ndim != 2:
             raise ValueError(f"batched logits must be 2D, got {tuple(logits.shape)}")
         batch_size, vocab_size = logits.shape
+        if vocab_size < 1:
+            raise ValueError("batched sampling requires a non-empty vocabulary")
         if not (
             len(samplings) == len(base_seeds) == len(positions) == batch_size
         ):
             raise ValueError("batched sampling metadata must match logits rows")
         if any(sampling.temperature == 0.0 for sampling in samplings):
             raise ValueError("scaled batched sampling requires non-zero temperature")
+        max_rows = max(1, _MAX_BATCHED_SAMPLING_ELEMENTS // vocab_size)
+        if batch_size > max_rows:
+            return torch.cat(
+                tuple(
+                    Sampler._sample_scaled_batch_device(
+                        logits[start : start + max_rows],
+                        samplings[start : start + max_rows],
+                        base_seeds[start : start + max_rows],
+                        positions[start : start + max_rows],
+                    )
+                    for start in range(0, batch_size, max_rows)
+                )
+            )
 
         temperatures = _sampling_metadata_tensor(
             [sampling.temperature for sampling in samplings],

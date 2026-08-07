@@ -340,11 +340,19 @@ inputs feed one batched softmax and one batched Gumbel draw. Bounded top-k +
 top-p uses the single maximum top-k prefix for cumulative thresholding instead
 of sorting each complete vocabulary row; top-p without a finite top-k retains
 the full-vocabulary sort because truncating that support would change the
-request contract. Minimum-token masks and incremental penalty state remain
-row-specific, while only grammar rows retain the CPU matcher path. Small host
-parameter vectors use pinned non-blocking copies, logits produce exactly one
-mutable fp32 working copy, and row seed/position identity preserves batch-order
-invariance.
+request contract. At an exact tie across the bounded top-k boundary, the
+combined top-k + top-p path intentionally defines its nucleus over exactly the
+library-selected top-k prefix; the former threshold path included every tied
+token and could exceed k. This changes the draw only for that exact boundary
+case, bounds the optimized work, and is shared by batched, scalar, and
+structured sampling so execution-path determinism remains intact. Top-k
+without top-p retains its previous tie-inclusive threshold behavior.
+Minimum-token masks and incremental penalty state remain row-specific, while
+only grammar rows retain the CPU matcher path. Small host parameter vectors
+use pinned non-blocking copies, and each sampler invocation produces one
+mutable fp32 working copy. Scaled rows are automatically chunked at 2^22
+vocabulary elements to bound temporary float64 Gumbel storage at large batch
+sizes. Row seed/position identity preserves batch-order invariance.
 
 **Incremental penalty-state amendment (2026-07-27, issue #216):** a
 penalty-active request lazily allocates one dense row for its logits
