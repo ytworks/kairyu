@@ -5,7 +5,12 @@ from dataclasses import replace
 
 import pytest
 
-from kairyu.engine.backend import GenerationRequest, UpstreamClientError
+from kairyu.engine.backend import (
+    GenerationRequest,
+    GenerationResult,
+    GenerationUsage,
+    UpstreamClientError,
+)
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
@@ -18,6 +23,7 @@ from kairyu.orchestration.orchestrator import (
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.orchestration.router import RuleRouter
+from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
 SIMPLE = "What is 2?"
@@ -1118,6 +1124,60 @@ async def test_multistage_stream_emits_periodic_keepalives(monkeypatch):
     assert kinds.count("status") >= 2  # routing + at least one "working" keepalive
     assert kinds[-1] == "result"
     assert any(e.kind == "delta" for e in events)
+
+
+async def test_direct_stream_timestamp_work_is_constant_and_skips_prefix_scan(
+    monkeypatch,
+) -> None:
+    import kairyu.orchestration.orchestrator as orchestrator_module
+
+    class NoPrefixScanText(str):
+        def startswith(self, *args, **kwargs):
+            raise AssertionError("AUTO streaming must trust the cumulative backend contract")
+
+    class CumulativeBackend(MockBackend):
+        def __init__(self, partials: int) -> None:
+            super().__init__()
+            self._partials = partials
+
+        async def stream(self, request):
+            for index in range(1, self._partials + 1):
+                yield GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(
+                        CompletionOutput(
+                            index=0,
+                            text=NoPrefixScanText("x" * index),
+                            token_ids=tuple(range(index)),
+                            finish_reason="length" if index == self._partials else None,
+                        ),
+                    ),
+                    finished=index == self._partials,
+                    usage=(
+                        GenerationUsage(prompt_tokens=1, completion_tokens=index)
+                        if index == self._partials
+                        else None
+                    ),
+                )
+
+    async def timestamp_calls(partials: int) -> int:
+        calls: list[int] = []
+
+        def counted_now() -> str:
+            calls.append(len(calls))
+            return "2026-08-07T00:00:00+00:00"
+
+        monkeypatch.setattr(orchestrator_module, "utc_now_iso", counted_now)
+        orchestrator = _orchestrator(
+            engines={"tier1": CumulativeBackend(partials), "tier2": MockBackend()}
+        )
+        stream = await orchestrator.run_chat(SIMPLE, stream=True)
+        events = [event async for event in stream]
+        assert "".join(event.text for event in events if event.kind == "delta") == "x" * partials
+        return len(calls)
+
+    assert await timestamp_calls(1) == await timestamp_calls(8)
 
 
 async def test_conductor_verifier_failure_precedes_streamed_final_boundary():

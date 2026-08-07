@@ -16,6 +16,9 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
+from functools import lru_cache
+
+from starlette.requests import ClientDisconnect
 
 _ASGIApp = Callable[..., Awaitable[None]]
 
@@ -31,6 +34,7 @@ _SLO_ADMISSION_LEASE_STATE_KEY = "slo_admission_lease"
 _ID_SEGMENT = re.compile(r"^(file-|batch_|resp_|chatcmpl-|cmpl-|[0-9a-f-]{16,}|\d{6,})")
 
 
+@lru_cache(maxsize=1024)
 def _template_path(path: str) -> str:
     return "/".join(
         "{id}" if _ID_SEGMENT.match(segment) else segment for segment in path.split("/")
@@ -308,25 +312,30 @@ class ChatBodyLimitMiddleware:
                 return
 
         received = 0
-        buffered: deque[dict] = deque()
-        while True:
+        rejected = False
+
+        async def limited_receive() -> dict:
+            nonlocal received, rejected
+            if rejected:
+                return {"type": "http.disconnect"}
             message = await receive()
-            buffered.append(message)
-            if message["type"] != "http.request":
-                break
-            received += len(message.get("body", b""))
-            if received > self._limit:
-                await self._reject(send)
-                return
-            if not message.get("more_body", False):
-                break
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self._limit:
+                    rejected = True
+                    await self._reject(send)
+                    return {"type": "http.disconnect"}
+            return message
 
-        async def replay_receive() -> dict:
-            if buffered:
-                return buffered.popleft()
-            return await receive()
+        async def limited_send(message: dict) -> None:
+            if not rejected:
+                await send(message)
 
-        await self.app(scope, replay_receive, send)
+        try:
+            await self.app(scope, limited_receive, limited_send)
+        except ClientDisconnect:
+            if not rejected:
+                raise
 
 
 class MetricsMiddleware:

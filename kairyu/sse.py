@@ -20,11 +20,7 @@ _SSE_LINE_END_RE = re.compile(rb"[\r\n]")
 def escape_json_line_separators(serialized: str) -> str:
     """Keep valid JSON text on one physical SSE line for legacy clients."""
 
-    if (
-        "\u0085" not in serialized
-        and "\u2028" not in serialized
-        and "\u2029" not in serialized
-    ):
+    if serialized.isascii():
         return serialized
     return serialized.translate(_JSON_LINE_SEPARATOR_ESCAPES)
 

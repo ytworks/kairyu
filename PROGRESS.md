@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Serving micro-overheads stay bounded
+- What: metrics path templates use a bounded LRU; SSE separator escaping uses one ASCII fast-path scan; AUTO direct streaming drops its duplicate prefix scan; chat body limiting forwards validated chunks without replay buffering; unset AUTO usage fields are excluded at serialization call sites.
+- Why: these repeated regex/string/Pydantic operations and duplicate request-body storage add small but compounding latency or peak memory on the public serving path.
+- Refs: issue #349; m7 D4; m11 accounting/trace; `kairyu/entrypoints/server/{middleware,app,protocol}.py`; `kairyu/{sse,orchestration/orchestrator}.py`
+
 ### 2026-08-07 — [amendment] Native admission is bounded by the RoPE table
 - What: real-model builders default an omitted `max_model_len` to `max_position_embeddings` and reject a larger override before loading or serving, across single-rank, TP, EP, P-D, and process-split paths.
 - Why: a fixed resident RoPE table must fail cleanly at admission rather than let an out-of-range gather raise on CPU or poison a CUDA context.
