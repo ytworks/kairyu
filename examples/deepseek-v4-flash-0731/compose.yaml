@@ -1,0 +1,90 @@
+name: kairyu-deepseek-v4-flash-0731
+
+services:
+  vllm:
+    # Same pinned stock-vLLM image as deploy/compose/docker-compose.webui-vlm.yaml.
+    # DeepSeek-V4-Flash-0731 is DeepseekV4ForCausalLM, an architecture outside
+    # Kairyu's native engine zoo (which stops at DeepseekV3), so the checkpoint
+    # runs on stock vLLM and Kairyu fronts it as a pool — the Qwen3-VL-32B
+    # pattern. DSpark drafting requires vLLM >= 0.25.0; this image is 0.26.0.
+    image: >-
+      vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404@sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8
+    ipc: host
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      HF_HOME: /root/.cache/huggingface
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_NO_USAGE_STATS: "1"
+    volumes:
+      - deepseek-v4-flash-model-cache:/root/.cache/huggingface
+    command:
+      - deepseek-ai/DeepSeek-V4-Flash-0731
+      - --revision
+      - 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+      - --served-model-name
+      - deepseek-v4-flash-0731
+      # 256 routed experts shard evenly over the 8-way group; the vLLM recipe
+      # pairs TP8 with expert parallelism on single-node deployments.
+      - --tensor-parallel-size
+      - "8"
+      - --enable-expert-parallel
+      - --tokenizer-mode
+      - deepseek_v4
+      - --kv-cache-dtype
+      - fp8
+      - --block-size
+      - "256"
+      - --max-model-len
+      - "32768"
+      # The 0731 checkpoint ships its DSpark draft module; the official serving
+      # command enables it for speculative decode.
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"greedy"}'
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 8
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/python3
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2).read()
+      interval: 5s
+      timeout: 3s
+      retries: 720
+      start_period: 120s
+
+  kairyu:
+    build:
+      context: ../..
+    volumes:
+      - ./kairyu.yaml:/etc/kairyu/config.yaml:ro
+    depends_on:
+      vllm:
+        condition: service_healthy
+    ports:
+      # PORT is the host port the README advertises; it must reach the mapping
+      # or a custom value would start a healthy service on 8001 and then time
+      # out waiting somewhere else.
+      - "127.0.0.1:${PORT:-8001}:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+
+volumes:
+  deepseek-v4-flash-model-cache:
