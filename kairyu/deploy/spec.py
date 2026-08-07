@@ -130,6 +130,13 @@ class PoolSpec(BaseModel):
     discovery: KubernetesEndpointSliceSpec | None = None
     unhealthy_after: int = Field(default=3, ge=1)
     queue_depth_threshold: int = Field(default=8, ge=0)
+    prefix_index: bool = Field(
+        default=False,
+        description=(
+            "Enable the bounded process-local PrefixIndex for cross-session "
+            "KV-aware placement."
+        ),
+    )
     probe_interval_s: float = Field(
         default=5.0,
         gt=0,

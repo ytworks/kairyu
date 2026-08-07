@@ -616,6 +616,39 @@ async def test_pool_is_served_and_affinity_sticks():
     assert 'kairyu_pool_decisions_total{pool="pooled",reason="least_outstanding"} 1.0' in metrics
 
 
+async def test_pool_prefix_index_option_enables_cross_session_reuse():
+    app = build_app_from_spec(
+        load_deployment_spec(
+            """
+pools:
+  pooled:
+    replicas:
+      - {backend: mock}
+      - {backend: mock}
+    prefix_index: true
+"""
+        )
+    )
+    content = "shared-prefix " * 32
+
+    async with _client(app) as client:
+        first = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body(content),
+        )
+        second = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body(content),
+        )
+        metrics = (await client.get("/metrics")).text
+
+    assert first.status_code == second.status_code == 200
+    assert (
+        'kairyu_pool_decisions_total{pool="pooled",reason="prefix_match"} 1.0'
+        in metrics
+    )
+
+
 async def test_gpu_gateway_exposes_canonical_default_model():
     app = build_app_from_config(GATEWAY_GPU_YAML)
     async with _client(app) as client:

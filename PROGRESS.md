@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Deployment pools can enable prefix-aware routing
+- What: `PoolSpec` now exposes default-off `prefix_index`; the production builder constructs the existing bounded approximate `PrefixIndex` per opted-in static or discovered pool and passes it to `ReplicaPool`.
+- Why: validated KV-aware placement existed only for programmatic callers and benchmarks, so a production DeploymentSpec could not select the warm replica across related sessions.
+- Refs: issue #343; m7 D3; m10 D6; `kairyu/deploy/{spec,builder}.py`; `docs/deployment.md`
+
 ### 2026-08-07 — [amendment] Cumulative engine state advances by deltas
 - What: overlapping step snapshots now freeze append-only outputs by reference plus length; TP/EP sync uses epoch/length and output/page tails; output presentation caches cumulative token/logprob content while exposing immutable-length internal views; KV allocation pages are concatenated once.
 - Why: copying and rescanning each request's full generated history on every step made host work quadratic in completion length.
