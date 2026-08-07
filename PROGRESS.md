@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Streaming prefix roots publish at first token
+- What: prefix-aware streams publish their root immediately before the first backend result is yielded, retain it after later cancellation, and promote a warm hit to its full prepared chain only on normal completion; pre-first-result failures remain unadvertised.
+- Why: waiting through the entire decode left concurrent related requests looking cold even though prefill KV already existed, while dispatch-time speculation would require rollback state to avoid poisoning the index.
+- Refs: issue #344; m10 D6; `kairyu/orchestration/replica.py`; `tests/unit/test_kv_routing.py`
+
 ### 2026-08-07 — [amendment] Deployment pools can enable prefix-aware routing
 - What: `PoolSpec` now exposes default-off `prefix_index`; the production builder constructs the existing bounded approximate `PrefixIndex` per opted-in static or discovered pool and passes it to `ReplicaPool`.
 - Why: validated KV-aware placement existed only for programmatic callers and benchmarks, so a production DeploymentSpec could not select the warm replica across related sessions.

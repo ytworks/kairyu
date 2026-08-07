@@ -4,7 +4,7 @@ Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
 2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28; D5/A27 amended
 2026-07-28; D7/A31 amended 2026-07-28; D6/A32 amended 2026-07-29;
 D8/A33 amended 2026-07-29; D4/A34 amended 2026-07-31; D5/A35 amended
-2026-08-03).
+2026-08-03; D6 amended 2026-08-07 for issue #344).
 Reviewed (1-reviewer panel with repo-line evidence; §6 binding; covers
 M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
@@ -158,7 +158,8 @@ a zero warm/cold tie prefers reuse, and a negative warm maximum falls through
 to the existing session-HRW plus queue-depth valve (or least-outstanding for a
 request without a session). Equal-score warm candidates use session HRW as the
 deterministic tiebreak. `enabled=False` is the default. Only a successful unary
-generation or normally completed stream advertises the selected prefix. The
+generation or a stream whose first backend result proves prefill landed
+advertises the selected prefix. The
 approximate, process-local index uses versioned XXH3-64 cumulative keys
 (`xxh3-64-v1`), matching vLLM Router's non-cryptographic routing-key approach;
 the 64-bit key width is unchanged and a collision can only cause a cache miss,
@@ -177,7 +178,12 @@ selection and successful publication. A cold success initially advertises only
 its root key through a dedicated root-publication fast path,
 which is sufficient to make the next related request discoverable; a successful
 warm `prefix_match` extends that same request-local chain and promotes the entry
-to full usable depth. Thus a complete prompt chunk is hashed at most once per
+to full usable depth. A streaming request publishes that root immediately before
+yielding its first backend result, which proves prefill landed; a failure or
+cancellation before that boundary cannot poison the index. Normal completion
+still performs full-key promotion for a warm hit. Unary generation has no
+observable first-token boundary and therefore publishes only after its
+successful result. Thus a complete prompt chunk is hashed at most once per
 request, one-off cold prompts do not populate unneeded deep index entries, and
 no process-global prompt cache needs invalidation. Decision reason
 `prefix_match` enters the router log.
@@ -757,8 +763,9 @@ online learning or the M4 request-family bandit.
   `PrefixIndex.overlap`. The backend reports whether the family was resident
   before dispatch and updates its cache only after successful generation.
   `ReplicaPool` likewise advertises an approximate prefix only after successful
-  unary completion or normal stream exhaustion; upstream error, client error,
-  and cancellation cannot create a false warm entry. Because cumulative chunk
+  unary completion or immediately before a stream's first backend result;
+  upstream error, client error, and cancellation before that result cannot
+  create a false warm entry. Because cumulative chunk
   keys are unusable after an ancestor is evicted, one over-cap prompt retains
   the root-side bounded prefix rather than unreachable tail keys. Selection and
   successful publication consume one request-local lazy key chain. A cold
@@ -865,8 +872,9 @@ online learning or the M4 request-family bandit.
   forget/register reset, so a partially mutated old view cannot re-enter
   exact scoring. While a replica is inactive, unknown epochs are rejected
   without displacing the active epoch tombstone. Successful exact choices use
-  the distinct `kv_event_match` decision reason; approximate publication still
-  occurs only after successful completion.
+  the distinct `kv_event_match` decision reason; approximate stream roots
+  publish at the same first-result boundary, while full-key promotion still
+  requires successful completion.
 
   The F2b formal profile reuses F1a run `30374404150` for the exact seed-175
   200-replica, ten-by-twenty churn identity schedule and reuses F2a run
