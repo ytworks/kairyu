@@ -321,6 +321,18 @@ output (DeepSeek convention).
   child-process resets are accumulated so removal, replacement, restart, or a
   temporarily failed scrape can never decrease the Prometheus counter.
 
+- **A29 (eager FlashInfer fast plan):** scheduler-owned host sequence lengths
+  now accompany both ordinary tensor eager decode and graph-shape eager
+  fallback. Each `(batch, page width)` wrapper uses stock FlashInfer `plan()`
+  once for initialization, then shares the existing fixed-shape Triton metadata
+  pack plus `fast_decode_plan` path with graph replay; steady eager planning has
+  neither boolean-mask `nonzero` nor a device-to-host schedule copy. The earlier
+  generation-key proposal is superseded by A17/A18: production CUDA eager
+  decode no longer enters the list `_plan`/`attend_batched` cache, its wrapper
+  key is O(1) shape/dtype metadata, and the bounded page-table cache already
+  owns host-side change detection. Legacy list compatibility paths remain
+  unchanged rather than adding an unused generation contract.
+
 - **Measurement:** Qwen3-32B on 8x RTX PRO 6000 Blackwell, TP8, 8 concurrent
   synthetic requests x 32 output tokens, torch attention: tensor eager wall
   8.844 s, TPOT 192.075 ms/token, 0.90 req/s; CUDA graph wall 7.196 s,

@@ -492,7 +492,12 @@ class FlashInferBackend:
         q_dtype: torch.dtype,
         host_seq_lens: tuple[int, ...] | None,
     ) -> bool:
-        """Refresh an initialized wrapper without any CUDA-to-host read."""
+        """Refresh an initialized wrapper without any CUDA-to-host read.
+
+        CUDA-graph replay and eager tensor decode share this implementation.
+        The public stock planner remains the one-time initializer for each
+        wrapper shape.
+        """
 
         if self._fast_decode_plan is None:
             self._record_stock_replay_fallback(
@@ -583,14 +588,20 @@ class FlashInferBackend:
         replay: bool = False,
         host_seq_lens: tuple[int, ...] | None = None,
     ) -> None:
-        """Plan stock capture/eager decode or an initialized graph replay."""
+        """Plan stock initialization or refresh an initialized decode shape.
+
+        Authoritative scheduler-owned host lengths opt eager tensor decode into
+        the same no-D2H fast planner used by graph replay.  The first occurrence
+        of a shape still uses stock ``plan()`` to initialize FlashInfer's module
+        and persistent wrapper buffers.
+        """
 
         if _is_capturing():
             raise RuntimeError(
                 "FlashInfer plan() cannot run inside a CUDA graph; call "
                 "plan_decode() once per decode step BEFORE capture/replay"
             )
-        if replay and self._try_fast_replay_plan(
+        if (replay or host_seq_lens is not None) and self._try_fast_replay_plan(
             kv_pool,
             page_tables,
             seq_lens,

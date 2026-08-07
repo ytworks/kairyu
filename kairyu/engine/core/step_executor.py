@@ -505,7 +505,7 @@ def build_decode_batch(
 
 DecodeFn = Callable[[DecodeBatch], torch.Tensor]  # -> logits/hidden [B, ...]
 PlanFn = Callable[[DecodeBatch], None]  # host phase, OUTSIDE the captured region
-ReplayPlanFn = Callable[[DecodeBatch], None]  # optimized host phase for replay only
+ReplayPlanFn = Callable[[DecodeBatch], None]  # optimized host phase with host metadata
 
 
 class EagerStepExecutor:
@@ -623,10 +623,11 @@ class GraphStepExecutor:
         # Optional, so a decode_fn whose backends have no host phase (every
         # FakeGraphBackend test) constructs exactly as before.
         self._plan_fn = plan_fn
-        # Kept separate from ``plan_fn`` deliberately.  Capture and eager
-        # fallback must retain the backend's stock planning path; only a graph
-        # whose wrapper was initialized by that stock plan may use a replay
-        # specialization such as FlashInfer's ``fast_decode_plan``.
+        # Kept separate from ``plan_fn`` deliberately. Capture initializes each
+        # wrapper with stock planning; graph replay and eager fallback can then
+        # use authoritative host metadata with a specialization such as
+        # FlashInfer's ``fast_decode_plan``. A new eager shape truthfully falls
+        # back to stock initialization inside that backend specialization.
         self._replay_plan_fn = replay_plan_fn
         self._backend = graph_backend
         self._buckets = decode_buckets(max_batch)
@@ -916,7 +917,7 @@ class GraphStepExecutor:
             self._eager_fallbacks += 1
             self._eager_fallbacks_total += 1
             self._page_table_eager_fallbacks += 1
-            self._plan(batch)  # eager still needs a live plan for THESE buffers
+            self._plan_fast(batch)  # eager still needs a plan for THESE buffers
             return self._decode_fn(batch)
         if bucket not in self._captured:
             self._capture(bucket)
@@ -962,6 +963,17 @@ class GraphStepExecutor:
         """Backend host phase over ``batch``'s buffers — never under capture."""
         if self._plan_fn is not None:
             self._plan_fn(batch)
+
+    def _plan_fast(self, batch: DecodeBatch) -> None:
+        """Use scheduler host metadata for eager planning when available."""
+
+        if (
+            self._replay_plan_fn is not None
+            and len(batch.host_seq_lens) == batch.batch_size
+        ):
+            self._replay_plan_fn(batch)
+            return
+        self._plan(batch)
 
     def _plan_replay(self, static: DecodeBatch, batch: DecodeBatch) -> None:
         """Plan an initialized graph replay without stale host metadata.

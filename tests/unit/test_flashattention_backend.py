@@ -246,8 +246,20 @@ class _FakeDecodeBackend:
         *,
         num_qo_heads: int,
         q_dtype: torch.dtype,
+        replay: bool = False,
+        host_seq_lens: tuple[int, ...] | None = None,
     ) -> None:
-        self.plan_calls.append((kv_pool, page_tables, seq_lens, num_qo_heads, q_dtype))
+        self.plan_calls.append(
+            (
+                kv_pool,
+                page_tables,
+                seq_lens,
+                num_qo_heads,
+                q_dtype,
+                replay,
+                host_seq_lens,
+            )
+        )
 
     def attend_decode(
         self,
@@ -379,6 +391,7 @@ def test_decode_list_tensor_and_graph_contracts_are_explicitly_delegated():
     pool, page_table, _ = _case()
     module = _FakeFA4()
     delegate = _FakeDecodeBackend()
+    delegate.supports_fast_replay_plan = True
     backend = _backend(4, module, sm=120, decode=delegate)
     query = torch.randn(1, 4, 8)
 
@@ -396,9 +409,18 @@ def test_decode_list_tensor_and_graph_contracts_are_explicitly_delegated():
         num_qo_heads=4,
         q_dtype=query.dtype,
     )
+    backend.plan_decode(
+        pool,
+        page_tables,
+        seq_lens,
+        num_qo_heads=4,
+        q_dtype=query.dtype,
+        host_seq_lens=(5,),
+    )
     graph_output = backend.attend_decode(query, pool, 0, page_tables, seq_lens)
     torch.testing.assert_close(graph_output, query.reshape(1, -1) + 30)
-    assert len(delegate.plan_calls) == 1
+    assert len(delegate.plan_calls) == 2
+    assert delegate.plan_calls[-1][-2:] == (False, (5,))
     assert len(delegate.decode_calls) == 1
     assert backend.supports_graph_capture is True
     assert backend.supports_batched_prefill is False

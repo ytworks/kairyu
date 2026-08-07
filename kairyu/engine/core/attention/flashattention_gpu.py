@@ -946,8 +946,10 @@ class FlashAttentionBackend:
             "num_qo_heads": num_qo_heads,
             "q_dtype": q_dtype,
         }
-        if replay and self.supports_fast_replay_plan:
-            kwargs.update(replay=True, host_seq_lens=host_seq_lens)
+        if self.supports_fast_replay_plan and (
+            replay or host_seq_lens is not None
+        ):
+            kwargs.update(replay=replay, host_seq_lens=host_seq_lens)
         return self._decode_backend.plan_decode(
             kv_pool, page_tables, seq_lens, **kwargs
         )

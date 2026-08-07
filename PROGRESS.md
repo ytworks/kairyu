@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Eager FlashInfer decode reuses the no-D2H planner
+- What: ordinary tensor eager decode and graph-shape eager fallback now pass authoritative scheduler lengths into the existing fixed-shape metadata pack and FlashInfer fast planner after one stock initialization per shape.
+- Why: eager and out-of-coverage graph steps rebuilt dynamic indices and copied schedule inputs to the host every decode step even though graph replay already had a validated no-sync path.
+- Refs: issue #329; m17 A29; `kairyu/engine/core/{attention/{flashinfer_gpu,flashattention_gpu},model_runner,step_executor}.py`; `kairyu/models/attention.py`
+
 ### 2026-08-07 — [amendment] Batch I/O yields to interactive pressure
 - What: batch output/error transactions now use bounded background JSONL writes; route and filesystem-worker store I/O runs off-loop, downloads stream fixed chunks, and configured SLO pressure pauses new batch lines without preempting running work.
 - Why: per-line flushes, local metadata reads, and whole-file downloads blocked the gateway event loop, while the fixed batch pool kept dispatching as interactive TTFT risk rose.

@@ -287,12 +287,14 @@ class Attention(nn.Module):
             "num_qo_heads": self.num_heads,
             "q_dtype": q_dtype,
         }
-        if replay and getattr(self.backend, "supports_fast_replay_plan", False):
-            # Replay metadata is an extension to the established backend
-            # contract.  Stock capture/eager calls retain the exact former
-            # signature so compatible third-party backends are unchanged.
+        if getattr(self.backend, "supports_fast_replay_plan", False) and (
+            replay or host_seq_lens is not None
+        ):
+            # Scheduler-owned host lengths let FlashInfer use the same fast
+            # planning extension for graph replay and eager tensor decode.
+            # Backends not declaring the extension retain the stock signature.
             kwargs.update(
-                replay=True,
+                replay=replay,
                 host_seq_lens=host_seq_lens,
             )
         plan(kv_pool, page_tables, seq_lens, **kwargs)

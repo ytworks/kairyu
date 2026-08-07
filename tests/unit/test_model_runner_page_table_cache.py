@@ -97,6 +97,35 @@ def test_normal_decode_uses_stable_owners_and_exact_on_off_wiring(monkeypatch):
     assert legacy_stats["cache"]["row_hits"] == 0
 
 
+def test_eager_tensor_plan_receives_authoritative_host_lengths(monkeypatch):
+    runner = _runner()
+    batch = runner._build_tensor_decode_batch(
+        tokens=torch.tensor([11, 12]),
+        positions=torch.tensor([4, 6]),
+        page_tables=[(2, 3), (4, 5)],
+        seq_lens=[5, 7],
+        max_pages=2,
+        scratch_page=None,
+        write_from=[0, 0],
+        row_owners=[DecodeRowOwner("a"), DecodeRowOwner("b")],
+    )
+    plan_kwargs = []
+
+    def plan(_pool, _tables, _lengths, **kwargs):
+        plan_kwargs.append(kwargs)
+
+    monkeypatch.setattr(runner._model, "plan_decode_tensors", plan)
+    monkeypatch.setattr(
+        runner._model,
+        "forward_decode_tensors",
+        lambda *_args: torch.empty((2, runner._model.config.hidden_size)),
+    )
+
+    runner._eager_tensor_hidden(batch)
+
+    assert plan_kwargs == [{"host_seq_lens": (5, 7)}]
+
+
 def test_decode_inputs_use_the_scheduler_tuple_snapshot_without_list_walks():
     class _UnwalkablePages(list):
         def __iter__(self):

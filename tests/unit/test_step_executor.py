@@ -859,6 +859,25 @@ def test_the_plan_hook_also_runs_on_the_eager_fallback():
     assert len(plan.plans) == 1
 
 
+def test_eager_fallback_uses_fast_plan_when_host_lengths_are_available():
+    stock = _PlanRecorder()
+    fast_batches: list[DecodeBatch] = []
+    batch = _batch(6)
+    executor = GraphStepExecutor(
+        _decode_fn,
+        FakeGraphBackend(),
+        max_batch=4,
+        scratch_page=SCRATCH,
+        plan_fn=stock,
+        replay_plan_fn=fast_batches.append,
+    )
+
+    executor.execute_decode(batch)
+
+    assert fast_batches == [batch]
+    assert stock.plans == []
+
+
 def test_no_plan_hook_is_still_valid():
     """Backends with no host phase (the torch path) construct unchanged."""
     executor = GraphStepExecutor(

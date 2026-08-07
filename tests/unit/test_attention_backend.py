@@ -677,8 +677,9 @@ class TestFlashInferTensorDecode:
         assert wrapper.indices_buffer[:3].tolist() == [5, 2, 0]
         assert wrapper.last_page_len_buffer.tolist() == [4, 4]
 
-    def test_fast_replay_uses_host_schedule_and_refreshes_persistent_buffers(
-        self, fake_flashinfer, monkeypatch
+    @pytest.mark.parametrize("replay", (False, True), ids=("eager", "graph-replay"))
+    def test_fast_plan_uses_host_schedule_and_refreshes_persistent_buffers(
+        self, fake_flashinfer, monkeypatch, replay
     ):
         from kairyu.engine.core.attention import flashinfer_gpu
 
@@ -733,7 +734,7 @@ class TestFlashInferTensorDecode:
             seq_lens,
             num_qo_heads=4,
             q_dtype=query.dtype,
-            replay=True,
+            replay=replay,
             host_seq_lens=(4, 8),
         )
 
