@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-07 — [amendment] Cumulative engine state advances by deltas
+- What: overlapping step snapshots now freeze append-only outputs by reference plus length; TP/EP sync uses epoch/length and output/page tails; output presentation caches cumulative token/logprob content while exposing immutable-length internal views; KV allocation pages are concatenated once.
+- Why: copying and rescanning each request's full generated history on every step made host work quadratic in completion length.
+- Refs: issue #324; m5 D2; m8 D1/D6; `kairyu/engine/{core/{frozen_prefix,step_input,scheduler,radix_kv,spec_runner},engine_loop,kairyu_backend}.py`
+
+### 2026-08-07 — [amendment] Engine presentation leaves the core step thread
+- What: all public prompt paths now prepare text outside the engine step owner; production detokenization and in-process delivery or process-wire event/msgpack work use one bounded serial output lane, overlapping at most one next raw step while ROUTER I/O stays on its socket thread; HF production requires native `DecodeStream`.
+- Why: burst tokenization and cumulative presentation work serialized the next model step and inflated TTFT tail latency; bounded one-ahead execution preserves stop-string scheduler safe points without adding a new protocol or configurable queue.
+- Refs: issue #327; m8 D1/D6; `kairyu/engine/{engine_loop,kairyu_backend,zmq_backend,core/engine_service,tokenizer}.py`
+
+### 2026-08-07 — [amendment] Prefill host preparation scales by physical pages
+- What: ragged prefill now validates cross-row KV ownership in one physical-page pass and packs its typed metadata into one fresh buffer, using a single pinned H2D copy on CUDA.
+- Why: token-by-token ownership maps, row-pair intersections, and pageable per-field uploads added avoidable TTFT before every batched prefill model call.
+- Refs: issue #322; m13 D1; `kairyu/engine/core/prefill.py`; `tests/unit/test_batched_prefill.py`
+
+### 2026-08-07 — [amendment] Prefill budget forms bounded work-conserving cohorts
+- What: native schedulers now share post-decode prefill budget across a bounded leading cohort of equal-priority partial prompts (two by default), expose `max_num_partial_prefills`, and permit one cache-safe, completion-only immediate-successor admission past a KV-blocked head; deferred P-D may retain one peer token to overlap its copy.
+- Why: serial long-prefill chunks and unbounded head-of-line KV blocking inflated small-prompt TTFT, while unrestricted skip-ahead could starve the head or create recompute-preemption thrash.
+- Refs: issue #328; m11 D6/A11; `kairyu/engine/core/scheduler.py`; `tests/unit/test_{scheduler,scheduler_waiting_queue}.py`
+
+### 2026-08-07 — [amendment] Direct chat activates predictive TTFT admission
+- What: added opt-in `server.ttft_slo_s`; validated direct interactive chat now includes known ingress elapsed time, atomically admits, batch-defers only on routes attesting running-decode isolation (otherwise sheds), observes the first successfully sent visible SSE delta, releases leases at the outer ASGI boundary, and exports the controller snapshot through six Prometheus gauges.
+- Why: the validated F5c controller had no production call site, so requests predicted to miss the TTFT SLO still consumed serving capacity and reduced SLO-goodput.
+- Refs: issue #340; `kairyu/entrypoints/server/{app,middleware,metrics,settings,slo}.py`; `kairyu/deploy/spec.py`; `tests/server/test_slo_admission_integration.py`; `docs/design/m11-product.md`
+
 ### 2026-08-06 — [progress] Pipeline-depth hypothesis closes as a measured negative
 - What: retained twelve Qwen3-32B TP4 HTTP diagnostics and CPU plan-shape evidence, reverted the experimental deep strict-decode tail and metric, and kept the existing two-step admission/prefill horizon.
 - Why: the initial depth-five candidate regressed throughput by 3–4%, its cohort-preserving refinement returned only to noisy parity, and the historical 35.98% result compared depth one with five rather than isolating benefit beyond depth two.
