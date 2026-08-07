@@ -5,18 +5,20 @@ from pathlib import Path
 
 import pytest
 
+from kairyu.batch import store as store_module
 from kairyu.batch.store import BatchStore
 
 
-class _CloseFailingHandle:
-    """Delegate a real handle, then report its flush-on-close failure."""
+def _make_writer_close_fail(writer) -> None:
+    background_writer = writer._writer
+    assert background_writer is not None
+    close = background_writer.close
 
-    def __init__(self, handle):
-        self._handle = handle
-
-    def close(self):
-        self._handle.close()
+    def fail_after_close():
+        close()
         raise OSError("simulated flush-on-close failure")
+
+    background_writer.close = fail_after_close
 
 
 def _input_file(store: BatchStore, owner: str):
@@ -150,7 +152,7 @@ def test_iter_file_lines_closes_handle_when_iteration_stops_early(
     assert content_handles[0].closed
 
 
-def test_jsonl_writer_is_lazy_and_appends_each_line_immediately(tmp_path):
+def test_jsonl_writer_is_lazy_and_queues_each_line_before_commit(tmp_path):
     store = BatchStore(tmp_path)
     writer = store.create_jsonl_writer(
         filename="output.jsonl", purpose="batch_output", owner="tenant-a"
@@ -164,16 +166,19 @@ def test_jsonl_writer_is_lazy_and_appends_each_line_immediately(tmp_path):
     writer.append({"custom_id": "a", "ok": True})
 
     expected = json.dumps({"custom_id": "a", "ok": True}).encode("utf-8") + b"\n"
-    temporary_files = list(files_dir.glob("*.tmp"))
     assert writer.state == "open"
     assert writer.has_content is True
     assert list(files_dir.glob("*.bin")) == []
     assert list(files_dir.glob("*.json")) == []
+    assert writer._writer is not None
+    writer._writer.flush()
+    temporary_files = list(files_dir.glob("*.tmp"))
     assert len(temporary_files) == 1
     assert temporary_files[0].read_bytes() == expected
 
     writer.append({"custom_id": "b", "ok": False})
     expected += json.dumps({"custom_id": "b", "ok": False}).encode("utf-8") + b"\n"
+    writer._writer.flush()
     assert temporary_files[0].read_bytes() == expected
 
     writer.abort()
@@ -240,14 +245,12 @@ def test_jsonl_writer_abort_cleans_up_when_close_flush_fails(tmp_path):
         filename="errors.jsonl", purpose="batch_output", owner="tenant-a"
     )
     writer.append({"error": "partial"})
-    handle = writer._handle
-    writer._handle = _CloseFailingHandle(handle)
+    _make_writer_close_fail(writer)
 
     with pytest.raises(OSError, match="flush-on-close"):
         writer.abort()
 
-    assert handle.closed
-    assert writer._handle is None
+    assert writer._writer is None
     assert writer.state == "aborted"
     assert list((tmp_path / "files").iterdir()) == []
 
@@ -258,14 +261,12 @@ def test_jsonl_writer_commit_close_failure_aborts_without_visibility(tmp_path):
         filename="output.jsonl", purpose="batch_output", owner="tenant-a"
     )
     writer.append({"custom_id": "partial"})
-    handle = writer._handle
-    writer._handle = _CloseFailingHandle(handle)
+    _make_writer_close_fail(writer)
 
     with pytest.raises(OSError, match="flush-on-close"):
         writer.commit()
 
-    assert handle.closed
-    assert writer._handle is None
+    assert writer._writer is None
     assert writer.state == "aborted"
     assert list((tmp_path / "files").iterdir()) == []
     with pytest.raises(KeyError):
@@ -290,7 +291,7 @@ def test_jsonl_writer_publish_failure_aborts_without_visibility(tmp_path, monkey
     with pytest.raises(OSError, match="content publish"):
         writer.commit()
 
-    assert writer._handle is None
+    assert writer._writer is None
     assert writer.state == "aborted"
     assert list((tmp_path / "files").iterdir()) == []
     with pytest.raises(KeyError):
@@ -313,7 +314,7 @@ def test_jsonl_writer_metadata_failure_aborts_without_visibility(tmp_path, monke
     with pytest.raises(OSError, match="metadata publish"):
         writer.commit()
 
-    assert writer._handle is None
+    assert writer._writer is None
     assert writer.state == "aborted"
     assert list((tmp_path / "files").iterdir()) == []
     with pytest.raises(KeyError):
@@ -358,9 +359,10 @@ def test_jsonl_writer_rejects_empty_commit_and_closed_state_operations(tmp_path)
         aborted.commit()
 
 
-def test_save_and_read_file_content_remain_byte_compatible(tmp_path):
+def test_save_and_read_file_content_remain_byte_compatible(tmp_path, monkeypatch):
     store = BatchStore(tmp_path)
     content = b"\x00binary\xff\n"
+    monkeypatch.setattr(store_module, "_FILE_CHUNK_BYTES", 4)
 
     file = store.save_file(
         content,
@@ -372,3 +374,8 @@ def test_save_and_read_file_content_remain_byte_compatible(tmp_path):
     assert file.bytes == len(content)
     assert file.owner == "tenant-a"
     assert store.read_file_content(file.id, owner="tenant-a") == content
+    assert tuple(store.iter_file_content(file.id, owner="tenant-a")) == (
+        content[:4],
+        content[4:8],
+        content[8:],
+    )

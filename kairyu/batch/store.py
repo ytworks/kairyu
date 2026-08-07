@@ -14,11 +14,14 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from types import TracebackType
-from typing import BinaryIO, Literal, Protocol, Self
+from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, Field
 
+from kairyu.audit_io import BoundedJsonlWriter
+
 _SUPPORTED_ENDPOINT = "/v1/chat/completions"
+_FILE_CHUNK_BYTES = 1024 * 1024
 
 
 class FileTooLargeError(Exception):
@@ -57,7 +60,7 @@ class JsonlFileWriter:
         self._owner = owner
         self._file_id = f"file-{uuid.uuid4().hex[:24]}"
         self._temporary_path = store._files_dir / f"{self._file_id}.bin.tmp"
-        self._handle: BinaryIO | None = None
+        self._writer: BoundedJsonlWriter | None = None
         self._bytes_written = 0
         self._state: Literal["new", "open", "committed", "aborted"] = "new"
 
@@ -71,22 +74,21 @@ class JsonlFileWriter:
 
     def append(self, payload: dict) -> None:
         self._require_writable()
-        encoded = json.dumps(payload).encode("utf-8") + b"\n"
-        if self._handle is None:
-            self._handle = self._temporary_path.open("xb")
+        encoded = json.dumps(payload)
+        if self._writer is None:
+            self._writer = BoundedJsonlWriter(self._temporary_path)
             self._state = "open"
-        self._handle.write(encoded)
-        self._handle.flush()
-        self._bytes_written += len(encoded)
+        self._writer.append(encoded)
+        self._bytes_written += len(encoded.encode("utf-8")) + 1
 
     def commit(self) -> FileObject:
         if self._state == "new":
             raise RuntimeError("cannot commit an empty JSONL writer")
         if self._state != "open":
             raise RuntimeError(f"JSONL writer is already {self._state}")
-        assert self._handle is not None
+        assert self._writer is not None
         try:
-            self._close_handle()
+            self._close_writer()
             file = self._store._commit_file(
                 self._temporary_path,
                 file_id=self._file_id,
@@ -107,7 +109,7 @@ class JsonlFileWriter:
         if self._state == "aborted":
             return
         try:
-            self._close_handle()
+            self._close_writer()
         finally:
             self._discard_temporary()
 
@@ -143,11 +145,11 @@ class JsonlFileWriter:
         if self._state not in ("new", "open"):
             raise RuntimeError(f"JSONL writer is already {self._state}")
 
-    def _close_handle(self) -> None:
-        handle = self._handle
-        self._handle = None
-        if handle is not None:
-            handle.close()
+    def _close_writer(self) -> None:
+        writer = self._writer
+        self._writer = None
+        if writer is not None:
+            writer.close()
 
     def _discard_temporary(self) -> None:
         self._state = "aborted"
@@ -181,8 +183,7 @@ class BatchJob(BaseModel):
 
 
 class BatchStoreProtocol(Protocol):
-    """The full store surface (m10a D3/A8) — worker, routes and builder use
-    exactly these eleven methods; M11 tenancy ledgers fake this."""
+    """The full store surface (m10a D3/A8) used by workers and routes."""
 
     def save_file(
         self, content: bytes, filename: str, purpose: str, owner: str = "default"
@@ -200,6 +201,10 @@ class BatchStoreProtocol(Protocol):
     def get_file(self, file_id: str, owner: str | None = None) -> FileObject: ...
 
     def read_file_content(self, file_id: str, owner: str | None = None) -> bytes: ...
+
+    def iter_file_content(
+        self, file_id: str, owner: str | None = None
+    ) -> Iterator[bytes]: ...
 
     def iter_file_lines(
         self, file_id: str, owner: str | None = None
@@ -296,6 +301,19 @@ class BatchStore:
     def read_file_content(self, file_id: str, owner: str | None = None) -> bytes:
         self.get_file(file_id, owner)  # KeyError on missing OR cross-tenant
         return (self._files_dir / f"{file_id}.bin").read_bytes()
+
+    def iter_file_content(
+        self, file_id: str, owner: str | None = None
+    ) -> Iterator[bytes]:
+        self.get_file(file_id, owner)  # validate before response headers
+        content_path = self._files_dir / f"{file_id}.bin"
+
+        def chunks() -> Iterator[bytes]:
+            with content_path.open("rb") as handle:
+                while chunk := handle.read(_FILE_CHUNK_BYTES):
+                    yield chunk
+
+        return chunks()
 
     def iter_file_lines(
         self, file_id: str, owner: str | None = None

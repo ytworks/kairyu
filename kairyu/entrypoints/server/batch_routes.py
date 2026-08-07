@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, Request, Response, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from kairyu.batch.store import BatchStoreProtocol, FileTooLargeError
@@ -21,6 +21,7 @@ def _tenant_of(request: Request) -> str:
 # cap the batch input upload so one client cannot OOM the gateway (S7)
 _MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 _CHUNK_BYTES = 1024 * 1024
+_CONTENT_SENTINEL = object()
 
 
 class CreateBatchRequest(BaseModel):
@@ -46,12 +47,8 @@ def _not_found(kind: str, object_id: str) -> JSONResponse:
 def add_batch_routes(
     app: FastAPI, store: BatchStoreProtocol, worker: BatchWorker
 ) -> None:
-    shared_store = callable(getattr(store, "claim_next_batch", None))
-
     async def store_call(function, *args, **kwargs):
-        if shared_store:
-            return await asyncio.to_thread(function, *args, **kwargs)
-        return function(*args, **kwargs)
+        return await asyncio.to_thread(function, *args, **kwargs)
 
     @app.post("/v1/files")
     async def upload_file(
@@ -97,14 +94,31 @@ def add_batch_routes(
     @app.get("/v1/files/{file_id}/content")
     async def get_file_content(request: Request, file_id: str):
         try:
-            content = await store_call(
-                store.read_file_content,
+            iterator = await store_call(
+                store.iter_file_content,
                 file_id,
                 owner=_tenant_of(request),
             )
         except KeyError:
             return _not_found("file", file_id)
-        return Response(content=content, media_type="application/octet-stream")
+
+        async def chunks():
+            try:
+                while True:
+                    chunk = await asyncio.to_thread(
+                        next,
+                        iterator,
+                        _CONTENT_SENTINEL,
+                    )
+                    if chunk is _CONTENT_SENTINEL:
+                        return
+                    yield chunk
+            finally:
+                close = getattr(iterator, "close", None)
+                if close is not None:
+                    await asyncio.to_thread(close)
+
+        return StreamingResponse(chunks(), media_type="application/octet-stream")
 
     @app.post("/v1/batches")
     async def create_batch(request: Request, body: CreateBatchRequest):

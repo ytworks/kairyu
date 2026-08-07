@@ -1183,6 +1183,7 @@ def test_builder_injects_usage_sinks_into_batch_worker(tmp_path):
         f"""
 server:
   usage_ledger_path: {tmp_path / "usage.jsonl"}
+  ttft_slo_s: 1.0
 engines:
   m: {{ backend: mock }}
 tenants:
@@ -1198,6 +1199,7 @@ batch:
     assert app.state.batch_worker._metrics is app.state.metrics
     assert app.state.batch_worker._usage_ledger is app.state.usage_ledger
     assert app.state.batch_worker._tenant_limiter is app.state.tenant_limiter
+    assert app.state.batch_worker._admission_controller is app.state.slo_admission
 
 
 def test_batch_store_config_keeps_filesystem_compatibility_and_shared_controls():

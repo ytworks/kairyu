@@ -426,6 +426,18 @@ preflight checks and post-generation tool-choice enforcement. Controlled request
 failures do not dispatch; arbitrary backend failures expose only their exception
 class while retaining the full traceback in server logs.
 
+**I/O and interactive-pressure amendment (2026-08-07, issue #342):** filesystem
+and PostgreSQL output/error transactions now admit encoded rows to the existing
+bounded background JSONL writer; only the worker's off-loop finalization waits
+for the accepted rows before atomic publication or rollback. All synchronous
+store calls in the HTTP routes and filesystem-worker path run outside the shared
+event loop, and file content is returned as fixed-size off-loop chunks rather
+than one whole-file allocation. When `server.ttft_slo_s` is enabled, a batch
+consumer waits before starting its next line while interactive work is active
+and the controller predicts that one more interactive request would exceed the
+SLO. This is admission-only: already-dispatched batch work is not cancelled or
+preempted, and disabling predictive admission preserves the fixed consumer cap.
+
 ### D8 — Observability: `prometheus-client` + stdlib JSON logs; no OTel
 
 Metrics: `kairyu_requests_total{model,code}`,
