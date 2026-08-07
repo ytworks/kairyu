@@ -1038,6 +1038,7 @@ class ZmqEngineBackend:
             ),
             "generation_config": generation_config,
         }
+        self._sequence_budget = max_num_seqs
         self._death_timeout_s = death_timeout_s
         self._configured_tensor_parallel_size = tensor_parallel_size
         # Public topology is populated only after the child reports a matching
@@ -1140,6 +1141,12 @@ class ZmqEngineBackend:
         # Event-loop-owned single flights.  Workers only compute; a live
         # waiter publishes into `_prepared_requests` after a successful await.
         self._preparing_requests: dict[int, _ProcPromptPreparationFlight] = {}
+
+    @property
+    def sequence_budget(self) -> int:
+        """Construction-time active sequence capacity for HTTP admission."""
+
+        return self._sequence_budget
 
     @property
     def request_validation_key(

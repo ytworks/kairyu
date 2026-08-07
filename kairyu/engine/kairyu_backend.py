@@ -1304,6 +1304,7 @@ class KairyuBackend:
             dram_kv_tier_profile=dram_kv_tier_profile,
             generation_config=generation_config,
         )
+        self._sequence_budget = max_num_seqs
         self.generation_defaults = self._loop.generation_defaults
         self.attention_backend_decision = getattr(
             self._loop, "attention_backend_decision", None
@@ -1362,6 +1363,12 @@ class KairyuBackend:
         # Event-loop-owned single flights.  The worker task only computes a
         # PreparedPrompt; a live waiter publishes it after a successful await.
         self._preparing_requests: dict[int, _PromptPreparationFlight] = {}
+
+    @property
+    def sequence_budget(self) -> int:
+        """Construction-time active sequence capacity for HTTP admission."""
+
+        return self._sequence_budget
 
     @property
     def request_validation_key(

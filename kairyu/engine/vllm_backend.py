@@ -115,6 +115,13 @@ class VLLMBackend:
             scheduling_policy=scheduling_policy,
             **engine_args,
         )
+        configured_sequence_budget = engine_args.get("max_num_seqs")
+        self._sequence_budget = (
+            configured_sequence_budget
+            if type(configured_sequence_budget) is int
+            and configured_sequence_budget > 0
+            else None
+        )
         self._vllm = vllm
         self._engine = vllm.AsyncLLMEngine.from_engine_args(args)
         model_config = getattr(self._engine, "model_config", None)
@@ -123,6 +130,12 @@ class VLLMBackend:
             if model_config is not None
             else None
         )
+
+    @property
+    def sequence_budget(self) -> int | None:
+        """Explicit vLLM active sequence capacity, when configured."""
+
+        return self._sequence_budget
 
     @property
     def generation_defaults(self) -> GenerationDefaults | None:

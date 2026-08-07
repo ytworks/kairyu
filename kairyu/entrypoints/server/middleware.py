@@ -7,6 +7,7 @@ full streamed response (design m7 D4/D5/D8).
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -131,40 +132,88 @@ class AuthMiddleware:
 
 
 class ConcurrencyLimitMiddleware:
-    """Global in-flight cap on /v1/*; saturation returns 429 + Retry-After (m7 D5).
+    """Bound active and queued /v1/* work; saturation returns 429 (m7 D5).
 
     Fine-grained per-client rate limiting is the edge WAF/LB's job — this guard
     only protects the process from overload.
     """
 
-    def __init__(self, app: _ASGIApp, *, limit: int) -> None:
+    def __init__(
+        self,
+        app: _ASGIApp,
+        *,
+        limit: int,
+        total_limit: int,
+        wait_timeout_s: float,
+    ) -> None:
+        if not 1 <= limit <= total_limit:
+            raise ValueError("active limit must be within the total concurrency limit")
+        if wait_timeout_s <= 0:
+            raise ValueError("admission wait timeout must be positive")
         self.app = app
         self._limit = limit
+        self._total_limit = total_limit
+        self._queue_limit = total_limit - limit
+        self._wait_timeout_s = wait_timeout_s
+        self._slots = asyncio.Semaphore(limit)
         self._active = 0
+        self._waiting = 0
+
+    async def _reject(self, send: Callable, message: str) -> None:
+        await _send_json(
+            send,
+            429,
+            {
+                "error": {
+                    "message": message,
+                    "type": "rate_limit_error",
+                    "code": "concurrency_exceeded",
+                }
+            },
+            {"retry-after": "1"},
+        )
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] != "http" or not scope["path"].startswith(_GUARDED_PREFIX):
             await self.app(scope, receive, send)
             return
-        if self._active >= self._limit:
-            await _send_json(
-                send,
-                429,
-                {
-                    "error": {
-                        "message": f"server is at max concurrency ({self._limit})",
-                        "type": "rate_limit_error",
-                        "code": "concurrency_exceeded",
-                    }
-                },
-                {"retry-after": "1"},
-            )
-            return
+        if self._slots.locked():
+            if self._waiting >= self._queue_limit:
+                message = (
+                    f"server is at max concurrency ({self._limit})"
+                    if self._queue_limit == 0
+                    else f"server admission queue is full ({self._total_limit})"
+                )
+                await self._reject(
+                    send,
+                    message,
+                )
+                return
+            self._waiting += 1
+            timed_out = False
+            try:
+                await asyncio.wait_for(
+                    self._slots.acquire(),
+                    timeout=self._wait_timeout_s,
+                )
+            except TimeoutError:
+                timed_out = True
+            finally:
+                self._waiting -= 1
+            if timed_out:
+                await self._reject(
+                    send,
+                    "server admission queue wait timed out",
+                )
+                return
+        else:
+            await self._slots.acquire()
         self._active += 1
         try:
             await self.app(scope, receive, send)
         finally:
             self._active -= 1
+            self._slots.release()
 
 
 class ChatBodyLimitMiddleware:

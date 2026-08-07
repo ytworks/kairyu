@@ -263,6 +263,11 @@ def test_server_section_owns_stable_schema_without_runtime_inheritance():
             ],
             "default": None,
         },
+        "admission_wait_timeout_s": {
+            "default": 1.0,
+            "exclusiveMinimum": 0,
+            "type": "number",
+        },
         "ttft_slo_s": {
             "anyOf": [
                 {"exclusiveMinimum": 0, "type": "number"},
@@ -300,6 +305,7 @@ server:
   port: 8100
   api_keys_env: KAIRYU_API_KEYS
   max_concurrency: 64
+  admission_wait_timeout_s: 3.5
   ttft_slo_s: 2.0
   max_chat_body_bytes: 16777216
   metrics: false
@@ -318,6 +324,7 @@ engines:
     assert spec.server.to_server_settings() == ServerSettings(
         api_keys_env="KAIRYU_API_KEYS",
         max_concurrency=64,
+        admission_wait_timeout_s=3.5,
         ttft_slo_s=2.0,
         max_chat_body_bytes=16_777_216,
         metrics=False,
@@ -328,6 +335,18 @@ engines:
         admin_keys_env="KAIRYU_ADMIN_KEYS",
     )
     assert ServerSection().to_server_settings() == ServerSettings()
+
+
+def test_server_section_rejects_nonpositive_admission_wait_timeout():
+    with pytest.raises(ValidationError, match="admission_wait_timeout_s"):
+        load_deployment_spec(
+            """
+server:
+  admission_wait_timeout_s: 0
+engines:
+  m: {backend: mock}
+"""
+        )
 
 
 def test_server_section_rejects_runtime_only_or_unknown_yaml_keys():

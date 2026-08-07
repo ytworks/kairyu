@@ -46,6 +46,7 @@ from kairyu.engine.backend import (
     GenerationUsage,
     UpstreamClientError,
     backend_admission_upper_bound_async,
+    backend_sequence_budget,
     backend_supports_slo_defer,
     prepare_backend_request,
     validate_backend_request_before_prepare,
@@ -1649,6 +1650,15 @@ def _record_ingress_to_handler(http_request: Request, endpoint: str) -> None:
         )
 
 
+def _server_sequence_budget(engines: Mapping[str, EngineBackend]) -> int | None:
+    budgets = tuple(
+        budget
+        for backend in engines.values()
+        if (budget := backend_sequence_budget(backend)) is not None
+    )
+    return min(budgets) if budgets else None
+
+
 def create_app(
     engines: Mapping[str, EngineBackend],
     orchestrator: Orchestrator | None = None,
@@ -1771,7 +1781,18 @@ def create_app(
     if metrics is not None:
         app.add_middleware(MetricsMiddleware, metrics=metrics)
     if settings.max_concurrency is not None:
-        app.add_middleware(ConcurrencyLimitMiddleware, limit=settings.max_concurrency)
+        sequence_budget = _server_sequence_budget(served_engines)
+        active_limit = (
+            min(settings.max_concurrency, sequence_budget)
+            if sequence_budget is not None
+            else settings.max_concurrency
+        )
+        app.add_middleware(
+            ConcurrencyLimitMiddleware,
+            limit=active_limit,
+            total_limit=settings.max_concurrency,
+            wait_timeout_s=settings.admission_wait_timeout_s,
+        )
     if tenant_config is not None:
         from kairyu.entrypoints.server.tenancy import (
             TenantLimiter,

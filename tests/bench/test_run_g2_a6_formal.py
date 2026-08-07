@@ -178,6 +178,7 @@ def test_kairyu_template_pins_context_cache_pipeline_and_access_log(
 
     for marker in (
         "access_log: false",
+        "admission_wait_timeout_s: 600",
         "num_pages: 8193",
         "max_model_len: 8192",
         "pipeline_depth: 5",

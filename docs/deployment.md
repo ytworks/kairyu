@@ -37,7 +37,7 @@ KV pages, TP collectives, and P-D transfers never leave the DC fabric
 | DDoS, bot filtering, per-client rate limits | Cloud WAF | — |
 | TLS termination, certificates | Cloud LB (or DC reverse proxy) | serves plain HTTP behind it |
 | Client authentication | Gateway | `server.api_keys_env` (static keys, constant-time compare) |
-| Process overload | Gateway | `server.max_concurrency` → 429 + Retry-After |
+| Process overload | Gateway | backend-aware active cap + bounded `server.max_concurrency` admission → 429 + Retry-After |
 | TTFT SLO overload | Gateway | optional `server.ttft_slo_s` → admit, batch-defer, or 429 + Retry-After |
 | Routing inspection | Gateway | `/v1/route` uses data-plane auth; `/routing` remains inside the configured API-key boundary |
 | Node-to-node auth inside the DC | Deployment choice | keyless (`api_key_env: null`) or a shared key env var |
@@ -246,7 +246,8 @@ server:
   host: 0.0.0.0
   port: 8000
   api_keys_env: KAIRYU_API_KEYS     # comma-separated client keys
-  max_concurrency: 256
+  max_concurrency: 256              # active plus admission waiters
+  admission_wait_timeout_s: 1.0     # queued request wait bound
   ttft_slo_s: 2.0                  # optional direct-chat predictive admission
 pools:
   llama-70b:
@@ -285,6 +286,15 @@ sessionless or explicitly hinted related prompts can prefer the warm replica.
 The pool still falls back to its existing session HRW, queue-depth, and
 least-outstanding policies when no usable prefix is known. This option does not
 start the separate exact KV-event subscriber lifecycle.
+
+`max_concurrency` remains opt-in and bounds the total number of active plus
+queued `/v1/*` requests. Local Kairyu, process-split Kairyu, and explicitly
+configured vLLM backends advertise their active sequence budget; the server
+uses the smallest advertised budget as its active-request cap and places only
+the remaining configured allowance in the admission queue. A waiter receives
+429 after `admission_wait_timeout_s`, while a request beyond the total bound is
+rejected immediately. If no backend advertises a budget, the configured value
+remains the active cap and saturation keeps the historical immediate 429.
 
 `ttft_slo_s` is opt-in and applies to direct interactive Chat Completions after
 request validation but before backend preparation. The controller admits work

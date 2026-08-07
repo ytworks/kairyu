@@ -19,6 +19,10 @@ only from retained, runtime-identity-matched crossover evidence.
 **Amended 2026-08-07** (D3, issue #343): deployment pools may opt into the
 existing bounded approximate `PrefixIndex`; omission remains byte-identical and
 does not imply the separate exact KV-event transport lifecycle.
+**Amended 2026-08-07** (D5, issue #341): a configured concurrency guard uses a
+built-in backend's advertised sequence budget as its active-request cap and
+holds only the remaining configured allowance in a bounded, timed admission
+queue; unknown backends retain the configured cap and immediate overflow 429.
 Milestone: M7
 Date: 2026-07-02
 Depends on: Goal G3 (`docs/goals/g3-production-deployment.md`, gates C1–C7);
@@ -78,7 +82,7 @@ may reference a ClusterSpec file; the gateway's DeploymentSpec only knows the
 replica's endpoint. Schema (pydantic, `kairyu/deploy/spec.py`):
 
 ```yaml
-server: { host, port, api_keys_env, max_concurrency, metrics: bool }
+server: { host, port, api_keys_env, max_concurrency, admission_wait_timeout_s, metrics: bool }
 engines:            # name -> single backend
   small: { backend: mock, options: {...} }
 pools:              # name -> ReplicaPool of backends
@@ -146,7 +150,12 @@ health/validation/generation accessors plus explicit probe state changes.
 The edge (WAF/LB) owns DDoS, per-client rate limits, TLS. The gateway ships
 defense-in-depth: optional static API keys sourced from an env var
 (comma-separated, constant-time compare), exempting `/health` and `/readyz`;
-plus a global concurrency guard (asyncio semaphore → 429 + `Retry-After`).
+plus a global concurrency guard. `max_concurrency` bounds active plus queued
+`/v1/*` requests. When a built-in backend advertises its immutable sequence
+budget, the smallest advertised budget caps active requests and the remaining
+allowance waits on the semaphore for at most `admission_wait_timeout_s`;
+overflow and timeout return 429 + `Retry-After`. Backends without a declared
+budget preserve the configured active cap and therefore have no implicit queue.
 Replica nodes inside the DC accept keyless traffic (m6 D2's
 `api_key_env=None`) or a shared key — deployment guide shows both. Kairyu
 builds no WAF and no per-key rate accounting.

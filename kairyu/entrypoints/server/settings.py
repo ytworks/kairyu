@@ -24,7 +24,16 @@ class ServerSettings(BaseModel):
     max_concurrency: int | None = Field(
         default=None,
         ge=1,
-        description="Global in-flight cap on /v1/* requests; None disables the guard.",
+        description=(
+            "Global active-plus-queued cap on /v1/* requests; None disables "
+            "the guard."
+        ),
+    )
+    admission_wait_timeout_s: float = Field(
+        default=1.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Maximum wait for a backend-aware active request slot.",
     )
     ttft_slo_s: float | None = Field(
         default=None,
