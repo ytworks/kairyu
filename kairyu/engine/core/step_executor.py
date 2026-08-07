@@ -893,7 +893,7 @@ class GraphStepExecutor:
                 self._eager_fallbacks += 1
                 self._eager_fallbacks_total += 1
                 self._page_table_eager_fallbacks += 1
-                self._plan(batch)
+                self._plan_fast(batch)
                 return self._decode_fn(batch)
             if batch.batch_size != coordinated.bucket_size:
                 raise RuntimeError(

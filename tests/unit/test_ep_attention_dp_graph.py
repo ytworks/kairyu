@@ -328,11 +328,14 @@ def _batch(size: int = 2) -> DecodeBatch:
         page_tables=torch.zeros((size, 1), dtype=torch.int32),
         seq_lens=torch.ones(size, dtype=torch.int32),
         write_from=torch.zeros(size, dtype=torch.int64),
+        host_seq_lens=(1,) * size,
     )
 
 
 def test_coordinated_eager_override_cannot_be_contradicted_by_local_graph() -> None:
     calls: list[int] = []
+    stock_plans: list[DecodeBatch] = []
+    fast_plans: list[DecodeBatch] = []
     backend = FakeGraphBackend()
     executor = GraphStepExecutor(
         lambda batch: calls.append(batch.batch_size) or batch.token_ids[:, None],
@@ -340,14 +343,19 @@ def test_coordinated_eager_override_cannot_be_contradicted_by_local_graph() -> N
         max_batch=8,
         max_pages=4,
         scratch_page=9,
+        plan_fn=stock_plans.append,
+        replay_plan_fn=fast_plans.append,
     )
     decision = GraphDecodeDecision("eager_fallback", 7, 1)
     executor.coordinate_next_decode(decision)
-    output = executor.execute_decode(_batch())
+    batch = _batch()
+    output = executor.execute_decode(batch)
     executor.assert_coordinated_decode_consumed()
 
     assert output.shape == (2, 1)
     assert calls == [2]
+    assert fast_plans == [batch]
+    assert stock_plans == []
     assert backend.captures == 0
     assert executor.execution_stats()["eager_fallbacks"] == 1
 

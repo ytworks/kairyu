@@ -234,9 +234,9 @@ class _Backbone(nn.Module):
 class DenseDecoder(nn.Module):
     """Paged incremental decoder; covers the m12 dense family via config."""
 
-    # The runner may pass replay-only scheduler metadata through this model
-    # seam. Models implementing only the original tensor-decode contract omit
-    # this capability and retain stock planning on every replay.
+    # The runner may pass scheduler metadata for fast eager/replay planning
+    # through this model seam. Models implementing only the original
+    # tensor-decode contract retain stock planning.
     supports_fast_replay_plan = True
     # The scheduler can provide contiguous chunk bounds without changing the
     # original arbitrary-position ``forward_tokens`` contract.
