@@ -485,14 +485,22 @@ def test_float_working_copy_makes_exactly_one_mutable_copy():
 
     fp32_work = Sampler._float_working_copy(fp32)
     bf16_work = Sampler._float_working_copy(bf16)
+    cpu_fp32_work = Sampler._cpu_float_working_copy(fp32)
+    cpu_bf16_work = Sampler._cpu_float_working_copy(bf16)
     fp32_work[0] = 100.0
     bf16_work[0] = 100.0
+    cpu_fp32_work[1] = 100.0
+    cpu_bf16_work[1] = 100.0
 
     assert fp32_work.dtype == torch.float32
     assert bf16_work.dtype == torch.float32
     assert fp32_work.data_ptr() != fp32.data_ptr()
+    assert cpu_fp32_work.data_ptr() != fp32.data_ptr()
+    assert cpu_bf16_work.dtype == torch.float32
     assert float(fp32[0]) != 100.0
+    assert float(fp32[1]) != 100.0
     assert float(bf16[0]) != 100.0
+    assert float(bf16[1]) != 100.0
 
 
 @pytest.mark.parametrize(

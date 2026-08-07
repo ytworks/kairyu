@@ -750,7 +750,7 @@ class Sampler:
         # requests use sample_device(), which keeps the decision and penalty
         # history dependency on-device. XGrammar's matcher is stateful host code,
         # so masking/acceptance deliberately stays here until it has a device FSM.
-        logits = logits.detach().to(device="cpu", dtype=torch.float32).clone()
+        logits = self._cpu_float_working_copy(logits)
 
         raw_logsoftmax: torch.Tensor | None = None
         if sampling.logprobs is not None or forced_token_id is not None:
@@ -884,6 +884,15 @@ class Sampler:
         if detached.dtype == torch.float32:
             return detached.clone()
         return detached.to(dtype=torch.float32)
+
+    @staticmethod
+    def _cpu_float_working_copy(logits: torch.Tensor) -> torch.Tensor:
+        """Return one mutable CPU fp32 copy without a redundant second copy."""
+
+        detached = logits.detach()
+        if detached.device.type == "cpu" and detached.dtype == torch.float32:
+            return detached.clone()
+        return detached.to(device="cpu", dtype=torch.float32)
 
     def sample_batch_device(
         self,

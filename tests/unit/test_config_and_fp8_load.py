@@ -37,6 +37,15 @@ def test_plain_and_default_rope_are_allowed():
     assert parse_model_config(cfg).rope_scaling is None
 
 
+def test_max_position_embeddings_is_validated_and_retained():
+    assert parse_model_config(
+        _llama_config(max_position_embeddings=123)
+    ).max_position_embeddings == 123
+    assert parse_model_config(_llama_config()).max_position_embeddings == 4096
+    with pytest.raises(ValueError, match="max_position_embeddings"):
+        parse_model_config(_llama_config(max_position_embeddings=0))
+
+
 def test_llama3_and_yarn_still_parse():
     llama3 = parse_model_config(
         _llama_config(

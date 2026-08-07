@@ -34,7 +34,8 @@ through the FULL engine (chunked prefill, radix reuse, paging, sampler).
 present — Qwen3 decouples it from hidden/heads — else derived),
 `intermediate_size`, `vocab_size`, `rms_norm_eps`, `rope_theta`,
 `rope_scaling` (llama3 type: factor, low/high_freq_factor,
-original_max_position_embeddings), `attention_bias` (Qwen2 qkv bias),
+original_max_position_embeddings), `max_position_embeddings`,
+`attention_bias` (Qwen2 qkv bias),
 `qk_norm` (implied by `Qwen3ForCausalLM`), `tie_word_embeddings`,
 `torch_dtype`. Unknown architectures fail fast with the supported list.
 
@@ -69,13 +70,21 @@ original_max_position_embeddings), `attention_bias` (Qwen2 qkv bias),
   boolean mask `mask[i, j] = (j <= chunk_start + i)` of shape
   `[chunk_len, seq_len]` and pass it as `attn_mask` (SDPA `enable_gqa=True`
   verified working on CPU torch 2.12).
-- **RoPE numerics contract (amended, verified)**: cos/sin computed once per
-  forward at model level from the chunk's absolute positions, in fp32
-  regardless of model dtype, then cast; `inv_freq` from the exact
+- **RoPE numerics contract (amended 2026-08-07, issue #332)**: load builds
+  non-persistent fp32 cos/sin tables through `max_position_embeddings`; each
+  model forward only gathers the chunk's absolute-position rows. `inv_freq`
+  and the table use the exact
   `arange(0, dim, 2, int64)/dim` expression; HF `attention_scaling` equals
-  1.0 for `default` and `llama3` rope types (no-op here; load-bearing only if
-  yarn/longrope archs land later). Qwen3 q/k RMSNorm is per-head over
-  head_dim, applied BEFORE RoPE.
+  1.0 for `default` and `llama3` and is baked into both tables for YaRN.
+  The fused dense CUDA kernel consumes those already-scaled rows for default,
+  llama3, and YaRN alike; scaling kind is not a dispatch restriction. Qwen3
+  q/k RMSNorm is per-head over head_dim, applied BEFORE RoPE. Kernel modules
+  are imported once rather than inside per-layer calls. Q/K joint-fusion type,
+  epsilon, and module identity are cached with dense packs, while hooks and
+  instance forward overrides remain dynamically checked so module semantics
+  are unchanged. Native real-model admission defaults an omitted
+  `max_model_len` to this table limit and rejects a larger override at startup,
+  so no CPU index error or CUDA device assert can occur past the resident table.
 - Computation dtype: fp32 on CPU for parity tests; the module honors
   `torch_dtype` for load (bf16 weights cast to fp32 compute on CPU — recorded;
   GPU keeps native dtype).

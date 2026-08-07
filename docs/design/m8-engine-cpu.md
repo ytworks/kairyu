@@ -193,13 +193,21 @@ media bytes.
   appends only new logprob/content entries. Public `CompletionOutput` values,
   legacy wire frames, and the first v2 snapshot materialize tuples/lists at
   their compatibility boundaries; steady v2 frames remain deltas.
+- **Empty-output amendment (2026-08-07, issue #332)**: a tracked request with
+  no newly committed token and no terminal transition produces no
+  `StreamUpdate`; both production drivers skip empty presentation jobs. A v2
+  process client still applies sequenced metadata-only deltas to its cursor but
+  does not join cumulative text or construct a public result for them. CPU and
+  CUDA sampler compatibility paths likewise make exactly one mutable fp32 copy:
+  an existing CPU fp32 tensor is cloned, while a device or dtype conversion is
+  itself the copy.
 - **Stream-backpressure conflation (2026-08-04, issue #335)**: the in-process
   `KairyuBackend` publishes cumulative `StreamUpdate` values through one bounded,
-  single-consumer mailbox per request. Empty prefill states replace one another;
-  the first token-bearing state is retained for TTFT, and later non-terminal
-  states replace the pending latest state. A cumulative successful terminal can
-  replace that latest state. The payload-free error sentinel cannot, so the
-  latest cumulative state is delivered once before the error. Publishing the
+  single-consumer mailbox per request. The first token-bearing state is retained
+  for TTFT, and later non-terminal states replace the pending latest state. A
+  cumulative successful terminal can replace that latest state. The payload-free
+  error sentinel cannot, so the latest cumulative state is delivered once before
+  the error. Publishing the
   first FIFO terminal seals the mailbox even after a waiting `get()` removes it,
   preventing a later unrelated pump failure from turning an already successful
   stream into an error. The steady queue is at most two snapshots; only the

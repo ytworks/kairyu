@@ -9,6 +9,7 @@ import torch
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
+from kairyu.engine.prompt import TokensPrompt
 from kairyu.models.loader import load_model
 
 transformers = pytest.importorskip("transformers")
@@ -83,6 +84,39 @@ def test_loader_roundtrip_matches_source_model(checkpoint):
     )
     mine = model.logits(hidden)
     assert (mine - theirs).abs().max().item() < 1e-4
+
+
+def test_real_model_admission_is_bounded_by_the_rope_table(checkpoint):
+    path, _ = checkpoint
+    with pytest.raises(
+        ValueError,
+        match=(
+            "max_model_len=513 exceeds the model's "
+            "max_position_embeddings=512"
+        ),
+    ):
+        build_engine_loop(
+            model_path=str(path),
+            tokenizer=_SmallVocabTokenizer(),
+            max_model_len=513,
+        )
+
+    loop, _cache, _scheduler = build_engine_loop(
+        num_pages=256,
+        page_size=4,
+        model_path=str(path),
+        tokenizer=_SmallVocabTokenizer(),
+    )
+    try:
+        assert loop.max_model_len == 512
+        with pytest.raises(ValueError, match="exceed max_model_len \\(512\\)"):
+            loop.submit(
+                "beyond-rope-table",
+                TokensPrompt((1,) * 512),
+                SamplingParams(max_tokens=1, ignore_eos=True),
+            )
+    finally:
+        loop.close()
 
 
 def test_quantized_config_with_unquantized_tensors_fails_loudly(checkpoint, tmp_path):

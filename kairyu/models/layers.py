@@ -13,6 +13,7 @@ import math
 import torch
 from torch import nn
 
+from kairyu.kernels import rms_norm_gpu, rope_gpu
 from kairyu.models.config import ModelConfig, RopeScaling
 from kairyu.quant.linear import ExpertScope, LinearRole, ModelScope, make_linear
 
@@ -25,9 +26,7 @@ class RMSNorm(nn.Module):
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         if hidden.device.type == "cuda":
-            from kairyu.kernels.rms_norm_gpu import try_rms_norm
-
-            fused = try_rms_norm(hidden, self.weight, self.eps)
+            fused = rms_norm_gpu.try_rms_norm(hidden, self.weight, self.eps)
             if fused is not None:
                 return fused
             # Preserve the model's historical BF16 rounding boundary before
@@ -106,7 +105,7 @@ def _llama3_inv_freq(inv_freq: torch.Tensor, scaling: RopeScaling) -> torch.Tens
 
 
 class RotaryEmbedding(nn.Module):
-    """cos/sin computed once per forward at model level, fp32 (m12 D2).
+    """Load-time fp32 cos/sin table shared by every layer (m12 D2).
 
     ``attention_scaling`` multiplies cos AND sin (HF convention; 1.0 for
     default/llama3 and for real DeepSeek-V3 yarn configs — m15 A5)."""
@@ -128,11 +127,29 @@ class RotaryEmbedding(nn.Module):
             if scaling is not None and scaling.kind == "llama3":
                 inv_freq = _llama3_inv_freq(inv_freq, scaling)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+        positions = torch.arange(
+            config.max_position_embeddings,
+            dtype=torch.float32,
+            device=inv_freq.device,
+        )
+        freqs = positions[:, None] * inv_freq[None, :]
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer(
+            "cos_cached",
+            emb.cos() * self.attention_scaling,
+            persistent=False,
+        )
+        self.register_buffer(
+            "sin_cached",
+            emb.sin() * self.attention_scaling,
+            persistent=False,
+        )
 
     def forward(self, positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        freqs = positions.to(torch.float32)[:, None] * self.inv_freq[None, :]
-        emb = torch.cat((freqs, freqs), dim=-1)
-        return emb.cos() * self.attention_scaling, emb.sin() * self.attention_scaling
+        return (
+            self.cos_cached.index_select(0, positions),
+            self.sin_cached.index_select(0, positions),
+        )
 
 
 def apply_rope_interleave(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -164,12 +181,9 @@ def apply_rope(
     if (
         positions is not None
         and rope_theta is not None
-        and rope_scaling is None
         and q.device.type == "cuda"
     ):
-        from kairyu.kernels.rope_gpu import try_apply_rope_inplace
-
-        if try_apply_rope_inplace(q, k, cos, sin):
+        if rope_gpu.try_apply_rope_inplace(q, k, cos, sin):
             return q, k
     cos = cos[:, None, :].to(q.dtype)
     sin = sin[:, None, :].to(q.dtype)

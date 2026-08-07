@@ -96,6 +96,7 @@ class ModelConfig:
     rope_scaling: RopeScaling | None
     tie_word_embeddings: bool
     dtype: str
+    max_position_embeddings: int = 4096
     moe: MoeConfig | None = None
     mla: MlaConfig | None = None
 
@@ -305,6 +306,9 @@ def parse_model_config(config: dict) -> ModelConfig:
         raise ValueError("num_key_value_heads must be an integer >= 1")
     intermediate_size = _required_int(config, "intermediate_size", minimum=1)
     vocab_size = _required_int(config, "vocab_size", minimum=1)
+    max_position_embeddings = config.get("max_position_embeddings", 4096)
+    if type(max_position_embeddings) is not int or max_position_embeddings < 1:
+        raise ValueError("max_position_embeddings must be an integer >= 1")
     rope_theta, rope_scaling = _rope_fields(config)
     mla = _mla_fields(config, architecture)
     # A7: DeepSeek saved configs carry head_dim == qk_rope_head_dim; hub
@@ -329,6 +333,7 @@ def parse_model_config(config: dict) -> ModelConfig:
         rope_scaling=rope_scaling,
         tie_word_embeddings=config.get("tie_word_embeddings", False),
         dtype=config.get("dtype") or config.get("torch_dtype") or "float32",
+        max_position_embeddings=max_position_embeddings,
         moe=_moe_fields(config, architecture),
         mla=mla,
     )

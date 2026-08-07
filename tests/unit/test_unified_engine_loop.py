@@ -277,6 +277,22 @@ def test_trace_disabled_never_reads_the_stage_clock(monkeypatch) -> None:
     loop.close()
 
 
+def test_chunked_prefill_does_not_emit_empty_stream_updates() -> None:
+    loop, _ = _loop(2, _PositionRunner(), budget=2)
+    loop.submit(
+        "chunked",
+        TokensPrompt((1, 2, 3, 4, 5)),
+        SamplingParams(max_tokens=1, ignore_eos=True),
+    )
+
+    assert loop.step() == []
+    updates = _drive(loop)
+    assert updates
+    assert all(update.outputs or update.finished for _, update in updates)
+    assert updates[-1][1].finished is True
+    loop.close()
+
+
 def test_trace_metrics_cover_mixed_chunked_prefill_and_decode(monkeypatch) -> None:
     ticks = iter(range(10, 100_000, 10))
     monkeypatch.setattr(engine_loop_module, "perf_counter_ns", lambda: next(ticks))

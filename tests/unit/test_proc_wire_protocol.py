@@ -15,7 +15,11 @@ from kairyu.engine.core.engine_service import (
     sampling_params_to_wire,
 )
 from kairyu.engine.engine_loop import StreamUpdate
-from kairyu.engine.zmq_backend import EngineServiceError, _WireAccumulator
+from kairyu.engine.zmq_backend import (
+    EngineServiceError,
+    _stream_event_needs_materialization,
+    _WireAccumulator,
+)
 from kairyu.outputs import TokenLogprob
 from kairyu.sampling_params import SamplingParams
 
@@ -517,3 +521,29 @@ def test_generate_style_reconstruction_materializes_only_the_terminal_text():
     assert normalized["outputs"] == list(range(total))
     assert normalized["text"] == "x" * total
     assert normalized["finished"] is True
+
+
+def test_streaming_skips_materialization_for_metadata_only_v2_deltas():
+    assert _stream_event_needs_materialization(
+        {"wire_version": WIRE_VERSION, "event": "snapshot", "finished": False}
+    )
+    assert _stream_event_needs_materialization(
+        {
+            "wire_version": WIRE_VERSION,
+            "event": "delta",
+            "new_token_ids": [1],
+            "finished": False,
+        }
+    )
+    assert _stream_event_needs_materialization(
+        {"wire_version": WIRE_VERSION, "event": "delta", "finished": True}
+    )
+    assert not _stream_event_needs_materialization(
+        {
+            "wire_version": WIRE_VERSION,
+            "event": "delta",
+            "new_token_ids": [],
+            "stage_metrics": [{"stage": "decode", "duration_ns": 1}],
+            "finished": False,
+        }
+    )
