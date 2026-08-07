@@ -918,6 +918,35 @@ class TestPrefixRouting:
         assert index.overlap("stream", request.prompt) == 3
 
     @pytest.mark.asyncio
+    async def test_warm_stream_failure_after_first_chunk_keeps_only_root(self):
+        class FailingAfterFirstChunkBackend(MockBackend):
+            async def stream(self, request):
+                yield GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(),
+                    finished=False,
+                )
+                raise RuntimeError("decode failed")
+
+        index = PrefixIndex(chunk_chars=4)
+        index.observe_root("stream", index.chunk_keys("aaaaseed")[0])
+        pool = ReplicaPool(
+            {"stream": FailingAfterFirstChunkBackend()},
+            prefix_index=index,
+            unhealthy_after=1,
+        )
+        request = _request("aaaabbbbcccc")
+        stream = pool.stream(request)
+
+        await anext(stream)
+        with pytest.raises(RuntimeError, match="decode failed"):
+            await anext(stream)
+
+        assert index.overlap("stream", request.prompt) == 1
+        assert pool.healthy_by_id() == {"stream": False}
+
+    @pytest.mark.asyncio
     async def test_completed_stream_advertises_the_prefix(self):
         index = PrefixIndex(chunk_chars=4)
         pool = ReplicaPool({"stream": MockBackend()}, prefix_index=index)

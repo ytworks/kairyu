@@ -4,9 +4,10 @@ The gateway has NO token ids (prompts are strings; tokenizers live in the
 optional hf extra), so the trie keys on fixed-size TEXT chunks of the prompt
 — an approximation of the engine-side token pages. Key unification via
 gateway tokenization is a deploy-time option (install tokenizers in the
-gateway image). ``observe`` is called once prefill success is known (at unary
-completion or before yielding the first stream result); ``overlap`` scores
-candidates at placement time.
+gateway image). ``observe*`` publication happens after unary success, before a
+native stream's first result, or at normal stream completion for empty/legacy
+observation and warm-key promotion. ``overlap`` scores candidates at placement
+time.
 
 Bounded: per-replica chunk sets are LRU-capped so a long-running gateway
 cannot grow without bound. A reverse map for the first cumulative key is

@@ -278,11 +278,13 @@ tenants:
 ```
 
 `prefix_index` is off by default. Enabling it gives that pool one bounded,
-process-local approximate text-prefix index: successful generation publishes a
-reusable prefix and later sessionless or explicitly hinted related prompts can
-prefer the warm replica. The pool still falls back to its existing session HRW,
-queue-depth, and least-outstanding policies when no usable prefix is known.
-This option does not start the separate exact KV-event subscriber lifecycle.
+process-local approximate text-prefix index: successful unary generation or a
+stream's first backend result publishes a reusable root, which remains valid if
+that stream later fails or is cancelled because prefill already landed. Later
+sessionless or explicitly hinted related prompts can prefer the warm replica.
+The pool still falls back to its existing session HRW, queue-depth, and
+least-outstanding policies when no usable prefix is known. This option does not
+start the separate exact KV-event subscriber lifecycle.
 
 `ttft_slo_s` is opt-in and applies to direct interactive Chat Completions after
 request validation but before backend preparation. The controller admits work
