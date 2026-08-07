@@ -11,6 +11,16 @@ from kairyu.engine.core.step_input import RequestSnapshot, snapshot_step
 PAGE = 4
 
 
+class _ObservedList(list):
+    def __init__(self, values):
+        super().__init__(values)
+        self.index_reads = 0
+
+    def __getitem__(self, index):
+        self.index_reads += 1
+        return super().__getitem__(index)
+
+
 def _scheduler(num_pages: int = 64, budget: int = 32, max_seqs: int = 4) -> Scheduler:
     cache = RadixKVCache(num_pages=num_pages, page_size=PAGE)
     return Scheduler(
@@ -69,6 +79,41 @@ def test_snapshot_is_torn_free_after_scheduler_mutation():
     assert entry.in_flight == 1
     live = scheduler.states["a"]
     assert live.outputs == [7] and live.in_flight == 0  # sanity: live state moved on
+
+
+def test_snapshot_freezes_output_length_without_copying_the_prefix():
+    scheduler = _scheduler()
+    scheduler.add_request(EngineRequest("a", (1, 2, 3, 4)))
+    plan = scheduler.schedule()
+    outputs = _ObservedList(range(4096))
+    scheduler.states["a"].outputs = outputs
+
+    snapshot = snapshot_step(plan, scheduler.states).states_view()["a"]
+
+    assert outputs.index_reads == 0
+    outputs.append(4096)
+    assert len(snapshot.outputs) == 4096
+    assert snapshot.outputs[-1] == 4095
+
+
+def test_state_sync_steady_delta_reads_only_the_new_output_tail():
+    from kairyu.engine.core.step_input import StateSync
+
+    scheduler = _scheduler()
+    scheduler.add_request(EngineRequest("a", (1, 2, 3, 4)))
+    plan = scheduler.schedule()
+    outputs = _ObservedList(range(4096))
+    scheduler.states["a"].outputs = outputs
+    sync = StateSync()
+    sync.apply(sync.diff(plan.scheduled, scheduler.states))
+    outputs.index_reads = 0
+    outputs.append(4096)
+
+    delta = sync.diff(plan.scheduled, scheduler.states)
+
+    assert delta.new == ()
+    assert delta.updates[0].new_outputs == (4096,)
+    assert outputs.index_reads == 1
 
 
 def test_snapshot_dataclasses_are_frozen():

@@ -231,6 +231,37 @@ def test_target_verification_rejects_a_truncated_target_result():
     assert target.calls == 1  # model/KV side effects are never retried
 
 
+def test_each_speculative_overlay_has_a_distinct_output_epoch():
+    class _OneDraft:
+        def propose(self, context, max_draft):
+            return [context[-1]][:max_draft]
+
+    class _RecordingTarget:
+        supports_batched_verification = True
+
+        def __init__(self):
+            self.epochs = []
+
+        def execute(self, scheduled, states):
+            state = states[scheduled[0].request_id]
+            self.epochs.append(state.output_epoch)
+            return {"r": (SampledToken(9), SampledToken(10))}
+
+    state = SimpleNamespace(
+        request=EngineRequest("r", (4, 5), max_new_tokens=4),
+        outputs=[9],
+        output_epoch=0,
+    )
+    target = _RecordingTarget()
+    runner = SpeculativeRunner(target, draft_source=_OneDraft())
+    chunk = ScheduledChunk("r", 2, False, 1)
+
+    runner.execute((chunk,), {"r": state})
+    runner.execute((chunk,), {"r": state})
+
+    assert target.epochs == [1, 2]
+
+
 def test_undeclared_one_token_runner_uses_legacy_scoring_before_call():
     class _MatchingDraft:
         def propose(self, context, max_draft):

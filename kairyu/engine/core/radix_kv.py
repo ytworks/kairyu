@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import heapq
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from kairyu.engine.core.pages import PagePool
 
@@ -140,8 +141,10 @@ class KVAllocation:
     _tree_inserted: bool = field(default=True, repr=False)
     _page_size: int = field(default=16, repr=False)
 
-    @property
+    @cached_property
     def pages(self) -> tuple[int, ...]:
+        # Page ownership is immutable for an allocation.  Only lifecycle flags
+        # change, so concatenate the three ownership segments once.
         tail = (self.tail_page,) if self.tail_page is not None else ()
         return self.cached_pages + self.new_full_pages + tail
 

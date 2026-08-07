@@ -184,9 +184,9 @@ class PDLoopAdapter:
         scheduler, resolved = self.route(request_id)
         return None if scheduler is None else scheduler.finish_reason(resolved)
 
-    def output_tokens(self, request_id: str) -> tuple[int, ...]:
+    def output_tokens(self, request_id: str, start: int = 0) -> tuple[int, ...]:
         scheduler, resolved = self.route(request_id)
-        return () if scheduler is None else scheduler.output_tokens(resolved)
+        return () if scheduler is None else scheduler.output_tokens(resolved, start)
 
     def num_cached_tokens(self, request_id: str) -> int:
         scheduler, resolved = self.route(request_id)

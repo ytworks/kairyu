@@ -74,6 +74,7 @@ class _RequestState:
         "surplus_in_flight",
         "allocation",
         "decode_pages",
+        "decode_pages_snapshot",
         "finish_reason",
         "spec_in_flight",
         "admission_bypasses",
@@ -96,6 +97,7 @@ class _RequestState:
         self.surplus_in_flight = 0
         self.allocation: KVAllocation | None = None
         self.decode_pages: list[int] = []
+        self.decode_pages_snapshot: tuple[int, ...] = ()
         self.finish_reason: str | None = None
         # reservation size of the one outstanding speculative chunk (m8 D3);
         # 0 when no spec chunk is in flight
@@ -961,6 +963,7 @@ class Scheduler:
         elif state.decode_pages:
             self._kv.free_private_pages(tuple(state.decode_pages))
         state.decode_pages.clear()
+        state.decode_pages_snapshot = ()
         state.surplus_in_flight += state.in_flight
         state.in_flight = 0
 
@@ -1144,8 +1147,14 @@ class Scheduler:
         # running request, matching the existing youngest-victim discipline.
         return max(candidates)[-1]
 
-    def output_tokens(self, request_id: str) -> tuple[int, ...]:
-        return tuple(self._states[request_id].outputs)
+    def output_tokens(self, request_id: str, start: int = 0) -> tuple[int, ...]:
+        """Return committed output from ``start``.
+
+        Streaming consumers advance an offset and copy only the new tail;
+        compatibility callers keep the historical cumulative default.
+        """
+
+        return tuple(self._states[request_id].outputs[start:])
 
     def resume_with_kv(
         self, request: EngineRequest, allocation: KVAllocation, first_token: int
@@ -1187,6 +1196,7 @@ class Scheduler:
         while state.capacity_tokens(self._page_size) < needed_tokens:
             try:
                 state.decode_pages.append(self._kv.allocate_private_page())
+                state.decode_pages_snapshot = tuple(state.decode_pages)
             except KVCacheFull:
                 return False
         return True
@@ -1657,6 +1667,7 @@ class Scheduler:
         elif state.decode_pages:
             self._kv.free_private_pages(tuple(state.decode_pages))
             state.decode_pages.clear()
+        state.decode_pages_snapshot = ()
 
     @staticmethod
     def _normalize_tokens(request_id: str, tokens: int | Sequence[int]) -> list[int]:
