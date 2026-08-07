@@ -1586,7 +1586,6 @@ class Orchestrator:
                     call,
                     f"direct-{uuid.uuid4().hex[:12]}",
                 )
-            emitted = 0
             last = None
             latest_usage = None
             started_at = utc_now_iso()
@@ -1600,17 +1599,14 @@ class Orchestrator:
                         if usage_observer is not None:
                             usage_observer(latest_usage)
                     text = partial.text
-                    if not text.startswith(previous_text):
-                        raise RuntimeError("direct stream must emit cumulative, prefix-stable text")
-                    previous_text = text
                     if first_token_at is None and partial.completions:
                         first_token_at = utc_now_iso()
                     yield OrchestratorEvent(
                         kind="delta",
-                        text=text[emitted:],
+                        text=text[len(previous_text) :],
                         completions=partial.completions,
                     )
-                    emitted = len(text)
+                    previous_text = text
                 if last is None:
                     raise RuntimeError("direct stream produced no result")
             except Exception as error:

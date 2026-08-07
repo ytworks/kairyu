@@ -146,6 +146,16 @@ validating a replacement that reused the same ID. m5 D4's "no background
 tasks" is preserved: the pool remains pure hashing and exposes only read-only
 health/validation/generation accessors plus explicit probe state changes.
 
+**Serving hot-path amendment (2026-08-07, issue #349).** Metrics path
+templating uses a 1,024-entry LRU keyed by the raw path, retaining the existing
+bounded-cardinality label while avoiding repeated regex work on ordinary
+routes. SSE JSON line-separator escaping replaces three membership scans with
+one ASCII classification before translating non-ASCII content. The chat body
+limit wraps `receive` and forwards each
+validated chunk immediately; it retains only the running byte count, so the
+middleware no longer duplicates the complete request body before Starlette
+materializes it.
+
 ### D5 — Auth: managed WAF at the edge; static API keys at the gateway; keyless node-to-node
 
 The edge (WAF/LB) owns DDoS, per-client rate limits, TLS. The gateway ships

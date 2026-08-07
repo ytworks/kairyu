@@ -61,6 +61,15 @@ responses while retaining the legacy field/comment. Partial failures return
 known usage and typed failure events, never raw exception messages, prompts,
 or generated intermediate text.
 
+**Serving hot-path amendment (2026-08-07, issue #349).** The direct AUTO
+stream trusts the backend's documented cumulative, prefix-stable contract and
+performs only the suffix slice needed by the existing delta event surface; it
+does not rescan the prior prefix. First-token time is captured once rather
+than scaling with partial count. Unset AUTO-only usage counters are omitted by
+`exclude=` at the finite HTTP/SSE serialization call sites, removing the
+Python `model_serializer` callback from every serialized `Usage` value while
+preserving the public wire shape.
+
 **OpenAI request-intent amendment (2026-07-28, issue #208).** L3 validates and
 normalizes the wire request once into an immutable `OrchestrationRequest`
 (rendered prompt, `SamplingParams`, tools/tool choice, whether the template

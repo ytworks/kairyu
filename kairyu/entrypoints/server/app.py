@@ -395,6 +395,11 @@ _KAIRYU_CHAT_EXTENSION_FIELDS = frozenset(
         "kairyu_route",
     }
 )
+_USAGE_ORCHESTRATION_FIELDS = frozenset(
+    {"orchestration_input_tokens", "orchestration_output_tokens"}
+)
+_USAGE_INPUT_FIELD = frozenset({"orchestration_input_tokens"})
+_USAGE_OUTPUT_FIELD = frozenset({"orchestration_output_tokens"})
 _CHAT_CHUNK_EXCLUDE_USAGE_FIELDS = _KAIRYU_CHAT_EXTENSION_FIELDS | frozenset({"usage"})
 _COMPLETION_CHUNK_EXCLUDE_USAGE_FIELDS = frozenset({"usage"})
 
@@ -408,11 +413,38 @@ def _route_payload(decision) -> RouteDecisionPayload:
     )
 
 
+def _unset_orchestration_usage_fields(usage: Usage) -> frozenset[str]:
+    if usage.orchestration_input_tokens is None:
+        if usage.orchestration_output_tokens is None:
+            return _USAGE_ORCHESTRATION_FIELDS
+        return _USAGE_INPUT_FIELD
+    if usage.orchestration_output_tokens is None:
+        return _USAGE_OUTPUT_FIELD
+    return frozenset()
+
+
+def _with_usage_exclude(
+    exclude: frozenset[str] | set[str] | None,
+    usage: Usage,
+) -> frozenset[str] | set[str] | dict[str, object] | None:
+    """Omit unset AUTO counters without a per-Usage serializer callback."""
+
+    fields = _unset_orchestration_usage_fields(usage)
+    if not fields or (exclude is not None and "usage" in exclude):
+        return exclude
+    nested: dict[str, object] = dict.fromkeys(exclude or (), True)
+    nested["usage"] = fields
+    return nested
+
+
 def _chat_response_payload(response: ChatCompletionResponse) -> dict:
     """Preserve the OpenAI wire shape while omitting unset Kairyu extensions."""
     return response.model_dump(
         mode="json",
-        exclude=_KAIRYU_CHAT_EXTENSION_FIELDS,
+        exclude=_with_usage_exclude(
+            _KAIRYU_CHAT_EXTENSION_FIELDS,
+            response.usage,
+        ),
     )
 
 
@@ -588,6 +620,8 @@ def _sse_chunk(
     # OpenAI contract: usage key omitted unless include_usage; then explicit
     # null on non-final chunks, populated on the final choices-less chunk
     exclude = _KAIRYU_CHAT_EXTENSION_FIELDS if include_usage else _CHAT_CHUNK_EXCLUDE_USAGE_FIELDS
+    if usage is not None:
+        exclude = _with_usage_exclude(exclude, usage)
     serialized = escape_json_line_separators(payload.model_dump_json(exclude=exclude))
     return f"data: {serialized}\n\n"
 
@@ -624,7 +658,12 @@ def _usage_chunk(response_id: str, created: int, model: str, usage: Usage) -> st
         id=response_id, created=created, model=model, choices=[], usage=usage
     )
     serialized = escape_json_line_separators(
-        payload.model_dump_json(exclude=_KAIRYU_CHAT_EXTENSION_FIELDS)
+        payload.model_dump_json(
+            exclude=_with_usage_exclude(
+                _KAIRYU_CHAT_EXTENSION_FIELDS,
+                usage,
+            )
+        )
     )
     return f"data: {serialized}\n\n"
 
@@ -665,6 +704,8 @@ def _orchestrator_metadata_chunk(
         exclude.update(_KAIRYU_CHAT_EXTENSION_FIELDS)
     elif trace is None:
         exclude.add("kairyu_trace_v2")
+    if usage is not None:
+        exclude = _with_usage_exclude(exclude, usage)
     serialized = escape_json_line_separators(payload.model_dump_json(exclude=exclude))
     return f"data: {serialized}\n\n"
 
@@ -1528,6 +1569,8 @@ async def _stream_completions(
             usage=usage,
         )
         exclude = None if include_usage else _COMPLETION_CHUNK_EXCLUDE_USAGE_FIELDS
+        if usage is not None:
+            exclude = _with_usage_exclude(exclude, usage)
         serialized = escape_json_line_separators(payload.model_dump_json(exclude=exclude))
         return f"data: {serialized}\n\n"
 
@@ -2153,7 +2196,10 @@ def create_app(
                 )
                 payload = {
                     "error": sanitize_backend_error(error.cause),
-                    "usage": usage.model_dump(mode="json"),
+                    "usage": usage.model_dump(
+                        mode="json",
+                        exclude=_unset_orchestration_usage_fields(usage),
+                    ),
                 }
                 if want_trace:
                     payload["kairyu_trace"] = list(result.trace)
@@ -2798,7 +2844,7 @@ def create_app(
             usage_exact=all(result.usage is not None for result in results),
         )
         response_type = LogLikelihoodCompletionResponse if is_loglikelihood else CompletionResponse
-        return response_type(
+        response = response_type(
             id=f"cmpl-{uuid.uuid4().hex[:16]}",
             created=int(time.time()),
             model=request.model,
@@ -2809,6 +2855,12 @@ def create_app(
                 total_tokens=usage_totals[0] + usage_totals[1],
                 prompt_tokens_details=details,
             ),
+        )
+        return JSONResponse(
+            content=response.model_dump(
+                mode="json",
+                exclude={"usage": _USAGE_ORCHESTRATION_FIELDS},
+            )
         )
 
     return app

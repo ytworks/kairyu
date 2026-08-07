@@ -9,7 +9,6 @@ from pydantic import (
     ConfigDict,
     Field,
     field_validator,
-    model_serializer,
     model_validator,
 )
 
@@ -268,17 +267,6 @@ class Usage(BaseModel):
     # responses and are cumulative across every internal generation call.
     orchestration_input_tokens: int | None = Field(default=None, ge=0)
     orchestration_output_tokens: int | None = Field(default=None, ge=0)
-
-    @model_serializer(mode="wrap")
-    def _omit_non_orchestrated_fields(self, handler):
-        """Keep the existing OpenAI wire shape for non-AUTO responses."""
-
-        payload = handler(self)
-        if self.orchestration_input_tokens is None:
-            payload.pop("orchestration_input_tokens", None)
-        if self.orchestration_output_tokens is None:
-            payload.pop("orchestration_output_tokens", None)
-        return payload
 
 
 class KairyuTraceTiming(BaseModel):
