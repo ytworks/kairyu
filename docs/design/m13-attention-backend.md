@@ -53,6 +53,13 @@ Writable physical pages are exclusive across batch rows. Fully cached pages
 may be shared and are filtered out before the write. Page aliases within one
 row or a writable page referenced by another row fail before model execution.
 
+Issue #322 amends the host preparation without weakening that invariant:
+ownership is checked once per physical page, and all typed prefill metadata is
+laid out in one fresh per-batch buffer. CUDA uses pinned host storage and one
+non-blocking H2D copy. Application code has no reusable staging pool, and the
+pinned allocator defers recycling until the copy completes, so no overwrite
+race or application-owned staging event is introduced.
+
 ### D2 — `TorchAttentionBackend` (`torch_backend.py`)
 
 M12's `paged_attention` moved verbatim (rectangular mask, `enable_gqa`) —

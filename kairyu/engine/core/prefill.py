@@ -60,6 +60,36 @@ class PrefillBatch:
         return tuple(torch.split(value, self.query_lens, dim=0))
 
 
+def _metadata_views(
+    buffer: torch.Tensor,
+    *,
+    num_tokens: int,
+    num_rows: int,
+    max_pages: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split one byte buffer into the typed prefill metadata tensors."""
+
+    cursor = 0
+
+    def take(count: int, dtype: torch.dtype) -> torch.Tensor:
+        nonlocal cursor
+        byte_count = count * dtype.itemsize
+        view = buffer[cursor : cursor + byte_count].view(dtype)
+        cursor += byte_count
+        return view
+
+    token_ids = take(num_tokens, torch.int64)
+    positions = take(num_tokens, torch.int64)
+    row_ids = take(num_tokens, torch.int64)
+    write_from = take(num_rows, torch.int64)
+    page_tables = take(num_rows * max_pages, torch.int32).view(
+        num_rows, max_pages
+    )
+    if cursor != buffer.numel():
+        raise AssertionError("prefill metadata buffer layout is inconsistent")
+    return token_ids, positions, row_ids, write_from, page_tables
+
+
 def build_prefill_batch(
     sequences: Sequence[PrefillSequence],
     *,
@@ -84,10 +114,11 @@ def build_prefill_batch(
 
     query_lens: list[int] = []
     qo_indptr = [0]
-    used_pages_by_row: list[set[int]] = []
-    writable_pages_by_row: list[set[int]] = []
-    writable_slots: dict[tuple[int, int], str] = {}
-    for row in rows:
+    # A physical page may be shared only while every owner treats it as cached
+    # read-only state. One map makes that page-level invariant O(total pages)
+    # instead of walking prompt tokens or comparing every pair of rows.
+    page_owners: dict[int, tuple[int, bool]] = {}
+    for row_index, row in enumerate(rows):
         query_len = len(row.token_ids)
         if query_len < 1:
             raise ValueError(
@@ -119,76 +150,85 @@ def build_prefill_batch(
             raise ValueError(
                 f"prefill row {row.request_id!r} has a negative page id"
             )
-        used_pages = set(row.page_table[:required_pages])
-        if len(used_pages) != required_pages:
+        used_pages = row.page_table[:required_pages]
+        if len(set(used_pages)) != required_pages:
             raise ValueError(
                 f"prefill row {row.request_id!r} aliases one physical page "
                 "from multiple logical page positions"
             )
         first_writable = max(row.chunk_start, row.write_from)
-        writable_pages = {
-            row.page_table[position // page_size]
-            for position in range(first_writable, row.seq_len)
-        }
-        for other_index, (other_used, other_writable) in enumerate(
-            zip(used_pages_by_row, writable_pages_by_row, strict=True)
-        ):
-            if writable_pages & other_used or other_writable & used_pages:
-                other = rows[other_index]
-                overlap = sorted(
-                    (writable_pages & other_used) | (other_writable & used_pages)
-                )
+        first_writable_page = (
+            first_writable // page_size
+            if first_writable < row.seq_len
+            else required_pages
+        )
+        for logical_page, page in enumerate(used_pages):
+            writable = logical_page >= first_writable_page
+            owner = page_owners.get(page)
+            if owner is not None and (writable or owner[1]):
+                other = rows[owner[0]]
                 raise ValueError(
                     "prefill rows would cross KV ownership: writable pages "
-                    f"{overlap} overlap between {other.request_id!r} and "
+                    f"[{page}] overlap between {other.request_id!r} and "
                     f"{row.request_id!r}"
                 )
-        used_pages_by_row.append(used_pages)
-        writable_pages_by_row.append(writable_pages)
-
-        for position in range(first_writable, row.seq_len):
-            page = row.page_table[position // page_size]
-            slot = (page, position % page_size)
-            owner = writable_slots.get(slot)
-            if owner is not None:
-                raise ValueError(
-                    "prefill rows would cross KV ownership: physical slot "
-                    f"{slot} is writable by both {owner!r} and {row.request_id!r}"
-                )
-            writable_slots[slot] = row.request_id
+            if owner is None:
+                page_owners[page] = (row_index, writable)
         query_lens.append(query_len)
         qo_indptr.append(qo_indptr[-1] + query_len)
 
     selected = torch.device(device)
     max_pages = max(len(row.page_table) for row in rows)
-    page_tables = torch.empty(
-        (len(rows), max_pages), dtype=torch.int32, device=selected
+    num_tokens = qo_indptr[-1]
+    total_bytes = (
+        (3 * num_tokens + len(rows)) * torch.int64.itemsize
+        + len(rows) * max_pages * torch.int32.itemsize
+    )
+    host_buffer = torch.empty(
+        total_bytes,
+        dtype=torch.uint8,
+        device="cpu",
+        pin_memory=selected.type == "cuda",
+    )
+    (
+        host_token_ids,
+        host_positions,
+        host_row_ids,
+        host_write_from,
+        host_page_tables,
+    ) = _metadata_views(
+        host_buffer,
+        num_tokens=num_tokens,
+        num_rows=len(rows),
+        max_pages=max_pages,
     )
     for index, row in enumerate(rows):
-        page_tables[index].fill_(row.page_table[-1])
-        page_tables[index, : len(row.page_table)] = torch.tensor(
-            row.page_table, dtype=torch.int32, device=selected
+        start, end = qo_indptr[index], qo_indptr[index + 1]
+        host_token_ids[start:end].copy_(
+            torch.as_tensor(row.token_ids, dtype=torch.int64)
+        )
+        torch.arange(
+            row.chunk_start,
+            row.seq_len,
+            dtype=torch.int64,
+            out=host_positions[start:end],
+        )
+        host_row_ids[start:end].fill_(index)
+        host_write_from[index] = row.write_from
+        host_page_tables[index].fill_(row.page_table[-1])
+        host_page_tables[index, : len(row.page_table)].copy_(
+            torch.as_tensor(row.page_table, dtype=torch.int32)
         )
 
-    token_ids = torch.tensor(
-        [token for row in rows for token in row.token_ids],
-        dtype=torch.int64,
+    device_buffer = host_buffer.to(
         device=selected,
+        non_blocking=selected.type == "cuda",
     )
-    positions = torch.cat(
-        [
-            torch.arange(
-                row.chunk_start,
-                row.seq_len,
-                dtype=torch.int64,
-                device=selected,
-            )
-            for row in rows
-        ]
-    )
-    row_ids = torch.repeat_interleave(
-        torch.arange(len(rows), dtype=torch.int64, device=selected),
-        torch.tensor(query_lens, dtype=torch.int64, device=selected),
+    token_ids, positions, row_ids, write_from, page_tables = _metadata_views(
+        device_buffer,
+        num_tokens=num_tokens,
+        num_rows=len(rows),
+        max_pages=max_pages,
     )
     return PrefillBatch(
         request_ids=request_ids,
@@ -200,10 +240,6 @@ def build_prefill_batch(
         chunk_starts=tuple(row.chunk_start for row in rows),
         query_lens=tuple(query_lens),
         qo_indptr=tuple(qo_indptr),
-        write_from=torch.tensor(
-            [row.write_from for row in rows],
-            dtype=torch.int64,
-            device=selected,
-        ),
+        write_from=write_from,
         page_lists=tuple(row.page_table for row in rows),
     )

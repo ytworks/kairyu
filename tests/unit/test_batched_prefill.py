@@ -106,6 +106,20 @@ def _row(
     )
 
 
+class _CountingPageTable(tuple):
+    integer_reads: int
+
+    def __new__(cls, pages):
+        instance = super().__new__(cls, pages)
+        instance.integer_reads = 0
+        return instance
+
+    def __getitem__(self, index):
+        if isinstance(index, int):
+            self.integer_reads += 1
+        return super().__getitem__(index)
+
+
 def test_prefill_plan_preserves_row_metadata_and_shared_cached_page():
     batch = build_prefill_batch(
         [
@@ -126,6 +140,23 @@ def test_prefill_plan_preserves_row_metadata_and_shared_cached_page():
     assert batch.chunk_starts == (4, 3, 0)
     assert batch.write_from.tolist() == [4, 4, 0]
     assert batch.page_lists == ((0, 1), (0,), (2, 3))
+    assert batch.token_ids.dtype is torch.int64
+    assert batch.positions.dtype is torch.int64
+    assert batch.row_ids.dtype is torch.int64
+    assert batch.write_from.dtype is torch.int64
+    assert batch.page_tables.dtype is torch.int32
+    assert len(
+        {
+            tensor.untyped_storage().data_ptr()
+            for tensor in (
+                batch.token_ids,
+                batch.positions,
+                batch.row_ids,
+                batch.write_from,
+                batch.page_tables,
+            )
+        }
+    ) == 1
 
 
 def test_prefill_plan_rejects_page_alias_and_cross_request_writable_page():
@@ -146,6 +177,62 @@ def test_prefill_plan_rejects_page_alias_and_cross_request_writable_page():
             ],
             page_size=PAGE,
         )
+
+    with pytest.raises(RuntimeError, match="overflow"):
+        build_prefill_batch(
+            [_row("overflow", [5], [2**31], start=0, seq_len=1, write_from=0)],
+            page_size=PAGE,
+        )
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["reader-first", "writer-first"])
+def test_prefill_plan_rejects_reader_writer_page_sharing_in_either_order(
+    reverse: bool,
+):
+    reader = _row("reader", [4], [1], start=3, seq_len=4, write_from=4)
+    writer = _row("writer", [5], [1], start=0, seq_len=1, write_from=0)
+    rows = [writer, reader] if reverse else [reader, writer]
+
+    with pytest.raises(ValueError, match="writable pages.*overlap"):
+        build_prefill_batch(rows, page_size=PAGE)
+
+
+def test_prefill_plan_allows_shared_read_only_partial_page_and_unused_aliases():
+    shared = build_prefill_batch(
+        [
+            _row("a", [3], [0], start=2, seq_len=3, write_from=3),
+            _row("b", [3], [0], start=2, seq_len=3, write_from=3),
+        ],
+        page_size=PAGE,
+    )
+    assert shared.page_lists == ((0,), (0,))
+
+    trailing = build_prefill_batch(
+        [_row("tail", [5], [0, 1, 0], start=4, seq_len=5, write_from=4)],
+        page_size=PAGE,
+    )
+    assert trailing.page_lists == ((0, 1, 0),)
+
+
+def test_prefill_ownership_page_lookups_do_not_scale_with_prompt_tokens():
+    def integer_reads(*, tokens: int, page_size: int) -> int:
+        pages = _CountingPageTable(range(64))
+        row = PrefillSequence(
+            request_id=str(tokens),
+            token_ids=tuple(range(tokens)),
+            page_table=pages,
+            chunk_start=0,
+            seq_len=tokens,
+            write_from=0,
+        )
+        build_prefill_batch([row], page_size=page_size)
+        return pages.integer_reads
+
+    short = integer_reads(tokens=1024, page_size=16)
+    long = integer_reads(tokens=8192, page_size=128)
+
+    assert short == long
+    assert long <= 64
 
 
 def test_batched_prefill_matches_sequential_and_retains_cached_kv():
