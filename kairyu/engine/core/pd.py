@@ -456,6 +456,7 @@ class PDCoordinator:
             self._finalize_completion = finalize_completion
             self._acknowledge_completion = acknowledge_completion
             self._wait_completion = wait_completion
+            self._prefill.enable_deferred_handoff_overlap()
         # the one prefill step's worth of transfers whose copies are still in
         # flight; None with a blocking handoff, which settles inside its own step
         self._handover: _Handover | None = None

@@ -95,6 +95,7 @@ def build_pd_coordinator(
     num_pages: int = 4096,
     page_size: int = 16,
     max_num_batched_tokens: int = 2048,
+    max_num_partial_prefills: int = 2,
     max_num_seqs: int = 256,
     priority_age_s: float | None = 60.0,
     tokenizer=None,
@@ -260,6 +261,7 @@ def build_pd_coordinator(
         scheduler = Scheduler(
             cache,
             max_num_batched_tokens=max_num_batched_tokens,
+            max_num_partial_prefills=max_num_partial_prefills,
             max_num_seqs=max_num_seqs,
             page_size=page_size,
             priority_age_s=priority_age_s,

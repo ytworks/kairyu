@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Prefill budget forms bounded work-conserving cohorts
+- What: native schedulers now share post-decode prefill budget across a bounded leading cohort of equal-priority partial prompts (two by default), expose `max_num_partial_prefills`, and permit one cache-safe, completion-only immediate-successor admission past a KV-blocked head; deferred P-D may retain one peer token to overlap its copy.
+- Why: serial long-prefill chunks and unbounded head-of-line KV blocking inflated small-prompt TTFT, while unrestricted skip-ahead could starve the head or create recompute-preemption thrash.
+- Refs: issue #328; m11 D6/A11; `kairyu/engine/core/scheduler.py`; `tests/unit/test_{scheduler,scheduler_waiting_queue}.py`
+
 ### 2026-08-07 — [amendment] Direct chat activates predictive TTFT admission
 - What: added opt-in `server.ttft_slo_s`; validated direct interactive chat now includes known ingress elapsed time, atomically admits, batch-defers only on routes attesting running-decode isolation (otherwise sheds), observes the first successfully sent visible SSE delta, releases leases at the outer ASGI boundary, and exports the controller snapshot through six Prometheus gauges.
 - Why: the validated F5c controller had no production call site, so requests predicted to miss the TTFT SLO still consumed serving capacity and reduced SLO-goodput.

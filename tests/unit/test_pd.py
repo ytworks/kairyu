@@ -569,6 +569,7 @@ def _deferred_coordinator(
     failures: int = 0,
     max_transfer_retries: int = 1,
     provider=None,
+    max_num_partial_prefills: int = 2,
 ):
     """A PDCoordinator whose handoff returns before its copy has finished."""
     from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
@@ -576,7 +577,12 @@ def _deferred_coordinator(
     provider = provider or CpuNoopStream()
     log = provider.events
     prefill_kv = _WatchedKVCache(log, num_pages=64, page_size=4)
-    prefill_sched = Scheduler(prefill_kv, max_num_batched_tokens=32, page_size=4)
+    prefill_sched = Scheduler(
+        prefill_kv,
+        max_num_batched_tokens=32,
+        max_num_partial_prefills=max_num_partial_prefills,
+        page_size=4,
+    )
     decode_sched, decode_kv = _make_pair()
     inner = LocalKVHandoff(decode_kv)
     coordinator = PDCoordinator(
@@ -762,7 +768,10 @@ def test_a_transient_completion_query_error_retains_both_page_leases() -> None:
 def test_a_batched_record_failure_keeps_earlier_completion_reachable() -> None:
     """Starting item B must not detach item A's still-unfinalized ownership."""
     provider = _HeldProvider(fail_record=2)
-    coordinator, log = _deferred_coordinator(provider=provider)
+    coordinator, log = _deferred_coordinator(
+        provider=provider,
+        max_num_partial_prefills=1,
+    )
     requests = [
         EngineRequest(name, prompt_token_ids=prompt, max_new_tokens=2)
         for name, prompt in (("a", (1, 2, 3, 4, 5, 6)), ("b", (7, 8, 9, 10, 11, 12)))
@@ -783,7 +792,7 @@ def test_a_batched_record_failure_keeps_earlier_completion_reachable() -> None:
 
 
 def test_partial_finalize_reentry_does_not_republish_the_first_item() -> None:
-    coordinator, _ = _deferred_coordinator()
+    coordinator, _ = _deferred_coordinator(max_num_partial_prefills=1)
     requests = [
         EngineRequest(name, prompt_token_ids=prompt, max_new_tokens=2)
         for name, prompt in (("a", (1, 2, 3, 4)), ("b", (5, 6, 7, 8)))
@@ -1066,7 +1075,7 @@ def test_raise_after_source_commit_does_not_commit_token_zero_twice() -> None:
 
 def test_owned_current_item_is_not_staged_for_a_second_transfer() -> None:
     """A caller error after registration may stage later items, not the owner."""
-    coordinator, _ = _deferred_coordinator()
+    coordinator, _ = _deferred_coordinator(max_num_partial_prefills=1)
     requests = [
         EngineRequest(name, prompt_token_ids=prompt, max_new_tokens=2)
         for name, prompt in (
@@ -1231,7 +1240,7 @@ def test_abort_after_partial_adoption_drops_the_unreported_token_zero() -> None:
 def test_every_copy_in_a_batched_prefill_step_is_settled() -> None:
     """One prefill step transfers every prompt that completed in it; keeping only
     the last event would leave the earlier copies unordered."""
-    coordinator, log = _deferred_coordinator()
+    coordinator, log = _deferred_coordinator(max_num_partial_prefills=1)
     requests = [
         EngineRequest(name, prompt_token_ids=prompt, max_new_tokens=2)
         for name, prompt in (("a", (1, 2, 3, 4, 5, 6)), ("b", (7, 8, 9, 10, 11, 12)))
@@ -1284,6 +1293,22 @@ def test_a_deferred_copy_has_engine_work_queued_alongside_it() -> None:
         # copy is still running
         EngineRequest("a", prompt_token_ids=tuple(range(1, 25)), max_new_tokens=2),
         EngineRequest("b", prompt_token_ids=tuple(range(50, 74)), max_new_tokens=2),
+    ]
+    for request in requests:
+        coordinator.add_request(request)
+
+    outputs = coordinator.run_to_completion()
+
+    assert outputs == _single_core_reference(requests)
+    _assert_every_copy_overlaps_engine_work(log)
+    _assert_no_release_under_a_running_copy(log)
+
+
+def test_short_deferred_prefills_stagger_completion_for_copy_overlap() -> None:
+    coordinator, log = _deferred_coordinator()
+    requests = [
+        EngineRequest("a", tuple(range(1, 5)), max_new_tokens=2),
+        EngineRequest("b", tuple(range(11, 15)), max_new_tokens=2),
     ]
     for request in requests:
         coordinator.add_request(request)

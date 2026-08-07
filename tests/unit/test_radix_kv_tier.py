@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 
 
 class _RestoreError(RuntimeError):
@@ -125,6 +126,78 @@ def test_policy_restores_the_available_prefix_above_the_crossover_only() -> None
     cache.release_preempted(allocation)
     one_page = cache.allocate((11, 12))
     assert one_page.num_cached_tokens == 0
+
+
+def test_scheduler_margin_charges_pages_restored_from_dram() -> None:
+    cache = RadixKVCache(num_pages=4, page_size=4)
+    tier = _FakeTier()
+    cache.attach_dram_tier(tier, min_restore_tokens=4)
+    first, second = (1, 2, 3, 4), (5, 6, 7, 8)
+    _publish(cache, first)
+    _publish(cache, second)
+    eviction = cache.allocate(tuple(range(100, 116)))
+    cache.release_preempted(eviction)
+    pinned = tuple(range(20, 28))
+    _publish(cache, pinned)
+    cache.pin("pinned", pinned)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=2,
+        max_num_seqs=2,
+        max_num_partial_prefills=2,
+    )
+    scheduler.add_request(EngineRequest("a", first, max_new_tokens=2))
+    scheduler.add_request(EngineRequest("b", second, max_new_tokens=2))
+
+    plan = scheduler.schedule()
+
+    assert [chunk.request_id for chunk in plan.scheduled] == ["a"]
+    assert scheduler.waiting_ids == ("b",)
+    scheduler.update({"a": 1000})
+    assert scheduler.schedule().scheduled[0].request_id == "a"
+
+
+def test_failed_dram_restore_reduces_scheduler_completion_margin() -> None:
+    cache = RadixKVCache(num_pages=6, page_size=5)
+    tier = _FakeTier()
+    cache.attach_dram_tier(tier, min_restore_tokens=5)
+    first = tuple(range(1, 11))
+    second = tuple(range(21, 31))
+    short = tuple(range(41, 46))
+    _publish(cache, first)
+    _publish(cache, second)
+    _publish(cache, short)
+    eviction = cache.allocate(tuple(range(101, 131)))
+    cache.release_preempted(eviction)
+    pinned = tuple(range(201, 211))
+    _publish(cache, pinned)
+    cache.pin("pinned", pinned)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=4,
+        max_num_seqs=3,
+        max_num_partial_prefills=3,
+    )
+    scheduler.add_request(EngineRequest("q0", short[:2], max_new_tokens=1))
+    scheduler.add_request(EngineRequest("q1", second[:9], max_new_tokens=3))
+    scheduler.add_request(EngineRequest("q2", first[:2], max_new_tokens=2))
+    scheduler.add_request(EngineRequest("q3", first[:6], max_new_tokens=5))
+
+    scheduler.schedule()
+    scheduler.update({"q0": 0})
+    plan = scheduler.schedule()
+
+    assert [
+        (chunk.request_id, chunk.num_tokens, chunk.is_prefill)
+        for chunk in plan.scheduled
+    ] == [("q1", 2, True), ("q2", 1, True)]
+    assert scheduler.states["q1"].computed_prompt == 8
+    assert scheduler.states["q1"].prefill_done is False
+    assert scheduler.states["q1"].in_flight == 0
+    assert scheduler.states["q2"].computed_prompt == 2
+    assert scheduler.states["q2"].prefill_done is True
+    assert scheduler.states["q2"].in_flight == 1
+    assert scheduler.waiting_ids == ("q3",)
 
 
 def test_safely_failed_restore_falls_back_to_recompute_without_publication() -> None:

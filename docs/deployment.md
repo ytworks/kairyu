@@ -170,6 +170,7 @@ engines:
       generation_config: auto  # auto | vllm | none; default auto
       tensor_parallel_size: 4
       max_num_seqs: 16       # bound active sequences
+      max_num_partial_prefills: 2 # 1 = legacy serial prefill; default 2
       priority_age_s: 60.0   # null = FIFO; 0 = strict priority; >0 = aging
       pipeline_depth: 2        # unified schedule/device overlap; default 1
       # decode_mode: eager      # optional rollback; supported CUDA defaults to graph
@@ -192,6 +193,19 @@ Every bucket is captured after weights and serving communicators are ready but
 before readiness is published. Distributed startup agreement and attention-DP
 direct-NCCL/layout agreement use a bounded host control group distinct from the
 long-idle request protocol.
+
+`max_num_partial_prefills` shapes equal-priority prompt work into a small,
+work-conserving cohort. A single prompt retains the entire token budget; with
+two eligible partial prefills, short unused shares are normally reassigned
+within the same step. Deferred P-D handoff may retain one peer prompt token so
+an asynchronous KV copy overlaps the next engine step. Decode remains first.
+If the selected waiting head is blocked by KV
+capacity or the decode watermark, only its immediate successor may pass, only
+once during that waiting epoch, and only when its prefill completes in the
+current share using currently free pages. Setting the knob to `1` restores
+serial prefill chunks but does not disable the bounded KV skip. Prompt KV is
+still reserved in full at admission; this knob shapes compute, not KV capacity.
+
 Oversized live steps fall back to eager and increment
 `kairyu_cuda_graph_eager_fallbacks_total{model=...}`. Local replica pools expose
 the monotonic sum across replica generations, including child restarts and

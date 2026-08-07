@@ -610,6 +610,7 @@ def test_terminal_cohort_drains_before_fragmented_prefill_admission() -> None:
             max_num_batched_tokens=2,
             max_num_seqs=2,
             page_size=4,
+            max_num_partial_prefills=1,
         )
         runner = _RecordingRunner()
         loop, _ = _loop(2, runner, scheduler=scheduler)
@@ -719,7 +720,7 @@ def test_terminal_cohort_drain_preserves_cached_prefix_admission_order() -> None
     assert build(cached_waiters=True).should_drain_before_admission() is False
 
 
-def test_terminal_cohort_does_not_drain_when_token_budget_cannot_grow_batch() -> None:
+def test_terminal_cohort_drains_when_prefill_shaping_can_grow_batch() -> None:
     cache = RadixKVCache(num_pages=64, page_size=4)
     scheduler = Scheduler(
         cache,
@@ -738,12 +739,44 @@ def test_terminal_cohort_does_not_drain_when_token_budget_cannot_grow_batch() ->
         EngineRequest("waiting-b", tuple(range(20, 28)), max_new_tokens=1)
     )
 
-    # One long prefill consumes the whole token budget with or without the
-    # terminal slot, so draining would only make the pipeline shallower.
-    assert scheduler.should_drain_before_admission() is False
+    # Releasing the terminal slot lets both long prompts split the next budget.
+    assert scheduler.should_drain_before_admission() is True
     plan = scheduler.schedule()
     assert [chunk.request_id for chunk in plan.scheduled] == ["waiting-a"]
     assert plan.scheduled[0].num_tokens == 4
+
+
+def test_terminal_cohort_drain_preserves_bounded_skip_ahead() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=3, page_size=2),
+        max_num_batched_tokens=3,
+        max_num_seqs=2,
+    )
+    scheduler.add_request(EngineRequest("terminal", (1, 2, 3), max_new_tokens=1))
+    scheduler.schedule()
+    scheduler.add_request(
+        EngineRequest("blocked", (10, 11, 12, 13, 14), max_new_tokens=1)
+    )
+    scheduler.add_request(EngineRequest("small", (20, 21), max_new_tokens=1))
+
+    assert scheduler.should_drain_before_admission() is False
+    assert [chunk.request_id for chunk in scheduler.schedule().scheduled] == ["small"]
+
+
+def test_terminal_cohort_drain_requires_a_larger_safe_cohort() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=5, page_size=1),
+        max_num_batched_tokens=2,
+        max_num_seqs=3,
+        max_num_partial_prefills=1,
+    )
+    scheduler.add_request(EngineRequest("terminal-a", (1,), max_new_tokens=1))
+    scheduler.add_request(EngineRequest("terminal-b", (2,), max_new_tokens=1))
+    scheduler.schedule()
+    scheduler.add_request(EngineRequest("waiting-a", (10,), max_new_tokens=4))
+    scheduler.add_request(EngineRequest("waiting-b", (20,), max_new_tokens=2))
+
+    assert scheduler.should_drain_before_admission() is False
 
 
 def test_terminal_cohort_priority_probe_is_bounded_for_large_waiting_queue(
@@ -801,7 +834,8 @@ def test_terminal_cohort_priority_probe_is_bounded_for_large_waiting_queue(
     monkeypatch.setattr("builtins.sorted", fail_sort)
 
     assert scheduler.should_drain_before_admission() is True
-    assert probes == [(19_876,), (18_765,)]
+    assert probes and len(probes) <= 6
+    assert set(probes) <= {(19_876,), (18_765,)}
 
 
 def test_stop_holdback_finishes_stream_before_late_surplus_is_reclaimed() -> None:

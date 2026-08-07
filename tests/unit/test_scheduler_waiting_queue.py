@@ -200,7 +200,7 @@ def test_hundred_thousand_ids_support_indexed_removal_and_fifo_drain() -> None:
     ]
 
 
-def test_priority_head_blocks_smaller_request_that_would_fit() -> None:
+def test_kv_blocked_priority_head_allows_one_complete_small_bypass() -> None:
     scheduler = Scheduler(
         RadixKVCache(num_pages=3, page_size=4),
         max_num_batched_tokens=64,
@@ -229,8 +229,320 @@ def test_priority_head_blocks_smaller_request_that_would_fit() -> None:
         )
     )
 
-    assert scheduler.schedule().scheduled == ()
-    assert scheduler.waiting_ids == ("high-large", "low-small")
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in step.scheduled] == [("low-small", 4)]
+    assert scheduler.waiting_ids == ("high-large",)
+    assert scheduler.states["high-large"].admission_bypasses == 1
+
+
+def test_blocked_head_returns_phantom_share_to_completing_successor() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=5, page_size=4),
+        max_num_batched_tokens=8,
+        max_num_seqs=3,
+    )
+    scheduler.add_request(EngineRequest("running", tuple(range(1, 9)), max_new_tokens=3))
+    first = scheduler.schedule()
+    scheduler.update({first.scheduled[0].request_id: 10})
+    scheduler.add_request(EngineRequest("blocked-head", tuple(range(101, 113)), max_new_tokens=1))
+    scheduler.add_request(EngineRequest("successor", tuple(range(201, 206)), max_new_tokens=1))
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.is_prefill, chunk.num_tokens) for chunk in step.scheduled] == [
+        ("running", False, 1),
+        ("successor", True, 5),
+    ]
+    assert scheduler.waiting_ids == ("blocked-head",)
+    assert scheduler.states["blocked-head"].admission_bypasses == 1
+
+
+def test_skip_does_not_cross_tier_while_winning_prefill_is_incomplete() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=7, page_size=4),
+        max_num_batched_tokens=8,
+        max_num_seqs=3,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(
+        EngineRequest(
+            "best-running",
+            tuple(range(1, 21)),
+            max_new_tokens=1,
+            priority=0,
+        )
+    )
+    scheduler.schedule()
+    scheduler.add_request(
+        EngineRequest(
+            "blocked-head",
+            tuple(range(101, 113)),
+            max_new_tokens=1,
+            priority=0,
+        )
+    )
+    scheduler.add_request(
+        EngineRequest(
+            "lower-successor",
+            tuple(range(201, 205)),
+            max_new_tokens=1,
+            priority=1,
+        )
+    )
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in step.scheduled] == [
+        ("best-running", 8)
+    ]
+    assert scheduler.waiting_ids == ("blocked-head", "lower-successor")
+    assert scheduler.states["blocked-head"].admission_bypasses == 0
+
+
+def test_blocked_head_bypass_is_lifetime_bounded_until_capacity_frees() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=4, page_size=4),
+        max_num_batched_tokens=64,
+        max_num_seqs=3,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(EngineRequest("running", tuple(range(1, 9)), max_new_tokens=3))
+    scheduler.schedule()
+    scheduler.update({"running": 10})
+    scheduler.add_request(
+        EngineRequest(
+            "blocked-head",
+            tuple(range(101, 109)),
+            max_new_tokens=1,
+            priority=-10,
+        )
+    )
+    scheduler.add_request(
+        EngineRequest(
+            "small-one",
+            tuple(range(201, 205)),
+            max_new_tokens=1,
+            priority=0,
+        )
+    )
+
+    first = scheduler.schedule()
+    assert [chunk.request_id for chunk in first.scheduled] == [
+        "running",
+        "small-one",
+    ]
+    scheduler.update({"running": 11, "small-one": 20})
+    scheduler.add_request(
+        EngineRequest(
+            "small-two",
+            tuple(range(201, 205)),
+            max_new_tokens=1,
+            priority=0,
+        )
+    )
+
+    capped = scheduler.schedule()
+
+    assert [chunk.request_id for chunk in capped.scheduled] == ["running"]
+    assert scheduler.waiting_ids == ("blocked-head", "small-two")
+    scheduler.update({"running": 12})
+
+    after_release = scheduler.schedule()
+    assert [chunk.request_id for chunk in after_release.scheduled] == [
+        "blocked-head",
+        "small-two",
+    ]
+    assert scheduler.waiting_ids == ()
+
+
+def test_decode_watermark_allows_only_candidate_that_preserves_reserve() -> None:
+    cache = RadixKVCache(num_pages=5, page_size=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=64,
+        max_num_seqs=3,
+        decode_watermark_pages=1,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(EngineRequest("running", tuple(range(1, 9)), max_new_tokens=3))
+    scheduler.schedule()
+    scheduler.update({"running": 10})
+    scheduler.add_request(
+        EngineRequest(
+            "watermark-head",
+            tuple(range(101, 109)),
+            max_new_tokens=1,
+            priority=-10,
+        )
+    )
+    scheduler.add_request(
+        EngineRequest(
+            "watermark-small",
+            tuple(range(201, 205)),
+            max_new_tokens=1,
+            priority=0,
+        )
+    )
+
+    step = scheduler.schedule()
+
+    assert [chunk.request_id for chunk in step.scheduled] == [
+        "running",
+        "watermark-small",
+    ]
+    assert scheduler.waiting_ids == ("watermark-head",)
+    assert cache.num_free_pages == 1
+
+
+def test_skip_ahead_does_not_admit_zero_token_unsafe_successor() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=4, page_size=4),
+        max_num_batched_tokens=4,
+        max_num_seqs=5,
+        max_num_partial_prefills=2,
+    )
+    scheduler.add_request(EngineRequest("decode", (1,), max_new_tokens=6))
+    scheduler.add_request(EngineRequest("partial", tuple(range(101, 109)), max_new_tokens=2))
+    scheduler.schedule()
+    scheduler.update({"decode": 10})
+    scheduler.add_request(EngineRequest("blocked-head", tuple(range(201, 209)), max_new_tokens=1))
+    scheduler.add_request(EngineRequest("unsafe-successor", (301,), max_new_tokens=12))
+
+    step = scheduler.schedule()
+
+    assert [chunk.request_id for chunk in step.scheduled] == [
+        "decode",
+        "partial",
+    ]
+    assert all(chunk.num_tokens > 0 for chunk in step.scheduled)
+    assert scheduler.waiting_ids == ("blocked-head", "unsafe-successor")
+    assert "unsafe-successor" not in scheduler._running
+    assert scheduler.states["blocked-head"].admission_bypasses == 0
+
+
+def test_cached_head_uses_new_page_estimate_and_is_not_bypassed() -> None:
+    cache = RadixKVCache(num_pages=5, page_size=4)
+    cached_prompt = tuple(range(101, 109))
+    cached = cache.allocate(cached_prompt)
+    cache.mark_computed(cached)
+    cache.free(cached)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=64,
+        max_num_seqs=3,
+        decode_watermark_pages=1,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(EngineRequest("running", tuple(range(1, 5)), max_new_tokens=3))
+    scheduler.schedule()
+    scheduler.update({"running": 10})
+    scheduler.add_request(
+        EngineRequest(
+            "cached-head",
+            cached_prompt,
+            max_new_tokens=1,
+            priority=-10,
+        )
+    )
+    scheduler.add_request(
+        EngineRequest(
+            "uncached-small",
+            tuple(range(201, 205)),
+            max_new_tokens=1,
+            priority=0,
+        )
+    )
+
+    step = scheduler.schedule()
+
+    assert [chunk.request_id for chunk in step.scheduled] == [
+        "running",
+        "cached-head",
+    ]
+    assert step.scheduled[1].num_tokens == 1
+    assert scheduler.states["cached-head"].admission_bypasses == 0
+    assert scheduler.waiting_ids == ("uncached-small",)
+
+
+def test_skip_ahead_inspects_only_the_immediate_successor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = RadixKVCache(num_pages=3, page_size=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(EngineRequest("running", tuple(range(1, 9)), max_new_tokens=1))
+    scheduler.schedule()
+    scheduler.add_request(EngineRequest("blocked-head", tuple(range(101, 109)), priority=-10))
+    scheduler.add_request(EngineRequest("blocked-next", tuple(range(201, 209)), priority=0))
+    scheduler.add_request(EngineRequest("fitting-third", tuple(range(301, 305)), priority=1))
+    probes: list[tuple[int, ...]] = []
+    original_probe = cache.peek_cached_tokens
+
+    def counted_probe(tokens: tuple[int, ...]) -> int:
+        probes.append(tokens)
+        return original_probe(tokens)
+
+    monkeypatch.setattr(cache, "peek_cached_tokens", counted_probe)
+
+    step = scheduler.schedule()
+
+    assert step.scheduled == ()
+    assert scheduler.waiting_ids == (
+        "blocked-head",
+        "blocked-next",
+        "fitting-third",
+    )
+    assert probes
+    assert set(probes) <= {
+        tuple(range(101, 109)),
+        tuple(range(201, 209)),
+    }
+
+
+def test_failed_head_allocation_cannot_create_successor_capacity() -> None:
+    cache = RadixKVCache(num_pages=6, page_size=4)
+    cached_prompt = tuple(range(901, 905))
+    cached = cache.allocate(cached_prompt)
+    cache.mark_computed(cached)
+    cache.free(cached)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=16,
+        max_num_seqs=3,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(EngineRequest("running", tuple(range(1, 9)), max_new_tokens=3))
+    first = scheduler.schedule()
+    scheduler.update({first.scheduled[0].request_id: 10})
+    scheduler.add_request(
+        EngineRequest(
+            "blocked-head",
+            tuple(range(101, 117)),
+            max_new_tokens=1,
+            priority=-10,
+        )
+    )
+    scheduler.add_request(
+        EngineRequest(
+            "successor",
+            tuple(range(201, 213)),
+            max_new_tokens=1,
+            priority=0,
+        )
+    )
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.is_prefill) for chunk in step.scheduled] == [
+        ("running", False)
+    ]
+    assert scheduler.waiting_ids == ("blocked-head", "successor")
+    assert scheduler.states["blocked-head"].admission_bypasses == 0
 
 
 def test_waiting_higher_priority_runs_before_lower_priority_running_prefill() -> None:
@@ -397,25 +709,110 @@ def test_priority_preemption_tolerates_two_pending_incomplete_prefills() -> None
     assert scheduler.states["interactive"].in_flight == 1
 
 
-def test_equal_priority_waiter_does_not_preempt_running_prefill() -> None:
+def test_equal_priority_waiter_cohorts_without_preempting_running_prefill() -> None:
     scheduler = Scheduler(
         RadixKVCache(num_pages=8, page_size=4),
         max_num_batched_tokens=4,
         max_num_seqs=2,
         priority_age_s=0.0,
     )
+    scheduler.add_request(EngineRequest("first", tuple(range(1, 9)), max_new_tokens=1))
+    scheduler.schedule()
+    scheduler.add_request(EngineRequest("second", tuple(range(101, 105)), max_new_tokens=1))
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in step.scheduled] == [
+        ("first", 2),
+        ("second", 2),
+    ]
+    assert scheduler.waiting_ids == ()
+
+
+def test_invalid_priority_head_does_not_make_best_tier_donate_budget() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=8, page_size=4),
+        max_num_batched_tokens=4,
+        max_num_seqs=3,
+        priority_age_s=0.0,
+    )
     scheduler.add_request(
-        EngineRequest("first", tuple(range(1, 9)), max_new_tokens=1)
+        EngineRequest(
+            "low-running",
+            tuple(range(1, 13)),
+            max_new_tokens=1,
+            priority=10,
+        )
     )
     scheduler.schedule()
+    scheduler.add_request(EngineRequest("invalid", (), priority=0))
     scheduler.add_request(
-        EngineRequest("second", tuple(range(101, 105)), max_new_tokens=1)
+        EngineRequest(
+            "high-valid",
+            tuple(range(101, 109)),
+            max_new_tokens=1,
+            priority=0,
+        )
     )
 
     step = scheduler.schedule()
 
-    assert [chunk.request_id for chunk in step.scheduled] == ["first"]
-    assert scheduler.waiting_ids == ("second",)
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in step.scheduled] == [("high-valid", 4)]
+    assert scheduler.drain_rejected() == ("invalid",)
+
+
+def test_multiple_invalid_heads_do_not_consume_cohort_frontier() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=16, page_size=4),
+        max_num_batched_tokens=8,
+        max_num_seqs=4,
+    )
+    scheduler.add_request(EngineRequest("invalid-a", ()))
+    scheduler.add_request(EngineRequest("invalid-b", ()))
+    scheduler.add_request(EngineRequest("long-a", tuple(range(1, 21)), max_new_tokens=1))
+    scheduler.add_request(EngineRequest("long-b", tuple(range(101, 121)), max_new_tokens=1))
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in step.scheduled] == [
+        ("long-a", 4),
+        ("long-b", 4),
+    ]
+    assert scheduler.drain_rejected() == ("invalid-a", "invalid-b")
+
+
+def test_priority_remainder_stays_in_incomplete_winning_tier() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=16, page_size=4),
+        max_num_batched_tokens=4,
+        max_num_seqs=3,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(
+        EngineRequest(
+            "high-long",
+            tuple(range(1, 11)),
+            max_new_tokens=1,
+            priority=0,
+        )
+    )
+    scheduler.add_request(EngineRequest("high-short", (101,), max_new_tokens=1, priority=0))
+    scheduler.add_request(
+        EngineRequest(
+            "low-long",
+            tuple(range(201, 211)),
+            max_new_tokens=1,
+            priority=1,
+        )
+    )
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in step.scheduled] == [
+        ("high-long", 3),
+        ("high-short", 1),
+    ]
+    assert scheduler.waiting_ids == ("low-long",)
 
 
 def test_decode_stays_ahead_of_higher_priority_waiting_prefill() -> None:
