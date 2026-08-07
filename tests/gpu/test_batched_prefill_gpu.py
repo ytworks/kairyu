@@ -103,6 +103,51 @@ def _cuda_event_count(profile) -> int:
     )
 
 
+def test_prefill_metadata_uses_one_typed_cuda_storage(cuda):
+    rows = [
+        PrefillSequence("a", (11, 12), (0,), 0, 2, 0),
+        PrefillSequence("b", (21, 22, 23), (1, 2), 4, 7, 4),
+    ]
+
+    build_prefill_batch(rows, page_size=PAGE, device=cuda)
+    torch.cuda.synchronize(cuda)
+    with profile_scope(
+        enabled=True,
+        activities=("cpu", "cuda"),
+        acc_events=True,
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+    ) as profile:
+        batch = build_prefill_batch(rows, page_size=PAGE, device=cuda)
+
+    events = profile.events()
+    assert sum(event.name == "cudaMemcpyAsync" for event in events) == 1
+    assert sum(
+        event.name == "Memcpy HtoD (Pinned -> Device)" for event in events
+    ) == 1
+    assert not any(event.name == "cudaStreamSynchronize" for event in events)
+
+    assert batch.token_ids.tolist() == [11, 12, 21, 22, 23]
+    assert batch.positions.tolist() == [0, 1, 4, 5, 6]
+    assert batch.row_ids.tolist() == [0, 0, 1, 1, 1]
+    assert batch.write_from.tolist() == [0, 4]
+    assert batch.page_tables.tolist() == [[0, 0], [1, 2]]
+    assert batch.page_tables.dtype is torch.int32
+    assert len(
+        {
+            tensor.untyped_storage().data_ptr()
+            for tensor in (
+                batch.token_ids,
+                batch.positions,
+                batch.row_ids,
+                batch.write_from,
+                batch.page_tables,
+            )
+        }
+    ) == 1
+
+
 def test_single_prefill_partial_write_avoids_dynamic_mask_host_sync(cuda):
     """Host chunk metadata must avoid scalar reads and dynamic CUDA masks."""
     from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
