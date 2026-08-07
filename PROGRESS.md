@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Model and stream hot paths avoid repeated setup
+- What: rotary cos/sin is precomputed to the model position limit and gathered per step; scaled dense RoPE uses the fused kernel; invariant Q/K guards and kernel imports leave layer loops; tokenless nonterminal updates and wire materialization are skipped; sampler conversion makes one mutable copy.
+- Why: decode repeatedly launched position/trig kernels, evaluated invariant guards/imports, and constructed cumulative output work even when no request produced a token.
+- Refs: issue #332; m8 D1/D2/D6; m12 D2; `kairyu/models/{layers,attention}.py`; `kairyu/engine/{engine_loop,zmq_backend}.py`
+
 ### 2026-08-07 — [amendment] Grammar-free CUDA sampling is batched
 - What: mixed decode rows now batch grammar-free temperature/min-p/top-k/top-p filtering and stateless Gumbel draws, use the maximum bounded top-k prefix for nucleus filtering, preserve exact full-vocabulary top-p when no finite top-k exists, and leave only grammar rows on the scalar CPU matcher path.
 - Why: one non-greedy row previously forced per-row fp32 copies, kernel launches, and full-vocabulary sorts across the complete decode batch; a Qwen3-size 151,936-token vocabulary at B=16 measured 1.13 ms batched versus 14.21 ms scalar on the same GPU.

@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from kairyu.kernels import paged_kv_write_gpu
+
 if TYPE_CHECKING:  # pragma: no cover
     from kairyu.engine.core.radix_kv import RadixKVCache
     from kairyu.models.config import ModelConfig
@@ -153,11 +155,7 @@ class PagedKVPool:
         write wherever the buffers currently point (m17 D1's static-buffer rule).
         """
         if self.k.device.type == "cuda" and self.v_head_dim == self.head_dim:
-            # Import only on the CUDA path: CPU-only installs retain the plain
-            # torch implementation and do not need Triton to import Kairyu.
-            from kairyu.kernels.paged_kv_write_gpu import try_write_batched
-
-            if try_write_batched(
+            if paged_kv_write_gpu.try_write_batched(
                 self.k[layer],
                 self.v[layer],
                 self.page_size,
@@ -216,9 +214,7 @@ class PagedKVPool:
             raise ValueError("write_from must have one entry per ragged row")
 
         if self.k.device.type == "cuda" and self.v_head_dim == self.head_dim:
-            from kairyu.kernels.paged_kv_write_gpu import try_write_ragged
-
-            if try_write_ragged(
+            if paged_kv_write_gpu.try_write_ragged(
                 self.k[layer],
                 self.v[layer],
                 self.page_size,

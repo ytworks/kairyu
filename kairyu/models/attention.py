@@ -14,6 +14,7 @@ from torch import nn
 from kairyu.engine.core.attention import AttentionBackend, TorchAttentionBackend
 from kairyu.engine.core.kv_pool import PagedKVPool
 from kairyu.engine.core.prefill import PrefillBatch
+from kairyu.kernels import rms_norm_gpu
 from kairyu.models.config import ModelConfig
 from kairyu.models.layers import RMSNorm, apply_rope
 from kairyu.models.packed_linear import DenseLinearPack, NvFp4LinearPack
@@ -117,6 +118,19 @@ class Attention(nn.Module):
             for projection in projections:
                 self._prepare_nvfp4_projection(projection)
         self._prepare_nvfp4_projection(self.o_proj)
+        q_norm = self.q_norm
+        k_norm = self.k_norm
+        object.__setattr__(
+            self,
+            "_joint_qk_norm_modules",
+            (
+                (q_norm, k_norm)
+                if type(q_norm) is RMSNorm
+                and type(k_norm) is RMSNorm
+                and q_norm.eps == k_norm.eps
+                else None
+            ),
+        )
 
     @staticmethod
     def _prepare_nvfp4_projection(projection: nn.Module) -> None:
@@ -156,10 +170,11 @@ class Attention(nn.Module):
         # Exact modules with unobserved forwards can use the joint CUDA
         # execution path. Replacements and hooks retain normal nn.Module
         # semantics through the separate fallback below.
+        cached_modules = self._joint_qk_norm_modules
         can_fuse = (
-            type(self.q_norm) is RMSNorm
-            and type(self.k_norm) is RMSNorm
-            and self.q_norm.eps == self.k_norm.eps
+            cached_modules is not None
+            and self.q_norm is cached_modules[0]
+            and self.k_norm is cached_modules[1]
             and "forward" not in self.q_norm.__dict__
             and "forward" not in self.k_norm.__dict__
             and not self.q_norm._forward_hooks
@@ -172,9 +187,7 @@ class Attention(nn.Module):
             and not self.k_norm._backward_pre_hooks
         )
         if can_fuse:
-            from kairyu.kernels.rms_norm_gpu import try_joint_qk_rms_norm
-
-            joint = try_joint_qk_rms_norm(
+            joint = rms_norm_gpu.try_joint_qk_rms_norm(
                 query,
                 keys,
                 self.q_norm.weight,

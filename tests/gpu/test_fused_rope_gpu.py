@@ -99,6 +99,88 @@ def test_default_rope_is_inplace_and_exact_to_reference(monkeypatch):
     _assert_within_bf16_ulps(actual_k, reference_k, max_ulps=0)
 
 
+@pytest.mark.parametrize("kind", ("llama3", "yarn"))
+def test_scaled_rope_uses_the_same_fused_kernel(kind, monkeypatch):
+    from kairyu.kernels import rope_gpu
+    from kairyu.models.config import RopeScaling
+    from kairyu.models.layers import apply_rope
+
+    device = _require_cuda()
+    torch.manual_seed(230)
+    positions = torch.tensor([0, 31, 127], device=device)
+    q = torch.randn(3, 8, 128, device=device, dtype=torch.bfloat16)
+    k = torch.randn(3, 2, 128, device=device, dtype=torch.bfloat16)
+    cos, sin = _cos_sin(positions, dim=128, theta=1_000_000.0)
+    expected_q, expected_k = apply_rope(q.clone(), k.clone(), cos, sin)
+    fused_results = []
+    fused_rope = rope_gpu.try_apply_rope_inplace
+
+    def spy_fused_rope(*args, **kwargs):
+        result = fused_rope(*args, **kwargs)
+        fused_results.append(result)
+        return result
+
+    monkeypatch.setattr(rope_gpu, "try_apply_rope_inplace", spy_fused_rope)
+    actual_q, actual_k = apply_rope(
+        q,
+        k,
+        cos,
+        sin,
+        positions=positions,
+        rope_theta=1_000_000.0,
+        rope_scaling=RopeScaling(kind=kind, factor=2.0),
+    )
+    torch.cuda.synchronize()
+
+    assert fused_results == [True]
+    _assert_within_bf16_ulps(actual_q, expected_q, max_ulps=0)
+    _assert_within_bf16_ulps(actual_k, expected_k, max_ulps=0)
+
+
+def test_rotary_embedding_cuda_forward_only_gathers_cached_rows():
+    from kairyu.models.config import parse_model_config
+    from kairyu.models.layers import RotaryEmbedding
+
+    device = _require_cuda()
+    config = parse_model_config(
+        {
+            "architectures": ["LlamaForCausalLM"],
+            "hidden_size": 512,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 128,
+            "intermediate_size": 1024,
+            "vocab_size": 256,
+            "max_position_embeddings": 512,
+        }
+    )
+    rotary = RotaryEmbedding(config).to(device)
+    positions = torch.tensor([0, 31, 127, 511], device=device)
+    rotary(positions)
+    torch.cuda.synchronize()
+
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        acc_events=True,
+    ) as profile:
+        rotary(positions)
+    torch.cuda.synchronize()
+
+    operations = {event.key for event in profile.key_averages()}
+    assert "aten::index_select" in operations
+    assert {
+        "aten::arange",
+        "aten::mul",
+        "aten::cat",
+        "aten::cos",
+        "aten::sin",
+    }.isdisjoint(operations)
+
+
 def test_default_rope_production_shape_is_exact_across_storage_remaps():
     from kairyu.kernels.rope_gpu import try_apply_rope_inplace
     from kairyu.models.layers import apply_rope

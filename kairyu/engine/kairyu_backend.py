@@ -1688,6 +1688,9 @@ class KairyuBackend:
                 else:
                     batch, ready_batch = ready_batch, None
 
+                if not batch.inputs:
+                    continue
+
                 if batch.requires_barrier:
                     pending = self._loop.start_output(
                         batch,

@@ -692,6 +692,17 @@ def _recv_optional_startup_frame(
     )
 
 
+def _stream_event_needs_materialization(event: Mapping[str, object]) -> bool:
+    """Whether one wire event can change a public streaming result."""
+
+    return (
+        event.get("wire_version", LEGACY_WIRE_VERSION) != WIRE_VERSION
+        or event.get("event") == "snapshot"
+        or bool(event.get("new_token_ids"))
+        or event.get("finished") is True
+    )
+
+
 @dataclass
 class _WireAccumulator:
     """Reconstruct the public cumulative result from legacy or v2 events."""
@@ -2488,7 +2499,10 @@ class ZmqEngineBackend:
             while True:
                 event = await queue.get()
                 self._raise_on_error(event)
-                event = accumulator.apply(event)
+                materialize = _stream_event_needs_materialization(event)
+                event = accumulator.apply(event, materialize=materialize)
+                if not materialize:
+                    continue
                 if len(event["outputs"]) > emitted or event["finished"]:
                     emitted = len(event["outputs"])
                     yield self._result(request, event)

@@ -1051,6 +1051,8 @@ class EngineLoop:
             finished = state.status.value == "finished"
             if finished:
                 terminal_request_ids.append(request_id)
+            elif not new_ids:
+                continue
             elif track.output_barrier:
                 requires_barrier = True
             inputs.append(

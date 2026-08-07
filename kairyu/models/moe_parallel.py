@@ -1929,8 +1929,8 @@ def build_ep_model(
     if config.tie_word_embeddings:
         model.lm_head.weight = model.model.embed_tokens.weight
 
-    fresh_rope = RotaryEmbedding(config)
-    model.model.rotary_emb._buffers["inv_freq"] = fresh_rope.inv_freq
+    fresh_rope = RotaryEmbedding(config).to(device)
+    model.model.rotary_emb._buffers.update(fresh_rope._buffers)
     model.model.rotary_emb.attention_scaling = fresh_rope.attention_scaling
     remaining_meta = [
         name

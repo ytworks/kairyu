@@ -836,6 +836,8 @@ def run_engine_service(
                 and output_ack_future is None
             ):
                 batch, ready_batch = ready_batch, None
+                if not batch.inputs:
+                    continue
                 owner_snapshot = dict(owners)
                 graph_metadata = _decode_graph_metadata_to_wire(engine_loop)
                 pending_output = engine_loop.start_output(
