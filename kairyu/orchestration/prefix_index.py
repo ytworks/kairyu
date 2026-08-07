@@ -4,9 +4,9 @@ The gateway has NO token ids (prompts are strings; tokenizers live in the
 optional hf extra), so the trie keys on fixed-size TEXT chunks of the prompt
 — an approximation of the engine-side token pages. Key unification via
 gateway tokenization is a deploy-time option (install tokenizers in the
-gateway image). ``observe`` is called only after successful generation (the
-replica now holds that prefix); ``overlap`` scores candidates at placement
-time.
+gateway image). ``observe`` is called once prefill success is known (at unary
+completion or before yielding the first stream result); ``overlap`` scores
+candidates at placement time.
 
 Bounded: per-replica chunk sets are LRU-capped so a long-running gateway
 cannot grow without bound. A reverse map for the first cumulative key is
@@ -176,7 +176,7 @@ class PrefixIndex:
         self._chunks.setdefault(replica_id, {})
 
     def observe(self, replica_id: str, prompt: str) -> None:
-        """Publish every usable prefix key after a successful generation."""
+        """Publish every usable prefix key after prefill is known to have landed."""
         # Preserve the original subclass seam: custom ``chunk_keys`` and
         # ``observe_keys`` overrides must remain authoritative.
         self.observe_keys(replica_id, self.chunk_keys(prompt))
@@ -243,7 +243,7 @@ class PrefixIndex:
             first_key = hasher.hexdigest()
         candidates = self._replicas_by_first_key.get(first_key)
         if candidates is None:
-            # The common cold path needs only its root at successful completion.
+            # The common cold path needs only its root once prefill has landed.
             return first_key
         candidate_ids = (
             (candidates,)

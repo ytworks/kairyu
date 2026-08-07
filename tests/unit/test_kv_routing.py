@@ -835,6 +835,89 @@ class TestPrefixRouting:
         assert index.overlap("stream", request.prompt) == 0
 
     @pytest.mark.asyncio
+    async def test_first_stream_chunk_advertises_root_before_completion(self):
+        class DecodingBackend(MockBackend):
+            def __init__(self):
+                self.never = asyncio.Event()
+
+            async def stream(self, request):
+                yield GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(),
+                    finished=False,
+                )
+                await self.never.wait()
+
+        index = PrefixIndex(chunk_chars=4)
+        pool = ReplicaPool(
+            {"a": DecodingBackend(), "b": MockBackend()},
+            prefix_index=index,
+        )
+        prompt = "shared-prefix"
+        stream = pool.stream(_request(prompt + "-first"))
+
+        await anext(stream)
+
+        keys = index.chunk_keys(prompt)
+        assert index.candidate_ids(keys) == ("a",)
+        await pool.generate(_request(prompt + "-second"))
+        assert pool.decision_counts["prefix_match"] == 1
+
+        await stream.aclose()
+        assert index.candidate_ids(keys) == ("a",)
+
+    @pytest.mark.asyncio
+    async def test_stream_failure_before_first_chunk_does_not_advertise(self):
+        class FailingStreamBackend(MockBackend):
+            async def stream(self, request):
+                raise RuntimeError("stream failed before output")
+                yield  # pragma: no cover
+
+        index = PrefixIndex(chunk_chars=4)
+        pool = ReplicaPool(
+            {"stream": FailingStreamBackend()},
+            prefix_index=index,
+        )
+        request = _request("failed-stream-prefix")
+
+        with pytest.raises(RuntimeError, match="stream failed before output"):
+            async for _chunk in pool.stream(request):
+                pass
+
+        assert index.overlap("stream", request.prompt) == 0
+
+    @pytest.mark.asyncio
+    async def test_warm_stream_promotes_root_only_after_completion(self):
+        class PausedBackend(MockBackend):
+            def __init__(self):
+                self.release = asyncio.Event()
+
+            async def stream(self, request):
+                yield GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(),
+                    finished=False,
+                )
+                await self.release.wait()
+
+        backend = PausedBackend()
+        index = PrefixIndex(chunk_chars=4)
+        index.observe_root("stream", index.chunk_keys("aaaaseed")[0])
+        pool = ReplicaPool({"stream": backend}, prefix_index=index)
+        request = _request("aaaabbbbcccc")
+        stream = pool.stream(request)
+
+        await anext(stream)
+        assert index.overlap("stream", request.prompt) == 1
+
+        backend.release.set()
+        with pytest.raises(StopAsyncIteration):
+            await anext(stream)
+        assert index.overlap("stream", request.prompt) == 3
+
+    @pytest.mark.asyncio
     async def test_completed_stream_advertises_the_prefix(self):
         index = PrefixIndex(chunk_chars=4)
         pool = ReplicaPool({"stream": MockBackend()}, prefix_index=index)

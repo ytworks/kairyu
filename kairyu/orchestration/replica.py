@@ -1372,6 +1372,29 @@ class ReplicaPool:
         if not entry.removed:  # late completion on a removed id is a no-op (A2)
             entry.outstanding -= 1
 
+    def _observe_prefix(
+        self,
+        replica_id: str,
+        entry: _ReplicaEntry,
+        request: GenerationRequest,
+        prefix_keys: str | Sequence[str] | PreparedKvRouting | None,
+        *,
+        promote: bool,
+    ) -> None:
+        """Publish a prefix only for the generation that received the request."""
+        if self._entries.get(replica_id) is not entry:
+            return
+        observe_root = self._prefix_observe_root
+        if isinstance(prefix_keys, str) and prefix_keys and observe_root is not None:
+            observe_root(replica_id, prefix_keys)
+        elif prefix_keys is not None and self._prefix_observe_prepared is not None:
+            self._prefix_observe_prepared(replica_id, prefix_keys, promote)
+        else:
+            prefix_prompt = prompt_text(request.prompt)
+            if prefix_prompt is None:  # Defensive: prefix tracking is text-only.
+                raise RuntimeError("prefix tracking requires a text prompt")
+            self._prefix_index.observe(replica_id, prefix_prompt)
+
     def _record_backend_failure(
         self,
         replica_id: str,
@@ -1436,21 +1459,14 @@ class ReplicaPool:
             raise
         else:
             self._record_backend_success(entry)
-            if track_prefix and self._entries.get(replica_id) is entry:
-                observe_root = self._prefix_observe_root
-                if isinstance(prefix_keys, str) and prefix_keys and observe_root is not None:
-                    observe_root(replica_id, prefix_keys)
-                elif prefix_keys is not None and self._prefix_observe_prepared is not None:
-                    self._prefix_observe_prepared(
-                        replica_id,
-                        prefix_keys,
-                        reason in ("prefix_match", "kv_event_match"),
-                    )
-                else:
-                    prefix_prompt = prompt_text(request.prompt)
-                    if prefix_prompt is None:  # Defensive: track_prefix is text-only.
-                        raise RuntimeError("prefix tracking requires a text prompt")
-                    self._prefix_index.observe(replica_id, prefix_prompt)
+            if track_prefix:
+                self._observe_prefix(
+                    replica_id,
+                    entry,
+                    request,
+                    prefix_keys,
+                    promote=reason in ("prefix_match", "kv_event_match"),
+                )
             return result
         finally:
             self._finish(entry)
@@ -1466,6 +1482,12 @@ class ReplicaPool:
         )
         entry = self._entries[replica_id]
         entry.outstanding += 1  # streams stay in-flight until generator close (A2)
+        publish_root_on_first_chunk = (
+            track_prefix
+            and prefix_keys is not None
+            and self._prefix_observe_prepared is not None
+        )
+        published_on_first_chunk = False
         try:
             from kairyu.telemetry import traced_span
 
@@ -1480,6 +1502,18 @@ class ReplicaPool:
                 kind="client",
             ) as span:
                 async for chunk in entry.backend.stream(request):
+                    if publish_root_on_first_chunk:
+                        # The first backend result proves that prefill landed.
+                        # Publish the cheap root before a long decode finishes.
+                        self._observe_prefix(
+                            replica_id,
+                            entry,
+                            request,
+                            prefix_keys,
+                            promote=False,
+                        )
+                        publish_root_on_first_chunk = False
+                        published_on_first_chunk = True
                     yield chunk
                 if span is not None:
                     span.set_attribute("kairyu.call.status", "success")
@@ -1490,21 +1524,24 @@ class ReplicaPool:
             raise
         else:
             self._record_backend_success(entry)
-            if track_prefix and self._entries.get(replica_id) is entry:
-                observe_root = self._prefix_observe_root
-                if isinstance(prefix_keys, str) and prefix_keys and observe_root is not None:
-                    observe_root(replica_id, prefix_keys)
-                elif prefix_keys is not None and self._prefix_observe_prepared is not None:
-                    self._prefix_observe_prepared(
-                        replica_id,
-                        prefix_keys,
-                        reason in ("prefix_match", "kv_event_match"),
-                    )
-                else:
-                    prefix_prompt = prompt_text(request.prompt)
-                    if prefix_prompt is None:  # Defensive: track_prefix is text-only.
-                        raise RuntimeError("prefix tracking requires a text prompt")
-                    self._prefix_index.observe(replica_id, prefix_prompt)
+            promote = reason in ("prefix_match", "kv_event_match")
+            if track_prefix and (
+                not published_on_first_chunk
+                or (
+                    promote
+                    and prefix_keys is not None
+                    and self._prefix_observe_prepared is not None
+                )
+            ):
+                # Empty streams still publish on normal completion. Warm native
+                # streams promote their first-token root to the full key chain.
+                self._observe_prefix(
+                    replica_id,
+                    entry,
+                    request,
+                    prefix_keys,
+                    promote=promote,
+                )
         finally:
             self._finish(entry)
 
