@@ -442,6 +442,14 @@ complete `AdmissionSnapshot`. Existing batch-class traffic, orchestrated chat,
 Completions, Responses, and the bounded queue tracked by issue #341 stay out of
 this policy.
 
+**Batch-pressure amendment (2026-08-07, issue #342).** Batch API work remains
+outside controller leases, TTFT feedback, and admit/defer/shed accounting, but
+the in-gateway worker now consumes one read-only pressure signal. Before a
+consumer starts a new line, it waits while at least one interactive lease is
+active and the predicted TTFT for another interactive request exceeds the SLO;
+it resumes when either condition clears. The fixed batch pool remains the bound,
+and in-flight generation is never interrupted.
+
 ### D7 — Open WebUI + frontier bench
 
 `deploy/compose/docker-compose.webui.yaml` points Open WebUI at the internal

@@ -107,10 +107,10 @@ to 503 (existing prober contract).
 The file-backed batch store's surface (`create/get/update/list`) is extracted
 to a Protocol so M11 tenancy ledgers and tests can fake it. The surface also
 includes owner-scoped lazy input-line iteration, an async streaming upload
-transaction, and a transactional JSONL writer. Streaming uploads enforce their
-byte limit incrementally and remove partial state on cancellation or failure;
-both writers publish metadata only after temporary content is closed and
-atomically renamed.
+transaction, owner-scoped fixed-chunk content iteration, and a transactional
+JSONL writer. Streaming uploads enforce their byte limit incrementally and
+remove partial state on cancellation or failure; both writers publish metadata
+only after temporary content is closed and atomically renamed.
 
 ### D4 — OTel tracing (`entrypoints/server/tracing.py`)
 
@@ -294,10 +294,10 @@ online learning or the M4 request-family bandit.
   tolerates in-flight remove refusal, closes each unused candidate, and retries
   next tick without changing the applied identity.
 - **A7**: registry takes ``now: Callable[[], float] = time.monotonic``.
-- **A8**: BatchStoreProtocol is the FULL 11-method surface (save_file,
-  save_file_streaming, get_file, read_file_content, iter_file_lines,
-  create_jsonl_writer, create_batch, get_batch, list_batches, update_batch,
-  recover_orphans) + FileObject/BatchJob/JsonlFileWriter models.
+- **A8**: BatchStoreProtocol is the FULL 12-method surface (save_file,
+  save_file_streaming, get_file, read_file_content, iter_file_content,
+  iter_file_lines, create_jsonl_writer, create_batch, get_batch, list_batches,
+  update_batch, recover_orphans) + FileObject/BatchJob/JsonlFileWriter models.
 - **A9**: traced_span lives in ``kairyu/telemetry.py`` (L2 must not import
   L3); the gateway request span is a middleware; ServerSection threading
   already copies model_fields — only the field addition is needed.

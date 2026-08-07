@@ -4,6 +4,7 @@ import asyncio
 import csv
 import io
 import json
+import threading
 import tracemalloc
 import weakref
 
@@ -12,12 +13,14 @@ import pytest
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartParser
 
+from kairyu.audit_io import AuditQueueFull
 from kairyu.batch.store import BatchStore
 from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.engine.backend import AdmissionUpperBound, GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.errors import sanitize_backend_error
+from kairyu.entrypoints.server.slo import AdmissionController
 from kairyu.entrypoints.server.tenancy import (
     TenantConfig,
     TenantLimiter,
@@ -362,6 +365,243 @@ async def test_worker_cap_holds_while_interactive_traffic_flows(tmp_path):
     assert backend.max_active <= 3  # 2 batch slots + the 1 interactive request
 
 
+async def test_worker_waits_while_interactive_ttft_prediction_exceeds_slo(tmp_path):
+    class RecordingBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.dispatched = asyncio.Event()
+
+        async def generate(self, request):
+            self.dispatched.set()
+            return await super().generate(request)
+
+    controller = AdmissionController(ttft_slo_s=1.0)
+    controller._ttft_per_unit_ema = 0.6
+    interactive = controller.begin()
+    assert interactive.decision.action == "admit"
+    assert controller.batch_should_yield()
+
+    backend = RecordingBackend()
+    store = BatchStore(tmp_path)
+    worker = LegacyBatchWorker(
+        store,
+        {"m": backend},
+        max_concurrency=1,
+        admission_controller=controller,
+    )
+    file = store.save_file(
+        _batch_line("batch", "hello").encode(),
+        "input.jsonl",
+        "batch",
+    )
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    processing = asyncio.create_task(worker.process(job.id))
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(backend.dispatched.wait(), timeout=0.05)
+
+    interactive.completed()
+    await asyncio.wait_for(processing, timeout=2)
+
+    assert backend.dispatched.is_set()
+    assert store.get_batch(job.id).status == "completed"
+
+
+async def test_worker_observes_batch_cancellation_while_waiting_for_slo_slack(
+    tmp_path,
+):
+    waiting = asyncio.Event()
+
+    class RecordingController(AdmissionController):
+        def batch_should_yield(self):
+            waiting.set()
+            return super().batch_should_yield()
+
+    class CountingBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            return await super().generate(request)
+
+    controller = RecordingController(ttft_slo_s=1.0)
+    controller._ttft_per_unit_ema = 0.6
+    interactive = controller.begin()
+    backend = CountingBackend()
+    store = BatchStore(tmp_path)
+    worker = LegacyBatchWorker(
+        store,
+        {"m": backend},
+        max_concurrency=1,
+        admission_controller=controller,
+    )
+    file = store.save_file(
+        _batch_line("batch", "hello").encode(),
+        "input.jsonl",
+        "batch",
+    )
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    processing = asyncio.create_task(worker.process(job.id))
+    await asyncio.wait_for(waiting.wait(), timeout=1)
+    cancelled = await asyncio.to_thread(store.cancel_batch, job.id)
+    await asyncio.wait_for(processing, timeout=1)
+    interactive.completed()
+
+    assert cancelled.status == "cancelled"
+    assert store.get_batch(job.id).status == "cancelled"
+    assert backend.calls == 0
+
+
+async def test_cancel_wins_atomically_before_filesystem_terminal_publication(tmp_path):
+    class BlockingFinalizeStore(BatchStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.finalize_started = threading.Event()
+            self.allow_finalize = threading.Event()
+
+        def finalize_batch(self, job):
+            self.finalize_started.set()
+            assert self.allow_finalize.wait(1)
+            return super().finalize_batch(job)
+
+    store = BlockingFinalizeStore(tmp_path)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(
+        _batch_line("batch", "hello").encode(),
+        "input.jsonl",
+        "batch",
+    )
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    files_before = {path.name for path in (tmp_path / "files").iterdir()}
+
+    processing = asyncio.create_task(worker.process(job.id))
+    assert await asyncio.to_thread(store.finalize_started.wait, 1)
+    cancelled = await asyncio.to_thread(store.cancel_batch, job.id)
+    store.allow_finalize.set()
+    await asyncio.wait_for(processing, timeout=1)
+
+    current = store.get_batch(job.id)
+    assert cancelled.status == current.status == "cancelled"
+    assert current.output_file_id is None
+    assert current.error_file_id is None
+    assert {path.name for path in (tmp_path / "files").iterdir()} == files_before
+
+
+async def test_shutdown_after_filesystem_terminal_commit_keeps_result_files(tmp_path):
+    class BlockingFinalizeStore(BatchStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.finalize_started = threading.Event()
+            self.allow_finalize = threading.Event()
+
+        def finalize_batch(self, job):
+            self.finalize_started.set()
+            assert self.allow_finalize.wait(1)
+            return super().finalize_batch(job)
+
+    store = BlockingFinalizeStore(tmp_path)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(
+        _batch_line("batch", "hello").encode(),
+        "input.jsonl",
+        "batch",
+    )
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    processing = asyncio.create_task(worker.process(job.id))
+    assert await asyncio.to_thread(store.finalize_started.wait, 1)
+    processing.cancel()
+    store.allow_finalize.set()
+    with pytest.raises(asyncio.CancelledError):
+        await processing
+
+    current = store.get_batch(job.id)
+    assert current.status == "completed"
+    assert current.output_file_id is not None
+    output = store.read_file_content(current.output_file_id)
+    assert json.loads(output)["custom_id"] == "batch"
+
+
+async def test_filesystem_batch_routes_run_store_io_off_event_loop(tmp_path):
+    from kairyu.entrypoints.server.batch_routes import add_batch_routes
+
+    loop_thread = threading.get_ident()
+    calls: list[tuple[str, int]] = []
+
+    class RecordingStore(BatchStore):
+        def _record(self, operation):
+            calls.append((operation, threading.get_ident()))
+
+        def get_file(self, *args, **kwargs):
+            self._record("get_file")
+            return super().get_file(*args, **kwargs)
+
+        def iter_file_content(self, *args, **kwargs):
+            self._record("iter_file_content")
+            iterator = super().iter_file_content(*args, **kwargs)
+
+            def chunks():
+                for chunk in iterator:
+                    self._record("content_chunk")
+                    yield chunk
+
+            return chunks()
+
+        def create_batch(self, *args, **kwargs):
+            self._record("create_batch")
+            return super().create_batch(*args, **kwargs)
+
+        def list_batches(self, *args, **kwargs):
+            self._record("list_batches")
+            return super().list_batches(*args, **kwargs)
+
+        def get_batch(self, *args, **kwargs):
+            self._record("get_batch")
+            return super().get_batch(*args, **kwargs)
+
+        def update_batch(self, *args, **kwargs):
+            self._record("update_batch")
+            return super().update_batch(*args, **kwargs)
+
+    store = RecordingStore(tmp_path)
+    file = store.save_file(b"streamed", "input.jsonl", "batch")
+    calls.clear()
+    app = create_legacy_app({"m": MockBackend()})
+    add_batch_routes(app, store, LegacyBatchWorker(store, {"m": MockBackend()}))
+
+    async with _client(app) as client:
+        assert (await client.get(f"/v1/files/{file.id}")).status_code == 200
+        content = await client.get(f"/v1/files/{file.id}/content")
+        assert content.content == b"streamed"
+        created = await client.post(
+            "/v1/batches",
+            json={
+                "input_file_id": file.id,
+                "endpoint": "/v1/chat/completions",
+            },
+        )
+        batch_id = created.json()["id"]
+        assert (await client.get("/v1/batches")).status_code == 200
+        assert (await client.get(f"/v1/batches/{batch_id}")).status_code == 200
+        assert (
+            await client.post(f"/v1/batches/{batch_id}/cancel")
+        ).status_code == 200
+
+    assert {
+        "get_file",
+        "iter_file_content",
+        "content_chunk",
+        "create_batch",
+        "list_batches",
+        "get_batch",
+        "update_batch",
+    } <= {operation for operation, _ in calls}
+    assert all(thread_id != loop_thread for _, thread_id in calls)
+
+
 async def test_worker_task_count_is_constant_for_large_batches(tmp_path, monkeypatch):
     max_concurrency = 4
     line_count = 300
@@ -664,8 +904,17 @@ def _stored_file_names(tmp_path):
     return {path.name for path in (tmp_path / "files").iterdir()}
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(OSError("secret output path"), id="io-error"),
+        pytest.param(AuditQueueFull("output queue full"), id="queue-full"),
+    ],
+)
 async def test_output_append_failure_persists_failed_and_cleans_spool(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
+    failure,
 ):
     store = BatchStore(tmp_path)
     ledger = UsageLedger(tmp_path / "usage.jsonl")
@@ -684,7 +933,7 @@ async def test_output_append_failure_persists_failed_and_cleans_spool(
 
             def fail_after_append(payload):
                 append(payload)
-                raise OSError("secret output path must not escape")
+                raise failure
 
             monkeypatch.setattr(writer, "append", fail_after_append)
         return writer
@@ -697,7 +946,7 @@ async def test_output_append_failure_persists_failed_and_cleans_spool(
     assert failed.status == "failed"
     assert failed.failed_at is not None
     assert failed.errors == {
-        "message": "batch processing failed (OSError); resubmit"
+        "message": f"batch processing failed ({type(failure).__name__}); resubmit"
     }
     assert failed.request_counts.model_dump() == {
         "total": 1,

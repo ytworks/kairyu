@@ -111,6 +111,7 @@ async def test_cross_instance_streaming_chunks_lines_and_writer(
     assert second.store_id == first.store_id == store_id
     assert second.get_file(file.id, owner="tenant-a") == file
     assert second.read_file_content(file.id, owner="tenant-a") == payload
+    assert b"".join(second.iter_file_content(file.id, owner="tenant-a")) == payload
     assert list(second.iter_file_lines(file.id, owner="tenant-a")) == [
         b"first\n",
         middle + b"\n",

@@ -142,6 +142,15 @@ class AdmissionController:
         with self._lock:
             return self._predicted_ttft_unlocked(elapsed_s)
 
+    def batch_should_yield(self) -> bool:
+        """Whether new batch work should wait for interactive pressure to fall."""
+
+        with self._lock:
+            return (
+                self._interactive_in_flight > 0
+                and self._predicted_ttft_unlocked() > self._slo
+            )
+
     def _decide_unlocked(self, elapsed_s: float = 0.0) -> AdmissionDecision:
         predicted = self._predicted_ttft_unlocked(elapsed_s)
         if predicted <= self._slo:

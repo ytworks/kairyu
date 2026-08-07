@@ -893,6 +893,7 @@ def build_app_from_spec(
             usage_ledger=getattr(app.state, "usage_ledger", None),
             tenant_limiter=getattr(app.state, "tenant_limiter", None),
             tenant_config=tenant_config,
+            admission_controller=app.state.slo_admission,
         )
         workers.append(worker)
         add_batch_routes(app, store, worker)

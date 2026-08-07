@@ -30,6 +30,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, BinaryIO, Literal, Protocol, Self, runtime_checkable
 
+from kairyu.audit_io import BoundedJsonlWriter
 from kairyu.batch.store import (
     BatchJob,
     BatchStore,
@@ -37,6 +38,7 @@ from kairyu.batch.store import (
     FileTooLargeError,
     JsonlFileWriter,
     StaleBatchClaimError,
+    _run_blocking_cancellation_safe,
 )
 
 try:  # Optional deployment dependency; checked with a useful error at construction.
@@ -344,7 +346,7 @@ class PostgresJsonlFileWriter(JsonlFileWriter):
         self._producer_fencing_token = producer_fencing_token
         self._file_id = f"file-{uuid.uuid4().hex[:24]}"
         self._temporary_path: Path | None = None
-        self._handle: BinaryIO | None = None
+        self._writer: BoundedJsonlWriter | None = None
         self._bytes_written = 0
         self._state: Literal["new", "open", "committed", "aborted"] = "new"
 
@@ -358,13 +360,14 @@ class PostgresJsonlFileWriter(JsonlFileWriter):
 
     def append(self, payload: dict) -> None:
         self._require_writable()
-        encoded = json.dumps(payload).encode("utf-8") + b"\n"
-        if self._handle is None:
-            self._temporary_path, self._handle = self._store._new_spool()
+        encoded = json.dumps(payload)
+        if self._writer is None:
+            self._temporary_path, handle = self._store._new_spool()
+            handle.close()
+            self._writer = BoundedJsonlWriter(self._temporary_path)
             self._state = "open"
-        self._handle.write(encoded)
-        self._handle.flush()
-        self._bytes_written += len(encoded)
+        self._writer.append(encoded)
+        self._bytes_written += len(encoded.encode("utf-8")) + 1
 
     def commit(self) -> FileObject:
         if self._state == "new":
@@ -372,8 +375,9 @@ class PostgresJsonlFileWriter(JsonlFileWriter):
         if self._state != "open":
             raise RuntimeError(f"JSONL writer is already {self._state}")
         assert self._temporary_path is not None
+        assert self._writer is not None
         try:
-            self._close_handle()
+            self._close_writer()
             file = self._store._commit_spool_file(
                 self._temporary_path,
                 file_id=self._file_id,
@@ -398,7 +402,7 @@ class PostgresJsonlFileWriter(JsonlFileWriter):
         if self._state == "aborted":
             return
         try:
-            self._close_handle()
+            self._close_writer()
         finally:
             self._discard_temporary()
 
@@ -428,11 +432,11 @@ class PostgresJsonlFileWriter(JsonlFileWriter):
         if self._state not in ("new", "open"):
             raise RuntimeError(f"JSONL writer is already {self._state}")
 
-    def _close_handle(self) -> None:
-        handle = self._handle
-        self._handle = None
-        if handle is not None:
-            handle.close()
+    def _close_writer(self) -> None:
+        writer = self._writer
+        self._writer = None
+        if writer is not None:
+            writer.close()
 
     def _discard_temporary(self) -> None:
         self._state = "aborted"
@@ -443,7 +447,7 @@ class PostgresJsonlFileWriter(JsonlFileWriter):
 
 
 class PostgresBatchStore(BatchStore):
-    """A PostgreSQL shared store implementing BatchStore's eleven methods."""
+    """A PostgreSQL shared store implementing the full batch-store protocol."""
 
     def __init__(
         self,
@@ -646,10 +650,10 @@ class PostgresBatchStore(BatchStore):
                     prospective_bytes = bytes_written + len(chunk)
                     if max_bytes is not None and prospective_bytes > max_bytes:
                         raise FileTooLargeError
-                    handle.write(chunk)
+                    await _run_blocking_cancellation_safe(handle.write, chunk)
                     bytes_written = prospective_bytes
             finally:
-                handle.close()
+                await _run_blocking_cancellation_safe(handle.close)
 
             # Chunk insertion can take seconds for the maximum upload. Keep it
             # off the gateway event loop, but let the underlying thread settle
@@ -681,7 +685,10 @@ class PostgresBatchStore(BatchStore):
                 # The request no longer has a caller that can use this object.
                 # Remove the now-complete, still-unreferenced publication.
                 try:
-                    await asyncio.to_thread(self._discard_file, file.id)
+                    await _run_blocking_cancellation_safe(
+                        self._discard_file,
+                        file.id,
+                    )
                 except Exception:
                     logger.warning(
                         "failed to roll back cancelled PostgreSQL batch upload",
@@ -691,7 +698,10 @@ class PostgresBatchStore(BatchStore):
                 raise cancelled
             return file
         finally:
-            self._remove_spool(temporary_path)
+            await _run_blocking_cancellation_safe(
+                self._remove_spool,
+                temporary_path,
+            )
 
     def _commit_spool_file(
         self,
@@ -946,6 +956,31 @@ class PostgresBatchStore(BatchStore):
                             f"declares {file.bytes} bytes, found {len(content)}"
                         )
                     return bytes(content)
+
+    def iter_file_content(
+        self,
+        file_id: str,
+        owner: str | None = None,
+    ) -> Iterator[bytes]:
+        file = self.get_file(file_id, owner)
+
+        def chunks() -> Iterator[bytes]:
+            chunk_no = 0
+            observed_bytes = 0
+            while True:
+                chunk = self._read_file_chunk(file_id, chunk_no)
+                if chunk is None:
+                    break
+                observed_bytes += len(chunk)
+                chunk_no += 1
+                yield chunk
+            if observed_bytes != file.bytes:
+                raise RuntimeError(
+                    f"corrupt PostgreSQL file {file_id!r}: metadata "
+                    f"declares {file.bytes} bytes, streamed {observed_bytes}"
+                )
+
+        return chunks()
 
     def iter_file_lines(
         self,

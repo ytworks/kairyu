@@ -59,10 +59,13 @@ from kairyu.entrypoints.server.tenancy import TenantConfig
 
 if TYPE_CHECKING:
     from kairyu.batch.postgres_store import BatchClaim
+    from kairyu.entrypoints.server.slo import AdmissionController
 
 logger = logging.getLogger("kairyu.batch")
 _INPUT_QUEUE_FACTOR = 2
 _INPUT_SENTINEL = object()
+_ITERATION_SENTINEL = object()
+_BATCH_PRESSURE_POLL_S = 0.01
 _WORKER_ID_ENV = "KAIRYU_BATCH_WORKER_ID"
 
 
@@ -90,6 +93,7 @@ class BatchWorker:
         usage_ledger: UsageLedgerSink | None = None,
         tenant_limiter: TokenLimiterSink | None = None,
         tenant_config: TenantConfig | None = None,
+        admission_controller: AdmissionController | None = None,
         worker_id: str | None = None,
         claim_poll_interval_s: float = 0.5,
         claim_lease_seconds: float = 30.0,
@@ -120,6 +124,7 @@ class BatchWorker:
         self._usage_ledger = usage_ledger
         self._tenant_limiter = tenant_limiter
         self._tenant_config = tenant_config or TenantConfig()
+        self._admission_controller = admission_controller
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._claim_wakeup = asyncio.Event()
         claim_next = getattr(store, "claim_next_batch", None)
@@ -186,7 +191,7 @@ class BatchWorker:
             except TimeoutError:
                 pass
 
-    def _cancelled(
+    async def _cancelled(
         self,
         batch_id: str,
         claim_lost: asyncio.Event | None = None,
@@ -196,7 +201,20 @@ class BatchWorker:
             # The dedicated heartbeat observes that state without issuing two
             # synchronous PostgreSQL reads for every JSONL line.
             return claim_lost is not None and claim_lost.is_set()
-        return self._store.get_batch(batch_id).status == "cancelled"
+        job = await asyncio.to_thread(self._store.get_batch, batch_id)
+        return job.status == "cancelled"
+
+    async def _wait_for_interactive_slack(
+        self,
+        batch_id: str,
+        claim_lost: asyncio.Event,
+    ) -> bool:
+        controller = self._admission_controller
+        while controller is not None and controller.batch_should_yield():
+            if await self._cancelled(batch_id, claim_lost):
+                return False
+            await asyncio.sleep(_BATCH_PRESSURE_POLL_S)
+        return True
 
     async def _finish(
         self,
@@ -208,9 +226,12 @@ class BatchWorker:
         job.status = state
         if claim is None:
             setattr(job, f"{state}_at", int(time.time()))
-            self._store.update_batch(job)
-            if publication_committed is not None:
-                publication_committed[0] = True
+            finalize = getattr(self._store, "finalize_batch", None)
+            await self._run_blocking_cancellation_safe(
+                finalize if callable(finalize) else self._store.update_batch,
+                job,
+                completion_flag=publication_committed,
+            )
         else:
             # The shared store fills the terminal timestamp from the same DB
             # clock that governs claim leases and their audit chronology.
@@ -231,7 +252,7 @@ class BatchWorker:
         completion_flag: list[bool] | None = None,
         **kwargs: object,
     ) -> Any:
-        """Let a started DB operation settle before propagating cancellation.
+        """Let a started store operation settle before propagating cancellation.
 
         ``asyncio.to_thread`` cannot stop its underlying thread. Propagating
         cancellation immediately would let rollback race a still-running file
@@ -525,12 +546,13 @@ class BatchWorker:
             return BatchWorker._failure_class(error.exceptions[0])
         return type(error).__name__
 
-    @staticmethod
-    def _rollback_writer(writer: JsonlFileWriter | None) -> None:
+    async def _rollback_writer(self, writer: JsonlFileWriter | None) -> None:
         if writer is None:
             return
         try:
-            writer.rollback()
+            await self._run_blocking_cancellation_safe(writer.rollback)
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("failed to roll back batch spool")
 
@@ -540,12 +562,24 @@ class BatchWorker:
         claim: BatchClaim | None = None,
     ) -> None:
         if claim is None:
-            job = self._store.get_batch(batch_id)
-            if job.status == "cancelled":
-                return
-            job.status = "in_progress"
-            job.in_progress_at = int(time.time())
-            self._store.update_batch(job)
+            start = getattr(self._store, "start_batch", None)
+            if callable(start):
+                job = await self._run_blocking_cancellation_safe(start, batch_id)
+                if job is None:
+                    return
+            else:
+                job = await self._run_blocking_cancellation_safe(
+                    self._store.get_batch,
+                    batch_id,
+                )
+                if job.status == "cancelled":
+                    return
+                job.status = "in_progress"
+                job.in_progress_at = int(time.time())
+                await self._run_blocking_cancellation_safe(
+                    self._store.update_batch,
+                    job,
+                )
         else:
             if claim.batch_id != batch_id:
                 raise ValueError("batch claim does not match the requested batch")
@@ -625,7 +659,7 @@ class BatchWorker:
                 nonlocal input_error
                 async def enqueue(raw_line: bytes) -> bool:
                     nonlocal input_error
-                    if self._cancelled(batch_id, claim_lost):
+                    if await self._cancelled(batch_id, claim_lost):
                         return False
                     if not raw_line.strip():
                         return True
@@ -660,7 +694,8 @@ class BatchWorker:
                             await close()
                 else:
                     try:
-                        input_lines = self._store.iter_file_lines(
+                        input_lines = await asyncio.to_thread(
+                            self._store.iter_file_lines,
                             job.input_file_id,
                             owner=job.owner,
                         )
@@ -668,13 +703,20 @@ class BatchWorker:
                         input_error = error
                     else:
                         try:
-                            for raw_line in input_lines:
+                            while True:
+                                raw_line = await asyncio.to_thread(
+                                    next,
+                                    input_lines,
+                                    _ITERATION_SENTINEL,
+                                )
+                                if raw_line is _ITERATION_SENTINEL:
+                                    break
                                 if not await enqueue(raw_line):
                                     break
                         finally:
                             close = getattr(input_lines, "close", None)
                             if close is not None:
-                                close()
+                                await asyncio.to_thread(close)
                 for _ in range(self._max_concurrency):
                     await input_queue.put(_INPUT_SENTINEL)
 
@@ -684,8 +726,13 @@ class BatchWorker:
                     try:
                         if line is _INPUT_SENTINEL:
                             return
-                        if input_error is not None or self._cancelled(
+                        if input_error is not None or await self._cancelled(
                             batch_id, claim_lost
+                        ):
+                            continue
+                        if not await self._wait_for_interactive_slack(
+                            batch_id,
+                            claim_lost,
                         ):
                             continue
                         output, error, usage = await self._run_line(
@@ -721,24 +768,26 @@ class BatchWorker:
                     task_group.create_task(consume())
 
             ensure_claim()
-            current = (
-                await asyncio.to_thread(self._store.get_batch, batch_id)
-                if claim is not None
-                else self._store.get_batch(batch_id)
+            current = await asyncio.to_thread(
+                self._store.get_batch,
+                batch_id,
             )  # cancellation may have landed
             current.request_counts = job.request_counts.model_copy()
             if current.status == "cancelled":
-                self._rollback_writer(output_writer)
-                self._rollback_writer(error_writer)
+                await self._rollback_writer(output_writer)
+                await self._rollback_writer(error_writer)
                 if claim is None:
                     current.cancelled_at = current.cancelled_at or int(time.time())
-                    self._store.update_batch(current)
+                    await self._run_blocking_cancellation_safe(
+                        self._store.update_batch,
+                        current,
+                    )
                 if self._metrics is not None:
                     self._metrics.batch_jobs_total.labels(state="cancelled").inc()
                 return
             if input_error is not None:
-                self._rollback_writer(output_writer)
-                self._rollback_writer(error_writer)
+                await self._rollback_writer(output_writer)
+                await self._rollback_writer(error_writer)
                 current.errors = {"message": f"invalid input file: {input_error}"}
                 await self._finish(
                     current,
@@ -749,27 +798,19 @@ class BatchWorker:
                 return
 
             if output_writer.has_content:
-                output_file = (
-                    output_writer.commit()
-                    if claim is None
-                    else await self._run_blocking_cancellation_safe(
-                        output_writer.commit
-                    )
+                output_file = await self._run_blocking_cancellation_safe(
+                    output_writer.commit
                 )
                 current.output_file_id = output_file.id
             else:
-                output_writer.abort()
+                await self._run_blocking_cancellation_safe(output_writer.abort)
             if error_writer.has_content:
-                error_file = (
-                    error_writer.commit()
-                    if claim is None
-                    else await self._run_blocking_cancellation_safe(
-                        error_writer.commit
-                    )
+                error_file = await self._run_blocking_cancellation_safe(
+                    error_writer.commit
                 )
                 current.error_file_id = error_file.id
             else:
-                error_writer.abort()
+                await self._run_blocking_cancellation_safe(error_writer.abort)
             ensure_claim()
             await self._finish(
                 current,
@@ -779,38 +820,39 @@ class BatchWorker:
             )
         except asyncio.CancelledError:
             if not terminal_published[0]:
-                self._rollback_writer(output_writer)
-                self._rollback_writer(error_writer)
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._rollback_writer(output_writer)
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._rollback_writer(error_writer)
             raise
         except (_BatchClaimLeaseLost, StaleBatchClaimError):
-            self._rollback_writer(output_writer)
-            self._rollback_writer(error_writer)
+            await self._rollback_writer(output_writer)
+            await self._rollback_writer(error_writer)
             logger.info(
                 "batch claim was lost before publication",
                 extra={"batch_id": batch_id, "worker_id": self._worker_id},
             )
             return
         except Exception as error:
-            self._rollback_writer(output_writer)
-            self._rollback_writer(error_writer)
+            await self._rollback_writer(output_writer)
+            await self._rollback_writer(error_writer)
             if claim_lost.is_set():
                 logger.info(
                     "batch claim lease renewal failed; leaving the job for reclaim",
                     extra={"batch_id": batch_id, "worker_id": self._worker_id},
                 )
                 return
-            current = (
-                await asyncio.to_thread(self._store.get_batch, batch_id)
-                if claim is not None
-                else self._store.get_batch(batch_id)
-            )
+            current = await asyncio.to_thread(self._store.get_batch, batch_id)
             current.request_counts = job.request_counts.model_copy()
             current.output_file_id = None
             current.error_file_id = None
             if current.status == "cancelled":
                 if claim is None:
                     current.cancelled_at = current.cancelled_at or int(time.time())
-                    self._store.update_batch(current)
+                    await self._run_blocking_cancellation_safe(
+                        self._store.update_batch,
+                        current,
+                    )
                 if self._metrics is not None:
                     self._metrics.batch_jobs_total.labels(state="cancelled").inc()
                 return

@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Batch I/O yields to interactive pressure
+- What: batch output/error transactions now use bounded background JSONL writes; route and filesystem-worker store I/O runs off-loop, downloads stream fixed chunks, and configured SLO pressure pauses new batch lines without preempting running work.
+- Why: per-line flushes, local metadata reads, and whole-file downloads blocked the gateway event loop, while the fixed batch pool kept dispatching as interactive TTFT risk rose.
+- Refs: issue #342; m7 D7; m10 D3/A8; m11 D6; `kairyu/batch/{store,postgres_store,worker}.py`; `kairyu/entrypoints/server/batch_routes.py`
+
 ### 2026-08-07 — [amendment] Admission waits ahead of native sequence capacity
 - What: an explicit wait timeout lets a single local built-in backend split configured `/v1/*` concurrency into its advertised active sequence budget plus a bounded FIFO; omission, multi-model, pool, and unknown backends retain immediate saturation 429, and queue depth/rejections are observable.
 - Why: synchronized bursts were occupying server slots while queuing invisibly inside the engine scheduler, and saturation above a hand-set cap flapped immediately to 429 instead of absorbing a bounded burst.

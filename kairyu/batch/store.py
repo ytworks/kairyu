@@ -8,17 +8,47 @@ orphaned in-flight jobs failed — honest and simple (single-gateway scope).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from types import TracebackType
-from typing import BinaryIO, Literal, Protocol, Self
+from typing import Literal, Protocol, Self
 
 from pydantic import BaseModel, Field
 
+from kairyu.audit_io import BoundedJsonlWriter
+
 _SUPPORTED_ENDPOINT = "/v1/chat/completions"
+_FILE_CHUNK_BYTES = 1024 * 1024
+
+
+async def _run_blocking_cancellation_safe(
+    function: Callable[..., object],
+    *args: object,
+    **kwargs: object,
+) -> object:
+    """Finish one started thread operation before propagating cancellation."""
+
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    cancelled: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            cancelled = error
+    try:
+        result = task.result()
+    except Exception:
+        if cancelled is not None:
+            raise cancelled from None
+        raise
+    if cancelled is not None:
+        raise cancelled
+    return result
 
 
 class FileTooLargeError(Exception):
@@ -27,6 +57,10 @@ class FileTooLargeError(Exception):
 
 class StaleBatchClaimError(RuntimeError):
     """A shared-store worker no longer owns the fenced batch lease."""
+
+
+class BatchCancelledError(RuntimeError):
+    """A filesystem batch was cancelled before terminal publication."""
 
 
 class FileObject(BaseModel):
@@ -57,7 +91,7 @@ class JsonlFileWriter:
         self._owner = owner
         self._file_id = f"file-{uuid.uuid4().hex[:24]}"
         self._temporary_path = store._files_dir / f"{self._file_id}.bin.tmp"
-        self._handle: BinaryIO | None = None
+        self._writer: BoundedJsonlWriter | None = None
         self._bytes_written = 0
         self._state: Literal["new", "open", "committed", "aborted"] = "new"
 
@@ -71,22 +105,21 @@ class JsonlFileWriter:
 
     def append(self, payload: dict) -> None:
         self._require_writable()
-        encoded = json.dumps(payload).encode("utf-8") + b"\n"
-        if self._handle is None:
-            self._handle = self._temporary_path.open("xb")
+        encoded = json.dumps(payload)
+        if self._writer is None:
+            self._writer = BoundedJsonlWriter(self._temporary_path)
             self._state = "open"
-        self._handle.write(encoded)
-        self._handle.flush()
-        self._bytes_written += len(encoded)
+        self._writer.append(encoded)
+        self._bytes_written += len(encoded.encode("utf-8")) + 1
 
     def commit(self) -> FileObject:
         if self._state == "new":
             raise RuntimeError("cannot commit an empty JSONL writer")
         if self._state != "open":
             raise RuntimeError(f"JSONL writer is already {self._state}")
-        assert self._handle is not None
+        assert self._writer is not None
         try:
-            self._close_handle()
+            self._close_writer()
             file = self._store._commit_file(
                 self._temporary_path,
                 file_id=self._file_id,
@@ -107,7 +140,7 @@ class JsonlFileWriter:
         if self._state == "aborted":
             return
         try:
-            self._close_handle()
+            self._close_writer()
         finally:
             self._discard_temporary()
 
@@ -143,11 +176,11 @@ class JsonlFileWriter:
         if self._state not in ("new", "open"):
             raise RuntimeError(f"JSONL writer is already {self._state}")
 
-    def _close_handle(self) -> None:
-        handle = self._handle
-        self._handle = None
-        if handle is not None:
-            handle.close()
+    def _close_writer(self) -> None:
+        writer = self._writer
+        self._writer = None
+        if writer is not None:
+            writer.close()
 
     def _discard_temporary(self) -> None:
         self._state = "aborted"
@@ -181,8 +214,7 @@ class BatchJob(BaseModel):
 
 
 class BatchStoreProtocol(Protocol):
-    """The full store surface (m10a D3/A8) — worker, routes and builder use
-    exactly these eleven methods; M11 tenancy ledgers fake this."""
+    """The full store surface (m10a D3/A8) used by workers and routes."""
 
     def save_file(
         self, content: bytes, filename: str, purpose: str, owner: str = "default"
@@ -200,6 +232,10 @@ class BatchStoreProtocol(Protocol):
     def get_file(self, file_id: str, owner: str | None = None) -> FileObject: ...
 
     def read_file_content(self, file_id: str, owner: str | None = None) -> bytes: ...
+
+    def iter_file_content(
+        self, file_id: str, owner: str | None = None
+    ) -> Iterator[bytes]: ...
 
     def iter_file_lines(
         self, file_id: str, owner: str | None = None
@@ -229,6 +265,7 @@ class BatchStore:
         self._batches_dir = Path(data_dir) / "batches"
         self._files_dir.mkdir(parents=True, exist_ok=True)
         self._batches_dir.mkdir(parents=True, exist_ok=True)
+        self._job_lock = threading.RLock()
 
     # -- files ------------------------------------------------------------
 
@@ -263,24 +300,47 @@ class BatchStore:
         file_id = f"file-{uuid.uuid4().hex[:24]}"
         temporary_path = self._files_dir / f"{file_id}.bin.tmp"
         bytes_written = 0
+        handle = temporary_path.open("xb")
         try:
-            with temporary_path.open("xb") as handle:
+            try:
                 async for chunk in chunks:
                     prospective_bytes = bytes_written + len(chunk)
                     if max_bytes is not None and prospective_bytes > max_bytes:
                         raise FileTooLargeError
-                    handle.write(chunk)
+                    await _run_blocking_cancellation_safe(handle.write, chunk)
                     bytes_written = prospective_bytes
-            return self._commit_file(
-                temporary_path,
-                file_id=file_id,
-                bytes_written=bytes_written,
-                filename=filename,
-                purpose=purpose,
-                owner=owner,
+            finally:
+                await _run_blocking_cancellation_safe(handle.close)
+
+            commit_task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._commit_file,
+                    temporary_path,
+                    file_id=file_id,
+                    bytes_written=bytes_written,
+                    filename=filename,
+                    purpose=purpose,
+                    owner=owner,
+                )
             )
+            cancelled: asyncio.CancelledError | None = None
+            while not commit_task.done():
+                try:
+                    await asyncio.shield(commit_task)
+                except asyncio.CancelledError as error:
+                    cancelled = error
+            file = commit_task.result()
+            if cancelled is not None:
+                await _run_blocking_cancellation_safe(self._discard_file, file.id)
+                raise cancelled
+            return file
         finally:
-            temporary_path.unlink(missing_ok=True)
+            if not handle.closed:
+                await _run_blocking_cancellation_safe(handle.close)
+            await _run_blocking_cancellation_safe(
+                temporary_path.unlink,
+                missing_ok=True,
+            )
 
     def get_file(self, file_id: str, owner: str | None = None) -> FileObject:
         path = self._files_dir / f"{file_id}.json"
@@ -296,6 +356,19 @@ class BatchStore:
     def read_file_content(self, file_id: str, owner: str | None = None) -> bytes:
         self.get_file(file_id, owner)  # KeyError on missing OR cross-tenant
         return (self._files_dir / f"{file_id}.bin").read_bytes()
+
+    def iter_file_content(
+        self, file_id: str, owner: str | None = None
+    ) -> Iterator[bytes]:
+        self.get_file(file_id, owner)  # validate before response headers
+        content_path = self._files_dir / f"{file_id}.bin"
+
+        def chunks() -> Iterator[bytes]:
+            with content_path.open("rb") as handle:
+                while chunk := handle.read(_FILE_CHUNK_BYTES):
+                    yield chunk
+
+        return chunks()
 
     def iter_file_lines(
         self, file_id: str, owner: str | None = None
@@ -380,26 +453,78 @@ class BatchStore:
         return job
 
     def get_batch(self, batch_id: str, owner: str | None = None) -> BatchJob:
-        path = self._batches_dir / f"{batch_id}.json"
-        if not path.exists():
-            raise KeyError(batch_id)
-        job = BatchJob.model_validate_json(path.read_text(encoding="utf-8"))
-        if owner is not None and job.owner != owner:
-            raise KeyError(batch_id)  # cross-tenant reads as not-found (C3)
-        return job
+        with self._job_lock:
+            path = self._batches_dir / f"{batch_id}.json"
+            if not path.exists():
+                raise KeyError(batch_id)
+            job = BatchJob.model_validate_json(path.read_text(encoding="utf-8"))
+            if owner is not None and job.owner != owner:
+                raise KeyError(batch_id)  # cross-tenant reads as not-found (C3)
+            return job
 
     def list_batches(self, limit: int = 20, owner: str | None = None) -> list[BatchJob]:
-        jobs = [
-            BatchJob.model_validate_json(path.read_text(encoding="utf-8"))
-            for path in self._batches_dir.glob("batch_*.json")
-        ]
-        if owner is not None:
-            jobs = [job for job in jobs if job.owner == owner]  # tenant-scoped list (C3)
-        jobs.sort(key=lambda job: (job.created_at, job.id), reverse=True)
-        return jobs[:limit]
+        with self._job_lock:
+            jobs = [
+                BatchJob.model_validate_json(path.read_text(encoding="utf-8"))
+                for path in self._batches_dir.glob("batch_*.json")
+            ]
+            if owner is not None:
+                jobs = [
+                    job for job in jobs if job.owner == owner
+                ]  # tenant-scoped list (C3)
+            jobs.sort(key=lambda job: (job.created_at, job.id), reverse=True)
+            return jobs[:limit]
 
     def update_batch(self, job: BatchJob) -> None:
-        self._write_json(self._batches_dir / f"{job.id}.json", job.model_dump())
+        with self._job_lock:
+            self._write_json(
+                self._batches_dir / f"{job.id}.json",
+                job.model_dump(),
+            )
+
+    def start_batch(self, batch_id: str) -> BatchJob | None:
+        """Atomically move a queued filesystem batch into worker ownership."""
+
+        with self._job_lock:
+            job = self.get_batch(batch_id)
+            if job.status == "cancelled":
+                return None
+            if job.status != "validating":
+                raise RuntimeError(
+                    f"cannot start batch {batch_id!r} from state {job.status!r}"
+                )
+            job.status = "in_progress"
+            job.in_progress_at = int(time.time())
+            self.update_batch(job)
+            return job
+
+    def cancel_batch(
+        self,
+        batch_id: str,
+        owner: str | None = None,
+    ) -> BatchJob:
+        """Atomically cancel only a non-terminal filesystem batch."""
+
+        with self._job_lock:
+            job = self.get_batch(batch_id, owner=owner)
+            if job.status in ("validating", "in_progress"):
+                job.status = "cancelled"
+                job.cancelled_at = int(time.time())
+                self.update_batch(job)
+            return job
+
+    def finalize_batch(self, job: BatchJob) -> None:
+        """Publish one terminal filesystem state unless cancellation won."""
+
+        with self._job_lock:
+            current = self.get_batch(job.id)
+            if current.status == "cancelled":
+                raise BatchCancelledError(job.id)
+            if current.status != "in_progress":
+                raise RuntimeError(
+                    f"cannot finalize batch {job.id!r} from state {current.status!r}"
+                )
+            self.update_batch(job)
 
     def recover_orphans(self) -> tuple[str, ...]:
         """Mark jobs left in flight by a previous process as failed (m7 D7)."""
