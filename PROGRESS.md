@@ -95,7 +95,7 @@ Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
 ### 2026-08-07 — [amendment] Admission waits ahead of native sequence capacity
-- What: configured `/v1/*` concurrency now bounds active plus queued requests; built-in backends advertise their sequence budget as the active cap, and excess work waits in a bounded semaphore queue until a configurable timeout before 429.
+- What: an explicit wait timeout lets a single local built-in backend split configured `/v1/*` concurrency into its advertised active sequence budget plus a bounded FIFO; omission, multi-model, pool, and unknown backends retain immediate saturation 429, and queue depth/rejections are observable.
 - Why: synchronized bursts were occupying server slots while queuing invisibly inside the engine scheduler, and saturation above a hand-set cap flapped immediately to 429 instead of absorbing a bounded burst.
 - Refs: issue #341; m7 D5; `kairyu/entrypoints/server/{middleware,settings,app}.py`; `kairyu/engine/{backend,kairyu_backend,zmq_backend,vllm_backend}.py`
 

@@ -1651,12 +1651,9 @@ def _record_ingress_to_handler(http_request: Request, endpoint: str) -> None:
 
 
 def _server_sequence_budget(engines: Mapping[str, EngineBackend]) -> int | None:
-    budgets = tuple(
-        budget
-        for backend in engines.values()
-        if (budget := backend_sequence_budget(backend)) is not None
-    )
-    return min(budgets) if budgets else None
+    if len(engines) != 1:
+        return None
+    return backend_sequence_budget(next(iter(engines.values())))
 
 
 def create_app(
@@ -1781,7 +1778,19 @@ def create_app(
     if metrics is not None:
         app.add_middleware(MetricsMiddleware, metrics=metrics)
     if settings.max_concurrency is not None:
-        sequence_budget = _server_sequence_budget(served_engines)
+        sequence_budget = (
+            _server_sequence_budget(served_engines)
+            if settings.admission_wait_timeout_s is not None
+            and not auto_models
+            and not served_embedding_backends
+            else None
+        )
+        if settings.admission_wait_timeout_s is not None and sequence_budget is None:
+            logger.warning(
+                "backend-aware admission queue disabled: serve exactly one "
+                "generation backend with an advertised sequence budget and "
+                "no orchestrated or embedding models"
+            )
         active_limit = (
             min(settings.max_concurrency, sequence_budget)
             if sequence_budget is not None
@@ -1792,6 +1801,7 @@ def create_app(
             limit=active_limit,
             total_limit=settings.max_concurrency,
             wait_timeout_s=settings.admission_wait_timeout_s,
+            metrics=metrics,
         )
     if tenant_config is not None:
         from kairyu.entrypoints.server.tenancy import (

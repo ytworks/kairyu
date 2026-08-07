@@ -29,11 +29,14 @@ class ServerSettings(BaseModel):
             "the guard."
         ),
     )
-    admission_wait_timeout_s: float = Field(
-        default=1.0,
+    admission_wait_timeout_s: float | None = Field(
+        default=None,
         gt=0,
         allow_inf_nan=False,
-        description="Maximum wait for a backend-aware active request slot.",
+        description=(
+            "Maximum wait for a backend-aware active request slot; None "
+            "preserves immediate saturation rejection."
+        ),
     )
     ttft_slo_s: float | None = Field(
         default=None,

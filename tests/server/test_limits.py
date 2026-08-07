@@ -6,6 +6,8 @@ import httpx
 import pytest
 
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.prompt import prompt_text
+from kairyu.entrypoints.server.app import _server_sequence_budget
 from kairyu.entrypoints.server.settings import ServerSettings
 from tests.server._legacy_chat import create_legacy_app
 
@@ -25,8 +27,12 @@ class _BudgetedMockBackend(MockBackend):
         self.sequence_budget = sequence_budget
         self.active = 0
         self.peak_active = 0
+        self.started: list[str] = []
 
     async def generate(self, request):
+        text = prompt_text(request.prompt)
+        assert text is not None
+        self.started.append(text)
         self.active += 1
         self.peak_active = max(self.peak_active, self.active)
         try:
@@ -73,6 +79,49 @@ async def test_backend_budget_moves_burst_waiting_in_front_of_engine():
     assert backend.peak_active == 1
 
 
+async def test_backend_aware_queue_is_explicit_opt_in():
+    backend = _BudgetedMockBackend(sequence_budget=1, latency_s=0.03)
+    app = create_legacy_app(
+        engines={"m": backend},
+        settings=ServerSettings(max_concurrency=2),
+    )
+    async with _client(app) as client:
+        responses = await asyncio.gather(
+            client.post("/v1/chat/completions", json=_chat_body("one")),
+            client.post("/v1/chat/completions", json=_chat_body("two")),
+        )
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert backend.peak_active == 2
+
+
+async def test_admission_queue_hands_slots_to_waiters_in_arrival_order():
+    backend = _BudgetedMockBackend(sequence_budget=1, latency_s=0.03)
+    app = create_legacy_app(
+        engines={"m": backend},
+        settings=ServerSettings(
+            max_concurrency=3,
+            admission_wait_timeout_s=0.5,
+        ),
+    )
+    async with _client(app) as client:
+        tasks = []
+        for content in ("one", "two", "three"):
+            tasks.append(
+                asyncio.create_task(
+                    client.post("/v1/chat/completions", json=_chat_body(content))
+                )
+            )
+            await asyncio.sleep(0.01)
+        responses = await asyncio.gather(*tasks)
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert [
+        next(content for content in ("one", "two", "three") if content in prompt)
+        for prompt in backend.started
+    ] == ["one", "two", "three"]
+
+
 async def test_admission_queue_rejects_only_beyond_total_bound():
     backend = _BudgetedMockBackend(sequence_budget=1, latency_s=0.1)
     app = create_legacy_app(
@@ -97,8 +146,15 @@ async def test_admission_queue_rejects_only_beyond_total_bound():
 
         assert rejected.status_code == 429
         assert rejected.json()["error"]["code"] == "concurrency_exceeded"
+        metrics = (await client.get("/metrics")).text
+        assert "kairyu_admission_active_requests 1.0" in metrics
+        assert "kairyu_admission_waiting_requests 1.0" in metrics
+        assert 'kairyu_admission_rejections_total{reason="overflow"} 1.0' in metrics
         assert (await first).status_code == 200
         assert (await queued).status_code == 200
+        drained_metrics = (await client.get("/metrics")).text
+        assert "kairyu_admission_active_requests 0.0" in drained_metrics
+        assert "kairyu_admission_waiting_requests 0.0" in drained_metrics
 
 
 async def test_admission_queue_wait_timeout_returns_429_and_releases_waiter():
@@ -121,6 +177,8 @@ async def test_admission_queue_wait_timeout_returns_429_and_releases_waiter():
 
         assert timed_out.status_code == 429
         assert timed_out.headers["retry-after"] == "1"
+        metrics = (await client.get("/metrics")).text
+        assert 'kairyu_admission_rejections_total{reason="timeout"} 1.0' in metrics
         assert (await first).status_code == 200
         assert (
             await client.post("/v1/chat/completions", json=_chat_body("three"))
@@ -179,3 +237,16 @@ async def test_health_is_never_guarded():
         await asyncio.sleep(0.05)
         assert (await client.get("/health")).status_code == 200
         assert (await task).status_code == 200
+
+
+def test_server_sequence_budget_requires_exactly_one_advertising_backend():
+    backend = _BudgetedMockBackend(sequence_budget=2, latency_s=0)
+
+    assert _server_sequence_budget({"m": backend}) == 2
+    assert _server_sequence_budget({"a": backend, "b": backend}) is None
+    assert _server_sequence_budget({"m": MockBackend()}) is None
+
+    invalid = MockBackend()
+    invalid.sequence_budget = True
+    with pytest.raises(TypeError, match="sequence_budget"):
+        _server_sequence_budget({"m": invalid})

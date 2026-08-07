@@ -264,9 +264,11 @@ def test_server_section_owns_stable_schema_without_runtime_inheritance():
             "default": None,
         },
         "admission_wait_timeout_s": {
-            "default": 1.0,
-            "exclusiveMinimum": 0,
-            "type": "number",
+            "anyOf": [
+                {"exclusiveMinimum": 0, "type": "number"},
+                {"type": "null"},
+            ],
+            "default": None,
         },
         "ttft_slo_s": {
             "anyOf": [
