@@ -16,6 +16,9 @@ artifact graph without starting serving or model execution.
 **Amended 2026-08-01** (D6, issue #187): native per-replica RadixKV gains an
 optional bounded, NUMA-attested pinned-DRAM tier whose restore policy is loaded
 only from retained, runtime-identity-matched crossover evidence.
+**Amended 2026-08-07** (D3, issue #343): deployment pools may opt into the
+existing bounded approximate `PrefixIndex`; omission remains byte-identical and
+does not imply the separate exact KV-event transport lifecycle.
 Milestone: M7
 Date: 2026-07-02
 Depends on: Goal G3 (`docs/goals/g3-production-deployment.md`, gates C1–C7);
