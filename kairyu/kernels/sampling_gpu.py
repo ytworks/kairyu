@@ -8,6 +8,7 @@ same tensor algorithm is used for CPU/structured replay and CUDA serving.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from functools import lru_cache
 
 import torch
@@ -86,3 +87,51 @@ def stateless_gumbel_argmax(log_weights: torch.Tensor, seed: int) -> torch.Tenso
     uniform = _uniform_from_words(values)
     noise = -torch.log(-torch.log1p(-uniform))
     return torch.argmax(log_weights.to(torch.float64) + noise).to(torch.int64)
+
+
+def stateless_gumbel_argmax_batched(
+    log_weights: torch.Tensor,
+    seeds: Sequence[int],
+) -> torch.Tensor:
+    """Return one independent categorical draw per ``[batch, vocab]`` row."""
+
+    if log_weights.ndim != 2:
+        raise ValueError(
+            f"log_weights must be 2D, got {tuple(log_weights.shape)}"
+        )
+    batch_size, vocab_size = log_weights.shape
+    if len(seeds) != batch_size:
+        raise ValueError(
+            "seed count must match sampling batch: "
+            f"seeds={len(seeds)}, batch={batch_size}"
+        )
+    if batch_size == 0:
+        return torch.empty(0, dtype=torch.int64, device=log_weights.device)
+
+    if (
+        log_weights.device.type == "cpu"
+        and vocab_size <= _MAX_CACHED_CPU_OFFSETS
+    ):
+        offsets = _cached_cpu_offsets(vocab_size)
+    else:
+        offsets = torch.arange(
+            vocab_size,
+            dtype=torch.int64,
+            device=log_weights.device,
+        )
+    counters = (offsets + 1).unsqueeze(0) * _SPLITMIX_GAMMA
+    host_seeds = torch.tensor(
+        [_signed_int64(seed) for seed in seeds],
+        dtype=torch.int64,
+        pin_memory=log_weights.device.type == "cuda",
+    )
+    seed_tensor = host_seeds.to(
+        device=log_weights.device,
+        non_blocking=log_weights.device.type == "cuda",
+    ).unsqueeze(1)
+    values = _splitmix64_finalizer(counters ^ seed_tensor)
+    uniform = _uniform_from_words(values)
+    noise = -torch.log(-torch.log1p(-uniform))
+    return torch.argmax(log_weights.to(torch.float64) + noise, dim=-1).to(
+        torch.int64
+    )

@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Grammar-free CUDA sampling is batched
+- What: mixed decode rows now batch grammar-free temperature/min-p/top-k/top-p filtering and stateless Gumbel draws, use the maximum bounded top-k prefix for nucleus filtering, preserve exact full-vocabulary top-p when no finite top-k exists, and leave only grammar rows on the scalar CPU matcher path.
+- Why: one non-greedy row previously forced per-row fp32 copies, kernel launches, and full-vocabulary sorts across the complete decode batch; a Qwen3-size 151,936-token vocabulary at B=16 measured 1.13 ms batched versus 14.21 ms scalar on the same GPU.
+- Refs: issue #326; m8 D2; `kairyu/engine/core/{model_runner,sampler}.py`; `kairyu/kernels/sampling_gpu.py`; `tests/gpu/test_batched_sampler_gpu.py`
+
 ### 2026-08-07 — [amendment] Eager FlashInfer decode reuses the no-D2H planner
 - What: ordinary tensor eager decode and graph-shape eager fallback now pass authoritative scheduler lengths into the existing fixed-shape metadata pack and FlashInfer fast planner after one stock initialization per shape.
 - Why: eager and out-of-coverage graph steps rebuilt dynamic indices and copied schedule inputs to the host every decode step even though graph replay already had a validated no-sync path.

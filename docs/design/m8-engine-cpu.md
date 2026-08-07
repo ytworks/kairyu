@@ -333,6 +333,19 @@ support and retains at most four immutable vocabulary-offset tensors up to
 tensors. CUDA retains branchless device execution and returns the selected token
 without a host-visible scalar read.
 
+**Batched CUDA amendment (2026-08-07, issue #326):** a decode batch now groups
+every grammar-free CUDA row even when a grammar-constrained row shares the
+step. Row-specific temperature/min-p/top-k/top-p and stateless seed/position
+inputs feed one batched softmax and one batched Gumbel draw. Bounded top-k +
+top-p uses the single maximum top-k prefix for cumulative thresholding instead
+of sorting each complete vocabulary row; top-p without a finite top-k retains
+the full-vocabulary sort because truncating that support would change the
+request contract. Minimum-token masks and incremental penalty state remain
+row-specific, while only grammar rows retain the CPU matcher path. Small host
+parameter vectors use pinned non-blocking copies, logits produce exactly one
+mutable fp32 working copy, and row seed/position identity preserves batch-order
+invariance.
+
 **Incremental penalty-state amendment (2026-07-27, issue #216):** a
 penalty-active request lazily allocates one dense row for its logits
 device/vocabulary: prompt membership, repetition membership, output counts,

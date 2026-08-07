@@ -46,7 +46,11 @@ from kairyu.engine.core.prefill import (
     PrefillSequence,
     build_prefill_batch,
 )
-from kairyu.engine.core.sampler import DeviceSample, Sampler
+from kairyu.engine.core.sampler import (
+    DeviceSample,
+    DeviceSamplingInput,
+    Sampler,
+)
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.core.step_executor import (
@@ -1132,19 +1136,46 @@ class PagedModelRunner:
         if self._sampler is None:
             sample = DeviceSample(torch.argmax(logits).to(dtype=torch.int64))
         else:
+            row = self._device_sampling_input(state, position)
             sample = self._sampler.sample_device(
-                state.request.sampling_identity,
-                state.request.sampling,
-                position,
+                row.request_id,
+                row.sampling,
+                row.position,
                 logits,
-                prompt=state.request.prompt_token_ids,
-                outputs=state.outputs,
-                pending_outputs=self._pending_device_outputs(state, position),
-                history_epoch=getattr(state, "output_epoch", 0),
-                eos_token_id=state.request.eos_token_id,
-                stop_token_ids=getattr(state.request, "stop_token_ids", ()),
-                min_tokens=getattr(state.request, "min_tokens", 0),
+                prompt=row.prompt,
+                outputs=row.outputs,
+                pending_outputs=row.pending_outputs,
+                history_epoch=row.history_epoch,
+                eos_token_id=row.eos_token_id,
+                stop_token_ids=row.stop_token_ids,
+                min_tokens=row.min_tokens,
             )
+        return self._pending_device_sample(state, position, sample)
+
+    def _device_sampling_input(
+        self,
+        state: object,
+        position: int,
+    ) -> DeviceSamplingInput:
+        return DeviceSamplingInput(
+            request_id=state.request.sampling_identity,
+            sampling=state.request.sampling,
+            position=position,
+            prompt=tuple(state.request.prompt_token_ids),
+            outputs=tuple(state.outputs),
+            pending_outputs=self._pending_device_outputs(state, position),
+            history_epoch=getattr(state, "output_epoch", 0),
+            eos_token_id=state.request.eos_token_id,
+            stop_token_ids=tuple(getattr(state.request, "stop_token_ids", ())),
+            min_tokens=getattr(state.request, "min_tokens", 0),
+        )
+
+    def _pending_device_sample(
+        self,
+        state: object,
+        position: int,
+        sample: DeviceSample,
+    ) -> _PendingDeviceToken:
         request_id = state.request.request_id
         self._remember_device(request_id, position, sample.token_id)
         return _PendingDeviceToken(
@@ -1178,53 +1209,92 @@ class PagedModelRunner:
         device-to-device; one deferred D2H carries the public StepOutput later.
         """
         self._require_sampling_owner()
-        if logits.device.type == "cuda" and all(
-            self._can_sample_device(states[chunk.request_id], logits[index])
-            for index, chunk in enumerate(chunks)
-        ):
-            direct = self._sampler is None
-            if self._sampler is not None:
-                direct = all(
-                    self._sampler.can_argmax_logits(
-                        states[chunk.request_id].request.sampling_identity,
-                        states[chunk.request_id].request.sampling,
-                        states[chunk.request_id].request.eos_token_id,
-                        position=chunk.position,
-                        stop_token_ids=getattr(
-                            states[chunk.request_id].request, "stop_token_ids", ()
-                        ),
-                        min_tokens=getattr(
-                            states[chunk.request_id].request, "min_tokens", 0
-                        ),
-                    )
-                    for chunk in chunks
-                )
-            if direct:
-                token_ids = torch.argmax(logits, dim=-1).to(dtype=torch.int64)
-                records: list[_PendingDeviceToken] = []
-                for index, chunk in enumerate(chunks):
-                    sample = DeviceSample(token_ids[index])
-                    self._remember_device(
-                        chunk.request_id, chunk.position, sample.token_id
-                    )
-                    records.append(
-                        _PendingDeviceToken(
-                            sample=sample,
-                            on_resolve=lambda token, request_id=chunk.request_id,
-                            position=chunk.position: self._remember(
-                                request_id, position, token
-                            ),
-                        )
-                    )
-                return tuple(records)
-            return tuple(
-                self._sample_device(
+        if logits.device.type == "cuda":
+            device_indices = tuple(
+                index
+                for index, chunk in enumerate(chunks)
+                if self._can_sample_device(
                     states[chunk.request_id],
                     logits[index],
-                    position=chunk.position,
                 )
-                for index, chunk in enumerate(chunks)
             )
+            records: list[SampledToken | _PendingDeviceToken | None] = [
+                None
+            ] * len(chunks)
+            direct = self._sampler is None
+            if self._sampler is not None and device_indices:
+                direct = all(
+                    self._sampler.can_argmax_logits(
+                        states[chunks[index].request_id].request.sampling_identity,
+                        states[chunks[index].request_id].request.sampling,
+                        states[chunks[index].request_id].request.eos_token_id,
+                        position=chunks[index].position,
+                        stop_token_ids=getattr(
+                            states[chunks[index].request_id].request,
+                            "stop_token_ids",
+                            (),
+                        ),
+                        min_tokens=getattr(
+                            states[chunks[index].request_id].request,
+                            "min_tokens",
+                            0,
+                        ),
+                    )
+                    for index in device_indices
+                )
+            if device_indices:
+                if device_indices == tuple(range(len(chunks))):
+                    device_logits = logits
+                else:
+                    host_indices = torch.tensor(
+                        device_indices,
+                        dtype=torch.long,
+                        pin_memory=True,
+                    )
+                    indices = host_indices.to(
+                        device=logits.device,
+                        non_blocking=True,
+                    )
+                    device_logits = logits.index_select(0, indices)
+                if direct:
+                    token_ids = torch.argmax(device_logits, dim=-1).to(
+                        dtype=torch.int64
+                    )
+                    samples = tuple(
+                        DeviceSample(token_ids[index])
+                        for index in range(len(device_indices))
+                    )
+                else:
+                    assert self._sampler is not None
+                    samples = self._sampler.sample_batch_device(
+                        tuple(
+                            self._device_sampling_input(
+                                states[chunks[index].request_id],
+                                chunks[index].position,
+                            )
+                            for index in device_indices
+                        ),
+                        device_logits,
+                    )
+                for index, sample in zip(device_indices, samples, strict=True):
+                    chunk = chunks[index]
+                    records[index] = self._pending_device_sample(
+                        states[chunk.request_id],
+                        chunk.position,
+                        sample,
+                    )
+            for index, chunk in enumerate(chunks):
+                if records[index] is None:
+                    records[index] = self._sample(
+                        states[chunk.request_id],
+                        logits[index],
+                        position=chunk.position,
+                    )
+            resolved: list[SampledToken | _PendingDeviceToken] = []
+            for record in records:
+                assert record is not None
+                resolved.append(record)
+            return tuple(resolved)
 
         direct = self._sampler is None
         if self._sampler is not None:
