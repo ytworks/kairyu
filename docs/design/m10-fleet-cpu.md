@@ -4,7 +4,8 @@ Status: **M10a + M10b Implemented** (2026-07-03; D7/A13 amended
 2026-07-27; D1/D2/D5/A16–A26 amended 2026-07-28; D5/A27 amended
 2026-07-28; D7/A31 amended 2026-07-28; D6/A32 amended 2026-07-29;
 D8/A33 amended 2026-07-29; D4/A34 amended 2026-07-31; D5/A35 amended
-2026-08-03; D6 amended 2026-08-07 for issue #344).
+2026-08-03; D6 amended 2026-08-07 for issue #344; D5/A19 amended
+2026-08-07 for issue #347).
 Reviewed (1-reviewer panel with repo-line evidence; §6 binding; covers
 M10a+M10b).
 Milestone: M10a/M10b (roadmap Track F1/F2; goal G5 base)
@@ -396,7 +397,13 @@ online learning or the M4 request-family bandit.
   the intersection. `OpenAICompatBackend` uses its frozen resolved capability
   contract as that key because its validator depends on no address, client, or
   model-instance state; subclasses fall back to per-replica validation unless
-  they explicitly publish their complete contract. At 200 equivalent replicas
+  they explicitly publish their complete contract. Native in-process and
+  process-split backends publish their model path, effective string tokenizer
+  source, and `max_model_len`; custom tokenizer objects and subclasses remain
+  unkeyed.
+  This collapses synchronous prompt tokenization across equivalent pool members
+  without deduplicating the per-member async preparation required before
+  placement. At 200 equivalent replicas
   this reduces measured validation from 1.785 ms to 0.143 ms median without
   changing placement or rejection semantics. Router and membership records
   still snapshot and enter the bounded queue synchronously, preserving

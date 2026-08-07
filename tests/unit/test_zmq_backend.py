@@ -80,6 +80,39 @@ async def test_constructor_forwards_partial_prefill_limit_to_child_config():
     assert backend._config["max_num_partial_prefills"] == 7
 
 
+async def test_validation_key_uses_effective_tokenizer_and_context_contract():
+    class StatefulValidationBackend(ZmqEngineBackend):
+        pass
+
+    first = ZmqEngineBackend(num_pages=64, max_model_len=32)
+    equivalent = ZmqEngineBackend(
+        num_pages=32,
+        tokenizer="toy",
+        max_model_len=32,
+    )
+    different_limit = ZmqEngineBackend(num_pages=64, max_model_len=64)
+    different_tokenizer = ZmqEngineBackend(
+        num_pages=64,
+        tokenizer="other-tokenizer",
+        max_model_len=32,
+    )
+    different_model = ZmqEngineBackend(
+        num_pages=64,
+        tokenizer="toy",
+        model_path="other-model",
+        max_model_len=32,
+    )
+    subclass = StatefulValidationBackend(num_pages=64, max_model_len=32)
+
+    assert first.request_validation_key == (None, "toy", 32)
+    assert first.request_validation_key == equivalent.request_validation_key
+    assert first.request_validation_key != different_limit.request_validation_key
+    assert first.request_validation_key != different_tokenizer.request_validation_key
+    assert first.request_validation_key != different_model.request_validation_key
+    assert subclass.request_validation_key is None
+    assert isinstance(hash(first.request_validation_key), int)
+
+
 _READY_DECISION = {
     "requested": "flashattention4",
     "resolved": "flashattention4",

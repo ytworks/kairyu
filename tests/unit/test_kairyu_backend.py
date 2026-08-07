@@ -89,6 +89,30 @@ def test_generation_trace_fields_preserve_historical_constructor_order() -> None
         GenerationRequest("bad", "prompt", params, trace_requested=1)  # type: ignore[arg-type]
 
 
+def test_validation_key_uses_effective_tokenizer_and_context_contract() -> None:
+    class StatefulValidationBackend(KairyuBackend):
+        pass
+
+    backends = (
+        KairyuBackend(num_pages=64, max_model_len=32),
+        KairyuBackend(num_pages=32, tokenizer="toy", max_model_len=32),
+        KairyuBackend(num_pages=64, max_model_len=64),
+        KairyuBackend(num_pages=64, tokenizer=ToyTokenizer(), max_model_len=32),
+        StatefulValidationBackend(num_pages=64, max_model_len=32),
+    )
+    first, equivalent, different_limit, custom_tokenizer, subclass = backends
+    try:
+        assert first.request_validation_key == (None, "toy", 32)
+        assert first.request_validation_key == equivalent.request_validation_key
+        assert first.request_validation_key != different_limit.request_validation_key
+        assert custom_tokenizer.request_validation_key is None
+        assert subclass.request_validation_key is None
+        assert isinstance(hash(first.request_validation_key), int)
+    finally:
+        for backend in backends:
+            backend._loop.close()
+
+
 class _SlowRunner:
     def execute(
         self,

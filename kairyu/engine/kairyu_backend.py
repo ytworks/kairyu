@@ -1330,6 +1330,17 @@ class KairyuBackend:
         self.dram_kv_tier_min_restore_tokens = (
             self._loop.dram_kv_tier_min_restore_tokens
         )
+        if tokenizer is None:
+            validation_tokenizer_source = model_path or "toy"
+        elif isinstance(tokenizer, str):
+            validation_tokenizer_source = tokenizer
+        else:
+            validation_tokenizer_source = None
+        self._request_validation_contract = (
+            (model_path, validation_tokenizer_source, max_model_len)
+            if validation_tokenizer_source is not None
+            else None
+        )
         self._queues: dict[str, _StreamUpdateQueue] = {}  # event-loop thread only
         self._active_request_ids: set[str] = set()  # full public-call lifetime
         self._pump_task: asyncio.Task | None = None
@@ -1351,6 +1362,16 @@ class KairyuBackend:
         # Event-loop-owned single flights.  The worker task only computes a
         # PreparedPrompt; a live waiter publishes it after a successful await.
         self._preparing_requests: dict[int, _PromptPreparationFlight] = {}
+
+    @property
+    def request_validation_key(
+        self,
+    ) -> tuple[str | None, str, int | None] | None:
+        """Identity for native replicas with equal synchronous validation."""
+
+        if type(self) is not KairyuBackend:
+            return None
+        return self._request_validation_contract
 
     def parallelism_metadata_snapshot(self) -> dict[str, object] | None:
         """Refresh topology counters for diagnostics without a rank collective."""

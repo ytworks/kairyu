@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Native pool validation shares immutable contracts
+- What: in-process and process-split native backends now publish an exact-type `request_validation_key` from model path, effective string tokenizer source, and `max_model_len`; equivalent pool members validate synchronously once, while custom tokenizers, subclasses, and per-member async preparation stay independent.
+- Why: typed prompt validation repeated the same tokenizer work on the serving loop for every equivalent replica even though the existing pool seam could safely deduplicate immutable contracts.
+- Refs: issue #347; m10 A19; `kairyu/engine/{kairyu_backend,zmq_backend}.py`; `tests/unit/test_{kairyu,zmq}_backend.py`
+
 ### 2026-08-07 — [amendment] Streaming prefix roots publish at first token
 - What: prefix-aware streams publish their root immediately before the first backend result is yielded, retain it after later cancellation, and promote a warm hit to its full prepared chain only on normal completion; pre-first-result failures remain unadvertised.
 - Why: waiting through the entire decode left concurrent related requests looking cold even though prefill KV already existed, while dispatch-time speculation would require rollback state to avoid poisoning the index.
