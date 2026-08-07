@@ -1118,6 +1118,11 @@ class ZmqEngineBackend:
             if model_path is not None
             else "toy"
         )
+        self._request_validation_contract = (
+            model_path,
+            self._preflight_tokenizer_source,
+            max_model_len,
+        )
         self._preflight_tokenizer: Tokenizer | None = None
         self._preflight_tokenizer_lock = threading.Lock()
         # Validation may be called more than once by wrapping orchestration
@@ -1135,6 +1140,16 @@ class ZmqEngineBackend:
         # Event-loop-owned single flights.  Workers only compute; a live
         # waiter publishes into `_prepared_requests` after a successful await.
         self._preparing_requests: dict[int, _ProcPromptPreparationFlight] = {}
+
+    @property
+    def request_validation_key(
+        self,
+    ) -> tuple[str | None, str, int | None] | None:
+        """Identity for process replicas with equal parent validation."""
+
+        if type(self) is not ZmqEngineBackend:
+            return None
+        return self._request_validation_contract
 
     # -- lifecycle ---------------------------------------------------------
 
