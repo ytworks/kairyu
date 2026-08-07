@@ -870,9 +870,9 @@ online learning or the M4 request-family bandit.
 
   Exact engine block hashes and approximate gateway text chunks remain
   different score spaces. `KvRoutingIndex` therefore chooses one mode for the
-  entire request: it uses one `KvEventIndex.route_overlaps` observation under
-  one lock and one clock sample for every eligible replica, or it discards all
-  exact scores and follows the existing approximate `PrefixIndex` path.
+  entire request: it uses one atomic `KvEventIndex.route_overlaps` observation
+  for the exact candidate set, or it discards all exact scores and follows the
+  existing approximate `PrefixIndex` path.
   Provider, index, lifecycle, malformed-vector, and freshness failures degrade
   to approximate placement rather than failing generation. A failed exact
   membership mutation quarantines that replica until a complete successful
@@ -883,13 +883,25 @@ online learning or the M4 request-family bandit.
   publish at the same first-result boundary, while full-key promotion still
   requires successful completion.
 
+  **Issue #348 amendment:** when the prepared approximate root already names
+  warm candidates, exact scoring is limited to their eligible intersection
+  and the result is expanded with zero overlaps for the remaining eligible
+  replicas; a cold root retains the historical all-eligible exact lookup.
+  `KvEventIndex` captures feed identity, epoch, sequence, and hash-set
+  references under its lock, performs the prompt-length membership scan
+  outside the lock, then rejects the vector unless a second lock epoch proves
+  every scored feed unchanged and live. `KvRoutingIndex` likewise releases
+  its lifecycle lock around the exact call and rejects a result if a
+  register/forget revision changed. Thus event ingestion and membership churn
+  are never serialized behind the O(candidates x prompt blocks) scan.
+
   The F2b formal profile reuses F1a run `30374404150` for the exact seed-175
   200-replica, ten-by-twenty churn identity schedule and reuses F2a run
   `30411111758` only for its production `ReplicaPool`/prefix-routing precedent.
   Neither measurement is repeated. F2b compresses only wall pacing to one
   second per churn epoch and exercises 200 logical feeds: 199 sequenced
   in-process feeds plus one representative physical ZMQ PUB/SUB/replay feed.
-  Because one unavailable eligible feed makes the request globally
+  Because one unavailable scored feed makes the request globally
   approximate, killing that representative socket binds the same 200-entry
   routing decision without claiming 200 physical transports.
 

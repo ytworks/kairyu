@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import AsyncIterator
 
 import pytest
@@ -73,6 +74,7 @@ class _ExactIndex:
         self.hashes = {"r1": {"block-1"}, "r2": set(_HASHES)}
         self.registered: set[str] = set()
         self.forgotten: list[str] = []
+        self.routed: list[tuple[str, ...]] = []
 
     def register_replica(self, replica_id: str) -> None:
         self.registered.add(replica_id)
@@ -96,6 +98,7 @@ class _ExactIndex:
         replica_ids: tuple[str, ...],
         block_hashes: tuple[str, ...],
     ) -> tuple[int, ...] | None:
+        self.routed.append(replica_ids)
         if not self.all_live(replica_ids):
             return None
         overlaps = []
@@ -130,9 +133,10 @@ def _request(request_id: str, *, blank_hint: bool = False) -> GenerationRequest:
     )
 
 
-def _approximate_index() -> PrefixIndex:
+def _approximate_index(*replica_ids: str) -> PrefixIndex:
     index = PrefixIndex()
-    index.observe("r1", _PROMPT)
+    for replica_id in replica_ids or ("r1",):
+        index.observe(replica_id, _PROMPT)
     return index
 
 
@@ -141,7 +145,7 @@ def _backends(selected: list[str]) -> dict[str, _Backend]:
 
 
 @pytest.mark.asyncio
-async def test_live_exact_view_selects_precise_winner_through_replica_pool():
+async def test_exact_scoring_is_bounded_to_approximate_candidates():
     selected: list[str] = []
     exact = _ExactIndex()
     provider = _Provider()
@@ -158,18 +162,61 @@ async def test_live_exact_view_selects_precise_winner_through_replica_pool():
     finally:
         await pool.shutdown()
 
-    assert selected == ["r2"]
+    assert selected == ["r1"]
     assert log.records[-1]["reason"] == "kv_event_match"
     assert pool.decision_counts["kv_event_match"] == 1
     assert routing.mode_counts["exact"] == 1
     assert provider.calls == [_PROMPT]
+    assert exact.routed == [("r1",)]
+
+
+def test_candidate_bound_preserves_eligible_vector_alignment():
+    replica_ids = tuple(f"r{index}" for index in range(200))
+    approximate = PrefixIndex()
+    approximate.observe("r3", _PROMPT)
+    approximate.observe("r17", _PROMPT)
+
+    class CapturingExactIndex:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        @staticmethod
+        def all_live(_replica_ids) -> bool:
+            return True
+
+        def route_overlaps(self, scored_ids, _block_hashes):
+            self.calls.append(scored_ids)
+            return (2, 1)
+
+    exact = CapturingExactIndex()
+    routing = KvRoutingIndex(approximate, exact, _Provider())
+
+    view = routing.route_view(replica_ids, routing.prepare(_PROMPT))
+
+    assert view.mode == "exact"
+    assert exact.calls == [("r3", "r17")]
+    assert len(view.overlaps) == len(replica_ids)
+    assert view.overlaps[3] == 2
+    assert view.overlaps[17] == 1
+    assert sum(view.overlaps) == 3
+
+
+def test_cold_approximate_root_keeps_all_eligible_exact_lookup():
+    exact = _ExactIndex()
+    routing = KvRoutingIndex(PrefixIndex(), exact, _Provider())
+
+    view = routing.route_view(("r1", "r2"), routing.prepare(_PROMPT))
+
+    assert view.mode == "exact"
+    assert view.overlaps == (1, 2)
+    assert exact.routed == [("r1", "r2")]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dead_state", ["stale", "gap"])
-async def test_non_live_feed_globally_uses_approximate_oracle(dead_state):
+async def test_non_live_scored_feed_uses_approximate_oracle(dead_state):
     exact = _ExactIndex()
-    exact.states["r2"] = dead_state
+    exact.states["r1"] = dead_state
     provider = _Provider()
     routing = KvRoutingIndex(_approximate_index(), exact, provider)
     selected: list[str] = []
@@ -200,7 +247,7 @@ async def test_non_live_feed_globally_uses_approximate_oracle(dead_state):
 async def test_restore_converges_to_exact_on_same_pool_and_index_objects():
     selected: list[str] = []
     exact = _ExactIndex()
-    exact.states["r2"] = "gap"
+    exact.states["r1"] = "gap"
     provider = _Provider()
     routing = KvRoutingIndex(_approximate_index(), exact, provider)
     log = _PlacementLog()
@@ -213,8 +260,9 @@ async def test_restore_converges_to_exact_on_same_pool_and_index_objects():
 
     try:
         await pool.generate(_request("during-gap"))
-        exact.states["r2"] = "live"
+        exact.states["r1"] = "live"
         exact.hashes["r2"] = set(_HASHES)
+        routing.approximate.observe("r2", _PROMPT)
         await pool.generate(_request("after-restore"))
     finally:
         await pool.shutdown()
@@ -285,7 +333,7 @@ def test_bulk_exact_failure_globally_falls_back_to_approximate(failure):
             return (len(block_hashes),)
 
     routing = KvRoutingIndex(
-        _approximate_index(),
+        _approximate_index("r1", "r2"),
         BrokenBulkIndex(),
         _Provider(),
     )
@@ -319,6 +367,48 @@ def test_provider_iterable_conversion_failure_falls_back_to_approximate():
     assert view.mode == "approximate"
     assert view.reason == "approximate_provider_error"
     assert view.overlaps == ()
+
+
+def test_exact_scoring_releases_lifecycle_lock_and_revalidates_membership():
+    scoring = threading.Event()
+    resume = threading.Event()
+
+    class BlockingExactIndex(_ExactIndex):
+        def route_overlaps(self, replica_ids, block_hashes):
+            scoring.set()
+            assert resume.wait(timeout=2)
+            return tuple(len(block_hashes) for _replica_id in replica_ids)
+
+    exact = BlockingExactIndex()
+    routing = KvRoutingIndex(_approximate_index(), exact, _Provider())
+    prepared = routing.prepare(_PROMPT)
+    result = []
+    route_thread = threading.Thread(
+        target=lambda: result.append(routing.route_view(("r1", "r2"), prepared))
+    )
+    route_thread.start()
+    assert scoring.wait(timeout=1)
+
+    changed = threading.Event()
+
+    def forget_candidate() -> None:
+        routing.forget_replica("r1")
+        changed.set()
+
+    mutation_thread = threading.Thread(target=forget_candidate)
+    mutation_thread.start()
+    try:
+        assert changed.wait(timeout=1), "exact scoring retained the lifecycle lock"
+    finally:
+        resume.set()
+        route_thread.join(timeout=2)
+        mutation_thread.join(timeout=2)
+
+    assert not route_thread.is_alive()
+    assert not mutation_thread.is_alive()
+    assert len(result) == 1
+    assert result[0].mode == "approximate"
+    assert result[0].reason == "approximate_feed_changed"
 
 
 def test_legacy_live_index_is_rejected_by_atomic_bulk_routing():
@@ -367,7 +457,7 @@ def test_register_failure_stays_quarantined_until_forget_register_reset():
 
     exact = FailingRegisterIndex()
     provider = _Provider()
-    routing = KvRoutingIndex(_approximate_index(), exact, provider)
+    routing = KvRoutingIndex(_approximate_index("r1", "r2"), exact, provider)
     prepared = routing.prepare(_PROMPT)
 
     routing.register_replica("r2")
@@ -405,7 +495,7 @@ def test_forget_failure_stays_quarantined_across_register_success():
 
     exact = FailingForgetIndex()
     provider = _Provider()
-    routing = KvRoutingIndex(_approximate_index(), exact, provider)
+    routing = KvRoutingIndex(_approximate_index("r1", "r2"), exact, provider)
     prepared = routing.prepare(_PROMPT)
 
     routing.forget_replica("r2")
