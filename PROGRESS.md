@@ -82,6 +82,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 - G2 A6 performance gap vs vLLM is the open hard gate; full TP4/8 HTTP matrix deferred until closed
 - Issue #333 verdict: process-split is not the A6 cause (`no_material_reduction`, ratio 0.92 vs ≤0.90 line)
+- Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
 - Production stage-sharded pipeline parallelism is a separate roadmap dependency (current PP report is not it)
 - EAGLE-3 runtime integration remains a G4 follow-up; FP8-E4M3 KV disabled pending offline calibration
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
@@ -92,6 +93,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-06 — [progress] Pipeline-depth hypothesis closes as a measured negative
+- What: retained twelve Qwen3-32B TP4 HTTP diagnostics and CPU plan-shape evidence, reverted the experimental deep strict-decode tail and metric, and kept the existing two-step admission/prefill horizon.
+- Why: the initial depth-five candidate regressed throughput by 3–4%, its cohort-preserving refinement returned only to noisy parity, and the historical 35.98% result compared depth one with five rather than isolating benefit beyond depth two.
+- Refs: issue #318; `bench/results/issue-318-pipeline-depth-qwen3-32b-rtxpro6000-2026-08-06/`
 
 ### 2026-08-06 — [amendment] CUDA graph coverage moves to readiness-time defaults
 - What: supported real CUDA models now resolve omitted decode policy to CUDA graphs, size graph batch/page coverage from serving limits, pre-capture every bucket before single/TP/attention-DP EP readiness with bounded rank preflight and rollback, and export monotonic single/process/pool eager fallbacks to Prometheus; CPU, P-D, replicated EP, custom, and MLA paths stay eager by capability.
