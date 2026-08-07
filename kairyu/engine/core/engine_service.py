@@ -816,6 +816,20 @@ def run_engine_service(
                     socket_boundary_pending = False
                     step_clears_socket_boundary = False
 
+            # An abort for an already-finished or unknown request queues no
+            # engine op. There is then no step boundary to wait for, so do not
+            # leave socket draining permanently gated.
+            if (
+                socket_boundary_pending
+                and step_future is None
+                and ready_batch is None
+                and pending_output is None
+                and output_ack_future is None
+                and step_error is None
+                and not engine_loop.has_work()
+            ):
+                socket_boundary_pending = False
+
             if (
                 ready_batch is not None
                 and pending_output is None

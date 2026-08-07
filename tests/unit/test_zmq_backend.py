@@ -978,6 +978,76 @@ async def test_engine_service_packs_off_thread_while_depth_one_next_step_runs(
     assert context.terminated is True
 
 
+async def test_engine_service_inactive_abort_does_not_block_later_socket_ops(
+    monkeypatch,
+):
+    class _LateAbortSocket(_QueuedServiceSocket):
+        def __init__(self) -> None:
+            super().__init__()
+            self._injected = False
+            self._staged_polls = 0
+
+        def poll(self, timeout):
+            if self._staged is not None:
+                self._staged_polls += 1
+                if self._staged_polls > 5:
+                    raise AssertionError("service stopped draining staged messages")
+            return super().poll(timeout)
+
+        def recv_multipart(self):
+            self._staged_polls = 0
+            return super().recv_multipart()
+
+        def send_multipart(self, frames):
+            super().send_multipart(frames)
+            payload = msgpack.unpackb(frames[1])
+            if (
+                not self._injected
+                and payload.get("request_id") == "late-abort"
+                and payload.get("finished")
+            ):
+                self._injected = True
+                self.enqueue(
+                    {"op": "abort", "request_id": "late-abort"},
+                )
+                self.enqueue({"op": "ping"}, identity=b"probe")
+                self.enqueue({"op": "shutdown"}, identity=b"shutdown")
+
+    engine_loop, _, _ = build_engine_loop(
+        num_pages=64,
+        tokenizer=ToyTokenizer(),
+        pipeline_depth=1,
+    )
+    service_socket = _LateAbortSocket()
+    context = _install_fake_service_zmq(monkeypatch, service_socket)
+    port_pipe = _FakeServicePortPipe()
+    monkeypatch.setattr(
+        "kairyu.engine.kairyu_backend.build_engine_loop",
+        lambda **_config: (engine_loop, None, None),
+    )
+    service_socket.enqueue(
+        {
+            "op": "add",
+            "request_id": "late-abort",
+            "prompt": "one two",
+            "sampling": {"max_tokens": 1, "ignore_eos": True},
+            "wire_version": LEGACY_WIRE_VERSION,
+        }
+    )
+
+    run_engine_service(port_pipe, {})
+
+    replies = [
+        (frames[0], msgpack.unpackb(frames[1]))
+        for frames in service_socket.sent
+    ]
+    assert service_socket.terminal_sent.is_set()
+    assert (b"probe", {"op": "pong"}) in replies
+    assert (b"shutdown", {"op": "bye"}) in replies
+    assert service_socket.closed is True
+    assert context.terminated is True
+
+
 @pytest.mark.parametrize(
     ("reported_failure_type", "reported_dead_ranks", "expected_frame"),
     [
