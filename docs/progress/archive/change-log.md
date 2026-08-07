@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-06 — [progress] Pipeline-depth hypothesis closes as a measured negative
+- What: retained twelve Qwen3-32B TP4 HTTP diagnostics and CPU plan-shape evidence, reverted the experimental deep strict-decode tail and metric, and kept the existing two-step admission/prefill horizon.
+- Why: the initial depth-five candidate regressed throughput by 3–4%, its cohort-preserving refinement returned only to noisy parity, and the historical 35.98% result compared depth one with five rather than isolating benefit beyond depth two.
+- Refs: issue #318; `bench/results/issue-318-pipeline-depth-qwen3-32b-rtxpro6000-2026-08-06/`
+
+### 2026-08-06 — [amendment] CUDA graph coverage moves to readiness-time defaults
+- What: supported real CUDA models now resolve omitted decode policy to CUDA graphs, size graph batch/page coverage from serving limits, pre-capture every bucket before single/TP/attention-DP EP readiness with bounded rank preflight and rollback, and export monotonic single/process/pool eager fallbacks to Prometheus; CPU, P-D, replicated EP, custom, and MLA paths stay eager by capability.
+- Why: lazy first-use capture blocked live traffic and the former batch/page defaults left common requests permanently eager without an operator-visible counter.
+- Refs: issue #320; m17 A26-A28; `kairyu/engine/{kairyu_backend,core/{step_executor,model_runner,worker}}.py`; `kairyu/entrypoints/server/metrics.py`; `tests/gpu/test_ep_attention_dp_cuda_graph_startup_gpu.py`
+
+### 2026-08-06 — [progress] Offloaded-route endpoint context no longer trusts FastAPI's id cache
+- What: `_OffloadedRequestBodyRoute` now computes the validation-error endpoint context once from the live endpoint at route build instead of calling FastAPI's `_extract_endpoint_context`, and the flaky ZMQ cancelled-submit test waits on wall-clock time for the prompt worker thread.
+- Why: FastAPI 0.139.0 caches endpoint context by `id(func)` without holding a reference, so a garbage-collected endpoint's recycled address serves a stale context (observed as `chat_completions` reported for `probe` in CI); the ZMQ test's bare loop yields gave the worker thread no time on loaded runners.
+- Refs: PR #423; `kairyu/entrypoints/server/app.py`; `tests/server/test_prompt_offload.py`; `tests/unit/test_zmq_backend.py`
+
+### 2026-08-06 — [progress] CPU microbenchmark gate retries timing-ratio noise
+- What: the same-run CPU gate re-runs a benchmark (≤3 attempts total) when its only failing checks are timing ratios; structural failures and benchmark errors still fail immediately, and thresholds plus the report schema consumed by the nightly series are unchanged.
+- Why: shared-runner jitter tripped `scheduler.priority_speedup` (0.87 vs the 0.9 floor) on a docs-only PR; a real hot-path regression keeps failing on every attempt, so retries preserve the smoke alarm while removing the flake.
+- Refs: PR #422 CI run 31094215441; `scripts/cpu_microbench_gate.py`; `tests/unit/test_cpu_microbench_gate.py`
+
+### 2026-08-06 — [design] PROGRESS.md restructured for minimal session-start tokens
+- What: archived the verbose Current Status to `docs/progress/archive/status-2026-08-06.md` and all older Change Log entries to `docs/progress/archive/change-log.md` (both verbatim); PROGRESS.md now holds a compact Product/Current Status/Change Log. Size budgets and archiving live in `.claude/rules/progress-log.md` + `docs/progress/archiving.md`, enforced by a SessionStart hook running `scripts/check_progress_size.py`.
+- Why: PROGRESS.md and the progress rules are loaded every session; at ~514 KB they burned the context they were meant to save.
+- Refs: `docs/progress/archive/`; `.claude/settings.json`; `scripts/check_progress_size.py`
+
 ### 2026-08-06 — [progress] Repeated token SSE shapes bypass per-token model construction
 - What: added stream-owned byte encoders for repeated role-less Chat content, unfinished legacy Completion text, and Responses output-text deltas. Constant JSON envelope fragments and per-index prefixes are retained per stream, only the dynamic scalar is serialized per chunk, and Starlette receives bytes directly. Strict predicates keep first-role, non-string/non-integer, logprob, tool, finish, usage, trace, error, and terminal shapes on their existing serializers. Hoisted fallback exclusion sets and byte-for-byte golden tests bind field order, usage omission/null, multiple indices, empty/control/Unicode content, SSE line separators in both constants and deltas, malformed boundaries, and operation counts. Same-process 100,000-iteration diagnostics measured 7.804→0.570 µs (13.69x) for Chat, 4.625→0.569 µs (8.13x) for Completions, and 3.847→0.753 µs (5.11x) for Responses.
 - Why: constructing and validating nested Pydantic models plus serializing the complete roughly 200-byte envelope for every small token delta imposed avoidable CPU work and allocations on all dominant streaming paths.
