@@ -69,6 +69,13 @@ async def test_constructor_preserves_legacy_tokenizer_positional_slot():
 
     assert backend._config["tokenizer"] == "toy"
     assert backend._config["tensor_parallel_size"] == 1
+    assert backend._config["max_num_partial_prefills"] == 2
+
+
+async def test_constructor_forwards_partial_prefill_limit_to_child_config():
+    backend = ZmqEngineBackend(max_num_partial_prefills=7)
+
+    assert backend._config["max_num_partial_prefills"] == 7
 
 
 _READY_DECISION = {

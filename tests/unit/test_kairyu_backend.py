@@ -2174,6 +2174,22 @@ def test_registry_forwards_server_max_model_len_option():
 
 
 @pytest.mark.parametrize(
+    ("options", "expected"),
+    [({}, 2), ({"max_num_partial_prefills": 7}, 7)],
+)
+def test_registry_forwards_partial_prefill_limit_to_local_scheduler(
+    options,
+    expected,
+):
+    backend = create_backend("kairyu", num_pages=64, **options)
+
+    try:
+        assert backend._scheduler._max_num_partial_prefills == expected
+    finally:
+        backend._loop.close()
+
+
+@pytest.mark.parametrize(
     ("builder_name", "options"),
     [
         ("_build_dist_tp_loop", {"model_path": "/unused", "tensor_parallel_size": 2}),
@@ -2188,7 +2204,7 @@ def test_registry_forwards_server_max_model_len_option():
         ("_build_pd_loop", {"model_path": "/unused", "pd_separation": True}),
     ],
 )
-def test_context_limit_crosses_distributed_and_pd_builders(
+def test_scheduler_limits_cross_distributed_and_pd_builders(
     monkeypatch,
     builder_name,
     options,
@@ -2203,11 +2219,16 @@ def test_context_limit_crosses_distributed_and_pd_builders(
 
     monkeypatch.setattr(kairyu_backend_module, builder_name, fake_builder)
 
-    result = build_engine_loop(max_model_len=8192, **options)
+    result = build_engine_loop(
+        max_model_len=8192,
+        max_num_partial_prefills=7,
+        **options,
+    )
 
     assert result is sentinel
     assert captured is not None
     assert captured["max_model_len"] == 8192
+    assert captured["max_num_partial_prefills"] == 7
 
 
 @pytest.mark.parametrize(

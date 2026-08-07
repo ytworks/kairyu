@@ -24,6 +24,8 @@ from kairyu.engine.core.sampling_types import EngineSampling
 
 _DEFAULT_TOKEN_BUDGET = 2048
 _DEFAULT_MAX_SEQS = 256
+_DEFAULT_MAX_PARTIAL_PREFILLS = 2
+_MAX_WAITING_BYPASSES = 1
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ class _RequestState:
         "decode_pages",
         "finish_reason",
         "spec_in_flight",
+        "admission_bypasses",
     )
 
     def __init__(self, request: EngineRequest) -> None:
@@ -97,6 +100,10 @@ class _RequestState:
         # reservation size of the one outstanding speculative chunk (m8 D3);
         # 0 when no spec chunk is in flight
         self.spec_in_flight = 0
+        # Successful admissions allowed past this request during its current
+        # waiting epoch.  Bounded skip-ahead is deliberately independent of
+        # priority aging: the common time term cannot change pairwise rank.
+        self.admission_bypasses = 0
 
     @property
     def prompt_len(self) -> int:
@@ -122,6 +129,60 @@ class ScheduledChunk:
 @dataclass(frozen=True)
 class SchedulerOutput:
     scheduled: tuple[ScheduledChunk, ...]
+
+
+@dataclass
+class _PrefillBudget:
+    """Work-conserving fair shares for one prefill cohort.
+
+    A short request returns the unused part of its share to later requests.
+    Once all initial shares are consumed, any remaining budget can only exist
+    because earlier requests completed, so it is safe to give to a replacement
+    without exceeding the configured partial-prefill width.
+    """
+
+    remaining: int
+    shares: int
+    public_priority: int | None = None
+    cohort_request_ids: frozenset[str] = field(default_factory=frozenset)
+    request_limits: dict[str, int] = field(default_factory=dict)
+    protected_completions: frozenset[str] = field(default_factory=frozenset)
+    persistent_prefills: int = 0
+    completion_margin_pages: int = 0
+
+    @property
+    def next_chunk_limit(self) -> int:
+        if self.remaining < 1:
+            return 0
+        divisor = max(1, self.shares)
+        return max(1, -(-self.remaining // divisor))
+
+    def limit_for(self, request_id: str) -> int:
+        return min(
+            self.next_chunk_limit,
+            self.request_limits.get(request_id, self.remaining),
+        )
+
+    def take(self, requested: int, request_id: str | None = None) -> int:
+        if requested < 1 or self.remaining < 1:
+            return 0
+        limit = self.next_chunk_limit if request_id is None else self.limit_for(request_id)
+        chunk = min(requested, limit)
+        self.remaining -= chunk
+        self.shares = max(0, self.shares - 1)
+        if request_id is not None:
+            self.request_limits.pop(request_id, None)
+        return chunk
+
+    def drop_share(self, request_id: str | None = None) -> None:
+        """Return one predicted participant that proved ineligible."""
+
+        self.shares = max(0, self.shares - 1)
+        if request_id is not None:
+            self.request_limits.pop(request_id, None)
+            if request_id in self.cohort_request_ids:
+                self.request_limits.clear()
+                self.protected_completions = frozenset()
 
 
 class _IndexedWaitingQueue:
@@ -351,6 +412,7 @@ class Scheduler:
         speculative_tokens: int = 0,
         priority_age_s: float | None = None,
         clock=None,
+        max_num_partial_prefills: int = _DEFAULT_MAX_PARTIAL_PREFILLS,
     ) -> None:
         if max_num_batched_tokens < 1:
             raise ValueError(f"max_num_batched_tokens must be >= 1, got {max_num_batched_tokens}")
@@ -358,6 +420,11 @@ class Scheduler:
             raise ValueError("pd_separation=True requires decode_token_budget >= 1")
         if speculative_tokens < 0:
             raise ValueError(f"speculative_tokens must be >= 0, got {speculative_tokens}")
+        if type(max_num_partial_prefills) is not int or max_num_partial_prefills < 1:
+            raise ValueError(
+                "max_num_partial_prefills must be a positive integer, "
+                f"got {max_num_partial_prefills!r}"
+            )
         self._kv = kv_cache
         self._budget = max_num_batched_tokens
         self._max_seqs = max_num_seqs
@@ -367,6 +434,8 @@ class Scheduler:
         # note: decode_watermark_pages was sized for +1 growth per step; with
         # speculative_tokens=k it should scale with k (m8 D3, documented knob)
         self._spec_k = speculative_tokens
+        self._max_num_partial_prefills = max_num_partial_prefills
+        self._prefer_prefill_completion = False
         # page_size param kept for back-compat; the cache is the source of truth
         self._page_size = getattr(kv_cache, "page_size", page_size)
         self._states: dict[str, _RequestState] = {}
@@ -495,6 +564,11 @@ class Scheduler:
             for request_id in self._running
         )
 
+    def enable_deferred_handoff_overlap(self) -> None:
+        """Prefer one prompt completion per cohort for deferred P-D copies."""
+
+        self._prefer_prefill_completion = True
+
     @property
     def states(self) -> dict[str, _RequestState]:
         """Read view of request states for the ModelRunner (do not mutate)."""
@@ -514,6 +588,221 @@ class Scheduler:
     @property
     def waiting_ids(self) -> tuple[str, ...]:
         return tuple(self._waiting)
+
+    def _waiting_compute_and_new_pages(self, state: _RequestState) -> tuple[int, int]:
+        """Return compute tokens and newly-owned pages for a waiting prompt."""
+
+        cached = self._kv.peek_cached_tokens(state.request.prompt_token_ids)
+        compute_tokens = state.prompt_len - min(cached, state.prompt_len - 1)
+        uncached_tokens = state.prompt_len - cached
+        new_pages = -(-uncached_tokens // self._page_size)
+        return compute_tokens, new_pages
+
+    def _valid_waiting_prefill(self, request_id: str) -> tuple[int, int] | None:
+        state = self._states[request_id]
+        if state.prompt_len < 1:
+            return None
+        required_pages = -(-state.prompt_len // self._page_size)
+        if required_pages > self._kv.num_pages:
+            return None
+        return self._waiting_compute_and_new_pages(state)
+
+    def _reclaimable_prefill_pages(self, request_id: str) -> int:
+        """Pages a recompute-preempted incomplete prompt makes allocatable."""
+
+        state = self._states[request_id]
+        allocation = state.allocation
+        if allocation is None:
+            return len(state.decode_pages)
+        return (
+            len(allocation.new_full_pages)
+            + (allocation.tail_page is not None)
+            + len(state.decode_pages)
+        )
+
+    def _decode_liability_pages(
+        self,
+        state: _RequestState,
+        allocation: KVAllocation | None = None,
+    ) -> int:
+        target_pages = -(-(state.prompt_len + state.request.max_new_tokens) // self._page_size)
+        selected = allocation if allocation is not None else state.allocation
+        allocation_pages = len(selected.pages) if selected is not None else 0
+        owned_pages = allocation_pages + len(state.decode_pages)
+        return max(0, target_pages - owned_pages)
+
+    def _can_complete_prefill(
+        self,
+        request_id: str,
+        budget: _PrefillBudget,
+        allocation: KVAllocation | None = None,
+    ) -> bool:
+        """Keep an escape victim until every decode can retain capacity."""
+
+        candidate = self._states[request_id]
+        if candidate.request.max_new_tokens <= 1:
+            return True
+        if budget.persistent_prefills < 1:
+            # The first decode leader can reclaim every incomplete prefill.
+            return True
+        return (
+            self._prefill_completion_cost(candidate, allocation) <= budget.completion_margin_pages
+        )
+
+    def _prefill_completion_cost(
+        self,
+        state: _RequestState,
+        allocation: KVAllocation | None = None,
+    ) -> int:
+        selected = allocation if allocation is not None else state.allocation
+        reclaimable = len(state.decode_pages)
+        if selected is not None:
+            reclaimable += len(selected.new_full_pages)
+            reclaimable += selected.tail_page is not None
+        liability = (
+            self._decode_liability_pages(state, selected) if state.request.max_new_tokens > 1 else 0
+        )
+        return reclaimable + liability
+
+    def _record_prefill_completion(
+        self,
+        state: _RequestState,
+        budget: _PrefillBudget,
+    ) -> None:
+        budget.completion_margin_pages -= self._prefill_completion_cost(state)
+        if state.request.max_new_tokens <= 1:
+            return
+        budget.persistent_prefills += 1
+
+    def _simple_prefill_cohort(
+        self,
+        running_prefills: Sequence[str],
+        remaining: int,
+        available_prefills: int,
+    ) -> tuple[str, ...]:
+        """Select a bounded leading tier without simulating KV admission."""
+
+        cap = min(
+            self._max_num_partial_prefills,
+            remaining,
+            available_prefills,
+        )
+        if cap < 1:
+            return ()
+        waiters = self._waiting.peek_prefix(min(len(self._waiting), cap))
+        candidates = tuple(running_prefills) + waiters
+        if not candidates:
+            return ()
+        if not self._waiting.priority_enabled:
+            return candidates[:cap]
+        indexed = list(enumerate(candidates))
+        indexed.sort(
+            key=lambda item: (
+                self._priority_key_for(item[1]),
+                item[0],
+            )
+        )
+        winning_priority = self._states[indexed[0][1]].request.priority
+        cohort: list[str] = []
+        for _position, request_id in indexed:
+            if self._states[request_id].request.priority != winning_priority:
+                break
+            cohort.append(request_id)
+            if len(cohort) >= cap:
+                break
+        return tuple(cohort)
+
+    def _prefill_budget(self, remaining: int) -> _PrefillBudget:
+        running_prefills: list[str] = []
+        persistent_prefills = 0
+        completion_margin_pages = self._kv.num_free_pages
+        for request_id in self._running:
+            state = self._states[request_id]
+            if state.status is not _Status.RUNNING:
+                continue
+            if not state.prefill_done:
+                running_prefills.append(request_id)
+                completion_margin_pages += self._reclaimable_prefill_pages(request_id)
+            elif state.request.max_new_tokens > 1:
+                persistent_prefills += 1
+                completion_margin_pages -= self._decode_liability_pages(state)
+        cohort = self._simple_prefill_cohort(
+            running_prefills,
+            remaining,
+            len(running_prefills)
+            + max(0, self._max_seqs - len(self._running)),
+        )
+        shares = max(1, len(cohort))
+        request_limits, protected_completions = self._deferred_handoff_limits(cohort, remaining)
+        return _PrefillBudget(
+            remaining=remaining,
+            shares=shares,
+            public_priority=(
+                self._states[cohort[0]].request.priority
+                if self._waiting.priority_enabled and cohort
+                else None
+            ),
+            cohort_request_ids=frozenset(cohort),
+            request_limits=request_limits,
+            protected_completions=protected_completions,
+            persistent_prefills=persistent_prefills,
+            completion_margin_pages=completion_margin_pages,
+        )
+
+    def _deferred_handoff_limits(
+        self, cohort: Sequence[str], remaining: int
+    ) -> tuple[dict[str, int], frozenset[str]]:
+        """Finish one prompt while retaining work for a deferred-copy overlap."""
+
+        if not self._prefer_prefill_completion or len(cohort) < 2:
+            return {}, frozenset()
+        prompt_remaining: dict[str, int] = {}
+        for request_id in cohort:
+            state = self._states[request_id]
+            if state.status is _Status.WAITING:
+                estimate = self._valid_waiting_prefill(request_id)
+                if estimate is None:
+                    return {}, frozenset()
+                prompt_remaining[request_id] = estimate[0]
+            else:
+                prompt_remaining[request_id] = state.prompt_len - state.computed_prompt
+        completion_budget = remaining - (len(cohort) - 1)
+        eligible = [
+            request_id for request_id in cohort if prompt_remaining[request_id] <= completion_budget
+        ]
+        if not eligible:
+            return {}, frozenset()
+        completion_id = eligible[0]
+        limits = {completion_id: prompt_remaining[completion_id]}
+        residual = remaining - limits[completion_id]
+        shares = len(cohort) - 1
+        for request_id in cohort:
+            if request_id == completion_id:
+                continue
+            fair_limit = max(1, -(-residual // shares))
+            limit = min(
+                fair_limit,
+                max(0, prompt_remaining[request_id] - 1),
+            )
+            limits[request_id] = limit
+            residual -= limit
+            shares -= 1
+        protected = frozenset(request_id for request_id in cohort if request_id != completion_id)
+        return limits, protected
+
+    def _terminal_releasable_pages(self, state: _RequestState) -> int:
+        """Lower bound on raw pages released by a terminal commit."""
+
+        allocation = state.allocation
+        if allocation is None:
+            return len(state.decode_pages)
+        private_pages = (allocation.tail_page is not None) + len(state.decode_pages)
+        written_len = state.prompt_len + len(state.outputs) + state.in_flight - 1
+        committed_pages = max(
+            0,
+            written_len // self._page_size - state.prompt_len // self._page_size,
+        )
+        return max(0, private_pages - committed_pages)
 
     def should_drain_before_admission(self) -> bool:
         """Whether committing terminal in-flight work can form a fuller cohort.
@@ -567,8 +856,38 @@ class Scheduler:
             self._budget,
         )
         candidates = self._waiting.peek_prefix(candidate_limit)
-        budget = self._budget
+        head_estimate = self._valid_waiting_prefill(candidates[0])
+        if head_estimate is None:
+            return False
+        if (
+            head_estimate[1] + self._decode_watermark
+            > self._kv.num_free_pages
+        ):
+            # Preserve an immediate bounded skip instead of draining first.
+            return False
+
+        cohort = self._simple_prefill_cohort(
+            (),
+            self._budget,
+            self._max_seqs,
+        )
+        public_priority = (
+            self._states[cohort[0]].request.priority
+            if self._waiting.priority_enabled and cohort
+            else None
+        )
+        budget = _PrefillBudget(
+            remaining=self._budget,
+            shares=max(1, len(cohort)),
+            public_priority=public_priority,
+        )
+        pages = self._kv.num_free_pages + sum(
+            self._terminal_releasable_pages(state) for state in running_states
+        )
+        completion_margin = pages
+        persistent_prefills = 0
         admitted = 0
+        incomplete_winning = False
         for request_id in candidates:
             state = self._states[request_id]
             prompt_len = state.prompt_len
@@ -588,12 +907,50 @@ class Scheduler:
             # so draining does not postpone it.
             if admitted < free_slots and cached_tokens > 0:
                 return False
-            uncached_tokens = prompt_len - min(cached_tokens, prompt_len - 1)
-            budget -= min(uncached_tokens, budget)
+            compute_tokens, new_pages = self._waiting_compute_and_new_pages(state)
+            watermark = self._decode_watermark if admitted else 0
+            if new_pages + watermark > pages:
+                break
+            if budget.public_priority is not None:
+                if state.request.priority != budget.public_priority:
+                    if incomplete_winning:
+                        break
+                    budget.public_priority = state.request.priority
+            requested = compute_tokens
+            if compute_tokens <= budget.limit_for(request_id):
+                owned_pages = -(-prompt_len // self._page_size)
+                target_pages = -(
+                    -(prompt_len + state.request.max_new_tokens)
+                    // self._page_size
+                )
+                liability = max(0, target_pages - owned_pages)
+                completion_cost = new_pages + (
+                    liability if state.request.max_new_tokens > 1 else 0
+                )
+                safe_completion = (
+                    state.request.max_new_tokens <= 1
+                    or persistent_prefills < 1
+                    or completion_cost <= completion_margin
+                )
+                if not safe_completion:
+                    if compute_tokens == 1:
+                        break
+                    requested -= 1
+                else:
+                    completion_margin -= completion_cost
+                    persistent_prefills += state.request.max_new_tokens > 1
+            chunk = budget.take(requested, request_id)
+            if chunk < 1:
+                break
+            pages -= new_pages
             admitted += 1
             if admitted > free_slots:
                 return True
-            if budget <= 0:
+            incomplete_winning |= (
+                state.request.priority == budget.public_priority
+                and chunk < compute_tokens
+            )
+            if budget.remaining <= 0:
                 break
         return False
 
@@ -703,17 +1060,28 @@ class Scheduler:
         return state.allocation.num_cached_tokens
 
     def _preempt_for_decode(self, needy_id: str) -> bool:
-        """Recompute-preempt the youngest output-free running request.
+        """Recompute-preempt a young output-free request that releases pages.
 
         Victims are restricted to requests with no committed outputs so
         requeueing them recomputes the prompt only (output-KV recompute is a
-        GPU-phase extension, see design m2 §5).
+        GPU-phase extension, see design m2 §5). Cached-only candidates are a
+        fallback because unlocking their shared pages may release nothing.
         """
+        fallback_id: str | None = None
         for victim_id in reversed(self._running):
             state = self._states[victim_id]
-            if victim_id == needy_id or state.outputs:
+            if victim_id == needy_id or state.outputs or state.in_flight:
                 continue
-            self._requeue_preempted(victim_id, state)
+            if self._reclaimable_prefill_pages(victim_id) > 0:
+                self._requeue_preempted(victim_id, state)
+                return True
+            if fallback_id is None:
+                fallback_id = victim_id
+        if fallback_id is not None:
+            self._requeue_preempted(
+                fallback_id,
+                self._states[fallback_id],
+            )
             return True
         return False
 
@@ -722,6 +1090,7 @@ class Scheduler:
         self._running.remove(request_id)
         self._release_without_commit(state)
         state.computed_prompt = 0
+        state.admission_bypasses = 0
         state.status = _Status.WAITING
         self._waiting.append(
             request_id,
@@ -863,12 +1232,14 @@ class Scheduler:
             budget -= reserve
         return budget
 
-    def _schedule_prefills(self, budget: int, plan: list[ScheduledChunk]) -> int:
+    def _schedule_prefills(self, budget: _PrefillBudget, plan: list[ScheduledChunk]) -> None:
+        already_scheduled = {chunk.request_id for chunk in plan if chunk.is_prefill}
         request_ids = [
             request_id
             for request_id in self._running
             if self._states[request_id].status is _Status.RUNNING
             and not self._states[request_id].prefill_done
+            and request_id not in already_scheduled
         ]
         if self._waiting.priority_enabled:
             stable_position = {
@@ -883,19 +1254,88 @@ class Scheduler:
             )
         for request_id in request_ids:
             state = self._states[request_id]
-            if budget < 1:
+            if budget.remaining < 1:
                 break
-            chunk = min(state.prompt_len - state.computed_prompt, budget)
+            if budget.public_priority is not None:
+                if state.request.priority != budget.public_priority:
+                    if self._has_incomplete_cohort_prefill(budget):
+                        break
+                    budget.public_priority = state.request.priority
+                    budget.cohort_request_ids = frozenset()
+            if budget.limit_for(request_id) < 1:
+                budget.drop_share(request_id)
+                continue
+            remaining_prompt = state.prompt_len - state.computed_prompt
+            requested = remaining_prompt
+            if remaining_prompt <= budget.limit_for(request_id) and not self._can_complete_prefill(
+                request_id, budget
+            ):
+                requested -= 1
+            if requested < 1:
+                budget.drop_share(request_id)
+                continue
+            chunk = budget.take(requested, request_id)
             state.computed_prompt += chunk
             if state.prefill_done:
                 state.in_flight += 1  # the prompt-completing chunk samples token 0
+                self._record_prefill_completion(state, budget)
+            elif budget.public_priority is not None:
+                budget.cohort_request_ids |= frozenset((request_id,))
             plan.append(ScheduledChunk(request_id=request_id, num_tokens=chunk, is_prefill=True))
-            budget -= chunk
-        return budget
+
+    def _has_incomplete_cohort_prefill(self, budget: _PrefillBudget) -> bool:
+        if budget.public_priority is None:
+            return False
+        live = frozenset(
+            request_id
+            for request_id in budget.cohort_request_ids
+            if self._states[request_id].status is _Status.RUNNING
+            and not self._states[request_id].prefill_done
+        )
+        budget.cohort_request_ids = live
+        return bool(live)
+
+    def _redistribute_prefill_remainder(
+        self, budget: _PrefillBudget, plan: list[ScheduledChunk]
+    ) -> None:
+        """Return an unused trailing share to an existing incomplete chunk."""
+
+        if budget.remaining < 1:
+            return
+        for index, scheduled in enumerate(plan):
+            if not scheduled.is_prefill:
+                continue
+            state = self._states[scheduled.request_id]
+            remaining_prompt = state.prompt_len - state.computed_prompt
+            if remaining_prompt < 1:
+                continue
+            extra = min(remaining_prompt, budget.remaining)
+            if scheduled.request_id in budget.protected_completions and extra >= remaining_prompt:
+                extra -= 1
+            if extra >= remaining_prompt and not self._can_complete_prefill(
+                scheduled.request_id,
+                budget,
+            ):
+                extra -= 1
+            if extra < 1:
+                continue
+            state.computed_prompt += extra
+            budget.remaining -= extra
+            if state.prefill_done:
+                state.in_flight += 1
+                self._record_prefill_completion(state, budget)
+            plan[index] = ScheduledChunk(
+                request_id=scheduled.request_id,
+                num_tokens=scheduled.num_tokens + extra,
+                is_prefill=True,
+                position=scheduled.position,
+            )
+            if budget.remaining < 1:
+                break
 
     def _admit_priority_ahead_of_prefills(
-        self, budget: int, plan: list[ScheduledChunk]
-    ) -> int:
+        self, budget: _PrefillBudget, plan: list[ScheduledChunk]
+    ) -> None:
         """Run an outranking waiter before lower-priority running prefill work.
 
         Existing decode work has already consumed its budget when this runs.
@@ -903,121 +1343,287 @@ class Scheduler:
         needed KV pages, recompute-preempt it and retry the higher-priority head.
         """
         if not self._waiting.priority_enabled:
-            return budget
-        while self._waiting and budget > 0:
+            return
+        while self._waiting and budget.remaining > 0:
             request_id = self._waiting.peek()
-            victim_id = self._lower_priority_prefill_victim(request_id)
-            if victim_id is None:
-                break
-
             state = self._states[request_id]
             required_pages = -(-state.prompt_len // self._page_size)
             if state.prompt_len == 0 or required_pages > self._kv.num_pages:
-                # Let the ordinary rejection path remove an impossible head;
-                # never preempt valid work on behalf of an invalid request.
-                budget = self._admit_waiting(
-                    budget,
-                    plan,
-                    max_admissions=1,
-                )
+                # A full sequence window prevents the ordinary admission loop
+                # from entering at all. Reject the already-validated impossible
+                # head directly so priority-ahead cannot spin forever.
+                self._reject_unadmittable(request_id, state)
                 continue
-            if len(self._running) >= self._max_seqs:
+            if budget.limit_for(request_id) < 1:
+                break
+            if (
+                budget.public_priority is not None
+                and state.request.priority != budget.public_priority
+                and self._has_incomplete_cohort_prefill(budget)
+            ):
+                break
+            victim_id = self._lower_priority_prefill_victim(request_id)
+            if victim_id is None:
+                break
+            # Probe policy before discarding work only when the probe cannot
+            # evict cached prefixes; success immediately swaps out the victim.
+            sequence_full = len(self._running) >= self._max_seqs
+            _head_compute, head_new_pages = self._waiting_compute_and_new_pages(state)
+            probe_full_sequence = (
+                sequence_full and head_new_pages <= self._kv.num_free_pages
+            )
+            if sequence_full and not probe_full_sequence:
+                prompt_pages = -(-state.prompt_len // self._page_size)
+                target_pages = -(
+                    -(state.prompt_len + state.request.max_new_tokens)
+                    // self._page_size
+                )
+                required_margin = head_new_pages + max(
+                    0,
+                    target_pages - prompt_pages,
+                )
+                if (
+                    state.request.max_new_tokens > 1
+                    and budget.persistent_prefills > 0
+                    and required_margin > budget.completion_margin_pages
+                ):
+                    potential_cached = self._kv.peek_cached_or_restorable_tokens(
+                        state.request.prompt_token_ids
+                    )
+                    potential_compute = state.prompt_len - min(
+                        potential_cached,
+                        state.prompt_len - 1,
+                    )
+                    if potential_compute == 1:
+                        # Do not discard running work or cached prefixes for a
+                        # completion that still fails the decode escape margin.
+                        break
+            victim_released = sequence_full and not probe_full_sequence
+            if victim_released:
                 self._requeue_preempted(victim_id, self._states[victim_id])
-
-            budget_after = self._admit_waiting(
+            blocked_on_kv = self._admit_waiting(
                 budget,
                 plan,
                 max_admissions=1,
+                allow_skip_ahead=False,
+                allow_sequence_overcommit=probe_full_sequence,
             )
-            budget = budget_after
             if state.status is _Status.RUNNING:
+                if probe_full_sequence:
+                    self._requeue_preempted(victim_id, self._states[victim_id])
                 continue
             if request_id not in self._states or state.status is _Status.FINISHED:
                 # Empty/oversized head was rejected; reevaluate the new head.
                 continue
+            if not blocked_on_kv:
+                break
 
             # Allocation can still fail despite the page-count estimate (for
             # example, pinned radix pages). Release another outranked prefill.
-            victim_id = self._lower_priority_prefill_victim(request_id)
-            if victim_id is None:
-                break
+            if victim_released:
+                victim_id = self._lower_priority_prefill_victim(request_id)
+                if victim_id is None:
+                    break
             self._requeue_preempted(victim_id, self._states[victim_id])
             # Retry immediately after releasing pages.  Waiting until the next
             # loop iteration would first require another eligible victim and
             # could therefore skip the only useful post-release allocation.
-            budget = self._admit_waiting(
+            blocked_on_kv = self._admit_waiting(
                 budget,
                 plan,
                 max_admissions=1,
+                allow_skip_ahead=False,
             )
-        return budget
+            if state.status is _Status.RUNNING:
+                continue
+            if request_id not in self._states or state.status is _Status.FINISHED:
+                continue
+            if not blocked_on_kv:
+                break
 
     def _admit_waiting(
         self,
-        budget: int,
+        budget: _PrefillBudget,
         plan: list[ScheduledChunk],
         *,
         max_admissions: int | None = None,
-    ) -> int:
+        allow_skip_ahead: bool = True,
+        allow_sequence_overcommit: bool = False,
+    ) -> bool:
+        """Admit waiting work and report whether KV capacity stopped it."""
+
         admitted = 0
+        blocked_on_kv = False
         while (
             self._waiting
-            and budget > 0
-            and len(self._running) < self._max_seqs
+            and budget.remaining > 0
+            and len(self._running)
+            < self._max_seqs + int(allow_sequence_overcommit)
             and (max_admissions is None or admitted < max_admissions)
         ):
-            # The indexed queue already exposes the highest effective priority,
-            # with stable FIFO ties. The head still BLOCKS on KVCacheFull — no
-            # skip-ahead (m11 A11).
-            request_id = self._waiting.peek()
-            state = self._states[request_id]
-            if state.prompt_len == 0:
-                self._reject_unadmittable(request_id, state)
+            head_id = self._waiting.peek()
+            head = self._states[head_id]
+            if head.prompt_len == 0:
+                self._reject_unadmittable(head_id, head)
                 continue
-            required_pages = -(-state.prompt_len // self._page_size)  # ceil division
+            required_pages = -(-head.prompt_len // self._page_size)
             if required_pages > self._kv.num_pages:
                 # This prompt is larger than the whole KV cache: it can NEVER be
                 # admitted no matter how much drains. Reject it instead of
                 # blocking the head of line forever (C2 — an un-rejectable head
                 # turns every subsequent step's empty schedule into a fatal
                 # engine stall that kills all concurrent requests).
-                self._reject_unadmittable(request_id, state)
+                self._reject_unadmittable(head_id, head)
                 continue
+            if budget.public_priority is not None:
+                if head.request.priority != budget.public_priority:
+                    if self._has_incomplete_cohort_prefill(budget):
+                        break
+                    budget.public_priority = head.request.priority
+                    budget.cohort_request_ids = frozenset()
+            if budget.limit_for(head_id) < 1:
+                break
+
+            allocation = None
+            allocation_free_before = self._kv.num_free_pages
+            head_blocked = False
+            pre_attempt_free = self._kv.num_free_pages
+            _head_compute, head_new_pages = self._waiting_compute_and_new_pages(head)
+            watermark = self._decode_watermark if self._running else 0
+            successor_before_attempt: tuple[str, int, int] | None = None
+            if self._running and pre_attempt_free < head_new_pages + watermark:
+                candidates = self._waiting.peek_prefix(_MAX_WAITING_BYPASSES + 1)
+                if len(candidates) >= 2:
+                    successor_id = candidates[1]
+                    successor = self._valid_waiting_prefill(successor_id)
+                    if successor is not None:
+                        successor_before_attempt = (
+                            successor_id,
+                            successor[0],
+                            successor[1],
+                        )
             if self._decode_watermark > 0 and self._running:
                 # reserve pages for running decodes only — with nothing running
                 # there is no decode to protect, so reserving would deadlock the
                 # sole waiting request forever (C2)
-                estimate = required_pages
-                if self._kv.num_free_pages < estimate + self._decode_watermark:
-                    break  # keep pages in reserve so running decodes never starve
-            try:
-                state.allocation = self._kv.allocate(state.request.prompt_token_ids)
-            except KVCacheFull:
-                if not self._running:
-                    # Nothing is running to free pages and the cache still can't
-                    # fit this prompt (e.g. pinned sessions hold every page):
-                    # waiting is futile, so reject rather than deadlock (C2).
-                    self._reject_unadmittable(request_id, state)
-                    continue
-                break  # head-of-line waits for running requests to free pages
-            popped_id = self._waiting.popleft()
-            if popped_id != request_id:
-                raise AssertionError("waiting queue head changed during admission")
+                head_blocked = pre_attempt_free < head_new_pages + self._decode_watermark
+            if not head_blocked:
+                try:
+                    allocation = self._kv.allocate(head.request.prompt_token_ids)
+                except KVCacheFull:
+                    # A failed DRAM restore may still consume destination pages.
+                    budget.completion_margin_pages += (
+                        self._kv.num_free_pages - allocation_free_before
+                    )
+                    allocation_free_before = self._kv.num_free_pages
+                    if not self._running:
+                        # Nothing is running to free pages and the cache still
+                        # cannot fit this prompt (for example, pinned sessions
+                        # own every page), so waiting is futile.
+                        self._reject_unadmittable(head_id, head)
+                        continue
+                    head_blocked = True
+
+            request_id = head_id
+            state = head
+            bypassed = False
+            if head_blocked:
+                blocked_on_kv = True
+                if allow_skip_ahead:
+                    budget.drop_share(head_id)
+                if (
+                    not allow_skip_ahead
+                    or head.admission_bypasses >= _MAX_WAITING_BYPASSES
+                    or successor_before_attempt is None
+                ):
+                    break
+                request_id, prior_compute, prior_new_pages = successor_before_attempt
+                state = self._states[request_id]
+                if budget.public_priority is not None:
+                    if state.request.priority != budget.public_priority:
+                        if self._has_incomplete_cohort_prefill(budget):
+                            break
+                        budget.public_priority = state.request.priority
+                        budget.cohort_request_ids = frozenset()
+                compute_tokens, new_pages = self._waiting_compute_and_new_pages(state)
+                if (
+                    prior_compute > budget.limit_for(request_id)
+                    or pre_attempt_free < prior_new_pages + watermark
+                    or compute_tokens > budget.limit_for(request_id)
+                    or self._kv.num_free_pages < new_pages + watermark
+                ):
+                    break
+                allocation_free_before = self._kv.num_free_pages
+                try:
+                    allocation = self._kv.allocate(state.request.prompt_token_ids)
+                except KVCacheFull:
+                    budget.completion_margin_pages += (
+                        self._kv.num_free_pages - allocation_free_before
+                    )
+                    break
+                bypassed = True
+
+            assert allocation is not None
+            private_pages = len(allocation.new_full_pages) + (
+                allocation.tail_page is not None
+            )
+            # Cold allocation converts raw pages into reclaimable private pages;
+            # radix eviction adds margin, while a DRAM restore consumes it.
+            allocation_gain = private_pages - (
+                allocation_free_before - self._kv.num_free_pages
+            )
+            budget.completion_margin_pages += allocation_gain
+            cached = min(
+                allocation.num_cached_tokens,
+                state.prompt_len - 1,
+            )
+            compute_tokens = state.prompt_len - cached
+            can_finish = True
+            if compute_tokens <= budget.limit_for(request_id):
+                can_finish = self._can_complete_prefill(
+                    request_id,
+                    budget,
+                    allocation,
+                )
+            if bypassed:
+                if compute_tokens > budget.limit_for(request_id) or not can_finish:
+                    self._kv.release_preempted(allocation, ())
+                    break
+            elif compute_tokens == 1 and not can_finish:
+                self._kv.release_preempted(allocation, ())
+                break
+            if bypassed:
+                self._waiting.remove(request_id)
+                head.admission_bypasses += 1
+            else:
+                popped_id = self._waiting.popleft()
+                if popped_id != request_id:
+                    raise AssertionError("waiting queue head changed during admission")
+            state.allocation = allocation
             self._record_waiting_exit(state)
             state.status = _Status.RUNNING
+            state.admission_bypasses = 0
             self._running.append(request_id)
             # cached prefix skips prefill compute; the last prompt token is
             # always recomputed so the step produces logits for sampling
-            cached = min(state.allocation.num_cached_tokens, state.prompt_len - 1)
-            chunk = min(state.prompt_len - cached, budget)
+            state.computed_prompt = cached
+            requested = compute_tokens
+            if compute_tokens <= budget.limit_for(request_id) and not can_finish:
+                requested -= 1
+            assert requested > 0
+            chunk = budget.take(requested, request_id)
             state.computed_prompt = cached + chunk
             if state.prefill_done:
                 state.in_flight += 1  # prompt-completing chunk samples token 0
+                self._record_prefill_completion(state, budget)
+            elif budget.public_priority is not None:
+                budget.cohort_request_ids |= frozenset((request_id,))
             plan.append(ScheduledChunk(request_id=request_id, num_tokens=chunk, is_prefill=True))
             self._priority_events[(state.request.scheduling_class, "admit")] += 1
-            budget -= chunk
             admitted += 1
-        return budget
+            if bypassed:
+                break
+        return blocked_on_kv
 
     def schedule(self) -> SchedulerOutput:
         """Plan one step. With P-D separation, decodes and prefills draw from
@@ -1030,11 +1636,11 @@ class Scheduler:
             prefill_budget = self._budget
         else:
             prefill_budget = self._schedule_decodes(self._budget, plan)
-        prefill_budget = self._admit_priority_ahead_of_prefills(
-            prefill_budget, plan
-        )
-        prefill_budget = self._schedule_prefills(prefill_budget, plan)
-        self._admit_waiting(prefill_budget, plan)
+        budget = self._prefill_budget(prefill_budget)
+        self._admit_priority_ahead_of_prefills(budget, plan)
+        self._schedule_prefills(budget, plan)
+        self._admit_waiting(budget, plan)
+        self._redistribute_prefill_remainder(budget, plan)
         return SchedulerOutput(scheduled=tuple(plan))
 
     def _finish(self, state: _RequestState) -> None:

@@ -440,6 +440,21 @@ def test_generation_config_mode_reaches_both_pd_model_loads(
     assert modes == ["vllm", "vllm"]
 
 
+def test_partial_prefill_limit_reaches_both_pd_schedulers(model_dir):
+    from kairyu.engine.core.pd_factory import build_pd_coordinator
+
+    coordinator = build_pd_coordinator(
+        model_path=model_dir,
+        num_pages=64,
+        page_size=16,
+        max_num_partial_prefills=7,
+        **_cpu_placement(),
+    )
+
+    assert coordinator._prefill._max_num_partial_prefills == 7
+    assert coordinator._decode._max_num_partial_prefills == 7
+
+
 def test_the_deferred_handoff_records_an_event_instead_of_blocking():
     """The ordering contract, on the recording provider."""
     from kairyu.engine.core.handoff_stream import CpuNoopStream, StreamCopyKVHandoff
@@ -1422,9 +1437,11 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
         if parameter.kind is inspect.Parameter.KEYWORD_ONLY
     )
     assert keyword_only == (
+        "max_num_partial_prefills",
         "expert_parallel_attention_dp",
         "generation_config",
     )
+    assert parameters["max_num_partial_prefills"].default == 2
     assert parameters["expert_parallel_attention_dp"].default is False
     assert parameters["generation_config"].default == "auto"
 

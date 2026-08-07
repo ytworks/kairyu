@@ -313,6 +313,26 @@ preemption retains front-of-tie placement, and KV allocation still blocks at
 the selected head without skip-ahead. Reproduce the 100k A/B measurements with
 `uv run python bench/scheduler_queue_bench.py --requests 100000 --repeats 5`.
 
+**Prefill cohort amendment (2026-08-07, issue #328).** This supersedes only the
+unbounded selected-head behavior above. Native schedulers default
+`max_num_partial_prefills` to two and divide each post-decode token budget among
+the effective-order leading tier of eligible prefills that share one public
+priority value. The full aging rank still orders that tier and prevents it from
+leapfrogging an intervening priority. Shares are normally work-conserving: a
+singleton retains the full budget and unused shares return to other eligible
+chunks in the same step. Deferred P-D handoff may leave one prompt token on
+peer cohort members after completing one member so its asynchronous KV copy
+overlaps the next engine step. Existing running and newly admitted prefills use
+the same budget, and one request appears at most once in a step.
+
+When the selected waiting head cannot preserve the decode watermark or cannot
+allocate KV while work is running, ordinary admission may inspect exactly its
+immediate successor. That successor passes only if a cache-aware estimate proves
+its new pages fit without eviction and its prompt completes within the current
+share. One successful bypass exhausts the blocked head's waiting-epoch allowance;
+priority preemption remains head-only. Empty and cache-oversized heads retain
+their existing rejection path, and full-prompt KV reservation is unchanged.
+
 **Overload-priority amendment (2026-07-28, issue #190).** The signed-int64
 `priority` extension now flows through Chat Completions, legacy Completions,
 Responses, `GenerationRequest`, ReplicaPool/OpenAI transport, vLLM, native,
@@ -600,8 +620,10 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   _normalize_message flattening, and the shared render_prompt (batch worker
   parity).
 - **A11 (D6)**: injectable clock + arrival timestamps; effective priority is
-  represented by an immutable aging rank (EngineRequest frozen); fairness
-  retains selected-head KV blocking with no skip-ahead. Issue #190 completed
+  represented by an immutable aging rank (EngineRequest frozen). Issue #328
+  supersedes unbounded selected-head blocking with one cache-safe,
+  completion-only immediate-successor bypass per waiting epoch, while the
+  strict priority-preemption path remains head-only. Issue #190 completed
   the formerly descoped HTTP→tenant class→replica→engine path and aligned the
   public numeric direction with vLLM (smaller wins);
   TTFT predictor uses GATEWAY-observable signals (in-flight count + observed

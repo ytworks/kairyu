@@ -59,6 +59,34 @@ def test_native_auto_graph_defaults_pass_static_preflight(backend):
 
 
 @pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
+@pytest.mark.parametrize("max_num_partial_prefills", [1, 2, 8])
+def test_native_partial_prefill_limit_accepts_positive_integers(
+    backend,
+    max_num_partial_prefills,
+):
+    validate_backend_options(
+        backend,
+        {"max_num_partial_prefills": max_num_partial_prefills},
+    )
+
+
+@pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
+@pytest.mark.parametrize("max_num_partial_prefills", [0, -1, True, 2.0, "2"])
+def test_native_partial_prefill_limit_rejects_non_positive_or_non_integer_values(
+    backend,
+    max_num_partial_prefills,
+):
+    with pytest.raises(
+        ValueError,
+        match="max_num_partial_prefills.*positive integer",
+    ):
+        validate_backend_options(
+            backend,
+            {"max_num_partial_prefills": max_num_partial_prefills},
+        )
+
+
+@pytest.mark.parametrize("backend", ["kairyu", "kairyu-proc"])
 @pytest.mark.parametrize(
     "options",
     [

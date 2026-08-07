@@ -234,6 +234,7 @@ class RadixKVCache:
         """A snapshot of ownership transitions, never the mutable counters."""
 
         return dict(self._dram_stats)
+
     @property
     def num_free_pages(self) -> int:
         return self._pool.num_free
@@ -244,26 +245,19 @@ class RadixKVCache:
             return 0.0
         return self._hit_tokens / self._total_tokens
 
-    def peek_cached_tokens(self, tokens: tuple[int, ...]) -> int:
-        """Return the computed page-aligned prefix length without mutation.
-
-        Admission policy occasionally needs to distinguish expensive uncached
-        prefill from a cheap radix hit before it allocates or locks pages. A
-        normal allocation walk splits nodes, updates LRU state, refcounts the
-        path, and contributes to hit-rate accounting; this probe deliberately
-        does none of those things.
-        """
-
+    def _peek_cached_prefix(self, tokens: tuple[int, ...]) -> tuple[int, bool]:
         node = self._root
         matched_tokens = 0
         position = 0
         while True:
             first_page = tuple(tokens[position : position + self._page_size])
             if len(first_page) < self._page_size:
-                return matched_tokens
+                return matched_tokens, False
             child = node.children.get(first_page)
-            if child is None or not child.computed or child.evicting:
-                return matched_tokens
+            if child is None:
+                return matched_tokens, True
+            if not child.computed or child.evicting:
+                return matched_tokens, False
             whole_pages = len(child.key) // self._page_size
             common_pages = 0
             for page_index in range(whole_pages):
@@ -276,9 +270,49 @@ class RadixKVCache:
                 common_pages += 1
             matched_tokens += common_pages * self._page_size
             if common_pages < whole_pages:
-                return matched_tokens
+                return matched_tokens, True
             position += len(child.key)
             node = child
+
+    def peek_cached_tokens(self, tokens: tuple[int, ...]) -> int:
+        """Return the computed page-aligned prefix length without mutation.
+
+        Admission policy occasionally needs to distinguish expensive uncached
+        prefill from a cheap radix hit before it allocates or locks pages. A
+        normal allocation walk splits nodes, updates LRU state, refcounts the
+        path, and contributes to hit-rate accounting; this probe deliberately
+        does none of those things.
+        """
+
+        matched_tokens, _restore_allowed = self._peek_cached_prefix(tokens)
+        return matched_tokens
+
+    def peek_cached_or_restorable_tokens(self, tokens: tuple[int, ...]) -> int:
+        """Return the HBM prefix plus an available DRAM suffix.
+
+        A positive DRAM policy probe follows the tier's normal LRU-touch
+        semantics so the prefix remains available for the deciding admission.
+        """
+
+        matched_tokens, restore_allowed = self._peek_cached_prefix(tokens)
+        if self._dram_tier is None or not restore_allowed:
+            return matched_tokens
+        full_suffix_tokens = (
+            (len(tokens) - matched_tokens) // self._page_size
+        ) * self._page_size
+        if full_suffix_tokens < self._dram_min_restore_tokens:
+            return matched_tokens
+        assert self._root.prefix_hasher is not None
+        _, _, _, all_keys = _extend_prefix_hash_chain(
+            self._root.prefix_hasher,
+            self._root.prefix_token_count,
+            tokens[: matched_tokens + full_suffix_tokens],
+            self._page_size,
+            include_tier_keys=True,
+        )
+        candidate_keys = all_keys[matched_tokens // self._page_size :]
+        available = self._available_dram_prefix_pages(candidate_keys)
+        return matched_tokens + available * self._page_size
 
     def _touch(self, node: _Node) -> None:
         self._clock += 1
@@ -501,6 +535,30 @@ class RadixKVCache:
             self._refresh_evictable(parent)
         return True
 
+    def _available_dram_prefix_pages(
+        self,
+        candidate_keys: tuple[str, ...],
+    ) -> int:
+        tier = self._dram_tier
+        if tier is None:
+            return 0
+        minimum_pages = -(
+            -self._dram_min_restore_tokens // self._page_size
+        )
+        if len(candidate_keys) < minimum_pages:
+            return 0
+        available = tier.available_prefix(
+            candidate_keys,
+            min_pages=minimum_pages,
+        )
+        if not isinstance(available, int) or isinstance(available, bool):
+            raise TypeError("DRAM tier available_prefix must return an int")
+        if not 0 <= available <= len(candidate_keys):
+            raise ValueError(
+                "DRAM tier available_prefix returned an out-of-range page count"
+            )
+        return available if available >= minimum_pages else 0
+
     def _restore_from_dram(
         self,
         tokens: tuple[int, ...],
@@ -541,20 +599,8 @@ class RadixKVCache:
             self._page_size,
             include_tier_keys=True,
         )
-        minimum_pages = -(
-            -self._dram_min_restore_tokens // self._page_size
-        )
-        available = tier.available_prefix(
-            candidate_keys,
-            min_pages=minimum_pages,
-        )
-        if not isinstance(available, int) or isinstance(available, bool):
-            raise TypeError("DRAM tier available_prefix must return an int")
-        if not 0 <= available <= len(candidate_keys):
-            raise ValueError(
-                "DRAM tier available_prefix returned an out-of-range page count"
-            )
-        if available < minimum_pages:
+        available = self._available_dram_prefix_pages(candidate_keys)
+        if not available:
             return matched_tokens, cached_pages, node
         # Protect the selected host entries while obtaining destination ids.
         # Offloading the HBM victim into a full bounded tier could evict the
@@ -870,16 +916,30 @@ class RadixKVCache:
     ) -> None:
         """Release a preempted/aborted request WITHOUT marking KV computed.
 
-        The request did not complete, so its uncomputed tree node (if any)
-        stays unmatched until LRU eviction reclaims it; private pages return
-        to the pool immediately.
+        The request did not complete, so its private pages and any exclusively
+        inserted uncomputed suffix return to the pool immediately. Computed
+        matched prefixes are only unlocked and retain their cache lifetime.
         """
         if not self._begin_release(allocation):
             return
         try:
             self._unlock_path(allocation._node)
-            if not allocation._tree_inserted and allocation.new_full_pages:
-                self._pool.free(allocation.new_full_pages)
+            if allocation.new_full_pages:
+                if allocation._tree_inserted and not allocation._node.computed:
+                    node = allocation._node
+                    parent = node.parent
+                    assert parent is not None
+                    assert node.ref_count == 0
+                    assert not node.children
+                    assert node.pages == allocation.new_full_pages
+                    edge = node.key[: self._page_size]
+                    assert parent.children.get(edge) is node
+                    self._invalidate_evictable(node)
+                    del parent.children[edge]
+                    self._pool.free(allocation.new_full_pages)
+                    self._refresh_evictable(parent)
+                elif not allocation._tree_inserted:
+                    self._pool.free(allocation.new_full_pages)
             loose = (
                 ((allocation.tail_page,) if allocation.tail_page is not None else ())
                 + tuple(decode_pages)

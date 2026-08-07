@@ -46,6 +46,7 @@ _KAIRYU_OPTIONS = frozenset(
         "num_pages",
         "page_size",
         "max_num_batched_tokens",
+        "max_num_partial_prefills",
         "max_num_seqs",
         "max_model_len",
         "priority_age_s",
@@ -77,6 +78,7 @@ _KAIRYU_PROC_OPTIONS = frozenset(
         "num_pages",
         "page_size",
         "max_num_batched_tokens",
+        "max_num_partial_prefills",
         "max_num_seqs",
         "max_model_len",
         "priority_age_s",
@@ -265,6 +267,12 @@ def _validate_native_common(
         backend,
         "max_num_batched_tokens",
         options.get("max_num_batched_tokens", 2048),
+        1,
+    )
+    _require_int_at_least(
+        backend,
+        "max_num_partial_prefills",
+        options.get("max_num_partial_prefills", 2),
         1,
     )
     _require_int_at_least(

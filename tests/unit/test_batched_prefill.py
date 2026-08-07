@@ -460,8 +460,8 @@ def _run_scheduler_preemption_case(*, batched: bool):
     assert urgent_allocation is not None
     assert set(urgent_allocation.pages) & set(first_pages)
 
-    # The victim resumes from zero under a new allocation. Its second chunk and
-    # the newly admitted partner then form the cross-request prefill batch.
+    # The victim resumes from zero under a new allocation and immediately forms
+    # a work-conserving prefill cohort with the newly admitted partner.
     scheduler.add_request(
         EngineRequest(
             "partner",
@@ -471,7 +471,10 @@ def _run_scheduler_preemption_case(*, batched: bool):
         )
     )
     resumed = execute_step()
-    assert [(chunk.request_id, chunk.num_tokens) for chunk in resumed.scheduled] == [("victim", 8)]
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in resumed.scheduled] == [
+        ("victim", 4),
+        ("partner", 4),
+    ]
     resumed_allocation = scheduler.states["victim"].allocation
     assert resumed_allocation is not None
     assert resumed_allocation is not first_allocation
@@ -480,8 +483,7 @@ def _run_scheduler_preemption_case(*, batched: bool):
     assert [
         (chunk.request_id, chunk.num_tokens, chunk.is_prefill) for chunk in completed.scheduled
     ] == [
-        ("victim", 4, True),
-        ("partner", 4, True),
+        ("victim", 8, True),
     ]
     outputs = {
         request_id: scheduler.output_tokens(request_id)

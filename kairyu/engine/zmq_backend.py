@@ -947,6 +947,7 @@ class ZmqEngineBackend:
         dram_kv_tier_profile: str | PathLike[str] | None = None,
         generation_config: GenerationConfigMode = "auto",
         tensor_parallel_size: int = 1,
+        max_num_partial_prefills: int = 2,
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
@@ -1014,6 +1015,7 @@ class ZmqEngineBackend:
             "num_pages": num_pages,
             "page_size": page_size,
             "max_num_batched_tokens": max_num_batched_tokens,
+            "max_num_partial_prefills": max_num_partial_prefills,
             "max_num_seqs": max_num_seqs,
             "max_model_len": max_model_len,
             "priority_age_s": priority_age_s,
