@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Deployment pools can enable prefix-aware routing
+- What: `PoolSpec` now exposes default-off `prefix_index`; the production builder constructs the existing bounded approximate `PrefixIndex` per opted-in static or discovered pool and passes it to `ReplicaPool`.
+- Why: validated KV-aware placement existed only for programmatic callers and benchmarks, so a production DeploymentSpec could not select the warm replica across related sessions.
+- Refs: issue #343; m7 D3; m10 D6; `kairyu/deploy/{spec,builder}.py`; `docs/deployment.md`
+
 ### 2026-08-07 — [amendment] Cumulative engine state advances by deltas
 - What: overlapping step snapshots now freeze append-only outputs by reference plus length; TP/EP sync uses epoch/length and output/page tails; output presentation caches cumulative token/logprob content while exposing immutable-length internal views; KV allocation pages are concatenated once.
 - Why: copying and rescanning each request's full generated history on every step made host work quadratic in completion length.
@@ -118,28 +123,3 @@ in `.claude/rules/progress-log.md`).
 - What: added opt-in `server.ttft_slo_s`; validated direct interactive chat now includes known ingress elapsed time, atomically admits, batch-defers only on routes attesting running-decode isolation (otherwise sheds), observes the first successfully sent visible SSE delta, releases leases at the outer ASGI boundary, and exports the controller snapshot through six Prometheus gauges.
 - Why: the validated F5c controller had no production call site, so requests predicted to miss the TTFT SLO still consumed serving capacity and reduced SLO-goodput.
 - Refs: issue #340; `kairyu/entrypoints/server/{app,middleware,metrics,settings,slo}.py`; `kairyu/deploy/spec.py`; `tests/server/test_slo_admission_integration.py`; `docs/design/m11-product.md`
-
-### 2026-08-06 — [progress] Pipeline-depth hypothesis closes as a measured negative
-- What: retained twelve Qwen3-32B TP4 HTTP diagnostics and CPU plan-shape evidence, reverted the experimental deep strict-decode tail and metric, and kept the existing two-step admission/prefill horizon.
-- Why: the initial depth-five candidate regressed throughput by 3–4%, its cohort-preserving refinement returned only to noisy parity, and the historical 35.98% result compared depth one with five rather than isolating benefit beyond depth two.
-- Refs: issue #318; `bench/results/issue-318-pipeline-depth-qwen3-32b-rtxpro6000-2026-08-06/`
-
-### 2026-08-06 — [amendment] CUDA graph coverage moves to readiness-time defaults
-- What: supported real CUDA models now resolve omitted decode policy to CUDA graphs, size graph batch/page coverage from serving limits, pre-capture every bucket before single/TP/attention-DP EP readiness with bounded rank preflight and rollback, and export monotonic single/process/pool eager fallbacks to Prometheus; CPU, P-D, replicated EP, custom, and MLA paths stay eager by capability.
-- Why: lazy first-use capture blocked live traffic and the former batch/page defaults left common requests permanently eager without an operator-visible counter.
-- Refs: issue #320; m17 A26-A28; `kairyu/engine/{kairyu_backend,core/{step_executor,model_runner,worker}}.py`; `kairyu/entrypoints/server/metrics.py`; `tests/gpu/test_ep_attention_dp_cuda_graph_startup_gpu.py`
-
-### 2026-08-06 — [progress] Offloaded-route endpoint context no longer trusts FastAPI's id cache
-- What: `_OffloadedRequestBodyRoute` now computes the validation-error endpoint context once from the live endpoint at route build instead of calling FastAPI's `_extract_endpoint_context`, and the flaky ZMQ cancelled-submit test waits on wall-clock time for the prompt worker thread.
-- Why: FastAPI 0.139.0 caches endpoint context by `id(func)` without holding a reference, so a garbage-collected endpoint's recycled address serves a stale context (observed as `chat_completions` reported for `probe` in CI); the ZMQ test's bare loop yields gave the worker thread no time on loaded runners.
-- Refs: PR #423; `kairyu/entrypoints/server/app.py`; `tests/server/test_prompt_offload.py`; `tests/unit/test_zmq_backend.py`
-
-### 2026-08-06 — [progress] CPU microbenchmark gate retries timing-ratio noise
-- What: the same-run CPU gate re-runs a benchmark (≤3 attempts total) when its only failing checks are timing ratios; structural failures and benchmark errors still fail immediately, and thresholds plus the report schema consumed by the nightly series are unchanged.
-- Why: shared-runner jitter tripped `scheduler.priority_speedup` (0.87 vs the 0.9 floor) on a docs-only PR; a real hot-path regression keeps failing on every attempt, so retries preserve the smoke alarm while removing the flake.
-- Refs: PR #422 CI run 31094215441; `scripts/cpu_microbench_gate.py`; `tests/unit/test_cpu_microbench_gate.py`
-
-### 2026-08-06 — [design] PROGRESS.md restructured for minimal session-start tokens
-- What: archived the verbose Current Status to `docs/progress/archive/status-2026-08-06.md` and all older Change Log entries to `docs/progress/archive/change-log.md` (both verbatim); PROGRESS.md now holds a compact Product/Current Status/Change Log. Size budgets and archiving live in `.claude/rules/progress-log.md` + `docs/progress/archiving.md`, enforced by a SessionStart hook running `scripts/check_progress_size.py`.
-- Why: PROGRESS.md and the progress rules are loaded every session; at ~514 KB they burned the context they were meant to save.
-- Refs: `docs/progress/archive/`; `.claude/settings.json`; `scripts/check_progress_size.py`

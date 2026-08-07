@@ -47,6 +47,7 @@ from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.models.generation import validate_generation_config_mode
 from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.prefix_index import PrefixIndex
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.router import JsonlRouterLog
 
@@ -640,6 +641,7 @@ def build_app_from_spec(
             log=pool_log,
             unhealthy_after=pool_spec.unhealthy_after,
             queue_depth_threshold=pool_spec.queue_depth_threshold,
+            prefix_index=PrefixIndex() if pool_spec.prefix_index else None,
             allow_empty=dynamic,
         )
         engines[name] = pool

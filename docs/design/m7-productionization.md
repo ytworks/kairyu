@@ -16,6 +16,9 @@ artifact graph without starting serving or model execution.
 **Amended 2026-08-01** (D6, issue #187): native per-replica RadixKV gains an
 optional bounded, NUMA-attested pinned-DRAM tier whose restore policy is loaded
 only from retained, runtime-identity-matched crossover evidence.
+**Amended 2026-08-07** (D3, issue #343): deployment pools may opt into the
+existing bounded approximate `PrefixIndex`; omission remains byte-identical and
+does not imply the separate exact KV-event transport lifecycle.
 Milestone: M7
 Date: 2026-07-02
 Depends on: Goal G3 (`docs/goals/g3-production-deployment.md`, gates C1–C7);
@@ -85,6 +88,7 @@ pools:              # name -> ReplicaPool of backends
       - { backend: openai, options: { base_url: "http://gpu-1:8000/v1", model: "...", api_key_env: null, upstream: kairyu } }
     unhealthy_after: 3
     queue_depth_threshold: 8
+    prefix_index: true       # opt-in bounded approximate KV-aware routing
     probe_interval_s: 5.0
 orchestrator: { spec: agent_pool.yaml }   # optional, reuses DSL loader
 batch: { data_dir: /var/lib/kairyu/batch, max_concurrency: 4 }  # optional
@@ -95,7 +99,11 @@ explicitly translates it to the runtime `ServerSettings` value. It does not
 inherit the runtime model: adding a runtime-only setting therefore cannot
 silently add a key or change the generated DeploymentSpec schema. Existing
 deployment keys and defaults remain backward-compatible; a new public YAML
-setting must be added and mapped deliberately in `ServerSection`.
+setting must be added to its owning spec model and mapped deliberately.
+Pool-level `prefix_index: true` constructs the existing process-local bounded
+`PrefixIndex` and passes it to `ReplicaPool`; omission preserves session HRW and
+load fallback byte-for-byte. Exact KV-event routing remains owned by its event
+transport/provider lifecycle and is not implied by this approximate opt-in.
 `ServerSection` validates the durable YAML artifact; `ServerSettings` remains
 the internal value validated for direct serve-layer callers and owns
 environment-backed API/admin key resolution.

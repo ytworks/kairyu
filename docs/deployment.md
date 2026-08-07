@@ -257,6 +257,7 @@ pools:
         options: { base_url: "http://gpu-1:8000/v1", model: "llama-70b", api_key_env: null, upstream: kairyu }
     unhealthy_after: 3
     queue_depth_threshold: 8
+    prefix_index: true                     # optional cross-session KV-aware routing
     probe_interval_s: 5.0
 orchestrator: { spec: agent_pool.yaml }          # optional: kairyu-auto routing
 legacy_chat_models: [llama-70b, kairyu-auto]     # current remote/AUTO compatibility
@@ -275,6 +276,13 @@ tenants:
       interactive_priority: 0  # smaller values run first
       batch_priority: 1        # Batch API overrides client-supplied priority
 ```
+
+`prefix_index` is off by default. Enabling it gives that pool one bounded,
+process-local approximate text-prefix index: successful generation publishes a
+reusable prefix and later sessionless or explicitly hinted related prompts can
+prefer the warm replica. The pool still falls back to its existing session HRW,
+queue-depth, and least-outstanding policies when no usable prefix is known.
+This option does not start the separate exact KV-event subscriber lifecycle.
 
 `ttft_slo_s` is opt-in and applies to direct interactive Chat Completions after
 request validation but before backend preparation. The controller admits work

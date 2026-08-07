@@ -44,8 +44,22 @@ def test_gateway_spec_parses():
     pool = spec.pools["llama-70b"]
     assert len(pool.replicas) == 2
     assert pool.unhealthy_after == 2
+    assert pool.prefix_index is False
     assert pool.probe_interval_s == 1.5
     assert pool.replicas[0].options["api_key_env"] is None  # keyless node-to-node
+
+
+def test_pool_can_enable_prefix_index() -> None:
+    spec = load_deployment_spec(
+        """
+pools:
+  fleet:
+    replicas: [{backend: mock}]
+    prefix_index: true
+"""
+    )
+
+    assert spec.pools["fleet"].prefix_index is True
 
 
 def test_kubernetes_endpoint_slice_pool_parses() -> None:
