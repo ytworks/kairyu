@@ -26,6 +26,15 @@ class ServerSettings(BaseModel):
         ge=1,
         description="Global in-flight cap on /v1/* requests; None disables the guard.",
     )
+    ttft_slo_s: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "TTFT target for direct-chat SLO admission; None disables "
+            "predictive admit/defer/shed decisions."
+        ),
+    )
     max_chat_body_bytes: int | None = Field(
         default=None,
         ge=1,

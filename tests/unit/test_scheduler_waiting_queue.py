@@ -139,6 +139,50 @@ def test_signed_int64_priority_order_is_exact(priority_age_s: float) -> None:
     assert queue.popleft() == "adjacent-lower"
 
 
+def test_output_bearing_deferred_decode_blocks_later_interactive_at_sequence_cap():
+    lowest = 2**63 - 1
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=16, page_size=4),
+        max_num_batched_tokens=4,
+        max_num_seqs=1,
+        page_size=4,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(
+        EngineRequest(
+            "deferred",
+            (1, 2, 3, 4),
+            max_new_tokens=4,
+            priority=lowest,
+            scheduling_class="batch",
+        )
+    )
+
+    prefill = scheduler.schedule()
+    assert [(chunk.request_id, chunk.is_prefill) for chunk in prefill.scheduled] == [
+        ("deferred", True)
+    ]
+    scheduler.update({"deferred": 10})
+    assert scheduler.output_tokens("deferred") == (10,)
+
+    scheduler.add_request(
+        EngineRequest(
+            "interactive",
+            (5, 6, 7, 8),
+            max_new_tokens=1,
+            priority=lowest - 1,
+            scheduling_class="interactive",
+        )
+    )
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.is_prefill) for chunk in step.scheduled] == [
+        ("deferred", False)
+    ]
+    assert scheduler.waiting_ids == ("interactive",)
+
+
 def test_hundred_thousand_ids_support_indexed_removal_and_fifo_drain() -> None:
     queue = _IndexedWaitingQueue(priority_age_s=None)
     count = 100_000

@@ -16,6 +16,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     UpstreamClientError,
+    backend_supports_slo_defer,
 )
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.prompt import TokensPrompt
@@ -55,6 +56,17 @@ class FlakyBackend:
         self.shutdown_count += 1
         if self.shutdown_error:
             raise RuntimeError("shutdown failed")
+
+
+class SLODeferCapabilityBackend(FlakyBackend):
+    def __init__(self, supported: bool) -> None:
+        super().__init__()
+        self.supports_slo_defer = supported
+
+
+class RequestSLODeferCapabilityBackend(FlakyBackend):
+    def supports_slo_defer_for_request(self, request: GenerationRequest) -> bool:
+        return request.request_id == "req-deferred"
 
 
 class KeyedValidationBackend(FlakyBackend):
@@ -1154,6 +1166,40 @@ async def test_all_unhealthy_raises_clear_runtime_error():
         await pool.generate(make_request("boom"))
     with pytest.raises(RuntimeError, match="none of the 1 replicas are eligible"):
         await pool.generate(make_request("nobody-home"))
+
+
+def test_replica_pool_reports_slo_defer_capability_intersection():
+    assert backend_supports_slo_defer(MockBackend()) is False
+    assert ReplicaPool([SLODeferCapabilityBackend(True)]).supports_slo_defer is True
+    assert (
+        ReplicaPool(
+            [SLODeferCapabilityBackend(True), SLODeferCapabilityBackend(False)]
+        ).supports_slo_defer
+        is False
+    )
+
+    request_aware = ReplicaPool([RequestSLODeferCapabilityBackend()])
+    assert backend_supports_slo_defer(
+        request_aware,
+        make_request("deferred"),
+    ) is True
+    assert backend_supports_slo_defer(
+        request_aware,
+        make_request("interactive"),
+    ) is False
+
+
+async def test_prepared_slo_defer_capability_includes_newly_placeable_replica():
+    unsafe = SLODeferCapabilityBackend(False)
+    safe = SLODeferCapabilityBackend(True)
+    pool = ReplicaPool({"unsafe": unsafe, "safe": safe})
+    pool.drain("unsafe")
+    request = make_request("deferred")
+
+    assert backend_supports_slo_defer(pool, request) is True
+    asyncio.get_running_loop().call_soon(pool.cancel_drain, "unsafe")
+    assert await pool.prepare_request(request) == ("unsafe", "safe")
+    assert backend_supports_slo_defer(pool, request) is False
 
 
 async def test_probe_rejects_invalid_index():

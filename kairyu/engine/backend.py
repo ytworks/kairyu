@@ -577,6 +577,23 @@ class EngineBackend(Protocol):
     async def shutdown(self) -> None: ...
 
 
+def backend_supports_slo_defer(
+    backend: object,
+    request: GenerationRequest | None = None,
+) -> bool:
+    """Resolve the running-batch isolation contract required by SLO defer."""
+
+    request_capability = getattr(backend, "supports_slo_defer_for_request", None)
+    supported = (
+        request_capability(request)
+        if request is not None and callable(request_capability)
+        else getattr(backend, "supports_slo_defer", False)
+    )
+    if type(supported) is not bool:
+        raise TypeError("backend supports_slo_defer must be a boolean")
+    return supported
+
+
 @dataclass(frozen=True)
 class EngineReadiness:
     """An engine's own answer to "could I serve a request right now?".

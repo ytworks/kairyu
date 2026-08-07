@@ -698,6 +698,7 @@ server:                        # versioned deployment schema; explicitly maps to
   api_keys_env: KAIRYU_KEYS    # env var with comma-separated keys; null = keyless
                                #   (keyless = trusted node-to-node mesh mode)
   max_concurrency: 256         # global in-flight cap on /v1/*; null disables
+  ttft_slo_s: null             # direct-chat admit/defer/shed TTFT target; null disables
   metrics: true                # expose /metrics (Prometheus)
   protect_metrics: false       # require an API key for /metrics too
   access_log: true             # one JSON line per request (X-Request-ID echoed)

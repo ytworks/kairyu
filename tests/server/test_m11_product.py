@@ -1634,6 +1634,27 @@ class TestF5Logic:
         with pytest.raises(RuntimeError, match="after completion"):
             lease.finished_first_token()
 
+    def test_admission_elapsed_time_does_not_backdate_feedback_window(self):
+        from kairyu.entrypoints.server.slo import AdmissionController
+
+        clock = {"t": 0.0}
+        controller = AdmissionController(
+            ttft_slo_s=0.6,
+            defer_threshold_s=1.0,
+            now=lambda: clock["t"],
+        )
+        lease = controller.begin(elapsed_s=0.5)
+
+        assert lease.decision.action == "admit"
+        assert lease.decision.predicted_ttft_s == pytest.approx(0.51)
+        assert lease.started_at == 0.0
+
+        clock["t"] = 0.2
+        lease.finished_first_token()
+        lease.completed()
+        # The EMA sees only post-admission latency: 0.8 * 0.01 + 0.2 * 0.2.
+        assert controller.snapshot().ttft_per_unit_ema_s == pytest.approx(0.048)
+
     def test_admission_lease_freezes_concurrency_and_shed_does_not_reserve(self):
         from kairyu.entrypoints.server.slo import AdmissionController
 

@@ -400,6 +400,28 @@ leases, and queues drain. Raw evidence is in
 `bench/results/f5c-slo-admission-cpu-2026-07-28.json`; reproduce it with
 `uv run python bench/slo_admission_bench.py --assert-gate`.
 
+**Live direct-chat admission amendment (2026-08-07, issue #340).**
+`server.ttft_slo_s` now opt-in instantiates one gateway-visible controller and
+wires direct interactive Chat Completions after request validation but before
+backend preparation. The decision adds known ingress-to-admission elapsed time
+once, while feedback continues to measure only the post-admission interval.
+`shed` returns 429 with `Retry-After` without dispatch. On routes explicitly
+attesting `supports_slo_defer`, `defer` rebuilds the immutable request with
+`scheduling_class="batch"` and the lowest signed-64-bit scheduler priority;
+the one colliding interactive value is always clamped one step ahead before
+preparation. That contract must guarantee running deferred decode cannot delay
+later interactive work; accepting numeric priority alone is insufficient once
+an output-bearing decode becomes non-preemptible. Current native, process-split,
+vLLM, and remote adapters therefore convert `defer` to the same 429 instead of
+claiming isolation they do not provide. The request-aware contract is rechecked
+against an exact prepared ReplicaPool placement lease. The outer ASGI request
+boundary owns lease release across unary, streaming, errors, and client
+cancellation, while only a first direct visible SSE delta whose ASGI send
+succeeds supplies TTFT feedback. Six unlabeled scrape-time gauges expose the
+complete `AdmissionSnapshot`. Existing batch-class traffic, orchestrated chat,
+Completions, Responses, and the bounded queue tracked by issue #341 stay out of
+this policy.
+
 ### D7 — Open WebUI + frontier bench
 
 `deploy/compose/docker-compose.webui.yaml` points Open WebUI at the internal

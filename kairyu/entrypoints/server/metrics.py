@@ -314,6 +314,57 @@ class _TenantLimiterCollector:
         yield violations
 
 
+class _SLOAdmissionCollector:
+    """Scrape-time view of the app-owned TTFT admission predictor."""
+
+    def __init__(self) -> None:
+        self._controller = None
+
+    def set(self, controller: object) -> None:
+        self._controller = controller
+
+    def collect(self) -> Iterator[Metric]:
+        families = (
+            GaugeMetricFamily(
+                "kairyu_slo_admission_in_flight",
+                "Direct-chat requests holding SLO admission leases",
+            ),
+            GaugeMetricFamily(
+                "kairyu_slo_admission_interactive_in_flight",
+                "Interactive direct-chat requests holding SLO admission leases",
+            ),
+            GaugeMetricFamily(
+                "kairyu_slo_admission_deferred_in_flight",
+                "Deferred direct-chat requests holding SLO admission leases",
+            ),
+            GaugeMetricFamily(
+                "kairyu_slo_admission_ttft_per_unit_ema_seconds",
+                "EMA of post-admission interactive TTFT per concurrency unit",
+            ),
+            GaugeMetricFamily(
+                "kairyu_slo_admission_predicted_ttft_seconds",
+                "Predicted TTFT for the next interactive direct-chat request",
+            ),
+            GaugeMetricFamily(
+                "kairyu_slo_admission_defer_pressure_seconds",
+                "Predicted total active pressure used to bound deferred work",
+            ),
+        )
+        if self._controller is not None:
+            snapshot = self._controller.snapshot()
+            values = (
+                snapshot.in_flight,
+                snapshot.interactive_in_flight,
+                snapshot.deferred_in_flight,
+                snapshot.ttft_per_unit_ema_s,
+                snapshot.predicted_ttft_s,
+                snapshot.defer_pressure_s,
+            )
+            for family, value in zip(families, values, strict=True):
+                family.add_metric([], value)
+        yield from families
+
+
 class ServerMetrics:
     """Registry + the request-level metrics recorded by the middleware."""
 
@@ -380,10 +431,12 @@ class ServerMetrics:
         self._scheduler_collector = _SchedulerCollector()
         self._cuda_graph_collector = _CudaGraphCollector()
         self._tenant_limiter_collector = _TenantLimiterCollector()
+        self._slo_admission_collector = _SLOAdmissionCollector()
         self.registry.register(self._pool_collector)
         self.registry.register(self._scheduler_collector)
         self.registry.register(self._cuda_graph_collector)
         self.registry.register(self._tenant_limiter_collector)
+        self.registry.register(self._slo_admission_collector)
 
     def track_pool(self, name: str, pool: ReplicaPool) -> None:
         self._pool_collector.add(name, pool)
@@ -396,6 +449,9 @@ class ServerMetrics:
 
     def track_tenant_limiter(self, limiter: object) -> None:
         self._tenant_limiter_collector.set(limiter)
+
+    def track_slo_admission(self, controller: object) -> None:
+        self._slo_admission_collector.set(controller)
 
     def record_preplacement_phase(
         self,

@@ -23,6 +23,7 @@ _ASGIApp = Callable[..., Awaitable[None]]
 # level matches the already-open /readyz and /metrics.
 _OPEN_PATHS = ("/health", "/readyz", "/backends")
 _GUARDED_PREFIX = "/v1/"
+_SLO_ADMISSION_LEASE_STATE_KEY = "slo_admission_lease"
 
 # collapse per-object id path segments (file-…, batch_…, uuids, long hex/digits)
 # to {id} so a Prometheus path label cannot explode in cardinality (M1)
@@ -274,7 +275,7 @@ class MetricsMiddleware:
 
 
 class RequestIngressMiddleware:
-    """Stamp the process's outer HTTP boundary for fleet placement evidence."""
+    """Own request-boundary timing and direct-chat SLO lease cleanup."""
 
     def __init__(self, app: _ASGIApp) -> None:
         self.app = app
@@ -282,7 +283,13 @@ class RequestIngressMiddleware:
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if scope["type"] == "http":
             _state(scope)["placement_started_ns"] = time.perf_counter_ns()
-        await self.app(scope, receive, send)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            if scope["type"] == "http":
+                lease = _state(scope).pop(_SLO_ADMISSION_LEASE_STATE_KEY, None)
+                if lease is not None and lease.active:
+                    lease.completed()
 
 
 class AccessLogMiddleware:
