@@ -351,6 +351,18 @@ engines:
         )
 
 
+def test_server_section_rejects_admission_timeout_without_concurrency_bound():
+    with pytest.raises(ValidationError, match="requires max_concurrency"):
+        load_deployment_spec(
+            """
+server:
+  admission_wait_timeout_s: 1
+engines:
+  m: {backend: mock}
+"""
+        )
+
+
 def test_server_section_rejects_runtime_only_or_unknown_yaml_keys():
     with pytest.raises(ValidationError, match="future_runtime_only"):
         load_deployment_spec(

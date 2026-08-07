@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ServerSettings(BaseModel):
@@ -78,6 +78,14 @@ class ServerSettings(BaseModel):
             "data-plane key cannot take the node out of service (S5)."
         ),
     )
+
+    @model_validator(mode="after")
+    def _admission_queue_requires_total_bound(self) -> ServerSettings:
+        if self.admission_wait_timeout_s is not None and self.max_concurrency is None:
+            raise ValueError(
+                "admission_wait_timeout_s requires max_concurrency"
+            )
+        return self
 
     def resolve_api_keys(self) -> frozenset[str]:
         """Read keys from the configured env var; fail loud on an empty var."""

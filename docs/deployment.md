@@ -300,7 +300,8 @@ FIFO. A waiter receives 429 after the timeout, while a request beyond the total
 bound is rejected immediately. Multiple-model servers, `ReplicaPool`, remote,
 and unknown-capacity backends cannot safely map one pre-body global limit to a
 model and therefore retain the historical cap; an explicitly requested but
-unavailable queue logs a startup warning. This class-blind queue precedes the
+unavailable queue logs a startup warning. Setting a timeout without
+`max_concurrency` is rejected during schema validation. This class-blind queue precedes the
 native priority scheduler, so interactive work cannot pass an earlier batch
 waiter; keep the timeout within the deployment's TTFT policy. Metrics expose
 `kairyu_admission_active_requests`, `kairyu_admission_waiting_requests`, and

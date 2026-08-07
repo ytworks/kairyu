@@ -239,6 +239,14 @@ class ServerSection(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _admission_queue_requires_total_bound(self) -> ServerSection:
+        if self.admission_wait_timeout_s is not None and self.max_concurrency is None:
+            raise ValueError(
+                "admission_wait_timeout_s requires max_concurrency"
+            )
+        return self
+
     def to_server_settings(self) -> ServerSettings:
         """Translate the deployment vocabulary to runtime settings explicitly."""
 

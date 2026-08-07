@@ -234,13 +234,16 @@ class ConcurrencyLimitMiddleware:
                 )
                 acquired = True
             except TimeoutError:
-                self._discard_waiter(waiter)
-                self._record_rejection("timeout")
-                await self._reject(
-                    send,
-                    "server admission queue wait timed out",
-                )
-                return
+                if waiter.done() and not waiter.cancelled():
+                    acquired = True
+                else:
+                    self._discard_waiter(waiter)
+                    self._record_rejection("timeout")
+                    await self._reject(
+                        send,
+                        "server admission queue wait timed out",
+                    )
+                    return
             except asyncio.CancelledError:
                 if waiter.done() and not waiter.cancelled():
                     self._release_slot()

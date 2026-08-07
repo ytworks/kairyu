@@ -8,6 +8,7 @@ import pytest
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.prompt import prompt_text
 from kairyu.entrypoints.server.app import _server_sequence_budget
+from kairyu.entrypoints.server.middleware import ConcurrencyLimitMiddleware
 from kairyu.entrypoints.server.settings import ServerSettings
 from tests.server._legacy_chat import create_legacy_app
 
@@ -214,6 +215,41 @@ async def test_cancelled_admission_waiter_releases_queue_capacity():
         assert (await replacement).status_code == 200
 
 
+async def test_timeout_after_slot_handoff_serves_without_leaking(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = 0
+
+    async def app(scope, receive, send):
+        nonlocal calls
+        calls += 1
+
+    middleware = ConcurrencyLimitMiddleware(
+        app,
+        limit=1,
+        total_limit=2,
+        wait_timeout_s=0.1,
+    )
+    middleware._active = 1
+
+    async def timeout_after_handoff(waiter, *, timeout):
+        assert timeout == 0.1
+        middleware._release_slot()
+        assert waiter.done() and not waiter.cancelled()
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", timeout_after_handoff)
+    await middleware(
+        {"type": "http", "path": "/v1/test"},
+        lambda: None,
+        lambda message: None,
+    )
+
+    assert calls == 1
+    assert middleware._active == 0
+    assert not middleware._waiters
+
+
 async def test_slot_is_released_after_completion():
     app = create_legacy_app(
         engines={"m": MockBackend()},
@@ -250,3 +286,8 @@ def test_server_sequence_budget_requires_exactly_one_advertising_backend():
     invalid.sequence_budget = True
     with pytest.raises(TypeError, match="sequence_budget"):
         _server_sequence_budget({"m": invalid})
+
+
+def test_admission_timeout_requires_total_concurrency_bound():
+    with pytest.raises(ValueError, match="requires max_concurrency"):
+        ServerSettings(admission_wait_timeout_s=1.0)
