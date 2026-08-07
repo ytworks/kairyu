@@ -1,6 +1,7 @@
 """C3: batch/file store tenant isolation — one tenant can never see another's."""
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -379,3 +380,59 @@ def test_save_and_read_file_content_remain_byte_compatible(tmp_path, monkeypatch
         content[4:8],
         content[8:],
     )
+
+
+async def test_streaming_upload_writes_and_commits_off_event_loop(
+    tmp_path,
+    monkeypatch,
+):
+    loop_thread = threading.get_ident()
+    write_threads = []
+    commit_threads = []
+    real_open = Path.open
+
+    class RecordingHandle:
+        def __init__(self, handle):
+            self._handle = handle
+
+        @property
+        def closed(self):
+            return self._handle.closed
+
+        def write(self, chunk):
+            write_threads.append(threading.get_ident())
+            return self._handle.write(chunk)
+
+        def close(self):
+            return self._handle.close()
+
+    def recording_open(path, *args, **kwargs):
+        handle = real_open(path, *args, **kwargs)
+        if path.name.endswith(".bin.tmp") and args == ("xb",):
+            return RecordingHandle(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", recording_open)
+    store = BatchStore(tmp_path)
+    commit = store._commit_file
+
+    def recording_commit(*args, **kwargs):
+        commit_threads.append(threading.get_ident())
+        return commit(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_commit_file", recording_commit)
+
+    async def chunks():
+        yield b"first"
+        yield b"second"
+
+    file = await store.save_file_streaming(
+        chunks(),
+        filename="input.jsonl",
+        purpose="batch",
+    )
+
+    assert store.read_file_content(file.id) == b"firstsecond"
+    assert write_threads and commit_threads
+    assert all(thread_id != loop_thread for thread_id in write_threads)
+    assert all(thread_id != loop_thread for thread_id in commit_threads)

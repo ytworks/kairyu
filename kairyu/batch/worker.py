@@ -204,13 +204,17 @@ class BatchWorker:
         job = await asyncio.to_thread(self._store.get_batch, batch_id)
         return job.status == "cancelled"
 
-    async def _wait_for_interactive_slack(self) -> bool:
+    async def _wait_for_interactive_slack(
+        self,
+        batch_id: str,
+        claim_lost: asyncio.Event,
+    ) -> bool:
         controller = self._admission_controller
-        waited = False
         while controller is not None and controller.batch_should_yield():
-            waited = True
+            if await self._cancelled(batch_id, claim_lost):
+                return False
             await asyncio.sleep(_BATCH_PRESSURE_POLL_S)
-        return waited
+        return True
 
     async def _finish(
         self,
@@ -222,12 +226,12 @@ class BatchWorker:
         job.status = state
         if claim is None:
             setattr(job, f"{state}_at", int(time.time()))
+            finalize = getattr(self._store, "finalize_batch", None)
             await self._run_blocking_cancellation_safe(
-                self._store.update_batch,
+                finalize if callable(finalize) else self._store.update_batch,
                 job,
+                completion_flag=publication_committed,
             )
-            if publication_committed is not None:
-                publication_committed[0] = True
         else:
             # The shared store fills the terminal timestamp from the same DB
             # clock that governs claim leases and their audit chronology.
@@ -558,18 +562,24 @@ class BatchWorker:
         claim: BatchClaim | None = None,
     ) -> None:
         if claim is None:
-            job = await self._run_blocking_cancellation_safe(
-                self._store.get_batch,
-                batch_id,
-            )
-            if job.status == "cancelled":
-                return
-            job.status = "in_progress"
-            job.in_progress_at = int(time.time())
-            await self._run_blocking_cancellation_safe(
-                self._store.update_batch,
-                job,
-            )
+            start = getattr(self._store, "start_batch", None)
+            if callable(start):
+                job = await self._run_blocking_cancellation_safe(start, batch_id)
+                if job is None:
+                    return
+            else:
+                job = await self._run_blocking_cancellation_safe(
+                    self._store.get_batch,
+                    batch_id,
+                )
+                if job.status == "cancelled":
+                    return
+                job.status = "in_progress"
+                job.in_progress_at = int(time.time())
+                await self._run_blocking_cancellation_safe(
+                    self._store.update_batch,
+                    job,
+                )
         else:
             if claim.batch_id != batch_id:
                 raise ValueError("batch claim does not match the requested batch")
@@ -720,8 +730,10 @@ class BatchWorker:
                             batch_id, claim_lost
                         ):
                             continue
-                        waited = await self._wait_for_interactive_slack()
-                        if waited and await self._cancelled(batch_id, claim_lost):
+                        if not await self._wait_for_interactive_slack(
+                            batch_id,
+                            claim_lost,
+                        ):
                             continue
                         output, error, usage = await self._run_line(
                             line, job.endpoint, seen_custom_ids, job.owner

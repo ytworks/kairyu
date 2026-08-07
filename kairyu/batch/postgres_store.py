@@ -38,6 +38,7 @@ from kairyu.batch.store import (
     FileTooLargeError,
     JsonlFileWriter,
     StaleBatchClaimError,
+    _run_blocking_cancellation_safe,
 )
 
 try:  # Optional deployment dependency; checked with a useful error at construction.
@@ -446,7 +447,7 @@ class PostgresJsonlFileWriter(JsonlFileWriter):
 
 
 class PostgresBatchStore(BatchStore):
-    """A PostgreSQL shared store implementing BatchStore's eleven methods."""
+    """A PostgreSQL shared store implementing the full batch-store protocol."""
 
     def __init__(
         self,
@@ -649,10 +650,10 @@ class PostgresBatchStore(BatchStore):
                     prospective_bytes = bytes_written + len(chunk)
                     if max_bytes is not None and prospective_bytes > max_bytes:
                         raise FileTooLargeError
-                    handle.write(chunk)
+                    await _run_blocking_cancellation_safe(handle.write, chunk)
                     bytes_written = prospective_bytes
             finally:
-                handle.close()
+                await _run_blocking_cancellation_safe(handle.close)
 
             # Chunk insertion can take seconds for the maximum upload. Keep it
             # off the gateway event loop, but let the underlying thread settle
@@ -684,7 +685,10 @@ class PostgresBatchStore(BatchStore):
                 # The request no longer has a caller that can use this object.
                 # Remove the now-complete, still-unreferenced publication.
                 try:
-                    await asyncio.to_thread(self._discard_file, file.id)
+                    await _run_blocking_cancellation_safe(
+                        self._discard_file,
+                        file.id,
+                    )
                 except Exception:
                     logger.warning(
                         "failed to roll back cancelled PostgreSQL batch upload",
@@ -694,7 +698,10 @@ class PostgresBatchStore(BatchStore):
                 raise cancelled
             return file
         finally:
-            self._remove_spool(temporary_path)
+            await _run_blocking_cancellation_safe(
+                self._remove_spool,
+                temporary_path,
+            )
 
     def _commit_spool_file(
         self,

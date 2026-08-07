@@ -13,6 +13,7 @@ import pytest
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartParser
 
+from kairyu.audit_io import AuditQueueFull
 from kairyu.batch.store import BatchStore
 from kairyu.deploy.builder import build_app_from_spec
 from kairyu.deploy.spec import load_deployment_spec
@@ -406,6 +407,124 @@ async def test_worker_waits_while_interactive_ttft_prediction_exceeds_slo(tmp_pa
     assert store.get_batch(job.id).status == "completed"
 
 
+async def test_worker_observes_batch_cancellation_while_waiting_for_slo_slack(
+    tmp_path,
+):
+    waiting = asyncio.Event()
+
+    class RecordingController(AdmissionController):
+        def batch_should_yield(self):
+            waiting.set()
+            return super().batch_should_yield()
+
+    class CountingBackend(MockBackend):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def generate(self, request):
+            self.calls += 1
+            return await super().generate(request)
+
+    controller = RecordingController(ttft_slo_s=1.0)
+    controller._ttft_per_unit_ema = 0.6
+    interactive = controller.begin()
+    backend = CountingBackend()
+    store = BatchStore(tmp_path)
+    worker = LegacyBatchWorker(
+        store,
+        {"m": backend},
+        max_concurrency=1,
+        admission_controller=controller,
+    )
+    file = store.save_file(
+        _batch_line("batch", "hello").encode(),
+        "input.jsonl",
+        "batch",
+    )
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    processing = asyncio.create_task(worker.process(job.id))
+    await asyncio.wait_for(waiting.wait(), timeout=1)
+    cancelled = await asyncio.to_thread(store.cancel_batch, job.id)
+    await asyncio.wait_for(processing, timeout=1)
+    interactive.completed()
+
+    assert cancelled.status == "cancelled"
+    assert store.get_batch(job.id).status == "cancelled"
+    assert backend.calls == 0
+
+
+async def test_cancel_wins_atomically_before_filesystem_terminal_publication(tmp_path):
+    class BlockingFinalizeStore(BatchStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.finalize_started = threading.Event()
+            self.allow_finalize = threading.Event()
+
+        def finalize_batch(self, job):
+            self.finalize_started.set()
+            assert self.allow_finalize.wait(1)
+            return super().finalize_batch(job)
+
+    store = BlockingFinalizeStore(tmp_path)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(
+        _batch_line("batch", "hello").encode(),
+        "input.jsonl",
+        "batch",
+    )
+    job = store.create_batch(file.id, "/v1/chat/completions")
+    files_before = {path.name for path in (tmp_path / "files").iterdir()}
+
+    processing = asyncio.create_task(worker.process(job.id))
+    assert await asyncio.to_thread(store.finalize_started.wait, 1)
+    cancelled = await asyncio.to_thread(store.cancel_batch, job.id)
+    store.allow_finalize.set()
+    await asyncio.wait_for(processing, timeout=1)
+
+    current = store.get_batch(job.id)
+    assert cancelled.status == current.status == "cancelled"
+    assert current.output_file_id is None
+    assert current.error_file_id is None
+    assert {path.name for path in (tmp_path / "files").iterdir()} == files_before
+
+
+async def test_shutdown_after_filesystem_terminal_commit_keeps_result_files(tmp_path):
+    class BlockingFinalizeStore(BatchStore):
+        def __init__(self, path):
+            super().__init__(path)
+            self.finalize_started = threading.Event()
+            self.allow_finalize = threading.Event()
+
+        def finalize_batch(self, job):
+            self.finalize_started.set()
+            assert self.allow_finalize.wait(1)
+            return super().finalize_batch(job)
+
+    store = BlockingFinalizeStore(tmp_path)
+    worker = LegacyBatchWorker(store, {"m": MockBackend()}, max_concurrency=1)
+    file = store.save_file(
+        _batch_line("batch", "hello").encode(),
+        "input.jsonl",
+        "batch",
+    )
+    job = store.create_batch(file.id, "/v1/chat/completions")
+
+    processing = asyncio.create_task(worker.process(job.id))
+    assert await asyncio.to_thread(store.finalize_started.wait, 1)
+    processing.cancel()
+    store.allow_finalize.set()
+    with pytest.raises(asyncio.CancelledError):
+        await processing
+
+    current = store.get_batch(job.id)
+    assert current.status == "completed"
+    assert current.output_file_id is not None
+    output = store.read_file_content(current.output_file_id)
+    assert json.loads(output)["custom_id"] == "batch"
+
+
 async def test_filesystem_batch_routes_run_store_io_off_event_loop(tmp_path):
     from kairyu.entrypoints.server.batch_routes import add_batch_routes
 
@@ -785,8 +904,17 @@ def _stored_file_names(tmp_path):
     return {path.name for path in (tmp_path / "files").iterdir()}
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(OSError("secret output path"), id="io-error"),
+        pytest.param(AuditQueueFull("output queue full"), id="queue-full"),
+    ],
+)
 async def test_output_append_failure_persists_failed_and_cleans_spool(
-    tmp_path, monkeypatch
+    tmp_path,
+    monkeypatch,
+    failure,
 ):
     store = BatchStore(tmp_path)
     ledger = UsageLedger(tmp_path / "usage.jsonl")
@@ -805,7 +933,7 @@ async def test_output_append_failure_persists_failed_and_cleans_spool(
 
             def fail_after_append(payload):
                 append(payload)
-                raise OSError("secret output path must not escape")
+                raise failure
 
             monkeypatch.setattr(writer, "append", fail_after_append)
         return writer
@@ -818,7 +946,7 @@ async def test_output_append_failure_persists_failed_and_cleans_spool(
     assert failed.status == "failed"
     assert failed.failed_at is not None
     assert failed.errors == {
-        "message": "batch processing failed (OSError); resubmit"
+        "message": f"batch processing failed ({type(failure).__name__}); resubmit"
     }
     assert failed.request_counts.model_dump() == {
         "total": 1,

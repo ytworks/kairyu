@@ -332,10 +332,12 @@ missing usage, and multi-candidate work consume the full reservation.
 return to zero after work drains.
 
 Batch metadata operations and transactional output finalization run outside the
-gateway event loop. Output/error rows use a bounded background JSONL writer and
-publish only after the accepted rows drain; writer saturation or I/O failure
-fails and rolls back the batch instead of dropping a row. File downloads stream
-fixed-size chunks rather than materializing the full file in gateway memory.
+gateway event loop; upload chunk writes do too. Filesystem job start, cancel,
+and terminal publication are serialized inside the store. Output/error rows use
+a bounded background JSONL writer and publish only after the accepted rows
+drain; writer saturation or I/O failure fails and rolls back the batch instead
+of dropping a row. File downloads stream fixed-size chunks rather than
+materializing the full file in gateway memory.
 When both `batch` and `server.ttft_slo_s` are configured, consumers pause before
 starting new lines while active interactive work makes the next predicted TTFT
 exceed the SLO. Already-running batch generation is not preempted, and without

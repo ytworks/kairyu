@@ -432,11 +432,14 @@ bounded background JSONL writer; only the worker's off-loop finalization waits
 for the accepted rows before atomic publication or rollback. All synchronous
 store calls in the HTTP routes and filesystem-worker path run outside the shared
 event loop, and file content is returned as fixed-size off-loop chunks rather
-than one whole-file allocation. When `server.ttft_slo_s` is enabled, a batch
-consumer waits before starting its next line while interactive work is active
-and the controller predicts that one more interactive request would exceed the
-SLO. This is admission-only: already-dispatched batch work is not cancelled or
-preempted, and disabling predictive admission preserves the fixed consumer cap.
+than one whole-file allocation. A filesystem-store lock makes job start, cancel,
+and terminal publication atomic now that routes and workers can use different
+threads. When `server.ttft_slo_s` is enabled, a batch consumer waits before
+starting its next line while interactive work is active and the controller
+predicts that one more interactive request would exceed the SLO, but continues
+to observe cancellation and claim loss. This is admission-only: already-dispatched
+batch work is not cancelled or preempted, and disabling predictive admission
+preserves the fixed consumer cap.
 
 ### D8 — Observability: `prometheus-client` + stdlib JSON logs; no OTel
 
