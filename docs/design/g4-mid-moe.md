@@ -447,18 +447,19 @@ values; other unusual tensors and mixed host/device batches retain the
 compatibility path. This internal input update does not change the public
 sampled-token D2H/materialization contract.
 
-Steady CUDA-graph replay also avoids FlashInfer's stock planning drain.
-Capture and eager fallback initialize each graph-shape wrapper with the public
-stock `plan()`. Replay receives authoritative scheduler-owned sequence lengths
-on the CPU, uses one Triton kernel to pack the current rectangular device page
-table into the wrapper's persistent indptr/index/last-page buffers, and calls
-FlashInfer 0.6.14 `fast_decode_plan` with CPU-only schedule inputs. This removes
-the stock boolean-index `nonzero` and device-to-host schedule copies without
-moving planning into the captured region. Missing APIs, compiler errors,
-signature drift, or incompatible wrapper buffers are optimization misses:
-stock `plan()` rewrites every persistent buffer and remains the correctness
-fallback. Models that do not explicitly declare the replay-plan extension
-retain the original stock planning contract.
+Steady CUDA-graph replay and eager tensor decode avoid FlashInfer's stock
+planning drain. Capture initializes its graph-shape wrapper with the public
+stock `plan()`; each eager shape does the same on first use. Later replay,
+ordinary eager, and graph eager-fallback steps receive authoritative
+scheduler-owned sequence lengths on the CPU, use one Triton kernel to pack the
+current rectangular device page table into the wrapper's persistent
+indptr/index/last-page buffers, and call FlashInfer 0.6.14 `fast_decode_plan`
+with CPU-only schedule inputs. This removes the stock boolean-index `nonzero`
+and device-to-host schedule copies without moving planning into the captured
+region. Missing APIs, compiler errors, signature drift, or incompatible wrapper
+buffers are optimization misses: stock `plan()` rewrites every persistent
+buffer and remains the correctness fallback. Models that do not explicitly
+declare the fast-plan extension retain the original stock planning contract.
 
 The comparison uses the same four physical GPUs, immutable checkpoint,
 BF16 KV, four request owners, EP4 ownership, FCFS policy, prompt/completion

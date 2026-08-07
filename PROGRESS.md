@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Eager FlashInfer decode reuses the no-D2H planner
+- What: ordinary tensor eager decode and graph-shape eager fallback now pass authoritative scheduler lengths into the existing fixed-shape metadata pack and FlashInfer fast planner after one stock initialization per shape.
+- Why: eager and out-of-coverage graph steps rebuilt dynamic indices and copied schedule inputs to the host every decode step even though graph replay already had a validated no-sync path.
+- Refs: issue #329; m17 A29; `kairyu/engine/core/{attention/{flashinfer_gpu,flashattention_gpu},model_runner,step_executor}.py`; `kairyu/models/attention.py`
+
 ### 2026-08-07 — [amendment] Batch I/O yields to interactive pressure
 - What: batch output/error transactions now use bounded background JSONL writes; route and filesystem-worker store I/O runs off-loop, downloads stream fixed chunks, and configured SLO pressure pauses new batch lines without preempting running work.
 - Why: per-line flushes, local metadata reads, and whole-file downloads blocked the gateway event loop, while the fixed batch pool kept dispatching as interactive TTFT risk rose.
@@ -118,28 +123,3 @@ in `.claude/rules/progress-log.md`).
 - What: `PoolSpec` now exposes default-off `prefix_index`; the production builder constructs the existing bounded approximate `PrefixIndex` per opted-in static or discovered pool and passes it to `ReplicaPool`.
 - Why: validated KV-aware placement existed only for programmatic callers and benchmarks, so a production DeploymentSpec could not select the warm replica across related sessions.
 - Refs: issue #343; m7 D3; m10 D6; `kairyu/deploy/{spec,builder}.py`; `docs/deployment.md`
-
-### 2026-08-07 — [amendment] Cumulative engine state advances by deltas
-- What: overlapping step snapshots now freeze append-only outputs by reference plus length; TP/EP sync uses epoch/length and output/page tails; output presentation caches cumulative token/logprob content while exposing immutable-length internal views; KV allocation pages are concatenated once.
-- Why: copying and rescanning each request's full generated history on every step made host work quadratic in completion length.
-- Refs: issue #324; m5 D2; m8 D1/D6; `kairyu/engine/{core/{frozen_prefix,step_input,scheduler,radix_kv,spec_runner},engine_loop,kairyu_backend}.py`
-
-### 2026-08-07 — [amendment] Engine presentation leaves the core step thread
-- What: all public prompt paths now prepare text outside the engine step owner; production detokenization and in-process delivery or process-wire event/msgpack work use one bounded serial output lane, overlapping at most one next raw step while ROUTER I/O stays on its socket thread; HF production requires native `DecodeStream`.
-- Why: burst tokenization and cumulative presentation work serialized the next model step and inflated TTFT tail latency; bounded one-ahead execution preserves stop-string scheduler safe points without adding a new protocol or configurable queue.
-- Refs: issue #327; m8 D1/D6; `kairyu/engine/{engine_loop,kairyu_backend,zmq_backend,core/engine_service,tokenizer}.py`
-
-### 2026-08-07 — [amendment] Prefill host preparation scales by physical pages
-- What: ragged prefill now validates cross-row KV ownership in one physical-page pass and packs its typed metadata into one fresh buffer, using a single pinned H2D copy on CUDA.
-- Why: token-by-token ownership maps, row-pair intersections, and pageable per-field uploads added avoidable TTFT before every batched prefill model call.
-- Refs: issue #322; m13 D1; `kairyu/engine/core/prefill.py`; `tests/unit/test_batched_prefill.py`
-
-### 2026-08-07 — [amendment] Prefill budget forms bounded work-conserving cohorts
-- What: native schedulers now share post-decode prefill budget across a bounded leading cohort of equal-priority partial prompts (two by default), expose `max_num_partial_prefills`, and permit one cache-safe, completion-only immediate-successor admission past a KV-blocked head; deferred P-D may retain one peer token to overlap its copy.
-- Why: serial long-prefill chunks and unbounded head-of-line KV blocking inflated small-prompt TTFT, while unrestricted skip-ahead could starve the head or create recompute-preemption thrash.
-- Refs: issue #328; m11 D6/A11; `kairyu/engine/core/scheduler.py`; `tests/unit/test_{scheduler,scheduler_waiting_queue}.py`
-
-### 2026-08-07 — [amendment] Direct chat activates predictive TTFT admission
-- What: added opt-in `server.ttft_slo_s`; validated direct interactive chat now includes known ingress elapsed time, atomically admits, batch-defers only on routes attesting running-decode isolation (otherwise sheds), observes the first successfully sent visible SSE delta, releases leases at the outer ASGI boundary, and exports the controller snapshot through six Prometheus gauges.
-- Why: the validated F5c controller had no production call site, so requests predicted to miss the TTFT SLO still consumed serving capacity and reduced SLO-goodput.
-- Refs: issue #340; `kairyu/entrypoints/server/{app,middleware,metrics,settings,slo}.py`; `kairyu/deploy/spec.py`; `tests/server/test_slo_admission_integration.py`; `docs/design/m11-product.md`

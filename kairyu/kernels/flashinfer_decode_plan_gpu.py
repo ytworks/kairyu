@@ -1,9 +1,9 @@
-"""Device-only metadata packing for FlashInfer CUDA-graph decode replay.
+"""Device-only metadata packing for fast FlashInfer decode planning.
 
 FlashInfer consumes CSR page indices, while Kairyu's captured input is a fixed
 rectangular page table.  Stock ``wrapper.plan`` converts that table with
 boolean indexing and then reads indptr/last-page lengths back to the host.
-Replay already has authoritative scheduler lengths on the CPU, so this one
+Kairyu already has authoritative scheduler lengths on the CPU, so this one
 kernel only refreshes the wrapper's persistent device buffers on the current
 stream; the CPU schedule is built independently from those host lengths.
 """

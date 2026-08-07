@@ -146,8 +146,9 @@ def test_a_captured_graph_replays_against_the_current_pages():
     assert not torch.allclose(replayed.float(), captured.float())
 
 
-def test_fast_replay_plan_has_no_stream_sync_or_nonzero_and_keeps_parity():
-    """Steady replay planning is device-only apart from CPU scheduler inputs."""
+@pytest.mark.parametrize("replay", (False, True), ids=("eager", "graph-replay"))
+def test_fast_plan_has_no_stream_sync_or_nonzero_and_keeps_parity(replay):
+    """Steady planning is device-only apart from CPU scheduler inputs."""
 
     from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
     from kairyu.engine.core.attention.torch_backend import TorchAttentionBackend
@@ -174,7 +175,7 @@ def test_fast_replay_plan_has_no_stream_sync_or_nonzero_and_keeps_parity():
         lengths,
         num_qo_heads=QO_HEADS,
         q_dtype=query.dtype,
-        replay=True,
+        replay=replay,
         host_seq_lens=(20, 30, 33),
     )
     torch.cuda.synchronize()
@@ -201,7 +202,7 @@ def test_fast_replay_plan_has_no_stream_sync_or_nonzero_and_keeps_parity():
             lengths,
             num_qo_heads=QO_HEADS,
             q_dtype=query.dtype,
-            replay=True,
+            replay=replay,
             host_seq_lens=(16, 17, 47),
         )
         actual = backend.attend_decode(query, pool, 0, tables, lengths)

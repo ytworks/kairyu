@@ -2031,8 +2031,14 @@ class PagedModelRunner:
 
     def _eager_tensor_hidden(self, batch) -> torch.Tensor:
         """Run eager tensor decode through KV write, without forcing lm_head."""
+        plan_kwargs = {}
+        if getattr(self._model, "supports_fast_replay_plan", False):
+            plan_kwargs["host_seq_lens"] = batch.host_seq_lens
         self._model.plan_decode_tensors(
-            self._pool, batch.page_tables, batch.seq_lens
+            self._pool,
+            batch.page_tables,
+            batch.seq_lens,
+            **plan_kwargs,
         )
         return self._model.forward_decode_tensors(
             batch.token_ids,
