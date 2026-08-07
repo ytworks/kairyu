@@ -35,7 +35,7 @@ code is rather than only in the design doc:
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 import torch
@@ -1763,7 +1763,10 @@ class PagedModelRunner:
         self._forget_committed(state.request.request_id, len(state.outputs))
         absolute = len(prompt) + position - 1
         cached = state.allocation.num_cached_tokens if state.allocation else 0
-        page_table = list(state.allocation.pages) + list(state.decode_pages)
+        decode_pages = getattr(state, "decode_pages_snapshot", None)
+        if decode_pages is None:
+            decode_pages = tuple(state.decode_pages)
+        page_table = state.allocation.pages + decode_pages
         return input_token, absolute, page_table, cached
 
     def _allocate_decode_slots(self, size: int) -> None:
@@ -1917,7 +1920,7 @@ class PagedModelRunner:
         *,
         tokens: torch.Tensor,
         positions: torch.Tensor,
-        page_tables: list[list[int]],
+        page_tables: Sequence[Sequence[int]],
         seq_lens: list[int],
         max_pages: int,
         scratch_page: int | None,
@@ -1966,7 +1969,7 @@ class PagedModelRunner:
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor,
-        page_tables: list[list[int]],
+        page_tables: Sequence[Sequence[int]],
         seq_lens: list[int],
         write_from: list[int] | None = None,
         row_owners: list[DecodeRowOwner] | None = None,
@@ -2002,7 +2005,7 @@ class PagedModelRunner:
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor,
-        page_tables: list[list[int]],
+        page_tables: Sequence[Sequence[int]],
         seq_lens: list[int],
         write_from: list[int],
         row_owners: list[DecodeRowOwner] | None = None,
@@ -2109,7 +2112,7 @@ class PagedModelRunner:
         list[ScheduledChunk],
         list[int | torch.Tensor],
         list[int],
-        list[list[int]],
+        list[tuple[int, ...]],
         list[int],
         list[int],
         list[DecodeRowOwner],
@@ -2126,7 +2129,7 @@ class PagedModelRunner:
         row_chunks: list[ScheduledChunk] = []
         tokens: list[int | torch.Tensor] = []
         positions: list[int] = []
-        page_tables: list[list[int]] = []
+        page_tables: list[tuple[int, ...]] = []
         seq_lens: list[int] = []
         write_from: list[int] = []
         row_owners: list[DecodeRowOwner] = []

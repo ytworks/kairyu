@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+import kairyu.engine.core.step_executor as step_executor
 from kairyu.engine.core.graph_buckets import bucket_for, decode_buckets
 from kairyu.engine.core.step_executor import (
     DecodeBatch,
@@ -55,6 +56,55 @@ def _batch(size: int, max_pages: int = 1) -> DecodeBatch:
 
 
 class TestDecodePageTableCache:
+    def test_preserves_already_integer_tuple_without_per_page_conversion(self):
+        class _AlreadyInteger(int):
+            def __int__(self):
+                raise AssertionError("page ids must not be converted per step")
+
+        pages = (_AlreadyInteger(3), _AlreadyInteger(4))
+        cache = DecodePageTableCache()
+        page_tables, rows = cache.materialize(
+            [pages],
+            max_pages=2,
+            scratch_page=91,
+            row_owners=[DecodeRowOwner("request")],
+        )
+
+        assert page_tables.tolist() == [[3, 4]]
+        assert rows[0].pages is pages
+
+    def test_append_spans_use_arithmetic_without_column_scans(self, monkeypatch):
+        owner = DecodeRowOwner("request")
+        previous_signature = step_executor.PageTableRow(owner, (1, 2), 91)
+        current_signature = step_executor.PageTableRow(owner, (1, 2, 3), 91)
+        previous = step_executor._CachedPageTableRow(previous_signature, 4)
+        graph_previous = step_executor._GraphPageTableRow(previous_signature, 4)
+        graph_current = step_executor._GraphPageTableRow(current_signature, 4)
+
+        def fail_scan(*_args):
+            raise AssertionError("append-only rows must not scan page columns")
+
+        monkeypatch.setattr(step_executor, "_page_at", fail_scan)
+
+        assert step_executor._dirty_span(previous, current_signature, 4) == (2, 3)
+        assert step_executor._graph_dirty_span(
+            graph_previous,
+            graph_current,
+            width=4,
+            scratch_page=91,
+        ) == (2, 3)
+        assert step_executor._dirty_span(
+            step_executor._CachedPageTableRow(previous_signature, 2),
+            previous_signature,
+            4,
+        ) == (2, 4)
+        assert step_executor._graph_dirty_span(
+            step_executor._GraphPageTableRow(previous_signature, 2),
+            step_executor._GraphPageTableRow(previous_signature, 4),
+            width=4,
+            scratch_page=91,
+        ) is None
+
     def test_preserves_eager_and_graph_padding_contracts(self):
         owners = [DecodeRowOwner("a"), DecodeRowOwner("b")]
         page_lists = [(3, 4), (8,)]
