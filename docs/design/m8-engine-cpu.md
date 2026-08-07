@@ -183,6 +183,16 @@ media bytes.
   builds wire events, and msgpacks an immutable owner snapshot, while only the
   ROUTER thread sends. The process parent resolves every text/templated prompt
   to `TokensPrompt` off its event loop even when `max_model_len` is omitted.
+- **Cumulative-state amendment (2026-08-07, issue #324)**: append-only scheduler
+  outputs cross overlapping step boundaries through immutable-length views, so
+  freezing a step is O(1) without exposing later appends. `StateSync` uses the
+  owner-declared output epoch plus retained lengths and sends only new output
+  and decode-page tails; reallocation, speculative overlay, epoch change, or
+  retraction still forces one full snapshot. The output lane likewise retains
+  mutable cumulative storage behind immutable-length `StreamUpdate` views and
+  appends only new logprob/content entries. Public `CompletionOutput` values,
+  legacy wire frames, and the first v2 snapshot materialize tuples/lists at
+  their compatibility boundaries; steady v2 frames remain deltas.
 - **Stream-backpressure conflation (2026-08-04, issue #335)**: the in-process
   `KairyuBackend` publishes cumulative `StreamUpdate` values through one bounded,
   single-consumer mailbox per request. Empty prefill states replace one another;

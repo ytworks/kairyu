@@ -400,6 +400,64 @@ def test_depths_share_streaming_and_immutable_snapshot_path(depth: int) -> None:
     loop.close()
 
 
+def test_cumulative_update_prefixes_remain_frozen_after_later_steps() -> None:
+    loop, _ = _loop(1, _PositionRunner(base=1000))
+    loop.submit(
+        "frozen-prefix",
+        TokensPrompt((1, 2, 3, 4)),
+        SamplingParams(max_tokens=3, ignore_eos=True),
+    )
+
+    token_updates = [
+        update
+        for request_id, update in _drive(loop)
+        if request_id == "frozen-prefix" and update.outputs
+    ]
+
+    assert [tuple(update.outputs) for update in token_updates] == [
+        (1000,),
+        (1000, 1001),
+        (1000, 1001, 1002),
+    ]
+    loop.close()
+
+
+def test_logprob_presentation_processes_each_token_once(monkeypatch) -> None:
+    calls = 0
+    original = engine_loop_module._token_logprob
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(engine_loop_module, "_token_logprob", counted)
+    loop, _ = _raw_special_loop(
+        {"logprobs": (2, 3, 4, 4)},
+        with_logprobs=True,
+    )
+    loop.submit(
+        "logprobs",
+        "keep prompt",
+        SamplingParams(
+            max_tokens=4,
+            ignore_eos=True,
+            logprobs=3,
+            skip_special_tokens=False,
+        ),
+    )
+
+    final = next(
+        update
+        for request_id, update in _drive(loop)
+        if request_id == "logprobs" and update.finished
+    )
+
+    assert tuple(entry.token_id for entry in final.logprob_content or ()) == (2, 3, 4, 4)
+    assert calls == 4 * 4  # selected token plus three top-logprob entries
+    loop.close()
+
+
 def test_depth_two_schedules_next_snapshot_before_oldest_execute_finishes() -> None:
     events: list[str] = []
 

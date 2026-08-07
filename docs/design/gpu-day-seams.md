@@ -94,6 +94,11 @@ delta to reconstruct snapshot_step()'s exact `RequestSnapshot`s, so
 per step instead of O(all active requests' full state). Byte-identical output:
 the `tests/dist` TP=2/EP=2/PP=2 spawn parity gates (TP=2 == TP=1) pass unchanged,
 plus `test_state_sync_delta_reconstructs_full_snapshot_each_step`.
+Issue #324 removes the remaining driver-side cumulative scan: append-only
+outputs are frozen by reference plus length, and steady `StateSync` decisions
+use output epoch/length while applying only the new output and decode-page tails.
+An epoch change, overlay transition, reallocation, or retraction keeps the full
+snapshot fallback.
 
 **Sampling ownership (landed, issue #225).** Rank 0 is the sole owner of RNG,
 penalty, grammar, and logprob state. Non-zero ranks run a passive model/KV path:

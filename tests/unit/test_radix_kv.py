@@ -22,6 +22,13 @@ def test_first_allocation_is_all_misses():
     assert cache.hit_rate == 0.0
 
 
+def test_allocation_pages_are_concatenated_once():
+    cache = RadixKVCache(num_pages=8, page_size=PAGE)
+    allocation = cache.allocate(_tokens([1, 2, 3, 4], [5, 6, 7, 8]))
+
+    assert allocation.pages is allocation.pages
+
+
 def test_event_only_hash_chain_skips_full_dram_tier_digests(monkeypatch):
     events: list[dict] = []
 

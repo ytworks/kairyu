@@ -17,7 +17,7 @@ loop; there is no alternate production overlap core.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
@@ -26,6 +26,7 @@ from typing import Generic, Protocol, TypeVar
 
 from kairyu.engine.backend import GenerationStageMetric
 from kairyu.engine.core.engine_core import grammar_finished, token_ids
+from kairyu.engine.core.frozen_prefix import FrozenPrefix
 from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 from kairyu.engine.core.step_input import snapshot_step
@@ -97,16 +98,16 @@ class _PendingStep:
 class StreamUpdate:
     """Cumulative per-request snapshot emitted after each engine step."""
 
-    outputs: tuple[int, ...]
+    outputs: Sequence[int]
     text: str
     finished: bool
     finish_reason: str | None
     error: Exception | None = None
-    logprobs: tuple[dict[int, float], ...] | None = None
+    logprobs: Sequence[dict[int, float]] | None = None
     cumulative_logprob: float = 0.0
     num_prompt_tokens: int = 0
     num_cached_tokens: int = 0
-    logprob_content: tuple[TokenLogprob, ...] | None = None
+    logprob_content: Sequence[TokenLogprob] | None = None
     stage_metrics: tuple[GenerationStageMetric, ...] = ()
 
 
@@ -154,7 +155,7 @@ def engine_sampling_from(params: SamplingParams) -> EngineSampling:
 
 
 def _logprob_fields(
-    meta: list[SampledToken],
+    meta: Sequence[SampledToken],
 ) -> tuple[tuple[dict[int, float], ...] | None, float]:
     if not any(token.logprob is not None for token in meta):
         return None, 0.0
@@ -196,7 +197,7 @@ def _token_logprob(
 def _logprob_content(
     decode: Callable[[tuple[int, ...]], str],
     vocabulary: tuple[str, ...],
-    meta: list[SampledToken],
+    meta: Sequence[SampledToken],
 ) -> tuple[TokenLogprob, ...] | None:
     if not any(token.logprob is not None for token in meta):
         return None
@@ -283,7 +284,10 @@ class _RequestTrack:
         "holdback",
         "consumed",
         "stable",
-        "meta",
+        "outputs",
+        "logprobs",
+        "cumulative_logprob",
+        "logprob_content",
         "pending",
         "num_prompt_tokens",
         "num_cached_tokens",
@@ -310,7 +314,10 @@ class _RequestTrack:
         self.holdback = self.stop_matcher.overlap
         self.consumed = 0
         self.stable = ""
-        self.meta: list[SampledToken] = []  # committed tokens' logprob metadata
+        self.outputs: list[int] = []
+        self.logprobs: list[dict[int, float]] | None = None
+        self.cumulative_logprob = 0.0
+        self.logprob_content: list[TokenLogprob] | None = None
         self.pending: list[SampledToken] = []
         self.num_prompt_tokens = num_prompt_tokens
         self.num_cached_tokens = 0
@@ -363,7 +370,6 @@ class _TrackUpdateInput:
 
     request_id: str
     track: _RequestTrack
-    outputs: tuple[int, ...]
     new_ids: tuple[int, ...]
     new_meta: tuple[SampledToken, ...]
     finished: bool
@@ -1036,9 +1042,8 @@ class EngineLoop:
             if state is None:
                 requires_barrier = requires_barrier or track.output_barrier
                 continue
-            outputs = tuple(self._scheduler.output_tokens(request_id))
-            new_ids = outputs[track.consumed :]
-            track.consumed = len(outputs)
+            new_ids = self._scheduler.output_tokens(request_id, track.consumed)
+            track.consumed += len(new_ids)
             # Committed tokens are the prefix of this step's pending metadata;
             # discarded post-terminal tokens drop with the clear.
             new_meta = tuple(track.pending[: len(new_ids)])
@@ -1052,7 +1057,6 @@ class EngineLoop:
                 _TrackUpdateInput(
                     request_id=request_id,
                     track=track,
-                    outputs=outputs,
                     new_ids=new_ids,
                     new_meta=new_meta,
                     finished=finished,
@@ -1320,7 +1324,7 @@ class EngineLoop:
 
     def _materialize_update(self, item: _TrackUpdateInput) -> _TrackUpdateResult:
         track = item.track
-        track.meta.extend(item.new_meta)
+        track.outputs.extend(item.new_ids)
         visible_new_ids = item.new_ids
         if (
             item.new_ids
@@ -1354,25 +1358,41 @@ class EngineLoop:
             track.num_cached_tokens,
             item.num_cached_tokens,
         )
-        logprobs, cumulative = _logprob_fields(track.meta)
-        content = None
-        if any(token.logprob is not None for token in track.meta):
+        new_logprobs, cumulative_delta = _logprob_fields(item.new_meta)
+        if new_logprobs is not None:
+            if track.logprobs is None:
+                track.logprobs = []
+            track.logprobs.extend(new_logprobs)
+            track.cumulative_logprob += cumulative_delta
             if self._logprob_vocab is None:
                 self._logprob_vocab = tuple(self._tokenizer.vocab())
-            content = _logprob_content(
+            new_content = _logprob_content(
                 track.detok.decode,
                 self._logprob_vocab,
-                track.meta,
+                item.new_meta,
             )
+            assert new_content is not None
+            if track.logprob_content is None:
+                track.logprob_content = []
+            track.logprob_content.extend(new_content)
+        outputs = FrozenPrefix(track.outputs)
+        logprobs = (
+            None if track.logprobs is None else FrozenPrefix(track.logprobs)
+        )
+        content = (
+            None
+            if track.logprob_content is None
+            else FrozenPrefix(track.logprob_content)
+        )
 
         def _update(text: str, finished: bool, reason: str | None) -> StreamUpdate:
             return StreamUpdate(
-                item.outputs,
+                outputs,
                 text,
                 finished,
                 reason,
                 logprobs=logprobs,
-                cumulative_logprob=cumulative,
+                cumulative_logprob=track.cumulative_logprob,
                 num_prompt_tokens=track.num_prompt_tokens,
                 num_cached_tokens=track.num_cached_tokens,
                 logprob_content=content,

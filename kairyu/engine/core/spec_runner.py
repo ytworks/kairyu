@@ -36,12 +36,23 @@ from kairyu.engine.core.spec_decode import verify_greedy
 class _OverlayState:
     """Immutable view of a request state with ``outputs`` overridden."""
 
-    __slots__ = ("_base", "outputs", "outputs_override")
+    __slots__ = ("_base", "outputs", "outputs_override", "output_epoch")
 
-    def __init__(self, base: object, outputs: tuple[int, ...]) -> None:
+    def __init__(
+        self,
+        base: object,
+        outputs: tuple[int, ...],
+        *,
+        output_epoch: int | None = None,
+    ) -> None:
         self._base = base
         self.outputs = list(outputs)
         self.outputs_override = True
+        self.output_epoch = (
+            getattr(base, "output_epoch", 0)
+            if output_epoch is None
+            else output_epoch
+        )
 
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_base"), name)
@@ -56,6 +67,17 @@ class SpeculativeRunner:
         self._runner = runner
         self.draft_proposed = 0
         self.draft_accepted = 0
+        self._overlay_epoch = 0
+
+    def _overlay(self, state: object, outputs: tuple[int, ...]) -> _OverlayState:
+        """Give every replaceable draft prefix a distinct sync epoch."""
+
+        self._overlay_epoch += 1
+        return _OverlayState(
+            state,
+            outputs,
+            output_epoch=self._overlay_epoch,
+        )
 
     @property
     def mean_accepted(self) -> float:
@@ -183,7 +205,7 @@ class SpeculativeRunner:
                 committed = tuple(state.outputs)
                 draft = self._propose(chunk, state)
                 drafts[chunk.request_id] = draft
-                runner_states[chunk.request_id] = _OverlayState(
+                runner_states[chunk.request_id] = self._overlay(
                     state, (*committed, *draft)
                 )
                 # The target emits one score for each draft token and one
@@ -242,7 +264,7 @@ class SpeculativeRunner:
                 result = self._runner.execute(
                     (sub_chunk,),
                     {
-                        chunk.request_id: _OverlayState(
+                        chunk.request_id: self._overlay(
                             state,
                             (*committed, *draft[:index]),
                         )

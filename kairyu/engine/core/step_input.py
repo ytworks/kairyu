@@ -13,9 +13,11 @@ so _ToyRunner-style runners execute unchanged on snapshots.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import dataclasses
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from kairyu.engine.core.frozen_prefix import FrozenPrefix
 from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.engine.core.scheduler import ScheduledChunk, SchedulerOutput
 
@@ -34,7 +36,7 @@ class RequestSnapshot:
     request_id: str
     prompt_token_ids: tuple[int, ...]
     computed_prompt: int
-    outputs: tuple[int, ...]
+    outputs: Sequence[int]
     in_flight: int
     page_ids: tuple[int, ...]
     decode_page_ids: tuple[int, ...]
@@ -111,10 +113,14 @@ def _snapshot_state(state: object) -> RequestSnapshot:
         request_id=request.request_id,
         prompt_token_ids=tuple(request.prompt_token_ids),
         computed_prompt=state.computed_prompt,  # type: ignore[attr-defined]
-        outputs=tuple(state.outputs),  # type: ignore[attr-defined]
+        outputs=FrozenPrefix(state.outputs),  # type: ignore[attr-defined]
         in_flight=state.in_flight,  # type: ignore[attr-defined]
         page_ids=tuple(allocation.pages) if allocation is not None else (),
-        decode_page_ids=tuple(state.decode_pages),  # type: ignore[attr-defined]
+        decode_page_ids=(
+            state.decode_pages_snapshot  # type: ignore[attr-defined]
+            if hasattr(state, "decode_pages_snapshot")
+            else tuple(state.decode_pages)  # type: ignore[attr-defined]
+        ),
         eos_token_id=request.eos_token_id,
         max_new_tokens=request.max_new_tokens,
         stop_token_ids=tuple(getattr(request, "stop_token_ids", ())),
@@ -140,7 +146,7 @@ class RequestDelta:
     computed_prompt: int
     new_outputs: tuple[int, ...]
     in_flight: int
-    decode_page_ids: tuple[int, ...]
+    new_decode_page_ids: tuple[int, ...]
     num_cached_tokens: int
 
 
@@ -167,11 +173,13 @@ class StateSync:
 
     def __init__(self) -> None:
         self._states: dict[str, RequestSnapshot] = {}
+        self._outputs: dict[str, list[int]] = {}
 
     def discard(self, request_ids: tuple[str, ...]) -> None:
         """Forget completed request identities before a possible immediate reuse."""
         for request_id in request_ids:
             self._states.pop(request_id, None)
+            self._outputs.pop(request_id, None)
 
     def diff(
         self,
@@ -196,21 +204,25 @@ class StateSync:
         for rid in active:
             snap = _snapshot_state(states[rid])
             prev = None if rid in released else self._states.get(rid)
-            # A delta may only ever APPEND. Comparing the retained prefix rather
-            # than just its length is what makes that true: a preempted request
-            # can change pages/prompt, and a rejected speculative draft replaces
-            # already-sent tokens with different ones at the SAME length. The old
-            # `len(prev) > len(snap)` test missed that case entirely — the delta
-            # came out empty and every worker kept the rejected token forever.
+            # Production scheduler outputs and private decode pages are append-
+            # only for one allocation epoch.  Reallocation, speculative overlay,
+            # or an owner-declared output rewrite takes the full-snapshot path.
             if (
                 prev is None
                 or prev.page_ids != snap.page_ids
                 or prev.prompt_token_ids != snap.prompt_token_ids
                 or prev.output_epoch != snap.output_epoch
                 or prev.outputs_override != snap.outputs_override
-                or snap.outputs[: len(prev.outputs)] != prev.outputs
+                or len(snap.outputs) < len(prev.outputs)
+                or len(snap.decode_page_ids) < len(prev.decode_page_ids)
             ):
-                new.append(snap)
+                new.append(
+                    dataclasses.replace(
+                        snap,
+                        outputs=tuple(snap.outputs),
+                        decode_page_ids=tuple(snap.decode_page_ids),
+                    )
+                )
             else:
                 updates.append(
                     RequestDelta(
@@ -218,7 +230,9 @@ class StateSync:
                         computed_prompt=snap.computed_prompt,
                         new_outputs=snap.outputs[len(prev.outputs):],
                         in_flight=snap.in_flight,
-                        decode_page_ids=snap.decode_page_ids,
+                        new_decode_page_ids=tuple(
+                            snap.decode_page_ids[len(prev.decode_page_ids) :]
+                        ),
                         num_cached_tokens=snap.num_cached_tokens,
                     )
                 )
@@ -235,18 +249,26 @@ class StateSync:
         self.discard(delta.released_ids)
         for rid in delta.dropped:
             self._states.pop(rid, None)
+            self._outputs.pop(rid, None)
         for snap in delta.new:
-            self._states[snap.request_id] = snap
+            outputs = list(snap.outputs)
+            self._outputs[snap.request_id] = outputs
+            self._states[snap.request_id] = dataclasses.replace(
+                snap,
+                outputs=FrozenPrefix(outputs),
+            )
         for update in delta.updates:
-            import dataclasses
-
             prev = self._states[update.request_id]
+            outputs = self._outputs[update.request_id]
+            outputs.extend(update.new_outputs)
             self._states[update.request_id] = dataclasses.replace(
                 prev,
                 computed_prompt=update.computed_prompt,
-                outputs=prev.outputs + update.new_outputs,
+                outputs=FrozenPrefix(outputs),
                 in_flight=update.in_flight,
-                decode_page_ids=update.decode_page_ids,
+                decode_page_ids=(
+                    prev.decode_page_ids + update.new_decode_page_ids
+                ),
                 num_cached_tokens=update.num_cached_tokens,
             )
         active = {chunk.request_id for chunk in delta.chunks}

@@ -1952,11 +1952,15 @@ class KairyuBackend:
         completion = CompletionOutput(
             index=0,
             text=update.text,
-            token_ids=update.outputs,
+            token_ids=tuple(update.outputs),
             cumulative_logprob=update.cumulative_logprob,
-            logprobs=update.logprobs,
+            logprobs=(None if update.logprobs is None else tuple(update.logprobs)),
             finish_reason=update.finish_reason,
-            logprob_content=update.logprob_content,
+            logprob_content=(
+                None
+                if update.logprob_content is None
+                else tuple(update.logprob_content)
+            ),
         )
         return GenerationResult(
             request_id=request.request_id,
@@ -2047,11 +2051,17 @@ class KairyuBackend:
             CompletionOutput(
                 index=index,
                 text=update.text,
-                token_ids=update.outputs,
+                token_ids=tuple(update.outputs),
                 cumulative_logprob=update.cumulative_logprob,
-                logprobs=update.logprobs,
+                logprobs=(
+                    None if update.logprobs is None else tuple(update.logprobs)
+                ),
                 finish_reason=update.finish_reason,
-                logprob_content=update.logprob_content,
+                logprob_content=(
+                    None
+                    if update.logprob_content is None
+                    else tuple(update.logprob_content)
+                ),
             )
             for index, update in sorted(latest.items())
         )
