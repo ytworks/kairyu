@@ -249,6 +249,13 @@ def test_server_section_owns_stable_schema_without_runtime_inheritance():
             ],
             "default": None,
         },
+        "ttft_slo_s": {
+            "anyOf": [
+                {"exclusiveMinimum": 0, "type": "number"},
+                {"type": "null"},
+            ],
+            "default": None,
+        },
         "max_chat_body_bytes": {
             "anyOf": [
                 {"minimum": 1, "type": "integer"},
@@ -279,6 +286,7 @@ server:
   port: 8100
   api_keys_env: KAIRYU_API_KEYS
   max_concurrency: 64
+  ttft_slo_s: 2.0
   max_chat_body_bytes: 16777216
   metrics: false
   protect_metrics: true
@@ -296,6 +304,7 @@ engines:
     assert spec.server.to_server_settings() == ServerSettings(
         api_keys_env="KAIRYU_API_KEYS",
         max_concurrency=64,
+        ttft_slo_s=2.0,
         max_chat_body_bytes=16_777_216,
         metrics=False,
         protect_metrics=True,

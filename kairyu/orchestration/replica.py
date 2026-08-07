@@ -49,6 +49,7 @@ from kairyu.engine.backend import (
     backend_admission_upper_bound,
     backend_admission_upper_bound_async,
     backend_admission_upper_bound_key,
+    backend_supports_slo_defer,
     prepare_backend_request,
     shutdown_all,
     shutdown_all_cancellation_safe,
@@ -641,6 +642,36 @@ class ReplicaPool:
 
     def _eligible_ids(self) -> tuple[str, ...]:
         return self._eligible_snapshot
+
+    @property
+    def supports_slo_defer(self) -> bool:
+        """Whether every placeable replica isolates running deferred work."""
+
+        return self._candidates_support_slo_defer(self._eligible_ids())
+
+    def supports_slo_defer_for_request(self, request: GenerationRequest) -> bool:
+        """Check the exact prepared placement lease, or current candidates."""
+
+        candidates = self._prepared_placement(request, consume=False)
+        if candidates is None:
+            candidates = self._eligible_ids()
+        return self._candidates_support_slo_defer(candidates, request=request)
+
+    def _candidates_support_slo_defer(
+        self,
+        candidates: tuple[str, ...],
+        *,
+        request: GenerationRequest | None = None,
+    ) -> bool:
+        if not candidates:
+            return False
+        return all(
+            backend_supports_slo_defer(
+                self._entries[replica_id].backend,
+                request,
+            )
+            for replica_id in candidates
+        )
 
     def _refresh_eligible_snapshot(self) -> None:
         self._eligible_snapshot = tuple(

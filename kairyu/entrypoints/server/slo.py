@@ -1,13 +1,13 @@
 """F5 CPU logic: SLO admission + autoscale decisions (m11 D6/A11).
 
-``AdmissionController`` predicts TTFT from GATEWAY-observable signals only
-(interactive in-flight count × EMA of observed TTFT per admission-time
-interactive concurrency unit — engine internals are invisible through the
-ZMQ/vLLM backends). Total active work separately bounds the deferred backlog.
-Over-SLO requests shed or defer to lower-priority batch scheduling. ``begin``
-atomically makes that decision and reserves an in-flight slot for
-admitted/deferred work; the caller remains responsible for applying the
-returned action before dispatch.
+``AdmissionController`` predicts TTFT from GATEWAY-observable signals only:
+known ingress elapsed time plus interactive in-flight count × an EMA of
+post-admission TTFT per admission-time interactive concurrency unit. Engine
+internals are invisible through the ZMQ/vLLM backends. Total active work
+separately bounds the deferred backlog. Over-SLO requests shed or defer to
+lower-priority batch scheduling. ``begin`` atomically makes that decision and
+reserves an in-flight slot for admitted/deferred work; the caller remains
+responsible for applying the returned action before dispatch.
 ``autoscale_decision`` is a pure function with hysteresis; execution is a
 deploy-day HPA/KEDA adapter.
 """
@@ -124,21 +124,29 @@ class AdmissionController:
         with self._lock:
             return self._in_flight
 
-    def _predicted_ttft_unlocked(self) -> float:
-        return (self._interactive_in_flight + 1) * self._ttft_per_unit_ema
+    def _predicted_ttft_unlocked(self, elapsed_s: float = 0.0) -> float:
+        return elapsed_s + (
+            (self._interactive_in_flight + 1) * self._ttft_per_unit_ema
+        )
 
-    def _defer_pressure_unlocked(self) -> float:
-        return (self._in_flight + 1) * self._ttft_per_unit_ema
+    def _defer_pressure_unlocked(self, elapsed_s: float = 0.0) -> float:
+        return elapsed_s + ((self._in_flight + 1) * self._ttft_per_unit_ema)
 
-    def predicted_ttft(self) -> float:
+    @staticmethod
+    def _validate_elapsed(elapsed_s: float) -> None:
+        if not math.isfinite(elapsed_s) or elapsed_s < 0:
+            raise ValueError("elapsed_s must be finite and >= 0")
+
+    def predicted_ttft(self, elapsed_s: float = 0.0) -> float:
+        self._validate_elapsed(elapsed_s)
         with self._lock:
-            return self._predicted_ttft_unlocked()
+            return self._predicted_ttft_unlocked(elapsed_s)
 
-    def _decide_unlocked(self) -> AdmissionDecision:
-        predicted = self._predicted_ttft_unlocked()
+    def _decide_unlocked(self, elapsed_s: float = 0.0) -> AdmissionDecision:
+        predicted = self._predicted_ttft_unlocked(elapsed_s)
         if predicted <= self._slo:
             return AdmissionDecision("admit", predicted)
-        defer_pressure = self._defer_pressure_unlocked()
+        defer_pressure = self._defer_pressure_unlocked(elapsed_s)
         if defer_pressure <= self._defer_threshold:
             return AdmissionDecision(
                 "defer", predicted, f"predicted {predicted:.3f}s > SLO {self._slo}s"
@@ -152,21 +160,23 @@ class AdmissionController:
             ),
         )
 
-    def decide(self) -> AdmissionDecision:
+    def decide(self, elapsed_s: float = 0.0) -> AdmissionDecision:
         """Return a diagnostic decision without reserving capacity.
 
         Production callers should use :meth:`begin` so another caller cannot
         enter between the decision and the in-flight increment.
         """
 
+        self._validate_elapsed(elapsed_s)
         with self._lock:
-            return self._decide_unlocked()
+            return self._decide_unlocked(elapsed_s)
 
-    def begin(self) -> AdmissionLease:
-        """Atomically decide and reserve admitted/deferred work."""
+    def begin(self, elapsed_s: float = 0.0) -> AdmissionLease:
+        """Atomically decide and reserve, including known ingress elapsed time."""
 
+        self._validate_elapsed(elapsed_s)
         with self._lock:
-            decision = self._decide_unlocked()
+            decision = self._decide_unlocked(elapsed_s)
             if decision.action == "shed":
                 return AdmissionLease(
                     self,

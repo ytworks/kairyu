@@ -38,6 +38,7 @@ KV pages, TP collectives, and P-D transfers never leave the DC fabric
 | TLS termination, certificates | Cloud LB (or DC reverse proxy) | serves plain HTTP behind it |
 | Client authentication | Gateway | `server.api_keys_env` (static keys, constant-time compare) |
 | Process overload | Gateway | `server.max_concurrency` → 429 + Retry-After |
+| TTFT SLO overload | Gateway | optional `server.ttft_slo_s` → admit, batch-defer, or 429 + Retry-After |
 | Routing inspection | Gateway | `/v1/route` uses data-plane auth; `/routing` remains inside the configured API-key boundary |
 | Node-to-node auth inside the DC | Deployment choice | keyless (`api_key_env: null`) or a shared key env var |
 | Audit trail | Gateway | JSON access log with `X-Request-ID`, JSONL router decision log |
@@ -232,6 +233,7 @@ server:
   port: 8000
   api_keys_env: KAIRYU_API_KEYS     # comma-separated client keys
   max_concurrency: 256
+  ttft_slo_s: 2.0                  # optional direct-chat predictive admission
 pools:
   llama-70b:
     replicas:
@@ -259,6 +261,18 @@ tenants:
       interactive_priority: 0  # smaller values run first
       batch_priority: 1        # Batch API overrides client-supplied priority
 ```
+
+`ttft_slo_s` is opt-in and applies to direct interactive Chat Completions after
+request validation but before backend preparation. The controller admits work
+predicted to meet the target, including time already spent inside gateway
+ingress. A backend may execute the bounded over-target tail at the lowest
+scheduler priority with `scheduling_class="batch"` only by explicitly attesting
+`supports_slo_defer`: running deferred decode must be isolated from later
+interactive work. Current built-in backends do not provide that isolation, so
+they shed the tail instead. Further pressure is also shed with HTTP 429 and
+`Retry-After: 1`. Live predictor state is exported under
+`kairyu_slo_admission_*`; `null` preserves ordinary admission behavior. Bounded
+waiting is a separate policy and is not implied by this setting.
 
 Every tenant profile must keep `interactive_priority < batch_priority`.
 For noisy-neighbor isolation, configure `request_burst`, `token_burst`, and

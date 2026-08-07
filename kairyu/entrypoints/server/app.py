@@ -19,7 +19,7 @@ import uuid
 import weakref
 from collections.abc import AsyncIterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
@@ -46,6 +46,7 @@ from kairyu.engine.backend import (
     GenerationUsage,
     UpstreamClientError,
     backend_admission_upper_bound_async,
+    backend_supports_slo_defer,
     prepare_backend_request,
     validate_backend_request_before_prepare,
 )
@@ -84,6 +85,7 @@ from kairyu.entrypoints.server.metering import (
 )
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.middleware import (
+    _SLO_ADMISSION_LEASE_STATE_KEY,
     AccessLogMiddleware,
     AuthMiddleware,
     ChatBodyLimitMiddleware,
@@ -118,6 +120,7 @@ from kairyu.entrypoints.server.protocol import (
 )
 from kairyu.entrypoints.server.request_body import reuse_prevalidated_model
 from kairyu.entrypoints.server.settings import ServerSettings
+from kairyu.entrypoints.server.slo import AdmissionController, AdmissionLease
 from kairyu.entrypoints.server.sse_encode import (
     ChatContentSSEEncoder,
     CompletionTextSSEEncoder,
@@ -143,6 +146,8 @@ if TYPE_CHECKING:
     from kairyu.entrypoints.server.extra_routes import EmbeddingBackend
 
 logger = logging.getLogger(__name__)
+_LOWEST_SCHEDULER_PRIORITY = 2**63 - 1
+_SLO_INTERACTIVE_PRIORITY_CEILING = _LOWEST_SCHEDULER_PRIORITY - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -483,6 +488,32 @@ def _tenant_limit_response(tenant: str, reason: str) -> JSONResponse:
     )
 
 
+def _slo_shed_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        headers={"Retry-After": "1"},
+        content={
+            "error": {
+                "message": "predicted TTFT exceeds the configured SLO",
+                "type": "rate_limit_error",
+                "code": "slo_admission_shed",
+            }
+        },
+    )
+
+
+def _slo_defer_to_shed_response(
+    http_request: Request,
+    lease: AdmissionLease,
+) -> JSONResponse:
+    state = http_request.scope.setdefault("state", {})
+    if state.get(_SLO_ADMISSION_LEASE_STATE_KEY) is lease:
+        state.pop(_SLO_ADMISSION_LEASE_STATE_KEY)
+    if lease.active:
+        lease.completed()
+    return _slo_shed_response()
+
+
 def _reserve_tenant_work(
     http_request: Request,
     bound: AdmissionUpperBound,
@@ -758,6 +789,7 @@ async def _stream_engine(
     last = None
     sse_write_ns = 0
     sse_write_count = 0
+    first_token_observed = False
     want_trace = generation_request.trace_requested
     if want_trace and trace_started_at is None:
         trace_started_at = utc_now_iso()
@@ -798,7 +830,7 @@ async def _stream_engine(
                         if fresh:
                             chunk_logprobs = ChoiceLogprobs(content=_logprob_entries(fresh))
                     write_started_ns = time.perf_counter_ns() if want_trace else None
-                    yield _chat_content_sse_chunk(
+                    chunk = _chat_content_sse_chunk(
                         content_encoder,
                         response_id,
                         created,
@@ -809,6 +841,16 @@ async def _stream_engine(
                         include_usage=include_usage,
                         logprobs=chunk_logprobs,
                     )
+                    yield chunk
+                    if delta_text and not first_token_observed:
+                        lease = getattr(
+                            http_request.state,
+                            _SLO_ADMISSION_LEASE_STATE_KEY,
+                            None,
+                        )
+                        if lease is not None:
+                            lease.finished_first_token()
+                        first_token_observed = True
                     if write_started_ns is not None:
                         sse_write_ns += time.perf_counter_ns() - write_started_ns
                         sse_write_count += 1
@@ -1134,6 +1176,7 @@ async def _stream_choices(
     stage_metrics: Sequence[GenerationStageMetric] = (),
     trace_started_at: str | None = None,
     want_trace: bool = False,
+    slo_lease: AdmissionLease | None = None,
 ) -> AsyncIterator[str]:
     """Stream already-final choices (orchestrated or tool-call responses)."""
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
@@ -1142,6 +1185,7 @@ async def _stream_choices(
     direct_trace = want_trace and orchestration_result is None and trace_started_at is not None
     sse_write_ns = 0
     sse_write_count = 0
+    first_token_observed = False
     for choice in choices:
         tool_calls = None
         if choice.message.tool_calls:
@@ -1152,7 +1196,7 @@ async def _stream_choices(
                 for i, tc in enumerate(choice.message.tool_calls)
             ]
         write_started_ns = time.perf_counter_ns() if direct_trace else None
-        yield _sse_chunk(
+        chunk = _sse_chunk(
             response_id,
             created,
             model,
@@ -1165,6 +1209,14 @@ async def _stream_choices(
             include_usage=include_usage,
             logprobs=choice.logprobs,
         )
+        yield chunk
+        if (
+            slo_lease is not None
+            and not first_token_observed
+            and (choice.message.content or tool_calls)
+        ):
+            slo_lease.finished_first_token()
+            first_token_observed = True
         if write_started_ns is not None:
             sse_write_ns += time.perf_counter_ns() - write_started_ns
             sse_write_count += 1
@@ -1673,7 +1725,15 @@ def create_app(
 
     metrics = ServerMetrics() if settings.metrics else None
     app.state.metrics = metrics
+    slo_admission = (
+        AdmissionController(settings.ttft_slo_s)
+        if settings.ttft_slo_s is not None
+        else None
+    )
+    app.state.slo_admission = slo_admission
     if metrics is not None:
+        if slo_admission is not None:
+            metrics.track_slo_admission(slo_admission)
         for name, engine in served_engines.items():
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
@@ -2198,6 +2258,55 @@ def create_app(
                 "request_validation",
                 validation_started_ns,
             )
+        slo_lease = None
+        if (
+            slo_admission is not None
+            and validated.generation_request.scheduling_class == "interactive"
+        ):
+            ingress_ns = getattr(http_request.state, "placement_started_ns", None)
+            elapsed_s = (
+                max(0, time.perf_counter_ns() - ingress_ns) / 1_000_000_000
+                if type(ingress_ns) is int
+                else 0.0
+            )
+            lease = slo_admission.begin(elapsed_s=elapsed_s)
+            if lease.decision.action == "shed":
+                return _slo_shed_response()
+            slo_lease = lease
+            http_request.scope.setdefault("state", {})[
+                _SLO_ADMISSION_LEASE_STATE_KEY
+            ] = lease
+            generation_request = validated.generation_request
+            if lease.decision.action == "defer":
+                admission_request = replace(
+                    generation_request,
+                    priority=_LOWEST_SCHEDULER_PRIORITY,
+                    scheduling_class="batch",
+                )
+                if not backend_supports_slo_defer(
+                    validated.engine,
+                    admission_request,
+                ):
+                    return _slo_defer_to_shed_response(http_request, lease)
+            elif generation_request.priority > _SLO_INTERACTIVE_PRIORITY_CEILING:
+                admission_request = replace(
+                    generation_request,
+                    priority=_SLO_INTERACTIVE_PRIORITY_CEILING,
+                )
+            else:
+                admission_request = generation_request
+            if admission_request is not generation_request:
+                try:
+                    validate_backend_request_before_prepare(
+                        validated.engine,
+                        admission_request,
+                    )
+                except ValueError as error:
+                    return invalid_request(str(error))
+                validated = replace(
+                    validated,
+                    generation_request=admission_request,
+                )
         prepare_started_ns = time.perf_counter_ns()
         try:
             await prepare_backend_request(
@@ -2228,6 +2337,15 @@ def create_app(
                 "backend_prepare",
                 prepare_started_ns,
             )
+        if (
+            slo_lease is not None
+            and slo_lease.decision.action == "defer"
+            and not backend_supports_slo_defer(
+                validated.engine,
+                validated.generation_request,
+            )
+        ):
+            return _slo_defer_to_shed_response(http_request, slo_lease)
         admission_started_ns = time.perf_counter_ns()
         try:
             bound = await backend_admission_upper_bound_async(
@@ -2300,6 +2418,7 @@ def create_app(
                     stage_metrics=executed.result.stage_metrics,
                     trace_started_at=trace_started_at,
                     want_trace=want_trace,
+                    slo_lease=slo_lease,
                 )
             )
         payload = _chat_response_payload(response)
