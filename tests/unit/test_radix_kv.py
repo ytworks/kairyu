@@ -235,6 +235,37 @@ def test_double_free_rejected():
         cache.free(allocation)
 
 
+def test_preempted_uncomputed_pages_are_discarded_before_cached_prefix() -> None:
+    cache = RadixKVCache(num_pages=3, page_size=PAGE)
+    cold_tokens = tuple(range(101, 105))
+    cold = cache.allocate(cold_tokens)
+    cache.mark_computed(cold)
+    cache.free(cold)
+    victim = cache.allocate(tuple(range(1, 9)))
+    assert cache.num_free_pages == 0
+
+    cache.release_preempted(victim)
+
+    assert cache.num_free_pages == 2
+    assert cache.peek_cached_tokens(cold_tokens) == PAGE
+
+
+def test_preempted_suffix_discard_preserves_its_cached_parent() -> None:
+    cache = RadixKVCache(num_pages=3, page_size=PAGE)
+    parent_tokens = tuple(range(1, 5))
+    parent = cache.allocate(parent_tokens)
+    cache.mark_computed(parent)
+    cache.free(parent)
+    full_tokens = tuple(range(1, 9))
+    suffix = cache.allocate(full_tokens)
+    assert suffix.num_cached_tokens == PAGE
+
+    cache.release_preempted(suffix)
+
+    assert cache.peek_cached_tokens(full_tokens) == PAGE
+    assert cache.num_free_pages == 2
+
+
 def test_private_pages_for_decode_growth():
     cache = RadixKVCache(num_pages=2, page_size=PAGE)
     page = cache.allocate_private_page()

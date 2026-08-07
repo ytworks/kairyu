@@ -117,6 +117,7 @@ def test_policy_restores_the_available_prefix_above_the_crossover_only() -> None
 
     _publish(cache, (1, 2, 3, 4, 5, 6))
     _publish(cache, (11, 12, 13, 14, 15, 16))  # stores the three-page prefix
+    assert cache.peek_cached_or_restorable_tokens((1, 2, 3, 4, 5, 6, 7, 8)) == 6
     allocation = cache.allocate((1, 2, 3, 4, 5, 6, 7, 8))
 
     assert allocation.num_cached_tokens == 6
@@ -198,6 +199,97 @@ def test_failed_dram_restore_reduces_scheduler_completion_margin() -> None:
     assert scheduler.states["q2"].prefill_done is True
     assert scheduler.states["q2"].in_flight == 1
     assert scheduler.waiting_ids == ("q3",)
+
+
+def test_priority_policy_hold_does_not_preempt_for_possible_dram_hit() -> None:
+    cache = RadixKVCache(num_pages=6, page_size=4)
+    tier = _FakeTier()
+    cache.attach_dram_tier(tier, min_restore_tokens=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=2,
+        max_num_seqs=3,
+        max_num_partial_prefills=2,
+        pd_separation=True,
+        decode_token_budget=1,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(EngineRequest("d0", (1,), max_new_tokens=5))
+    scheduler.add_request(EngineRequest("d1", (2,), max_new_tokens=5))
+    scheduler.schedule()
+    scheduler.update({"d0": 10, "d1": 11})
+    scheduler.add_request(
+        EngineRequest("victim", tuple(range(101, 109)), max_new_tokens=1, priority=2)
+    )
+    scheduler.schedule()
+    scheduler.update({"d0": 12})
+    held_tokens = tuple(range(201, 205))
+    _publish(cache, held_tokens)
+    _publish(cache, tuple(range(301, 309)))
+    assert cache.num_free_pages == 0
+    assert cache.peek_cached_tokens(held_tokens) == 0
+    assert len(tier.entries) == 1
+    assert cache.peek_cached_or_restorable_tokens(held_tokens) == 4
+    scheduler.add_request(
+        EngineRequest("held", held_tokens, max_new_tokens=20, priority=0)
+    )
+
+    plan = scheduler.schedule()
+
+    assert [
+        (chunk.request_id, chunk.is_prefill, chunk.num_tokens)
+        for chunk in plan.scheduled
+    ] == [("d0", False, 1), ("victim", True, 2)]
+    assert scheduler.waiting_ids == ("held",)
+    assert scheduler.states["victim"].computed_prompt == 4
+    assert scheduler.priority_metrics_snapshot()["events"][("interactive", "preempt")] == 0
+    assert tier.restore_calls == 0
+    assert cache.peek_cached_tokens(held_tokens) == 0
+
+
+def test_empty_dram_tier_does_not_create_a_false_priority_policy_hold() -> None:
+    cache = RadixKVCache(num_pages=6, page_size=4)
+    tier = _FakeTier()
+    cache.attach_dram_tier(tier, min_restore_tokens=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=2,
+        max_num_seqs=3,
+        max_num_partial_prefills=2,
+        pd_separation=True,
+        decode_token_budget=1,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(EngineRequest("d0", (1,), max_new_tokens=5))
+    scheduler.add_request(EngineRequest("d1", (2,), max_new_tokens=5))
+    scheduler.schedule()
+    scheduler.update({"d0": 10, "d1": 11})
+    scheduler.add_request(
+        EngineRequest("victim", tuple(range(101, 109)), max_new_tokens=1, priority=2)
+    )
+    scheduler.schedule()
+    scheduler.update({"d0": 12})
+    cold_tokens = tuple(range(301, 309))
+    _publish(cache, cold_tokens)
+    held_tokens = tuple(range(201, 205))
+    assert cache.num_free_pages == 0
+    assert not tier.entries
+    assert cache.peek_cached_or_restorable_tokens(held_tokens) == 0
+    scheduler.add_request(
+        EngineRequest("held", held_tokens, max_new_tokens=20, priority=0)
+    )
+
+    plan = scheduler.schedule()
+
+    assert [
+        (chunk.request_id, chunk.is_prefill, chunk.num_tokens)
+        for chunk in plan.scheduled
+    ] == [("d0", False, 1), ("held", True, 2)]
+    assert scheduler.waiting_ids == ("victim",)
+    assert scheduler.states["held"].computed_prompt == 2
+    assert scheduler.priority_metrics_snapshot()["events"][("interactive", "preempt")] == 1
+    assert tier.restore_calls == 0
+    assert cache.peek_cached_tokens(cold_tokens) == len(cold_tokens)
 
 
 def test_safely_failed_restore_falls_back_to_recompute_without_publication() -> None:

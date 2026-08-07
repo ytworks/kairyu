@@ -576,6 +576,117 @@ def test_waiting_higher_priority_runs_before_lower_priority_running_prefill() ->
     assert scheduler.states["batch"].computed_prompt == 4
 
 
+def test_priority_cohort_hold_does_not_recompute_preempt_other_tiers() -> None:
+    now = [0.0]
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=256, page_size=4),
+        max_num_batched_tokens=12,
+        max_num_seqs=4,
+        priority_age_s=1.0,
+        clock=lambda: now[0],
+    )
+    scheduler.add_request(
+        EngineRequest("victim", tuple(range(1, 49)), max_new_tokens=1, priority=7)
+    )
+    scheduler.schedule()
+    now[0] = 1.0
+    scheduler.add_request(
+        EngineRequest("cohort", tuple(range(101, 149)), max_new_tokens=1, priority=5)
+    )
+    scheduler.schedule()
+    assert scheduler.states["victim"].computed_prompt == 12
+    assert scheduler.states["cohort"].computed_prompt == 12
+
+    now[0] = 6.5
+    scheduler.add_request(
+        EngineRequest("held", tuple(range(201, 209)), max_new_tokens=1, priority=0)
+    )
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in step.scheduled] == [
+        ("cohort", 12)
+    ]
+    assert scheduler.states["victim"].computed_prompt == 12
+    assert scheduler.waiting_ids == ("held",)
+    assert scheduler.priority_metrics_snapshot()["events"][("interactive", "preempt")] == 0
+
+
+def test_deferred_zero_share_does_not_recompute_preempt_other_tiers() -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=16, page_size=4),
+        max_num_batched_tokens=4,
+        max_num_seqs=4,
+        priority_age_s=0.0,
+    )
+    scheduler.enable_deferred_handoff_overlap()
+    scheduler.add_request(
+        EngineRequest("victim", tuple(range(1, 21)), max_new_tokens=1, priority=1)
+    )
+    scheduler.schedule()
+    scheduler.add_request(
+        EngineRequest("completion", tuple(range(101, 106)), max_new_tokens=1, priority=0)
+    )
+    scheduler.schedule()
+    scheduler.add_request(
+        EngineRequest("held", (201,), max_new_tokens=1, priority=0)
+    )
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in step.scheduled] == [
+        ("completion", 1),
+        ("victim", 3),
+    ]
+    assert scheduler.states["victim"].computed_prompt == 7
+    assert scheduler.waiting_ids == ("held",)
+    assert scheduler.priority_metrics_snapshot()["events"][("interactive", "preempt")] == 0
+
+
+@pytest.mark.parametrize("max_num_seqs", [3, 4], ids=["full", "free"])
+def test_completion_margin_hold_does_not_recompute_preempt(
+    max_num_seqs: int,
+) -> None:
+    scheduler = Scheduler(
+        RadixKVCache(num_pages=6, page_size=4),
+        max_num_batched_tokens=2,
+        max_num_seqs=max_num_seqs,
+        max_num_partial_prefills=2,
+        pd_separation=True,
+        decode_token_budget=1,
+        priority_age_s=0.0,
+    )
+    scheduler.add_request(EngineRequest("d0", (1,), max_new_tokens=5))
+    scheduler.add_request(EngineRequest("d1", (2,), max_new_tokens=5))
+    scheduler.schedule()
+    scheduler.update({"d0": 10, "d1": 11})
+    scheduler.add_request(
+        EngineRequest("victim", tuple(range(101, 109)), max_new_tokens=1, priority=2)
+    )
+    scheduler.schedule()
+    scheduler.update({"d0": 12})
+    cold_tokens: tuple[int, ...] = ()
+    if max_num_seqs == 3:
+        cold_tokens = tuple(range(301, 309))
+        cold = scheduler.kv_cache.allocate(cold_tokens)
+        scheduler.kv_cache.mark_computed(cold)
+        scheduler.kv_cache.free(cold)
+    scheduler.add_request(EngineRequest("held", (201,), max_new_tokens=8, priority=0))
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.is_prefill, chunk.num_tokens) for chunk in step.scheduled] == [
+        ("d0", False, 1),
+        ("victim", True, 2),
+    ]
+    assert scheduler.states["victim"].computed_prompt == 4
+    assert scheduler.waiting_ids == ("held",)
+    assert scheduler.priority_metrics_snapshot()["events"][("interactive", "preempt")] == 0
+    assert len(scheduler._running) <= max_num_seqs
+    if cold_tokens:
+        assert scheduler.kv_cache.peek_cached_tokens(cold_tokens) == len(cold_tokens)
+
+
 def test_higher_priority_preempts_output_free_prefill_for_sequence_slot() -> None:
     scheduler = Scheduler(
         RadixKVCache(num_pages=8, page_size=4),
@@ -601,6 +712,45 @@ def test_higher_priority_preempts_output_free_prefill_for_sequence_slot() -> Non
     assert [chunk.request_id for chunk in step.scheduled] == ["interactive"]
     assert scheduler.waiting_ids == ("batch",)
     assert scheduler.states["batch"].computed_prompt == 0
+
+
+def test_full_sequence_priority_probe_does_not_evict_cold_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cache = RadixKVCache(num_pages=3, page_size=4)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=4,
+        max_num_seqs=1,
+        max_num_partial_prefills=1,
+        priority_age_s=0.0,
+    )
+    cold_tokens = tuple(range(101, 105))
+    cold = cache.allocate(cold_tokens)
+    cache.mark_computed(cold)
+    cache.free(cold)
+    scheduler.add_request(
+        EngineRequest("victim", tuple(range(1, 9)), max_new_tokens=1, priority=10)
+    )
+    scheduler.schedule()
+    assert cache.peek_cached_tokens(cold_tokens) == 4
+    monkeypatch.setattr(
+        cache,
+        "peek_cached_or_restorable_tokens",
+        lambda _tokens: pytest.fail("one-output request must not probe DRAM"),
+    )
+    scheduler.add_request(
+        EngineRequest("head", tuple(range(201, 205)), max_new_tokens=1, priority=0)
+    )
+
+    step = scheduler.schedule()
+
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in step.scheduled] == [
+        ("head", 4)
+    ]
+    assert scheduler.waiting_ids == ("victim",)
+    assert cache.peek_cached_tokens(cold_tokens) == 4
+    assert cache.num_free_pages == 1
 
 
 def test_higher_priority_preempts_output_free_prefill_for_kv_pages() -> None:

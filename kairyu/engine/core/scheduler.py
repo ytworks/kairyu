@@ -1346,10 +1346,6 @@ class Scheduler:
             return
         while self._waiting and budget.remaining > 0:
             request_id = self._waiting.peek()
-            victim_id = self._lower_priority_prefill_victim(request_id)
-            if victim_id is None:
-                break
-
             state = self._states[request_id]
             required_pages = -(-state.prompt_len // self._page_size)
             if state.prompt_len == 0 or required_pages > self._kv.num_pages:
@@ -1358,10 +1354,81 @@ class Scheduler:
                 # head directly so priority-ahead cannot spin forever.
                 self._reject_unadmittable(request_id, state)
                 continue
-            if len(self._running) >= self._max_seqs:
+            if budget.limit_for(request_id) < 1:
+                break
+            if (
+                budget.public_priority is not None
+                and state.request.priority != budget.public_priority
+                and self._has_incomplete_cohort_prefill(budget)
+            ):
+                break
+            victim_id = self._lower_priority_prefill_victim(request_id)
+            if victim_id is None:
+                break
+            # Probe policy before discarding work only when the probe cannot
+            # evict cached prefixes; success immediately swaps out the victim.
+            sequence_full = len(self._running) >= self._max_seqs
+            _head_compute, head_new_pages = self._waiting_compute_and_new_pages(state)
+            probe_full_sequence = (
+                sequence_full and head_new_pages <= self._kv.num_free_pages
+            )
+            if sequence_full and not probe_full_sequence:
+                prompt_pages = -(-state.prompt_len // self._page_size)
+                target_pages = -(
+                    -(state.prompt_len + state.request.max_new_tokens)
+                    // self._page_size
+                )
+                required_margin = head_new_pages + max(
+                    0,
+                    target_pages - prompt_pages,
+                )
+                if (
+                    state.request.max_new_tokens > 1
+                    and budget.persistent_prefills > 0
+                    and required_margin > budget.completion_margin_pages
+                ):
+                    potential_cached = self._kv.peek_cached_or_restorable_tokens(
+                        state.request.prompt_token_ids
+                    )
+                    potential_compute = state.prompt_len - min(
+                        potential_cached,
+                        state.prompt_len - 1,
+                    )
+                    if potential_compute == 1:
+                        # Do not discard running work or cached prefixes for a
+                        # completion that still fails the decode escape margin.
+                        break
+            victim_released = sequence_full and not probe_full_sequence
+            if victim_released:
                 self._requeue_preempted(victim_id, self._states[victim_id])
+            blocked_on_kv = self._admit_waiting(
+                budget,
+                plan,
+                max_admissions=1,
+                allow_skip_ahead=False,
+                allow_sequence_overcommit=probe_full_sequence,
+            )
+            if state.status is _Status.RUNNING:
+                if probe_full_sequence:
+                    self._requeue_preempted(victim_id, self._states[victim_id])
+                continue
+            if request_id not in self._states or state.status is _Status.FINISHED:
+                # Empty/oversized head was rejected; reevaluate the new head.
+                continue
+            if not blocked_on_kv:
+                break
 
-            self._admit_waiting(
+            # Allocation can still fail despite the page-count estimate (for
+            # example, pinned radix pages). Release another outranked prefill.
+            if victim_released:
+                victim_id = self._lower_priority_prefill_victim(request_id)
+                if victim_id is None:
+                    break
+            self._requeue_preempted(victim_id, self._states[victim_id])
+            # Retry immediately after releasing pages.  Waiting until the next
+            # loop iteration would first require another eligible victim and
+            # could therefore skip the only useful post-release allocation.
+            blocked_on_kv = self._admit_waiting(
                 budget,
                 plan,
                 max_admissions=1,
@@ -1370,24 +1437,9 @@ class Scheduler:
             if state.status is _Status.RUNNING:
                 continue
             if request_id not in self._states or state.status is _Status.FINISHED:
-                # Empty/oversized head was rejected; reevaluate the new head.
                 continue
-
-            # Allocation can still fail despite the page-count estimate (for
-            # example, pinned radix pages). Release another outranked prefill.
-            victim_id = self._lower_priority_prefill_victim(request_id)
-            if victim_id is None:
+            if not blocked_on_kv:
                 break
-            self._requeue_preempted(victim_id, self._states[victim_id])
-            # Retry immediately after releasing pages.  Waiting until the next
-            # loop iteration would first require another eligible victim and
-            # could therefore skip the only useful post-release allocation.
-            self._admit_waiting(
-                budget,
-                plan,
-                max_admissions=1,
-                allow_skip_ahead=False,
-            )
 
     def _admit_waiting(
         self,
@@ -1396,12 +1448,17 @@ class Scheduler:
         *,
         max_admissions: int | None = None,
         allow_skip_ahead: bool = True,
-    ) -> None:
+        allow_sequence_overcommit: bool = False,
+    ) -> bool:
+        """Admit waiting work and report whether KV capacity stopped it."""
+
         admitted = 0
+        blocked_on_kv = False
         while (
             self._waiting
             and budget.remaining > 0
-            and len(self._running) < self._max_seqs
+            and len(self._running)
+            < self._max_seqs + int(allow_sequence_overcommit)
             and (max_admissions is None or admitted < max_admissions)
         ):
             head_id = self._waiting.peek()
@@ -1471,6 +1528,7 @@ class Scheduler:
             state = head
             bypassed = False
             if head_blocked:
+                blocked_on_kv = True
                 if allow_skip_ahead:
                     budget.drop_share(head_id)
                 if (
@@ -1565,6 +1623,7 @@ class Scheduler:
             admitted += 1
             if bypassed:
                 break
+        return blocked_on_kv
 
     def schedule(self) -> SchedulerOutput:
         """Plan one step. With P-D separation, decodes and prefills draw from
