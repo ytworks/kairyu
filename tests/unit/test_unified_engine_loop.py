@@ -7,6 +7,8 @@ and are kept only as compatibility harnesses.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
 
 import pytest
@@ -1379,6 +1381,132 @@ def test_production_builder_exposes_pipeline_depth() -> None:
 
     assert loop.pipeline_depth == 3
     loop.close()
+
+
+async def test_depth_one_backend_overlaps_output_with_next_step_and_returns_stop(
+    monkeypatch,
+) -> None:
+    detokenize_entered = threading.Event()
+    release_detokenize = threading.Event()
+    later_device_step_finished = threading.Event()
+    detokenize_threads: list[int] = []
+
+    class _GatedDetokenizer:
+        def __init__(
+            self,
+            _tokenizer,
+            *,
+            skip_special_tokens: bool = True,
+        ) -> None:
+            del skip_special_tokens
+            self.stable = ""
+
+        def push(self, token_ids) -> str:
+            detokenize_threads.append(threading.get_ident())
+            detokenize_entered.set()
+            if not release_detokenize.wait(2):
+                raise TimeoutError("test did not release detokenization")
+            self.stable += "".join(
+                chr(ord("a") + token_id % 26) for token_id in token_ids
+            )
+            return self.stable
+
+        def finalize(self) -> str:
+            return self.stable
+
+        @staticmethod
+        def decode(token_ids) -> str:
+            return "".join(
+                chr(ord("a") + token_id % 26) for token_id in token_ids
+            )
+
+    class _OverlapRunner(_PositionRunner):
+        def __init__(self) -> None:
+            super().__init__()
+            self.threads: list[int] = []
+
+        def execute(self, scheduled, states):
+            self.threads.append(threading.get_ident())
+            if any(
+                not chunk.is_prefill and chunk.position >= 1
+                for chunk in scheduled
+            ):
+                if not detokenize_entered.wait(2):
+                    raise TimeoutError("detokenization did not start")
+                later_device_step_finished.set()
+            return super().execute(scheduled, states)
+
+    monkeypatch.setattr(
+        engine_loop_module,
+        "IncrementalDetokenizer",
+        _GatedDetokenizer,
+    )
+    runner = _OverlapRunner()
+    backend = KairyuBackend(
+        tokenizer=_CharTokenizer(),
+        runner=runner,
+        pipeline_depth=1,
+    )
+    finish_threads: list[int] = []
+    original_finish_early = backend._scheduler.finish_early
+
+    def tracked_finish_early(request_id: str) -> None:
+        finish_threads.append(threading.get_ident())
+        original_finish_early(request_id)
+
+    monkeypatch.setattr(
+        backend._scheduler,
+        "finish_early",
+        tracked_finish_early,
+    )
+    request = GenerationRequest(
+        request_id="output-lane",
+        prompt="one two three",
+        sampling_params=SamplingParams(max_tokens=4, ignore_eos=True),
+    )
+    generation = asyncio.create_task(backend.generate(request))
+
+    try:
+        detokenize_started = await asyncio.to_thread(
+            detokenize_entered.wait,
+            2,
+        )
+        device_progressed = await asyncio.to_thread(
+            later_device_step_finished.wait,
+            2,
+        )
+        assert detokenize_started
+        assert device_progressed
+        assert not generation.done()
+        release_detokenize.set()
+        result = await asyncio.wait_for(generation, 5)
+        assert result.finished
+        assert detokenize_threads
+        assert set(detokenize_threads).isdisjoint(runner.threads)
+
+        stopped = await backend.generate(
+            GenerationRequest(
+                request_id="output-stop",
+                prompt="one two three",
+                sampling_params=SamplingParams(
+                    max_tokens=4,
+                    stop=("a",),
+                    ignore_eos=True,
+                ),
+            )
+        )
+        assert stopped.finished
+        assert stopped.completions[0].text == ""
+        assert stopped.completions[0].finish_reason == "stop"
+        assert finish_threads
+        assert set(finish_threads) <= set(runner.threads)
+        assert set(finish_threads).isdisjoint(detokenize_threads)
+    finally:
+        release_detokenize.set()
+        if not generation.done():
+            generation.cancel()
+            await asyncio.gather(generation, return_exceptions=True)
+        await backend.shutdown()
 
 
 async def test_backend_streams_stop_holdback_through_depth_two() -> None:

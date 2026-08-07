@@ -1,10 +1,11 @@
 """Engine-core service process: ZMQ ROUTER + msgpack over one EngineLoop (m8 D6).
 
 The service owns tokenizer + sampler + scheduler + runner — the deploy-day
-process layout. Single-threaded loop: drain socket ops → one engine step →
-send events; the m8 D1 op discipline holds by construction. Heartbeats are
-answered between steps, so the client's death-detection timeout must exceed
-the worst-case step time.
+process layout. Its socket thread drains ops, polls control traffic, and sends
+already-packed events. One serial step executor advances the engine, while the
+loop's private serial output lane detokenizes and encodes wire events. The
+socket keeps polling during both phases; the death-detection timeout still must
+allow for transport and process scheduling delays.
 
 Wire protocol (msgpack maps):
   client → service: {"op": "add", "request_id", "prompt", "sampling": {...},
@@ -40,6 +41,7 @@ import logging
 import os
 import tempfile
 from collections.abc import Iterator, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -51,6 +53,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from kairyu.engine.engine_loop import StreamUpdate
 
 _POLL_IDLE_MS = 50
+_POLL_ACTIVE_MS = 1
 LEGACY_WIRE_VERSION = 1
 WIRE_VERSION = 2
 _SUPPORTED_WIRE_VERSIONS = frozenset({LEGACY_WIRE_VERSION, WIRE_VERSION})
@@ -394,6 +397,38 @@ def _decode_graph_metadata_to_wire(engine_loop) -> dict | None:
     }
 
 
+def _encode_update_batch(
+    owners: Mapping[str, _RequestOwner],
+    updates: list[tuple[str, StreamUpdate]],
+    msgpack,
+    graph_metadata: Mapping[str, object] | None,
+) -> list[tuple[str, _RequestOwner, bool, bytes]]:
+    """Build and pack one FIFO update batch away from the socket thread."""
+
+    encoded: list[tuple[str, _RequestOwner, bool, bytes]] = []
+    for request_id, update in updates:
+        owner = owners.get(request_id)
+        if owner is None:
+            continue
+        event = event_from_update(
+            request_id,
+            update,
+            wire_version=owner.wire_version,
+            cursor=owner.cursor,
+            trace_requested=owner.trace_requested,
+        )
+        if event is None:
+            continue
+        if owner.stream_id is not None:
+            event["stream_id"] = owner.stream_id
+        if graph_metadata is not None:
+            event["decode_graph_metadata"] = dict(graph_metadata)
+        encoded.append(
+            (request_id, owner, update.finished, msgpack.packb(event))
+        )
+    return encoded
+
+
 def _parallel_failure_frame(engine_loop) -> dict | None:
     """Return one sanitized fatal frame for an unusable parallel group."""
 
@@ -591,12 +626,36 @@ def run_engine_service(
     port_pipe.close()
 
     owners: dict[str, _RequestOwner] = {}
+    step_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="kairyu-step",
+    )
+    step_future: Future | None = None
+    step_clears_socket_boundary = False
+    ready_batch = None
+    pending_output = None
+    output_ack_future: Future | None = None
+    step_error: BaseException | None = None
+    socket_boundary_pending = False
     running = True
     try:
         while running:
-            timeout = 0 if engine_loop.has_work() else _POLL_IDLE_MS
+            active = step_error is not None or any(
+                item is not None
+                for item in (
+                    step_future,
+                    ready_batch,
+                    pending_output,
+                    output_ack_future,
+                )
+            )
+            timeout = (
+                _POLL_ACTIVE_MS
+                if active
+                else (0 if engine_loop.has_work() else _POLL_IDLE_MS)
+            )
             socket.poll(timeout)
-            while socket.poll(0):
+            while not socket_boundary_pending and socket.poll(0):
                 identity, raw = socket.recv_multipart()
                 # Per-message fault isolation: a malformed frame, a bad sampling
                 # payload, or a duplicate request_id must fail only the offending
@@ -668,6 +727,7 @@ def run_engine_service(
                         if owner is None or owner.stream_id == message.get("stream_id"):
                             engine_loop.abort(request_id)
                             owners.pop(request_id, None)
+                            socket_boundary_pending = True
                         # Apply abort/_forget before accepting a queued add with
                         # the same ID; otherwise one socket-drain batch sees it
                         # as a duplicate even though the client awaited abort send.
@@ -716,27 +776,87 @@ def run_engine_service(
                     )
             if not running:
                 break
-            if engine_loop.has_work():
-                for request_id, update in engine_loop.step():
-                    owner = owners.get(request_id)
-                    if owner is None:
+
+            if output_ack_future is not None and output_ack_future.done():
+                encoded = output_ack_future.result()
+                output_ack_future = None
+                for request_id, owner, finished, payload in encoded:
+                    if owners.get(request_id) is not owner:
                         continue
-                    event = event_from_update(
-                        request_id,
-                        update,
-                        wire_version=owner.wire_version,
-                        cursor=owner.cursor,
-                        trace_requested=owner.trace_requested,
-                    )
-                    if event is None:
-                        continue
-                    if owner.stream_id is not None:
-                        event["stream_id"] = owner.stream_id
-                    graph_metadata = _decode_graph_metadata_to_wire(engine_loop)
-                    if graph_metadata is not None:
-                        event["decode_graph_metadata"] = graph_metadata
-                    socket.send_multipart([owner.identity, msgpack.packb(event)])
-                    if update.finished:
+                    socket.send_multipart([owner.identity, payload])
+                    if finished:
                         del owners[request_id]
+
+            if pending_output is not None and pending_output.future.done():
+                if pending_output.requires_barrier:
+                    # Stop-string feedback must return to the scheduler owner
+                    # before another step. The core executor is idle whenever
+                    # a barrier output is active.
+                    output_ack_future = step_executor.submit(
+                        engine_loop.finish_output,
+                        pending_output,
+                    )
+                else:
+                    encoded = engine_loop.finish_output(pending_output)
+                    for request_id, owner, finished, payload in encoded:
+                        if owners.get(request_id) is not owner:
+                            continue
+                        socket.send_multipart([owner.identity, payload])
+                        if finished:
+                            del owners[request_id]
+                pending_output = None
+
+            if step_future is not None and step_future.done():
+                try:
+                    ready_batch = step_future.result()
+                except BaseException as error:
+                    step_error = error
+                step_future = None
+                if step_clears_socket_boundary:
+                    socket_boundary_pending = False
+                    step_clears_socket_boundary = False
+
+            if (
+                ready_batch is not None
+                and pending_output is None
+                and output_ack_future is None
+            ):
+                batch, ready_batch = ready_batch, None
+                owner_snapshot = dict(owners)
+                graph_metadata = _decode_graph_metadata_to_wire(engine_loop)
+                pending_output = engine_loop.start_output(
+                    batch,
+                    lambda updates,
+                    owner_snapshot=owner_snapshot,
+                    graph_metadata=graph_metadata: _encode_update_batch(
+                        owner_snapshot,
+                        updates,
+                        msgpack,
+                        graph_metadata,
+                    ),
+                )
+
+            if (
+                step_error is not None
+                and pending_output is None
+                and output_ack_future is None
+                and ready_batch is None
+            ):
+                raise step_error
+
+            can_advance = (
+                step_future is None
+                and ready_batch is None
+                and output_ack_future is None
+                and step_error is None
+                and (
+                    pending_output is None
+                    or not pending_output.requires_barrier
+                )
+            )
+            if can_advance and engine_loop.has_work():
+                step_clears_socket_boundary = socket_boundary_pending
+                step_future = step_executor.submit(engine_loop.advance_output)
     finally:
+        step_executor.shutdown(wait=True, cancel_futures=True)
         _cleanup_engine_service(engine_loop, socket, context)

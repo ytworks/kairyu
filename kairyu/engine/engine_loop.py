@@ -2,9 +2,10 @@
 
 One thread-agnostic core used by both process layouts:
 ``KairyuBackend`` drives it from an asyncio pump (``asyncio.to_thread``), the
-ZMQ ``engine_service`` drives it from its single-threaded socket loop. All
-scheduler mutations (submit/abort/stop-string ``finish_early``) happen inside
-``step()`` — the m8 D1 op discipline holds by construction.
+ZMQ ``engine_service`` drives it from its socket loop. All scheduler mutations
+(submit/abort/stop-string ``finish_early``) happen inside the serialized step
+boundary, while production detokenization and output encoding run on one
+private serial output lane.
 
 ``pipeline_depth=1`` is the historical synchronous behavior. Larger depths
 freeze each scheduled step and let the device worker run step N while this
@@ -17,11 +18,11 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
 from time import perf_counter_ns
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar
 
 from kairyu.engine.backend import GenerationStageMetric
 from kairyu.engine.core.engine_core import grammar_finished, token_ids
@@ -47,6 +48,7 @@ from kairyu.sampling_params import RESPONSE_FORMAT_EXTRA_ARG, SamplingParams
 
 _DEFAULT_MAX_NEW_TOKENS = 16
 _DEFAULT_PIPELINE_DEPTH = 1
+_OutputT = TypeVar("_OutputT")
 _TRACE_STAGE_ORDER = (
     "tokenize",
     "queue_wait",
@@ -290,6 +292,7 @@ class _RequestTrack:
         "first_schedule_observed",
         "stage_durations_ns",
         "stage_occurrences",
+        "output_barrier",
     )
 
     def __init__(
@@ -320,6 +323,10 @@ class _RequestTrack:
         self.stage_occurrences: dict[str, int] | None = (
             {} if trace_requested else None
         )
+        # Stop matching can feed ``finish_early`` back into the scheduler, and
+        # trace accumulation currently shares one request-local metrics map.
+        # Either condition must finish presentation before the next schedule.
+        self.output_barrier = bool(stops) or trace_requested
         if tokenize_duration_ns is not None:
             self.record_stage("tokenize", tokenize_duration_ns)
 
@@ -348,6 +355,41 @@ class _RequestTrack:
             for stage in _TRACE_STAGE_ORDER
             if stage in durations
         )
+
+
+@dataclass(frozen=True)
+class _TrackUpdateInput:
+    """Scheduler-owned facts copied before presentation leaves the step thread."""
+
+    request_id: str
+    track: _RequestTrack
+    outputs: tuple[int, ...]
+    new_ids: tuple[int, ...]
+    new_meta: tuple[SampledToken, ...]
+    finished: bool
+    state_finish_reason: str | None
+    request: EngineRequest
+    num_cached_tokens: int
+    finish_reason: str | None
+
+
+@dataclass(frozen=True)
+class _TrackUpdateResult:
+    request_id: str
+    update: StreamUpdate
+    finish_early: bool = False
+
+
+@dataclass(frozen=True)
+class _StepOutputBatch:
+    inputs: tuple[_TrackUpdateInput, ...]
+    requires_barrier: bool
+
+
+@dataclass(frozen=True)
+class _PendingOutput(Generic[_OutputT]):
+    future: Future[tuple[list[_TrackUpdateResult], _OutputT]]
+    requires_barrier: bool
 
 
 @dataclass
@@ -406,6 +448,9 @@ class EngineLoop:
             self._device_executor = ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="kairyu-device"
             )
+        # Created only by production drivers. Direct ``step()`` callers retain
+        # the allocation-free synchronous compatibility path.
+        self._output_executor: ThreadPoolExecutor | None = None
         # generation_config.json may carry an eos LIST (m12 D5): first entry
         # is eos, the rest are stop tokens; falls back to the tokenizer's eos
         self._default_eos = (
@@ -814,10 +859,64 @@ class EngineLoop:
     def step(self) -> list[tuple[str, StreamUpdate]]:
         """Serialize public step calls around the unified pipeline state."""
         with self._step_lock:
+            batch = self._step_once()
+            results = self._materialize_updates(batch.inputs)
+            return self._apply_update_results(results)
+
+    def advance_output(self) -> _StepOutputBatch:
+        """Advance one core step and return immutable presentation inputs.
+
+        Production drivers may hold at most this one raw batch while one prior
+        output is outstanding; ``step()`` remains the unrestricted public
+        compatibility entry point.
+        """
+
+        with self._step_lock:
             return self._step_once()
 
-    def _step_once(self) -> list[tuple[str, StreamUpdate]]:
-        """Advance the unified pipeline and return cumulative stream updates.
+    def start_output(
+        self,
+        batch: _StepOutputBatch,
+        transform: Callable[[list[tuple[str, StreamUpdate]]], _OutputT],
+    ) -> _PendingOutput[_OutputT]:
+        """Submit one batch to the serial output lane.
+
+        Production drivers call this only after the prior pending output has
+        been finished. That driver precondition bounds the executor to one
+        outstanding item without adding a second queue protocol here.
+        """
+
+        with self._step_lock:
+            executor = self._output_executor
+            if executor is None:
+                executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="kairyu-output",
+                )
+                self._output_executor = executor
+            future = executor.submit(
+                self._materialize_and_transform,
+                batch.inputs,
+                transform,
+            )
+        return _PendingOutput(future, batch.requires_barrier)
+
+    def finish_output(self, pending: _PendingOutput[_OutputT]) -> _OutputT:
+        """Resolve one output batch and apply any stop-string feedback."""
+
+        results, output = pending.future.result()
+        has_feedback = any(result.finish_early for result in results)
+        if has_feedback and not pending.requires_barrier:
+            raise RuntimeError("output feedback escaped its scheduler barrier")
+        if has_feedback:
+            # Production drivers never advance past a barrier batch, so this
+            # lock reacquires the same serialized scheduler safe point.
+            with self._step_lock:
+                self._apply_update_results(results)
+        return output
+
+    def _step_once(self) -> _StepOutputBatch:
+        """Advance the unified pipeline and snapshot presentation inputs.
 
         At most one submitted device step is committed per call. Before that
         commit, the scheduler fills the configured pipeline depth with frozen
@@ -929,22 +1028,57 @@ class EngineLoop:
         if self._pending_steps:
             self._commit_oldest()
 
-        updates: list[tuple[str, StreamUpdate]] = []
+        inputs: list[_TrackUpdateInput] = []
+        requires_barrier = False
+        terminal_request_ids: list[str] = []
         for request_id, track in list(self._tracked.items()):
-            update = self._track_update(request_id, track)
-            if update is None:
+            state = self._scheduler.states.get(request_id)
+            if state is None:
+                requires_barrier = requires_barrier or track.output_barrier
                 continue
-            updates.append((request_id, update))
-            if update.finished:
-                self._remove_track(request_id)
-                if self._pending_by_request.get(request_id, 0):
-                    # A later scheduled-ahead step can still return this id.
-                    # Keep scheduler + runner state until its surplus token is
-                    # trimmed, but emit the terminal stream update immediately.
-                    self._deferred_forget.add(request_id)
-                else:
-                    self._forget(request_id)
-        return updates
+            outputs = tuple(self._scheduler.output_tokens(request_id))
+            new_ids = outputs[track.consumed :]
+            track.consumed = len(outputs)
+            # Committed tokens are the prefix of this step's pending metadata;
+            # discarded post-terminal tokens drop with the clear.
+            new_meta = tuple(track.pending[: len(new_ids)])
+            track.pending.clear()
+            finished = state.status.value == "finished"
+            if finished:
+                terminal_request_ids.append(request_id)
+            elif track.output_barrier:
+                requires_barrier = True
+            inputs.append(
+                _TrackUpdateInput(
+                    request_id=request_id,
+                    track=track,
+                    outputs=outputs,
+                    new_ids=new_ids,
+                    new_meta=new_meta,
+                    finished=finished,
+                    state_finish_reason=state.finish_reason,
+                    request=state.request,
+                    num_cached_tokens=self._scheduler.num_cached_tokens(
+                        request_id
+                    ),
+                    finish_reason=(
+                        self._scheduler.finish_reason(request_id)
+                        if finished
+                        else None
+                    ),
+                )
+            )
+        # A scheduler-known terminal can be reclaimed before presentation: the
+        # output worker owns the captured track object, while future core steps
+        # must neither resnapshot it nor delay unrelated requests. Stop-string
+        # terminals are not scheduler-known and remain behind the barrier.
+        for request_id in terminal_request_ids:
+            self._remove_track(request_id)
+            if self._pending_by_request.get(request_id, 0):
+                self._deferred_forget.add(request_id)
+            else:
+                self._forget(request_id)
+        return _StepOutputBatch(tuple(inputs), requires_barrier)
 
     def _submit_step(self, scheduled: tuple) -> None:
         """Freeze and submit one scheduler plan to the common handle contract."""
@@ -1100,11 +1234,14 @@ class EngineLoop:
         return discarded_ids
 
     def close(self) -> None:
-        """Settle outstanding device work and release the private device lane."""
+        """Settle outstanding work and release private execution lanes."""
         # asyncio cancellation cannot stop an already-running to_thread(step).
         # Waiting on the same lock prevents shutdown from releasing runner state
         # underneath that call.
         with self._step_lock:
+            if self._output_executor is not None:
+                self._output_executor.shutdown(wait=True, cancel_futures=True)
+                self._output_executor = None
             self._discard_pending_steps()
             # Reclaim live requests too: shutdown may interrupt a long stream
             # after its current device call. Pending adds have no scheduler
@@ -1146,25 +1283,52 @@ class EngineLoop:
                 self._active_request_ids.discard(request_id)
                 self._abort_requested.discard(request_id)
 
-    def _track_update(self, request_id: str, track: _RequestTrack) -> StreamUpdate | None:
-        state = self._scheduler.states.get(request_id)
-        if state is None:
-            return None
-        outputs = self._scheduler.output_tokens(request_id)
-        new_ids = outputs[track.consumed :]
-        track.consumed = len(outputs)
-        # committed tokens are the prefix of this step's pending metadata;
-        # discarded (post-terminal) tokens drop with the clear
-        track.meta.extend(track.pending[: len(new_ids)])
-        track.pending.clear()
-        visible_new_ids = new_ids
+    def _materialize_updates(
+        self,
+        inputs: list[_TrackUpdateInput],
+    ) -> list[_TrackUpdateResult]:
+        return [self._materialize_update(item) for item in inputs]
+
+    def _materialize_and_transform(
+        self,
+        inputs: list[_TrackUpdateInput],
+        transform: Callable[[list[tuple[str, StreamUpdate]]], _OutputT],
+    ) -> tuple[list[_TrackUpdateResult], _OutputT]:
+        results = self._materialize_updates(inputs)
+        updates = [(result.request_id, result.update) for result in results]
+        return results, transform(updates)
+
+    def _apply_update_results(
+        self,
+        results: list[_TrackUpdateResult],
+    ) -> list[tuple[str, StreamUpdate]]:
+        updates: list[tuple[str, StreamUpdate]] = []
+        for result in results:
+            request_id = result.request_id
+            update = result.update
+            if result.finish_early:
+                # The output lane can discover a stop string, but the scheduler
+                # mutation remains on the serialized step thread.
+                self._scheduler.finish_early(request_id)
+                self._remove_track(request_id)
+                if self._pending_by_request.get(request_id, 0):
+                    self._deferred_forget.add(request_id)
+                else:
+                    self._forget(request_id)
+            updates.append((request_id, update))
+        return updates
+
+    def _materialize_update(self, item: _TrackUpdateInput) -> _TrackUpdateResult:
+        track = item.track
+        track.meta.extend(item.new_meta)
+        visible_new_ids = item.new_ids
         if (
-            new_ids
-            and state.status.value == "finished"
-            and state.finish_reason == "stop"
+            item.new_ids
+            and item.finished
+            and item.state_finish_reason == "stop"
         ):
-            terminal_id = new_ids[-1]
-            request = state.request
+            terminal_id = item.new_ids[-1]
+            request = item.request
             terminal_is_eos = (
                 not request.ignore_eos
                 and request.eos_token_id is not None
@@ -1175,7 +1339,7 @@ class EngineLoop:
                 # KV/radix history, and scheduler accounting.  It alone is not
                 # visible text, and a native incremental decoder cannot retract
                 # it after it has been pushed.
-                visible_new_ids = new_ids[:-1]
+                visible_new_ids = item.new_ids[:-1]
         if visible_new_ids:
             if track.trace_requested:
                 detokenize_started_ns = perf_counter_ns()
@@ -1187,7 +1351,8 @@ class EngineLoop:
             else:
                 track.stable = track.detok.push(visible_new_ids)
         track.num_cached_tokens = max(
-            track.num_cached_tokens, self._scheduler.num_cached_tokens(request_id)
+            track.num_cached_tokens,
+            item.num_cached_tokens,
         )
         logprobs, cumulative = _logprob_fields(track.meta)
         content = None
@@ -1202,7 +1367,7 @@ class EngineLoop:
 
         def _update(text: str, finished: bool, reason: str | None) -> StreamUpdate:
             return StreamUpdate(
-                outputs,
+                item.outputs,
                 text,
                 finished,
                 reason,
@@ -1214,7 +1379,7 @@ class EngineLoop:
                 stage_metrics=track.metrics(),
             )
 
-        if state.status.value == "finished":
+        if item.finished:
             if track.trace_requested:
                 detokenize_started_ns = perf_counter_ns()
                 terminal = track.detok.finalize()
@@ -1235,16 +1400,27 @@ class EngineLoop:
                 track.stable = terminal
             stop_at = track.find_stop(track.stable)
             if stop_at is not None:
-                return _update(track.stable[:stop_at], True, "stop")
-            return _update(
-                track.stable,
-                True,
-                self._scheduler.finish_reason(request_id) or "length",
+                return _TrackUpdateResult(
+                    item.request_id,
+                    _update(track.stable[:stop_at], True, "stop"),
+                )
+            return _TrackUpdateResult(
+                item.request_id,
+                _update(
+                    track.stable,
+                    True,
+                    item.finish_reason or "length",
+                ),
             )
         stop_at = track.find_stop(track.stable)
         if stop_at is not None:
-            # between update() and the next schedule(): the safe finish point
-            self._scheduler.finish_early(request_id)
-            return _update(track.stable[:stop_at], True, "stop")
+            return _TrackUpdateResult(
+                item.request_id,
+                _update(track.stable[:stop_at], True, "stop"),
+                finish_early=True,
+            )
         visible_end = max(0, len(track.stable) - track.holdback)
-        return _update(track.stable[:visible_end], False, None)
+        return _TrackUpdateResult(
+            item.request_id,
+            _update(track.stable[:visible_end], False, None),
+        )

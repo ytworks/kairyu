@@ -25,7 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 # Real-model support (tokenizer/weights); heavy GPU kernels live in the gpu extra.
 hf = [
-    "tokenizers>=0.20",
+    "tokenizers>=0.21.1",
     "safetensors>=0.5",
 ]
 # Real-model engine runtime: torch + structured-output + tokenizer/weights.
@@ -34,7 +34,7 @@ hf = [
 engine = [
     "torch>=2.6",
     "xgrammar>=0.2.3",
-    "tokenizers>=0.20",
+    "tokenizers>=0.21.1",
     "safetensors>=0.5",
 ]
 # CPU production embeddings without pulling the multi-GB PyTorch runtime.
@@ -105,7 +105,7 @@ dev = [
     "ruff>=0.6",
     "torch>=2.6",
     "xgrammar>=0.2.3",
-    "tokenizers>=0.20",
+    "tokenizers>=0.21.1",
     "safetensors>=0.5",
     "pyzmq>=26",
     "msgpack>=1.0",
