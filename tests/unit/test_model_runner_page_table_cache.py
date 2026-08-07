@@ -97,6 +97,25 @@ def test_normal_decode_uses_stable_owners_and_exact_on_off_wiring(monkeypatch):
     assert legacy_stats["cache"]["row_hits"] == 0
 
 
+def test_decode_inputs_use_the_scheduler_tuple_snapshot_without_list_walks():
+    class _UnwalkablePages(list):
+        def __iter__(self):
+            raise AssertionError("live decode pages must not be walked per step")
+
+    runner = _runner()
+    state = _decode_state("request", (2, 3), (11,))
+    state.decode_pages = _UnwalkablePages([99])
+    state.decode_pages_snapshot = (4, 5)
+
+    _, _, page_table, _ = runner._decode_inputs(
+        ScheduledChunk("request", 1, False, 1),
+        state,
+    )
+
+    assert page_table == (2, 3, 4, 5)
+    assert isinstance(page_table, tuple)
+
+
 def test_speculative_rows_use_request_local_lanes_starting_at_one(monkeypatch):
     runner = _runner()
     batches = _record_tensor_batches(runner, monkeypatch)

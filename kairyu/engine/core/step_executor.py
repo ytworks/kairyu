@@ -149,6 +149,25 @@ def _dirty_span(
         return 0, width
     if previous.visible_width == width and previous.signature == current:
         return None
+    previous_pages = previous.signature.pages
+    current_pages = current.pages
+    if (
+        len(previous_pages) <= len(current_pages)
+        and current_pages[: len(previous_pages)] == previous_pages
+    ):
+        start = len(current_pages)
+        end = len(current_pages)
+        if len(previous_pages) < len(current_pages):
+            start = len(previous_pages)
+        if previous.visible_width < width:
+            # Columns outside the previous view were never made authoritative.
+            start = min(start, previous.visible_width)
+            end = width
+        if previous.signature.pad_page != current.pad_page:
+            # Eager decode repeats the final owned page through the row tail.
+            start = min(start, len(previous_pages))
+            end = width
+        return None if start == end else (start, end)
     first: int | None = None
     last = 0
     for column in range(width):
@@ -267,13 +286,13 @@ class DecodePageTableCache:
         for row, (pages, owner) in enumerate(
             zip(page_lists, row_owners, strict=True)
         ):
-            owned = tuple(int(page) for page in pages[:max_pages])
+            owned = tuple(pages[:max_pages])
             if scratch_page is None:
                 if not owned:
                     raise ValueError("eager decode page lists must not be empty")
                 pad_page = owned[-1]
             else:
-                pad_page = int(scratch_page)
+                pad_page = scratch_page
             signature = PageTableRow(owner, owned, pad_page)
             signatures.append(signature)
             dirty = _dirty_span(self._rows[row], signature, max_pages)
@@ -382,6 +401,17 @@ def _graph_dirty_span(
         and previous.signature == current.signature
     ):
         return None
+    previous_pages = previous.signature.pages
+    current_pages = current.signature.pages
+    if (
+        previous.signature.pad_page == scratch_page
+        and current.signature.pad_page == scratch_page
+        and len(previous_pages) <= len(current_pages)
+        and current_pages[: len(previous_pages)] == previous_pages
+    ):
+        start = len(previous_pages)
+        end = len(current_pages)
+        return None if start == end else (start, end)
     first: int | None = None
     last = 0
     for column in range(width):
@@ -457,8 +487,8 @@ def build_decode_batch(
             page_table_rows = tuple(
                 PageTableRow(
                     owner,
-                    tuple(int(page) for page in pages[:max_pages]),
-                    int(scratch_page) if scratch_page is not None else int(pages[-1]),
+                    tuple(pages[:max_pages]),
+                    scratch_page if scratch_page is not None else pages[-1],
                 )
                 for owner, pages in zip(row_owners, page_lists, strict=True)
             )
