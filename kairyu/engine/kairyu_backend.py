@@ -5,10 +5,11 @@ Full-stack integration on CPU: OpenAI server / LLM API → this backend →
 forward is a deterministic toy runner on CPU; the GPU phase swaps in the real
 ModelRunner behind the same protocol — nothing above it changes.
 
-Threading discipline (m8 D1): all scheduler mutations happen inside
-``EngineLoop.step()`` on the step thread; the event loop only enqueues ops and
-reads queues. The ZMQ process-split backend ("kairyu-proc", m8 D6) drives the
-same ``EngineLoop`` from a child process.
+Threading discipline (m8 D1): all scheduler mutations happen inside the
+serialized engine step boundary; the event loop only enqueues ops and reads
+queues. Production detokenization runs on the loop's serial output lane. The
+ZMQ process-split backend ("kairyu-proc", m8 D6) drives the same ``EngineLoop``
+from a child process.
 """
 
 from __future__ import annotations
@@ -77,6 +78,12 @@ _DECODE_MODES = frozenset({"eager", "cuda_graph"})
 _EXPERT_PARALLEL_SIZES = frozenset({1, 2, 4})
 logger = logging.getLogger(__name__)
 _TokenizerWorkT = TypeVar("_TokenizerWorkT")
+
+
+def _identity_step_updates(
+    updates: list[tuple[str, StreamUpdate]],
+) -> list[tuple[str, StreamUpdate]]:
+    return updates
 
 
 def _resolve_decode_mode(
@@ -1636,15 +1643,49 @@ class KairyuBackend:
         stop: threading.Event,
         delivery_drained: asyncio.Future,
     ) -> Exception | None:
-        """Own ``EngineLoop.step`` until idle or stopped at a step boundary."""
+        """Own engine stepping until idle or stopped at a step boundary."""
 
         error: Exception | None = None
+        ready_batch = None
+
+        def deliver(updates: list[tuple[str, StreamUpdate]]) -> None:
+            event_loop.call_soon_threadsafe(self._publish_step, updates)
+
         try:
-            while not stop.is_set():
-                if not self._loop.has_work() or stop.is_set():
-                    break
-                updates = self._loop.step()
-                event_loop.call_soon_threadsafe(self._publish_step, updates)
+            while True:
+                if ready_batch is None:
+                    if not self._loop.has_work() or stop.is_set():
+                        break
+                    batch = self._loop.advance_output()
+                else:
+                    batch, ready_batch = ready_batch, None
+
+                if batch.requires_barrier:
+                    pending = self._loop.start_output(
+                        batch,
+                        _identity_step_updates,
+                    )
+                    updates = self._loop.finish_output(pending)
+                    event_loop.call_soon_threadsafe(
+                        self._publish_step,
+                        updates,
+                    )
+                    continue
+
+                # The output worker publishes N as soon as presentation is
+                # complete. Meanwhile this step thread may advance exactly one
+                # raw N+1 batch; no second output batch is queued until N is
+                # settled, which bounds both lanes structurally.
+                pending = self._loop.start_output(batch, deliver)
+                advance_error: Exception | None = None
+                if not stop.is_set() and self._loop.has_work():
+                    try:
+                        ready_batch = self._loop.advance_output()
+                    except Exception as caught:  # noqa: BLE001 - ordered below
+                        advance_error = caught
+                self._loop.finish_output(pending)
+                if advance_error is not None:
+                    raise advance_error
         except Exception as caught:  # noqa: BLE001 - returned to the event loop
             error = caught
         finally:

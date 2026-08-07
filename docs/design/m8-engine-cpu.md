@@ -1,6 +1,6 @@
 # M8 Design: Engine CPU Core — Real Tokens, Real Sampling, Multi-Token Commit
 
-Status: **Implemented** (2026-07-03; D1/D2/D6 amended 2026-08-05). Reviewed — APPROVE-WITH-AMENDMENTS
+Status: **Implemented** (2026-07-03; D1/D2/D6 amended 2026-08-07). Reviewed — APPROVE-WITH-AMENDMENTS
 (3-reviewer agent panel, 2026-07-03; all amendments applied inline, see §6).
 All six phases (D1–D6) landed with tests: 328 → 437 tests, 95% coverage.
 The original M8 deliverables remain implemented and CPU-tested. Issue #333's
@@ -51,10 +51,12 @@ New `kairyu/engine/tokenizer.py`:
   the Rust `tokenizers.decoders.DecodeStream` (including its incomplete-UTF-8
   buffer and special-token policy), and `ToyTokenizer` joins only the arriving
   token delta. Push work is O(delta).
-- A tokenizer without that capability, an older `tokenizers` version without
-  `DecodeStream`, or a subclass that overrides `decode()` without also defining
-  a matching stream uses the original full-prefix safe fallback. Capability is
-  never inferred merely from inheritance.
+- Production `HFTokenizer` requires `tokenizers>=0.21.1` and its
+  `DecodeStream`; a mismatched installation fails fast instead of silently
+  selecting O(length²) full-prefix work. Custom tokenizers without a stream,
+  and subclasses overriding `decode()` without a matching stream, retain the
+  exact full-prefix compatibility path. Capability is never inferred merely
+  from inheritance.
 - Operation-count coverage fixes 4,096 one-token pushes at N incremental work;
   finalization decodes only an un-emitted terminal window and never re-decodes
   published history. ByteLevel, WordPiece, Metaspace, special-token skipping,
@@ -169,6 +171,18 @@ media bytes.
   and close seals the queue before reclaiming active requests. Reproduce the
   burst throughput measurements with
   `uv run python bench/op_queue_bench.py --operations 100000 --repeats 5`.
+- **Presentation-lane amendment (2026-08-07, issue #327)**: production drivers
+  split one core advance from detokenization/output completion. One serial
+  `kairyu-output` future overlaps with at most one raw next step, including at
+  pipeline depth one; there is no unbounded output queue. Stop-string feedback
+  and traced requests form a barrier, so `finish_early` and all scheduler/track
+  reclamation still occur on the serialized step owner before another schedule.
+  Direct `EngineLoop.step()` remains the synchronous compatibility path.
+  `KairyuBackend` publishes from the output lane. The D6 ROUTER thread keeps
+  polling while a serial core executor advances; the output lane detokenizes,
+  builds wire events, and msgpacks an immutable owner snapshot, while only the
+  ROUTER thread sends. The process parent resolves every text/templated prompt
+  to `TokensPrompt` off its event loop even when `max_model_len` is omitted.
 - **Stream-backpressure conflation (2026-08-04, issue #335)**: the in-process
   `KairyuBackend` publishes cumulative `StreamUpdate` values through one bounded,
   single-consumer mailbox per request. Empty prefill states replace one another;
@@ -204,8 +218,8 @@ custom-tokenizer fallback; EOS/stop end-to-end; randomized incremental/full
 stop-match equivalence; long-output/many-stop bounded work; concurrent
 add/abort producer stress and partial-failure recovery; stop-string-across-deltas
 holdback pinned.
-Deps: `tokenizers` (dev group + new `[project.optional-dependencies] hf` extra —
-the section is created in this milestone).
+Deps: `tokenizers>=0.21.1` (dev group +
+`[project.optional-dependencies] hf` extra).
 
 ### D2 — Sampler: `SampledToken`, tuple-valued runner output, grammar-mask-first
 
@@ -489,17 +503,19 @@ prompts (accepts > 0) and adversarial ones (accepts 0).
   `get_slice` hook (M16 per-rank loads). Tested against tiny generated
   checkpoints. Dep: `safetensors`.
 
-### D6 — Process split: ZMQ ROUTER/DEALER, msgpack; service owns the tokenizer
+### D6 — Process split: ZMQ ROUTER/DEALER, msgpack; engine owns token truth
 
 New `kairyu/engine/core/engine_service.py` (child main) +
 `kairyu/engine/zmq_backend.py` (`EngineBackend`, name `"kairyu-proc"` —
 **registered via a `_LAZY_MODULES` entry in `registry.py`**, the only wiring that
 makes it reachable from YAML).
 
-- Service: single-threaded loop — **drain ZMQ ops → schedule → execute →
-  update** (the D1 threading discipline holds by construction). Owns tokenizer +
-  sampler + engine core. Heartbeats are answered between steps; the backend's
-  death-detection timeout must exceed worst-case step time (documented knob).
+- Service: the ROUTER thread drains ops and sends frames, one serial step
+  executor owns schedule/execute/scheduler mutation, and the D1 output lane
+  owns detokenization/event construction/msgpack. The bounded one-ahead
+  protocol preserves the D1 discipline while the ROUTER can answer heartbeats
+  during engine/output work. The configured death-detection timeout still must
+  exceed worst-case step time (documented knob).
 - Events: msgpack wire v2 is negotiated per `add` without a global handshake.
   The client sends `wire_version=2` plus a fresh `stream_id`; an old service
   ignores those fields and returns the legacy cumulative event, while a new
@@ -507,9 +523,9 @@ makes it reachable from YAML).
   receives one cumulative `snapshot` at sequence 0, then only sequenced deltas
   `{output_offset, new_token_ids, text_offset, text_delta, new_logprobs?,
   new_logprob_content?, finished, finish_reason, num_cached_tokens}`.
-  **The snapshot also carries `num_prompt_tokens`** (the service owns the
-  tokenizer, so the server side cannot count prompt tokens; M9 usage truth
-  needs it). Offsets and sequence are checked before reconstruction. Empty
+  **The snapshot also carries `num_prompt_tokens`** from the engine's validated
+  token truth, so M9 usage does not depend on client estimates. Offsets and
+  sequence are checked before reconstruction. Empty
   non-terminal updates are suppressed so unrelated scheduler steps do not
   inflate a request's wire volume. Normal visible text appends; terminal exact
   detokenization may replace one suffix using a single longest-common-prefix
@@ -528,6 +544,11 @@ makes it reachable from YAML).
   tokenization; it never stringifies IDs. Multimodal envelopes round-trip in
   codec tests but are rejected by the client preflight because the child has
   no media processor.
+- **Parent preparation (2026-08-07, issue #327):** current clients resolve text
+  and templated text to the tagged `TokensPrompt` envelope before send,
+  independent of `max_model_len`; the child validates the exact IDs and never
+  repeats text tokenization. Legacy raw strings remain accepted for rolling
+  upgrades.
 - Backend: `zmq.asyncio` DEALER with **lazy socket/receiver-task creation on
   first `_submit`** (amended — `build_app_from_spec` constructs backends before
   any event loop exists; same lazy pattern as today's `_pump_task`).

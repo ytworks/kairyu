@@ -9,6 +9,7 @@ import contextlib
 import gc
 import multiprocessing
 import os
+import queue as queue_module
 import signal
 import sys
 import threading
@@ -33,7 +34,8 @@ from kairyu.engine.core.engine_service import (
     _startup_ready_frame,
     run_engine_service,
 )
-from kairyu.engine.kairyu_backend import KairyuBackend
+from kairyu.engine.core.sampling_types import SampledToken
+from kairyu.engine.kairyu_backend import KairyuBackend, build_engine_loop
 from kairyu.engine.prompt import (
     MultimodalItem,
     MultimodalPrompt,
@@ -324,6 +326,55 @@ class _FakeServiceSocket:
         self.closed = True
 
 
+class _QueuedServiceSocket:
+    """Thread-safe fake ROUTER used to exercise the live service state machine."""
+
+    def __init__(self) -> None:
+        self._incoming: queue_module.Queue[tuple[bytes, bytes]] = (
+            queue_module.Queue()
+        )
+        self._staged: tuple[bytes, bytes] | None = None
+        self.sent: list[list[bytes]] = []
+        self.send_threads: list[int] = []
+        self.terminal_sent = threading.Event()
+        self.shutdown_on_terminal = False
+        self.closed = False
+
+    def bind_to_random_port(self, endpoint):
+        assert endpoint == "tcp://127.0.0.1"
+        return 43124
+
+    def enqueue(self, message: dict, identity: bytes = b"client") -> None:
+        self._incoming.put((identity, msgpack.packb(message)))
+
+    def poll(self, timeout):
+        if self._staged is not None:
+            return True
+        try:
+            self._staged = self._incoming.get(timeout=max(0, timeout) / 1000)
+        except queue_module.Empty:
+            return False
+        return True
+
+    def recv_multipart(self):
+        assert self._staged is not None
+        staged, self._staged = self._staged, None
+        return list(staged)
+
+    def send_multipart(self, frames):
+        self.send_threads.append(threading.get_ident())
+        self.sent.append(frames)
+        payload = msgpack.unpackb(frames[1])
+        if payload.get("request_id") and payload.get("finished"):
+            self.terminal_sent.set()
+            if self.shutdown_on_terminal:
+                self.enqueue({"op": "shutdown"}, identity=b"shutdown")
+
+    def close(self, *, linger):
+        assert linger == 0
+        self.closed = True
+
+
 class _FakeServiceContext:
     def __init__(self, service_socket) -> None:
         self.service_socket = service_socket
@@ -416,9 +467,15 @@ class _OverlapRejectingTokenizer(ToyTokenizer):
                 self._active = False
 
 
-async def test_direct_public_calls_parent_tokenize_off_loop_once_each():
+@pytest.mark.parametrize("max_model_len", [None, 32])
+async def test_direct_public_calls_parent_tokenize_off_loop_once_each(
+    max_model_len,
+):
     tokenizer = _CountingTokenizer()
-    backend = ZmqEngineBackend(num_pages=64, max_model_len=32)
+    backend = ZmqEngineBackend(
+        num_pages=64,
+        max_model_len=max_model_len,
+    )
     backend._preflight_tokenizer = tokenizer
     event_loop_thread = threading.get_ident()
     try:
@@ -811,6 +868,184 @@ async def test_engine_service_close_always_shuts_down_parallel_launcher():
     with pytest.raises(RuntimeError, match="loop close failed"):
         _close_engine_service_loop(Loop())
     assert calls == ["loop", "launcher"]
+
+
+async def test_engine_service_packs_off_thread_while_depth_one_next_step_runs(
+    monkeypatch,
+):
+    class _OverlapRunner:
+        def __init__(self) -> None:
+            self.threads: list[int] = []
+            self.next_decode_finished = threading.Event()
+
+        def execute(self, scheduled, states):
+            self.threads.append(threading.get_ident())
+            if any(
+                not chunk.is_prefill and chunk.position >= 1
+                for chunk in scheduled
+            ):
+                if not pack_entered.wait(5):
+                    raise TimeoutError("wire packing did not start")
+                self.next_decode_finished.set()
+            return {
+                chunk.request_id: tuple(
+                    SampledToken(chunk.position + offset)
+                    for offset in range(
+                        1 if chunk.is_prefill else chunk.num_tokens
+                    )
+                )
+                for chunk in scheduled
+                if not chunk.is_prefill
+                or states[chunk.request_id].prefill_done
+            }
+
+        def release(self, _request_id):
+            return None
+
+    runner = _OverlapRunner()
+    engine_loop, _, _ = build_engine_loop(
+        num_pages=64,
+        tokenizer=ToyTokenizer(),
+        runner=runner,
+        pipeline_depth=1,
+    )
+    service_socket = _QueuedServiceSocket()
+    context = _install_fake_service_zmq(monkeypatch, service_socket)
+    port_pipe = _FakeServicePortPipe()
+    monkeypatch.setattr(
+        "kairyu.engine.kairyu_backend.build_engine_loop",
+        lambda **_config: (engine_loop, None, None),
+    )
+
+    pack_entered = threading.Event()
+    pack_threads: list[int] = []
+    pack_gate_lock = threading.Lock()
+    pack_gated = False
+    real_packb = msgpack.packb
+    fake_msgpack = types.ModuleType("msgpack")
+    fake_msgpack.unpackb = msgpack.unpackb
+
+    def tracked_packb(payload):
+        nonlocal pack_gated
+        gate = False
+        if (
+            isinstance(payload, dict)
+            and payload.get("request_id") == "wire-overlap"
+            and payload.get("outputs")
+        ):
+            with pack_gate_lock:
+                if not pack_gated:
+                    pack_gated = True
+                    gate = True
+        if gate:
+            pack_threads.append(threading.get_ident())
+            pack_entered.set()
+            if not runner.next_decode_finished.wait(5):
+                raise TimeoutError("next depth-one step did not finish")
+        return real_packb(payload)
+
+    fake_msgpack.packb = tracked_packb
+    monkeypatch.setitem(sys.modules, "msgpack", fake_msgpack)
+    service_socket.shutdown_on_terminal = True
+    service_socket.enqueue(
+        {
+            "op": "add",
+            "request_id": "wire-overlap",
+            "prompt": "one two",
+            "sampling": {"max_tokens": 3, "ignore_eos": True},
+            "wire_version": LEGACY_WIRE_VERSION,
+        }
+    )
+    run_engine_service(port_pipe, {})
+
+    events = [
+        msgpack.unpackb(frames[1])
+        for frames in service_socket.sent
+        if msgpack.unpackb(frames[1]).get("request_id") == "wire-overlap"
+    ]
+    output_lengths = [len(event["outputs"]) for event in events]
+    assert pack_entered.is_set()
+    assert runner.next_decode_finished.is_set()
+    assert output_lengths == [1, 2, 3]
+    assert [event["finished"] for event in events] == [False, False, True]
+    assert pack_threads
+    assert set(pack_threads).isdisjoint(runner.threads)
+    assert set(pack_threads).isdisjoint(service_socket.send_threads)
+    assert set(runner.threads).isdisjoint(service_socket.send_threads)
+    assert port_pipe.frames[0] == 43124
+    assert port_pipe.frames[1]["status"] == "ready"
+    assert service_socket.closed is True
+    assert context.terminated is True
+
+
+async def test_engine_service_inactive_abort_does_not_block_later_socket_ops(
+    monkeypatch,
+):
+    class _LateAbortSocket(_QueuedServiceSocket):
+        def __init__(self) -> None:
+            super().__init__()
+            self._injected = False
+            self._staged_polls = 0
+
+        def poll(self, timeout):
+            if self._staged is not None:
+                self._staged_polls += 1
+                if self._staged_polls > 5:
+                    raise AssertionError("service stopped draining staged messages")
+            return super().poll(timeout)
+
+        def recv_multipart(self):
+            self._staged_polls = 0
+            return super().recv_multipart()
+
+        def send_multipart(self, frames):
+            super().send_multipart(frames)
+            payload = msgpack.unpackb(frames[1])
+            if (
+                not self._injected
+                and payload.get("request_id") == "late-abort"
+                and payload.get("finished")
+            ):
+                self._injected = True
+                self.enqueue(
+                    {"op": "abort", "request_id": "late-abort"},
+                )
+                self.enqueue({"op": "ping"}, identity=b"probe")
+                self.enqueue({"op": "shutdown"}, identity=b"shutdown")
+
+    engine_loop, _, _ = build_engine_loop(
+        num_pages=64,
+        tokenizer=ToyTokenizer(),
+        pipeline_depth=1,
+    )
+    service_socket = _LateAbortSocket()
+    context = _install_fake_service_zmq(monkeypatch, service_socket)
+    port_pipe = _FakeServicePortPipe()
+    monkeypatch.setattr(
+        "kairyu.engine.kairyu_backend.build_engine_loop",
+        lambda **_config: (engine_loop, None, None),
+    )
+    service_socket.enqueue(
+        {
+            "op": "add",
+            "request_id": "late-abort",
+            "prompt": "one two",
+            "sampling": {"max_tokens": 1, "ignore_eos": True},
+            "wire_version": LEGACY_WIRE_VERSION,
+        }
+    )
+
+    run_engine_service(port_pipe, {})
+
+    replies = [
+        (frames[0], msgpack.unpackb(frames[1]))
+        for frames in service_socket.sent
+    ]
+    assert service_socket.terminal_sent.is_set()
+    assert (b"probe", {"op": "pong"}) in replies
+    assert (b"shutdown", {"op": "bye"}) in replies
+    assert service_socket.closed is True
+    assert context.terminated is True
 
 
 @pytest.mark.parametrize(
@@ -1908,7 +2143,7 @@ async def test_parent_preflight_tokenizes_tool_prompt_once_and_submits_tokens(
     await backend.shutdown()
 
 
-async def test_templated_text_uses_versioned_prompt_wire_without_parent_tokenizer(
+async def test_templated_text_is_parent_tokenized_before_versioned_prompt_wire(
     monkeypatch,
 ):
     import msgpack
@@ -1921,6 +2156,8 @@ async def test_templated_text_uses_versioned_prompt_wire_without_parent_tokenize
 
     backend = ZmqEngineBackend(num_pages=64)
     backend.generation_defaults = GenerationDefaults()
+    tokenizer = _CountingTokenizer()
+    backend._preflight_tokenizer = tokenizer
     event_loop_thread = threading.get_ident()
     pack_threads = []
     original_pack = backend._pack_add_message
@@ -1949,9 +2186,14 @@ async def test_templated_text_uses_versioned_prompt_wire_without_parent_tokenize
     message = msgpack.unpackb(socket.payload)
     assert message["prompt_wire_version"] == 1
     assert message["prompt"] == {
-        "kind": "templated_text",
+        "kind": "tokens",
+        "prompt_token_ids": list(
+            ToyTokenizer().encode("<BOS>user hello<ASSISTANT>")
+        ),
         "prompt": "<BOS>user hello<ASSISTANT>",
     }
+    assert tokenizer.encoded == ["<BOS>user hello<ASSISTANT>"]
+    assert tokenizer.encode_threads != [event_loop_thread]
     assert pack_threads and pack_threads != [event_loop_thread]
     assert backend._queues.pop(request.request_id) is queue
     backend._release_wire_route(request.request_id)

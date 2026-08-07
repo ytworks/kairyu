@@ -1500,21 +1500,16 @@ class TestIncrementalDetokenizer:
         assert not detok.uses_native_stream
         assert detok.push((1, 2, 3)) == tok.decode((1, 2, 3))
 
-    def test_hf_without_decode_stream_uses_safe_fallback(self, hf_tokenizer_dir, monkeypatch):
+    def test_hf_without_decode_stream_fails_fast(self, hf_tokenizer_dir, monkeypatch):
         from tokenizers import decoders
 
         monkeypatch.delattr(decoders, "DecodeStream")
         tok = HFTokenizer(hf_tokenizer_dir)
-        ids = tok.encode("こんにちは世界 hello")
-        detok = IncrementalDetokenizer(tok)
 
-        assert not detok.uses_native_stream
-        for token_id in ids:
-            stable = detok.push((token_id,))
-            assert tok.decode(ids).startswith(stable)
-        assert detok.finalize() == tok.decode(ids)
+        with pytest.raises(RuntimeError, match=r"tokenizers>=0\.21\.1"):
+            IncrementalDetokenizer(tok)
 
-    def test_hf_without_decode_stream_fallback_honors_false_special_policy(
+    def test_hf_without_decode_stream_fails_fast_for_false_special_policy(
         self,
         byte_fallback_tokenizer,
         monkeypatch,
@@ -1522,18 +1517,12 @@ class TestIncrementalDetokenizer:
         from tokenizers import decoders
 
         monkeypatch.delattr(decoders, "DecodeStream")
-        tok = byte_fallback_tokenizer
-        ids = _ids_for_tokens(tok, "a", "<special>", "<0xE3>", "<0x81>", "<0x82>", "z")
-        detok = IncrementalDetokenizer(tok, skip_special_tokens=False)
 
-        assert not detok.uses_native_stream
-        previous = ""
-        for token_id in ids:
-            current = detok.push((token_id,))
-            assert current.startswith(previous)
-            previous = current
-        assert detok.finalize() == "a<special>あz"
-        assert detok.finalize() == tok.decode(ids, skip_special_tokens=False)
+        with pytest.raises(RuntimeError, match=r"tokenizers>=0\.21\.1"):
+            IncrementalDetokenizer(
+                byte_fallback_tokenizer,
+                skip_special_tokens=False,
+            )
 
     def test_fallback_holds_incomplete_replacement_suffix(self):
         class _SplitUtf8Tokenizer:

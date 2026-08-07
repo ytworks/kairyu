@@ -431,18 +431,16 @@ class HFTokenizer:
         *,
         skip_special_tokens: bool = True,
     ) -> TokenDecodeStream | None:
-        """Use the Rust tokenizer's stateful decoder when the version supports it.
-
-        ``tokenizers`` added ``DecodeStream`` after Kairyu's original minimum
-        dependency. Older installations stay byte-correct through the generic
-        fallback instead of failing at startup.
-        """
+        """Use the required Rust tokenizer stateful decoder."""
         if type(self).decode is not HFTokenizer.decode:
             return None
         tokenizers = _import_tokenizers()
         stream_type = getattr(tokenizers.decoders, "DecodeStream", None)
         if stream_type is None:
-            return None
+            raise RuntimeError(
+                "HFTokenizer requires tokenizers>=0.21.1 with "
+                "tokenizers.decoders.DecodeStream"
+            )
         return _HFDecodeStream(
             self._tok,
             lambda: stream_type(skip_special_tokens=skip_special_tokens),

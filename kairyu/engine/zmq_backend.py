@@ -1107,11 +1107,10 @@ class ZmqEngineBackend:
         self._atexit_registered = False
         self._max_model_len = max_model_len
         # A configured context limit must be enforceable by the HTTP-facing
-        # parent before a StreamingResponse commits SSE headers. Lazily resolve
-        # the exact tokenizer source that the child uses so construction stays
-        # side-effect compatible and config-only tooling need not mount a
-        # checkpoint. With no limit, retain the historical one-tokenizer-in-the-
-        # child process layout.
+        # parent before a StreamingResponse commits SSE headers. All text is
+        # also resolved here before crossing the process boundary, even when
+        # no limit is configured. Lazily load the exact child tokenizer source
+        # so construction and config-only tooling stay side-effect compatible.
         self._preflight_tokenizer_source = (
             tokenizer
             if tokenizer is not None
@@ -1839,17 +1838,15 @@ class ZmqEngineBackend:
         if prompt is None:
             prompt = prompt_with_tool_intent(request)
         max_model_len = self._max_model_len
-        if max_model_len is None:
-            return _PreparedProcPrompt(prompt)
         tokenize_started_ns = (
             time.perf_counter_ns() if request.trace_requested else None
         )
-        tokenizer = self._get_preflight_tokenizer()
 
         prompt_token_ids = supplied_prompt_token_ids(prompt)
         if prompt_token_ids is None:
             text = prompt_text(prompt)
             assert text is not None
+            tokenizer = self._get_preflight_tokenizer()
             prompt_token_ids = tuple(tokenizer.encode(text))
             if not prompt_token_ids:
                 raise ValueError("prompt must tokenize to at least one token")
@@ -1858,17 +1855,18 @@ class ZmqEngineBackend:
             # diagnostics; the caller's public request remains untouched.
             prompt = TokensPrompt(prompt_token_ids, prompt=text)
 
-        max_new_tokens = (
-            request.sampling_params.max_tokens
-            if request.sampling_params.max_tokens is not None
-            else 16
-        )
-        requested_length = len(prompt_token_ids) + max_new_tokens
-        if requested_length > max_model_len:
-            raise ValueError(
-                f"prompt tokens ({len(prompt_token_ids)}) plus max_tokens "
-                f"({max_new_tokens}) exceed max_model_len ({max_model_len})"
+        if max_model_len is not None:
+            max_new_tokens = (
+                request.sampling_params.max_tokens
+                if request.sampling_params.max_tokens is not None
+                else 16
             )
+            requested_length = len(prompt_token_ids) + max_new_tokens
+            if requested_length > max_model_len:
+                raise ValueError(
+                    f"prompt tokens ({len(prompt_token_ids)}) plus max_tokens "
+                    f"({max_new_tokens}) exceed max_model_len ({max_model_len})"
+                )
         tokenize_duration_ns = (
             max(0, time.perf_counter_ns() - tokenize_started_ns)
             if tokenize_started_ns is not None
