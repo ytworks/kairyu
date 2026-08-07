@@ -41,7 +41,9 @@ from kairyu.engine.core.sampling_types import (
 )
 from kairyu.engine.core.structured import XGrammarEnforcer
 from kairyu.engine.tokenizer import GrammarVocabulary
-from kairyu.kernels.sampling_gpu import stateless_gumbel_argmax
+from kairyu.kernels.sampling_gpu import stateless_gumbel_argmax_batched
+
+_MAX_BATCHED_SAMPLING_ELEMENTS = 1 << 22
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,40 @@ class DeviceSample:
     logprob: torch.Tensor | None = None  # scalar float32
     top_indices: torch.Tensor | None = None  # [K] int64
     top_logprobs: torch.Tensor | None = None  # [K] float32
+
+
+@dataclass(frozen=True)
+class DeviceSamplingInput:
+    """One grammar-free row supplied to the batched device sampler."""
+
+    request_id: str
+    sampling: EngineSampling
+    position: int
+    prompt: tuple[int, ...] = ()
+    outputs: Sequence[int] = ()
+    pending_outputs: Sequence[torch.Tensor] = ()
+    history_epoch: int | None = None
+    eos_token_id: int | None = None
+    stop_token_ids: tuple[int, ...] = ()
+    min_tokens: int = 0
+
+
+def _sampling_metadata_tensor(
+    values: Sequence[int | float | bool],
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    """Copy a small host parameter vector without synchronizing a CUDA stream."""
+
+    host = torch.tensor(
+        values,
+        dtype=dtype,
+        pin_memory=device.type == "cuda",
+    )
+    if device.type == "cuda":
+        return host.to(device=device, non_blocking=True)
+    return host
 
 
 class _IncrementalPenaltyState:
@@ -791,7 +827,7 @@ class Sampler:
             logits.shape[-1],
         )
 
-        work = logits.detach().to(dtype=torch.float32).clone()
+        work = self._float_working_copy(logits)
         raw_logsoftmax: torch.Tensor | None = None
         if sampling.logprobs is not None or forced_token_id is not None:
             raw_logsoftmax = torch.log_softmax(work, dim=-1)
@@ -841,6 +877,398 @@ class Sampler:
         )
 
     @staticmethod
+    def _float_working_copy(logits: torch.Tensor) -> torch.Tensor:
+        """Return one mutable fp32 copy without copying converted logits twice."""
+
+        detached = logits.detach()
+        if detached.dtype == torch.float32:
+            return detached.clone()
+        return detached.to(dtype=torch.float32)
+
+    def sample_batch_device(
+        self,
+        rows: Sequence[DeviceSamplingInput],
+        logits: torch.Tensor,
+    ) -> tuple[DeviceSample, ...]:
+        """Sample grammar-free rows with shared batched filtering and RNG ops."""
+
+        if logits.ndim != 2:
+            raise ValueError(f"batched logits must be 2D, got {tuple(logits.shape)}")
+        if len(rows) != logits.shape[0]:
+            raise ValueError(
+                "sampling row count must match logits batch: "
+                f"rows={len(rows)}, batch={logits.shape[0]}"
+            )
+        if not rows:
+            return ()
+        if any(row.sampling.needs_grammar for row in rows):
+            raise ValueError("structured sampling requires the per-row CPU path")
+
+        states = tuple(
+            self._state_for(
+                row.request_id,
+                row.sampling,
+                row.eos_token_id,
+            )
+            for row in rows
+        )
+        if any(state.enforcer is not None for state in states):
+            raise ValueError("structured sampling requires the per-row CPU path")
+        forced_token_ids = tuple(
+            self._forced_token_id(
+                row.sampling,
+                row.position,
+                logits.shape[-1],
+            )
+            for row in rows
+        )
+
+        work = self._float_working_copy(logits)
+        needs_raw = tuple(
+            row.sampling.logprobs is not None or forced_token_id is not None
+            for row, forced_token_id in zip(rows, forced_token_ids, strict=True)
+        )
+        raw_logsoftmax = (
+            torch.log_softmax(work, dim=-1) if any(needs_raw) else None
+        )
+
+        blocked_rows: list[int] = []
+        blocked_tokens: list[int] = []
+        vocab_size = work.shape[-1]
+        for index, row in enumerate(rows):
+            if row.position >= row.min_tokens:
+                continue
+            seen: set[int] = set()
+            for token_id in (*row.stop_token_ids, row.eos_token_id):
+                if (
+                    token_id is not None
+                    and 0 <= token_id < vocab_size
+                    and token_id not in seen
+                ):
+                    seen.add(token_id)
+                    blocked_rows.append(index)
+                    blocked_tokens.append(token_id)
+        if blocked_rows:
+            row_indices = _sampling_metadata_tensor(
+                blocked_rows,
+                dtype=torch.long,
+                device=work.device,
+            )
+            token_indices = _sampling_metadata_tensor(
+                blocked_tokens,
+                dtype=torch.long,
+                device=work.device,
+            )
+            work[row_indices, token_indices] = float("-inf")
+
+        for index, (row, state) in enumerate(zip(rows, states, strict=True)):
+            self._apply_incremental_penalties(
+                state,
+                work[index],
+                row.sampling,
+                row.prompt,
+                row.outputs,
+                row.pending_outputs,
+                row.history_epoch,
+            )
+
+        stochastic_rows = tuple(
+            index
+            for index, (row, forced_token_id) in enumerate(
+                zip(rows, forced_token_ids, strict=True)
+            )
+            if forced_token_id is None and row.sampling.temperature != 0.0
+        )
+        if len(stochastic_rows) == len(rows):
+            token_ids = self._sample_scaled_batch_device(
+                work,
+                tuple(row.sampling for row in rows),
+                tuple(state.base_seed for state in states),
+                tuple(row.position for row in rows),
+            )
+        else:
+            token_ids = torch.argmax(work, dim=-1).to(dtype=torch.int64)
+        if stochastic_rows and len(stochastic_rows) != len(rows):
+            indices = _sampling_metadata_tensor(
+                stochastic_rows,
+                dtype=torch.long,
+                device=work.device,
+            )
+            selected = self._sample_scaled_batch_device(
+                work.index_select(0, indices),
+                tuple(rows[index].sampling for index in stochastic_rows),
+                tuple(states[index].base_seed for index in stochastic_rows),
+                tuple(rows[index].position for index in stochastic_rows),
+            )
+            token_ids = token_ids.index_copy(0, indices, selected)
+
+        forced_rows = tuple(
+            index
+            for index, token_id in enumerate(forced_token_ids)
+            if token_id is not None
+        )
+        if forced_rows:
+            indices = _sampling_metadata_tensor(
+                forced_rows,
+                dtype=torch.long,
+                device=work.device,
+            )
+            values = _sampling_metadata_tensor(
+                [forced_token_ids[index] for index in forced_rows],
+                dtype=torch.int64,
+                device=work.device,
+            )
+            token_ids = token_ids.index_copy(0, indices, values)
+
+        selected_logprobs = None
+        if raw_logsoftmax is not None:
+            selected_logprobs = raw_logsoftmax.gather(
+                1,
+                token_ids.unsqueeze(1),
+            ).squeeze(1)
+        max_report = max(
+            (
+                min(row.sampling.logprobs, vocab_size)
+                for row in rows
+                if row.sampling.logprobs is not None
+                and row.sampling.logprobs > 0
+            ),
+            default=0,
+        )
+        top_logprobs = None
+        top_indices = None
+        if max_report > 0:
+            assert raw_logsoftmax is not None
+            top_logprobs, top_indices = torch.topk(
+                raw_logsoftmax,
+                max_report,
+                dim=-1,
+            )
+
+        samples: list[DeviceSample] = []
+        for index, row in enumerate(rows):
+            report_count = row.sampling.logprobs
+            top_count = (
+                0
+                if report_count is None
+                else min(report_count, vocab_size)
+            )
+            samples.append(
+                DeviceSample(
+                    token_id=token_ids[index],
+                    logprob=(
+                        selected_logprobs[index]
+                        if needs_raw[index] and selected_logprobs is not None
+                        else None
+                    ),
+                    top_indices=(
+                        top_indices[index, :top_count]
+                        if top_count > 0 and top_indices is not None
+                        else None
+                    ),
+                    top_logprobs=(
+                        top_logprobs[index, :top_count]
+                        if top_count > 0 and top_logprobs is not None
+                        else None
+                    ),
+                )
+            )
+        return tuple(samples)
+
+    @staticmethod
+    def _sample_scaled_batch_device(
+        logits: torch.Tensor,
+        samplings: Sequence[EngineSampling],
+        base_seeds: Sequence[int],
+        positions: Sequence[int],
+    ) -> torch.Tensor:
+        """Apply row-specific filters with batched vocabulary operations."""
+
+        if logits.ndim != 2:
+            raise ValueError(f"batched logits must be 2D, got {tuple(logits.shape)}")
+        batch_size, vocab_size = logits.shape
+        if vocab_size < 1:
+            raise ValueError("batched sampling requires a non-empty vocabulary")
+        if not (
+            len(samplings) == len(base_seeds) == len(positions) == batch_size
+        ):
+            raise ValueError("batched sampling metadata must match logits rows")
+        if any(sampling.temperature == 0.0 for sampling in samplings):
+            raise ValueError("scaled batched sampling requires non-zero temperature")
+        max_rows = max(1, _MAX_BATCHED_SAMPLING_ELEMENTS // vocab_size)
+        if batch_size > max_rows:
+            return torch.cat(
+                tuple(
+                    Sampler._sample_scaled_batch_device(
+                        logits[start : start + max_rows],
+                        samplings[start : start + max_rows],
+                        base_seeds[start : start + max_rows],
+                        positions[start : start + max_rows],
+                    )
+                    for start in range(0, batch_size, max_rows)
+                )
+            )
+
+        temperatures = _sampling_metadata_tensor(
+            [sampling.temperature for sampling in samplings],
+            dtype=logits.dtype,
+            device=logits.device,
+        ).unsqueeze(1)
+        probs = torch.softmax(logits / temperatures, dim=-1)
+
+        min_ps = _sampling_metadata_tensor(
+            [sampling.min_p for sampling in samplings],
+            dtype=probs.dtype,
+            device=probs.device,
+        ).unsqueeze(1)
+        if any(sampling.min_p > 0.0 for sampling in samplings):
+            probs = torch.where(
+                probs >= min_ps * probs.max(dim=-1, keepdim=True).values,
+                probs,
+                torch.zeros_like(probs),
+            )
+
+        bounded_top_k = tuple(
+            index
+            for index, sampling in enumerate(samplings)
+            if 0 < sampling.top_k < vocab_size
+        )
+        top_values = None
+        top_indices = None
+        max_top_k = 0
+        if bounded_top_k:
+            max_top_k = max(samplings[index].top_k for index in bounded_top_k)
+            top_values, top_indices = torch.topk(
+                probs,
+                max_top_k,
+                dim=-1,
+                sorted=True,
+            )
+            per_row_k = _sampling_metadata_tensor(
+                [
+                    sampling.top_k
+                    if 0 < sampling.top_k < vocab_size
+                    else max_top_k
+                    for sampling in samplings
+                ],
+                dtype=torch.long,
+                device=probs.device,
+            )
+            thresholds = top_values.gather(
+                1,
+                (per_row_k - 1).unsqueeze(1),
+            )
+            bounded = set(bounded_top_k)
+            bounded_mask = _sampling_metadata_tensor(
+                [index in bounded for index in range(batch_size)],
+                dtype=torch.bool,
+                device=probs.device,
+            ).unsqueeze(1)
+            probs = torch.where(
+                bounded_mask & (probs < thresholds),
+                torch.zeros_like(probs),
+                probs,
+            )
+
+        bounded_nucleus = tuple(
+            index
+            for index in bounded_top_k
+            if samplings[index].top_p < 1.0
+        )
+        if bounded_nucleus:
+            assert top_values is not None
+            assert top_indices is not None
+            row_indices = _sampling_metadata_tensor(
+                bounded_nucleus,
+                dtype=torch.long,
+                device=probs.device,
+            )
+            values = top_values.index_select(0, row_indices)
+            indices = top_indices.index_select(0, row_indices)
+            row_ks = _sampling_metadata_tensor(
+                [samplings[index].top_k for index in bounded_nucleus],
+                dtype=torch.long,
+                device=probs.device,
+            ).unsqueeze(1)
+            ranks = torch.arange(max_top_k, device=probs.device).unsqueeze(0)
+            values = torch.where(
+                ranks < row_ks,
+                values,
+                torch.zeros_like(values),
+            )
+            cumulative = torch.cumsum(values, dim=-1)
+            top_ps = _sampling_metadata_tensor(
+                [samplings[index].top_p for index in bounded_nucleus],
+                dtype=probs.dtype,
+                device=probs.device,
+            ).unsqueeze(1)
+            cut = cumulative - values >= top_ps * cumulative[:, -1:].clamp(
+                min=1e-12
+            )
+            values = values.masked_fill(cut, 0.0)
+            filtered = torch.zeros(
+                (len(bounded_nucleus), vocab_size),
+                dtype=probs.dtype,
+                device=probs.device,
+            ).scatter(1, indices, values)
+            probs = probs.index_copy(0, row_indices, filtered)
+
+        unbounded_nucleus = tuple(
+            index
+            for index, sampling in enumerate(samplings)
+            if sampling.top_p < 1.0
+            and not (0 < sampling.top_k < vocab_size)
+        )
+        if unbounded_nucleus:
+            row_indices = _sampling_metadata_tensor(
+                unbounded_nucleus,
+                dtype=torch.long,
+                device=probs.device,
+            )
+            selected = probs.index_select(0, row_indices)
+            values, indices = torch.sort(selected, dim=-1, descending=True)
+            cumulative = torch.cumsum(values, dim=-1)
+            top_ps = _sampling_metadata_tensor(
+                [samplings[index].top_p for index in unbounded_nucleus],
+                dtype=probs.dtype,
+                device=probs.device,
+            ).unsqueeze(1)
+            cut = cumulative - values >= top_ps * cumulative[:, -1:].clamp(
+                min=1e-12
+            )
+            values = values.masked_fill(cut, 0.0)
+            filtered = torch.zeros_like(selected).scatter(1, indices, values)
+            probs = probs.index_copy(0, row_indices, filtered)
+
+        totals = probs.sum(dim=-1, keepdim=True)
+        if logits.device.type == "cpu" and bool(torch.all(totals > 0)):
+            safe = probs / totals
+        else:
+            argmax = torch.argmax(logits, dim=-1, keepdim=True).to(torch.int64)
+            fallback = torch.zeros_like(probs).scatter(
+                1,
+                argmax,
+                torch.ones(
+                    (batch_size, 1),
+                    dtype=probs.dtype,
+                    device=probs.device,
+                ),
+            )
+            safe = torch.where(totals > 0, probs, fallback)
+            safe = safe / safe.sum(dim=-1, keepdim=True).clamp(min=1e-12)
+        return stateless_gumbel_argmax_batched(
+            torch.log(safe),
+            [
+                mix_seed(base_seed, position)
+                for base_seed, position in zip(
+                    base_seeds,
+                    positions,
+                    strict=True,
+                )
+            ],
+        )
+
+    @staticmethod
     def _sample_scaled_device(
         logits: torch.Tensor,
         sampling: EngineSampling,
@@ -848,40 +1276,12 @@ class Sampler:
         position: int,
     ) -> torch.Tensor:
         """The reviewed filter order with no scalar extraction."""
-        probs = torch.softmax(logits / sampling.temperature, dim=-1)
-        if sampling.min_p > 0.0:
-            probs = torch.where(
-                probs >= sampling.min_p * probs.max(), probs, torch.zeros_like(probs)
-            )
-        if 0 < sampling.top_k < probs.shape[-1]:
-            threshold = torch.topk(probs, sampling.top_k).values[-1]
-            probs = torch.where(probs >= threshold, probs, torch.zeros_like(probs))
-        if sampling.top_p < 1.0:
-            sorted_probs, sorted_idx = torch.sort(probs, descending=True)
-            cumulative = torch.cumsum(sorted_probs, dim=-1)
-            cut = cumulative - sorted_probs >= sampling.top_p * cumulative[-1].clamp(min=1e-12)
-            sorted_probs = sorted_probs.masked_fill(cut, 0.0)
-            probs = torch.zeros_like(probs).scatter(-1, sorted_idx, sorted_probs)
-
-        # Grammar-free filtering always retains one token. CPU can avoid
-        # constructing the fallback on its normal path; CUDA remains branchless
-        # so sampling never creates a device-to-host control dependency.
-        total = probs.sum()
-        if logits.device.type == "cpu" and bool(total > 0):
-            safe = probs / total
-        else:
-            argmax = torch.argmax(logits).to(dtype=torch.int64)
-            fallback = torch.zeros_like(probs).scatter(
-                0,
-                argmax.view(1),
-                torch.ones(1, dtype=probs.dtype, device=probs.device),
-            )
-            safe = torch.where(total > 0, probs, fallback)
-            safe = safe / safe.sum().clamp(min=1e-12)
-        return stateless_gumbel_argmax(
-            torch.log(safe),
-            mix_seed(base_seed, position),
-        )
+        return Sampler._sample_scaled_batch_device(
+            logits.unsqueeze(0),
+            (sampling,),
+            (base_seed,),
+            (position,),
+        )[0]
 
     @staticmethod
     def _sample_scaled(

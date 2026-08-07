@@ -5,10 +5,19 @@ import math
 import pytest
 import torch
 
-from kairyu.engine.core.sampler import Sampler, mix_seed, stable_request_seed
+from kairyu.engine.core import sampler as sampler_module
+from kairyu.engine.core.sampler import (
+    DeviceSamplingInput,
+    Sampler,
+    mix_seed,
+    stable_request_seed,
+)
 from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.kernels import sampling_gpu
-from kairyu.kernels.sampling_gpu import stateless_gumbel_argmax
+from kairyu.kernels.sampling_gpu import (
+    stateless_gumbel_argmax,
+    stateless_gumbel_argmax_batched,
+)
 
 VOCAB = 32
 
@@ -250,6 +259,240 @@ def test_stateless_gumbel_cpu_has_fixed_golden_draws():
     ]
 
     assert actual == [7, 4, 3, 7, 2, 5, 5, 5, 4]
+
+
+def test_batched_gumbel_matches_scalar_draws_and_row_reordering():
+    weights = torch.stack(
+        (
+            torch.linspace(-2.0, 1.0, VOCAB),
+            torch.linspace(0.7, -1.3, VOCAB),
+            torch.sin(torch.arange(VOCAB) * 0.3),
+        )
+    )
+    seeds = (0, 71, (1 << 64) - 1)
+
+    expected = torch.stack(
+        tuple(
+            stateless_gumbel_argmax(row, seed)
+            for row, seed in zip(weights, seeds, strict=True)
+        )
+    )
+    actual = stateless_gumbel_argmax_batched(weights, seeds)
+    order = (2, 0, 1)
+    reordered = stateless_gumbel_argmax_batched(
+        weights[list(order)],
+        tuple(seeds[index] for index in order),
+    )
+
+    assert torch.equal(actual, expected)
+    assert torch.equal(reordered, expected[list(order)])
+
+
+def test_bounded_top_p_batch_uses_one_topk_and_no_full_sort(monkeypatch):
+    logits = torch.stack((_logits(1), _logits(2), _logits(3)))
+    samplings = (
+        EngineSampling(temperature=0.7, top_k=5, top_p=0.8),
+        EngineSampling(temperature=0.9, top_k=11, top_p=0.9),
+        EngineSampling(temperature=1.1, top_k=7, top_p=0.95),
+    )
+    original_topk = torch.topk
+    topk_calls = 0
+
+    def record_topk(*args, **kwargs):
+        nonlocal topk_calls
+        topk_calls += 1
+        return original_topk(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "topk", record_topk)
+    monkeypatch.setattr(
+        torch,
+        "sort",
+        lambda *_args, **_kwargs: pytest.fail(
+            "bounded top-p must use the top-k prefix"
+        ),
+    )
+
+    tokens = Sampler._sample_scaled_batch_device(
+        logits,
+        samplings,
+        (1, 2, 3),
+        (4, 5, 6),
+    )
+
+    assert tokens.shape == (3,)
+    assert topk_calls == 1
+
+
+def test_bounded_top_p_exact_k_prefix_is_explicit_for_boundary_ties(monkeypatch):
+    captured: list[torch.Tensor] = []
+
+    def capture_support(log_weights, _seeds):
+        captured.append(log_weights)
+        return torch.argmax(log_weights, dim=-1).to(torch.int64)
+
+    monkeypatch.setattr(
+        sampler_module,
+        "stateless_gumbel_argmax_batched",
+        capture_support,
+    )
+
+    Sampler._sample_scaled_batch_device(
+        torch.zeros((1, VOCAB)),
+        (EngineSampling(temperature=1.0, top_k=3, top_p=0.5),),
+        (1,),
+        (2,),
+    )
+
+    assert len(captured) == 1
+    assert torch.isfinite(captured[0]).sum().item() == 2
+
+
+def test_large_scaled_batch_chunks_the_transient_gumbel_work(monkeypatch):
+    logits = torch.stack(tuple(_logits(seed) for seed in range(5)))
+    samplings = tuple(
+        EngineSampling(temperature=0.8, top_k=7, top_p=0.9, seed=index)
+        for index in range(5)
+    )
+    seeds = tuple(range(5))
+    positions = tuple(range(5))
+    expected = torch.stack(
+        tuple(
+            Sampler._sample_scaled_device(
+                logits[index],
+                samplings[index],
+                seeds[index],
+                positions[index],
+            )
+            for index in range(5)
+        )
+    )
+    original = sampler_module.stateless_gumbel_argmax_batched
+    calls = 0
+
+    def count_draws(log_weights, draw_seeds):
+        nonlocal calls
+        calls += 1
+        return original(log_weights, draw_seeds)
+
+    monkeypatch.setattr(
+        sampler_module,
+        "_MAX_BATCHED_SAMPLING_ELEMENTS",
+        2 * VOCAB,
+    )
+    monkeypatch.setattr(
+        sampler_module,
+        "stateless_gumbel_argmax_batched",
+        count_draws,
+    )
+
+    actual = Sampler._sample_scaled_batch_device(
+        logits,
+        samplings,
+        seeds,
+        positions,
+    )
+
+    assert torch.equal(actual, expected)
+    assert calls == 3
+
+
+def test_batched_device_sampler_matches_individual_mixed_rows():
+    logits = torch.stack(tuple(_logits(seed) for seed in range(5)))
+    rows = (
+        DeviceSamplingInput(
+            "greedy-report",
+            EngineSampling(logprobs=3),
+            4,
+        ),
+        DeviceSamplingInput(
+            "bounded",
+            EngineSampling(temperature=0.73, top_k=9, top_p=0.87, seed=17),
+            5,
+        ),
+        DeviceSamplingInput(
+            "nucleus",
+            EngineSampling(temperature=0.91, top_p=0.83, seed=23),
+            6,
+        ),
+        DeviceSamplingInput(
+            "forced",
+            EngineSampling(temperature=0.8, forced_token_ids=(7,), seed=29),
+            0,
+        ),
+        DeviceSamplingInput(
+            "penalty",
+            EngineSampling(
+                temperature=0.67,
+                top_k=12,
+                top_p=0.92,
+                repetition_penalty=1.15,
+                presence_penalty=0.2,
+                frequency_penalty=0.1,
+                seed=31,
+            ),
+            3,
+            prompt=(1, 2, 1),
+            outputs=(2, 3),
+            eos_token_id=4,
+            stop_token_ids=(5,),
+            min_tokens=4,
+        ),
+    )
+
+    actual = Sampler().sample_batch_device(rows, logits)
+    expected = tuple(
+        Sampler().sample_device(
+            row.request_id,
+            row.sampling,
+            row.position,
+            logits[index],
+            prompt=row.prompt,
+            outputs=row.outputs,
+            pending_outputs=row.pending_outputs,
+            history_epoch=row.history_epoch,
+            eos_token_id=row.eos_token_id,
+            stop_token_ids=row.stop_token_ids,
+            min_tokens=row.min_tokens,
+        )
+        for index, row in enumerate(rows)
+    )
+
+    for batch_sample, row_sample in zip(actual, expected, strict=True):
+        assert int(batch_sample.token_id) == int(row_sample.token_id)
+        if row_sample.logprob is None:
+            assert batch_sample.logprob is None
+        else:
+            assert batch_sample.logprob is not None
+            assert float(batch_sample.logprob) == pytest.approx(
+                float(row_sample.logprob)
+            )
+        if row_sample.top_indices is None:
+            assert batch_sample.top_indices is None
+            assert batch_sample.top_logprobs is None
+        else:
+            assert batch_sample.top_indices is not None
+            assert batch_sample.top_logprobs is not None
+            assert torch.equal(batch_sample.top_indices, row_sample.top_indices)
+            assert torch.allclose(
+                batch_sample.top_logprobs,
+                row_sample.top_logprobs,
+            )
+
+
+def test_float_working_copy_makes_exactly_one_mutable_copy():
+    fp32 = _logits()
+    bf16 = fp32.to(torch.bfloat16)
+
+    fp32_work = Sampler._float_working_copy(fp32)
+    bf16_work = Sampler._float_working_copy(bf16)
+    fp32_work[0] = 100.0
+    bf16_work[0] = 100.0
+
+    assert fp32_work.dtype == torch.float32
+    assert bf16_work.dtype == torch.float32
+    assert fp32_work.data_ptr() != fp32.data_ptr()
+    assert float(fp32[0]) != 100.0
+    assert float(bf16[0]) != 100.0
 
 
 @pytest.mark.parametrize(
