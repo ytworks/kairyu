@@ -2101,16 +2101,24 @@ class ZmqEngineBackend:
         ZmqEngineBackend.validate_request_before_prepare(self, request)
         validate_native_request_surface(request)
         prompt = prompt_with_tool_intent(request)
-        if (
-            self._max_model_len is not None
-            and self._peek_prepared_request(request) is None
-        ):
+        if self._peek_prepared_request(request) is not None:
+            return
+        if self._max_model_len is not None:
             prepared = self._prepare_request(
                 request,
                 validate_surface=False,
                 prompt=prompt,
             )
             self._retain_prepared_request(request, prepared)
+            return
+        native_params = native_sampling_params(request)
+        if engine_sampling_from(native_params).needs_grammar:
+            tokenizer = self._get_preflight_tokenizer()
+            validate_structured_sampling(
+                native_params,
+                tokenizer,
+                tokenizer.eos_token_id,
+            )
 
     def _reserve_request_id(self, request_id: str) -> None:
         if request_id in self._active_request_ids:

@@ -444,7 +444,7 @@ def _strict_tool_response_format(
             "triggers": [trigger],
             "tags": tags,
             "at_least_one": choice == "required" or isinstance(choice, Mapping),
-            "stop_after_first": parallel is False,
+            "stop_after_first": protocol == "llama" or parallel is False,
             "excludes": [],
         },
     }

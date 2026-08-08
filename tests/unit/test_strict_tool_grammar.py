@@ -4,6 +4,10 @@ from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest, native_sampling_params
 from kairyu.engine.core.structured import XGrammarEnforcer
 from kairyu.engine.engine_loop import engine_sampling_from
+from kairyu.entrypoints.chat_template import ToolCallProtocol
+from kairyu.entrypoints.server.chat_service import _parse_tool_calls
+
+pytest.importorskip("xgrammar")
 
 _VOCAB = [chr(codepoint) for codepoint in range(32, 127)] + ["\n", "<eos>"]
 
@@ -25,22 +29,25 @@ def _tool(name: str, *, strict: bool) -> dict[str, object]:
 
 
 @pytest.mark.parametrize(
-    ("protocol", "begin", "style"),
+    ("protocol", "begin", "style", "stop_after_first"),
     [
         (
             "generic",
             '<tool_call>{"name":"strict_tool","arguments":',
             "json",
+            False,
         ),
         (
             "llama",
             '<|python_tag|>{"name": "strict_tool", "parameters": ',
             "json",
+            True,
         ),
         (
             "qwen",
             "<tool_call>\n<function=strict_tool>\n",
             "qwen_xml",
+            False,
         ),
     ],
 )
@@ -48,6 +55,7 @@ def test_native_strict_tool_builds_parser_matched_structural_tag(
     protocol,
     begin,
     style,
+    stop_after_first,
 ):
     request = GenerationRequest(
         "strict",
@@ -55,7 +63,6 @@ def test_native_strict_tool_builds_parser_matched_structural_tag(
         SamplingParams(),
         tools=(_tool("strict_tool", strict=True),),
         tool_choice="required",
-        parallel_tool_calls=False,
         tool_call_protocol=protocol,
     )
 
@@ -66,7 +73,7 @@ def test_native_strict_tool_builds_parser_matched_structural_tag(
 
     assert response_format["type"] == "structural_tag"
     assert grammar_format["at_least_one"] is True
-    assert grammar_format["stop_after_first"] is True
+    assert grammar_format["stop_after_first"] is stop_after_first
     assert tag["begin"] == begin
     assert tag["content"]["style"] == style
     assert tag["content"]["json_schema"] == _tool(
@@ -80,7 +87,10 @@ def test_native_strict_tool_builds_parser_matched_structural_tag(
     )
 
 
-def test_non_strict_tool_arguments_remain_unconstrained_in_mixed_request():
+@pytest.mark.parametrize("protocol", ["generic", "llama", "qwen"])
+def test_non_strict_tool_arguments_remain_unconstrained_in_mixed_request(
+    protocol,
+):
     request = GenerationRequest(
         "mixed",
         "prompt",
@@ -89,14 +99,77 @@ def test_non_strict_tool_arguments_remain_unconstrained_in_mixed_request():
             _tool("strict_tool", strict=True),
             _tool("ordinary_tool", strict=False),
         ),
+        tool_call_protocol=protocol,
     )
 
-    grammar_format = native_sampling_params(request).extra_args[
+    response_format = native_sampling_params(request).extra_args[
         "response_format"
-    ]["format"]
+    ]
+    grammar_format = response_format["format"]
 
     assert grammar_format["tags"][0]["content"]["json_schema"] is not True
     assert grammar_format["tags"][1]["content"]["json_schema"] is True
+    XGrammarEnforcer(
+        _VOCAB,
+        structural_tag=response_format,
+        stop_token_id=len(_VOCAB) - 1,
+    )
+
+
+@pytest.mark.parametrize(
+    ("protocol", "output", "parser_protocol"),
+    [
+        (
+            "generic",
+            '<tool_call>{"name":"strict_tool","arguments":{"value":1}}'
+            "</tool_call>",
+            ToolCallProtocol.GENERIC,
+        ),
+        (
+            "llama",
+            '<|python_tag|>{"name": "strict_tool", "parameters": '
+            '{"value":1}}',
+            ToolCallProtocol.LLAMA,
+        ),
+        (
+            "qwen",
+            "<tool_call>\n<function=strict_tool>\n<parameter=value>\n1\n"
+            "</parameter>\n</function>\n</tool_call>",
+            ToolCallProtocol.QWEN,
+        ),
+    ],
+)
+def test_strict_tool_grammar_output_round_trips_through_attested_parser(
+    protocol,
+    output,
+    parser_protocol,
+):
+    tool = _tool("strict_tool", strict=True)
+    request = GenerationRequest(
+        "roundtrip",
+        "prompt",
+        SamplingParams(),
+        tools=(tool,),
+        tool_choice="required",
+        tool_call_protocol=protocol,
+    )
+    response_format = native_sampling_params(request).extra_args[
+        "response_format"
+    ]
+    enforcer = XGrammarEnforcer(
+        _VOCAB,
+        structural_tag=response_format,
+        stop_token_id=len(_VOCAB) - 1,
+    )
+
+    for character in output:
+        assert enforcer.accept(_VOCAB.index(character))
+    assert enforcer.accept(len(_VOCAB) - 1)
+    assert enforcer.is_terminated()
+
+    calls = _parse_tool_calls(output, (tool,), parser_protocol)
+    assert len(calls) == 1
+    assert calls[0].function.name == "strict_tool"
 
 
 def test_named_non_strict_tool_does_not_activate_unselected_strict_grammar():

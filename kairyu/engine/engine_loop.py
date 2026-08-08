@@ -38,6 +38,7 @@ from kairyu.engine.prompt import (
     supplied_prompt_token_ids,
 )
 from kairyu.engine.tokenizer import (
+    GrammarVocabulary,
     IncrementalDetokenizer,
     Tokenizer,
     grammar_vocabulary,
@@ -191,6 +192,7 @@ def validate_structured_sampling(
     params: SamplingParams,
     tokenizer: Tokenizer,
     eos_token_id: int | None,
+    grammar_vocab: GrammarVocabulary | None = None,
 ) -> None:
     """Compile structured intent before admission so failures stay request-local."""
 
@@ -203,7 +205,7 @@ def validate_structured_sampling(
         raise ValueError("structured output requires an eos token id")
     try:
         XGrammarEnforcer(
-            grammar_vocabulary(tokenizer),
+            grammar_vocab or grammar_vocabulary(tokenizer),
             json_schema=sampling.json_schema,
             regex=sampling.regex,
             grammar=sampling.grammar,
@@ -485,6 +487,7 @@ class EngineLoop:
         pipeline_depth: int = _DEFAULT_PIPELINE_DEPTH,
         max_model_len: int | None = None,
         generation_defaults: GenerationDefaults | None = None,
+        grammar_vocab: GrammarVocabulary | None = None,
     ) -> None:
         if pipeline_depth < 1:
             raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
@@ -496,6 +499,7 @@ class EngineLoop:
         self._runner = runner
         self._pipeline_depth = pipeline_depth
         self._max_model_len = max_model_len
+        self._grammar_vocab = grammar_vocab
         self.generation_defaults = generation_defaults or GenerationDefaults(
             mode="none",
             source="disabled",
@@ -643,7 +647,17 @@ class EngineLoop:
         prompt_token_ids = self.resolve_prompt_token_ids(prompt)
         max_new_tokens = self._max_new_tokens(params)
         self._validate_context_length(prompt_token_ids, max_new_tokens)
-        validate_structured_sampling(params, self._tokenizer, self._default_eos)
+        if (
+            engine_sampling_from(params).needs_grammar
+            and self._grammar_vocab is None
+        ):
+            self._grammar_vocab = grammar_vocabulary(self._tokenizer)
+        validate_structured_sampling(
+            params,
+            self._tokenizer,
+            self._default_eos,
+            self._grammar_vocab,
+        )
         structured_output = (params.extra_args or {}).get(
             RESPONSE_FORMAT_EXTRA_ARG
         )

@@ -878,6 +878,7 @@ def build_engine_loop(
         grammar_vocab = grammar_vocabulary(resolved, model_vocab_size=model_config.vocab_size)
     else:
         resolved = resolve_tokenizer(tokenizer if tokenizer is not None else "toy")
+        grammar_vocab = None
 
     validate_tp_degree(
         tensor_parallel_size,
@@ -995,6 +996,7 @@ def build_engine_loop(
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
         generation_defaults=generation,
+        grammar_vocab=grammar_vocab,
     )
     loop.parallel_launcher = None  # single-process: nothing to tear down
     loop.tp_launcher = None  # compatibility alias for TP-specific callers
@@ -1067,6 +1069,11 @@ def _build_pd_loop(
 
     generation = load_generation_defaults(model_path, generation_config)
     resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
+    raw_config = json.loads((Path(model_path) / "config.json").read_text())
+    grammar_vocab = grammar_vocabulary(
+        resolved,
+        model_vocab_size=int(raw_config["vocab_size"]),
+    )
     coordinator = build_pd_coordinator(
         model_path=model_path,
         num_pages=num_pages,
@@ -1091,6 +1098,7 @@ def _build_pd_loop(
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
         generation_defaults=generation,
+        grammar_vocab=grammar_vocab,
     )
     loop.parallel_launcher = None
     loop.tp_launcher = None
@@ -1197,6 +1205,7 @@ def _build_dist_ep_loop(
             pipeline_depth=pipeline_depth,
             max_model_len=max_model_len,
             generation_defaults=generation,
+            grammar_vocab=grammar_vocab,
         )
     except BaseException:
         launcher.shutdown()
@@ -1314,6 +1323,7 @@ def _build_dist_tp_loop(
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
         generation_defaults=generation,
+        grammar_vocab=grammar_vocab,
     )
     loop.parallel_launcher = launcher
     loop.tp_launcher = launcher  # compatibility alias for TP-specific callers

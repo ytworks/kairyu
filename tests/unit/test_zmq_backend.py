@@ -1820,8 +1820,12 @@ async def test_native_process_layouts_accept_response_format_extension():
     )
     tokenizer = ToyTokenizer()
     tokenizer.eos_token_id = 0
-    in_process = KairyuBackend(num_pages=64, tokenizer=tokenizer)
-    process_split = ZmqEngineBackend(num_pages=64)
+    in_process = KairyuBackend(
+        num_pages=64,
+        tokenizer=tokenizer,
+        max_model_len=32,
+    )
+    process_split = ZmqEngineBackend(num_pages=64, max_model_len=32)
     process_split._preflight_tokenizer = tokenizer
     try:
         in_process.validate_request(request)
@@ -1829,6 +1833,27 @@ async def test_native_process_layouts_accept_response_format_extension():
     finally:
         await in_process.shutdown()
         await process_split.shutdown()
+
+
+async def test_process_sync_validation_rejects_malformed_grammar_without_context_limit():
+    tokenizer = ToyTokenizer()
+    tokenizer.eos_token_id = 0
+    backend = ZmqEngineBackend(num_pages=64)
+    backend._preflight_tokenizer = tokenizer
+    request = _request(
+        "malformed-grammar",
+        "surface parity",
+        max_tokens=1,
+        extra_args={"response_format": {"type": "regex", "pattern": "("}},
+    )
+
+    try:
+        with pytest.raises(ValueError, match="invalid structured output"):
+            backend.validate_request(request)
+
+        assert backend._process is None
+    finally:
+        await backend.shutdown()
 
 
 async def test_native_sync_validation_rejects_unserializable_tool_schema():

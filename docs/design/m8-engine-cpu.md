@@ -471,7 +471,12 @@ matcher, never the vocabulary-sized logits row. Batched ordinary and structured
 rows share `sample_batch_device`; the sampling owner advances each matcher once
 and carries `grammar_terminated` through the deferred public-token boundary.
 The bounded request-preparation lane first compiles the same format so malformed
-regex/EBNF/structural tags fail only their request as a 400, before admission.
+regex/EBNF/structural tags fail only their request as a 400, before admission;
+the process-split parent's synchronous validation does the same even without a
+context limit. Enforcers sharing one tokenizer vocabulary reuse its xgrammar
+compiler, so admission and first-token sampling do not rebuild tokenizer state.
+Llama structural tags stop after one call because its attested parser accepts
+exactly one bare call object; generic and Qwen retain their parallel-call form.
 `min_tokens` is rejected with structured output because masking grammar-terminal
 EOS would create empty support. If overlap has already scheduled the next row
 when a matcher terminates, that row replays EOS without advancing the matcher.

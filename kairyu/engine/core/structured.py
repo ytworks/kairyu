@@ -9,8 +9,12 @@ Import of xgrammar is deferred so kairyu works without it installed.
 from __future__ import annotations
 
 import json
+from threading import Lock
 
 from kairyu.engine.tokenizer import GrammarVocabulary
+
+_COMPILER_LOCK = Lock()
+_COMPILERS: dict[tuple[object, ...], tuple[list[str], object, object]] = {}
 
 
 def _import_xgrammar():
@@ -42,41 +46,71 @@ class XGrammarEnforcer:
         xgr = self._xgr = _import_xgrammar()
         stop_ids = [stop_token_id] if stop_token_id is not None else None
         if isinstance(vocab, GrammarVocabulary):
+            encoded_vocab = vocab.encoded_vocab
             vocab_type = {
                 "raw": xgr.VocabType.RAW,
                 "byte_fallback": xgr.VocabType.BYTE_FALLBACK,
                 "byte_level": xgr.VocabType.BYTE_LEVEL,
             }[vocab.vocab_type]
-            tokenizer_info = xgr.TokenizerInfo(
-                vocab.encoded_vocab,
-                vocab_type,
-                vocab_size=vocab.vocab_size,
-                stop_token_ids=stop_ids,
-                add_prefix_space=vocab.add_prefix_space,
+            compiler_key = (
+                id(encoded_vocab),
+                vocab.vocab_type,
+                vocab.vocab_size,
+                vocab.add_prefix_space,
+                stop_token_id,
             )
         else:
             # Public tests and third-party runners that provide literal token
             # strings retain the pre-metadata RAW behavior.
-            tokenizer_info = xgr.TokenizerInfo(vocab, stop_token_ids=stop_ids)
-        compiler = xgr.GrammarCompiler(tokenizer_info)
+            encoded_vocab = vocab
+            vocab_type = None
+            compiler_key = (id(encoded_vocab), "literal", stop_token_id)
         formats = sum(
             value is not None
             for value in (json_schema, regex, grammar, structural_tag)
         )
         if formats > 1:
             raise ValueError("structured output accepts exactly one grammar format")
-        if json_schema is not None:
-            # strict format (no free whitespace): removes degenerate unbounded
-            # whitespace runs — matches vLLM's disable_any_whitespace guidance
-            compiled = compiler.compile_json_schema(json.dumps(json_schema), any_whitespace=False)
-        elif regex is not None:
-            compiled = compiler.compile_regex(regex)
-        elif grammar is not None:
-            compiled = compiler.compile_grammar(grammar)
-        elif structural_tag is not None:
-            compiled = compiler.compile_structural_tag(structural_tag)
-        else:
-            compiled = compiler.compile_builtin_json_grammar()
+        with _COMPILER_LOCK:
+            cached = _COMPILERS.get(compiler_key)
+            if cached is None:
+                if isinstance(vocab, GrammarVocabulary):
+                    tokenizer_info = xgr.TokenizerInfo(
+                        encoded_vocab,
+                        vocab_type,
+                        vocab_size=vocab.vocab_size,
+                        stop_token_ids=stop_ids,
+                        add_prefix_space=vocab.add_prefix_space,
+                    )
+                else:
+                    tokenizer_info = xgr.TokenizerInfo(
+                        encoded_vocab,
+                        stop_token_ids=stop_ids,
+                    )
+                compiler = xgr.GrammarCompiler(tokenizer_info)
+                _COMPILERS[compiler_key] = (
+                    encoded_vocab,
+                    tokenizer_info,
+                    compiler,
+                )
+            else:
+                compiler = cached[2]
+                tokenizer_info = cached[1]
+            if json_schema is not None:
+                # strict format (no free whitespace): removes degenerate unbounded
+                # whitespace runs — matches vLLM's disable_any_whitespace guidance
+                compiled = compiler.compile_json_schema(
+                    json.dumps(json_schema),
+                    any_whitespace=False,
+                )
+            elif regex is not None:
+                compiled = compiler.compile_regex(regex)
+            elif grammar is not None:
+                compiled = compiler.compile_grammar(grammar)
+            elif structural_tag is not None:
+                compiled = compiler.compile_structural_tag(structural_tag)
+            else:
+                compiled = compiler.compile_builtin_json_grammar()
         self._matcher = xgr.GrammarMatcher(compiled)
         self._vocab_size = tokenizer_info.vocab_size
         self._bitmask = xgr.allocate_token_bitmask(1, self._vocab_size)

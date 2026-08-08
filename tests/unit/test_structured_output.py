@@ -63,6 +63,24 @@ def test_extended_grammar_compilers_mask_to_the_requested_prefix(kwargs):
     assert masked[VOCAB.index("b")] == float("-inf")
 
 
+def test_enforcers_reuse_compiler_for_the_same_grammar_vocabulary(monkeypatch):
+    vocab = GrammarVocabulary([*VOCAB, "cache-probe"])
+    real_compiler = xgr.GrammarCompiler
+    constructed = 0
+
+    def counting_compiler(tokenizer_info):
+        nonlocal constructed
+        constructed += 1
+        return real_compiler(tokenizer_info)
+
+    monkeypatch.setattr(xgr, "GrammarCompiler", counting_compiler)
+
+    XGrammarEnforcer(vocab, regex="a+")
+    XGrammarEnforcer(vocab, regex="b+")
+
+    assert constructed == 1
+
+
 def test_byte_level_space_marker_remains_legal_after_schema_colon():
     # Qwen's tokenizer stores a space as Ġ. Interpreting this vocabulary as RAW
     # leaves no legal token after the schema's canonical `": ` prefix, causing
