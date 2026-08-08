@@ -26,6 +26,8 @@ if triton is not None:
             "table_stride_0",
             "NUM_ROWS",
             "NUM_TABLE_PAGES",
+            "k_scale",
+            "v_scale",
         )
     )
     def _write_batched_kernel(
@@ -46,6 +48,8 @@ if triton is not None:
         value_stride_1,
         value_stride_2,
         write_from_stride,
+        k_scale,
+        v_scale,
         NUM_ROWS,
         NUM_TABLE_PAGES,
         NUM_POOL_PAGES: tl.constexpr,
@@ -101,8 +105,8 @@ if triton is not None:
             other=0.0,
         )
         if FP8_DEST:
-            key = tl.clamp(key, -448.0, 448.0)
-            value = tl.clamp(value, -448.0, 448.0)
+            key = tl.clamp(key / k_scale, -448.0, 448.0)
+            value = tl.clamp(value / v_scale, -448.0, 448.0)
         destination = (
             (page * PAGE_SIZE + slot) * (NUM_HEADS * HEAD_DIM) + offsets
         )
@@ -115,6 +119,8 @@ if triton is not None:
             "NUM_TOKENS",
             "NUM_ROWS",
             "NUM_TABLE_PAGES",
+            "k_scale",
+            "v_scale",
         )
     )
     def _write_ragged_kernel(
@@ -137,6 +143,8 @@ if triton is not None:
         value_stride_1,
         value_stride_2,
         write_from_stride,
+        k_scale,
+        v_scale,
         NUM_TOKENS,
         NUM_ROWS,
         NUM_TABLE_PAGES,
@@ -198,8 +206,8 @@ if triton is not None:
             other=0.0,
         )
         if FP8_DEST:
-            key = tl.clamp(key, -448.0, 448.0)
-            value = tl.clamp(value, -448.0, 448.0)
+            key = tl.clamp(key / k_scale, -448.0, 448.0)
+            value = tl.clamp(value / v_scale, -448.0, 448.0)
         destination = (
             (page * PAGE_SIZE + slot) * (NUM_HEADS * HEAD_DIM) + offsets
         )
@@ -290,6 +298,9 @@ def try_write_batched(
     keys: torch.Tensor,
     values: torch.Tensor,
     write_from: torch.Tensor | None,
+    *,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> bool:
     """Write a dense decode batch and report whether the fused path ran."""
 
@@ -339,6 +350,8 @@ def try_write_batched(
         values.stride(1),
         values.stride(2),
         dummy_write_from.stride(0),
+        k_scale,
+        v_scale,
         NUM_ROWS=rows,
         NUM_TABLE_PAGES=page_tables.shape[1],
         NUM_POOL_PAGES=k_pool.shape[0],
@@ -363,6 +376,9 @@ def try_write_ragged(
     keys: torch.Tensor,
     values: torch.Tensor,
     write_from: torch.Tensor,
+    *,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> bool:
     """Write a ragged prefill batch and report whether the fused path ran."""
 
@@ -409,6 +425,8 @@ def try_write_ragged(
         values.stride(1),
         values.stride(2),
         write_from.stride(0),
+        k_scale,
+        v_scale,
         NUM_TOKENS=tokens,
         NUM_ROWS=rows,
         NUM_TABLE_PAGES=page_tables.shape[1],

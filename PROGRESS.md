@@ -60,7 +60,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - #356 real-checkpoint quant parity: evidence complete — INT8 PASS; AWQ/GPTQ formal FAIL retained with SHA-bound same-GPU oracle replay isolating checkpoint quantization loss
 - B7 (KV answer-equivalence, #373): operator implemented and portable-validated; additive over F2/F4
 - G4 MoE: M-A1 formal FAIL retained; M-A2 complete; M-A3 scope-closed by owner deviation (perf gate stays FAIL); generic EP combines complete returned rows in fixed FP32 order before one model-dtype cast
-- G4 E-KV: FP8-E4M3 KV **FAIL** on Qwen3-32B long-context; `fp8_e4m3` startup rejected, BF16 KV fail-closed
+- G4 E-KV: unit-scale FP8-E4M3 KV **FAIL** retained; per-layer K/V calibration plumbing is GPU-validated, calibrated re-bake pending; `fp8_e4m3` startup rejected
 - G5: F1a–F1d, F2a–F2d, F4a, F4b all closed; F4c decided (keep per-replica RadixKV + F2 routing, thresholded revisit)
 - F5a/b/c (priority, noisy-neighbor, SLO admission): closed
 - G6: P-A, P-B1–P-B4, P-C2/C3/C4 green (incl. Open WebUI P-B3 browser gate); remaining P-C gates continue
@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-08 — [amendment] FP8 KV scales bind per layer and K/V kind
+- What: FP8 pools and fused writers apply validated static per-layer K/V scales; a disjoint long-context amax pass emits a checkpoint- and data-bound calibration artifact for the unchanged G4 E-KV thresholds.
+- Why: unit scale underused E4M3 range on small-value layers and caused the retained cache-quality and output failures.
+- Refs: issue #357; FlashInfer SM120 amendment; `kairyu/engine/core/{kv_pool,kv_scale_calibration}.py`; `bench/fp8_kv_g4_ekv_bench.py`
 
 ### 2026-08-08 — [amendment] Generic EP combine is local and degree-invariant
 - What: correcting the preceding #359 entry, reverse all-to-all's complete returned rows are combined locally in fixed FP32 slot order, with no redundant combine collective.

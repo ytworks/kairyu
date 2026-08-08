@@ -17,6 +17,8 @@ def _pool(
     pages: int = 8,
     page_size: int = 4,
     dtype: torch.dtype = torch.bfloat16,
+    k_scales=None,
+    v_scales=None,
 ):
     from kairyu.engine.core.kv_pool import PagedKVPool
 
@@ -28,6 +30,8 @@ def _pool(
         head_dim=128,
         dtype=dtype,
         device="cuda:0",
+        k_scales=k_scales,
+        v_scales=v_scales,
     )
 
 
@@ -193,6 +197,50 @@ def test_fp8_batched_write_uses_satfinite_bytes(monkeypatch):
     assert torch.isfinite(stored_v.float()).all()
 
 
+def test_fp8_fused_writes_apply_independent_calibrated_scales():
+    device = _require_cuda()
+    pool = _pool(
+        dtype=torch.float8_e4m3fn,
+        k_scales=[0.5],
+        v_scales=[0.25],
+    )
+    page_tables = torch.tensor([[0]], dtype=torch.int32, device=device)
+    positions = torch.tensor([0], dtype=torch.int64, device=device)
+    keys = torch.full(
+        (1, 2, 128), 1.0, dtype=torch.bfloat16, device=device
+    )
+    values = torch.full_like(keys, 0.5)
+
+    pool.write_batched(0, page_tables, positions, keys, values)
+    torch.cuda.synchronize()
+    assert torch.equal(
+        pool.k[0, 0, 0], (keys / 0.5).to(torch.float8_e4m3fn)[0]
+    )
+    assert torch.equal(
+        pool.v[0, 0, 0], (values / 0.25).to(torch.float8_e4m3fn)[0]
+    )
+
+    positions.fill_(1)
+    row_ids = torch.tensor([0], dtype=torch.int32, device=device)
+    write_from = torch.tensor([1], dtype=torch.int32, device=device)
+    pool.write_ragged(
+        0,
+        page_tables,
+        row_ids,
+        positions,
+        keys * 2,
+        values * 2,
+        write_from,
+    )
+    torch.cuda.synchronize()
+    assert torch.equal(
+        pool.k[0, 0, 1], (keys * 4).to(torch.float8_e4m3fn)[0]
+    )
+    assert torch.equal(
+        pool.v[0, 0, 1], (values * 8).to(torch.float8_e4m3fn)[0]
+    )
+
+
 def test_batched_write_cuda_graph_replay_reads_current_buffers(monkeypatch):
     from kairyu.kernels import paged_kv_write_gpu
 
@@ -291,6 +339,8 @@ def test_batched_request_shape_bounds_are_runtime_kernel_arguments():
         "table_stride_0",
         "NUM_ROWS",
         "NUM_TABLE_PAGES",
+        "k_scale",
+        "v_scale",
     }
 
 
@@ -515,4 +565,6 @@ def test_ragged_request_shape_bounds_are_runtime_kernel_arguments():
         "NUM_TOKENS",
         "NUM_ROWS",
         "NUM_TABLE_PAGES",
+        "k_scale",
+        "v_scale",
     }

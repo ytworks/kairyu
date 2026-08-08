@@ -8,6 +8,8 @@ per-shard) slice contiguously. The same page ids index every layer;
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -30,6 +32,8 @@ class PagedKVPool:
         dtype: torch.dtype = torch.float32,
         device: str = "cpu",
         v_head_dim: int | None = None,
+        k_scales: Sequence[float] | None = None,
+        v_scales: Sequence[float] | None = None,
     ) -> None:
         # MLA caches only the latent in k (v width 0) — m15 A7
         v_dim = head_dim if v_head_dim is None else v_head_dim
@@ -49,12 +53,48 @@ class PagedKVPool:
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.v_head_dim = v_dim
+        self._k_scales, self._v_scales = self._resolve_scales(
+            dtype,
+            num_layers,
+            k_scales,
+            v_scales,
+        )
+
+    @staticmethod
+    def _resolve_scales(
+        dtype: torch.dtype,
+        num_layers: int,
+        k_scales: Sequence[float] | None,
+        v_scales: Sequence[float] | None,
+    ) -> tuple[tuple[float, ...] | None, tuple[float, ...] | None]:
+        if dtype != torch.float8_e4m3fn:
+            if k_scales is not None or v_scales is not None:
+                raise ValueError("KV calibration scales require an FP8 cache")
+            return None, None
+        if (k_scales is None) != (v_scales is None):
+            raise ValueError("FP8 KV calibration requires both K and V scales")
+        if k_scales is None:
+            return (1.0,) * num_layers, (1.0,) * num_layers
+
+        def validated(name: str, values: Sequence[float]) -> tuple[float, ...]:
+            result = tuple(float(value) for value in values)
+            if len(result) != num_layers:
+                raise ValueError(
+                    f"FP8 {name} scales must contain {num_layers} layers; "
+                    f"got {len(result)}"
+                )
+            if any(not math.isfinite(value) or value <= 0.0 for value in result):
+                raise ValueError(f"FP8 {name} scales must be finite and positive")
+            return result
+
+        return validated("K", k_scales), validated("V", v_scales)
 
     @staticmethod
     def _cache_payload(
         payload: torch.Tensor,
         *,
         dtype: torch.dtype,
+        scale: float | None,
     ) -> torch.Tensor:
         """Convert one projected K/V payload to its storage representation.
 
@@ -70,23 +110,27 @@ class PagedKVPool:
             # of saturating them, which would poison every later attention
             # result that reads the affected cache slot.
             limit = torch.finfo(dtype).max
-            return payload.clamp(min=-limit, max=limit).to(dtype=dtype)
+            return (payload / scale).clamp(min=-limit, max=limit).to(dtype=dtype)
         return payload
 
-    def _layer_scale(self, layer: int, dtype: torch.dtype) -> float | None:
+    def _layer_scale(
+        self,
+        layer: int,
+        scales: tuple[float, ...] | None,
+    ) -> float | None:
         if not 0 <= layer < self.num_layers:
             raise IndexError(
                 f"KV layer {layer} is outside [0, {self.num_layers})"
             )
-        return 1.0 if dtype == torch.float8_e4m3fn else None
+        return None if scales is None else scales[layer]
 
     def k_scale(self, layer: int) -> float | None:
-        """Unit calibration scale for an FP8 K cache, otherwise ``None``."""
-        return self._layer_scale(layer, self.k.dtype)
+        """Static calibration scale for an FP8 K cache, otherwise ``None``."""
+        return self._layer_scale(layer, self._k_scales)
 
     def v_scale(self, layer: int) -> float | None:
-        """Unit calibration scale for an FP8 V cache, otherwise ``None``."""
-        return self._layer_scale(layer, self.v.dtype)
+        """Static calibration scale for an FP8 V cache, otherwise ``None``."""
+        return self._layer_scale(layer, self._v_scales)
 
     @classmethod
     def for_cache(
@@ -132,8 +176,12 @@ class PagedKVPool:
     ) -> None:
         """keys/values: [T, num_kv_heads, head_dim] at absolute positions [T]."""
         flat = self._flat_indices(page_table, positions)
-        keys = self._cache_payload(keys, dtype=self.k.dtype)
-        values = self._cache_payload(values, dtype=self.v.dtype)
+        keys = self._cache_payload(
+            keys, dtype=self.k.dtype, scale=self.k_scale(layer)
+        )
+        values = self._cache_payload(
+            values, dtype=self.v.dtype, scale=self.v_scale(layer)
+        )
         self.k[layer].reshape(-1, self.num_kv_heads, self.head_dim)[flat] = keys
         if self.v_head_dim:  # MLA pools have no v payload (width 0)
             self.v[layer].reshape(-1, self.num_kv_heads, self.v_head_dim)[flat] = values
@@ -164,10 +212,16 @@ class PagedKVPool:
                 keys,
                 values,
                 write_from,
+                k_scale=self.k_scale(layer) or 1.0,
+                v_scale=self.v_scale(layer) or 1.0,
             ):
                 return
-        keys = self._cache_payload(keys, dtype=self.k.dtype)
-        values = self._cache_payload(values, dtype=self.v.dtype)
+        keys = self._cache_payload(
+            keys, dtype=self.k.dtype, scale=self.k_scale(layer)
+        )
+        values = self._cache_payload(
+            values, dtype=self.v.dtype, scale=self.v_scale(layer)
+        )
         page_index = torch.div(positions, self.page_size, rounding_mode="floor")
         slot = positions - page_index * self.page_size
         pages = page_tables.gather(1, page_index.unsqueeze(1).long()).squeeze(1)
@@ -224,11 +278,17 @@ class PagedKVPool:
                 keys,
                 values,
                 write_from,
+                k_scale=self.k_scale(layer) or 1.0,
+                v_scale=self.v_scale(layer) or 1.0,
             ):
                 return
 
-        keys = self._cache_payload(keys, dtype=self.k.dtype)
-        values = self._cache_payload(values, dtype=self.v.dtype)
+        keys = self._cache_payload(
+            keys, dtype=self.k.dtype, scale=self.k_scale(layer)
+        )
+        values = self._cache_payload(
+            values, dtype=self.v.dtype, scale=self.v_scale(layer)
+        )
         owners = row_ids.long()
         page_index = torch.div(
             positions, self.page_size, rounding_mode="floor"

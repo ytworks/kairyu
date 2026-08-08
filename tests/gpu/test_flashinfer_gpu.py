@@ -94,7 +94,12 @@ def test_flashinfer_batched_decode_matches_torch_backend(cuda, dtype):
 
 
 @pytest.mark.parametrize("chunk_len", [5, 1], ids=["prefill", "decode"])
-def test_flashinfer_fp8_kv_replans_and_matches_bf16(cuda, chunk_len):
+@pytest.mark.parametrize(
+    "scales",
+    [None, ([0.02], [0.01])],
+    ids=["unit-scale", "calibrated-scale"],
+)
+def test_flashinfer_fp8_kv_replans_and_matches_bf16(cuda, chunk_len, scales):
     from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
     from kairyu.engine.core.kv_pool import PagedKVPool
 
@@ -118,6 +123,7 @@ def test_flashinfer_fp8_kv_replans_and_matches_bf16(cuda, chunk_len):
         dtype=torch.bfloat16,
         device=cuda,
     )
+    k_scales, v_scales = (None, None) if scales is None else scales
     fp8_pool = PagedKVPool(
         1,
         8,
@@ -126,6 +132,8 @@ def test_flashinfer_fp8_kv_replans_and_matches_bf16(cuda, chunk_len):
         head_dim,
         dtype=torch.float8_e4m3fn,
         device=cuda,
+        k_scales=k_scales,
+        v_scales=v_scales,
     )
     bf16_pool.write(0, page_table, positions, keys, values)
     fp8_pool.write(0, page_table, positions, keys, values)

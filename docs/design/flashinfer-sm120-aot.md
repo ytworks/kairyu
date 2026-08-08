@@ -8,6 +8,15 @@ verification below before any FP8-KV path is declared deployable.
 
 Date: 2026-07-13; updated 2026-07-31 for E4M3 KV-cache support.
 
+> **Amended 2026-08-08 (issue #357).** The replacement candidate uses one
+> positive static scale per layer and independently for K and V. A disjoint
+> long-context calibration pass records production ragged-prefill and decode
+> payload amax, applies explicit headroom, and binds the derived scales to the
+> exact checkpoint and calibration-data digests. Every FP8 write stores
+> `SATFINITE(input / scale)` and FlashInfer receives the same scale for reads.
+> Unit-scale fallback remains offline-only; public FP8 KV stays disabled until
+> the unchanged G4 E-KV quality thresholds pass on a clean calibrated rerun.
+
 ## Decision
 
 - Build FlashInfer's `flashinfer-jit-cache` wheel in a CUDA 13.0.1 `-devel`

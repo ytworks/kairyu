@@ -111,6 +111,7 @@ BOUND_SOURCE_FILES = (
     "kairyu/engine/core/engine_service.py",
     "kairyu/engine/core/kv_cache_dtype.py",
     "kairyu/engine/core/kv_pool.py",
+    "kairyu/engine/core/kv_scale_calibration.py",
     "kairyu/engine/core/prefill.py",
     "kairyu/engine/core/worker.py",
     "kairyu/engine/kairyu_backend.py",
@@ -959,6 +960,26 @@ def _prompt_rows(tokenizer: object) -> list[dict[str, object]]:
     return rows
 
 
+def _calibration_prompt_rows(tokenizer: object) -> list[dict[str, object]]:
+    pieces = _stable_token_pieces(tokenizer, required=2 * len(PROMPT_LENGTHS))[
+        len(PROMPT_LENGTHS) :
+    ]
+    rows: list[dict[str, object]] = []
+    for length, (token_id, piece) in zip(PROMPT_LENGTHS, pieces, strict=True):
+        token_ids = (token_id,) * length
+        rows.append(
+            {
+                "prompt_id": f"calibration-long-{length}",
+                "length": length,
+                "piece_token_id": token_id,
+                "piece_text": piece,
+                "token_ids": list(token_ids),
+                "token_ids_sha256": sha256_json(list(token_ids)),
+            }
+        )
+    return rows
+
+
 def _tensor_bytes(tensor: object) -> bytes:
     import torch
 
@@ -1228,6 +1249,97 @@ class _FP8WriteAuditor:
         return rows
 
 
+class _KvAmaxObserver:
+    """Calibration-only observer for production ragged/decode K/V payloads."""
+
+    def __init__(self, pool: object) -> None:
+        import torch
+
+        self.pool = pool
+        self.torch = torch
+        self._original_ragged = pool.write_ragged
+        self._original_batched = pool.write_batched
+        self.k_amax = torch.zeros(
+            pool.num_layers, dtype=torch.float32, device=pool.k.device
+        )
+        self.v_amax = torch.zeros_like(self.k_amax)
+
+    def install(self) -> None:
+        self.pool.write_ragged = self.write_ragged
+        self.pool.write_batched = self.write_batched
+
+    def restore(self) -> None:
+        self.pool.write_ragged = self._original_ragged
+        self.pool.write_batched = self._original_batched
+
+    def _observe(
+        self,
+        layer: int,
+        keys: object,
+        values: object,
+        writable: object,
+    ) -> None:
+        if bool(self.torch.any(writable)):
+            self.k_amax[layer] = self.torch.maximum(
+                self.k_amax[layer], keys[writable].float().abs().max()
+            )
+            self.v_amax[layer] = self.torch.maximum(
+                self.v_amax[layer], values[writable].float().abs().max()
+            )
+
+    def write_ragged(
+        self,
+        layer: int,
+        page_tables: object,
+        row_ids: object,
+        positions: object,
+        keys: object,
+        values: object,
+        write_from: object,
+    ) -> None:
+        owners = row_ids.long()
+        self._observe(layer, keys, values, positions >= write_from[owners])
+        self._original_ragged(
+            layer,
+            page_tables,
+            row_ids,
+            positions,
+            keys,
+            values,
+            write_from,
+        )
+
+    def write_batched(
+        self,
+        layer: int,
+        page_tables: object,
+        positions: object,
+        keys: object,
+        values: object,
+        write_from: object | None = None,
+    ) -> None:
+        writable = (
+            self.torch.ones_like(positions, dtype=self.torch.bool)
+            if write_from is None
+            else positions >= write_from
+        )
+        self._observe(layer, keys, values, writable)
+        self._original_batched(
+            layer,
+            page_tables,
+            positions,
+            keys,
+            values,
+            write_from,
+        )
+
+    def values(self) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        return (
+            tuple(float(value) for value in self.k_amax.cpu().tolist()),
+            tuple(float(value) for value in self.v_amax.cpu().tolist()),
+        )
+
+
 def _new_pool(config: object, *, dtype: object, device: object) -> object:
     from kairyu.engine.core.kv_pool import PagedKVPool
 
@@ -1487,6 +1599,105 @@ def _sanitize_failure(error: BaseException) -> dict[str, object]:
         "error_type": type(error).__name__,
         "message": message[:2_000],
     }
+
+
+def calibrate(
+    *,
+    model_path: Path,
+    image_id: str,
+    headroom: float,
+) -> dict[str, object]:
+    """Measure per-layer K/V amax on disjoint long-context prompts."""
+    import gc
+
+    import torch
+
+    from kairyu.engine.core.attention import select_backend
+    from kairyu.engine.core.hw_profile import probe
+    from kairyu.engine.core.kv_scale_calibration import KvScaleCalibration
+    from kairyu.engine.tokenizer import HFTokenizer
+    from kairyu.models.loader import load_model
+
+    if _IMAGE_ID.fullmatch(image_id) is None:
+        raise ValueError("--image-id must be sha256:<64 lowercase hex>")
+    if os.environ.get("KAIRYU_ATTENTION_BACKEND") != "flashinfer":
+        raise RuntimeError(
+            "FP8 KV calibration requires explicit KAIRYU_ATTENTION_BACKEND=flashinfer"
+        )
+    source = _source_snapshot()
+    if not _source_snapshot_valid(source):
+        raise RuntimeError("FP8 KV calibration requires a clean bound source commit")
+    checkpoint = _checkpoint_snapshot(model_path)
+    if not _checkpoint_valid(checkpoint):
+        raise RuntimeError("calibration requires the reviewed Qwen3-32B checkpoint")
+    backend = select_backend(probe(), device="cuda:0")
+    environment = _environment_snapshot(
+        backend_decision=backend.selection_decision
+    )
+    if not _environment_valid(environment):
+        raise RuntimeError(
+            "FP8 KV calibration requires one visible SM120 GPU and FlashInfer"
+        )
+
+    tokenizer = HFTokenizer(model_path)
+    prompts = _calibration_prompt_rows(tokenizer)
+    data_sha256 = sha256_json(prompts)
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
+    model = None
+    pool = None
+    observer = None
+    try:
+        model, config, _generation = load_model(
+            model_path,
+            dtype=torch.bfloat16,
+            attention_backend=backend,
+            target_device=device,
+        )
+        model = model.to(device)
+        pool = _new_pool(config, dtype=torch.bfloat16, device=device)
+        observer = _KvAmaxObserver(pool)
+        observer.install()
+        for prompt in prompts:
+            _run_prompt(model, pool, prompt, device=device)
+        observer.restore()
+        k_amax, v_amax = observer.values()
+        calibration = KvScaleCalibration.from_amax(
+            checkpoint_sha256=sha256_json(checkpoint),
+            calibration_data_sha256=data_sha256,
+            headroom=headroom,
+            k_amax=k_amax,
+            v_amax=v_amax,
+        )
+        return {
+            "type": "fp8_kv_calibration",
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "model": MODEL,
+            "model_revision": MODEL_REVISION,
+            "image_id": image_id,
+            "source": source,
+            "checkpoint": checkpoint,
+            "environment": environment,
+            "calibration_prompts": [
+                {
+                    "prompt_id": row["prompt_id"],
+                    "length": row["length"],
+                    "piece_token_id": row["piece_token_id"],
+                    "piece_text": row["piece_text"],
+                    "token_ids_sha256": row["token_ids_sha256"],
+                }
+                for row in prompts
+            ],
+            "calibration_data_sha256": data_sha256,
+            "calibration": calibration.artifact(),
+            "calibration_sha256": calibration.sha256,
+        }
+    finally:
+        if observer is not None:
+            observer.restore()
+        del observer, pool, model
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 def measure(
@@ -2276,6 +2487,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    calibrate_parser = subparsers.add_parser(
+        "calibrate", help="record static per-layer K/V scales"
+    )
+    calibrate_parser.add_argument("--model-path", type=Path, required=True)
+    calibrate_parser.add_argument("--image-id", required=True)
+    calibrate_parser.add_argument("--output", type=Path, required=True)
+    calibrate_parser.add_argument("--headroom", type=float, default=1.05)
+
     measure_parser = subparsers.add_parser(
         "measure", help="run the real one-GPU BF16/FP8 bake"
     )
@@ -2300,7 +2519,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.command == "measure":
+    if args.command == "calibrate":
+        result = calibrate(
+            model_path=args.model_path.resolve(),
+            image_id=args.image_id,
+            headroom=args.headroom,
+        )
+        output = args.output.resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(canonical_json(result) + "\n", encoding="utf-8")
+    elif args.command == "measure":
         rows = measure(
             model_path=args.model_path.resolve(),
             image_id=args.image_id,
@@ -2311,7 +2539,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         result = replay_artifact(args.artifact.resolve())
     print(canonical_json(result))
-    return 1 if args.assert_gate and result["passed"] is not True else 0
+    return (
+        1
+        if getattr(args, "assert_gate", False) and result["passed"] is not True
+        else 0
+    )
 
 
 if __name__ == "__main__":

@@ -541,3 +541,37 @@ def test_satfinite_oracle_does_not_conflate_overrange_with_bytes() -> None:
     assert row["stored_nonfinite"] == 0
     assert row["stored_byte_mismatch"] == 0
     assert torch.isfinite(pool.k.to(torch.float32)).all()
+
+
+def test_calibration_observer_records_independent_layer_kv_amax() -> None:
+    pool = PagedKVPool(
+        num_layers=2,
+        num_pages=1,
+        page_size=2,
+        num_kv_heads=1,
+        head_dim=2,
+        dtype=torch.bfloat16,
+    )
+    observer = gate._KvAmaxObserver(pool)
+    observer.install()
+    try:
+        pool.write_ragged(
+            0,
+            torch.tensor([[0]], dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+            torch.tensor([0]),
+            torch.tensor([[[2.0, -3.0]]], dtype=torch.bfloat16),
+            torch.tensor([[[4.0, -1.0]]], dtype=torch.bfloat16),
+            torch.tensor([0]),
+        )
+        pool.write_batched(
+            1,
+            torch.tensor([[0]], dtype=torch.int32),
+            torch.tensor([1]),
+            torch.tensor([[[5.0, -2.0]]], dtype=torch.bfloat16),
+            torch.tensor([[[1.0, -6.0]]], dtype=torch.bfloat16),
+        )
+    finally:
+        observer.restore()
+
+    assert observer.values() == ((3.0, 5.0), (4.0, 6.0))
