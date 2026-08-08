@@ -7,6 +7,7 @@ import pytest
 
 from kairyu.bench.adapters import (
     CORE_ROW_ORDER,
+    LONG_CONTEXT_ROW_ORDER,
     QUANTIZATION_ROW_ORDER,
     STRUCTURED_ROW_ORDER,
     all_adapters,
@@ -130,13 +131,27 @@ def test_structured_suite_is_isolated_from_core_and_quantization():
     assert "structured-output" not in QUANTIZATION_ROW_ORDER
 
 
+def test_long_context_scoreboard_is_the_length_curve():
+    pairs = [_pair(benchmark, "m") for benchmark in reversed(LONG_CONTEXT_ROW_ORDER)]
+
+    board = _board(pairs, ["m"], suite="long-context")
+
+    assert board["benchmarks"] == list(LONG_CONTEXT_ROW_ORDER)
+    assert render_markdown(board).startswith(
+        "# Long Context benchmark scoreboard — run run-1"
+    )
+
+
 def test_only_and_exclude_names_are_validated_within_the_selected_suite():
     assert [adapter.info.name for adapter in suite_adapters("core")] == list(CORE_ROW_ORDER)
     with pytest.raises(ValueError, match="gpqa-diamond"):
         suite_adapters("core", only=("gpqa-diamond",))
     with pytest.raises(ValueError, match="gsm8k"):
         suite_adapters("fugu", exclude=("gsm8k",))
-    with pytest.raises(ValueError, match="available: fugu, core, quantization, structured"):
+    with pytest.raises(
+        ValueError,
+        match="available: fugu, core, quantization, structured, long-context",
+    ):
         suite_adapters("unknown")
 
 
@@ -692,6 +707,7 @@ def test_only_contractually_binary_adapters_enable_wilson_intervals():
         "livecodebench-pro",
         "long-context-reasoning",
         "mmlu",
+        *LONG_CONTEXT_ROW_ORDER,
         "scicode",
         "swe-bench-pro",
         "structured-output",

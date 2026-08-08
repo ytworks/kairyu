@@ -12,7 +12,7 @@ preserving the affected command and evidence paths.
 |---|---|---|
 | Reusable config, target types, credential resolution, statistics, atomic reporting, adapters, and runners | `kairyu/bench/` | Installed in the Kairyu wheel; may be imported by both the public CLI and checkout-only wrappers |
 | Public benchmark CLI | `kairyu bench` | Installed console surface: `run`, `download`, `report`, `compare-runs`, `compare`, `quant-sweep`, `calibrate-judge`, `list`, and `entrypoints` |
-| Offline benchmark/calibration fixtures | `kairyu/bench/fixtures/` | Installed package data: 11 synthetic stand-ins, one fixed structured-output corpus, and one judge-calibration corpus; all 13 JSONL files must be readable through `importlib.resources` |
+| Offline benchmark/calibration fixtures | `kairyu/bench/fixtures/` | Installed package data: 17 synthetic stand-ins, one fixed structured-output corpus, and one judge-calibration corpus; all 19 JSONL files must be readable through `importlib.resources` |
 | Entrypoint inventory | `kairyu/bench/entrypoints.toml` | Installed, machine-readable source of truth for every supported top-level wrapper |
 | Gate, comparison, operator, and microbenchmark executables | `bench/*.py` | Repository-only; the inventory declares a path form and, where supported, an optional module form; B7 and A12 evidence are path-only |
 | Measurement and decision artifacts | `bench/results/` | Repository-only and never shipped in a wheel; routine output is ignored, while explicitly reviewed formal evidence may be retained by Git |
@@ -25,6 +25,13 @@ structured-output suite defaults to `bench/results/structured/`. For an
 installed CLI used outside this repository, these are paths relative to the
 caller's working directory; they do not mean the top-level `bench/` tree is
 installed.
+
+The package-owned `long-context` suite defaults to
+`bench/results/long-context/`. Its six ordinary adapter rows are the 4K, 8K,
+16K, 32K, 64K, and 128K points of one deterministic RULER-style single-key NIAH
+curve. It reuses the standard runner, pair evidence, scoreboard, history, and
+config comparison paths; it does not introduce a repository-only wrapper or a
+second aggregate format. See `docs/design/issue-374-long-context-sweep.md`.
 
 `kairyu bench quant-sweep` is package-owned composition, not another top-level
 wrapper. It reloads a complete indexed `quantization` run and reuses the public

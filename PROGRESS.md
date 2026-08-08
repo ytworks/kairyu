@@ -75,7 +75,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: `kairyu bench run` (Fugu + core suites), hash-chained quality history, config A/B and quant sweeps
+- Benchmark/eval tooling: Fugu/Core/Quantization/Structured/Long Context suites, hash-chained quality history, config A/B and quant sweeps
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-08 — [design] Long-context accuracy is a fixed-length NIAH curve
+- What: a package-owned suite runs one deterministic exact-retrieval task at 4K/8K/16K/32K/64K/128K, with 20 evenly positioned needles per row and whole-row target-window gating.
+- Why: one aggregate MRCR/LongBench score cannot show the context length where accuracy collapses; ordinary rows reuse the existing evidence and comparison contracts without a parallel harness.
+- Refs: issue #374; `docs/design/issue-374-long-context-sweep.md`; `kairyu/bench/adapters/ruler_niah.py`
 
 ### 2026-08-08 — [amendment] Grouped-MoE probe failures always fall back
 - What: capability and plan-warmup probes catch backend-specific ordinary exceptions and decline the derived grouped pack.

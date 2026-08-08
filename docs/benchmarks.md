@@ -172,6 +172,11 @@ kairyu bench run --config examples/bench_quantization.yaml \
 kairyu bench quant-sweep --run qwen3-quant-accuracy \
     --tolerance gsm8k=1.0 --tolerance mmlu=1.0 \
     --tolerance ifeval=1.0 --tolerance gpqa-diamond=2.0
+
+# deterministic 4K -> 128K single-key retrieval curve (120 calls):
+kairyu bench run --suite long-context \
+    --base-url http://localhost:8000/v1 --model m1 \
+    --max-context-tokens 131072
 ```
 
 Results land in `bench/results/fugu/<run_id>/`:
@@ -190,8 +195,9 @@ quantization-sweep.md                         # scheme-major accuracy/gate repor
 ```
 
 Core results default to `bench/results/core/<run_id>/`; structured results
-default to `bench/results/structured/<run_id>/`; and quantization results
-default to `bench/results/quantization/<run_id>/`. All three contain the same
+default to `bench/results/structured/<run_id>/`; quantization results default
+to `bench/results/quantization/<run_id>/`; and long-context results default to
+`bench/results/long-context/<run_id>/`. All four contain the same
 run, pair, and scoreboard artifacts. They intentionally omit
 `comparison.json` and `comparison.md`: the published reference table is a Fugu
 contract, not a generic benchmark baseline. A completed quantization run adds
@@ -532,6 +538,46 @@ A full one-attempt run schedules five source items, two endpoint calls per
 item, and ten calls in total. `--limit` remains useful for plumbing but creates
 an explicit subset. No GPU, judge, Docker runner, or remote dataset is required;
 the deployed target must implement the chat `response_format` contract.
+
+## Long-context length curve
+
+The dedicated `long-context` suite turns sequence length into the scoreboard's
+row dimension. It runs the same deterministic, single-key needle retrieval task
+at 4K, 8K, 16K, 32K, 64K, and 128K user-message content tokens. Each row has 20
+items with the needle placed at evenly spaced target depths from 2.5% through
+97.5%, so a normal scoreboard is the accuracy-vs-length curve rather than one
+average that hides the failure point. Each answer is a unique deterministic
+value and scores one only when the stripped response is exactly that value.
+
+The rows are generated locally during `download`; no remote dataset is needed.
+Generation uses the pinned `o200k_base` vocabulary and recounts the complete
+message content to require its exact row length. Endpoint-specific chat-template
+tokens are outside that count and are disclosed in every cell. This is a
+RULER-style single-key NIAH probe, not the official 13-task NVIDIA RULER suite,
+and its scores must not be reported as official RULER numbers. The design uses
+RULER's configurable-length retrieval principle and standard 4K-to-128K curve,
+while deliberately avoiding a second external harness. See the
+[official RULER repository](https://github.com/NVIDIA/RULER) for the full task
+family and [`docs/design/issue-374-long-context-sweep.md`](design/issue-374-long-context-sweep.md)
+for Kairyu's exact boundary.
+
+`--max-context-tokens` declares the input limit of every CLI target. A curve
+point above that limit is skipped in full and is never truncated into a shorter
+test. Omitting the limit attempts every point; server rejection or exhaustion is
+retained as failed evidence. A full run makes 120 calls per target. `--limit`
+and offline fixtures remain plumbing aids and carry the existing subset/
+fixture incomparability markers. Clean full runs can use the ordinary
+`compare-runs` history report or the paired `compare` command with one tolerance
+per length row, which makes the curve a direct gate for RoPE or KV-cache changes.
+
+```bash
+uv sync --extra bench
+kairyu bench download --suite long-context --strict
+kairyu bench run --suite long-context \
+    --base-url http://localhost:8000/v1 --model qwen3-32b \
+    --max-context-tokens 131072 --run-id qwen3-long-context
+kairyu bench report --suite long-context qwen3-long-context
+```
 
 ## Quantization x task-accuracy suite
 

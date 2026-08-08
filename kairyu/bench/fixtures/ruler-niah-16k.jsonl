@@ -1,0 +1,1 @@
+{"id":"fixture-ruler-niah-16384","messages":[{"role":"user","content":"Records: key-demo = value-16384. What value is assigned to key-demo? Answer only the value."}],"answer":"value-16384","context_tokens":24,"needle_position":0.5}

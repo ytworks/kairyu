@@ -78,6 +78,42 @@ def test_models_shorthand_builds_targets():
     assert config.limit is None  # full run is the default
 
 
+def test_long_context_cli_applies_declared_target_limit():
+    args = _parse(
+        [
+            "run",
+            "--suite",
+            "long-context",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--max-context-tokens",
+            "131072",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.suite == "long-context"
+    assert config.results_dir == "bench/results/long-context"
+    assert config.targets[0].max_context_tokens == 131_072
+
+    invalid = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--max-context-tokens",
+            "0",
+        ]
+    )
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        build_config(invalid)
+
+
 def test_served_config_identity_normalizes_label_and_requires_lowercase_sha256():
     identity = ServedConfigIdentity(label="  fp8-kv production  ", sha256="a" * 64)
 

@@ -54,6 +54,12 @@ def add_bench_parser(subparsers) -> None:
         "measured on prompts with the image silently dropped",
     )
     run.add_argument(
+        "--max-context-tokens",
+        type=int,
+        default=None,
+        help="Declare the maximum input context supported by every CLI target",
+    )
+    run.add_argument(
         "--reasoning-effort",
         default=None,
         help="reasoning_effort sent to every target (Fugu reports max effort)",
