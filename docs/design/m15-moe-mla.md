@@ -149,3 +149,10 @@ MLA fields from config). `validate_tp_degree`: MLA models report
 - **A9 fixtures**: minimum kwargs pinned; DeepSeek needs consistent
   n_routed/n_group/topk_group/top_k, v_head_dim ≠ qk dims (catches
   transposes), q_lora both int and None, num_key_value_heads=heads.
+- **A10 (issue #331)**: CUDA BF16 routed experts replace D1's data-dependent
+  token loop with a stable sort, device-side expert offsets, and two FlashInfer
+  cuDNN grouped GEMMs (fused gate/up, then down). Canonical per-expert HF
+  parameters remain views into one packed allocation; assign-load and device
+  conversion rebuild the pack without changing checkpoint paths. Unsupported
+  projection types retain the reference path, including the separately fused
+  production NVFP4 implementation.

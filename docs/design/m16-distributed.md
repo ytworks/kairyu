@@ -165,6 +165,16 @@ NCCL share the code path.
 > addition grouping are independent of EP2/4/8 ownership; the NVFP4 carve-out
 > above remains unchanged.
 
+> **Amended 2026-08-08 (issue #331).** Dense BF16 EP uses fixed
+> `[ep_size, tokens * top_k, hidden]` peer-capacity buffers. Device-side sorted
+> positions fill each destination chunk, padding targets that destination's
+> first local expert, and the forward/reverse `all_to_all_single` split lists
+> are host constants. Local rows use M15 A10's grouped GEMMs. This removes the
+> counts `.item()`/`.tolist()` and data-dependent expert loop from the CUDA hot
+> path and makes a static decode shape graph-capturable. Quantized/custom
+> compatibility paths and the fused NVFP4 path retain their established
+> transports.
+
 ### D4 — SPMD worker + PP stage (`engine/core/worker.py`, `pp_worker.py`)
 
 `worker.py`: `run_tp_worker(rank, world, init_method, model_dir, ...)` —

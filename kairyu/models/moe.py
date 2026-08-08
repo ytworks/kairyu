@@ -11,6 +11,7 @@ import torch
 from torch import nn
 
 from kairyu.models.config import ModelConfig
+from kairyu.models.grouped_moe import GroupedExpertPack
 from kairyu.models.layers import SwiGluMlp
 from kairyu.quant.linear import (
     CheckpointMemberLayout,
@@ -85,9 +86,27 @@ def _mix_experts(
     experts: nn.ModuleList,
     topk_indices: torch.Tensor,
     topk_weights: torch.Tensor,
+    grouped_pack: GroupedExpertPack | None = None,
 ) -> torch.Tensor:
     """Reference combine with one final cast after router-weight accumulation."""
     combine_dtype = torch.promote_types(hidden.dtype, topk_weights.dtype)
+    if grouped_pack is not None and grouped_pack.supports(hidden):
+        tokens, top_k = topk_indices.shape
+        rows = hidden.repeat_interleave(
+            top_k,
+            dim=0,
+            output_size=tokens * top_k,
+        )
+        expert_out = grouped_pack.forward(rows, topk_indices.reshape(-1))
+        weighted = expert_out.to(combine_dtype) * topk_weights.reshape(-1, 1).to(
+            combine_dtype
+        )
+        weighted = weighted.reshape(tokens, top_k, -1)
+        out = torch.zeros_like(hidden, dtype=combine_dtype)
+        for slot in range(top_k):
+            out = out + weighted[:, slot]
+        return out.to(hidden.dtype)
+
     out = torch.zeros_like(hidden, dtype=combine_dtype)
     for expert_id in topk_indices.unique():
         token_mask, slot = (topk_indices == expert_id).nonzero(as_tuple=True)
@@ -95,6 +114,20 @@ def _mix_experts(
         weights = topk_weights[token_mask, slot].to(combine_dtype)
         out.index_add_(0, token_mask, expert_out * weights[:, None])
     return out.to(hidden.dtype)
+
+
+def _refresh_grouped_expert_pack(module: nn.Module, _incompatible_keys=None) -> None:
+    """Rebuild dense expert storage after assign-load or device conversion."""
+
+    experts = tuple(module.experts)
+    current = getattr(module, "_grouped_expert_pack", None)
+    if current is not None and current.is_current():
+        return
+    object.__setattr__(
+        module,
+        "_grouped_expert_pack",
+        GroupedExpertPack.create(experts),
+    )
 
 
 def apply_nvfp4_moe_global_input_scales(
@@ -277,10 +310,23 @@ class Qwen3MoeSparseBlock(nn.Module):
             )
             for expert_index in range(moe.num_experts)
         )
+        _refresh_grouped_expert_pack(self)
+        self.register_load_state_dict_post_hook(_refresh_grouped_expert_pack)
+
+    def _apply(self, fn, recurse: bool = True):
+        result = super()._apply(fn, recurse=recurse)
+        _refresh_grouped_expert_pack(self)
+        return result
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         topk_indices, topk_weights = route_experts(self, hidden)
-        return _mix_experts(hidden, self.experts, topk_indices, topk_weights)
+        return _mix_experts(
+            hidden,
+            self.experts,
+            topk_indices,
+            topk_weights,
+            self._grouped_expert_pack,
+        )
 
 
 class DeepseekV3MoeBlock(nn.Module):
@@ -338,6 +384,8 @@ class DeepseekV3MoeBlock(nn.Module):
             )
             for expert_index in range(moe.num_experts)
         )
+        _refresh_grouped_expert_pack(self)
+        self.register_load_state_dict_post_hook(_refresh_grouped_expert_pack)
         if moe.n_shared_experts:
             self.shared_experts = _ExpertMlp(
                 config,
@@ -352,12 +400,23 @@ class DeepseekV3MoeBlock(nn.Module):
         else:
             self.shared_experts = None
 
+    def _apply(self, fn, recurse: bool = True):
+        result = super()._apply(fn, recurse=recurse)
+        _refresh_grouped_expert_pack(self)
+        return result
+
     def _route(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         return route_experts(self, hidden)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         topk_indices, topk_weights = self._route(hidden)
-        out = _mix_experts(hidden, self.experts, topk_indices, topk_weights)
+        out = _mix_experts(
+            hidden,
+            self.experts,
+            topk_indices,
+            topk_weights,
+            self._grouped_expert_pack,
+        )
         if self.shared_experts is not None:
             out = out + self.shared_experts(hidden)
         return out

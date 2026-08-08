@@ -1752,7 +1752,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "fastembed", marker = "extra == 'embeddings'", specifier = "==0.8.0" },
     { name = "flash-attn-4", extras = ["cu13"], marker = "sys_platform == 'linux' and extra == 'flashattention4'", specifier = "==4.0.0b24" },
-    { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=0.2" },
+    { name = "flashinfer-python", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=0.6.14" },
     { name = "h5py", marker = "extra == 'bench'", specifier = ">=3.11" },
     { name = "harbor", marker = "python_full_version >= '3.12' and extra == 'bench-agentic'", specifier = ">=0.17" },
     { name = "httptools", marker = "sys_platform == 'linux'", specifier = ">=0.8.0" },

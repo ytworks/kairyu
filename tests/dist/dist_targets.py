@@ -144,6 +144,19 @@ class _NcclScaleExpert(torch.nn.Module):
         return hidden * self.scale
 
 
+class _NcclDenseExpert(torch.nn.Module):
+    def __init__(self, hidden: int = 32, intermediate: int = 48) -> None:
+        super().__init__()
+        self.gate_proj = torch.nn.Linear(hidden, intermediate, bias=False)
+        self.up_proj = torch.nn.Linear(hidden, intermediate, bias=False)
+        self.down_proj = torch.nn.Linear(intermediate, hidden, bias=False)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(
+            torch.nn.functional.silu(self.gate_proj(hidden)) * self.up_proj(hidden)
+        )
+
+
 class _NcclTinyMoeBlock(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -167,6 +180,12 @@ class _NcclTinyMoeBlock(torch.nn.Module):
             mask = expert_ids[:, 0] == expert_id
             out[mask] = expert(hidden[mask])
         return out
+
+
+class _NcclDenseMoeBlock(_NcclTinyMoeBlock):
+    def __init__(self) -> None:
+        super().__init__()
+        self.experts = torch.nn.ModuleList(_NcclDenseExpert() for _ in range(4))
 
 
 class _EpInvariantExpert(torch.nn.Module):
@@ -480,18 +499,14 @@ def ep_block_nccl_parity(
     try:
         comm = TorchDistCommunicator()
         device = torch.device("cuda", rank)
-        block = _NcclTinyMoeBlock().to(device)
-        hidden = torch.tensor(
-            [
-                [1.0, 2.0, -1.0],
-                [0.5, -3.0, 4.0],
-                [-2.0, 1.5, 3.0],
-                [4.0, -0.5, 2.0],
-                [3.0, 2.5, -4.0],
-                [-1.0, 0.25, 5.0],
-            ],
-            dtype=torch.float32,
-            device=device,
+        torch.manual_seed(29)
+        block = _NcclDenseMoeBlock().to(device=device, dtype=torch.bfloat16)
+        hidden = (
+            torch.arange(6 * 32, device=device, dtype=torch.float32)
+            .reshape(6, 32)
+            .sub(96)
+            .div(64)
+            .to(torch.bfloat16)
         )
         reference = block(hidden)
         ep_block = EpMoeBlock(block, comm, ep_rank=rank, ep_size=world_size)

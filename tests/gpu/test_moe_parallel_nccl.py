@@ -14,7 +14,7 @@ pytestmark = pytest.mark.gpu
 
 WORLD_SIZE = 2
 SPAWN_TIMEOUT_S = 120
-FLOAT32_TOLERANCE = 1e-6
+BF16_TOLERANCE = 2e-2
 
 
 def test_ep_dispatch_and_return_match_reference_over_nccl(tmp_path: Path) -> None:
@@ -51,4 +51,4 @@ def test_ep_dispatch_and_return_match_reference_over_nccl(tmp_path: Path) -> Non
         result = json.loads(result_file.read_text())
         assert result["local_experts"] == 2
         assert result["device"] == f"cuda:{rank}"
-        assert result["max_error"] <= FLOAT32_TOLERANCE
+        assert result["max_error"] <= BF16_TOLERANCE

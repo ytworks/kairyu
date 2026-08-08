@@ -21,6 +21,7 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from kairyu.models.grouped_moe import GroupedExpertPack
 from kairyu.models.moe import (
     apply_nvfp4_moe_global_input_scales,
     route_experts,
@@ -278,6 +279,20 @@ def _ep_combine_returned_rows(
         contribution = contribution * topk_weights[:, slot].to(combine_dtype)[:, None]
         combined = combined + contribution
     return combined
+
+
+def _refresh_ep_grouped_expert_pack(module: nn.Module, _incompatible_keys=None) -> None:
+    """Pack only this rank's dense experts after assign-load or conversion."""
+
+    local_experts = tuple(module.local_experts)
+    current = getattr(module, "_grouped_expert_pack", None)
+    if current is not None and current.is_current():
+        return
+    object.__setattr__(
+        module,
+        "_grouped_expert_pack",
+        GroupedExpertPack.create(local_experts),
+    )
 
 
 def _swizzle_nvfp4_moe_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -562,6 +577,10 @@ class EpMoeBlock(nn.Module):
         )
         self.experts = experts
         block.experts = experts
+        # A local dense expert may still be a view into the original block's
+        # all-expert pack.  Drop that owner before repacking rank-local storage
+        # so retaining ``block`` cannot retain remote expert tensors.
+        object.__setattr__(block, "_grouped_expert_pack", None)
         self.shared_experts = getattr(block, "shared_experts", None)
         object.__setattr__(self, "_route_override", route_override)
 
@@ -602,6 +621,8 @@ class EpMoeBlock(nn.Module):
             "_attention_dp_capture_resolver",
             None,
         )
+        _refresh_ep_grouped_expert_pack(self)
+        self.register_load_state_dict_post_hook(_refresh_ep_grouped_expert_pack)
 
     def _invalidate_prepared_nvfp4(self) -> None:
         """Drop derived fused operands before registered tensors can change."""
@@ -691,7 +712,9 @@ class EpMoeBlock(nn.Module):
         # Invalidate first so even a failed conversion cannot re-enable stale
         # operands; the normal build path prepares only after model.to(device).
         self._invalidate_prepared_nvfp4()
-        return super()._apply(fn, recurse=recurse)
+        result = super()._apply(fn, recurse=recurse)
+        _refresh_ep_grouped_expert_pack(self)
+        return result
 
     def _load_from_state_dict(
         self,
@@ -890,6 +913,106 @@ class EpMoeBlock(nn.Module):
             )
         return layout
 
+    def _forward_grouped_all_to_all(
+        self,
+        hidden: torch.Tensor,
+        topk_indices: torch.Tensor,
+        topk_weights: torch.Tensor,
+        grouped_pack: GroupedExpertPack,
+    ) -> torch.Tensor:
+        """Dispatch fixed peer-capacity buffers and run rank-local grouped GEMM."""
+
+        device = hidden.device
+        tokens, top_k = topk_indices.shape
+        rows = tokens * top_k
+        # A peer can own every selected row, so ``rows`` is the exact safe
+        # per-peer capacity.  Static decode shapes therefore use static host
+        # split sizes while validity and placement remain device tensors.
+        capacity = rows
+        flat_expert = topk_indices.reshape(-1)
+        owner = flat_expert // self.experts_per_rank
+        order = torch.argsort(owner, stable=True)
+        owner_sorted = owner[order]
+        owner_counts = torch.zeros(
+            self.ep_size,
+            dtype=torch.int64,
+            device=device,
+        )
+        owner_counts.scatter_add_(
+            0,
+            owner_sorted,
+            torch.ones_like(owner_sorted),
+        )
+        owner_starts = owner_counts.cumsum(0) - owner_counts
+        positions = torch.arange(rows, device=device) - owner_starts[owner_sorted]
+        dispatch_indices = owner_sorted * capacity + positions
+
+        repeated = hidden.repeat_interleave(
+            top_k,
+            dim=0,
+            output_size=rows,
+        )[order]
+        fixed_rows = self.ep_size * capacity
+        payload = torch.zeros(
+            fixed_rows,
+            hidden.shape[-1],
+            dtype=hidden.dtype,
+            device=device,
+        )
+        payload[dispatch_indices] = repeated
+        local_start = self.owned_expert_indices[0]
+        expert_ids_out = (
+            torch.arange(self.ep_size, dtype=torch.int64, device=device)
+            .mul(self.experts_per_rank)
+            .repeat_interleave(capacity, output_size=fixed_rows)
+        )
+        expert_ids_out[dispatch_indices] = flat_expert[order]
+
+        splits = [capacity] * self.ep_size
+        received = torch.empty_like(payload)
+        expert_ids_in = torch.empty_like(expert_ids_out)
+        _assert_collective_device(
+            device,
+            payload=payload,
+            received=received,
+            expert_ids_out=expert_ids_out,
+            expert_ids_in=expert_ids_in,
+        )
+        self._comm.tensor_all_to_all_single(
+            received,
+            payload.contiguous(),
+            splits,
+            splits,
+        )
+        self._comm.tensor_all_to_all_single(
+            expert_ids_in,
+            expert_ids_out.contiguous(),
+            splits,
+            splits,
+        )
+
+        local_expert_ids = expert_ids_in - local_start
+        computed = grouped_pack.forward(received, local_expert_ids)
+        returned = torch.empty_like(computed)
+        _assert_collective_device(device, computed=computed, returned=returned)
+        self._comm.tensor_all_to_all_single(
+            returned,
+            computed.contiguous(),
+            splits,
+            splits,
+        )
+
+        returned_in_owner_order = returned[dispatch_indices]
+        unsorted = torch.empty_like(returned_in_owner_order)
+        unsorted[order] = returned_in_owner_order
+        out = _ep_combine_returned_rows(
+            unsorted.reshape(tokens, top_k, -1),
+            topk_weights,
+        ).to(hidden.dtype)
+        if self.shared_experts is not None:
+            out = out + self.shared_experts(hidden)
+        return out
+
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
         if self.attention_dp:
             return self._forward_attention_dp(hidden)
@@ -919,6 +1042,15 @@ class EpMoeBlock(nn.Module):
                 out = out + self.shared_experts(hidden)
             object.__setattr__(self, "_fused_nvfp4_executed", True)
             return out
+
+        grouped_pack = self._grouped_expert_pack
+        if grouped_pack is not None and grouped_pack.supports(hidden):
+            return self._forward_grouped_all_to_all(
+                hidden,
+                topk_indices,
+                topk_weights,
+                grouped_pack,
+            )
 
         tokens, k = topk_indices.shape
         flat_expert = topk_indices.reshape(-1)  # [tokens*k]

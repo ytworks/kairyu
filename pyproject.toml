@@ -52,7 +52,7 @@ vision = [
 otel = ["opentelemetry-sdk>=1.27"]
 # GPU kernels/fabric: linux-only markers so macOS `uv sync` ignores them.
 gpu = [
-    "flashinfer-python>=0.2; sys_platform == 'linux'",
+    "flashinfer-python>=0.6.14; sys_platform == 'linux'",
     "triton>=3.0; sys_platform == 'linux'",
     "nixl>=0.2; sys_platform == 'linux'",
 ]
