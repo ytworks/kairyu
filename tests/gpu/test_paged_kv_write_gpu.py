@@ -199,25 +199,29 @@ def test_fp8_batched_write_uses_satfinite_bytes(monkeypatch):
 
 def test_fp8_fused_writes_apply_independent_calibrated_scales():
     device = _require_cuda()
+    k_scale = 0.27773437500000003
+    v_scale = 0.0013641357421875
     pool = _pool(
         dtype=torch.float8_e4m3fn,
-        k_scales=[0.5],
-        v_scales=[0.25],
+        k_scales=[k_scale],
+        v_scales=[v_scale],
     )
     page_tables = torch.tensor([[0]], dtype=torch.int32, device=device)
     positions = torch.tensor([0], dtype=torch.int64, device=device)
-    keys = torch.full(
-        (1, 2, 128), 1.0, dtype=torch.bfloat16, device=device
-    )
-    values = torch.full_like(keys, 0.5)
+    torch.manual_seed(357)
+    keys = torch.randn(1, 2, 128, dtype=torch.bfloat16, device=device) * 30
+    values = torch.randn_like(keys) * 0.1
+
+    def quantized(tensor, scale):
+        return (tensor.float() / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
 
     pool.write_batched(0, page_tables, positions, keys, values)
     torch.cuda.synchronize()
     assert torch.equal(
-        pool.k[0, 0, 0], (keys / 0.5).to(torch.float8_e4m3fn)[0]
+        pool.k[0, 0, 0], quantized(keys, k_scale)[0]
     )
     assert torch.equal(
-        pool.v[0, 0, 0], (values / 0.25).to(torch.float8_e4m3fn)[0]
+        pool.v[0, 0, 0], quantized(values, v_scale)[0]
     )
 
     positions.fill_(1)
@@ -234,10 +238,10 @@ def test_fp8_fused_writes_apply_independent_calibrated_scales():
     )
     torch.cuda.synchronize()
     assert torch.equal(
-        pool.k[0, 0, 1], (keys * 4).to(torch.float8_e4m3fn)[0]
+        pool.k[0, 0, 1], quantized(keys * 2, k_scale)[0]
     )
     assert torch.equal(
-        pool.v[0, 0, 1], (values * 8).to(torch.float8_e4m3fn)[0]
+        pool.v[0, 0, 1], quantized(values * 2, v_scale)[0]
     )
 
 

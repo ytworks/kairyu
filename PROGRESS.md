@@ -95,6 +95,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] FP8 KV scaling is correctly rounded
+- What: fused batched and ragged FP8 KV writers perform calibrated BF16-to-FP8 scaling through explicit FP32 round-to-nearest division; the gate audits dequantization error in FP64.
+- Why: Triton's approximate division crossed E4M3 byte boundaries for a small fraction of real calibrated writes, while FP32 audit multiplication introduced false bound excesses near zero.
+- Refs: issue #357; `kairyu/kernels/paged_kv_write_gpu.py`; `bench/fp8_kv_g4_ekv_bench.py`; `tests/gpu/test_paged_kv_write_gpu.py`
+
 ### 2026-08-08 — [amendment] FP8 KV scales bind per layer and K/V kind
 - What: FP8 pools and fused writers apply validated static per-layer K/V scales; a disjoint long-context amax pass emits a checkpoint- and data-bound calibration artifact for the unchanged G4 E-KV thresholds.
 - Why: unit scale underused E4M3 range on small-value layers and caused the retained cache-quality and output failures.

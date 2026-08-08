@@ -1139,11 +1139,13 @@ class _FP8WriteAuditor:
         expected = scaled_source.clamp(-FP8_MAX, FP8_MAX).to(
             torch.float8_e4m3fn
         )
-        actual_f32 = actual.to(torch.float32) * scale
-        error = (actual_f32 - source_for_math).abs()
+        actual_f32 = actual.to(torch.float32)
+        actual_f64 = actual_f32.to(torch.float64) * scale
+        source_f64 = source_for_math.to(torch.float64)
+        error = (actual_f64 - source_f64).abs()
         bound = torch.maximum(
-            source_for_math.abs() / 16.0,
-            torch.full_like(source_for_math, FP8_MIN_ABS_ERROR * scale),
+            source_f64.abs() / 16.0,
+            torch.full_like(source_f64, FP8_MIN_ABS_ERROR * scale),
         )
         stats = self._stats[(phase, kind)]
         stats["calls"] += 1

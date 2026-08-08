@@ -14,9 +14,11 @@ import torch
 try:
     import triton
     import triton.language as tl
+    from triton.language.extra import libdevice
 except ImportError:  # pragma: no cover - the caller retains the torch fallback
     triton = None
     tl = None
+    libdevice = None
 
 
 if triton is not None:
@@ -105,8 +107,14 @@ if triton is not None:
             other=0.0,
         )
         if FP8_DEST:
-            key = tl.clamp(key / k_scale, -448.0, 448.0)
-            value = tl.clamp(value / v_scale, -448.0, 448.0)
+            key = tl.clamp(
+                libdevice.div_rn(key.to(tl.float32), k_scale), -448.0, 448.0
+            )
+            value = tl.clamp(
+                libdevice.div_rn(value.to(tl.float32), v_scale),
+                -448.0,
+                448.0,
+            )
         destination = (
             (page * PAGE_SIZE + slot) * (NUM_HEADS * HEAD_DIM) + offsets
         )
@@ -206,8 +214,14 @@ if triton is not None:
             other=0.0,
         )
         if FP8_DEST:
-            key = tl.clamp(key / k_scale, -448.0, 448.0)
-            value = tl.clamp(value / v_scale, -448.0, 448.0)
+            key = tl.clamp(
+                libdevice.div_rn(key.to(tl.float32), k_scale), -448.0, 448.0
+            )
+            value = tl.clamp(
+                libdevice.div_rn(value.to(tl.float32), v_scale),
+                -448.0,
+                448.0,
+            )
         destination = (
             (page * PAGE_SIZE + slot) * (NUM_HEADS * HEAD_DIM) + offsets
         )
