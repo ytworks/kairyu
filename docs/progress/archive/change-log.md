@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-07 — [amendment] Serving micro-overheads stay bounded
+- What: metrics path templates use a bounded LRU; SSE separator escaping uses one ASCII fast-path scan; AUTO direct streaming drops its duplicate prefix scan; chat body limiting forwards validated chunks without replay buffering; unset AUTO usage fields are excluded at serialization call sites.
+- Why: these repeated regex/string/Pydantic operations and duplicate request-body storage add small but compounding latency or peak memory on the public serving path.
+- Refs: issue #349; m7 D4; m11 accounting/trace; `kairyu/entrypoints/server/{middleware,app,protocol}.py`; `kairyu/{sse,orchestration/orchestrator}.py`
+
+### 2026-08-07 — [amendment] Native admission is bounded by the RoPE table
+- What: real-model builders default an omitted `max_model_len` to `max_position_embeddings` and reject a larger override before loading or serving, across single-rank, TP, EP, P-D, and process-split paths.
+- Why: a fixed resident RoPE table must fail cleanly at admission rather than let an out-of-range gather raise on CPU or poison a CUDA context.
+- Refs: issue #332; m12 D2; `kairyu/engine/kairyu_backend.py`; `tests/unit/test_model_loader_backend.py`
+
+### 2026-08-07 — [amendment] Model and stream hot paths avoid repeated setup
+- What: rotary cos/sin is precomputed to the model position limit and gathered per step; scaled dense RoPE uses the fused kernel; invariant Q/K guards and kernel imports leave layer loops; tokenless nonterminal updates and wire materialization are skipped; sampler conversion makes one mutable copy.
+- Why: decode repeatedly launched position/trig kernels, evaluated invariant guards/imports, and constructed cumulative output work even when no request produced a token.
+- Refs: issue #332; m8 D1/D2/D6; m12 D2; `kairyu/models/{layers,attention}.py`; `kairyu/engine/{engine_loop,zmq_backend}.py`
+
+### 2026-08-07 — [amendment] Grammar-free CUDA sampling is batched
+- What: mixed decode rows now batch grammar-free temperature/min-p/top-k/top-p filtering and stateless Gumbel draws, use the maximum bounded top-k prefix for nucleus filtering, preserve exact full-vocabulary top-p when no finite top-k exists, and leave only grammar rows on the scalar CPU matcher path.
+- Why: one non-greedy row previously forced per-row fp32 copies, kernel launches, and full-vocabulary sorts across the complete decode batch; a Qwen3-size 151,936-token vocabulary at B=16 measured 1.13 ms batched versus 14.21 ms scalar on the same GPU.
+- Refs: issue #326; m8 D2; `kairyu/engine/core/{model_runner,sampler}.py`; `kairyu/kernels/sampling_gpu.py`; `tests/gpu/test_batched_sampler_gpu.py`
+
+### 2026-08-07 — [amendment] Eager FlashInfer decode reuses the no-D2H planner
+- What: ordinary tensor eager decode and graph-shape eager fallback now pass authoritative scheduler lengths into the existing fixed-shape metadata pack and FlashInfer fast planner after one stock initialization per shape.
+- Why: eager and out-of-coverage graph steps rebuilt dynamic indices and copied schedule inputs to the host every decode step even though graph replay already had a validated no-sync path.
+- Refs: issue #329; m17 A29; `kairyu/engine/core/{attention/{flashinfer_gpu,flashattention_gpu},model_runner,step_executor}.py`; `kairyu/models/attention.py`
+
 ### 2026-08-07 — [amendment] Batch I/O yields to interactive pressure
 - What: batch output/error transactions now use bounded background JSONL writes; route and filesystem-worker store I/O runs off-loop, downloads stream fixed chunks, and configured SLO pressure pauses new batch lines without preempting running work.
 - Why: per-line flushes, local metadata reads, and whole-file downloads blocked the gateway event loop, while the fixed batch pool kept dispatching as interactive TTFT risk rose.
