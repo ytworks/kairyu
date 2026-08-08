@@ -27,6 +27,12 @@ FIXTURE_FILES = (
     "long-context-reasoning.jsonl",
     "mmlu.jsonl",
     "mrcr-v2.jsonl",
+    "ruler-niah-128k.jsonl",
+    "ruler-niah-16k.jsonl",
+    "ruler-niah-32k.jsonl",
+    "ruler-niah-4k.jsonl",
+    "ruler-niah-64k.jsonl",
+    "ruler-niah-8k.jsonl",
     "scicode.jsonl",
     "structured-output.jsonl",
 )
@@ -249,6 +255,10 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
     for command, expected in (
         (["bench", "list"], "suite fugu (11 slots)"),
         (["bench", "list", "--suite", "core"], "suite core (3 slots)"),
+        (
+            ["bench", "list", "--suite", "long-context"],
+            "suite long-context (6 slots)",
+        ),
         (["bench", "list", "--suite", "structured"], "suite structured (1 slots)"),
     ):
         list_code = f"from kairyu.entrypoints.cli import main; main({command!r})"
