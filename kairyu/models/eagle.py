@@ -329,14 +329,17 @@ class _EagleMidLayer(nn.Module):
         """Run the context once and return its last output plus reusable K/V."""
 
         query, key, value = self._project(embeds, hidden, positions)
+        # Only the newest query produces a proposal.  Retain every context K/V
+        # row for later draft steps, but avoid the unused T-by-T attention and
+        # MLP outputs for older queries.
         context = nn.functional.scaled_dot_product_attention(
-            query[None],
+            query[None, :, -1:],
             key[None],
             value[None],
-            is_causal=query.shape[1] > 1,
+            is_causal=False,
             enable_gqa=self.num_heads != self.num_kv_heads,
         )[0]
-        return self._finish(context, hidden)[-1], key, value
+        return self._finish(context, hidden[-1:])[0], key, value
 
     def decode_cached(
         self,

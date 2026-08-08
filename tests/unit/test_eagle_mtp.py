@@ -121,6 +121,27 @@ class TestEagleHead:
         }
         assert [row[3] for row in buffers] == [6, 7, 8]
 
+    def test_cached_rollout_scores_only_the_last_prefill_query(self, monkeypatch):
+        torch.manual_seed(19)
+        head = EagleDraftHead(EAGLE).eval()
+        embed = torch.randn(128, 32)
+        hidden = torch.randn(6, 32)
+        query_widths = []
+        original = torch.nn.functional.scaled_dot_product_attention
+
+        def capture(query, key, value, **kwargs):
+            query_widths.append(query.shape[-2])
+            return original(query, key, value, **kwargs)
+
+        monkeypatch.setattr(
+            torch.nn.functional,
+            "scaled_dot_product_attention",
+            capture,
+        )
+        head.rollout_cached(embed[:6], hidden, lambda token: embed[token], k=3)
+
+        assert query_widths == [1, 1, 1]
+
     def test_d2t_offsets_map_to_target_ids(self):
         torch.manual_seed(1)
         head = EagleDraftHead(EAGLE).eval()
