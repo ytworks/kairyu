@@ -15,6 +15,7 @@ from collections.abc import Callable, Mapping
 from os import PathLike
 
 from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
+from kairyu.engine.core.nvfp4_accuracy import NvFp4AccuracyProfile
 from kairyu.engine.openai_capabilities import resolve_openai_capabilities
 from kairyu.engine.vision import ImageInputPolicy
 from kairyu.models.generation import validate_generation_config_mode
@@ -72,6 +73,7 @@ _KAIRYU_OPTIONS = frozenset(
         "dram_kv_tier_capacity_pages",
         "dram_kv_tier_profile",
         "generation_config",
+        "nvfp4_accuracy_profile",
     }
 )
 _KAIRYU_PROC_OPTIONS = frozenset(
@@ -99,6 +101,7 @@ _KAIRYU_PROC_OPTIONS = frozenset(
         "dram_kv_tier_capacity_pages",
         "dram_kv_tier_profile",
         "generation_config",
+        "nvfp4_accuracy_profile",
     }
 )
 _DECODE_MODES = frozenset({"eager", "cuda_graph"})
@@ -317,6 +320,23 @@ def _validate_native_common(
         raise ValueError("native backend model_path must be a local path or null")
     if model_path is not None and runner is not None:
         raise ValueError("native backend model_path and runner are mutually exclusive")
+    accuracy_profile = NvFp4AccuracyProfile.parse(
+        options.get("nvfp4_accuracy_profile")
+    )
+    if accuracy_profile.active and model_path is None:
+        raise ValueError(
+            "native backend NVFP4 accuracy profile requires a real model_path"
+        )
+    if accuracy_profile.active and pd_separation:
+        raise ValueError(
+            "native backend NVFP4 accuracy profile does not support P-D separation"
+        )
+    if accuracy_profile.active and bool(
+        options.get("expert_parallel_attention_dp", False)
+    ):
+        raise ValueError(
+            "native backend NVFP4 accuracy profile requires replicated-attention EP"
+        )
     draft_model_path = options.get("draft_model_path")
     if draft_model_path is not None and (
         not isinstance(draft_model_path, (str, PathLike))

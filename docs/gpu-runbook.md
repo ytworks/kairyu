@@ -2179,6 +2179,40 @@ PY
   incomplete ownership, missing top-64 token-ID logprobs, or an unavailable
   runtime are never skips.
 
+  For issue #355 accuracy/memory experiments, keep the same host snapshot,
+  reference fragment, container identity, model mount, and EP degree. Store one
+  JSON object per profile (for example `baseline.json`,
+  `dynamic-boundary.json`, and `fp8-boundary.json`), then run profiles
+  sequentially in fresh containers:
+
+  ```bash
+  python bench/g4_ma1_nvfp4_accuracy_bench.py run \
+    --name dynamic-boundary \
+    --profile /results/dynamic-boundary.json \
+    --model-path /models/qwen3-235b-nvfp4 \
+    --world-size 4 \
+    --host-snapshot /results/host-start.json \
+    --reference-fragment /results/reference-ep4.json \
+    --container-inspect /results/kairyu-profile-inspect.json \
+    --output /results/dynamic-boundary-report.json
+
+  python bench/g4_ma1_nvfp4_accuracy_bench.py curve \
+    --report /results/baseline-report.json \
+    --report /results/dynamic-boundary-report.json \
+    --report /results/fp8-boundary-report.json \
+    --output /results/nvfp4-accuracy-memory-curve.json
+  ```
+
+  A dynamic boundary profile is
+  `{"dynamic_activation":["first:1","last:1"]}`; an FP8 boundary
+  profile replaces that key with `"fp8"`. Add
+  `"saturation_counters":true` for a diagnostic run. Counter observation
+  deliberately uses the non-fused expert path so each routed projection owns
+  its real denominator; do not compare its timing with non-observed profiles.
+  A profile report is evidence even when its unchanged M-A1 gate remains FAIL.
+  Never infer an accuracy/memory curve from configuration alone: publish only
+  the measured `curve` artifact.
+
 - 9.12 G4 M-A2 Qwen3-235B-A22B NVFP4 EP4 radix reuse (#167): run from the
   clean tracked commit containing the M-A2 operator. This is one EP4 cell on
   GPUs 0–3, not an EP2/EP4 matrix and not a reference-engine comparison. It

@@ -74,6 +74,7 @@ def load_model(
     target_device: str | torch.device = "cpu",
     linear_capabilities=None,
     linear_selection_policy=None,
+    nvfp4_accuracy_profile=None,
     generation_config: GenerationConfigMode = "auto",
 ) -> tuple[DenseDecoder, ModelConfig, GenerationDefaults]:
     from kairyu.quant.linear import linear_factory
@@ -95,6 +96,18 @@ def load_model(
         is_mla=config.is_mla,
         architecture=config.architecture,
     )
+    if linear_selection_policy is not None and nvfp4_accuracy_profile is not None:
+        raise ValueError(
+            "linear_selection_policy and nvfp4_accuracy_profile are mutually exclusive"
+        )
+    if nvfp4_accuracy_profile is not None:
+        from kairyu.engine.core.nvfp4_accuracy import resolve_nvfp4_accuracy_policy
+
+        _profile, linear_selection_policy = resolve_nvfp4_accuracy_policy(
+            quant,
+            nvfp4_accuracy_profile,
+            num_layers=config.num_hidden_layers,
+        )
     model = build_model(
         config,
         attention_backend=attention_backend,
@@ -117,6 +130,7 @@ def load_model(
         for module_name, module in model.named_modules()
         if getattr(module, "is_quantized", False)
         for buffer_name, buffer in module.named_buffers(recurse=False)
+        if buffer_name not in module._non_persistent_buffers_set
     }
     for name, current in expected.items():
         if name == "lm_head.weight" and config.tie_word_embeddings:

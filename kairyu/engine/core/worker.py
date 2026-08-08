@@ -170,6 +170,18 @@ class _EPKernelInventoryReply:
 
 
 @dataclass(frozen=True)
+class _NvFp4AccuracyProbe:
+    reset: bool = False
+
+
+@dataclass(frozen=True)
+class _NvFp4AccuracyReply:
+    rank: int
+    row: dict[str, object] | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
 class _EPKVAccountingControl:
     """Start or finish one opt-in all-rank EP KV-accounting capture."""
 
@@ -1688,6 +1700,71 @@ def _ep_kernel_inventory_reply(control_comm, local_runner) -> _EPKernelInventory
             rank=rank,
             error=(f"{type(error).__name__}: {error}")[:1024],
         )
+
+
+def _nvfp4_accuracy_reply(
+    control_comm,
+    local_runner,
+    *,
+    reset: bool,
+) -> _NvFp4AccuracyReply:
+    rank = control_comm.rank
+    try:
+        from kairyu.engine.core.nvfp4_accuracy import saturation_snapshot
+
+        model = local_runner._model
+        seen: set[tuple[str, int]] = set()
+        resident_bytes = 0
+        for tensor in (*model.parameters(), *model.buffers()):
+            if tensor.device.type == "meta" or tensor.numel() == 0:
+                continue
+            storage = tensor.untyped_storage()
+            key = (str(tensor.device), storage.data_ptr())
+            if key not in seen:
+                seen.add(key)
+                resident_bytes += storage.nbytes()
+        formats: dict[str, int] = {}
+        for module in model.modules():
+            scheme = getattr(module, "quant_scheme", None)
+            if isinstance(scheme, str):
+                formats[scheme] = formats.get(scheme, 0) + 1
+        return _NvFp4AccuracyReply(
+            rank=rank,
+            row={
+                "rank": rank,
+                "resident_model_bytes": resident_bytes,
+                "projection_formats": dict(sorted(formats.items())),
+                "saturation": saturation_snapshot(model, reset=reset),
+            },
+        )
+    except BaseException as error:
+        return _NvFp4AccuracyReply(
+            rank=rank,
+            error=(f"{type(error).__name__}: {error}")[:1024],
+        )
+
+
+def _validate_nvfp4_accuracy_replies(
+    replies,
+    *,
+    world_size: int,
+) -> tuple[dict[str, object], ...]:
+    by_rank: dict[int, _NvFp4AccuracyReply] = {}
+    for reply in replies:
+        if not isinstance(reply, _NvFp4AccuracyReply):
+            raise RuntimeError("NVFP4 accuracy probe returned a malformed reply")
+        if reply.rank in by_rank or not 0 <= reply.rank < world_size:
+            raise RuntimeError("NVFP4 accuracy probe returned invalid rank ownership")
+        by_rank[reply.rank] = reply
+    if set(by_rank) != set(range(world_size)):
+        raise RuntimeError("NVFP4 accuracy probe omitted a rank")
+    failures = [reply for reply in by_rank.values() if reply.error is not None]
+    if failures:
+        first = failures[0]
+        raise RuntimeError(
+            f"NVFP4 accuracy probe failed on rank {first.rank}: {first.error}"
+        )
+    return tuple(by_rank[rank].row for rank in range(world_size))  # type: ignore[misc]
 
 
 def _is_lower_sha256(value: object) -> bool:
@@ -5585,6 +5662,38 @@ class DistEPModelRunner:
             delegate._fatal_error = failure
             raise failure from error
 
+    @_serialized_protocol
+    def nvfp4_accuracy_metadata(
+        self,
+        *,
+        reset: bool = False,
+    ) -> tuple[dict[str, object], ...]:
+        """Gather per-projection saturation and resident-byte evidence."""
+
+        delegate = object.__getattribute__(self, "_delegate")
+        if delegate._fatal_error is not None:
+            raise RuntimeError(
+                "expert-parallel runner is unavailable after a fatal step failure"
+            ) from delegate._fatal_error
+        try:
+            delivered = delegate._broadcast_control(_NvFp4AccuracyProbe(reset=reset))
+            if not isinstance(delivered, _NvFp4AccuracyProbe):
+                raise RuntimeError("NVFP4 accuracy probe broadcast was malformed")
+            local = _nvfp4_accuracy_reply(
+                delegate._control_comm,
+                delegate._local,
+                reset=delivered.reset,
+            )
+            gathered = delegate._control_comm.all_gather(local)
+            return _validate_nvfp4_accuracy_replies(
+                gathered,
+                world_size=self.expert_parallel_size,
+            )
+        except Exception as error:
+            failure = RuntimeError(f"NVFP4 accuracy metadata probe failed: {error}")
+            delegate._fatal_error = failure
+            raise failure from error
+
     @staticmethod
     def _reject_dram_kv() -> None:
         raise RuntimeError(
@@ -5682,6 +5791,14 @@ def worker_step_loop(
                 continue
             if isinstance(payload, _EPKernelInventoryProbe):
                 local = _ep_kernel_inventory_reply(control_comm, local_runner)
+                control_comm.all_gather(local)
+                continue
+            if isinstance(payload, _NvFp4AccuracyProbe):
+                local = _nvfp4_accuracy_reply(
+                    control_comm,
+                    local_runner,
+                    reset=payload.reset,
+                )
                 control_comm.all_gather(local)
                 continue
             if isinstance(payload, _EPKVAccountingControl):
@@ -5937,6 +6054,7 @@ def build_tp_runner(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     max_num_batched_tokens: int = 2048,
+    nvfp4_accuracy_profile=None,
 ):
     """The per-rank sharded PagedModelRunner (pool sized from the tp_view config).
 
@@ -5970,6 +6088,11 @@ def build_tp_runner(
     selected_attention_backend_identity = attention_backend_identity(
         attention_backend.selection_decision
     )
+    accuracy_options = (
+        {"nvfp4_accuracy_profile": nvfp4_accuracy_profile}
+        if nvfp4_accuracy_profile is not None
+        else {}
+    )
     model, local_config, full_config = build_tp_model(
         model_dir,
         tp,
@@ -5980,6 +6103,7 @@ def build_tp_runner(
         # keyed off the PLACEMENT, not the raw probe: a CPU-placed rank on a GPU
         # box would otherwise get the flashinfer kernel and hand it fp32 tensors
         attention_backend=attention_backend,
+        **accuracy_options,
     )
     resolved_kv_cache_dtype = resolve_kv_cache_dtype(
         kv_cache_dtype,
@@ -6078,6 +6202,7 @@ def build_ep_runner(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     speculative: str | None = None,
+    nvfp4_accuracy_profile=None,
 ):
     """Build one explicit replicated-attention or request-owned EP rank."""
 
@@ -6129,6 +6254,11 @@ def build_ep_runner(
     selected_attention_backend_identity = attention_backend_identity(
         attention_backend.selection_decision
     )
+    accuracy_options = (
+        {"nvfp4_accuracy_profile": nvfp4_accuracy_profile}
+        if nvfp4_accuracy_profile is not None
+        else {}
+    )
     model, full_config, load_info = build_ep_model(
         model_dir,
         expert_parallel_size,
@@ -6138,6 +6268,7 @@ def build_ep_runner(
         device=placement.device,
         attention_backend=attention_backend,
         attention_dp=attention_dp,
+        **accuracy_options,
     )
     resolved_kv_cache_dtype = resolve_kv_cache_dtype(
         kv_cache_dtype,
@@ -6288,6 +6419,7 @@ def _tp_worker_entry(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     max_num_batched_tokens: int = 2048,
+    nvfp4_accuracy_profile=None,
 ) -> None:
     """Spawned worker (rank = spawn_index + 1; rank 0 is the driver process).
 
@@ -6331,6 +6463,7 @@ def _tp_worker_entry(
         dram_kv_tier_capacity_pages,
         dram_kv_tier_profile,
         max_num_batched_tokens,
+        nvfp4_accuracy_profile,
     )
     # the handshake is the collective that absorbs load skew, so it — and only it
     # — runs on the long-timeout startup group
@@ -6392,6 +6525,7 @@ def _ep_worker_entry(
     graph_max_batch: int = 0,
     graph_max_pages: int = 0,
     graph_warmup_iters: int = 3,
+    nvfp4_accuracy_profile=None,
 ) -> None:
     """Spawned EP worker; rank 0 remains in the driver process."""
 
@@ -6439,6 +6573,7 @@ def _ep_worker_entry(
         graph_max_batch=graph_max_batch,
         graph_max_pages=graph_max_pages,
         graph_warmup_iters=graph_warmup_iters,
+        nvfp4_accuracy_profile=nvfp4_accuracy_profile,
     )
     if (
         runner.expert_parallel_size != expert_parallel_size
@@ -6543,6 +6678,7 @@ class DistTPLauncher:
         max_num_batched_tokens: int = 2048,
         speculative: str | None = None,
         draft_model_path: str | Path | None = None,
+        nvfp4_accuracy_profile=None,
     ) -> None:
         import tempfile
 
@@ -6614,6 +6750,7 @@ class DistTPLauncher:
                 dram_kv_tier_capacity_pages,
                 dram_kv_tier_profile,
                 max_num_batched_tokens,
+                nvfp4_accuracy_profile,
             ),
             nprocs=tp - 1,
             join=False,
@@ -6654,6 +6791,7 @@ class DistTPLauncher:
                 dram_kv_tier_capacity_pages,
                 dram_kv_tier_profile,
                 max_num_batched_tokens,
+                nvfp4_accuracy_profile,
             )
             self.draft_source = None
             if speculative in ("eagle", "mtp"):
@@ -6896,6 +7034,7 @@ class DistEPLauncher(_DistLauncherLifecycle):
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | Path | None = None,
         speculative: str | None = None,
+        nvfp4_accuracy_profile=None,
     ) -> None:
         import tempfile
 
@@ -6974,6 +7113,7 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 graph_max_batch,
                 graph_max_pages,
                 graph_warmup_iters,
+                nvfp4_accuracy_profile,
             ),
             nprocs=expert_parallel_size - 1,
             join=False,
@@ -7011,6 +7151,7 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
                 dram_kv_tier_profile=dram_kv_tier_profile,
                 speculative=speculative,
+                nvfp4_accuracy_profile=nvfp4_accuracy_profile,
             )
             self.attention_backend_decision = runner.attention_backend_decision
             self.attention_backend_identity = runner.attention_backend_identity
@@ -7081,3 +7222,10 @@ class DistEPLauncher(_DistLauncherLifecycle):
         """Return the rank-complete runtime inventory from the EP runner."""
 
         return self.runner.ep_kernel_inventory_metadata()
+
+    def nvfp4_accuracy_metadata(
+        self,
+        *,
+        reset: bool = False,
+    ) -> tuple[dict[str, object], ...]:
+        return self.runner.nvfp4_accuracy_metadata(reset=reset)

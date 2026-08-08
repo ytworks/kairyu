@@ -57,7 +57,7 @@ def test_package_manifest_is_complete_and_sorted() -> None:
     manifest = resources.files("kairyu.bench").joinpath(MANIFEST_NAME)
     assert manifest.is_file()
     entries = load_entrypoints()
-    assert len(entries) == 66
+    assert len(entries) == 67
     assert [entry.path for entry in entries] == sorted(
         entry.path for entry in entries
     )
@@ -111,6 +111,10 @@ def test_retained_cross_wrapper_imports_are_an_exact_allowlist() -> None:
         ),
         "bench.g2_a9_dp_tp_crossover_bench": (
             "bench.dp_scaling_g2_a8_bench",
+        ),
+        "bench.g4_ma1_nvfp4_accuracy_bench": (
+            "bench.g4_ma1_qwen3_235b_nvfp4_bench",
+            "bench.g4_ma1_qwen3_235b_nvfp4_capture",
         ),
         "bench.g4_ma1_qwen3_235b_nvfp4_bench": ("bench.parity_tp",),
         "bench.g4_ma1_qwen3_235b_nvfp4_capture": (
@@ -187,7 +191,7 @@ def test_entrypoints_json_is_stable_and_explicit() -> None:
         source: list(targets)
         for source, targets in load_compatibility_imports().items()
     }
-    assert len(payload["entrypoints"]) == 66
+    assert len(payload["entrypoints"]) == 67
 
 
 def test_bench_entrypoints_parser_dispatches(capsys) -> None:
@@ -196,7 +200,7 @@ def test_bench_entrypoints_parser_dispatches(capsys) -> None:
     assert args.bench_command == "entrypoints"
     assert bench_cli.handle(args) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert len(payload["entrypoints"]) == 66
+    assert len(payload["entrypoints"]) == 67
 
 
 def test_bench_entrypoints_check_failure_is_nonzero(

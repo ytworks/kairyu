@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] NVFP4 exposes measured projection accuracy levers
+- What: opt-in projection selectors can observe group-16 activation saturation, use per-token NVFP4 scaling, or convert checkpoint NVFP4 weights once to FP8 runtime storage after TP/EP slicing; a strict M-A1 companion records accuracy, resident memory, and saturation curves.
+- Why: the retained 235B NVFP4 gate failure had no clipping visibility or bounded way to trade memory and activation precision while preserving the default fused path.
+- Refs: issue #355; m14 accuracy-profile amendment; `kairyu/quant`; `bench/g4_ma1_nvfp4_accuracy_bench.py`
+
 ### 2026-08-08 — [amendment] Streaming results carry text deltas end to end
 - What: completion results expose offset-validated text deltas; native, process-split, and OpenAI-compatible streams feed server and orchestration consumers without rebuilding or rescanning cumulative text, while legacy cumulative text remains lazily compatible.
 - Why: flattening each token into a growing string at several serving layers caused quadratic copies and GIL-held allocation work per request.

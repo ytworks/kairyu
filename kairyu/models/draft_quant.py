@@ -390,6 +390,7 @@ def coerce_draft_state_for_load(
         for module_name, module in head.named_modules()
         if getattr(module, "is_quantized", False)
         for buffer_name, buffer in module.named_buffers(recurse=False)
+        if buffer_name not in module._non_persistent_buffers_set
     }
     coerced: dict[str, torch.Tensor] = {}
     for name, current in expected.items():

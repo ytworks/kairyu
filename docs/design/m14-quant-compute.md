@@ -300,3 +300,36 @@ checkpoint provenance. Its target correctness gate requires exact teacher
 prefixes and bounds any cross-shape correction divergence using reciprocal
 selected-token log-probabilities within 0.25 nat; it does not silently discard
 or relabel divergent target output.
+
+## 10. NVFP4 accuracy-profile amendment (2026-08-08, issue #355)
+
+NVFP4 serving keeps the checkpoint's static activation scale and fused MoE path
+by default. An opt-in `nvfp4_accuracy_profile` may select `first:N`, `last:N`,
+`down_proj`, or `shared_experts` projections independently for two accuracy
+experiments: dynamic per-token NVFP4 activation scaling, or FP8 runtime
+execution. FP8 pinning first loads the canonical ModelOpt NVFP4 members, then
+dequantizes and requantizes that projection once after TP/EP checkpoint slicing.
+It spends additional resident memory and removes FP4 activation error; it does
+not pretend to restore weight information already lost in the NVFP4 checkpoint.
+
+Dynamic NVFP4 uses FlashInfer's per-token quantizer with the fixed inverse base
+multiplier `1 / (448 * 6)`. The returned per-token decode multiplier is applied
+row-wise after `mm_fp4`, while the GEMM alpha retains only the checkpoint weight
+global scale. CPU and SM120 tests bind this equation to independent reference
+quantization. Row-parallel FP8 pins synchronize the existing per-token FP8 amax
+across ranks before quantization.
+
+`saturation_counters: true` adds two non-persistent, device-resident int64
+counters to each selected NVFP4-source projection. A block is saturated only
+when its group-16 amax exceeds `input_scale * 6 * 448`; snapshots synchronize
+only in the explicit operator probe. Accurate per-expert attribution requires
+the existing non-fused EP execution path while observation is active. Mixed
+FP8 or dynamic routed experts likewise use that already-correct all-to-all
+path; untouched homogeneous layers retain FlashInfer fused MoE.
+
+The companion `bench/g4_ma1_nvfp4_accuracy_bench.py` reuses the pinned formal M-A1
+reference teacher rollout without changing its retained schema. Each profile
+report includes all 1,024 teacher positions, free-running diagnostics, actual
+unique resident storage per rank, projection-format counts, and per-projection
+saturation. Its `curve` command accepts only reports with identical source,
+checkpoint, model, world size, and reference identity.

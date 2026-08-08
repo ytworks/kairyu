@@ -80,6 +80,55 @@ def quantize_nvfp4_with_scale(
     return packed, fp8_scale
 
 
+def quantize_nvfp4_per_token(
+    values: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Reference per-token global scaling used by the dynamic CUDA path."""
+    if values.ndim != 2 or values.shape[1] % _BLOCK:
+        raise ValueError("dynamic NVFP4 input must be 2D with K divisible by 16")
+    source = values.to(torch.float32)
+    row_amax = source.abs().amax(dim=1, keepdim=True)
+    global_scale = (row_amax / (FP4_MAX * FP8_MAX)).clamp(min=1e-12)
+    blocks = source.reshape(source.shape[0], source.shape[1] // _BLOCK, _BLOCK)
+    block_amax = blocks.abs().amax(dim=-1)
+    block_scale = (
+        block_amax / FP4_MAX / global_scale
+    ).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+    effective = block_scale.to(torch.float32) * global_scale
+    scaled = (blocks / effective.clamp(min=1e-12)[..., None]).clamp(
+        -FP4_MAX, FP4_MAX
+    )
+    signs = (scaled < 0).to(torch.uint8) << 3
+    indices = _cast_to_fp4_indices(scaled.abs()).to(torch.uint8)
+    nibbles = (signs | indices).reshape_as(source)
+    packed = nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)
+    return packed, block_scale, global_scale
+
+
+def activation_saturation_counts(
+    values: torch.Tensor,
+    static_scale: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return device-resident saturated and total group-16 block counts."""
+    source = values.reshape(-1, values.shape[-1]).to(torch.float32)
+    if source.shape[1] % _BLOCK:
+        raise ValueError("NVFP4 activation width must be divisible by 16")
+    blocks = source.reshape(source.shape[0], source.shape[1] // _BLOCK, _BLOCK)
+    block_amax = blocks.abs().amax(dim=-1)
+    if static_scale is None:
+        row_amax = source.abs().amax(dim=1, keepdim=True)
+        scale = (row_amax / (FP4_MAX * FP8_MAX)).clamp(min=1e-12)
+    else:
+        if static_scale.numel() != 1:
+            raise ValueError("static NVFP4 input scale must be scalar")
+        scale = static_scale.to(device=source.device, dtype=torch.float32).reshape(1, 1)
+    saturated = (block_amax > scale * FP4_MAX * FP8_MAX).sum(dtype=torch.int64)
+    total = torch.full(
+        (), block_amax.numel(), dtype=torch.int64, device=source.device
+    )
+    return saturated, total
+
+
 def unpack_nvfp4(packed: torch.Tensor) -> torch.Tensor:
     """uint8 [out, in//2] -> fp32 LUT values with sign, [out, in]."""
     low = packed & 0xF
@@ -96,7 +145,12 @@ def dequantize_nvfp4(
     values = unpack_nvfp4(packed)  # [out, in]
     out_features, in_features = values.shape
     blocks = values.reshape(out_features, in_features // _BLOCK, _BLOCK)
-    scaled = blocks * fp8_scale.to(torch.float32)[:, :, None] * global_scale.to(
-        torch.float32
-    )
+    global_scale = global_scale.to(torch.float32)
+    if global_scale.numel() == 1:
+        multiplier = global_scale.reshape(1, 1, 1)
+    elif global_scale.numel() == out_features:
+        multiplier = global_scale.reshape(out_features, 1, 1)
+    else:
+        raise ValueError("NVFP4 global scale must be scalar or per row")
+    scaled = blocks * fp8_scale.to(torch.float32)[:, :, None] * multiplier
     return scaled.reshape(out_features, in_features)

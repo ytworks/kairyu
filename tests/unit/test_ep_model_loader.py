@@ -476,6 +476,33 @@ def test_ep_nvfp4_global_abi_rejects_remote_expert_dtype(tmp_path):
         )
 
 
+def test_ep_nvfp4_accuracy_profile_converts_owned_down_projections_after_slicing(
+    tmp_path,
+):
+    checkpoint = tmp_path / "accuracy-profile"
+    _write_checkpoint(checkpoint)
+
+    model, _config, _info = build_ep_model(
+        checkpoint,
+        ep_size=2,
+        ep_rank=1,
+        comm=_UnusedEpComm(),
+        nvfp4_accuracy_profile={
+            "fp8": ["down_proj"],
+            "dynamic_activation": ["first:1"],
+            "saturation_counters": True,
+        },
+    )
+
+    block = model.model.layers[0].mlp
+    for expert in block.local_experts:
+        assert expert.down_proj.quant_scheme == "fp8"
+        assert expert.down_proj.weight.dtype is torch.float8_e4m3fn
+        assert expert.gate_proj.quant_scheme == "nvfp4"
+        assert expert.gate_proj.activation_dynamic is True
+    assert block._prepared_nvfp4_moe is None
+
+
 @pytest.mark.parametrize("bad_scale", [float("nan"), float("inf"), 0.0, -1.0])
 def test_ep_contract_rejects_invalid_auxiliary_kv_scale(tmp_path, bad_scale):
     checkpoint = tmp_path / "bad-kv-scale"

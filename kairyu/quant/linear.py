@@ -336,10 +336,13 @@ class LinearSelection:
     quantization: QuantConfig
     kernel: LinearKernel | None
     reason: str
+    observe_activation_saturation: bool = False
 
     def __post_init__(self) -> None:
         if not self.reason:
             raise ValueError("linear selection reason must be non-empty")
+        if type(self.observe_activation_saturation) is not bool:
+            raise TypeError("activation saturation observation must be a boolean")
 
 
 LinearSelectionPolicy = Callable[[QuantConfig, LinearBuildContext], LinearSelection]
@@ -630,7 +633,15 @@ class NvFp4Linear(QuantizedLinearBase):
 
     quant_scheme = "nvfp4"
 
-    def __init__(self, in_features: int, out_features: int, bias: bool) -> None:
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool,
+        *,
+        activation_dynamic: bool = False,
+        observe_activation_saturation: bool = False,
+    ) -> None:
         super().__init__(in_features, out_features, bias)
         if in_features % 16:
             raise ValueError("NVFP4 in_features must be divisible by 16")
@@ -645,6 +656,32 @@ class NvFp4Linear(QuantizedLinearBase):
         # real checkpoints ship an input_scale scalar (activation quant arrives
         # with the GPU kernels); accepted so loads don't reject it
         self.register_buffer("input_scale", torch.ones(()))
+        self.activation_dynamic = activation_dynamic
+        self.observe_activation_saturation = observe_activation_saturation
+        if observe_activation_saturation:
+            # EP constructs checkpoint payloads under a meta-device context.
+            # These two scalar runtime counters have no checkpoint source, so
+            # keep their tiny seed storage real and let model.to() place them.
+            self.register_buffer(
+                "activation_blocks",
+                torch.zeros((), dtype=torch.int64, device="cpu"),
+                persistent=False,
+            )
+            self.register_buffer(
+                "saturated_activation_blocks",
+                torch.zeros((), dtype=torch.int64, device="cpu"),
+                persistent=False,
+            )
+
+    def _observe_activation(self, x: torch.Tensor) -> None:
+        if not self.observe_activation_saturation:
+            return
+        saturated, total = nvfp4.activation_saturation_counts(
+            x,
+            None if self.activation_dynamic else self.input_scale,
+        )
+        self.saturated_activation_blocks.add_(saturated)
+        self.activation_blocks.add_(total)
 
     def dequantize(self) -> torch.Tensor:
         return nvfp4.dequantize_nvfp4(self.weight, self.weight_scale, self.weight_scale_2)
@@ -662,12 +699,119 @@ class NvFp4Linear(QuantizedLinearBase):
 
     def forward_reference(self, x: torch.Tensor) -> torch.Tensor:
         flat = x.reshape(-1, x.shape[-1]).to(torch.float32)
-        packed, scale = nvfp4.quantize_nvfp4_with_scale(flat, self.input_scale)
-        activation = nvfp4.dequantize_nvfp4(packed, scale, self.input_scale)
+        self._observe_activation(flat)
+        if self.activation_dynamic:
+            packed, scale, input_scale = nvfp4.quantize_nvfp4_per_token(flat)
+            activation = nvfp4.dequantize_nvfp4(packed, scale, input_scale)
+        else:
+            packed, scale = nvfp4.quantize_nvfp4_with_scale(flat, self.input_scale)
+            activation = nvfp4.dequantize_nvfp4(packed, scale, self.input_scale)
         weight = self.dequantize()
         bias = self.bias if self._add_local_bias() else None
         out = nn.functional.linear(activation, weight, bias)
         return out.reshape(*x.shape[:-1], self.out_features).to(x.dtype)
+
+
+class NvFp4ToFp8Linear(NvFp4Linear):
+    """Load ModelOpt NVFP4 members, then retain only an FP8 runtime weight."""
+
+    quant_scheme = "fp8"
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool,
+        *,
+        observe_activation_saturation: bool = False,
+    ) -> None:
+        super().__init__(
+            in_features,
+            out_features,
+            bias,
+            activation_dynamic=True,
+            observe_activation_saturation=observe_activation_saturation,
+        )
+        self._runtime_materialized = False
+
+    @torch.no_grad()
+    def materialize_runtime_weight(self) -> None:
+        if self._runtime_materialized or self.weight.device.type == "meta":
+            return
+        source = nvfp4.dequantize_nvfp4(
+            self.weight, self.weight_scale, self.weight_scale_2
+        )
+        weight, scale = fp8.quantize_fp8(source, per_channel=True)
+        self._buffers["weight"] = weight
+        self._buffers["weight_scale"] = scale
+        self._buffers.pop("weight_scale_2", None)
+        self._buffers.pop("input_scale", None)
+        self._runtime_materialized = True
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        if self._runtime_materialized:
+            device = self.weight.device
+            self.register_buffer(
+                "weight",
+                torch.empty(
+                    self.out_features,
+                    self.in_features // 2,
+                    dtype=torch.uint8,
+                    device=device,
+                ),
+            )
+            self.register_buffer(
+                "weight_scale",
+                torch.empty(
+                    self.out_features,
+                    self.in_features // 16,
+                    dtype=torch.float8_e4m3fn,
+                    device=device,
+                ),
+            )
+            self.register_buffer(
+                "weight_scale_2", torch.ones((), dtype=torch.float32, device=device)
+            )
+            self.register_buffer(
+                "input_scale", torch.ones((), dtype=torch.float32, device=device)
+            )
+        self._runtime_materialized = False
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def dequantize(self) -> torch.Tensor:
+        if self._runtime_materialized:
+            return fp8.dequantize_fp8(self.weight, self.weight_scale)
+        return super().dequantize()
+
+    def forward_reference(self, x: torch.Tensor) -> torch.Tensor:
+        self.materialize_runtime_weight()
+        self._observe_activation(x)
+        x_q, x_scale = fp8.quantize_fp8_activation(x.to(torch.float32))
+        out = fp8.fp8_w8a8_matmul(x_q, x_scale, self.weight, self.weight_scale)
+        if self.bias is not None and self._add_local_bias():
+            out = out + self.bias
+        return out.to(x.dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.materialize_runtime_weight()
+        self._observe_activation(x)
+        comm = getattr(self, "_row_parallel_comm", None)
+        if comm is not None:
+            local_amax = Fp8Linear.activation_amax(self, x).contiguous()
+            global_amax = comm.tensor_all_reduce_max(local_amax)
+            activation_scale = (global_amax / fp8.FP8_MAX).clamp(min=1e-12)
+            return Fp8Linear.forward_with_activation_scale(
+                self,
+                x,
+                activation_scale,
+            )
+        if x.device.type == "cuda":
+            return self.forward_fused(x)
+        x_q, x_scale = fp8.quantize_fp8_activation(x.to(torch.float32))
+        out = fp8.fp8_w8a8_matmul(x_q, x_scale, self.weight, self.weight_scale)
+        if self.bias is not None and self._add_local_bias():
+            out = out + self.bias
+        return out.to(x.dtype)
 
 
 def _construct_linear(
@@ -707,7 +851,9 @@ def _construct_linear(
     raise ValueError(f"no QuantizedLinear for {quant.method}")  # pragma: no cover
 
 
-def _default_selection(quant: QuantConfig, context: LinearBuildContext) -> LinearSelection:
+def default_linear_selection(
+    quant: QuantConfig, context: LinearBuildContext
+) -> LinearSelection:
     if not context.allow_quantization:
         return LinearSelection(
             QuantConfig(method=QuantMethod.NONE),
@@ -838,7 +984,7 @@ class ContextualLinearFactory:
         self._world_size = tensor_parallel_size
         self._rank = tensor_parallel_rank
         self._capabilities = capabilities or LinearKernelCapabilities.for_device(self._device)
-        self._selection_policy = selection_policy or _default_selection
+        self._selection_policy = selection_policy or default_linear_selection
 
     def __call__(
         self,
@@ -940,8 +1086,29 @@ class ContextualLinearFactory:
                 "quantized CUDA compute requires float16 or bfloat16; "
                 f"{_context_description(context)}"
             )
-        resolved = LinearSelection(selected_quant, kernel, selected.reason)
-        module = _construct_linear(selected_quant, in_features, out_features, bias)
+        resolved = LinearSelection(
+            selected_quant,
+            kernel,
+            selected.reason,
+            selected.observe_activation_saturation,
+        )
+        if self._quant.method is QuantMethod.NVFP4 and selected_quant.method is QuantMethod.FP8:
+            module = NvFp4ToFp8Linear(
+                in_features,
+                out_features,
+                bias,
+                observe_activation_saturation=selected.observe_activation_saturation,
+            )
+        elif selected_quant.method is QuantMethod.NVFP4:
+            module = NvFp4Linear(
+                in_features,
+                out_features,
+                bias,
+                activation_dynamic=selected_quant.activation_dynamic is True,
+                observe_activation_saturation=selected.observe_activation_saturation,
+            )
+        else:
+            module = _construct_linear(selected_quant, in_features, out_features, bias)
         _bind_fused_forward(module, resolved, self._device)
         # Plain metadata: it is intentionally absent from state_dict and cannot
         # change checkpoint names or tensor ownership.
