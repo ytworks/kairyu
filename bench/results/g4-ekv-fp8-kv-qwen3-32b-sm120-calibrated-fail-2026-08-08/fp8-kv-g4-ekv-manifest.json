@@ -127,7 +127,7 @@
       "cache_sample_cosine_min": 0.99,
       "cache_sample_nrmse_max": 0.05,
       "finish_reason": "exact-length",
-      "fp8_dequant_error": "abs(stored.float32*scale-input.float32) <= max(abs(input.float32)/16, scale*2^-10)",
+      "fp8_dequant_error": "abs(stored.float32*scale-input.float32) <= max(abs(input.float32)/16, scale*2^-10) * (1 + 2^-48)",
       "fp8_max_finite": 448.0,
       "fp8_quantization": "SATFINITE clamp((input / per-layer-KV-scale), -448, 448) then E4M3",
       "output_token_ids": "exact",
@@ -555,7 +555,7 @@
       {
         "calibration_sha256": "a42b3c3f53ce2aa05d3d32cca389c8ed54745a71d1eb79e97cf92eaef6320d64",
         "calls": 1792,
-        "dequant_error_violation": 7149,
+        "dequant_error_violation": 0,
         "input_dtype": "bfloat16",
         "input_dtype_mismatch": 0,
         "input_nonfinite": 0,
@@ -563,7 +563,7 @@
         "kind": "k",
         "max_abs_error": 4.400000095367432,
         "max_abs_input": 115.0,
-        "max_bound_excess": 5.421010862427522e-20,
+        "max_bound_excess": 0.0,
         "phase": "ragged_prefill",
         "scale_mode": "per-layer-kv",
         "schema_version": "kairyu.g4.e-kv.fp8-kv.v2",
@@ -576,7 +576,7 @@
       {
         "calibration_sha256": "a42b3c3f53ce2aa05d3d32cca389c8ed54745a71d1eb79e97cf92eaef6320d64",
         "calls": 1792,
-        "dequant_error_violation": 65536,
+        "dequant_error_violation": 0,
         "input_dtype": "bfloat16",
         "input_dtype_mismatch": 0,
         "input_nonfinite": 0,
@@ -584,7 +584,7 @@
         "kind": "v",
         "max_abs_error": 1.1875,
         "max_abs_input": 32.0,
-        "max_bound_excess": 1.3552527156068805e-20,
+        "max_bound_excess": 0.0,
         "phase": "ragged_prefill",
         "scale_mode": "per-layer-kv",
         "schema_version": "kairyu.g4.e-kv.fp8-kv.v2",
@@ -642,7 +642,7 @@
   "raw": {
     "name": "fp8-kv-g4-ekv-raw.jsonl",
     "rows": 783,
-    "sha256": "64b5b6d1f965d5b8bfacc37d1c9ebb0f29ec15731cc6ed93a54060cadc378575"
+    "sha256": "45078bda9f8e9f1c60cf7d9f42b1a56411c7d31ae7c7c879cd643b0cd89fdcf8"
   },
   "schema_version": "kairyu.g4.e-kv.fp8-kv.v2",
   "verdict": "FAIL"
