@@ -49,14 +49,25 @@ if triton is not None:
         ).to(tl.float32)
         if DYNAMIC:
             amax = tl.max(tl.abs(values), axis=0)
-            scale = tl.maximum(amax / QUANT_MAX, 1e-12)
+            if ROUND_TO_INT:
+                # Match quantize_int8_activation exactly: clamp the FP32 amax,
+                # then use IEEE round-to-nearest division for the row scale.
+                scale = libdevice.div_rn(tl.maximum(amax, 1e-12), QUANT_MAX)
+            else:
+                scale = tl.maximum(amax / QUANT_MAX, 1e-12)
         elif ROW_SCALE:
             scale = tl.load(input_scale_ptr + row).to(tl.float32)
         else:
             scale = tl.load(input_scale_ptr).to(tl.float32)
-        scaled = tl.maximum(tl.minimum(values / scale, QUANT_MAX), -QUANT_MAX)
         if ROUND_TO_INT:
+            # Triton's ordinary division may lower to an approximate reciprocal.
+            # At x/scale == n + 0.5 that can cross the tie and disagree with
+            # torch.round(), so use IEEE round-to-nearest division for INT8.
+            scaled = libdevice.div_rn(values, scale)
+            scaled = tl.maximum(tl.minimum(scaled, QUANT_MAX), -QUANT_MAX)
             scaled = libdevice.rint(scaled)
+        else:
+            scaled = tl.maximum(tl.minimum(values / scale, QUANT_MAX), -QUANT_MAX)
         tl.store(
             quant_ptr + row * stride_qm + offsets * stride_qk,
             scaled,
@@ -196,8 +207,13 @@ if triton is not None:
         )
         output = accumulator.to(tl.float32) * x_scale[:, None] * weight_scale[None, :]
         if HAS_BIAS:
-            bias = tl.load(bias_ptr + offs_n, mask=offs_n < n_size, other=0.0)
-            output += bias[None, :]
+            bias = tl.load(
+                bias_ptr + offs_n, mask=offs_n < n_size, other=0.0
+            ).to(tl.float32)
+            # Keep the reference's rounded scale product distinct from the
+            # bias addition; ordinary + may fuse into an FMA and skip that
+            # intermediate FP32 rounding.
+            output = libdevice.add_rn(output, bias[None, :])
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
             output,

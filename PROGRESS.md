@@ -57,6 +57,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G2 A8 (DP scaling): `passed: false` (1.7993× vs 1.9× threshold); owner accepted as explicit closure deviation
 - G2 A9: closed — DP=2×TP4 vs TP8 production-topology report on Qwen3-32B
 - A12 (batch-invariance determinism, #360): closed — exact-match verdict passed on Qwen3-32B TP8
+- #356 real-checkpoint quant parity: evidence complete — INT8 PASS; AWQ/GPTQ formal FAIL retained with SHA-bound same-GPU oracle replay isolating checkpoint quantization loss
 - B7 (KV answer-equivalence, #373): operator implemented and portable-validated; additive over F2/F4
 - G4 MoE: M-A1 formal FAIL retained; M-A2 complete; M-A3 scope-closed by owner deviation (perf gate stays FAIL)
 - G4 E-KV: FP8-E4M3 KV **FAIL** on Qwen3-32B long-context; `fp8_e4m3` startup rejected, BF16 KV fail-closed
@@ -94,6 +95,26 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] INT8 bias addition preserves oracle rounding
+- What: the fused INT8 kernel now uses explicit round-to-nearest bias addition after the rounded scale product, with a compact FMA-sensitive seed and production-width GPU coverage.
+- Why: compiler FMA fusion skipped the CPU oracle's intermediate FP32 rounding and caused one real-checkpoint token disagreement despite exact q/scale and int32 accumulation.
+- Refs: issue #356; PR #447 Fable 5 review; `kairyu/kernels/quant_gemm_gpu.py`; `tests/gpu/test_quant_kernels.py`
+
+### 2026-08-08 — [amendment] INT8 scale division is exact and zero-row aligned
+- What: dynamic INT8 scale calculation now clamps amax before correctly rounded division, matching the CPU oracle for ordinary and all-zero rows.
+- Why: exact activation rounding also requires an exact scale; an approximate reciprocal one operation earlier could move the same half-integer ties.
+- Refs: issue #356; PR #447 Fable 5 review; `kairyu/kernels/quant_gemm_gpu.py`; `tests/gpu/test_quant_kernels.py`
+
+### 2026-08-08 — [amendment] INT8 activation rounding matches its exact oracle
+- What: dynamic INT8 activation quantization now uses round-to-nearest division before tie-to-even integer rounding, with production-width GPU regression coverage.
+- Why: approximate Triton division crossed half-integer ties and the real-checkpoint gate exposed a model-output disagreement that small random tolerances missed.
+- Refs: issue #356; m14 real-checkpoint parity amendment; `kairyu/kernels/quant_gemm_gpu.py`; `tests/gpu/test_quant_kernels.py`
+
+### 2026-08-08 — [amendment] Real checkpoints gate INT8 and W4 formats
+- What: one pinned BF16 Qwen2.5-1.5B reference now drives 64x16 teacher-forced top-64 parity arms for public compressed-tensors INT8, AWQ, and GPTQ checkpoints; raw replay binds exact ABIs, revisions, completeness, and the measured tie floor.
+- Why: tiny random weights and GEMM error metrics could not expose subtle real-checkpoint packing or zero-point convention errors at model output.
+- Refs: issue #356; m14 real-checkpoint parity amendment; `bench/{parity_hf,quant_checkpoint_parity_bench}.py`
+
 ### 2026-08-08 — [amendment] NVFP4 exposes measured projection accuracy levers
 - What: opt-in projection selectors can observe group-16 activation saturation, use per-token NVFP4 scaling, or convert checkpoint NVFP4 weights once to FP8 runtime storage after TP/EP slicing; a strict M-A1 companion records accuracy, resident memory, and saturation curves.
 - Why: the retained 235B NVFP4 gate failure had no clipping visibility or bounded way to trade memory and activation precision while preserving the default fused path.
@@ -118,28 +139,3 @@ in `.claude/rules/progress-log.md`).
 - What: exact hash-set identities and lifecycle revisions are captured under their respective locks, scored outside, then revalidated before a vector is accepted; approximate candidates do not prune the independent exact score space.
 - Why: an 8K-token prompt across a large fleet performed O(replicas x prompt blocks) membership work while blocking event ingestion and replica lifecycle changes.
 - Refs: issue #348; m10 A31; `kairyu/orchestration/{kv_index,kv_routing}.py`; `tests/unit/test_{kv_event_recovery,kv_routing_adapter}.py`
-
-### 2026-08-07 — [amendment] Serving micro-overheads stay bounded
-- What: metrics path templates use a bounded LRU; SSE separator escaping uses one ASCII fast-path scan; AUTO direct streaming drops its duplicate prefix scan; chat body limiting forwards validated chunks without replay buffering; unset AUTO usage fields are excluded at serialization call sites.
-- Why: these repeated regex/string/Pydantic operations and duplicate request-body storage add small but compounding latency or peak memory on the public serving path.
-- Refs: issue #349; m7 D4; m11 accounting/trace; `kairyu/entrypoints/server/{middleware,app,protocol}.py`; `kairyu/{sse,orchestration/orchestrator}.py`
-
-### 2026-08-07 — [amendment] Native admission is bounded by the RoPE table
-- What: real-model builders default an omitted `max_model_len` to `max_position_embeddings` and reject a larger override before loading or serving, across single-rank, TP, EP, P-D, and process-split paths.
-- Why: a fixed resident RoPE table must fail cleanly at admission rather than let an out-of-range gather raise on CPU or poison a CUDA context.
-- Refs: issue #332; m12 D2; `kairyu/engine/kairyu_backend.py`; `tests/unit/test_model_loader_backend.py`
-
-### 2026-08-07 — [amendment] Model and stream hot paths avoid repeated setup
-- What: rotary cos/sin is precomputed to the model position limit and gathered per step; scaled dense RoPE uses the fused kernel; invariant Q/K guards and kernel imports leave layer loops; tokenless nonterminal updates and wire materialization are skipped; sampler conversion makes one mutable copy.
-- Why: decode repeatedly launched position/trig kernels, evaluated invariant guards/imports, and constructed cumulative output work even when no request produced a token.
-- Refs: issue #332; m8 D1/D2/D6; m12 D2; `kairyu/models/{layers,attention}.py`; `kairyu/engine/{engine_loop,zmq_backend}.py`
-
-### 2026-08-07 — [amendment] Grammar-free CUDA sampling is batched
-- What: mixed decode rows now batch grammar-free temperature/min-p/top-k/top-p filtering and stateless Gumbel draws, use the maximum bounded top-k prefix for nucleus filtering, preserve exact full-vocabulary top-p when no finite top-k exists, and leave only grammar rows on the scalar CPU matcher path.
-- Why: one non-greedy row previously forced per-row fp32 copies, kernel launches, and full-vocabulary sorts across the complete decode batch; a Qwen3-size 151,936-token vocabulary at B=16 measured 1.13 ms batched versus 14.21 ms scalar on the same GPU.
-- Refs: issue #326; m8 D2; `kairyu/engine/core/{model_runner,sampler}.py`; `kairyu/kernels/sampling_gpu.py`; `tests/gpu/test_batched_sampler_gpu.py`
-
-### 2026-08-07 — [amendment] Eager FlashInfer decode reuses the no-D2H planner
-- What: ordinary tensor eager decode and graph-shape eager fallback now pass authoritative scheduler lengths into the existing fixed-shape metadata pack and FlashInfer fast planner after one stock initialization per shape.
-- Why: eager and out-of-coverage graph steps rebuilt dynamic indices and copied schedule inputs to the host every decode step even though graph replay already had a validated no-sync path.
-- Refs: issue #329; m17 A29; `kairyu/engine/core/{attention/{flashinfer_gpu,flashattention_gpu},model_runner,step_executor}.py`; `kairyu/models/attention.py`

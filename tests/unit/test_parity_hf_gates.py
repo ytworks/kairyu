@@ -74,6 +74,29 @@ def test_a_missing_logprob_sample_is_not_a_free_pass():
     assert "could not be made" in reason
 
 
+def test_cross_checkpoint_gate_binds_completeness_and_substantive_differences():
+    from bench.parity_hf import decide_cross_checkpoint
+
+    assert decide_cross_checkpoint(
+        positions=1024,
+        expected_positions=1024,
+        substantive=0,
+        missing_predictions=0,
+    )[0]
+    assert not decide_cross_checkpoint(
+        positions=1023,
+        expected_positions=1024,
+        substantive=0,
+        missing_predictions=0,
+    )[0]
+    assert not decide_cross_checkpoint(
+        positions=1024,
+        expected_positions=1024,
+        substantive=1,
+        missing_predictions=0,
+    )[0]
+
+
 def _reference_file(tmp_path: Path, provenance: dict, entries: dict) -> Path:
     path = tmp_path / "ref.json"
     path.write_text(json.dumps({"provenance": provenance, "reference": entries}))
@@ -136,6 +159,60 @@ def test_reference_prompt_ids_match_kairyu_without_implicit_bos():
             return type("Encoded", (), {"input_ids": [7, 8]})()
 
     assert _prompt_ids(Tokenizer(), "hello") == [7, 8]
+
+
+def _cross_provenance(*, quantized: bool, **overrides) -> dict:
+    value = _provenance(
+        checkpoint_contract={
+            "architectures": ["Qwen2ForCausalLM"],
+            "hidden_size": 1536,
+            "intermediate_size": 8960,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 12,
+            "num_key_value_heads": 2,
+            "vocab_size": 151936,
+            "torch_dtype": "bfloat16",
+            "quantization_config": {"quant_method": "awq"} if quantized else None,
+        },
+        checkpoint_weight_files={
+            "model.safetensors": ("b" if quantized else "a") * 64
+        },
+    )
+    value.update(overrides)
+    return value
+
+
+def test_cross_checkpoint_reference_accepts_same_quantized_model() -> None:
+    from bench.parity_hf import _validate_cross_checkpoint_reference
+
+    _validate_cross_checkpoint_reference(
+        _cross_provenance(quantized=False),
+        _cross_provenance(quantized=True),
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "message"),
+    [
+        (_cross_provenance(quantized=False), "must declare quantization_config"),
+        (
+            _cross_provenance(
+                quantized=True,
+                prompt_token_ids_sha256="different",
+            ),
+            "prompt_token_ids_sha256 differs",
+        ),
+    ],
+)
+def test_cross_checkpoint_reference_rejects_wrong_candidate(
+    candidate: dict, message: str
+) -> None:
+    from bench.parity_hf import _validate_cross_checkpoint_reference
+
+    with pytest.raises(SystemExit, match=message):
+        _validate_cross_checkpoint_reference(
+            _cross_provenance(quantized=False), candidate
+        )
 
 
 def test_a_cache_from_another_checkpoint_is_rejected(tmp_path):

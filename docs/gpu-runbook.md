@@ -2213,6 +2213,41 @@ PY
   Never infer an accuracy/memory curve from configuration alone: publish only
   the measured `curve` artifact.
 
+  For issue #356, run all three real Qwen2.5-1.5B quantized checkpoints from
+  one clean commit on the same GPU. Create the BF16 top-64 reference once, then
+  reuse it without changing prompts or positions. The paths below must resolve
+  to the exact revisions pinned by `quant_checkpoint_parity_bench.py`:
+
+  ```bash
+  REFERENCE=/models/Qwen2.5-1.5B-Instruct
+  INT8=/models/Qwen2.5-1.5B-Instruct-quantized.w8a8
+  AWQ=/models/Qwen2.5-1.5B-Instruct-AWQ
+  GPTQ=/models/Qwen2.5-1.5B-Instruct-GPTQ-Int4
+  RESULT_ROOT=bench/results/issue-356-qwen25-1.5b-quant-parity-sm120
+
+  CUDA_VISIBLE_DEVICES=0 .venv/bin/python bench/parity_hf.py \
+    --model-path "$INT8" --reference-model-path "$REFERENCE" \
+    --tp 1 --num-prompts 64 --positions 16 --top-logprobs 64 \
+    --reference "$RESULT_ROOT/reference.json" \
+    --checkpoint-repo RedHatAI/Qwen2.5-1.5B-Instruct-quantized.w8a8 \
+    --checkpoint-revision 876ae8e2b9982d9603afd3c71add6b3b4b0bc0b6 \
+    --reference-checkpoint-repo Qwen/Qwen2.5-1.5B-Instruct \
+    --reference-checkpoint-revision 989aa7980e4cf806f80c7fef2b1adb7bc71aa306 \
+    --out "$RESULT_ROOT/int8.json"
+
+  # Repeat the command for AWQ and GPTQ, changing --model-path, candidate
+  # repo/revision, and --out to the pins declared by the assembler.
+  .venv/bin/python bench/quant_checkpoint_parity_bench.py \
+    --reference "$RESULT_ROOT/reference.json" \
+    --int8 "$RESULT_ROOT/int8.json" --awq "$RESULT_ROOT/awq.json" \
+    --gptq "$RESULT_ROOT/gptq.json" --out "$RESULT_ROOT/summary.json"
+  ```
+
+  The individual arm JSON files are the raw authority. A non-zero arm or
+  assembler exit is a retained formal FAIL, never a skip and never permission
+  to relax the measured tie floor. Do not substitute Qwen's GPTQ-Int8 model for
+  compressed-tensors W8A8; Kairyu's INT8 ABI is the latter.
+
 - 9.12 G4 M-A2 Qwen3-235B-A22B NVFP4 EP4 radix reuse (#167): run from the
   clean tracked commit containing the M-A2 operator. This is one EP4 cell on
   GPUs 0–3, not an EP2/EP4 matrix and not a reference-engine comparison. It

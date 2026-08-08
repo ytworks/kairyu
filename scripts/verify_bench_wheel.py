@@ -38,7 +38,7 @@ IFEVAL_VENDOR_FILES = (
 )
 ENTRYPOINT_MANIFEST = "kairyu/bench/entrypoints.toml"
 CONSOLE_TARGET = "kairyu.entrypoints.cli:main"
-EXPECTED_ENTRYPOINTS = 67
+EXPECTED_ENTRYPOINTS = 68
 
 
 class VerificationError(RuntimeError):

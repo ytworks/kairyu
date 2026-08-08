@@ -211,6 +211,46 @@ def _provenance(model_path: str, prompts: list[str], positions: int) -> dict:
     }
 
 
+def _validate_cross_checkpoint_reference(reference: dict, candidate: dict) -> None:
+    """Require a quantized candidate to be the same model as its BF16 anchor."""
+
+    reference_contract = reference.get("checkpoint_contract") or {}
+    candidate_contract = candidate.get("checkpoint_contract") or {}
+    if reference_contract.get("quantization_config") is not None:
+        raise SystemExit("cross-checkpoint reference must be an unquantized checkpoint")
+    if not isinstance(candidate_contract.get("quantization_config"), dict):
+        raise SystemExit("cross-checkpoint candidate must declare quantization_config")
+    geometry = (
+        "architectures",
+        "hidden_size",
+        "intermediate_size",
+        "num_hidden_layers",
+        "num_attention_heads",
+        "num_key_value_heads",
+        "vocab_size",
+    )
+    for key in geometry:
+        if reference_contract.get(key) != candidate_contract.get(key):
+            raise SystemExit(
+                f"cross-checkpoint candidate does not match reference model: {key} differs"
+            )
+    for key in (
+        "tokenizer_vocab_sha256",
+        "prompt_token_ids_sha256",
+        "num_prompts",
+        "positions",
+        "generation",
+    ):
+        if reference.get(key) != candidate.get(key):
+            raise SystemExit(
+                f"cross-checkpoint candidate does not match reference inputs: {key} differs"
+            )
+    if reference.get("checkpoint_weight_files") == candidate.get(
+        "checkpoint_weight_files"
+    ):
+        raise SystemExit("cross-checkpoint candidate unexpectedly has reference weights")
+
+
 def _load_reference(path: Path, expected: dict) -> dict:
     """Accept a cache only if it is the same measurement, and complete."""
     payload = json.loads(path.read_text())
@@ -287,6 +327,7 @@ def _build_reference(
     positions: int,
     device_map: str | None = None,
     batch_size: int = 1,
+    top_k: int = _TOP_K,
 ) -> dict:
     """HF greedy continuations, optionally layer-dispatched across GPUs.
 
@@ -357,7 +398,7 @@ def _build_reference(
                 # position predicting continuation[step] is the token before it
                 row = log_probs[prompt_length + step - 1]
                 values, indices = torch.topk(
-                    row, k=min(_TOP_K, row.shape[-1])
+                    row, k=min(top_k, row.shape[-1])
                 )
                 distributions.append(
                     {
@@ -412,6 +453,24 @@ def decide(
             "a comparison that could not be made is not one that passed"
         )
     return True, "within the reference's noise floor on both halves"
+
+
+def decide_cross_checkpoint(
+    *,
+    positions: int,
+    expected_positions: int,
+    substantive: int,
+    missing_predictions: int,
+) -> tuple[bool, str]:
+    """Verdict for quantized weights against their unquantized model anchor."""
+
+    if positions != expected_positions:
+        return False, f"captured {positions}/{expected_positions} required positions"
+    if missing_predictions:
+        return False, f"{missing_predictions} position(s) produced no candidate token"
+    if substantive:
+        return False, f"{substantive} substantive disagreement(s) outside the tie floor"
+    return True, "all candidate differences stay within the measured tie floor"
 
 
 def _reference_noise_floor(reference: dict) -> dict:
@@ -507,7 +566,12 @@ def _teacher_forced_waves(reference: dict):
 
 
 def _engine_next_tokens(
-    model_path: str, tp: int, reference: dict, num_pages: int, page_size: int
+    model_path: str,
+    tp: int,
+    reference: dict,
+    num_pages: int,
+    page_size: int,
+    top_k: int = _TOP_K,
 ) -> dict[str, list]:
     """One token per teacher-forced prefix, through the ordinary request path."""
     from bench.parity_tp import _real_runner
@@ -539,7 +603,7 @@ def _engine_next_tokens(
                         max_new_tokens=1,
                         # run_to_completion() returns token ids only; step() hands
                         # back SampledToken, which is where the logprobs live
-                        sampling=EngineSampling(logprobs=_TOP_K),
+                        sampling=EngineSampling(logprobs=top_k),
                     )
                 )
             core.run_to_completion()
@@ -556,6 +620,11 @@ def _engine_next_tokens(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-path", required=True)
+    parser.add_argument(
+        "--reference-model-path",
+        help="build/reuse the HF reference from this unquantized checkpoint "
+        "while running Kairyu from --model-path",
+    )
     parser.add_argument("--tp", type=int, default=1)
     parser.add_argument("--num-prompts", type=int, default=16)
     parser.add_argument("--positions", type=int, default=16, help="teacher-forced steps")
@@ -574,12 +643,20 @@ def main() -> int:
     )
     parser.add_argument("--reference-batch-size", type=int, default=1)
     parser.add_argument(
+        "--top-logprobs",
+        type=int,
+        default=_TOP_K,
+        help="token ranks retained on both sides (default: G2 A2 top-20)",
+    )
+    parser.add_argument(
         "--reference-only",
         action="store_true",
         help="create/validate the reference and exit before loading Kairyu",
     )
     parser.add_argument("--checkpoint-repo")
     parser.add_argument("--checkpoint-revision")
+    parser.add_argument("--reference-checkpoint-repo")
+    parser.add_argument("--reference-checkpoint-revision")
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     if args.reference_only and args.reference is None:
@@ -588,6 +665,15 @@ def main() -> int:
         parser.error(
             "--checkpoint-repo and --checkpoint-revision must be provided together"
         )
+    if bool(args.reference_checkpoint_repo) != bool(
+        args.reference_checkpoint_revision
+    ):
+        parser.error(
+            "--reference-checkpoint-repo and --reference-checkpoint-revision "
+            "must be provided together"
+        )
+    if args.top_logprobs < 2:
+        parser.error("--top-logprobs must be at least 2")
 
     prompts = list(_TEXT_PROMPTS[: args.num_prompts])
     if len(prompts) < args.num_prompts:
@@ -595,7 +681,17 @@ def main() -> int:
             f"--num-prompts {args.num_prompts} exceeds the {len(_TEXT_PROMPTS)} fixed prompts"
         )
 
-    provenance = _provenance(args.model_path, prompts, args.positions)
+    reference_model_path = args.reference_model_path or args.model_path
+    cross_checkpoint = reference_model_path != args.model_path
+    provenance = _provenance(reference_model_path, prompts, args.positions)
+    if args.top_logprobs != _TOP_K:
+        provenance["recorded_top_logprobs"] = args.top_logprobs
+    candidate_provenance = provenance
+    if cross_checkpoint:
+        candidate_provenance = _provenance(args.model_path, prompts, args.positions)
+        if args.top_logprobs != _TOP_K:
+            candidate_provenance["recorded_top_logprobs"] = args.top_logprobs
+        _validate_cross_checkpoint_reference(provenance, candidate_provenance)
     if args.reference and args.reference.exists():
         # no truncation, no key filtering: a cache either IS this measurement or
         # it is rejected. Silently trimming it is how a 1-prompt file got scored
@@ -603,11 +699,12 @@ def main() -> int:
         reference = _load_reference(args.reference, provenance)
     else:
         reference = _build_reference(
-            args.model_path,
+            reference_model_path,
             prompts,
             args.positions,
             device_map=args.reference_device_map,
             batch_size=args.reference_batch_size,
+            top_k=args.top_logprobs,
         )
         if args.reference:
             import torch
@@ -629,8 +726,16 @@ def main() -> int:
                             "device_map": args.reference_device_map,
                             "batch_size": args.reference_batch_size,
                             "visible_device_count": torch.cuda.device_count(),
-                            "checkpoint_repo": args.checkpoint_repo,
-                            "checkpoint_revision": args.checkpoint_revision,
+                            "checkpoint_repo": (
+                                args.reference_checkpoint_repo
+                                if cross_checkpoint
+                                else args.checkpoint_repo
+                            ),
+                            "checkpoint_revision": (
+                                args.reference_checkpoint_revision
+                                if cross_checkpoint
+                                else args.checkpoint_revision
+                            ),
                         },
                         "reference": reference,
                     },
@@ -648,7 +753,12 @@ def main() -> int:
     tie_gap = max(_MIN_TIE_GAP, noise_floor["max_gap_at_self_disagreement"])
 
     predicted = _engine_next_tokens(
-        args.model_path, args.tp, reference, args.num_pages, args.page_size
+        args.model_path,
+        args.tp,
+        reference,
+        args.num_pages,
+        args.page_size,
+        args.top_logprobs,
     )
 
     total = 0
@@ -743,14 +853,26 @@ def main() -> int:
     substantive = [d for d in disagreements if not d["tie_break"]]
     raw_max_delta = max(logprob_deltas) if logprob_deltas else 0.0
     max_delta = round(raw_max_delta, 5)
-    passed, verdict_reason = decide(
-        agreed=agreed,
-        total=total,
-        reference_self_agreement=noise_floor["raw_self_agreement_rate"],
-        max_abs_delta=raw_max_delta,
-        substantive=len(substantive),
-        missing_samples=len(missing_deltas),
+    missing_predictions = sum(
+        row["engine_token"] is None for row in raw_positions
     )
+    expected_positions = len(reference) * args.positions
+    if cross_checkpoint:
+        passed, verdict_reason = decide_cross_checkpoint(
+            positions=len(raw_positions),
+            expected_positions=expected_positions,
+            substantive=len(substantive),
+            missing_predictions=missing_predictions,
+        )
+    else:
+        passed, verdict_reason = decide(
+            agreed=agreed,
+            total=total,
+            reference_self_agreement=noise_floor["raw_self_agreement_rate"],
+            max_abs_delta=raw_max_delta,
+            substantive=len(substantive),
+            missing_samples=len(missing_deltas),
+        )
     tolerance_ok = not substantive and not missing_deltas and (
         raw_max_delta <= _MAX_LOGPROB_DELTA
     )
@@ -761,40 +883,55 @@ def main() -> int:
     from kairyu.engine.core.hw_profile import probe
 
     profile = probe()
+    config = {
+        "model_path": args.model_path,
+        "checkpoint_repo": args.checkpoint_repo,
+        "checkpoint_revision": args.checkpoint_revision,
+        "reference_provenance": provenance,
+        "code": _code_provenance(),
+        "tensor_parallel_size": args.tp,
+        "num_pages": args.num_pages,
+        "page_size": args.page_size,
+        "num_prompts": len(reference),
+        "positions": args.positions,
+        "dtype": "bfloat16" if profile.arch == "cuda" else "float32",
+        "hardware": {
+            "arch": profile.arch,
+            "device_name": profile.device_name,
+            "device_count": profile.device_count,
+            "runtime": (
+                _gpu_runtime_provenance()
+                if profile.arch == "cuda"
+                else None
+            ),
+        },
+        "method": (
+            "both sides receive the identical prefix at every position; only "
+            "the next token is compared, so trajectory divergence cannot compound"
+        ),
+    }
+    if cross_checkpoint:
+        config.update(
+            {
+                "reference_model_path": reference_model_path,
+                "reference_checkpoint_repo": args.reference_checkpoint_repo,
+                "reference_checkpoint_revision": args.reference_checkpoint_revision,
+                "candidate_provenance": candidate_provenance,
+                "comparison_kind": "quantized-candidate-vs-unquantized-reference",
+            }
+        )
     payload = {
         "schema_version": 5,
         "measurement": (
-            "teacher-forced next-token agreement vs HF transformers "
-            "(formal G2 A2 measurement; G2 A1 additionally requires full "
-            "greedy continuations with overlap ON and OFF)"
+            "teacher-forced quantized Kairyu candidate vs unquantized HF reference"
+            if cross_checkpoint
+            else (
+                "teacher-forced next-token agreement vs HF transformers "
+                "(formal G2 A2 measurement; G2 A1 additionally requires full "
+                "greedy continuations with overlap ON and OFF)"
+            )
         ),
-        "config": {
-            "model_path": args.model_path,
-            "checkpoint_repo": args.checkpoint_repo,
-            "checkpoint_revision": args.checkpoint_revision,
-            "reference_provenance": provenance,
-            "code": _code_provenance(),
-            "tensor_parallel_size": args.tp,
-            "num_pages": args.num_pages,
-            "page_size": args.page_size,
-            "num_prompts": len(reference),
-            "positions": args.positions,
-            "dtype": "bfloat16" if profile.arch == "cuda" else "float32",
-            "hardware": {
-                "arch": profile.arch,
-                "device_name": profile.device_name,
-                "device_count": profile.device_count,
-                "runtime": (
-                    _gpu_runtime_provenance()
-                    if profile.arch == "cuda"
-                    else None
-                ),
-            },
-            "method": (
-                "both sides receive the identical prefix at every position; only "
-                "the next token is compared, so trajectory divergence cannot compound"
-            ),
-        },
+        "config": config,
         # An engine cannot be required to match the reference more closely than
         # the reference matches itself. Reported first because it reframes every
         # number under it.
@@ -806,7 +943,16 @@ def main() -> int:
             "threshold": noise_floor["raw_self_agreement_rate"],
             "threshold_source": "the reference's own self-agreement (G2 A2, amended 2026-07-25)",
             "historical_fixed_threshold": _REPORTED_REFERENCE_RATE,
-            "verdict": "PASS" if raw_rate >= noise_floor["raw_self_agreement_rate"] else "FAIL",
+            "verdict": (
+                "DIAGNOSTIC"
+                if cross_checkpoint
+                else (
+                    "PASS"
+                    if raw_rate >= noise_floor["raw_self_agreement_rate"]
+                    else "FAIL"
+                )
+            ),
+            "binding": not cross_checkpoint,
         },
         # A2 asks for a match rate AND a logprob tolerance. The rate alone cannot
         # separate "reduction order shifted a tie" from "the shard is wrong", and
@@ -820,7 +966,7 @@ def main() -> int:
                 if tie_gap > _MIN_TIE_GAP
                 else "floor (bf16 logprob resolution); reference was self-consistent"
             ),
-            "top_k": _TOP_K,
+            "top_k": args.top_logprobs,
             "agreeing_positions_max_abs_delta": max_delta,
             "agreeing_positions_mean_abs_delta": mean_delta,
             "disagreements": len(disagreements),
@@ -834,7 +980,12 @@ def main() -> int:
             # BOTH halves: agreeing on every argmax while the distribution is far
             # off is not a logprob tolerance pass
             # a comparison that could not be made is not a comparison that passed
-            "verdict": "PASS" if tolerance_ok else "FAIL",
+            "verdict": (
+                "DIAGNOSTIC"
+                if cross_checkpoint
+                else ("PASS" if tolerance_ok else "FAIL")
+            ),
+            "binding": not cross_checkpoint,
         },
         "per_prompt": per_prompt,
         "raw_positions": raw_positions,
@@ -842,6 +993,20 @@ def main() -> int:
         # rate alone cannot tell a scattered near-tie from a systematic fault
         "disagreements": disagreements,
     }
+    if cross_checkpoint:
+        payload["cross_checkpoint_gate"] = {
+            "expected_positions": expected_positions,
+            "captured_positions": len(raw_positions),
+            "missing_predictions": missing_predictions,
+            "substantive_disagreements": len(substantive),
+            "tie_gap_nats": tie_gap,
+            "tie_gap_source": payload["logprob_tolerance"]["tie_gap_source"],
+            "agreement_is_diagnostic": True,
+            "agreeing_logprob_delta_is_diagnostic": True,
+            "passed": passed,
+            "verdict": "PASS" if passed else "FAIL",
+            "reason": verdict_reason,
+        }
     print(json.dumps(payload, indent=2))
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -852,17 +1017,28 @@ def main() -> int:
         f"{noise_floor['positions'] - noise_floor['self_inconsistent']}/"
         f"{noise_floor['positions']} = {noise_floor['self_agreement_rate']:.4f}"
     )
-    print(
-        f"teacher-forced agreement: {agreed}/{total} = {rate:.4f} "
-        f"(bar = reference self-agreement {noise_floor['self_agreement_rate']:.4f}) "
-        f"-> {payload['agreement']['verdict']}"
-    )
-    print(
-        f"logprob tolerance: {len(substantive)} substantive disagreement(s), "
-        f"{len(disagreements) - len(substantive)} tie-break(s) within {tie_gap} nats; "
-        f"max |delta| on agreeing positions {max_delta} "
-        f"-> {payload['logprob_tolerance']['verdict']}"
-    )
+    if cross_checkpoint:
+        print(f"teacher-forced agreement diagnostic: {agreed}/{total} = {rate:.4f}")
+        print(
+            f"quantized checkpoint gate: {len(substantive)} substantive "
+            f"disagreement(s), {missing_predictions} missing prediction(s), "
+            f"tie floor {tie_gap} nats -> "
+            f"{payload['cross_checkpoint_gate']['verdict']}"
+        )
+        print(f"agreeing-position max |logprob delta| diagnostic: {max_delta}")
+    else:
+        print(
+            f"teacher-forced agreement: {agreed}/{total} = {rate:.4f} "
+            f"(bar = reference self-agreement "
+            f"{noise_floor['self_agreement_rate']:.4f}) "
+            f"-> {payload['agreement']['verdict']}"
+        )
+        print(
+            f"logprob tolerance: {len(substantive)} substantive disagreement(s), "
+            f"{len(disagreements) - len(substantive)} tie-break(s) within "
+            f"{tie_gap} nats; max |delta| on agreeing positions {max_delta} "
+            f"-> {payload['logprob_tolerance']['verdict']}"
+        )
     # both halves must hold: a high rate with one badly-wrong pick is not a pass,
     # and neither half is a fixed number — each is measured against the reference
     print(f"verdict: {verdict_reason}")

@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "measurement": "issue-356-substantive-position-independent-oracle-replay",
+  "source_commit": "6c4ddc75c98d04c168e9ae9d017a4507a13acb35",
+  "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "formal_arm_sha256": {
+    "int8": "787ca7ab7260223b85d7860678f89e5b57fa028a22d8e00474457518091e6227",
+    "awq": "266e1ad88a0040256b32f8c9b9281557d913bb6fa5024f4965891badc9d6cb2e",
+    "gptq": "4999f0bb61b66864af3f38745a0cfb650ffe5ec4e087a1f442c5b82d613f66f9"
+  },
+  "reference_sha256": "f9eb3a6440b0167453c8d23e281665cc55980443520a5f42c3e3138a46fd3412",
+  "methods": {
+    "int8": "no substantive position remained after exact rounding fixes",
+    "awq": "same-GPU BF16 pipeline; AwqLinear.forward_reference unpack/dequant oracle",
+    "gptq": "same-GPU BF16 pipeline; GptqLinear.forward_reference unpack/dequant oracle"
+  },
+  "rows": {
+    "int8": [],
+    "awq": [
+      {
+        "prompt": "p1",
+        "position": 5,
+        "bf16_token": 37,
+        "production_token": 34,
+        "bf16_logprob_gap_nats": 4.0,
+        "oracle_token": 34,
+        "oracle_matches_production": true
+      },
+      {
+        "prompt": "p1",
+        "position": 7,
+        "bf16_token": 9853,
+        "production_token": 88955,
+        "bf16_logprob_gap_nats": 6.0,
+        "oracle_token": 88955,
+        "oracle_matches_production": true
+      },
+      {
+        "prompt": "p14",
+        "position": 5,
+        "bf16_token": 32711,
+        "production_token": 18491,
+        "bf16_logprob_gap_nats": 4.75,
+        "oracle_token": 18491,
+        "oracle_matches_production": true
+      },
+      {
+        "prompt": "p40",
+        "position": 12,
+        "bf16_token": 30303,
+        "production_token": 54456,
+        "bf16_logprob_gap_nats": 3.0,
+        "oracle_token": 54456,
+        "oracle_matches_production": true
+      },
+      {
+        "prompt": "p55",
+        "position": 12,
+        "bf16_token": 14588,
+        "production_token": 10926,
+        "bf16_logprob_gap_nats": 9.12499,
+        "oracle_token": 10926,
+        "oracle_matches_production": true
+      }
+    ],
+    "gptq": [
+      {
+        "prompt": "p20",
+        "position": 11,
+        "bf16_token": 20,
+        "production_token": 22,
+        "bf16_logprob_gap_nats": 4.125,
+        "oracle_token": 22,
+        "oracle_matches_production": true
+      },
+      {
+        "prompt": "p20",
+        "position": 12,
+        "bf16_token": 15,
+        "production_token": 18,
+        "bf16_logprob_gap_nats": 14.625,
+        "oracle_token": 18,
+        "oracle_matches_production": true
+      }
+    ]
+  },
+  "all_oracles_match_production": true,
+  "verdict": "PASS"
+}
