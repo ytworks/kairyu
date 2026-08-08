@@ -4,6 +4,8 @@ Status: **GPU-validated** (2026-08-05).
 
 Related contracts: M2 radix-paged KV and chunked prefill, M13 FlashInfer
 attention selection, M15 MLA/MoE execution, and M17 CUDA-graph decode buckets.
+Issue #317 can reshape a decode row only in a mixed prefill/decode step; none of
+the frozen A12 arms schedules such a step, so its retained claim is unchanged.
 The `A12` name in this document is the 2026-08-03 accuracy-review identifier;
 it is unrelated to the historical M16 decision with the same short label.
 

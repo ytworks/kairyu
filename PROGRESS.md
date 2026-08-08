@@ -96,8 +96,8 @@ in `.claude/rules/progress-log.md`).
 
 ### 2026-08-08 — [amendment] Mixed engine steps share one ragged model chain
 - What: native-ragged backends append one-token decode rows after prefill rows and execute one flat model forward; device-owned feedback uses the existing decode input slots, while unsupported backends and pure decode retain their prior paths.
-- Why: colocated mixed steps otherwise traverse every model layer twice even though ragged prefill already represents a causal one-token continuation exactly.
-- Refs: issue #317; m13 D1; `kairyu/engine/core/model_runner.py`; `tests/{unit,gpu}/test_batched_prefill*.py`
+- Why: colocated mixed steps otherwise traverse every model layer twice even though ragged prefill already supports a causal one-token continuation.
+- Refs: issue #317; m13 D1; A12 #360; `kairyu/engine/core/model_runner.py`; `tests/{unit,gpu}/test_batched_prefill*.py`
 
 ### 2026-08-07 — [amendment] Exact KV scoring leaves routing locks
 - What: exact hash-set identities and lifecycle revisions are captured under their respective locks, scored outside, then revalidated before a vector is accepted; approximate candidates do not prune the independent exact score space.
