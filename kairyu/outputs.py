@@ -84,23 +84,28 @@ class CompletionOutput:
 
         Older backends expose only cumulative ``text`` and retain the prior
         slicing behavior. Delta-native backends avoid reading or scanning that
-        cumulative value on the streaming hot path.
+        cumulative value on the streaming hot path. Re-presenting the exact
+        completion after its delta was consumed is idempotent.
         """
 
         if type(offset) is not int or offset < 0:
             raise ValueError(f"completion text offset must be non-negative, got {offset!r}")
         if self.text_delta is None and self.text_offset is None:
             return self.text[offset:], len(self.text)
-        if (
-            not isinstance(self.text_delta, str)
-            or type(self.text_offset) is not int
-            or self.text_offset != offset
-        ):
+        if not isinstance(self.text_delta, str) or type(self.text_offset) is not int:
             raise ValueError(
                 "completion text delta offset mismatch: "
                 f"expected {offset}, got {self.text_offset!r}"
             )
-        return self.text_delta, offset + len(self.text_delta)
+        delta_end = self.text_offset + len(self.text_delta)
+        if offset == delta_end:
+            return "", offset
+        if self.text_offset != offset:
+            raise ValueError(
+                "completion text delta offset mismatch: "
+                f"expected {offset}, got {self.text_offset!r}"
+            )
+        return self.text_delta, delta_end
 
 
 @dataclass(frozen=True)

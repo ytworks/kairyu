@@ -1706,6 +1706,46 @@ class MeteringStreamBackend:
         return None
 
 
+class DeltaTerminalBackend:
+    """Delta-native stream whose terminal completion is also the final result."""
+
+    async def generate(self, request):
+        raise AssertionError("streaming test reached generate")
+
+    async def stream(self, request):
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text="Hel",
+                    token_ids=(1,),
+                    text_delta="Hel",
+                    text_offset=0,
+                ),
+            ),
+            finished=False,
+        )
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text="Hello",
+                    token_ids=(1, 2),
+                    finish_reason="stop",
+                    text_delta="lo",
+                    text_offset=3,
+                ),
+            ),
+        )
+
+    async def shutdown(self):
+        return None
+
+
 def _metered_stream_app(kind, backend, ledger_path):
     settings = ServerSettings(usage_ledger_path=str(ledger_path))
     if kind == "orchestrated-chat":
@@ -2828,6 +2868,43 @@ async def test_every_dispatched_stream_is_metered_exactly_once(
         ]
         assert len(error_chunks) == 1
         assert "RuntimeError" in error_chunks[0]["message"]
+
+
+async def test_auto_stream_represented_terminal_delta_is_idempotent():
+    backend = DeltaTerminalBackend()
+    app = create_legacy_app(
+        engines={},
+        orchestrators={"auto": Orchestrator({"tier1": backend})},
+    )
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == 200
+    chunks = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: {")
+    ]
+    assert "".join(
+        choice["delta"].get("content") or ""
+        for chunk in chunks
+        for choice in chunk["choices"]
+    ) == "Hello"
+    assert any(
+        choice.get("finish_reason") == "stop"
+        for chunk in chunks
+        for choice in chunk["choices"]
+    )
+    assert '"error"' not in response.text
+    assert "data: [DONE]" in response.text
 
 
 @pytest.mark.parametrize(

@@ -135,7 +135,7 @@ from kairyu.orchestration.orchestrator import (
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.orchestration.trace import StructuredTrace, TraceEvent, utc_now_iso
-from kairyu.outputs import CompletionOutput
+from kairyu.outputs import CompletionOutput, _lazy_text
 from kairyu.pricing import InvoiceExportError, PriceSheet, export_invoice_csv
 from kairyu.sampling_params import (
     GENERATION_CONFIG_SAMPLING_FIELDS,
@@ -1075,7 +1075,7 @@ async def _stream_orchestrator(
                         completions = (
                             CompletionOutput(
                                 index=0,
-                                text="",
+                                text=_lazy_text(completion_parts),
                                 token_ids=(),
                                 finish_reason=None,
                                 text_delta=event.text,

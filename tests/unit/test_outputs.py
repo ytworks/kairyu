@@ -55,8 +55,13 @@ def test_completion_output_prefers_delta_native_stream_contract():
     )
 
     assert out.delta_after(3) == ("lo", 5)
+    assert out.delta_after(5) == ("", 5)
     with pytest.raises(ValueError, match="offset mismatch"):
         out.delta_after(2)
+    with pytest.raises(ValueError, match="offset mismatch"):
+        out.delta_after(4)
+    with pytest.raises(ValueError, match="offset mismatch"):
+        out.delta_after(6)
 
 
 def test_completion_output_falls_back_to_cumulative_text():

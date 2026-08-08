@@ -208,7 +208,8 @@ media bytes.
   to suffix slicing. Cumulative `text` remains compatible and is backed by an
   append-only lazy snapshot where flattening would otherwise repeat per token.
   Offset validation replaces repeated full-prefix scans and fails closed if a
-  backend changes text that has already crossed the streaming boundary.
+  backend changes text that has already crossed the streaming boundary; an
+  exact terminal completion re-presented by orchestration is idempotent.
 - **Stream-backpressure conflation (2026-08-04, issue #335)**: the in-process
   `KairyuBackend` publishes cumulative `StreamUpdate` values through one bounded,
   single-consumer mailbox per request. The first token-bearing state is retained
