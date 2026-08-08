@@ -609,6 +609,7 @@ class PagedModelRunner:
         # established sequential behavior.
         self._prefill_batch_gap = _batched_prefill_gap(model)
         self._batched_prefill_enabled = bool(enable_batched_prefill)
+        self._unified_mixed_enabled = True
         self._prefill_rows_executed = 0
         self._prefill_model_calls = 0
         self._prefill_batched_groups = 0
@@ -895,6 +896,17 @@ class PagedModelRunner:
         if type(enabled) is not bool:
             raise TypeError("batched prefill enabled flag must be bool")
         self._batched_prefill_enabled = enabled
+
+    def set_unified_mixed_enabled(self, enabled: bool) -> None:
+        """Keep distributed per-forward protocols on the split mixed path."""
+        if type(enabled) is not bool:
+            raise TypeError("unified mixed enabled flag must be bool")
+        self._unified_mixed_enabled = enabled
+
+    @property
+    def unified_mixed_enabled(self) -> bool:
+        """Whether compatible mixed steps may share one ragged model chain."""
+        return self._unified_mixed_enabled
 
     def prefill_execution_stats(self, *, reset: bool = False) -> dict[str, object]:
         """Return structural counters; optional reset is out-of-band only."""
@@ -1387,35 +1399,50 @@ class PagedModelRunner:
             for chunk in scheduled
             if not chunk.is_prefill and chunk.num_tokens > 1
         ]
-        if (
-            len(prefills) >= 2
+        unified_mixed = bool(
+            prefills
+            and decodes
             and self._batched_prefill_enabled
+            and self._unified_mixed_enabled
             and self._prefill_batch_gap is None
-        ):
-            self._execute_prefill_batch(prefills, states, sampled)
+        )
+        if unified_mixed:
+            # A one-token decode is a valid ragged-prefill row. Combining both
+            # groups here traverses the model weights once; pure decode retains
+            # its graph/tensor path below.
+            self._execute_ragged_batch(prefills + decodes, states, sampled)
         else:
-            for chunk in prefills:
-                self._execute_prefill(
-                    chunk, states[chunk.request_id], sampled
+            if (
+                len(prefills) >= 2
+                and self._batched_prefill_enabled
+                and self._prefill_batch_gap is None
+            ):
+                self._execute_ragged_batch(prefills, states, sampled)
+            else:
+                for chunk in prefills:
+                    self._execute_prefill(
+                        chunk, states[chunk.request_id], sampled
+                    )
+            # C4: single-token decodes for all sequences run as ONE tensor forward
+            # (byte-identical to per-sequence decode; see test_batched_decode).
+            # Eager execution keeps the cheaper per-sequence path for B=1, but graph
+            # mode must use its tensor/static-buffer path at every supported bucket:
+            # single-stream launch overhead is one of CUDA graph's primary targets.
+            if (
+                decodes
+                and self._decode_batch_gap is None
+                and (
+                    self._graph is not None
+                    or len(decodes) >= 2
+                    or (self._device.type == "cuda" and self._tensor_decode_supported)
                 )
-        # C4: single-token decodes for all sequences run as ONE tensor forward
-        # (byte-identical to per-sequence decode; see test_batched_decode).
-        # Eager execution keeps the cheaper per-sequence path for B=1, but graph
-        # mode must use its tensor/static-buffer path at every supported bucket:
-        # single-stream launch overhead is one of CUDA graph's primary targets.
-        if (
-            decodes
-            and self._decode_batch_gap is None
-            and (
-                self._graph is not None
-                or len(decodes) >= 2
-                or (self._device.type == "cuda" and self._tensor_decode_supported)
-            )
-        ):
-            self._execute_decode_batch(decodes, states, sampled)
-        else:
-            for chunk in decodes:
-                self._execute_decode(chunk, states[chunk.request_id], sampled)
+            ):
+                self._execute_decode_batch(decodes, states, sampled)
+            else:
+                for chunk in decodes:
+                    self._execute_decode(
+                        chunk, states[chunk.request_id], sampled
+                    )
         if verifications:
             if (
                 self._batched_verification_enabled
@@ -1689,16 +1716,41 @@ class PagedModelRunner:
             **metadata,
         )
 
-    def _execute_prefill_batch(
+    def _execute_ragged_batch(
         self,
         chunks: list[ScheduledChunk],
         states: Mapping[str, object],
         sampled: dict | None,
     ) -> None:
-        """Run compatible ScheduledChunks through one flat model chain."""
+        """Run compatible prefill and one-token decode rows in one model chain."""
         rows: list[PrefillSequence] = []
+        decode_tokens: list[int | torch.Tensor] = []
+        decode_positions: list[int] = []
         for chunk in chunks:
             state = states[chunk.request_id]
+            if not chunk.is_prefill:
+                input_token, absolute, page_table, cached = self._decode_inputs(
+                    chunk, state
+                )
+                decode_tokens.append(input_token)
+                decode_positions.append(absolute)
+                rows.append(
+                    PrefillSequence(
+                        request_id=chunk.request_id,
+                        # Device-owned future tokens are patched into the flat
+                        # batch below without a host scalar read.
+                        token_ids=(
+                            0
+                            if isinstance(input_token, torch.Tensor)
+                            else input_token,
+                        ),
+                        page_table=tuple(page_table),
+                        chunk_start=absolute,
+                        seq_len=absolute + 1,
+                        write_from=cached,
+                    )
+                )
+                continue
             allocation = state.allocation
             if allocation is None:
                 raise RuntimeError(
@@ -1723,9 +1775,22 @@ class PagedModelRunner:
         batch = build_prefill_batch(
             rows, page_size=self._pool.page_size, device=self._device
         )
+        if decode_tokens:
+            # Callers append decode rows after every prefill row, so their
+            # one-token queries form one contiguous suffix in the flat batch.
+            assert all(
+                not chunk.is_prefill for chunk in chunks[-len(decode_tokens) :]
+            ), "ragged decode rows must form a contiguous suffix"
+            token_slots, _position_slots = self._decode_input_slots(
+                decode_tokens,
+                decode_positions,
+            )
+            decode_start = batch.qo_indptr[-len(decode_tokens) - 1]
+            batch.token_ids[decode_start:].copy_(token_slots)
         hidden = self._model.forward_prefill_batch(batch, self._pool)
+        prefill_count = sum(chunk.is_prefill for chunk in chunks)
         self._prefill_rows_executed = (
-            getattr(self, "_prefill_rows_executed", 0) + len(chunks)
+            getattr(self, "_prefill_rows_executed", 0) + prefill_count
         )
         self._prefill_model_calls = (
             getattr(self, "_prefill_model_calls", 0) + 1
@@ -1741,9 +1806,12 @@ class PagedModelRunner:
         for index, chunk in enumerate(chunks):
             state = states[chunk.request_id]
             if (
-                state.prefill_done
-                and batch.seq_lens[index]
-                == len(state.request.prompt_token_ids)
+                not chunk.is_prefill
+                or (
+                    state.prefill_done
+                    and batch.seq_lens[index]
+                    == len(state.request.prompt_token_ids)
+                )
             ):
                 emitting_chunks.append(chunk)
                 terminal_rows.append(batch.qo_indptr[index + 1] - 1)
@@ -1757,7 +1825,8 @@ class PagedModelRunner:
         records = self._sample_rows(emitting_chunks, states, logits)
         for chunk, token in zip(emitting_chunks, records, strict=True):
             if isinstance(token, SampledToken):
-                self._remember(chunk.request_id, 0, token)
+                position = 0 if chunk.is_prefill else chunk.position
+                self._remember(chunk.request_id, position, token)
             sampled[chunk.request_id] = (token,)
 
     def _remember(self, request_id: str, position: int, token: SampledToken) -> None:

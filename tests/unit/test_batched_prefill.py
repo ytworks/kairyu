@@ -298,6 +298,8 @@ def _state(
     *,
     computed: int | None = None,
     cached: int = 0,
+    decode_pages: tuple[int, ...] = (),
+    outputs: tuple[int, ...] = (),
 ):
     end = len(prompt) if computed is None else computed
     return SimpleNamespace(
@@ -309,10 +311,10 @@ def _state(
             eos_token_id=None,
         ),
         allocation=SimpleNamespace(pages=pages, num_cached_tokens=cached),
-        decode_pages=[],
+        decode_pages=list(decode_pages),
         computed_prompt=end,
         prefill_done=end >= len(prompt),
-        outputs=[],
+        outputs=list(outputs),
         output_epoch=0,
     )
 
@@ -344,6 +346,264 @@ def test_runner_batches_multiple_prefills_and_emits_only_terminal_rows():
         "sequential_rows": 0,
         "backend": [],
     }
+
+
+def test_runner_unifies_mixed_prefill_and_decode_with_numeric_parity(monkeypatch):
+    mixed_backend = _NativeTorchBackend()
+    split_backend = _NativeTorchBackend()
+    mixed_model = _model(mixed_backend)
+    split_model = _model(split_backend)
+    mixed_pool = _pool(mixed_model)
+    split_pool = _pool(split_model)
+    decode_prompt = (11, 12, 13, 14)
+    for model, pool in ((mixed_model, mixed_pool), (split_model, split_pool)):
+        model.forward_tokens(
+            torch.tensor(decode_prompt),
+            torch.arange(len(decode_prompt)),
+            pool,
+            [0],
+            seq_len=len(decode_prompt),
+        )
+
+    mixed_runner = PagedModelRunner(mixed_model, mixed_pool)
+    split_runner = PagedModelRunner(split_model, split_pool)
+    split_runner.set_batched_prefill_enabled(False)
+    mixed_calls = 0
+    split_calls = 0
+    mixed_forward = mixed_model.forward_prefill_batch
+    split_forward = split_model.forward_tokens
+
+    def counted_mixed(*args, **kwargs):
+        nonlocal mixed_calls
+        mixed_calls += 1
+        return mixed_forward(*args, **kwargs)
+
+    def counted_split(*args, **kwargs):
+        nonlocal split_calls
+        split_calls += 1
+        return split_forward(*args, **kwargs)
+
+    monkeypatch.setattr(mixed_model, "forward_prefill_batch", counted_mixed)
+    monkeypatch.setattr(split_model, "forward_tokens", counted_split)
+    chunks = (
+        ScheduledChunk("prefill", 3, True),
+        ScheduledChunk("decode", 1, False, position=1),
+    )
+
+    def states():
+        return {
+            "prefill": _state("prefill", (1, 2, 3), (2,)),
+            "decode": _state(
+                "decode",
+                decode_prompt,
+                (0,),
+                decode_pages=(1,),
+                outputs=(9,),
+            ),
+        }
+
+    mixed = mixed_runner.execute(chunks, states())
+    split = split_runner.execute(chunks, states())
+
+    assert mixed_calls == 1
+    assert split_calls == 2
+    assert {
+        request_id: tuple(token.token_id for token in tokens)
+        for request_id, tokens in mixed.items()
+    } == {
+        request_id: tuple(token.token_id for token in tokens)
+        for request_id, tokens in split.items()
+    }
+    assert torch.allclose(mixed_pool.k, split_pool.k, atol=1e-6)
+    assert torch.allclose(mixed_pool.v, split_pool.v, atol=1e-6)
+    assert mixed_runner.prefill_execution_stats() == {
+        "enabled": True,
+        "capability_gap": None,
+        "rows": 1,
+        "model_calls": 1,
+        "batched_groups": 1,
+        "sequential_rows": 0,
+        "backend": [],
+    }
+
+
+def test_mixed_batch_handles_multiple_rows_partial_prefill_and_cached_prefix():
+    mixed_model = _model(_NativeTorchBackend())
+    split_model = _model(_NativeTorchBackend())
+    mixed_pool = _pool(mixed_model)
+    split_pool = _pool(split_model)
+    shared_prompt = (11, 12, 13, 14)
+    second_decode_prompt = (21, 22, 23, 24)
+    for model, pool in ((mixed_model, mixed_pool), (split_model, split_pool)):
+        for prompt, page in ((shared_prompt, 4), (second_decode_prompt, 7)):
+            model.forward_tokens(
+                torch.tensor(prompt),
+                torch.arange(len(prompt)),
+                pool,
+                [page],
+                seq_len=len(prompt),
+            )
+
+    cached_k = mixed_pool.k[:, 4].clone()
+    cached_v = mixed_pool.v[:, 4].clone()
+    mixed_runner = PagedModelRunner(mixed_model, mixed_pool)
+    split_runner = PagedModelRunner(split_model, split_pool)
+    split_runner.set_batched_prefill_enabled(False)
+    chunks = (
+        ScheduledChunk("partial", 2, True),
+        ScheduledChunk("cached", 1, True),
+        ScheduledChunk("decode-a", 1, False, position=1),
+        ScheduledChunk("decode-b", 1, False, position=1),
+    )
+
+    def states():
+        return {
+            "partial": _state(
+                "partial", (31, 32, 33, 34), (6,), computed=2
+            ),
+            "cached": _state(
+                "cached", shared_prompt, (4,), cached=len(shared_prompt)
+            ),
+            "decode-a": _state(
+                "decode-a",
+                shared_prompt,
+                (4,),
+                decode_pages=(5,),
+                outputs=(9,),
+            ),
+            "decode-b": _state(
+                "decode-b",
+                second_decode_prompt,
+                (7,),
+                decode_pages=(8,),
+                outputs=(10,),
+            ),
+        }
+
+    mixed = mixed_runner.execute(chunks, states())
+    split = split_runner.execute(chunks, states())
+
+    assert set(mixed) == {"cached", "decode-a", "decode-b"}
+    assert {
+        request_id: tuple(token.token_id for token in tokens)
+        for request_id, tokens in mixed.items()
+    } == {
+        request_id: tuple(token.token_id for token in tokens)
+        for request_id, tokens in split.items()
+    }
+    assert torch.allclose(mixed_pool.k, split_pool.k, atol=1e-6)
+    assert torch.allclose(mixed_pool.v, split_pool.v, atol=1e-6)
+    assert torch.equal(mixed_pool.k[:, 4], cached_k)
+    assert torch.equal(mixed_pool.v[:, 4], cached_v)
+    assert mixed_runner.prefill_execution_stats()["model_calls"] == 1
+    assert split_runner.prefill_execution_stats()["model_calls"] == 2
+
+
+def test_mixed_step_falls_back_when_ragged_prefill_is_unsupported(monkeypatch):
+    model = _model()
+    pool = _pool(model)
+    decode_prompt = (11, 12, 13, 14)
+    model.forward_tokens(
+        torch.tensor(decode_prompt),
+        torch.arange(len(decode_prompt)),
+        pool,
+        [0],
+        seq_len=len(decode_prompt),
+    )
+    runner = PagedModelRunner(model, pool)
+    calls = 0
+    forward = model.forward_tokens
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return forward(*args, **kwargs)
+
+    monkeypatch.setattr(model, "forward_tokens", counted)
+    result = runner.execute(
+        (
+            ScheduledChunk("prefill", 3, True),
+            ScheduledChunk("decode", 1, False, position=1),
+        ),
+        {
+            "prefill": _state("prefill", (1, 2, 3), (2,)),
+            "decode": _state(
+                "decode",
+                decode_prompt,
+                (0,),
+                decode_pages=(1,),
+                outputs=(9,),
+            ),
+        },
+    )
+
+    assert set(result) == {"prefill", "decode"}
+    assert calls == 2
+    assert "does not declare supports_batched_prefill" in runner._prefill_batch_gap
+
+
+def test_unified_mixed_disable_keeps_pure_prefill_batching(monkeypatch):
+    model = _model(_NativeTorchBackend())
+    pool = _pool(model)
+    decode_prompt = (11, 12, 13, 14)
+    model.forward_tokens(
+        torch.tensor(decode_prompt),
+        torch.arange(len(decode_prompt)),
+        pool,
+        [0],
+        seq_len=len(decode_prompt),
+    )
+    runner = PagedModelRunner(model, pool)
+    runner.set_unified_mixed_enabled(False)
+    ragged_calls = 0
+    token_calls = 0
+    ragged_forward = model.forward_prefill_batch
+    token_forward = model.forward_tokens
+
+    def counted_ragged(*args, **kwargs):
+        nonlocal ragged_calls
+        ragged_calls += 1
+        return ragged_forward(*args, **kwargs)
+
+    def counted_tokens(*args, **kwargs):
+        nonlocal token_calls
+        token_calls += 1
+        return token_forward(*args, **kwargs)
+
+    monkeypatch.setattr(model, "forward_prefill_batch", counted_ragged)
+    monkeypatch.setattr(model, "forward_tokens", counted_tokens)
+    mixed = runner.execute(
+        (
+            ScheduledChunk("prefill", 3, True),
+            ScheduledChunk("decode", 1, False, position=1),
+        ),
+        {
+            "prefill": _state("prefill", (1, 2, 3), (2,)),
+            "decode": _state(
+                "decode",
+                decode_prompt,
+                (0,),
+                decode_pages=(1,),
+                outputs=(9,),
+            ),
+        },
+    )
+    pure_prefill = runner.execute(
+        (
+            ScheduledChunk("a", 2, True),
+            ScheduledChunk("b", 2, True),
+        ),
+        {
+            "a": _state("a", (5, 6), (3,)),
+            "b": _state("b", (7, 8), (4,)),
+        },
+    )
+
+    assert set(mixed) == {"prefill", "decode"}
+    assert set(pure_prefill) == {"a", "b"}
+    assert token_calls == 2
+    assert ragged_calls == 1
+    assert runner.unified_mixed_enabled is False
 
 
 def test_runner_falls_back_for_torch_backend_and_single_request():

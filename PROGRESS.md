@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-06. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-08. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -93,6 +93,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-08 — [amendment] Mixed engine steps share one ragged model chain
+- What: native-ragged backends append one-token decode rows after prefill rows and execute one flat model forward; device-owned feedback uses existing decode slots, while unsupported backends, pure decode, and attention-DP's per-forward distributed protocol retain their prior paths.
+- Why: colocated mixed steps otherwise traverse every model layer twice even though ragged prefill already supports a causal one-token continuation.
+- Refs: issue #317; m13 D1; A12 #360; `kairyu/engine/core/model_runner.py`; `tests/{unit,gpu}/test_batched_prefill*.py`
 
 ### 2026-08-07 — [amendment] Exact KV scoring leaves routing locks
 - What: exact hash-set identities and lifecycle revisions are captured under their respective locks, scored outside, then revalidated before a vector is accepted; approximate candidates do not prune the independent exact score space.
