@@ -71,7 +71,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - `kairyu serve --tp N` on real hardware: Qwen3-32B TP8, Llama-3.1-8B, Llama-3.3-70B FP8, Qwen3-VL-32B (via vLLM replica)
 - Attention backends: `auto`/torch/FlashInfer/FA3/FA4 with `/backends` reporting; capable CUDA models pre-capture decode graphs before readiness
 - Quantized serving: FP8/INT8/AWQ/GPTQ/NVFP4 without full dequantization; opt-in FP8 EAGLE/MTP draft loading
-- Fully device-side sampling, penalties, spec verification, page-table caching; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling; incremental detokenization and stop matching
+- Device-side sampling, penalties, spec verification, page-table caching; structured masks stay on CUDA with only selected IDs returned to the host matcher; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-08 — [amendment] Structured generation uses the device sampling seam
+- What: regex, EBNF, and structural-tag formats join JSON grammars; native strict tools compile protocol-matched argument schemas; CUDA applies grammar masks without a full logits-row D2H copy.
+- Why: structured and strict-tool requests must be correctness invariants without forcing every token through the vocabulary-sized CPU sampling path.
+- Refs: issue #363; M8 D2; `kairyu/engine/{backend.py,core/{structured,sampler}.py}`
 
 ### 2026-08-08 — [amendment] Deterministic drafts preserve sampled distributions
 - What: n-gram/EAGLE/MTP argmax drafts use point-mass rejection verification for T>0; per-row history slicing also enables penalties while grammar/forced continuations keep the safe bypass.

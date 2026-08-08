@@ -59,11 +59,12 @@ class DeviceSample:
     logprob: torch.Tensor | None = None  # scalar float32
     top_indices: torch.Tensor | None = None  # [K] int64
     top_logprobs: torch.Tensor | None = None  # [K] float32
+    grammar_terminated: bool = False
 
 
 @dataclass(frozen=True)
 class DeviceSamplingInput:
-    """One grammar-free row supplied to the batched device sampler."""
+    """One row supplied to the batched device sampler."""
 
     request_id: str
     sampling: EngineSampling
@@ -520,9 +521,9 @@ class Sampler:
     """Per-request sampling state: stateless seed identity + grammar enforcers.
 
     ``vocab_provider`` supplies token strings for grammar compilation; required
-    only when a request carries ``json_schema``/``json_mode``. State is dropped
-    via ``release`` (owners call it on finish). Penalty-free state is a few
-    scalars; penalty-active state lazily owns one vocabulary-sized row.
+    only when a request carries structured-output intent. State is dropped via
+    ``release`` (owners call it on finish). Penalty-free state is a few scalars;
+    penalty-active state lazily owns one vocabulary-sized row.
     """
 
     def __init__(
@@ -552,6 +553,9 @@ class Sampler:
                 enforcer = XGrammarEnforcer(
                     self._vocab_provider(),
                     json_schema=sampling.json_schema,
+                    regex=sampling.regex,
+                    grammar=sampling.grammar,
+                    structural_tag=sampling.structural_tag,
                     stop_token_id=eos_token_id,
                 )
             base = sampling.seed if sampling.seed is not None else stable_request_seed(request_id)
@@ -746,10 +750,8 @@ class Sampler:
             min_tokens=min_tokens,
         ):
             return SampledToken(int(torch.argmax(logits).item()))
-        # CPU and structured-output compatibility path. CUDA grammar-free
-        # requests use sample_device(), which keeps the decision and penalty
-        # history dependency on-device. XGrammar's matcher is stateful host code,
-        # so masking/acceptance deliberately stays here until it has a device FSM.
+        # CPU compatibility path. CUDA requests use sample_device(), which
+        # keeps the vocabulary row and penalty history dependency on-device.
         logits = self._cpu_float_working_copy(logits)
 
         raw_logsoftmax: torch.Tensor | None = None
@@ -812,14 +814,11 @@ class Sampler:
         scalars, so penalties cover the same effective history as the CPU path
         without first resolving those tokens to Python ints.
 
-        XGrammar's matcher is stateful CPU code: advancing it requires the
-        previous token as a host integer.  Structured requests therefore keep
-        the reviewed CPU compatibility path rather than silently applying a
-        stale grammar mask.  All other supported sampling modes use this path.
+        XGrammar's matcher is stateful CPU code, so a structured request copies
+        only the selected token ID back to advance it. The vocabulary row and
+        grammar mask stay on the logits device.
         """
         state = self._state_for(request_id, sampling, eos_token_id)
-        if state.enforcer is not None:
-            raise ValueError("structured sampling requires the CPU matcher path")
 
         forced_token_id = self._forced_token_id(
             sampling,
@@ -831,6 +830,9 @@ class Sampler:
         raw_logsoftmax: torch.Tensor | None = None
         if sampling.logprobs is not None or forced_token_id is not None:
             raw_logsoftmax = torch.log_softmax(work, dim=-1)
+
+        if state.enforcer is not None:
+            state.enforcer.mask_logits(work)
 
         self._apply_min_tokens_mask(
             work,
@@ -869,11 +871,19 @@ class Sampler:
             if sampling.logprobs is not None and sampling.logprobs > 0:
                 k = min(sampling.logprobs, raw_logsoftmax.shape[-1])
                 top_logprobs, top_indices = torch.topk(raw_logsoftmax, k)
+        terminated = False
+        if state.enforcer is not None:
+            terminated = self._accept_once(
+                state,
+                position,
+                int(token_id.item()),
+            )
         return DeviceSample(
             token_id=token_id,
             logprob=logprob,
             top_indices=top_indices,
             top_logprobs=top_logprobs,
+            grammar_terminated=terminated,
         )
 
     @staticmethod
@@ -899,7 +909,7 @@ class Sampler:
         rows: Sequence[DeviceSamplingInput],
         logits: torch.Tensor,
     ) -> tuple[DeviceSample, ...]:
-        """Sample grammar-free rows with shared batched filtering and RNG ops."""
+        """Sample rows with shared batched filtering and RNG ops."""
 
         if logits.ndim != 2:
             raise ValueError(f"batched logits must be 2D, got {tuple(logits.shape)}")
@@ -910,9 +920,6 @@ class Sampler:
             )
         if not rows:
             return ()
-        if any(row.sampling.needs_grammar for row in rows):
-            raise ValueError("structured sampling requires the per-row CPU path")
-
         states = tuple(
             self._state_for(
                 row.request_id,
@@ -921,8 +928,6 @@ class Sampler:
             )
             for row in rows
         )
-        if any(state.enforcer is not None for state in states):
-            raise ValueError("structured sampling requires the per-row CPU path")
         forced_token_ids = tuple(
             self._forced_token_id(
                 row.sampling,
@@ -940,6 +945,10 @@ class Sampler:
         raw_logsoftmax = (
             torch.log_softmax(work, dim=-1) if any(needs_raw) else None
         )
+
+        for index, state in enumerate(states):
+            if state.enforcer is not None:
+                state.enforcer.mask_logits(work[index])
 
         blocked_rows: list[int] = []
         blocked_tokens: list[int] = []
@@ -1054,6 +1063,32 @@ class Sampler:
                 dim=-1,
             )
 
+        terminated = [False] * len(rows)
+        structured_rows = tuple(
+            index
+            for index, state in enumerate(states)
+            if state.enforcer is not None
+        )
+        if structured_rows:
+            indices = _sampling_metadata_tensor(
+                structured_rows,
+                dtype=torch.long,
+                device=work.device,
+            )
+            accepted_ids = token_ids.index_select(0, indices).to(
+                device="cpu"
+            ).tolist()
+            for index, token_id in zip(
+                structured_rows,
+                accepted_ids,
+                strict=True,
+            ):
+                terminated[index] = self._accept_once(
+                    states[index],
+                    rows[index].position,
+                    int(token_id),
+                )
+
         samples: list[DeviceSample] = []
         for index, row in enumerate(rows):
             report_count = row.sampling.logprobs
@@ -1080,6 +1115,7 @@ class Sampler:
                         if top_count > 0 and top_logprobs is not None
                         else None
                     ),
+                    grammar_terminated=terminated[index],
                 )
             )
         return tuple(samples)

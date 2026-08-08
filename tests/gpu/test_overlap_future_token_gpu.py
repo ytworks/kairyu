@@ -294,6 +294,7 @@ def test_deferred_public_output_preserves_device_logprobs():
             logprob=raw.gather(0, token_id.view(1)).squeeze(0),
             top_indices=top_indices,
             top_logprobs=top_values,
+            grammar_terminated=True,
         ),
         on_resolve=resolved.append,
     )
@@ -314,6 +315,7 @@ def test_deferred_public_output_preserves_device_logprobs():
     assert resolved == [token]
     assert token.token_id == 1
     assert token.logprob == pytest.approx(float(raw[1].cpu()))
+    assert token.grammar_terminated is True
     assert token.top_logprobs is not None
     assert [index for index, _value in token.top_logprobs] == top_indices.cpu().tolist()
     assert [value for _index, value in token.top_logprobs] == pytest.approx(
@@ -335,7 +337,7 @@ class _FakeEnforcer:
         return False
 
 
-def test_structured_sampling_keeps_the_reviewed_cpu_matcher_path():
+def test_structured_sampling_masks_the_device_row_before_selection():
     from kairyu.engine.core.sampler import Sampler
     from kairyu.engine.core.sampling_types import EngineSampling
 
@@ -349,11 +351,10 @@ def test_structured_sampling_keeps_the_reviewed_cpu_matcher_path():
     logits[3] = 10.0  # illegal winner before the grammar mask
     logits[4] = 9.0
 
-    with pytest.raises(ValueError, match="CPU matcher"):
-        sampler.sample_device("structured", params, 0, logits)
+    token = sampler.sample_device("structured", params, 0, logits)
 
-    token = sampler.sample("structured", params, 0, logits)
-    assert token.token_id == 4
+    assert token.token_id.device.type == "cuda"
+    assert int(token.token_id.cpu()) == 4
 
 
 def test_steady_decode_feedback_profiler_has_no_host_scalar_sync(

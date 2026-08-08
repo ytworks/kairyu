@@ -981,6 +981,7 @@ async def _stream_orchestrator(
             tool_choice=request.tool_choice,
             parallel_tool_calls=request.parallel_tool_calls,
             response_format=request.response_format,
+            tool_call_protocol="generic",
         )
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
@@ -2121,6 +2122,7 @@ def create_app(
                     parallel_tool_calls=request.parallel_tool_calls,
                     tools_in_prompt=validated_input.tools_in_prompt,
                     response_format=request.response_format,
+                    tool_call_protocol=validated_input.tool_call_protocol.value,
                 )
                 selected = auto_models[request.model]
                 try:

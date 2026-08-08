@@ -17,6 +17,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationStageMetric,
     GenerationUsage,
+    native_sampling_params,
 )
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import ScheduledChunk
@@ -937,7 +938,7 @@ async def test_native_tool_surface_walk_runs_off_event_loop():
         await backend.shutdown()
 
 
-def test_validate_request_rejects_native_strict_tool_semantics():
+def test_validate_request_accepts_native_strict_tool_semantics():
     backend = KairyuBackend()
     request = GenerationRequest(
         request_id="strict",
@@ -955,8 +956,11 @@ def test_validate_request_rejects_native_strict_tool_semantics():
         ),
     )
 
-    with pytest.raises(ValueError, match=r"tools\[0\]\.function\.strict"):
-        backend.validate_request(request)
+    backend.validate_request(request)
+
+    assert native_sampling_params(request).extra_args["response_format"]["type"] == (
+        "structural_tag"
+    )
 
 
 async def test_generate_runs_through_engine_core():

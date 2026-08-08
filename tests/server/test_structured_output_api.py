@@ -74,7 +74,7 @@ async def test_json_schema_yields_valid_json_and_stop(app, schema):
                 },
             },
         )
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     choice = response.json()["choices"][0]
     parsed = json.loads(choice["message"]["content"])
     assert isinstance(parsed, dict)
@@ -115,3 +115,72 @@ async def test_response_format_text_passes_through(app):
             },
         )
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("response_format", "expected"),
+    [
+        ({"type": "regex", "pattern": "ab"}, "ab"),
+        ({"type": "grammar", "grammar": 'root ::= "cd"'}, "cd"),
+        (
+            {
+                "type": "structural_tag",
+                "format": {"type": "const_string", "value": "ef"},
+            },
+            "ef",
+        ),
+    ],
+)
+async def test_extended_response_formats_are_enforced(app, response_format, expected):
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "structured"}],
+                "max_tokens": 10,
+                "temperature": 0.0,
+                "response_format": response_format,
+            },
+        )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["message"]["content"] == expected
+    assert choice["finish_reason"] == "stop"
+
+
+async def test_native_strict_tool_arguments_follow_the_declared_schema(app):
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "call the tool"}],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "record",
+                            "strict": True,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"value": {"type": "integer", "enum": [1]}},
+                                "required": ["value"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    choice = response.json()["choices"][0]
+    call = choice["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "record"
+    assert json.loads(call["function"]["arguments"])["value"] == 1
+    assert choice["finish_reason"] == "tool_calls"

@@ -34,6 +34,9 @@ class XGrammarEnforcer:
         self,
         vocab: list[str] | GrammarVocabulary,
         json_schema: dict | None = None,
+        regex: str | None = None,
+        grammar: str | None = None,
+        structural_tag: dict | None = None,
         stop_token_id: int | None = None,
     ) -> None:
         xgr = self._xgr = _import_xgrammar()
@@ -56,20 +59,43 @@ class XGrammarEnforcer:
             # strings retain the pre-metadata RAW behavior.
             tokenizer_info = xgr.TokenizerInfo(vocab, stop_token_ids=stop_ids)
         compiler = xgr.GrammarCompiler(tokenizer_info)
+        formats = sum(
+            value is not None
+            for value in (json_schema, regex, grammar, structural_tag)
+        )
+        if formats > 1:
+            raise ValueError("structured output accepts exactly one grammar format")
         if json_schema is not None:
             # strict format (no free whitespace): removes degenerate unbounded
             # whitespace runs — matches vLLM's disable_any_whitespace guidance
             compiled = compiler.compile_json_schema(json.dumps(json_schema), any_whitespace=False)
+        elif regex is not None:
+            compiled = compiler.compile_regex(regex)
+        elif grammar is not None:
+            compiled = compiler.compile_grammar(grammar)
+        elif structural_tag is not None:
+            compiled = compiler.compile_structural_tag(structural_tag)
         else:
             compiled = compiler.compile_builtin_json_grammar()
         self._matcher = xgr.GrammarMatcher(compiled)
         self._vocab_size = tokenizer_info.vocab_size
         self._bitmask = xgr.allocate_token_bitmask(1, self._vocab_size)
+        self._device_bitmasks = {}
 
     def mask_logits(self, logits):
         """Set grammar-illegal token logits to -inf (in place); returns logits."""
         self._matcher.fill_next_token_bitmask(self._bitmask)
-        self._xgr.apply_token_bitmask_inplace(logits.view(1, -1), self._bitmask)
+        bitmask = self._bitmask
+        if logits.device.type != "cpu":
+            key = (logits.device.type, logits.device.index)
+            device_bitmask = self._device_bitmasks.get(key)
+            if device_bitmask is None:
+                device_bitmask = self._bitmask.to(device=logits.device)
+                self._device_bitmasks[key] = device_bitmask
+            else:
+                device_bitmask.copy_(self._bitmask)
+            bitmask = device_bitmask
+        self._xgr.apply_token_bitmask_inplace(logits.view(1, -1), bitmask)
         return logits
 
     def accept(self, token_id: int) -> bool:

@@ -455,6 +455,22 @@ pump already propagates). `response_format` mapping (P-A gate):
 "json_schema":{"schema":{...}}}` → `EngineSampling.json_schema`; enforcer built
 per-request in `_submit` from the tokenizer's `GrammarVocabulary`.
 
+**Structured formats/device path (issue #363 amendment)**: the same
+`response_format` seam also maps `regex.pattern`, `grammar.grammar` (EBNF), and
+the xgrammar `structural_tag` object to their corresponding compiler. Native
+`tools[].function.strict=true` requests synthesize a parser-attested structural
+tag for the generic, Llama, or Qwen tool-call protocol; strict tool argument
+objects use their declared JSON schema while non-strict siblings retain an
+unconstrained JSON object. Explicit structured response formats and strict-tool
+formats are mutually exclusive.
+
+On CUDA the matcher still owns host-side state, but its next-token bitmask is
+copied to a cached device tensor and applied to the device logits row. Sampling
+therefore transfers only the selected structured token IDs back to advance the
+matcher, never the vocabulary-sized logits row. Batched ordinary and structured
+rows share `sample_batch_device`; the sampling owner advances each matcher once
+and carries `grammar_terminated` through the deferred public-token boundary.
+
 Logprobs land in `CompletionOutput.logprobs`/`cumulative_logprob`, filled by the
 backend from accumulated `SampledToken`s.
 

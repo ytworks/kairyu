@@ -46,11 +46,20 @@ class EngineSampling:
     logprobs: int | None = None  # None: no report; N >= 0: chosen + top-N
     json_schema: dict | None = None
     json_mode: bool = False
+    regex: str | None = None
+    grammar: str | None = None
+    structural_tag: dict | None = None
     forced_token_ids: tuple[int, ...] | None = None
 
     @property
     def needs_grammar(self) -> bool:
-        return self.json_schema is not None or self.json_mode
+        return (
+            self.json_schema is not None
+            or self.json_mode
+            or self.regex is not None
+            or self.grammar is not None
+            or self.structural_tag is not None
+        )
 
     @property
     def is_greedy_pure(self) -> bool:

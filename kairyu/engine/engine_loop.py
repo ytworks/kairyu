@@ -130,14 +130,16 @@ class PreparedPrompt:
 
 def engine_sampling_from(params: SamplingParams) -> EngineSampling:
     """Map API SamplingParams (+ response_format in extra_args) to the engine
-    subset (m8 D2): {"type": "json_object"} -> builtin JSON grammar;
-    {"type": "json_schema", "json_schema": {"schema": ...}} -> schema."""
+    structured-output subset."""
     response_format = (params.extra_args or {}).get(RESPONSE_FORMAT_EXTRA_ARG) or {}
     kind = response_format.get("type")
     json_schema = None
     json_mode = kind == "json_object"
     if kind == "json_schema":
         json_schema = (response_format.get("json_schema") or {}).get("schema") or {}
+    regex = response_format.get("pattern") if kind == "regex" else None
+    grammar = response_format.get("grammar") if kind == "grammar" else None
+    structural_tag = response_format if kind == "structural_tag" else None
     return EngineSampling(
         temperature=params.temperature,
         top_k=params.top_k,
@@ -151,6 +153,9 @@ def engine_sampling_from(params: SamplingParams) -> EngineSampling:
         forced_token_ids=params.forced_token_ids,
         json_schema=json_schema,
         json_mode=json_mode,
+        regex=regex,
+        grammar=grammar,
+        structural_tag=structural_tag,
     )
 
 

@@ -1,4 +1,4 @@
-"""Real-CUDA coverage for the grammar-free batched sampler (#326)."""
+"""Real-CUDA coverage for the batched sampler (#326, #363)."""
 
 from __future__ import annotations
 
@@ -163,6 +163,32 @@ def test_batched_sampler_matches_scalar_for_mixed_processors() -> None:
             )
 
 
+def test_structured_row_masks_logits_on_cuda_and_returns_only_selected_id() -> None:
+    pytest.importorskip("xgrammar")
+    vocab = ["{", "}", "[", "]", '"', "a", "1", ":", ",", " ", "<eos>"]
+    eos = len(vocab) - 1
+    logits = torch.zeros((2, len(vocab)), device="cuda")
+    logits[0, 1] = 100.0  # Illegal as the first JSON token.
+    logits[0, 0] = 10.0
+    logits[1, 6] = 10.0
+    rows = (
+        DeviceSamplingInput(
+            "structured",
+            EngineSampling(json_mode=True),
+            0,
+            eos_token_id=eos,
+        ),
+        DeviceSamplingInput("ordinary", EngineSampling(), 0),
+    )
+
+    samples = Sampler(vocab_provider=lambda: vocab).sample_batch_device(rows, logits)
+
+    assert samples[0].token_id.device.type == "cuda"
+    assert int(samples[0].token_id.cpu()) == 0
+    assert int(samples[1].token_id.cpu()) == 6
+    assert samples[0].grammar_terminated is False
+
+
 class _RoutingSampler:
     def __init__(self) -> None:
         self.batch_ids: tuple[str, ...] = ()
@@ -201,7 +227,7 @@ def _state(request_id: str, sampling: EngineSampling):
     )
 
 
-def test_mixed_grammar_batch_only_routes_grammar_row_to_scalar_sampler() -> None:
+def test_mixed_grammar_batch_routes_every_row_to_device_sampler() -> None:
     sampler = _RoutingSampler()
     runner = object.__new__(PagedModelRunner)
     runner._sampler = sampler
@@ -222,13 +248,14 @@ def test_mixed_grammar_batch_only_routes_grammar_row_to_scalar_sampler() -> None
 
     records = runner._sample_rows(chunks, states, logits)
 
-    assert sampler.batch_ids == ("a", "c")
+    assert sampler.batch_ids == ("a", "b", "c")
     assert sampler.batch_outputs[0] is states["a"].outputs
-    assert sampler.batch_outputs[1] is states["c"].outputs
-    assert sampler.scalar_ids == ["b"]
+    assert sampler.batch_outputs[1] is states["b"].outputs
+    assert sampler.batch_outputs[2] is states["c"].outputs
+    assert sampler.scalar_ids == []
     assert isinstance(records[0], _PendingDeviceToken)
-    assert isinstance(records[1], SampledToken)
+    assert isinstance(records[1], _PendingDeviceToken)
     assert isinstance(records[2], _PendingDeviceToken)
     assert int(records[0].sample.token_id.cpu()) == 10
-    assert records[1].token_id == 99
-    assert int(records[2].sample.token_id.cpu()) == 11
+    assert int(records[1].sample.token_id.cpu()) == 11
+    assert int(records[2].sample.token_id.cpu()) == 12

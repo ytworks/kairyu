@@ -39,6 +39,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationStageMetric,
     GenerationUsage,
+    native_sampling_params,
     prompt_with_tool_intent,
     validate_backend_request_before_prepare,
     validate_native_request_surface,
@@ -2274,7 +2275,7 @@ class ZmqEngineBackend:
 
         _, msgpack = _import_deps()
         sampling = sampling_params_to_wire(
-            generation_defaults.apply(request.sampling_params)
+            generation_defaults.apply(native_sampling_params(request))
         )
         if sampling["seed"] is None:
             # The child schedules by the generation-unique wire ID. Make the

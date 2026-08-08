@@ -41,6 +41,28 @@ def test_schema_constrained_grammar_compiles():
     assert masked[VOCAB.index("{")] != float("-inf")
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"regex": "a+"},
+        {"grammar": 'root ::= "a"'},
+        {
+            "structural_tag": {
+                "type": "structural_tag",
+                "format": {"type": "const_string", "value": "a"},
+            }
+        },
+    ],
+)
+def test_extended_grammar_compilers_mask_to_the_requested_prefix(kwargs):
+    enforcer = XGrammarEnforcer(vocab=VOCAB, **kwargs)
+
+    masked = enforcer.mask_logits(torch.zeros(len(VOCAB)))
+
+    assert masked[VOCAB.index("a")] != float("-inf")
+    assert masked[VOCAB.index("b")] == float("-inf")
+
+
 def test_byte_level_space_marker_remains_legal_after_schema_colon():
     # Qwen's tokenizer stores a space as Ġ. Interpreting this vocabulary as RAW
     # leaves no legal token after the schema's canonical `": ` prefix, causing

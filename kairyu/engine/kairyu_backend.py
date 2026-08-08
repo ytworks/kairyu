@@ -32,6 +32,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationStageMetric,
     GenerationUsage,
+    native_sampling_params,
     prompt_with_tool_intent,
     validate_backend_request_before_prepare,
     validate_native_request_surface,
@@ -1591,7 +1592,7 @@ class KairyuBackend:
         validate_native_request_surface(request)
         return self._loop.prepare_prompt(
             prompt_with_tool_intent(request),
-            request.sampling_params,
+            native_sampling_params(request),
             trace_requested=request.trace_requested,
         )
 
@@ -2062,7 +2063,7 @@ class KairyuBackend:
             self._loop.submit(
                 request_id,
                 prepared_prompt.prompt,
-                request.sampling_params,
+                native_sampling_params(request),
                 priority=request.priority,
                 scheduling_class=request.scheduling_class,
                 prepared_prompt=prepared_prompt,
@@ -2146,6 +2147,7 @@ class KairyuBackend:
                     tools_in_prompt=request.tools_in_prompt,
                     trace_requested=request.trace_requested,
                     parallel_tool_calls=request.parallel_tool_calls,
+                    tool_call_protocol=request.tool_call_protocol,
                 )
             )
         return subs

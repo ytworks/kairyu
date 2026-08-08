@@ -256,9 +256,17 @@ def _validate_response_format(response_format: dict | None) -> None:
     if response_format is None:
         return
     kind = response_format.get("type")
-    if kind not in ("text", "json_object", "json_schema"):
+    if kind not in (
+        "text",
+        "json_object",
+        "json_schema",
+        "regex",
+        "grammar",
+        "structural_tag",
+    ):
         raise ChatRequestError(
-            f"response_format.type must be text, json_object or json_schema, got {kind!r}"
+            "response_format.type must be text, json_object, json_schema, "
+            f"regex, grammar or structural_tag, got {kind!r}"
         )
     if kind == "json_schema":
         schema = (response_format.get("json_schema") or {}).get("schema")
@@ -266,6 +274,12 @@ def _validate_response_format(response_format: dict | None) -> None:
             raise ChatRequestError(
                 "response_format.json_schema.schema must be a JSON schema object"
             )
+    if kind == "regex" and not isinstance(response_format.get("pattern"), str):
+        raise ChatRequestError("response_format.pattern must be a regex string")
+    if kind == "grammar" and not isinstance(response_format.get("grammar"), str):
+        raise ChatRequestError("response_format.grammar must be an EBNF string")
+    if kind == "structural_tag" and not isinstance(response_format.get("format"), dict):
+        raise ChatRequestError("response_format.format must be a structural-tag object")
 
 
 def validate_chat_policy(
@@ -804,6 +818,7 @@ def _finish_chat_request_validation(
         tool_choice=request.tool_choice,
         parallel_tool_calls=request.parallel_tool_calls,
         tools_in_prompt=validated_input.tools_in_prompt,
+        tool_call_protocol=validated_input.tool_call_protocol.value,
     )
     try:
         if before_prepare:

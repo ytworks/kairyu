@@ -1719,19 +1719,6 @@ async def test_model_less_constructor_rejects_unshardable_tp_degree():
         ({"best_of": 2}, (), "best_of"),
         ({"prompt_logprobs": 1}, (), "prompt_logprobs"),
         ({"extra_args": {"unsupported": True}}, (), "extra_args.unsupported"),
-        (
-            {},
-            (
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "strict_tool",
-                        "strict": True,
-                    },
-                },
-            ),
-            "tools[0].function.strict",
-        ),
     ],
 )
 async def test_native_process_layouts_reject_the_same_unsupported_surface(

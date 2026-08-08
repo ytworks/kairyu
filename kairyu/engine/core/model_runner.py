@@ -324,7 +324,12 @@ class _DeferredStepOutput(Mapping[str, tuple[SampledToken, ...]]):
                             strict=True,
                         )
                     )
-                token = SampledToken(token_id, logprob, top)
+                token = SampledToken(
+                    token_id,
+                    logprob,
+                    top,
+                    record.sample.grammar_terminated,
+                )
                 record.on_resolve(token)
                 host_values.append(token)
             resolved[request_id] = tuple(host_values)
@@ -1227,10 +1232,7 @@ class PagedModelRunner:
         )
 
     def _can_sample_device(self, state: object, logits: torch.Tensor) -> bool:
-        if logits.device.type != "cuda":
-            return False
-        sampling = getattr(state.request, "sampling", None)
-        return sampling is None or not sampling.needs_grammar
+        return logits.device.type == "cuda"
 
     def _sample_record(
         self, state: object, logits: torch.Tensor, position: int
