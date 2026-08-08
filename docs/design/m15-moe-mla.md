@@ -149,3 +149,19 @@ MLA fields from config). `validate_tp_degree`: MLA models report
 - **A9 fixtures**: minimum kwargs pinned; DeepSeek needs consistent
   n_routed/n_group/topk_group/top_k, v_head_dim ≠ qk dims (catches
   transposes), q_lora both int and None, num_key_value_heads=heads.
+- **A10 (issue #331)**: CUDA BF16 routed experts replace D1's data-dependent
+  token loop with a stable sort, device-side expert offsets, and two FlashInfer
+  cuDNN grouped GEMMs (fused gate/up, then down). Canonical per-expert HF
+  parameters remain views into one packed allocation; assign-load and device
+  conversion rebuild the pack without changing checkpoint paths. Unsupported
+  projection types retain the reference path, including the separately fused
+  production NVFP4 implementation.
+- **A11 (PR #453 Fable 5 review)**: grouped execution is selected only for the
+  known `_ExpertMlp` SwiGLU contract after a FlashInfer/cuDNN/SM capability
+  probe. Rows use prewarmed power-of-two plans up to the bounded hot-path
+  maximum; larger prefills and unsupported runtimes retain D1's reference
+  implementation. Empty inputs also remain on that reference path.
+- **A12 (PR #453 Fable 5 re-review)**: any ordinary capability or cuDNN graph
+  warmup exception declines the derived pack and preserves the reference path;
+  backend-specific exception hierarchies must not turn an optional
+  optimization into a model-load failure.

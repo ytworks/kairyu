@@ -165,6 +165,25 @@ NCCL share the code path.
 > addition grouping are independent of EP2/4/8 ownership; the NVFP4 carve-out
 > above remains unchanged.
 
+> **Amended 2026-08-08 (issue #331).** Dense BF16 EP uses fixed
+> `[ep_size, tokens * top_k, hidden]` peer-capacity buffers. Device-side sorted
+> positions fill each destination chunk, padding targets that destination's
+> first local expert, and the forward/reverse `all_to_all_single` split lists
+> are host constants. Local rows use M15 A10's grouped GEMMs. This removes the
+> counts `.item()`/`.tolist()` and data-dependent expert loop from the CUDA hot
+> path and makes a static decode shape graph-capturable. Quantized/custom
+> compatibility paths and the fused NVFP4 path retain their established
+> transports.
+
+> **Corrected 2026-08-08 (PR #453 Fable 5 review).** Fixed-capacity EP is
+> limited to at most 8,192 total grouped rows after EP padding; larger prefills
+> retain the exact-split compatibility transport. Grouped row counts are
+> power-of-two bucketed and every permitted plan is warmed before decode graph
+> capture, reserving FlashInfer's grouped workspace high-water mark. Dense BF16
+> EP1/EP2 parity is tolerance-pinned because different cuDNN expert-group
+> shapes may choose different numerically valid GEMM plans; FP32 slot combine
+> order remains identical.
+
 ### D4 — SPMD worker + PP stage (`engine/core/worker.py`, `pp_worker.py`)
 
 `worker.py`: `run_tp_worker(rank, world, init_method, model_dir, ...)` —

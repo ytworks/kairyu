@@ -59,7 +59,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - A12 (batch-invariance determinism, #360): closed — exact-match verdict passed on Qwen3-32B TP8
 - #356 real-checkpoint quant parity: evidence complete — INT8 PASS; AWQ/GPTQ formal FAIL retained with SHA-bound same-GPU oracle replay isolating checkpoint quantization loss
 - B7 (KV answer-equivalence, #373): operator implemented and portable-validated; additive over F2/F4
-- G4 MoE: M-A1 formal FAIL retained; M-A2 complete; M-A3 scope-closed by owner deviation (perf gate stays FAIL); generic EP combines complete returned rows in fixed FP32 order before one model-dtype cast
+- G4 MoE: M-A1 formal FAIL retained; M-A2 complete; M-A3 scope-closed by owner deviation (perf gate stays FAIL); dense BF16 MoE uses sort-by-expert grouped GEMM and fixed-capacity EP transport, then combines returned rows in fixed FP32 order before one model-dtype cast
 - G4 E-KV: unit-scale and calibrated per-layer K/V FP8-E4M3 re-bakes **FAIL** retained; calibrated cache metrics/logprobs pass but 16K/32K exact tokens and decode envelope do not; `fp8_e4m3` startup rejected
 - G5: F1a–F1d, F2a–F2d, F4a, F4b all closed; F4c decided (keep per-replica RadixKV + F2 routing, thresholded revisit)
 - F5a/b/c (priority, noisy-neighbor, SLO admission): closed
@@ -95,6 +95,21 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] Grouped-MoE probe failures always fall back
+- What: capability and plan-warmup probes catch backend-specific ordinary exceptions and decline the derived grouped pack.
+- Why: cuDNN graph-support errors do not consistently inherit `RuntimeError`; an optional optimization must not abort otherwise supported reference serving.
+- Refs: issue #331; PR #453 Fable 5 re-review; M15 A12; `kairyu/models/grouped_moe.py`
+
+### 2026-08-08 — [amendment] Grouped MoE is capability-probed and decode-bounded
+- What: correcting the preceding #331 entry, grouped plans are power-of-two bucketed and prewarmed through 8,192 total rows before graph capture; larger EP prefills and unsupported/custom runtimes keep the reference transport/math.
+- Why: unconditional fixed capacity multiplied prefill memory/FLOPs by EP degree, while late cuDNN plan/workspace growth could invalidate captured graph pointers.
+- Refs: issue #331; PR #453 Fable 5 review; M15 A11; M16 D3; `kairyu/models/grouped_moe.py`
+
+### 2026-08-08 — [amendment] Dense MoE uses grouped GEMM and fixed EP capacity
+- What: CUDA BF16 experts use canonical-storage packs, device-side sort/offsets, and two FlashInfer cuDNN grouped GEMMs; generic EP uses fixed peer-capacity forward/reverse all-to-all buffers with host-constant splits.
+- Why: data-dependent `unique`/`nonzero` expert loops and count `.item()`/`.tolist()` forced up to one host synchronization and small GEMM per expert, preventing CUDA graph capture.
+- Refs: issue #331; M15 A10; M16 D3; `kairyu/models/{grouped_moe,moe,moe_parallel}.py`
+
 ### 2026-08-08 — [amendment] TP step headers remain on sleeping Gloo transport
 - What: correcting the preceding #323 entry, a two-word Gloo tensor header frames every transaction; only encoded `StepDelta` payloads use the bounded NCCL model group.
 - Why: posting a process-lifetime NCCL receive while idle burns resources and can strand orphaned GPU workers after rank-0 death; a Gloo tensor header avoids pickle while retaining sleeping TCP liveness.
@@ -119,27 +134,3 @@ in `.claude/rules/progress-log.md`).
 - What: calibrated dequant auditing permits a documented 2^-48 relative FP64 comparison slack while retaining exact stored-byte, finite, range, and physical E4M3 error checks.
 - Why: byte-perfect writes could exceed the theoretical error boundary by a few FP64 ulps, making the calibrated gate unsatisfiable independently of model quality.
 - Refs: issue #357; PR #449 Fable 5 review; `bench/fp8_kv_g4_ekv_bench.py`; `tests/bench/test_fp8_kv_g4_ekv_bench.py`
-
-### 2026-08-08 — [progress] Calibrated FP8 KV re-bake retains FAIL
-- What: the clean Qwen3-32B SM120 re-bake passed cache cosine/NRMSE and selected-logprob bounds, but failed 16K/32K exact tokens and the disjoint calibration envelope; public FP8 KV remains rejected.
-- Refs: issue #357; `bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08/`; FlashInfer SM120 design
-
-### 2026-08-08 — [amendment] Calibrated FP8 KV writes use the exact path
-- What: correcting the preceding #357 entry, non-unit calibrated scales bypass the fused Triton writer and use the existing torch quantize-and-store path; unit-scale FP8 keeps the fused path.
-- Why: real Qwen3-32B writes showed backend FP8-cast byte differences beyond division rounding alone, so calibrated serving must prefer the gate oracle over an unproven fused fast path.
-- Refs: issue #357; G4 E-KV calibrated re-bake; `kairyu/{engine/core/kv_pool.py,kernels/paged_kv_write_gpu.py}`
-
-### 2026-08-08 — [amendment] FP8 KV scaling is correctly rounded
-- What: fused batched and ragged FP8 KV writers perform calibrated BF16-to-FP8 scaling through explicit FP32 round-to-nearest division; the gate audits dequantization error in FP64.
-- Why: Triton's approximate division crossed E4M3 byte boundaries for a small fraction of real calibrated writes, while FP32 audit multiplication introduced false bound excesses near zero.
-- Refs: issue #357; `kairyu/kernels/paged_kv_write_gpu.py`; `bench/fp8_kv_g4_ekv_bench.py`; `tests/gpu/test_paged_kv_write_gpu.py`
-
-### 2026-08-08 — [amendment] FP8 KV scales bind per layer and K/V kind
-- What: FP8 pools and fused writers apply validated static per-layer K/V scales; a disjoint long-context amax pass emits a checkpoint- and data-bound calibration artifact for the unchanged G4 E-KV thresholds.
-- Why: unit scale underused E4M3 range on small-value layers and caused the retained cache-quality and output failures.
-- Refs: issue #357; FlashInfer SM120 amendment; `kairyu/engine/core/{kv_pool,kv_scale_calibration}.py`; `bench/fp8_kv_g4_ekv_bench.py`
-
-### 2026-08-08 — [amendment] Generic EP combine is local and degree-invariant
-- What: correcting the preceding #359 entry, reverse all-to-all's complete returned rows are combined locally in fixed FP32 slot order, with no redundant combine collective.
-- Why: FP32 rank-partial reduction removed BF16 boundaries but retained ownership-dependent addition grouping and doubled combine traffic.
-- Refs: issue #359; PR #448 Fable 5 review; M16 D3; `kairyu/models/moe_parallel.py`
