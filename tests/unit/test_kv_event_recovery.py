@@ -83,6 +83,48 @@ def test_atomic_routing_waits_for_matching_high_water_confirmation() -> None:
     assert index.route_overlaps(("r1",), ("h0",)) == (1,)
 
 
+def test_exact_membership_scoring_releases_lock_and_revalidates_feed() -> None:
+    index = KvEventIndex(now=lambda: 1.0)
+    assert index.install_snapshot("r1", "epoch-a", 0, ["h0"])
+    scoring = threading.Event()
+    resume = threading.Event()
+
+    class BlockingSet(set[str]):
+        def __contains__(self, value: object) -> bool:
+            scoring.set()
+            assert resume.wait(timeout=2)
+            return super().__contains__(value)
+
+    with index._lock:
+        index._replicas["r1"].hashes = BlockingSet({"h0"})
+
+    result: list[tuple[int, ...] | None] = []
+    route_thread = threading.Thread(
+        target=lambda: result.append(index.route_overlaps(("r1",), ("h0",)))
+    )
+    route_thread.start()
+    assert scoring.wait(timeout=1)
+
+    changed = threading.Event()
+
+    def mark_gap() -> None:
+        index.mark_gap("r1", stream_epoch="epoch-a")
+        changed.set()
+
+    mutation_thread = threading.Thread(target=mark_gap)
+    mutation_thread.start()
+    try:
+        assert changed.wait(timeout=1), "membership scoring retained the index lock"
+    finally:
+        resume.set()
+        route_thread.join(timeout=2)
+        mutation_thread.join(timeout=2)
+
+    assert not route_thread.is_alive()
+    assert not mutation_thread.is_alive()
+    assert result == [None]
+
+
 def test_retired_epoch_cannot_replace_or_clear_current_epoch() -> None:
     index = KvEventIndex(now=lambda: 1.0)
     assert index.apply_sequenced("r1", "epoch-old", 0, _stored("old")) == "applied"

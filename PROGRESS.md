@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-07 — [amendment] Exact KV scoring leaves routing locks
+- What: exact hash-set identities and lifecycle revisions are captured under their respective locks, scored outside, then revalidated before a vector is accepted; approximate candidates do not prune the independent exact score space.
+- Why: an 8K-token prompt across a large fleet performed O(replicas x prompt blocks) membership work while blocking event ingestion and replica lifecycle changes.
+- Refs: issue #348; m10 A31; `kairyu/orchestration/{kv_index,kv_routing}.py`; `tests/unit/test_{kv_event_recovery,kv_routing_adapter}.py`
+
 ### 2026-08-07 — [amendment] Serving micro-overheads stay bounded
 - What: metrics path templates use a bounded LRU; SSE separator escaping uses one ASCII fast-path scan; AUTO direct streaming drops its duplicate prefix scan; chat body limiting forwards validated chunks without replay buffering; unset AUTO usage fields are excluded at serialization call sites.
 - Why: these repeated regex/string/Pydantic operations and duplicate request-body storage add small but compounding latency or peak memory on the public serving path.
@@ -118,28 +123,3 @@ in `.claude/rules/progress-log.md`).
 - What: ordinary tensor eager decode and graph-shape eager fallback now pass authoritative scheduler lengths into the existing fixed-shape metadata pack and FlashInfer fast planner after one stock initialization per shape.
 - Why: eager and out-of-coverage graph steps rebuilt dynamic indices and copied schedule inputs to the host every decode step even though graph replay already had a validated no-sync path.
 - Refs: issue #329; m17 A29; `kairyu/engine/core/{attention/{flashinfer_gpu,flashattention_gpu},model_runner,step_executor}.py`; `kairyu/models/attention.py`
-
-### 2026-08-07 — [amendment] Batch I/O yields to interactive pressure
-- What: batch output/error transactions now use bounded background JSONL writes; route and filesystem-worker store I/O runs off-loop, downloads stream fixed chunks, and configured SLO pressure pauses new batch lines without preempting running work.
-- Why: per-line flushes, local metadata reads, and whole-file downloads blocked the gateway event loop, while the fixed batch pool kept dispatching as interactive TTFT risk rose.
-- Refs: issue #342; m7 D7; m10 D3/A8; m11 D6; `kairyu/batch/{store,postgres_store,worker}.py`; `kairyu/entrypoints/server/batch_routes.py`
-
-### 2026-08-07 — [amendment] Admission waits ahead of native sequence capacity
-- What: an explicit wait timeout lets a single local built-in backend split configured `/v1/*` concurrency into its advertised active sequence budget plus a bounded FIFO; omission, multi-model, pool, and unknown backends retain immediate saturation 429, and queue depth/rejections are observable.
-- Why: synchronized bursts were occupying server slots while queuing invisibly inside the engine scheduler, and saturation above a hand-set cap flapped immediately to 429 instead of absorbing a bounded burst.
-- Refs: issue #341; m7 D5; `kairyu/entrypoints/server/{middleware,settings,app}.py`; `kairyu/engine/{backend,kairyu_backend,zmq_backend,vllm_backend}.py`
-
-### 2026-08-07 — [amendment] Native pool validation shares immutable contracts
-- What: in-process and process-split native backends now publish an exact-type `request_validation_key` from model path, effective string tokenizer source, and `max_model_len`; equivalent pool members validate synchronously once, while custom tokenizers, subclasses, and per-member async preparation stay independent.
-- Why: typed prompt validation repeated the same tokenizer work on the serving loop for every equivalent replica even though the existing pool seam could safely deduplicate immutable contracts.
-- Refs: issue #347; m10 A19; `kairyu/engine/{kairyu_backend,zmq_backend}.py`; `tests/unit/test_{kairyu,zmq}_backend.py`
-
-### 2026-08-07 — [amendment] Streaming prefix roots publish at first token
-- What: prefix-aware streams publish their root immediately before the first backend result is yielded, retain it after later cancellation, and promote a warm hit to its full prepared chain only on normal completion; pre-first-result failures remain unadvertised.
-- Why: waiting through the entire decode left concurrent related requests looking cold even though prefill KV already existed, while dispatch-time speculation would require rollback state to avoid poisoning the index.
-- Refs: issue #344; m10 D6; `kairyu/orchestration/replica.py`; `tests/unit/test_kv_routing.py`
-
-### 2026-08-07 — [amendment] Deployment pools can enable prefix-aware routing
-- What: `PoolSpec` now exposes default-off `prefix_index`; the production builder constructs the existing bounded approximate `PrefixIndex` per opted-in static or discovered pool and passes it to `ReplicaPool`.
-- Why: validated KV-aware placement existed only for programmatic callers and benchmarks, so a production DeploymentSpec could not select the warm replica across related sessions.
-- Refs: issue #343; m7 D3; m10 D6; `kairyu/deploy/{spec,builder}.py`; `docs/deployment.md`

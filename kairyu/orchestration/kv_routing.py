@@ -75,7 +75,7 @@ class KvRoutingIndex:
     """Combine a precise event index with the existing approximate index.
 
     The adapter owns no transport lifecycle.  ``exact`` must provide atomic
-    fleet-wide ``route_overlaps(replica_ids, block_hashes)`` and may provide
+    ``route_overlaps(replica_ids, block_hashes)`` and may provide
     ``all_live``, ``is_live``, ``register_replica``, and ``forget_replica``.
     Optional exact routing failures degrade to the approximate index rather
     than failing an otherwise valid generation request.
@@ -97,6 +97,7 @@ class KvRoutingIndex:
         self._lifecycle_lock = threading.RLock()
         self._lifecycle_quarantine: set[str] = set()
         self._lifecycle_reset_ready: set[str] = set()
+        self._lifecycle_revision = 0
 
     @property
     def mode_counts(self) -> dict[str, int]:
@@ -131,6 +132,7 @@ class KvRoutingIndex:
         with self._lifecycle_lock:
             if not self._lifecycle_quarantine.isdisjoint(replica_ids):
                 return self._fallback(_FEED_CHANGED)
+            lifecycle_revision = self._lifecycle_revision
         try:
             feeds_live = self._all_live(replica_ids)
         except Exception:
@@ -151,16 +153,22 @@ class KvRoutingIndex:
             return self._fallback(_INVALID_HASHES)
 
         try:
-            # Recheck after prompt hashing, then serialize the authoritative
-            # read with lifecycle mutation so a concurrent partial failure
-            # cannot escape quarantine for this decision.
             with self._lifecycle_lock:
-                if not self._lifecycle_quarantine.isdisjoint(replica_ids):
+                if (
+                    self._lifecycle_revision != lifecycle_revision
+                    or not self._lifecycle_quarantine.isdisjoint(replica_ids)
+                ):
                     return self._fallback(_FEED_CHANGED)
-                supplied_overlaps = route_overlaps(
-                    replica_ids,
-                    block_hashes,
-                )
+            supplied_overlaps = route_overlaps(
+                replica_ids,
+                block_hashes,
+            )
+            with self._lifecycle_lock:
+                if (
+                    self._lifecycle_revision != lifecycle_revision
+                    or not self._lifecycle_quarantine.isdisjoint(replica_ids)
+                ):
+                    return self._fallback(_FEED_CHANGED)
             overlaps = None if supplied_overlaps is None else tuple(supplied_overlaps)
         except Exception:
             return self._fallback(_FEED_CHANGED)
@@ -204,6 +212,7 @@ class KvRoutingIndex:
         register = getattr(self.exact, "register_replica", None)
         if callable(register):
             with self._lifecycle_lock:
+                self._lifecycle_revision += 1
                 try:
                     register(replica_id)
                 except Exception:
@@ -225,6 +234,7 @@ class KvRoutingIndex:
         forget = getattr(self.exact, "forget_replica", None)
         if callable(forget):
             with self._lifecycle_lock:
+                self._lifecycle_revision += 1
                 try:
                     forget(replica_id)
                 except Exception:

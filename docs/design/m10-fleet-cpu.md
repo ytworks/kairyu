@@ -870,9 +870,9 @@ online learning or the M4 request-family bandit.
 
   Exact engine block hashes and approximate gateway text chunks remain
   different score spaces. `KvRoutingIndex` therefore chooses one mode for the
-  entire request: it uses one `KvEventIndex.route_overlaps` observation under
-  one lock and one clock sample for every eligible replica, or it discards all
-  exact scores and follows the existing approximate `PrefixIndex` path.
+  entire request: it uses one atomic `KvEventIndex.route_overlaps` observation
+  for every eligible replica, or it discards all exact scores and follows the
+  existing approximate `PrefixIndex` path.
   Provider, index, lifecycle, malformed-vector, and freshness failures degrade
   to approximate placement rather than failing generation. A failed exact
   membership mutation quarantines that replica until a complete successful
@@ -882,6 +882,17 @@ online learning or the M4 request-family bandit.
   the distinct `kv_event_match` decision reason; approximate stream roots
   publish at the same first-result boundary, while full-key promotion still
   requires successful completion.
+
+  **Issue #348 amendment:** `KvEventIndex` captures feed identity, epoch,
+  sequence, and hash-set references under its lock, performs the
+  prompt-length membership scan outside the lock, then rejects the vector
+  unless a second lock epoch proves every eligible feed unchanged and live.
+  `KvRoutingIndex` likewise releases its lifecycle lock around the exact call
+  and rejects a result if a register/forget revision changed. Approximate
+  root candidates cannot prune this pass: the F2b oracle deliberately proves
+  that approximate text-chunk and exact engine-block winners may differ.
+  Thus event ingestion and membership churn are not serialized behind exact
+  scoring without mixing the two score spaces or adding another index.
 
   The F2b formal profile reuses F1a run `30374404150` for the exact seed-175
   200-replica, ten-by-twenty churn identity schedule and reuses F2a run

@@ -521,14 +521,16 @@ class KvEventIndex:
 
         Unlike the legacy per-replica ``overlap`` API, this production routing
         surface admits only sequenced feeds whose high-water mark was confirmed
-        by a heartbeat, complete replay, or authoritative snapshot.  One lock
-        and one clock sample cover the entire eligible fleet, so churn cannot
-        construct a score vector that never existed at any instant.
+        by a heartbeat, complete replay, or authoritative snapshot.  The lock
+        captures stable feed/hash-set identities, prefix membership is scored
+        outside it, and a second lock epoch rejects any changed or stale feed.
         """
 
         with self._lock:
             now = self._now()
-            entries: list[_ReplicaBlocks] = []
+            snapshots: list[
+                tuple[str, _ReplicaBlocks, set[str], str, int]
+            ] = []
             for replica_id in replica_ids:
                 entry = self._replicas.get(replica_id)
                 if (
@@ -539,16 +541,41 @@ class KvEventIndex:
                     or not self._is_live_unlocked(entry, now)
                 ):
                     return None
-                entries.append(entry)
-            overlaps: list[int] = []
-            for entry in entries:
-                count = 0
-                for block_hash in block_hashes:
-                    if block_hash not in entry.hashes:
-                        break
-                    count += 1
-                overlaps.append(count)
-            return tuple(overlaps)
+                assert entry.stream_epoch is not None
+                snapshots.append(
+                    (
+                        replica_id,
+                        entry,
+                        entry.hashes,
+                        entry.stream_epoch,
+                        entry.last_sequence,
+                    )
+                )
+
+        overlaps: list[int] = []
+        for _replica_id, _entry, hashes, _epoch, _sequence in snapshots:
+            count = 0
+            for block_hash in block_hashes:
+                if block_hash not in hashes:
+                    break
+                count += 1
+            overlaps.append(count)
+
+        with self._lock:
+            now = self._now()
+            for replica_id, entry, hashes, epoch, sequence in snapshots:
+                current = self._replicas.get(replica_id)
+                if (
+                    replica_id in self._inactive_replicas
+                    or current is not entry
+                    or current.hashes is not hashes
+                    or current.stream_epoch != epoch
+                    or current.last_sequence != sequence
+                    or not current.synchronized
+                    or not self._is_live_unlocked(current, now)
+                ):
+                    return None
+        return tuple(overlaps)
 
     def overlap(
         self,
