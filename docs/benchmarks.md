@@ -563,10 +563,11 @@ for Kairyu's exact boundary.
 
 `--max-context-tokens` declares the input limit of every CLI target. A curve
 point above that limit is skipped in full and is never truncated into a shorter
-test. Omitting the limit attempts every point; server rejection or exhaustion is
-retained as failed evidence. A full run makes 120 calls per target. `--limit`
-and offline fixtures remain plumbing aids and carry the existing subset/
-fixture incomparability markers. Clean full runs can use the ordinary
+test. Omitting the limit attempts every point; a standard context-length HTTP
+400 is retained as skipped evidence with its raw error, while transport or
+retry-exhaustion errors remain failed evidence. A full run makes 120 calls per
+target. `--limit` and offline fixtures remain plumbing aids with the existing
+subset/fixture incomparability markers. Clean full runs can use the ordinary
 `compare-runs` history report or the paired `compare` command with one tolerance
 per length row, which makes the curve a direct gate for RoPE or KV-cache changes.
 

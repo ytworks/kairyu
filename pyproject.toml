@@ -118,6 +118,7 @@ dev = [
     "langdetect==1.0.9",
     "nltk==3.9.2",
     "pillow>=10",
+    "tiktoken>=0.7",  # real o200k_base long-context generator coverage
     "jsonschema==4.26.0",
 ]
 

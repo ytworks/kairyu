@@ -81,6 +81,22 @@ def test_normalization_is_deterministic_exact_length_and_position_swept(
     assert len({row["answer"] for row in first}) == SAMPLES_PER_LENGTH
 
 
+@pytest.mark.parametrize("context_tokens", [4_096, 131_072])
+def test_real_o200k_generator_covers_curve_endpoints(tmp_path, context_tokens):
+    import tiktoken
+
+    encoder = tiktoken.get_encoding("o200k_base")
+    rows = RulerNiahAdapter(context_tokens).normalize(
+        DownloadContext(cache=BenchCache(tmp_path / "cache"))
+    )
+
+    assert len(rows) == SAMPLES_PER_LENGTH
+    assert all(
+        len(encoder.encode(row["messages"][0]["content"])) == context_tokens
+        for row in rows
+    )
+
+
 def test_context_limit_skips_whole_curve_point_without_truncation(tmp_path):
     adapter = RulerNiahAdapter(8_192)
     ctx = _ctx(tmp_path)
