@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-08 — [amendment] NVFP4 exposes measured projection accuracy levers
+- What: opt-in projection selectors can observe group-16 activation saturation, use per-token NVFP4 scaling, or convert checkpoint NVFP4 weights once to FP8 runtime storage after TP/EP slicing; a strict M-A1 companion records accuracy, resident memory, and saturation curves.
+- Why: the retained 235B NVFP4 gate failure had no clipping visibility or bounded way to trade memory and activation precision while preserving the default fused path.
+- Refs: issue #355; m14 accuracy-profile amendment; `kairyu/quant`; `bench/g4_ma1_nvfp4_accuracy_bench.py`
+
+### 2026-08-08 — [amendment] Streaming results carry text deltas end to end
+- What: completion results expose offset-validated text deltas; native, process-split, and OpenAI-compatible streams feed server and orchestration consumers without rebuilding or rescanning cumulative text, while legacy cumulative text remains lazily compatible.
+- Why: flattening each token into a growing string at several serving layers caused quadratic copies and GIL-held allocation work per request.
+- Refs: issue #338; m8 wire v2; `kairyu/{outputs,engine,entrypoints/server,orchestration}`
+
+### 2026-08-08 — [amendment] Learned draft heads enter native serving
+- What: public native config wires EAGLE-3/MTP checkpoints into stateful target-hidden capture, O(T+k) cached rollout, exact accepted-row commit, per-source acceptance evidence, and request-local speculative pipeline dependencies; missing Radix hidden history safely degrades to target decode.
+- Why: the trained heads and batched teacher path existed, but public serving exposed only low-acceptance n-gram proposals and serialized unrelated pipeline work behind a global barrier.
+- Refs: issue #330; m17 A30-A32; `kairyu/engine/core/{draft,model_runner,spec_runner,scheduler}.py`; `kairyu/models/{eagle,mtp,llama}.py`
+
+### 2026-08-08 — [amendment] Mixed engine steps share one ragged model chain
+- What: native-ragged backends append one-token decode rows after prefill rows and execute one flat model forward; device-owned feedback uses existing decode slots, while unsupported backends, pure decode, and attention-DP's per-forward distributed protocol retain their prior paths.
+- Why: colocated mixed steps otherwise traverse every model layer twice even though ragged prefill already supports a causal one-token continuation.
+- Refs: issue #317; m13 D1; A12 #360; `kairyu/engine/core/model_runner.py`; `tests/{unit,gpu}/test_batched_prefill*.py`
+
+### 2026-08-07 — [amendment] Exact KV scoring leaves routing locks
+- What: exact hash-set identities and lifecycle revisions are captured under their respective locks, scored outside, then revalidated before a vector is accepted; approximate candidates do not prune the independent exact score space.
+- Why: an 8K-token prompt across a large fleet performed O(replicas x prompt blocks) membership work while blocking event ingestion and replica lifecycle changes.
+- Refs: issue #348; m10 A31; `kairyu/orchestration/{kv_index,kv_routing}.py`; `tests/unit/test_{kv_event_recovery,kv_routing_adapter}.py`
+
 ### 2026-08-07 — [amendment] Serving micro-overheads stay bounded
 - What: metrics path templates use a bounded LRU; SSE separator escaping uses one ASCII fast-path scan; AUTO direct streaming drops its duplicate prefix scan; chat body limiting forwards validated chunks without replay buffering; unset AUTO usage fields are excluded at serialization call sites.
 - Why: these repeated regex/string/Pydantic operations and duplicate request-body storage add small but compounding latency or peak memory on the public serving path.

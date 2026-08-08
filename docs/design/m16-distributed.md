@@ -150,6 +150,20 @@ assignment is contiguous blocks (`num_experts // ep_size` each). The math is
 IDENTICAL to the m15 token-loop (pinned by EP=2 ≡ EP=1 parity); gloo and
 NCCL share the code path.
 
+> **Amended 2026-08-08 (issue #359).** The generic all-to-all path accumulates
+> each rank's weighted expert contribution in FP32, all-reduces those FP32
+> partials, and casts once to the model dtype after the collective. This avoids
+> a model-dtype rounding boundary per EP rank and pins the same combine result
+> for the exercised EP2/4/8 ownership partitions. The homogeneous NVFP4 fused
+> correctness path retains G4 D3's explicitly measured BF16 finalize contract.
+
+> **Corrected 2026-08-08 (PR #448 Fable 5 review).** Reverse all-to-all already
+> returns the complete computed expert rows to each replicated source rank.
+> Generic EP therefore combines every slot locally in a fixed FP32 order and
+> casts once, without a redundant combine all-reduce. The result and its
+> addition grouping are independent of EP2/4/8 ownership; the NVFP4 carve-out
+> above remains unchanged.
+
 ### D4 — SPMD worker + PP stage (`engine/core/worker.py`, `pp_worker.py`)
 
 `worker.py`: `run_tp_worker(rank, world, init_method, model_dir, ...)` —

@@ -59,7 +59,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - A12 (batch-invariance determinism, #360): closed — exact-match verdict passed on Qwen3-32B TP8
 - #356 real-checkpoint quant parity: evidence complete — INT8 PASS; AWQ/GPTQ formal FAIL retained with SHA-bound same-GPU oracle replay isolating checkpoint quantization loss
 - B7 (KV answer-equivalence, #373): operator implemented and portable-validated; additive over F2/F4
-- G4 MoE: M-A1 formal FAIL retained; M-A2 complete; M-A3 scope-closed by owner deviation (perf gate stays FAIL)
+- G4 MoE: M-A1 formal FAIL retained; M-A2 complete; M-A3 scope-closed by owner deviation (perf gate stays FAIL); generic EP combines complete returned rows in fixed FP32 order before one model-dtype cast
 - G4 E-KV: FP8-E4M3 KV **FAIL** on Qwen3-32B long-context; `fp8_e4m3` startup rejected, BF16 KV fail-closed
 - G5: F1a–F1d, F2a–F2d, F4a, F4b all closed; F4c decided (keep per-replica RadixKV + F2 routing, thresholded revisit)
 - F5a/b/c (priority, noisy-neighbor, SLO admission): closed
@@ -95,6 +95,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] Generic EP combine is local and degree-invariant
+- What: correcting the preceding #359 entry, reverse all-to-all's complete returned rows are combined locally in fixed FP32 slot order, with no redundant combine collective.
+- Why: FP32 rank-partial reduction removed BF16 boundaries but retained ownership-dependent addition grouping and doubled combine traffic.
+- Refs: issue #359; PR #448 Fable 5 review; M16 D3; `kairyu/models/moe_parallel.py`
+
+### 2026-08-08 — [amendment] Generic EP combine crosses one rounding boundary
+- What: generic all-to-all MoE keeps rank-owned weighted partials FP32 through the all-reduce and casts once afterward; EP2/4/8 ownership partitions are regression-pinned.
+- Why: casting every rank partial to BF16 before reduction made identical prompts depend on the configured EP degree.
+- Refs: issue #359; M16 D3; `kairyu/models/moe_parallel.py`; `tests/unit/test_moe_precision.py`
+
 ### 2026-08-08 — [amendment] INT8 bias addition preserves oracle rounding
 - What: the fused INT8 kernel now uses explicit round-to-nearest bias addition after the rounded scale product, with a compact FMA-sensitive seed and production-width GPU coverage.
 - Why: compiler FMA fusion skipped the CPU oracle's intermediate FP32 rounding and caused one real-checkpoint token disagreement despite exact q/scale and int32 accumulation.
@@ -114,28 +124,3 @@ in `.claude/rules/progress-log.md`).
 - What: one pinned BF16 Qwen2.5-1.5B reference now drives 64x16 teacher-forced top-64 parity arms for public compressed-tensors INT8, AWQ, and GPTQ checkpoints; raw replay binds exact ABIs, revisions, completeness, and the measured tie floor.
 - Why: tiny random weights and GEMM error metrics could not expose subtle real-checkpoint packing or zero-point convention errors at model output.
 - Refs: issue #356; m14 real-checkpoint parity amendment; `bench/{parity_hf,quant_checkpoint_parity_bench}.py`
-
-### 2026-08-08 — [amendment] NVFP4 exposes measured projection accuracy levers
-- What: opt-in projection selectors can observe group-16 activation saturation, use per-token NVFP4 scaling, or convert checkpoint NVFP4 weights once to FP8 runtime storage after TP/EP slicing; a strict M-A1 companion records accuracy, resident memory, and saturation curves.
-- Why: the retained 235B NVFP4 gate failure had no clipping visibility or bounded way to trade memory and activation precision while preserving the default fused path.
-- Refs: issue #355; m14 accuracy-profile amendment; `kairyu/quant`; `bench/g4_ma1_nvfp4_accuracy_bench.py`
-
-### 2026-08-08 — [amendment] Streaming results carry text deltas end to end
-- What: completion results expose offset-validated text deltas; native, process-split, and OpenAI-compatible streams feed server and orchestration consumers without rebuilding or rescanning cumulative text, while legacy cumulative text remains lazily compatible.
-- Why: flattening each token into a growing string at several serving layers caused quadratic copies and GIL-held allocation work per request.
-- Refs: issue #338; m8 wire v2; `kairyu/{outputs,engine,entrypoints/server,orchestration}`
-
-### 2026-08-08 — [amendment] Learned draft heads enter native serving
-- What: public native config wires EAGLE-3/MTP checkpoints into stateful target-hidden capture, O(T+k) cached rollout, exact accepted-row commit, per-source acceptance evidence, and request-local speculative pipeline dependencies; missing Radix hidden history safely degrades to target decode.
-- Why: the trained heads and batched teacher path existed, but public serving exposed only low-acceptance n-gram proposals and serialized unrelated pipeline work behind a global barrier.
-- Refs: issue #330; m17 A30-A32; `kairyu/engine/core/{draft,model_runner,spec_runner,scheduler}.py`; `kairyu/models/{eagle,mtp,llama}.py`
-
-### 2026-08-08 — [amendment] Mixed engine steps share one ragged model chain
-- What: native-ragged backends append one-token decode rows after prefill rows and execute one flat model forward; device-owned feedback uses existing decode slots, while unsupported backends, pure decode, and attention-DP's per-forward distributed protocol retain their prior paths.
-- Why: colocated mixed steps otherwise traverse every model layer twice even though ragged prefill already supports a causal one-token continuation.
-- Refs: issue #317; m13 D1; A12 #360; `kairyu/engine/core/model_runner.py`; `tests/{unit,gpu}/test_batched_prefill*.py`
-
-### 2026-08-07 — [amendment] Exact KV scoring leaves routing locks
-- What: exact hash-set identities and lifecycle revisions are captured under their respective locks, scored outside, then revalidated before a vector is accepted; approximate candidates do not prune the independent exact score space.
-- Why: an 8K-token prompt across a large fleet performed O(replicas x prompt blocks) membership work while blocking event ingestion and replica lifecycle changes.
-- Refs: issue #348; m10 A31; `kairyu/orchestration/{kv_index,kv_routing}.py`; `tests/unit/test_{kv_event_recovery,kv_routing_adapter}.py`

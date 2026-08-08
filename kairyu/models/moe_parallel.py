@@ -4,11 +4,11 @@ Routing runs REPLICATED (fp32, deterministic on CPU/gloo; a deploy-day debug
 guard hashes topk_indices across ranks — m16 A8). Tokens permute to
 expert-owning ranks via ``tensor_all_to_all_single`` (counts exchange first,
 then payload), local experts compute, and reverse all_to_all returns the
-expert rows. Each rank finalizes only its owned-expert contribution in fp32,
-casts that partial to the model dtype, then all-reduces the rank partials.
-This preserves the standalone fused-MoE finalize boundary. Contiguous expert
-blocks per rank; gloo and NCCL share this code path. DeepEP/UCCL is the
-deploy-day fast path behind the same block interface.
+complete expert rows to every source rank. Each rank combines those rows in
+the same fp32 slot order and casts once to the model dtype. The homogeneous
+NVFP4 fused path separately retains its measured BF16 partial all-reduce.
+Contiguous expert blocks per rank; gloo and NCCL share this code path.
+DeepEP/UCCL is the deploy-day fast path behind the same block interface.
 """
 
 from __future__ import annotations
@@ -251,48 +251,33 @@ def _assert_collective_device(
         )
 
 
-def _ep_rank_partial(
+def _ep_combine_returned_rows(
     expert_outputs: torch.Tensor,
-    topk_indices: torch.Tensor,
     topk_weights: torch.Tensor,
-    *,
-    ep_rank: int,
-    experts_per_rank: int,
-    output_dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Finalize one EP rank in slot order, then cross the output dtype boundary."""
+    """Combine the complete returned expert rows in FP32 slot order."""
 
     if expert_outputs.ndim != 3:
         raise ValueError("EP expert outputs must have [tokens, top_k, hidden] shape")
     if (
-        topk_indices.shape != expert_outputs.shape[:2]
-        or topk_weights.shape != expert_outputs.shape[:2]
+        topk_weights.shape != expert_outputs.shape[:2]
     ):
-        raise ValueError("EP routing tensors must match expert output token/slot axes")
-    if ep_rank < 0 or experts_per_rank < 1:
-        raise ValueError("EP rank and experts-per-rank must be valid")
+        raise ValueError("EP routing weights must match expert output token/slot axes")
 
-    combine_dtype = torch.promote_types(expert_outputs.dtype, topk_weights.dtype)
-    owners = topk_indices // experts_per_rank
-    partial = torch.zeros(
+    combine_dtype = torch.float32
+    combined = torch.zeros(
         expert_outputs.shape[0],
         expert_outputs.shape[2],
         dtype=combine_dtype,
         device=expert_outputs.device,
     )
-    # TensorRT-LLM's standalone finalize walks routing slots in order and
-    # accumulates only experts owned by this rank in fp32. Keep that order
-    # explicit instead of asking a reduction kernel to choose an order.
+    # Every source rank receives the same complete rows after reverse
+    # all-to-all. Walk slots explicitly so EP degree cannot change grouping.
     for slot in range(expert_outputs.shape[1]):
-        selected = owners[:, slot] == ep_rank
         contribution = expert_outputs[:, slot].to(combine_dtype)
         contribution = contribution * topk_weights[:, slot].to(combine_dtype)[:, None]
-        partial = partial + torch.where(
-            selected[:, None],
-            contribution,
-            torch.zeros((), dtype=combine_dtype, device=expert_outputs.device),
-        )
-    return partial.to(output_dtype)
+        combined = combined + contribution
+    return combined
 
 
 def _swizzle_nvfp4_moe_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -991,22 +976,14 @@ class EpMoeBlock(nn.Module):
             recv_counts.tolist(),
         )
         # Undo the permutation. Each source rank now has the same complete set
-        # of returned expert rows, but contributes only the experts owned by
-        # its rank. The BF16 boundary before the all-reduce matches standalone
-        # fused-MoE finalization and is observably different from one global
-        # FP32 sum followed by a single cast.
+        # of returned expert rows. Combine the complete rows locally in one
+        # FP32 slot order, independent of the expert ownership partition.
         unsorted = torch.empty_like(returned)
         unsorted[order] = returned
-        local_partial = _ep_rank_partial(
+        out = _ep_combine_returned_rows(
             unsorted.reshape(tokens, k, -1),
-            topk_indices,
             topk_weights,
-            ep_rank=self.ep_rank,
-            experts_per_rank=self.experts_per_rank,
-            output_dtype=hidden.dtype,
-        )
-        _assert_collective_device(device, local_partial=local_partial)
-        out = self._comm.tensor_all_reduce(local_partial.contiguous())
+        ).to(hidden.dtype)
         if self.shared_experts is not None:
             out = out + self.shared_experts(hidden)
         return out

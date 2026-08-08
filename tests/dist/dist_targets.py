@@ -90,6 +90,42 @@ class _NcclTinyMoeBlock(torch.nn.Module):
         return out
 
 
+class _EpInvariantExpert(torch.nn.Module):
+    def __init__(self, value: float) -> None:
+        super().__init__()
+        self.value = value
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return torch.full_like(hidden, self.value)
+
+
+class _EpInvariantMoeBlock(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.experts = torch.nn.ModuleList(
+            _EpInvariantExpert(value)
+            for value in (0.66015625, 0.267578125, 0.061767578125, 0.62109375)
+        )
+
+    def _route(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        indices = torch.tensor([[0, 2, 1, 3]], device=hidden.device)
+        weights = torch.tensor(
+            [[0.2010020762681961, 0.2674923539161682,
+              0.06888598203659058, 0.4626196026802063]],
+            dtype=torch.float32,
+            device=hidden.device,
+        )
+        return indices.expand(hidden.shape[0], -1), weights.expand(hidden.shape[0], -1)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        indices, weights = self._route(hidden)
+        rows = torch.stack(
+            [self.experts[int(index)](hidden) for index in indices[0]],
+            dim=1,
+        )
+        return (rows.float() * weights[:, :, None]).sum(dim=1).to(hidden.dtype)
+
+
 def _setup(rank: int, world_size: int, init_file: str):
     from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
 
@@ -323,6 +359,30 @@ def ep_block_parity(rank: int, world_size: int, init_file: str, out_dir: str,
     out = ep_block(hidden)
     diff = (out - reference).abs().max().item()
     _finish(out_dir, rank, {"maxdiff": diff, "local_experts": len(ep_block.local_experts)})
+
+
+def ep_block_bf16_invariance(
+    rank: int, world_size: int, init_file: str, out_dir: str
+) -> None:
+    """EP2 generic combine matches one fixed FP32 slot order in BF16."""
+    from kairyu.models.moe_parallel import EpMoeBlock
+
+    comm = _setup(rank, world_size, init_file)
+    block = _EpInvariantMoeBlock()
+    hidden = torch.zeros(1, 1, dtype=torch.bfloat16)
+    reference = block(hidden)
+    ep_block = EpMoeBlock(block, comm, ep_rank=rank, ep_size=world_size)
+    out = ep_block(hidden)
+    _finish(
+        out_dir,
+        rank,
+        {
+            "exact": torch.equal(out, reference),
+            "actual": float(out.item()),
+            "reference": float(reference.item()),
+            "dtype": str(out.dtype),
+        },
+    )
 
 
 def ep_block_nccl_parity(
