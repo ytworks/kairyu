@@ -49,7 +49,12 @@ if triton is not None:
         ).to(tl.float32)
         if DYNAMIC:
             amax = tl.max(tl.abs(values), axis=0)
-            scale = tl.maximum(amax / QUANT_MAX, 1e-12)
+            if ROUND_TO_INT:
+                # Match quantize_int8_activation exactly: clamp the FP32 amax,
+                # then use IEEE round-to-nearest division for the row scale.
+                scale = libdevice.div_rn(tl.maximum(amax, 1e-12), QUANT_MAX)
+            else:
+                scale = tl.maximum(amax / QUANT_MAX, 1e-12)
         elif ROW_SCALE:
             scale = tl.load(input_scale_ptr + row).to(tl.float32)
         else:

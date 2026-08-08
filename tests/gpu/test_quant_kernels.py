@@ -46,6 +46,7 @@ def test_int8_activation_quantization_matches_torch_rounding(cuda, k_size):
 
     torch.manual_seed(356)
     values = torch.randn(4, k_size, device=cuda, dtype=torch.bfloat16)
+    values[0].zero_()
     expected, expected_scale = quantize_int8_activation(values.float())
     actual, actual_scale = _quantize_activation(values, torch.int8, 127.0)
 

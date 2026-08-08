@@ -364,7 +364,8 @@ The real INT8 arm exposed an activation-quantization discrepancy that the
 small random gate missed. Dynamic W8A8 uses the CPU oracle's FP32
 `torch.round(x / scale)` tie-to-even contract exactly. Triton's ordinary `/`
 may lower to an approximate reciprocal and move a half-integer across its tie,
-so the INT8 branch uses libdevice round-to-nearest division before `rint`.
+so the INT8 branch uses libdevice round-to-nearest division for both the
+clamped amax-derived scale and the scaled activation before `rint`.
 FP8 keeps its existing division because it does not perform integer rounding.
 
 The retained SM120 run at clean source `953a703` completed every required
