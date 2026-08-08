@@ -133,10 +133,9 @@ def _request(request_id: str, *, blank_hint: bool = False) -> GenerationRequest:
     )
 
 
-def _approximate_index(*replica_ids: str) -> PrefixIndex:
+def _approximate_index() -> PrefixIndex:
     index = PrefixIndex()
-    for replica_id in replica_ids or ("r1",):
-        index.observe(replica_id, _PROMPT)
+    index.observe("r1", _PROMPT)
     return index
 
 
@@ -145,7 +144,7 @@ def _backends(selected: list[str]) -> dict[str, _Backend]:
 
 
 @pytest.mark.asyncio
-async def test_exact_scoring_is_bounded_to_approximate_candidates():
+async def test_approximate_candidates_do_not_prune_exact_score_space():
     selected: list[str] = []
     exact = _ExactIndex()
     provider = _Provider()
@@ -162,61 +161,19 @@ async def test_exact_scoring_is_bounded_to_approximate_candidates():
     finally:
         await pool.shutdown()
 
-    assert selected == ["r1"]
+    assert selected == ["r2"]
     assert log.records[-1]["reason"] == "kv_event_match"
     assert pool.decision_counts["kv_event_match"] == 1
     assert routing.mode_counts["exact"] == 1
     assert provider.calls == [_PROMPT]
-    assert exact.routed == [("r1",)]
-
-
-def test_candidate_bound_preserves_eligible_vector_alignment():
-    replica_ids = tuple(f"r{index}" for index in range(200))
-    approximate = PrefixIndex()
-    approximate.observe("r3", _PROMPT)
-    approximate.observe("r17", _PROMPT)
-
-    class CapturingExactIndex:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, ...]] = []
-
-        @staticmethod
-        def all_live(_replica_ids) -> bool:
-            return True
-
-        def route_overlaps(self, scored_ids, _block_hashes):
-            self.calls.append(scored_ids)
-            return (2, 1)
-
-    exact = CapturingExactIndex()
-    routing = KvRoutingIndex(approximate, exact, _Provider())
-
-    view = routing.route_view(replica_ids, routing.prepare(_PROMPT))
-
-    assert view.mode == "exact"
-    assert exact.calls == [("r3", "r17")]
-    assert len(view.overlaps) == len(replica_ids)
-    assert view.overlaps[3] == 2
-    assert view.overlaps[17] == 1
-    assert sum(view.overlaps) == 3
-
-
-def test_cold_approximate_root_keeps_all_eligible_exact_lookup():
-    exact = _ExactIndex()
-    routing = KvRoutingIndex(PrefixIndex(), exact, _Provider())
-
-    view = routing.route_view(("r1", "r2"), routing.prepare(_PROMPT))
-
-    assert view.mode == "exact"
-    assert view.overlaps == (1, 2)
     assert exact.routed == [("r1", "r2")]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dead_state", ["stale", "gap"])
-async def test_non_live_scored_feed_uses_approximate_oracle(dead_state):
+async def test_non_live_feed_globally_uses_approximate_oracle(dead_state):
     exact = _ExactIndex()
-    exact.states["r1"] = dead_state
+    exact.states["r2"] = dead_state
     provider = _Provider()
     routing = KvRoutingIndex(_approximate_index(), exact, provider)
     selected: list[str] = []
@@ -247,7 +204,7 @@ async def test_non_live_scored_feed_uses_approximate_oracle(dead_state):
 async def test_restore_converges_to_exact_on_same_pool_and_index_objects():
     selected: list[str] = []
     exact = _ExactIndex()
-    exact.states["r1"] = "gap"
+    exact.states["r2"] = "gap"
     provider = _Provider()
     routing = KvRoutingIndex(_approximate_index(), exact, provider)
     log = _PlacementLog()
@@ -260,9 +217,8 @@ async def test_restore_converges_to_exact_on_same_pool_and_index_objects():
 
     try:
         await pool.generate(_request("during-gap"))
-        exact.states["r1"] = "live"
+        exact.states["r2"] = "live"
         exact.hashes["r2"] = set(_HASHES)
-        routing.approximate.observe("r2", _PROMPT)
         await pool.generate(_request("after-restore"))
     finally:
         await pool.shutdown()
@@ -333,7 +289,7 @@ def test_bulk_exact_failure_globally_falls_back_to_approximate(failure):
             return (len(block_hashes),)
 
     routing = KvRoutingIndex(
-        _approximate_index("r1", "r2"),
+        _approximate_index(),
         BrokenBulkIndex(),
         _Provider(),
     )
@@ -457,7 +413,7 @@ def test_register_failure_stays_quarantined_until_forget_register_reset():
 
     exact = FailingRegisterIndex()
     provider = _Provider()
-    routing = KvRoutingIndex(_approximate_index("r1", "r2"), exact, provider)
+    routing = KvRoutingIndex(_approximate_index(), exact, provider)
     prepared = routing.prepare(_PROMPT)
 
     routing.register_replica("r2")
@@ -495,7 +451,7 @@ def test_forget_failure_stays_quarantined_across_register_success():
 
     exact = FailingForgetIndex()
     provider = _Provider()
-    routing = KvRoutingIndex(_approximate_index("r1", "r2"), exact, provider)
+    routing = KvRoutingIndex(_approximate_index(), exact, provider)
     prepared = routing.prepare(_PROMPT)
 
     routing.forget_replica("r2")
