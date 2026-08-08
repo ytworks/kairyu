@@ -95,6 +95,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] Grouped MoE is capability-probed and decode-bounded
+- What: correcting the preceding #331 entry, grouped plans are power-of-two bucketed and prewarmed through 8,192 total rows before graph capture; larger EP prefills and unsupported/custom runtimes keep the reference transport/math.
+- Why: unconditional fixed capacity multiplied prefill memory/FLOPs by EP degree, while late cuDNN plan/workspace growth could invalidate captured graph pointers.
+- Refs: issue #331; PR #453 Fable 5 review; M15 A11; M16 D3; `kairyu/models/grouped_moe.py`
+
 ### 2026-08-08 — [amendment] Dense MoE uses grouped GEMM and fixed EP capacity
 - What: CUDA BF16 experts use canonical-storage packs, device-side sort/offsets, and two FlashInfer cuDNN grouped GEMMs; generic EP uses fixed peer-capacity forward/reverse all-to-all buffers with host-constant splits.
 - Why: data-dependent `unique`/`nonzero` expert loops and count `.item()`/`.tolist()` forced up to one host synchronization and small GEMM per expert, preventing CUDA graph capture.

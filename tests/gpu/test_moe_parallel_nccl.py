@@ -52,3 +52,4 @@ def test_ep_dispatch_and_return_match_reference_over_nccl(tmp_path: Path) -> Non
         assert result["local_experts"] == 2
         assert result["device"] == f"cuda:{rank}"
         assert result["max_error"] <= BF16_TOLERANCE
+        assert result["ep1_max_error"] <= BF16_TOLERANCE

@@ -27,6 +27,8 @@ from kairyu.quant.linear import (
 class _ExpertMlp(nn.Module):
     """One expert: SwiGLU at moe_intermediate_size, HF names."""
 
+    _kairyu_grouped_swiglu = True
+
     def __init__(
         self,
         config: ModelConfig,
@@ -90,8 +92,9 @@ def _mix_experts(
 ) -> torch.Tensor:
     """Reference combine with one final cast after router-weight accumulation."""
     combine_dtype = torch.promote_types(hidden.dtype, topk_weights.dtype)
-    if grouped_pack is not None and grouped_pack.supports(hidden):
-        tokens, top_k = topk_indices.shape
+    tokens, top_k = topk_indices.shape
+    rows_count = tokens * top_k
+    if grouped_pack is not None and grouped_pack.supports(hidden, rows_count):
         rows = hidden.repeat_interleave(
             top_k,
             dim=0,
@@ -101,7 +104,7 @@ def _mix_experts(
         weighted = expert_out.to(combine_dtype) * topk_weights.reshape(-1, 1).to(
             combine_dtype
         )
-        weighted = weighted.reshape(tokens, top_k, -1)
+        weighted = weighted.reshape(tokens, top_k, hidden.shape[-1])
         out = torch.zeros_like(hidden, dtype=combine_dtype)
         for slot in range(top_k):
             out = out + weighted[:, slot]

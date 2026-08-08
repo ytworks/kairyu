@@ -175,6 +175,15 @@ NCCL share the code path.
 > compatibility paths and the fused NVFP4 path retain their established
 > transports.
 
+> **Corrected 2026-08-08 (PR #453 Fable 5 review).** Fixed-capacity EP is
+> limited to at most 8,192 total grouped rows after EP padding; larger prefills
+> retain the exact-split compatibility transport. Grouped row counts are
+> power-of-two bucketed and every permitted plan is warmed before decode graph
+> capture, reserving FlashInfer's grouped workspace high-water mark. Dense BF16
+> EP1/EP2 parity is tolerance-pinned because different cuDNN expert-group
+> shapes may choose different numerically valid GEMM plans; FP32 slot combine
+> order remains identical.
+
 ### D4 — SPMD worker + PP stage (`engine/core/worker.py`, `pp_worker.py`)
 
 `worker.py`: `run_tp_worker(rank, world, init_method, model_dir, ...)` —

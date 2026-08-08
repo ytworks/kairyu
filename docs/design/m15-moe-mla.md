@@ -156,3 +156,8 @@ MLA fields from config). `validate_tp_degree`: MLA models report
   conversion rebuild the pack without changing checkpoint paths. Unsupported
   projection types retain the reference path, including the separately fused
   production NVFP4 implementation.
+- **A11 (PR #453 Fable 5 review)**: grouped execution is selected only for the
+  known `_ExpertMlp` SwiGLU contract after a FlashInfer/cuDNN/SM capability
+  probe. Rows use prewarmed power-of-two plans up to the bounded hot-path
+  maximum; larger prefills and unsupported runtimes retain D1's reference
+  implementation. Empty inputs also remain on that reference path.

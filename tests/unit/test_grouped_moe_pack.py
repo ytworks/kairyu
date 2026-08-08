@@ -3,11 +3,13 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from kairyu.models.grouped_moe import GroupedExpertPack
+from kairyu.models.grouped_moe import GroupedExpertPack, _grouped_rows_bucket
 from kairyu.models.moe_parallel import EpMoeBlock
 
 
 class _DenseExpert(nn.Module):
+    _kairyu_grouped_swiglu = True
+
     def __init__(self, hidden: int = 16, intermediate: int = 24) -> None:
         super().__init__()
         self.gate_proj = nn.Linear(hidden, intermediate, bias=False)
@@ -62,6 +64,24 @@ def test_grouped_expert_pack_declines_replaced_canonical_parameter() -> None:
     expert.gate_proj.weight = nn.Parameter(expert.gate_proj.weight.detach().clone())
 
     assert not pack.is_current()
+
+
+def test_grouped_expert_pack_declines_unmarked_custom_forward() -> None:
+    class CustomExpert(_DenseExpert):
+        def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+            return super().forward(hidden) * 2
+
+    experts = nn.ModuleList(CustomExpert() for _ in range(2)).to(torch.bfloat16)
+
+    assert GroupedExpertPack.create(experts) is None
+
+
+def test_grouped_row_buckets_are_bounded_powers_of_two() -> None:
+    assert _grouped_rows_bucket(0) is None
+    assert _grouped_rows_bucket(1) == 1
+    assert _grouped_rows_bucket(3) == 4
+    assert _grouped_rows_bucket(8192) == 8192
+    assert _grouped_rows_bucket(8193) is None
 
 
 def test_ep_repackages_only_rank_local_dense_experts() -> None:

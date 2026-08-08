@@ -145,6 +145,8 @@ class _NcclScaleExpert(torch.nn.Module):
 
 
 class _NcclDenseExpert(torch.nn.Module):
+    _kairyu_grouped_swiglu = True
+
     def __init__(self, hidden: int = 32, intermediate: int = 48) -> None:
         super().__init__()
         self.gate_proj = torch.nn.Linear(hidden, intermediate, bias=False)
@@ -490,6 +492,8 @@ def ep_block_nccl_parity(
     import torch.distributed as dist
 
     from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
+    from kairyu.models.grouped_moe import GroupedExpertPack
+    from kairyu.models.moe import _mix_experts
     from kairyu.models.moe_parallel import EpMoeBlock
 
     if world_size != 2:
@@ -509,10 +513,22 @@ def ep_block_nccl_parity(
             .to(torch.bfloat16)
         )
         reference = block(hidden)
+        indices, weights = block._route(hidden)
+        local_pack = GroupedExpertPack.create(block.experts)
+        if local_pack is None:
+            raise RuntimeError("NCCL dense-MoE target did not select grouped GEMM")
+        ep1_grouped = _mix_experts(
+            hidden,
+            block.experts,
+            indices,
+            weights,
+            local_pack,
+        )
         ep_block = EpMoeBlock(block, comm, ep_rank=rank, ep_size=world_size)
         out = ep_block(hidden)
         result = {
             "max_error": (out - reference).abs().max().item(),
+            "ep1_max_error": (out - ep1_grouped).abs().max().item(),
             "device": str(out.device),
             "local_experts": len(ep_block.local_experts),
         }

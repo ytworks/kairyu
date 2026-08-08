@@ -14,6 +14,8 @@ pytestmark = pytest.mark.gpu
 
 
 class _DenseExpert(nn.Module):
+    _kairyu_grouped_swiglu = True
+
     def __init__(self, hidden: int = 32, intermediate: int = 48) -> None:
         super().__init__()
         self.gate_proj = nn.Linear(hidden, intermediate, bias=False)
@@ -128,6 +130,34 @@ def test_local_grouped_moe_uses_two_grouped_gemms_without_host_sync(
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=2e-2)
 
 
+def test_grouped_moe_handles_single_route_with_empty_trailing_experts() -> None:
+    torch.manual_seed(13)
+    block = _FixedRouteBlock().to(device="cuda", dtype=torch.bfloat16)
+    hidden = torch.randn(1, 32, device="cuda", dtype=torch.bfloat16)
+    indices = torch.zeros(1, 1, dtype=torch.int64, device="cuda")
+    weights = torch.ones(1, 1, dtype=torch.float32, device="cuda")
+    pack = GroupedExpertPack.create(block.experts)
+    assert pack is not None
+
+    actual = _mix_experts(hidden, block.experts, indices, weights, pack)
+    expected = block.experts[0](hidden)
+
+    torch.testing.assert_close(actual, expected, rtol=1e-2, atol=2e-2)
+
+
+def test_local_moe_empty_input_preserves_shape() -> None:
+    block = _FixedRouteBlock().to(device="cuda", dtype=torch.bfloat16)
+    hidden = torch.empty(0, 32, device="cuda", dtype=torch.bfloat16)
+    indices = torch.empty(0, 2, dtype=torch.int64, device="cuda")
+    weights = torch.empty(0, 2, dtype=torch.float32, device="cuda")
+    pack = GroupedExpertPack.create(block.experts)
+    assert pack is not None
+
+    actual = _mix_experts(hidden, block.experts, indices, weights, pack)
+
+    assert actual.shape == hidden.shape
+
+
 def test_ep_grouped_moe_uses_fixed_splits_and_is_cuda_graph_capturable() -> None:
     torch.manual_seed(19)
     block = _FixedRouteBlock().to(device="cuda", dtype=torch.bfloat16)
@@ -149,6 +179,16 @@ def test_ep_grouped_moe_uses_fixed_splits_and_is_cuda_graph_capturable() -> None
     torch.cuda.synchronize()
     with torch.cuda.graph(graph):
         captured = ep_block(static_hidden)
+    from flashinfer import utils as flashinfer_utils
+
+    workspace = flashinfer_utils._cache_buf[("grouped_mm_workspace", hidden.device)]
+    workspace_pointer = workspace.data_ptr()
+    larger_hidden = torch.randn(64, 32, device="cuda", dtype=torch.bfloat16)
+    ep_block(larger_hidden)
+    assert (
+        flashinfer_utils._cache_buf[("grouped_mm_workspace", hidden.device)].data_ptr()
+        == workspace_pointer
+    )
     static_hidden.copy_(hidden * 0.5)
     graph.replay()
     torch.cuda.synchronize()

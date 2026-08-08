@@ -1044,7 +1044,8 @@ class EpMoeBlock(nn.Module):
             return out
 
         grouped_pack = self._grouped_expert_pack
-        if grouped_pack is not None and grouped_pack.supports(hidden):
+        grouped_rows = self.ep_size * topk_indices.numel()
+        if grouped_pack is not None and grouped_pack.supports(hidden, grouped_rows):
             return self._forward_grouped_all_to_all(
                 hidden,
                 topk_indices,
