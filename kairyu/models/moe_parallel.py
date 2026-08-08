@@ -1989,7 +1989,8 @@ def build_ep_model(
         materialize_fp8_weights(model)
     if quant.method is QuantMethod.NVFP4 and torch.device(device).type == "cuda":
         for _block_name, block in blocks:
-            if all(
+            profile_changes_experts = accuracy_profile is not None and accuracy_profile.active
+            if not profile_changes_experts or all(
                 type(projection) is NvFp4Linear
                 and not projection.activation_dynamic
                 and not projection.observe_activation_saturation

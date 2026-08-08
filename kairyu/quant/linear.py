@@ -1099,11 +1099,16 @@ class ContextualLinearFactory:
                 bias,
                 observe_activation_saturation=selected.observe_activation_saturation,
             )
+        elif selected_quant.method is QuantMethod.NVFP4:
+            module = NvFp4Linear(
+                in_features,
+                out_features,
+                bias,
+                activation_dynamic=selected_quant.activation_dynamic is True,
+                observe_activation_saturation=selected.observe_activation_saturation,
+            )
         else:
             module = _construct_linear(selected_quant, in_features, out_features, bias)
-            if isinstance(module, NvFp4Linear):
-                module.activation_dynamic = selected_quant.activation_dynamic is True
-                module.observe_activation_saturation = selected.observe_activation_saturation
         _bind_fused_forward(module, resolved, self._device)
         # Plain metadata: it is intentionally absent from state_dict and cannot
         # change checkpoint names or tensor ownership.

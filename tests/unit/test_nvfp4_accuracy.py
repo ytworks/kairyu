@@ -112,10 +112,30 @@ def test_policy_selects_fp8_dynamic_and_shared_projection_roles() -> None:
     assert isinstance(last, NvFp4Linear) and last.activation_dynamic
     assert isinstance(shared, NvFp4Linear) and shared.activation_dynamic
     assert type(ordinary) is NvFp4Linear and not ordinary.activation_dynamic
+    assert not first.observe_activation_saturation
+    assert not down.observe_activation_saturation
     assert all(
         module.observe_activation_saturation
-        for module in (first, down, last, shared, ordinary)
+        for module in (last, shared, ordinary)
     )
+
+
+def test_factory_built_projection_registers_saturation_counters() -> None:
+    module = _projection(
+        _factory(NvFp4AccuracyProfile(saturation_counters=True)),
+        "model.layers.1.self_attn.q_proj",
+        LinearRole.ATTENTION_QUERY,
+        1,
+    )
+    module.input_scale.fill_(1.0 / (6.0 * 448.0))
+    values = torch.zeros(2, 16)
+    values[0, 0] = 2.0
+
+    module(values)
+
+    row = saturation_snapshot(module)[0]
+    assert row["blocks"] == 2
+    assert row["saturated_blocks"] == 1
 
 
 def test_nvfp4_to_fp8_loads_source_abi_then_discards_packed_weight() -> None:

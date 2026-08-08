@@ -131,7 +131,10 @@ def make_nvfp4_accuracy_policy(profile: NvFp4AccuracyProfile, num_layers: int):
                 ),
                 None,
                 "nvfp4-accuracy:fp8",
-                observe_activation_saturation=observe,
+                # These counters diagnose NVFP4 activation clipping.  An FP8
+                # pin uses its own dynamic scale, so reporting zero clipping
+                # for it would be vacuous and misleading.
+                observe_activation_saturation=False,
             )
         if matches(profile.dynamic_activation, context):
             dynamic = QuantConfig(
