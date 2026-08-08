@@ -24,6 +24,7 @@ schema_version = 1
 "bench.parity_hf" = ["bench.parity_tp"]
 "bench.pd_overlap_qwen" = ["bench.parity_tp"]
 "bench.prefix_weight_f2d_bench" = ["bench.prefix_routing_f2a_bench"]
+"bench.quant_checkpoint_parity_bench" = ["bench.parity_hf"]
 "bench.tiered_auto_bench" = ["bench.orchestration_stream_bench"]
 "bench.tp_kv_hit_g2_a7_bench" = ["bench.multiturn_prefix"]
 "bench.tp_sampling_owner_qwen" = ["bench.parity_tp"]
@@ -484,6 +485,15 @@ module = "bench.proc_wire_bench"
 kind = "microbench"
 requires = ["fleet"]
 documentation = ["bench/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "bench/quant_checkpoint_parity_bench.py"
+module = "bench.quant_checkpoint_parity_bench"
+kind = "formal-gate"
+requires = ["engine", "gpu", "hf"]
+documentation = ["bench/README.md", "docs/design/m14-quant-compute.md", "docs/gpu-runbook.md"]
 installed = false
 invocations = ["path", "module"]
 

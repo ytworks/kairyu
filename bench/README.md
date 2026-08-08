@@ -314,6 +314,7 @@ bench/prefix_weight_f2d_bench.py
 bench/priority_overload_bench.py
 bench/priority_overload_gpu_bench.py
 bench/proc_wire_bench.py
+bench/quant_checkpoint_parity_bench.py
 bench/quant_gemm_bench.py
 bench/radix_eviction_bench.py
 bench/reduce_scatter_bench.py

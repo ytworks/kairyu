@@ -333,3 +333,29 @@ report includes all 1,024 teacher positions, free-running diagnostics, actual
 unique resident storage per rank, projection-format counts, and per-projection
 saturation. Its `curve` command accepts only reports with identical source,
 checkpoint, model, world size, and reference identity.
+
+## 11. Real-checkpoint parity amendment (2026-08-08, issue #356)
+
+The tiny random-model gate remains a format-oracle smoke, not sufficient
+real-model evidence. The retained real-checkpoint gate uses the unquantized
+`Qwen/Qwen2.5-1.5B-Instruct@989aa798` HF model as one shared reference and
+loads three separately published candidates through Kairyu's production CUDA
+path: Red Hat AI compressed-tensors dynamic INT8 W8A8, Qwen AWQ GEMM W4A16,
+and Qwen GPTQ-v1 W4A16. Repository revisions and complete safetensors digests
+are binding.
+
+`bench/parity_hf.py --reference-model-path` permits the HF reference checkpoint
+to differ from the Kairyu candidate only when architecture geometry, vocabulary,
+and the actual fixed prompt-token sequences match, the reference is unquantized,
+and the candidate declares quantization. Ordinary same-checkpoint A1/A2 behavior
+and verdicts are unchanged.
+
+Each arm scores 64 fixed prompts at 16 independent teacher-forced positions and
+retains top-64 token-ID logprobs. For cross-checkpoint quantization, exact token
+agreement and agreeing-token logprob drift are diagnostics: format loss makes
+the A2 same-weight 0.25-nat distribution bound inapplicable. The binding gate
+requires all 1,024 positions, no missing candidate token, and zero disagreements
+outside the measured BF16 reference tie floor (never below 0.125 nat). The
+`bench/quant_checkpoint_parity_bench.py` assembler independently replays raw
+positions, verifies the exact INT8/AWQ/GPTQ checkpoint ABI and revisions, and
+rejects dirty or mixed-source arms.

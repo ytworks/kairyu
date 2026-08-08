@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] Real checkpoints gate INT8 and W4 formats
+- What: one pinned BF16 Qwen2.5-1.5B reference now drives 64x16 teacher-forced top-64 parity arms for public compressed-tensors INT8, AWQ, and GPTQ checkpoints; raw replay binds exact ABIs, revisions, completeness, and the measured tie floor.
+- Why: tiny random weights and GEMM error metrics could not expose subtle real-checkpoint packing or zero-point convention errors at model output.
+- Refs: issue #356; m14 real-checkpoint parity amendment; `bench/{parity_hf,quant_checkpoint_parity_bench}.py`
+
 ### 2026-08-08 — [amendment] NVFP4 exposes measured projection accuracy levers
 - What: opt-in projection selectors can observe group-16 activation saturation, use per-token NVFP4 scaling, or convert checkpoint NVFP4 weights once to FP8 runtime storage after TP/EP slicing; a strict M-A1 companion records accuracy, resident memory, and saturation curves.
 - Why: the retained 235B NVFP4 gate failure had no clipping visibility or bounded way to trade memory and activation precision while preserving the default fused path.
