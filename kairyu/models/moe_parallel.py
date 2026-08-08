@@ -258,9 +258,8 @@ def _ep_rank_partial(
     *,
     ep_rank: int,
     experts_per_rank: int,
-    output_dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Finalize one EP rank in slot order, then cross the output dtype boundary."""
+    """Accumulate one EP rank's routed contribution in FP32 slot order."""
 
     if expert_outputs.ndim != 3:
         raise ValueError("EP expert outputs must have [tokens, top_k, hidden] shape")
@@ -272,7 +271,7 @@ def _ep_rank_partial(
     if ep_rank < 0 or experts_per_rank < 1:
         raise ValueError("EP rank and experts-per-rank must be valid")
 
-    combine_dtype = torch.promote_types(expert_outputs.dtype, topk_weights.dtype)
+    combine_dtype = torch.float32
     owners = topk_indices // experts_per_rank
     partial = torch.zeros(
         expert_outputs.shape[0],
@@ -292,7 +291,7 @@ def _ep_rank_partial(
             contribution,
             torch.zeros((), dtype=combine_dtype, device=expert_outputs.device),
         )
-    return partial.to(output_dtype)
+    return partial
 
 
 def _swizzle_nvfp4_moe_scale(scale: torch.Tensor) -> torch.Tensor:
@@ -992,9 +991,8 @@ class EpMoeBlock(nn.Module):
         )
         # Undo the permutation. Each source rank now has the same complete set
         # of returned expert rows, but contributes only the experts owned by
-        # its rank. The BF16 boundary before the all-reduce matches standalone
-        # fused-MoE finalization and is observably different from one global
-        # FP32 sum followed by a single cast.
+        # its rank. Keep rank partials in FP32 through the all-reduce so the
+        # output crosses the model-dtype boundary only once.
         unsorted = torch.empty_like(returned)
         unsorted[order] = returned
         local_partial = _ep_rank_partial(
@@ -1003,10 +1001,9 @@ class EpMoeBlock(nn.Module):
             topk_weights,
             ep_rank=self.ep_rank,
             experts_per_rank=self.experts_per_rank,
-            output_dtype=hidden.dtype,
         )
         _assert_collective_device(device, local_partial=local_partial)
-        out = self._comm.tensor_all_reduce(local_partial.contiguous())
+        out = self._comm.tensor_all_reduce(local_partial.contiguous()).to(hidden.dtype)
         if self.shared_experts is not None:
             out = out + self.shared_experts(hidden)
         return out

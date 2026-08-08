@@ -61,6 +61,9 @@ class _MixedExpert(nn.Module):
 
 
 class _CopyCommunicator:
+    def __init__(self) -> None:
+        self.all_reduce_dtypes: list[torch.dtype] = []
+
     def tensor_all_to_all_single(
         self,
         output: torch.Tensor,
@@ -71,6 +74,7 @@ class _CopyCommunicator:
         output.copy_(input_)
 
     def tensor_all_reduce(self, tensor: torch.Tensor) -> torch.Tensor:
+        self.all_reduce_dtypes.append(tensor.dtype)
         return tensor
 
 
@@ -191,9 +195,10 @@ def test_ep_moe_combines_fp32_router_weights_before_final_bf16_cast() -> None:
     from kairyu.models.moe_parallel import EpMoeBlock
 
     hidden = torch.zeros(1, 1, dtype=torch.bfloat16)
+    communicator = _CopyCommunicator()
     block = EpMoeBlock(
         _PrecisionMoeBlock(),
-        _CopyCommunicator(),
+        communicator,
         ep_rank=0,
         ep_size=1,
     )
@@ -208,45 +213,42 @@ def test_ep_moe_combines_fp32_router_weights_before_final_bf16_cast() -> None:
     ).sum(dim=1)
     torch.testing.assert_close(actual[:, 0], expected, rtol=0, atol=0)
     assert not torch.equal(actual[:, 0], premature_bf16)
+    assert communicator.all_reduce_dtypes == [torch.float32]
 
 
-def test_ep_finalize_casts_owner_partials_before_rank_reduction() -> None:
+@pytest.mark.parametrize("ep_size", [2, 4, 8])
+def test_ep_finalize_reduces_owner_partials_in_fp32(ep_size: int) -> None:
     from kairyu.models.moe_parallel import _ep_rank_partial
 
     expert_outputs = torch.tensor(
         [[[-5.84375], [-7.5625]]],
         dtype=torch.bfloat16,
     )
-    indices = torch.tensor([[0, 2]])
+    indices = torch.tensor([[0, 4]])
     weights = torch.tensor([[0.5715058445930481, 0.4284941852092743]])
 
-    rank_0 = _ep_rank_partial(
-        expert_outputs,
-        indices,
-        weights,
-        ep_rank=0,
-        experts_per_rank=2,
-        output_dtype=torch.bfloat16,
-    )
-    rank_1 = _ep_rank_partial(
-        expert_outputs,
-        indices,
-        weights,
-        ep_rank=1,
-        experts_per_rank=2,
-        output_dtype=torch.bfloat16,
-    )
-    actual = rank_0 + rank_1
+    partials = [
+        _ep_rank_partial(
+            expert_outputs,
+            indices,
+            weights,
+            ep_rank=rank,
+            experts_per_rank=8 // ep_size,
+        )
+        for rank in range(ep_size)
+    ]
+    actual = torch.stack(partials).sum(dim=0).to(torch.bfloat16)
 
     expected = (
-        (expert_outputs[:, 0].float() * weights[:, 0, None]).to(torch.bfloat16)
-        + (expert_outputs[:, 1].float() * weights[:, 1, None]).to(torch.bfloat16)
-    )
-    one_global_fp32_sum = (
         expert_outputs.float() * weights[:, :, None]
     ).sum(dim=1).to(torch.bfloat16)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert not torch.equal(actual, one_global_fp32_sum)
+    assert all(partial.dtype is torch.float32 for partial in partials)
+
+    premature_bf16 = torch.stack(
+        [partial.to(torch.bfloat16) for partial in partials]
+    ).sum(dim=0)
+    assert not torch.equal(actual, premature_bf16)
 
 
 def test_ep_nvfp4_pack_preserves_canonical_buffers_without_weight_duplication() -> None:
