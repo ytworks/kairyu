@@ -613,17 +613,18 @@ def test_calibration_observer_records_independent_layer_kv_amax() -> None:
     assert observer.values() == ((3.0, 5.0), (4.0, 6.0))
 
 
-def test_checked_in_calibrated_failure_artifact_replays() -> None:
+def test_checked_in_calibrated_failure_raw_replays_portably() -> None:
     artifact = (
         Path(__file__).resolve().parents[2]
         / "bench/results/"
         "g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08"
     )
-    verified = gate.verify_artifact(artifact)
     replayed = gate.replay_artifact(artifact)
 
-    assert verified == replayed
-    assert verified["verdict"] == "FAIL"
+    assert replayed["raw"]["sha256"] == (
+        "45078bda9f8e9f1c60cf7d9f42b1a56411c7d31ae7c7c879cd643b0cd89fdcf8"
+    )
+    assert replayed["verdict"] == "FAIL"
     assert {
-        name for name, passed in verified["checks"].items() if not passed
+        name for name, passed in replayed["checks"].items() if not passed
     } == {"all_fp8_writes_audited", "exact_output_tokens_and_stopping"}
