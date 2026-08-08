@@ -348,10 +348,12 @@ output (DeepSeek convention).
   learned head over its context once, then appends one-token draft K/V for the
   remaining proposals (`O(T+k)`, not `O(k*T)`). Target verification stages all
   candidate input rows and retains exactly the accepted prefix plus one
-  correction/bonus input row. Single-rank serving owns the head locally; TP
-  rank 0 owns the learned head and capture history while all ranks still enter
-  identical target-model collectives. Draft source, proposed/accepted counts,
-  and mean acceptance are emitted together in benchmark evidence.
+  correction/bonus input row. MTP feeds its post-`shared_head.norm` row through
+  the next step's `hnorm`, matching vLLM DeepSeek MTP's tuple feedback and
+  SGLang NextN's normalized return. Single-rank serving owns the head locally;
+  TP rank 0 owns the learned head and capture history while all ranks still
+  enter identical target-model collectives. Draft source, proposed/accepted
+  counts, and mean acceptance are emitted together in benchmark evidence.
 - **A32 (request-local commit dependency):** an outstanding variable-length
   speculative result blocks only its own next scheduler snapshot. Independent
   requests may fill later pipeline slots; the prompt-completing root remains a

@@ -7,8 +7,10 @@ head}`` plus one FULL MLA+MoE decoder block. ``eh_proj`` input is
 ``cat([enorm(embedding), hnorm(hidden)])`` — EMBEDDING FIRST (the paper's
 equation writes it the other way; the implementations win). ``shared_head.
 head`` and ``embed_tokens`` are separate physical tensors (tied to the target
-only by training) — loaded, never assumed tied. k>1 MTP = reapplying the same
-module on its own output.
+only by training) — loaded, never assumed tied. For k>1, the post-
+``shared_head.norm`` row feeds the next step through ``hnorm`` while the same
+once-normalized row feeds the logits head, matching vLLM DeepSeek MTP and
+SGLang NextN.
 """
 
 from __future__ import annotations
