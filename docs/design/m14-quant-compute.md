@@ -371,13 +371,12 @@ addition, preserving the oracle's rounded scale product instead of allowing
 the compiler to fuse the final multiply and bias into one FMA.
 FP8 keeps its existing division because it does not perform integer rounding.
 
-The retained SM120 run at clean source `953a703` completed every required
+The retained SM120 run at clean source `6c4ddc7` completed every required
 position and kept the measured 2.875-nat BF16 tie floor unchanged. INT8 has
-1 substantive disagreement, AWQ 5, and GPTQ 2, so all three arms and the
-combined verdict remain formal FAIL. Independent exact-reference replays at
-those positions matched the production candidate; the INT8 replay uses the
-same BF16 activations with PyTorch exact-int32 accumulation, while the W4
-replays use their CPU unpack/dequant oracles. These residuals are therefore
+zero substantive disagreements and passes; AWQ has 5 and GPTQ 2, so both W4
+arms and the combined verdict remain formal FAIL. A same-GPU BF16 replay of
+all seven W4 substantive positions through the independent CPU unpack/dequant
+oracles matched every production token. These W4 residuals are therefore
 published checkpoint quantization loss, not relabeled parity or missing data.
-The raw authority and combined summary live under
+The raw authority, combined summary, and SHA-bound `oracle-replay.json` live under
 `bench/results/issue-356-qwen25-1.5b-quant-parity-sm120/`.

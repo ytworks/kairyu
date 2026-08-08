@@ -469,6 +469,15 @@
       "verdict": "discarded"
     },
     {
+      "artifact_path": "bench/results/issue-356-qwen25-1.5b-quant-parity-sm120",
+      "commit": "6c4ddc75c98d04c168e9ae9d017a4507a13acb35",
+      "date": "2026-08-08",
+      "gate_id": "issue-356",
+      "hardware": "nvidia-rtx-pro-6000-blackwell-sm120",
+      "summary_path": "bench/results/issue-356-qwen25-1.5b-quant-parity-sm120/summary.json",
+      "verdict": "fail"
+    },
+    {
       "artifact_path": "bench/results/issue-364-fp32-logits-a1-a2-2026-08-05",
       "commit": "ac589fb67452173f45f23d9107af313c2b79cc17",
       "date": "2026-08-05",

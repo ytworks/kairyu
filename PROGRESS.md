@@ -57,7 +57,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G2 A8 (DP scaling): `passed: false` (1.7993× vs 1.9× threshold); owner accepted as explicit closure deviation
 - G2 A9: closed — DP=2×TP4 vs TP8 production-topology report on Qwen3-32B
 - A12 (batch-invariance determinism, #360): closed — exact-match verdict passed on Qwen3-32B TP8
-- #356 real-checkpoint quant parity: evidence complete — INT8/AWQ/GPTQ formal FAIL retained; exact-oracle replay isolated checkpoint quantization loss after fixing INT8 rounding
+- #356 real-checkpoint quant parity: evidence complete — INT8 PASS; AWQ/GPTQ formal FAIL retained with SHA-bound same-GPU oracle replay isolating checkpoint quantization loss
 - B7 (KV answer-equivalence, #373): operator implemented and portable-validated; additive over F2/F4
 - G4 MoE: M-A1 formal FAIL retained; M-A2 complete; M-A3 scope-closed by owner deviation (perf gate stays FAIL)
 - G4 E-KV: FP8-E4M3 KV **FAIL** on Qwen3-32B long-context; `fp8_e4m3` startup rejected, BF16 KV fail-closed

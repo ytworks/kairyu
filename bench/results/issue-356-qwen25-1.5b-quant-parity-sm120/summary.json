@@ -18,7 +18,7 @@
       "tie_gap_nats": 2.875
     }
   },
-  "source_commit": "953a703c76b4c2651819df2c87d7d67951aa80be",
+  "source_commit": "6c4ddc75c98d04c168e9ae9d017a4507a13acb35",
   "arms": {
     "int8": {
       "checkpoint_repo": "RedHatAI/Qwen2.5-1.5B-Instruct-quantized.w8a8",
@@ -26,13 +26,13 @@
       "checkpoint_weight_files": {
         "model.safetensors": "6ab2d4b73b7664e7449e18402345abe99fcc03a792e260f82b2d6109ab9110bb"
       },
-      "agreed": 876,
-      "agreement_rate": 0.85546875,
-      "substantive_disagreements": 1,
+      "agreed": 889,
+      "agreement_rate": 0.8681640625,
+      "substantive_disagreements": 0,
       "missing_predictions": 0,
       "tie_gap_nats": 2.875,
-      "max_agreeing_logprob_abs_delta_diagnostic": 0.52676,
-      "passed": false
+      "max_agreeing_logprob_abs_delta_diagnostic": 0.55352,
+      "passed": true
     },
     "awq": {
       "checkpoint_repo": "Qwen/Qwen2.5-1.5B-Instruct-AWQ",
