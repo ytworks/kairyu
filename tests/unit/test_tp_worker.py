@@ -214,7 +214,28 @@ def test_serving_groups_keep_control_off_the_model_backend(monkeypatch):
     ]
     assert groups.control == "group-1-gloo"
     assert groups.startup_control == "group-2-gloo"
+    assert groups.step_control is None
     assert groups.model == "group-3-nccl"
+
+
+def test_serving_groups_gives_tensor_control_its_idle_timeout(monkeypatch):
+    created: list[tuple[str, float]] = []
+
+    def fake_group(backend: str, *, timeout_s: float):
+        created.append((backend, timeout_s))
+        return f"group-{len(created)}-{backend}"
+
+    monkeypatch.setattr(worker_module, "serving_group", fake_group)
+    groups = worker_module.serving_groups("nccl", step_tensor_transport=True)
+
+    assert created == [
+        ("gloo", worker_module._CONTROL_IDLE_TIMEOUT_S),
+        ("gloo", worker_module._SERVE_OP_TIMEOUT_S),
+        ("nccl", worker_module._CONTROL_IDLE_TIMEOUT_S),
+        ("nccl", worker_module._SERVE_OP_TIMEOUT_S),
+    ]
+    assert groups.step_control == "group-3-nccl"
+    assert groups.model == "group-4-nccl"
 
 
 def _backend_identity(
@@ -625,6 +646,57 @@ class _RecordingControl:
     def broadcast(self, payload, src):
         self.payloads.append(payload)
         return self._comm.broadcast(payload, src)
+
+
+class _TensorStepCommunicator:
+    supports_step_tensor_transport = True
+    tensor_device = torch.device("cpu")
+
+    def __init__(self, comm) -> None:
+        self._comm = comm
+        self.packet_shapes: list[tuple[int, ...]] = []
+
+    def __getattr__(self, name):
+        return getattr(self._comm, name)
+
+    def tensor_broadcast(self, tensor, src):
+        self.packet_shapes.append(tuple(tensor.shape))
+        return self._comm.tensor_broadcast(tensor, src)
+
+
+def test_step_delta_uses_tensor_control_group_while_rare_control_stays_object():
+    control = FakeCommunicator.create_group(2)
+    model = FakeCommunicator.create_group(2)
+    recorded_control = _RecordingControl(control[0])
+    tensor_model = tuple(_TensorStepCommunicator(comm) for comm in model)
+    local = (_AuthorityRunner((17,)), _AuthorityRunner((999,)))
+    driver = DistTPModelRunner(
+        recorded_control,
+        local[0],
+        tensor_model[0],
+        step_comm=tensor_model[0],
+    )
+    chunks = (ScheduledChunk("a", 1, True, 0),)
+    states = {"a": _snapshot("a")}
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker = pool.submit(
+            worker_step_loop,
+            control[1],
+            local[1],
+            tensor_model[1],
+            step_comm=tensor_model[1],
+        )
+        driver.execute(chunks, states)
+        driver.shutdown()
+        assert worker.result(timeout=5) == 1
+
+    assert not any(isinstance(payload, StepDelta) for payload in recorded_control.payloads)
+    assert len(recorded_control.payloads) == 1  # shutdown remains on object control
+    assert tensor_model[0].packet_shapes[0] == (2,)  # fixed control header
+    assert tensor_model[0].packet_shapes[1][0] > 2  # encoded StepDelta
+    assert local[0].adopted == [(17,)]
+    assert local[1].adopted == [(17,)]
 
 
 class _BlockingStepControl:

@@ -62,6 +62,22 @@ class TorchDistCommunicator:
         return self._group
 
     @property
+    def tensor_device(self) -> torch.device | None:
+        """Device for caller-created tensors on this communicator."""
+
+        return self._device
+
+    @property
+    def supports_step_tensor_transport(self) -> bool:
+        """Whether this group can carry the per-step CUDA control packet."""
+
+        return (
+            self._device is not None
+            and self._device.type == "cuda"
+            and dist.get_backend(self._group) == "nccl"
+        )
+
+    @property
     def rank(self) -> int:
         return dist.get_rank(self._group)
 

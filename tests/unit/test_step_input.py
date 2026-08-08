@@ -5,8 +5,16 @@ import dataclasses
 import pytest
 
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.engine.core.scheduler import EngineRequest, ScheduledChunk, Scheduler
-from kairyu.engine.core.step_input import RequestSnapshot, snapshot_step
+from kairyu.engine.core.step_input import (
+    RequestDelta,
+    RequestSnapshot,
+    StepDelta,
+    decode_step_delta,
+    encode_step_delta,
+    snapshot_step,
+)
 
 PAGE = 4
 
@@ -168,6 +176,130 @@ def test_snapshot_rejects_chunk_for_unknown_request():
     plan = scheduler.schedule()
     with pytest.raises(ValueError, match="unknown request"):
         snapshot_step(plan.scheduled, {})
+
+
+def test_step_delta_tensor_codec_round_trips_every_field():
+    assert tuple(field.name for field in dataclasses.fields(EngineSampling)) == (
+        "temperature",
+        "top_k",
+        "top_p",
+        "min_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "repetition_penalty",
+        "seed",
+        "logprobs",
+        "json_schema",
+        "json_mode",
+        "regex",
+        "grammar",
+        "structural_tag",
+        "forced_token_ids",
+    )
+    assert tuple(field.name for field in dataclasses.fields(RequestSnapshot)) == (
+        "request_id",
+        "prompt_token_ids",
+        "computed_prompt",
+        "outputs",
+        "in_flight",
+        "page_ids",
+        "decode_page_ids",
+        "eos_token_id",
+        "max_new_tokens",
+        "num_cached_tokens",
+        "sampling",
+        "output_epoch",
+        "outputs_override",
+        "sampling_id",
+        "stop_token_ids",
+        "min_tokens",
+        "ignore_eos",
+    )
+    assert tuple(field.name for field in dataclasses.fields(RequestDelta)) == (
+        "request_id",
+        "computed_prompt",
+        "new_outputs",
+        "in_flight",
+        "new_decode_page_ids",
+        "num_cached_tokens",
+    )
+    assert tuple(field.name for field in dataclasses.fields(ScheduledChunk)) == (
+        "request_id",
+        "num_tokens",
+        "is_prefill",
+        "position",
+    )
+    assert tuple(field.name for field in dataclasses.fields(StepDelta)) == (
+        "chunks",
+        "new",
+        "updates",
+        "dropped",
+        "released_ids",
+    )
+    sampling = EngineSampling(
+        temperature=0.75,
+        top_k=17,
+        top_p=0.875,
+        min_p=0.125,
+        presence_penalty=0.25,
+        frequency_penalty=-0.5,
+        repetition_penalty=1.125,
+        seed=(1 << 63) - 1,
+        logprobs=4,
+        json_schema={"type": "object", "required": ["資料"]},
+        json_mode=True,
+        regex="資料.+",
+        grammar='root ::= "資料"',
+        structural_tag={
+            "type": "structural_tag",
+            "format": {"type": "const_string", "value": "資料"},
+        },
+        forced_token_ids=(7, 8),
+    )
+    snapshot = RequestSnapshot(
+        request_id="新規-request",
+        prompt_token_ids=(1, 2, 3),
+        computed_prompt=2,
+        outputs=(9, 10),
+        in_flight=1,
+        page_ids=(11, 12),
+        decode_page_ids=(13,),
+        eos_token_id=14,
+        max_new_tokens=32,
+        num_cached_tokens=2,
+        sampling=sampling,
+        output_epoch=3,
+        outputs_override=True,
+        sampling_id="public-id",
+        stop_token_ids=(15, 16),
+        min_tokens=2,
+        ignore_eos=True,
+    )
+    delta = StepDelta(
+        chunks=(ScheduledChunk("新規-request", 3, True, 4),),
+        new=(snapshot,),
+        updates=(
+            RequestDelta(
+                request_id="existing",
+                computed_prompt=8,
+                new_outputs=(17, 18),
+                in_flight=2,
+                new_decode_page_ids=(19,),
+                num_cached_tokens=7,
+            ),
+        ),
+        dropped=("完了",),
+        released_ids=("released",),
+    )
+
+    assert decode_step_delta(encode_step_delta(delta)) == delta
+
+
+def test_step_delta_tensor_codec_rejects_trailing_values():
+    delta = StepDelta(chunks=(), new=(), updates=(), dropped=())
+
+    with pytest.raises(ValueError, match="trailing"):
+        decode_step_delta((*encode_step_delta(delta), 0))
 
 
 def test_state_sync_delta_reconstructs_full_snapshot_each_step():
