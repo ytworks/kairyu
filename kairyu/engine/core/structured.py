@@ -96,21 +96,21 @@ class XGrammarEnforcer:
             else:
                 compiler = cached[2]
                 tokenizer_info = cached[1]
-            if json_schema is not None:
-                # strict format (no free whitespace): removes degenerate unbounded
-                # whitespace runs — matches vLLM's disable_any_whitespace guidance
-                compiled = compiler.compile_json_schema(
-                    json.dumps(json_schema),
-                    any_whitespace=False,
-                )
-            elif regex is not None:
-                compiled = compiler.compile_regex(regex)
-            elif grammar is not None:
-                compiled = compiler.compile_grammar(grammar)
-            elif structural_tag is not None:
-                compiled = compiler.compile_structural_tag(structural_tag)
-            else:
-                compiled = compiler.compile_builtin_json_grammar()
+        if json_schema is not None:
+            # strict format (no free whitespace): removes degenerate unbounded
+            # whitespace runs — matches vLLM's disable_any_whitespace guidance
+            compiled = compiler.compile_json_schema(
+                json.dumps(json_schema),
+                any_whitespace=False,
+            )
+        elif regex is not None:
+            compiled = compiler.compile_regex(regex)
+        elif grammar is not None:
+            compiled = compiler.compile_grammar(grammar)
+        elif structural_tag is not None:
+            compiled = compiler.compile_structural_tag(structural_tag)
+        else:
+            compiled = compiler.compile_builtin_json_grammar()
         self._matcher = xgr.GrammarMatcher(compiled)
         self._vocab_size = tokenizer_info.vocab_size
         self._bitmask = xgr.allocate_token_bitmask(1, self._vocab_size)

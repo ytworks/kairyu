@@ -71,7 +71,9 @@ from kairyu.engine.prompt import (
 )
 from kairyu.engine.registry import register_backend
 from kairyu.engine.tokenizer import (
+    GrammarVocabulary,
     Tokenizer,
+    grammar_vocabulary,
     resolve_tokenizer,
     tokenize_loglikelihood_continuation,
     tokenizer_encode_is_concurrent_safe,
@@ -1170,6 +1172,7 @@ class ZmqEngineBackend:
             max_model_len,
         )
         self._preflight_tokenizer: Tokenizer | None = None
+        self._preflight_grammar_vocab: GrammarVocabulary | None = None
         self._preflight_tokenizer_lock = threading.Lock()
         # Validation may be called more than once by wrapping orchestration
         # layers. Retain only this exact immutable request object, consume the
@@ -1909,6 +1912,7 @@ class ZmqEngineBackend:
                 native_params,
                 tokenizer,
                 tokenizer.eos_token_id,
+                self._get_preflight_grammar_vocab(),
             )
         if prompt is None:
             prompt = prompt_with_tool_intent(request)
@@ -2041,6 +2045,18 @@ class ZmqEngineBackend:
                 self._preflight_tokenizer = tokenizer
         return tokenizer
 
+    def _get_preflight_grammar_vocab(self) -> GrammarVocabulary:
+        vocabulary = self._preflight_grammar_vocab
+        if vocabulary is not None:
+            return vocabulary
+        tokenizer = self._get_preflight_tokenizer()
+        with self._preflight_tokenizer_lock:
+            vocabulary = self._preflight_grammar_vocab
+            if vocabulary is None:
+                vocabulary = grammar_vocabulary(tokenizer)
+                self._preflight_grammar_vocab = vocabulary
+        return vocabulary
+
     def tokenize_loglikelihood(
         self,
         context: str,
@@ -2118,6 +2134,7 @@ class ZmqEngineBackend:
                 native_params,
                 tokenizer,
                 tokenizer.eos_token_id,
+                self._get_preflight_grammar_vocab(),
             )
 
     def _reserve_request_id(self, request_id: str) -> None:

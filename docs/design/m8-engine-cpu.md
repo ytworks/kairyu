@@ -474,7 +474,10 @@ The bounded request-preparation lane first compiles the same format so malformed
 regex/EBNF/structural tags fail only their request as a 400, before admission;
 the process-split parent's synchronous validation does the same even without a
 context limit. Enforcers sharing one tokenizer vocabulary reuse its xgrammar
-compiler, so admission and first-token sampling do not rebuild tokenizer state.
+compiler, so admission and first-token sampling do not rebuild tokenizer state;
+the process parent caches that vocabulary once. The cache lock covers only
+compiler lookup/construction, never grammar compilation, so an admission compile
+cannot block another request's engine-step sampling.
 Llama structural tags stop after one call because its attested parser accepts
 exactly one bare call object; generic and Qwen retain their parallel-call form.
 `min_tokens` is rejected with structured output because masking grammar-terminal

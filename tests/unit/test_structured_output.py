@@ -1,3 +1,5 @@
+from threading import Event, Thread
+
 import pytest
 
 xgr = pytest.importorskip("xgrammar")
@@ -79,6 +81,52 @@ def test_enforcers_reuse_compiler_for_the_same_grammar_vocabulary(monkeypatch):
     XGrammarEnforcer(vocab, regex="b+")
 
     assert constructed == 1
+
+
+def test_grammar_compilation_does_not_hold_the_compiler_cache_lock(monkeypatch):
+    real_compiler = xgr.GrammarCompiler
+    first_entered = Event()
+    release_first = Event()
+    second_done = Event()
+    errors = []
+
+    class BlockingCompiler:
+        def __init__(self, tokenizer_info):
+            self._compiler = real_compiler(tokenizer_info)
+
+        def compile_regex(self, regex):
+            if regex == "a+":
+                first_entered.set()
+                release_first.wait(2)
+            return self._compiler.compile_regex(regex)
+
+    monkeypatch.setattr(xgr, "GrammarCompiler", BlockingCompiler)
+
+    def compile_regex(vocab, regex, done=None):
+        try:
+            XGrammarEnforcer(vocab, regex=regex)
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            if done is not None:
+                done.set()
+
+    first = Thread(target=compile_regex, args=([*VOCAB, "first"], "a+"))
+    second = Thread(
+        target=compile_regex,
+        args=([*VOCAB, "second"], "b+", second_done),
+    )
+    first.start()
+    assert first_entered.wait(1)
+    second.start()
+    try:
+        assert second_done.wait(1)
+    finally:
+        release_first.set()
+        first.join()
+        second.join()
+
+    assert errors == []
 
 
 def test_byte_level_space_marker_remains_legal_after_schema_colon():

@@ -1856,6 +1856,40 @@ async def test_process_sync_validation_rejects_malformed_grammar_without_context
         await backend.shutdown()
 
 
+async def test_process_structured_validation_caches_fresh_custom_vocabulary():
+    class FreshVocabularyTokenizer(ToyTokenizer):
+        def __init__(self) -> None:
+            self.eos_token_id = 0
+            self.vocab_calls = 0
+
+        def vocab(self) -> list[str]:
+            self.vocab_calls += 1
+            return super().vocab()
+
+    tokenizer = FreshVocabularyTokenizer()
+    backend = ZmqEngineBackend(num_pages=64)
+    backend._preflight_tokenizer = tokenizer
+    try:
+        for request_id, pattern in (("first", "a+"), ("second", "b+")):
+            backend.validate_request(
+                _request(
+                    request_id,
+                    "surface parity",
+                    max_tokens=1,
+                    extra_args={
+                        "response_format": {
+                            "type": "regex",
+                            "pattern": pattern,
+                        }
+                    },
+                )
+            )
+
+        assert tokenizer.vocab_calls == 1
+    finally:
+        await backend.shutdown()
+
+
 async def test_native_sync_validation_rejects_unserializable_tool_schema():
     request = GenerationRequest(
         request_id="unserializable-tool",
