@@ -396,6 +396,7 @@ def _passive_runner() -> tuple[PagedModelRunner, _PassiveModel]:
     # This white-box fixture bypasses PagedModelRunner.__init__; mirror the
     # shared prefill/decode/verification decisions that construction owns.
     runner._batched_prefill_enabled = True
+    runner._unified_mixed_enabled = True
     runner._prefill_batch_gap = "synthetic backend has no native ragged prefill"
     runner._decode_batch_gap = None
     runner._verification_batch_gap = runner._decode_batch_gap

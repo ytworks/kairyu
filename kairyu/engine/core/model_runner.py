@@ -609,6 +609,7 @@ class PagedModelRunner:
         # established sequential behavior.
         self._prefill_batch_gap = _batched_prefill_gap(model)
         self._batched_prefill_enabled = bool(enable_batched_prefill)
+        self._unified_mixed_enabled = True
         self._prefill_rows_executed = 0
         self._prefill_model_calls = 0
         self._prefill_batched_groups = 0
@@ -896,6 +897,12 @@ class PagedModelRunner:
             raise TypeError("batched prefill enabled flag must be bool")
         self._batched_prefill_enabled = enabled
 
+    def set_unified_mixed_enabled(self, enabled: bool) -> None:
+        """Keep distributed per-forward protocols on the split mixed path."""
+        if type(enabled) is not bool:
+            raise TypeError("unified mixed enabled flag must be bool")
+        self._unified_mixed_enabled = enabled
+
     def prefill_execution_stats(self, *, reset: bool = False) -> dict[str, object]:
         """Return structural counters; optional reset is out-of-band only."""
         backend_rows: list[dict[str, object]] = []
@@ -917,6 +924,9 @@ class PagedModelRunner:
                 backend_rows.append(row)
         result = {
             "enabled": getattr(self, "_batched_prefill_enabled", True),
+            "unified_mixed_enabled": getattr(
+                self, "_unified_mixed_enabled", True
+            ),
             "capability_gap": getattr(self, "_prefill_batch_gap", None),
             "rows": getattr(self, "_prefill_rows_executed", 0),
             "model_calls": getattr(self, "_prefill_model_calls", 0),
@@ -1391,6 +1401,7 @@ class PagedModelRunner:
             prefills
             and decodes
             and self._batched_prefill_enabled
+            and self._unified_mixed_enabled
             and self._prefill_batch_gap is None
         )
         if unified_mixed:

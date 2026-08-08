@@ -71,6 +71,9 @@ invariance: concurrent prefill can change the FlashInfer kernel/GEMM shape used
 for a decode row. `set_batched_prefill_enabled(False)` is the operational
 rollback. The retained A12 arms schedule no mixed step and are therefore
 unchanged; mixed-load throughput evidence remains part of the open A6 work.
+Request-owned attention-DP retains split mixed execution because its coordinator
+arms one collective row layout, and possibly one graph decision, per planned
+forward; merging those forwards would violate that fail-closed protocol.
 
 ### D2 — `TorchAttentionBackend` (`torch_backend.py`)
 
@@ -233,6 +236,8 @@ ownership.
 - Issue #317: CPU output/KV parity against split execution and one-versus-two
   model-forward structure; real SM120 BF16 FlashInfer parity with a device-owned
   decode token; unsupported-backend fallback and unchanged pure-decode dispatch.
+  Attention-DP validation requires the explicit split-mixed mode while retaining
+  native ragged batching for pure-prefill groups.
   Retained mixed-load throughput evidence is pending the A6 benchmark.
 - Selector/Helm: all five public values render and resolve; invalid or
   unavailable explicit selections fail without fallback; an unavailable

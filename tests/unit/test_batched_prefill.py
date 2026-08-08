@@ -339,6 +339,7 @@ def test_runner_batches_multiple_prefills_and_emits_only_terminal_rows():
     assert len(result["done"]) == 1
     assert runner.prefill_execution_stats() == {
         "enabled": True,
+        "unified_mixed_enabled": True,
         "capability_gap": None,
         "rows": 2,
         "model_calls": 1,
@@ -418,6 +419,7 @@ def test_runner_unifies_mixed_prefill_and_decode_with_numeric_parity(monkeypatch
     assert torch.allclose(mixed_pool.v, split_pool.v, atol=1e-6)
     assert mixed_runner.prefill_execution_stats() == {
         "enabled": True,
+        "unified_mixed_enabled": True,
         "capability_gap": None,
         "rows": 1,
         "model_calls": 1,
@@ -540,6 +542,70 @@ def test_mixed_step_falls_back_when_ragged_prefill_is_unsupported(monkeypatch):
     assert set(result) == {"prefill", "decode"}
     assert calls == 2
     assert "does not declare supports_batched_prefill" in runner._prefill_batch_gap
+
+
+def test_unified_mixed_disable_keeps_pure_prefill_batching(monkeypatch):
+    model = _model(_NativeTorchBackend())
+    pool = _pool(model)
+    decode_prompt = (11, 12, 13, 14)
+    model.forward_tokens(
+        torch.tensor(decode_prompt),
+        torch.arange(len(decode_prompt)),
+        pool,
+        [0],
+        seq_len=len(decode_prompt),
+    )
+    runner = PagedModelRunner(model, pool)
+    runner.set_unified_mixed_enabled(False)
+    ragged_calls = 0
+    token_calls = 0
+    ragged_forward = model.forward_prefill_batch
+    token_forward = model.forward_tokens
+
+    def counted_ragged(*args, **kwargs):
+        nonlocal ragged_calls
+        ragged_calls += 1
+        return ragged_forward(*args, **kwargs)
+
+    def counted_tokens(*args, **kwargs):
+        nonlocal token_calls
+        token_calls += 1
+        return token_forward(*args, **kwargs)
+
+    monkeypatch.setattr(model, "forward_prefill_batch", counted_ragged)
+    monkeypatch.setattr(model, "forward_tokens", counted_tokens)
+    mixed = runner.execute(
+        (
+            ScheduledChunk("prefill", 3, True),
+            ScheduledChunk("decode", 1, False, position=1),
+        ),
+        {
+            "prefill": _state("prefill", (1, 2, 3), (2,)),
+            "decode": _state(
+                "decode",
+                decode_prompt,
+                (0,),
+                decode_pages=(1,),
+                outputs=(9,),
+            ),
+        },
+    )
+    pure_prefill = runner.execute(
+        (
+            ScheduledChunk("a", 2, True),
+            ScheduledChunk("b", 2, True),
+        ),
+        {
+            "a": _state("a", (5, 6), (3,)),
+            "b": _state("b", (7, 8), (4,)),
+        },
+    )
+
+    assert set(mixed) == {"prefill", "decode"}
+    assert set(pure_prefill) == {"a", "b"}
+    assert token_calls == 2
+    assert ragged_calls == 1
+    assert runner.prefill_execution_stats()["unified_mixed_enabled"] is False
 
 
 def test_runner_falls_back_for_torch_backend_and_single_request():

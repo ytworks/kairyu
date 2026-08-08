@@ -95,7 +95,7 @@ Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
 ### 2026-08-08 — [amendment] Mixed engine steps share one ragged model chain
-- What: native-ragged backends append one-token decode rows after prefill rows and execute one flat model forward; device-owned feedback uses the existing decode input slots, while unsupported backends and pure decode retain their prior paths.
+- What: native-ragged backends append one-token decode rows after prefill rows and execute one flat model forward; device-owned feedback uses existing decode slots, while unsupported backends, pure decode, and attention-DP's per-forward distributed protocol retain their prior paths.
 - Why: colocated mixed steps otherwise traverse every model layer twice even though ragged prefill already supports a causal one-token continuation.
 - Refs: issue #317; m13 D1; A12 #360; `kairyu/engine/core/model_runner.py`; `tests/{unit,gpu}/test_batched_prefill*.py`
 

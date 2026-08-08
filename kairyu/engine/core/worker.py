@@ -2929,6 +2929,10 @@ def _validate_attention_dp_batched_prefill_runner(local_runner) -> None:
         raise RuntimeError(
             "request-owned attention-DP requires batched prefill to remain enabled"
         )
+    if stats.get("unified_mixed_enabled") is not False:
+        raise RuntimeError(
+            "request-owned attention-DP requires mixed steps to remain split"
+        )
     gap = stats.get("capability_gap")
     if gap is not None:
         raise RuntimeError(
@@ -6205,6 +6209,7 @@ def build_ep_runner(
         **graph_options,
     )
     if attention_dp:
+        runner.set_unified_mixed_enabled(False)
         _validate_attention_dp_batched_prefill_runner(runner)
     runner.attention_backend_decision = attention_backend.selection_decision
     runner.attention_backend_identity = selected_attention_backend_identity
