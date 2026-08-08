@@ -60,7 +60,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - #356 real-checkpoint quant parity: evidence complete — INT8 PASS; AWQ/GPTQ formal FAIL retained with SHA-bound same-GPU oracle replay isolating checkpoint quantization loss
 - B7 (KV answer-equivalence, #373): operator implemented and portable-validated; additive over F2/F4
 - G4 MoE: M-A1 formal FAIL retained; M-A2 complete; M-A3 scope-closed by owner deviation (perf gate stays FAIL); generic EP combines complete returned rows in fixed FP32 order before one model-dtype cast
-- G4 E-KV: unit-scale FP8-E4M3 KV **FAIL** retained; per-layer K/V calibration plumbing is GPU-validated, calibrated re-bake pending; `fp8_e4m3` startup rejected
+- G4 E-KV: unit-scale and calibrated per-layer K/V FP8-E4M3 re-bakes **FAIL** retained; calibrated cache metrics/logprobs pass but 16K/32K exact tokens and decode envelope do not; `fp8_e4m3` startup rejected
 - G5: F1a–F1d, F2a–F2d, F4a, F4b all closed; F4c decided (keep per-replica RadixKV + F2 routing, thresholded revisit)
 - F5a/b/c (priority, noisy-neighbor, SLO admission): closed
 - G6: P-A, P-B1–P-B4, P-C2/C3/C4 green (incl. Open WebUI P-B3 browser gate); remaining P-C gates continue
@@ -85,7 +85,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Issue #333 verdict: process-split is not the A6 cause (`no_material_reduction`, ratio 0.92 vs ≤0.90 line)
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
 - Production stage-sharded pipeline parallelism is a separate roadmap dependency (current PP report is not it)
-- Learned-draft real-checkpoint acceptance/performance evidence remains open; FP8-E4M3 KV disabled pending offline calibration
+- Learned-draft real-checkpoint acceptance/performance evidence remains open; FP8-E4M3 KV remains disabled after its calibrated re-bake failed exact-output and decode-envelope checks
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Human sign-off pending on M2–M4 design reviews
@@ -94,6 +94,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-08 — [progress] Calibrated FP8 KV re-bake retains FAIL
+- What: the clean Qwen3-32B SM120 re-bake passed cache cosine/NRMSE and selected-logprob bounds, but failed 16K/32K exact tokens and the disjoint calibration envelope; public FP8 KV remains rejected.
+- Refs: issue #357; `bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08/`; FlashInfer SM120 design
 
 ### 2026-08-08 — [amendment] Calibrated FP8 KV writes use the exact path
 - What: correcting the preceding #357 entry, non-unit calibrated scales bypass the fused Triton writer and use the existing torch quantize-and-store path; unit-scale FP8 keeps the fused path.

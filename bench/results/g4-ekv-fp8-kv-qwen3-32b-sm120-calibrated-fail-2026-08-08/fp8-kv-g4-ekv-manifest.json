@@ -1,0 +1,649 @@
+{
+  "checks": {
+    "all_fp8_writes_audited": false,
+    "cache_sample_cosine_at_least_0_99": true,
+    "cache_sample_nrmse_at_most_0_05": true,
+    "clean_source_stable": true,
+    "complete_cache_samples": true,
+    "complete_output_rows": true,
+    "exact_output_tokens_and_stopping": false,
+    "exact_raw_prompts": true,
+    "formal_config_exact": true,
+    "full_checkpoint_identity": true,
+    "no_runtime_failure": true,
+    "one_run_and_one_run_end": true,
+    "run_end_counts_exact": true,
+    "selected_logprob_delta_at_most_0_25": true,
+    "selected_logprobs_finite": true,
+    "sm120_flashinfer_environment_stable": true
+  },
+  "config": {
+    "arms": {
+      "bf16": {
+        "default": true,
+        "k_scale": null,
+        "kv_dtype": "bfloat16",
+        "v_scale": null
+      },
+      "fp8_e4m3": {
+        "calibration_file_sha256": "9cbf0505163c9e80fead4385827629b5939428ddef169955bda89655e1d890d8",
+        "calibration_sha256": "a42b3c3f53ce2aa05d3d32cca389c8ed54745a71d1eb79e97cf92eaef6320d64",
+        "default": false,
+        "headroom": 1.05,
+        "k_scale": "per-layer",
+        "kv_dtype": "float8_e4m3fn",
+        "v_scale": "per-layer"
+      }
+    },
+    "attention_backend": "flashinfer",
+    "cache_geometry": {
+      "head_dim": 128,
+      "num_kv_heads": 8,
+      "num_layers": 64
+    },
+    "compute_dtype": "bfloat16",
+    "gate": "G4-E-KV",
+    "greedy_output_tokens": 16,
+    "ignore_eos": true,
+    "model": "Qwen/Qwen3-32B",
+    "model_revision": "9216db5781bf21249d130ec9da846c4624c16137",
+    "page_size": 16,
+    "prefill_chunk_tokens": 2048,
+    "prompt_construction": "stable-single-token-repeat-v1",
+    "prompt_lengths": [
+      8192,
+      16384,
+      32768
+    ],
+    "required_sm": 120,
+    "sample_layers": [
+      0,
+      1,
+      7,
+      15,
+      31,
+      47,
+      62,
+      63
+    ],
+    "sample_positions": {
+      "16384": [
+        0,
+        1,
+        15,
+        16,
+        63,
+        255,
+        1023,
+        2047,
+        4096,
+        8191,
+        8192,
+        12287,
+        12288,
+        16381,
+        16382,
+        16383
+      ],
+      "32768": [
+        0,
+        1,
+        15,
+        16,
+        63,
+        255,
+        1023,
+        2047,
+        8192,
+        16383,
+        16384,
+        24575,
+        24576,
+        32765,
+        32766,
+        32767
+      ],
+      "8192": [
+        0,
+        1,
+        15,
+        16,
+        63,
+        255,
+        1023,
+        2047,
+        2048,
+        4095,
+        4096,
+        6143,
+        6144,
+        8189,
+        8190,
+        8191
+      ]
+    },
+    "tensor_parallel_size": 1,
+    "thresholds": {
+      "cache_sample_cosine_min": 0.99,
+      "cache_sample_nrmse_max": 0.05,
+      "finish_reason": "exact-length",
+      "fp8_dequant_error": "abs(stored.float32*scale-input.float32) <= max(abs(input.float32)/16, scale*2^-10)",
+      "fp8_max_finite": 448.0,
+      "fp8_quantization": "SATFINITE clamp((input / per-layer-KV-scale), -448, 448) then E4M3",
+      "output_token_ids": "exact",
+      "selected_logprob_max_abs_delta": 0.25
+    },
+    "timing_is_binding": false,
+    "visible_gpu_count": 1
+  },
+  "failures": [],
+  "gate": "G4-E-KV",
+  "metrics": {
+    "cache_samples": [
+      {
+        "cosine": 0.9997092371607557,
+        "kind": "k",
+        "layer": 0,
+        "nrmse": 0.02414221410448546,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996134432945039,
+        "kind": "v",
+        "layer": 0,
+        "nrmse": 0.028100390713534443,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996417006404628,
+        "kind": "k",
+        "layer": 1,
+        "nrmse": 0.026920798540334745,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9994738128086381,
+        "kind": "v",
+        "layer": 1,
+        "nrmse": 0.03318164974719045,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996146206436949,
+        "kind": "k",
+        "layer": 7,
+        "nrmse": 0.0278152642185561,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9993799698522113,
+        "kind": "v",
+        "layer": 7,
+        "nrmse": 0.04304521529724448,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996310085810984,
+        "kind": "k",
+        "layer": 15,
+        "nrmse": 0.027170752045701532,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9995865727762264,
+        "kind": "v",
+        "layer": 15,
+        "nrmse": 0.03524792150627133,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997372236398676,
+        "kind": "k",
+        "layer": 31,
+        "nrmse": 0.025982068727165204,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996651131422375,
+        "kind": "v",
+        "layer": 31,
+        "nrmse": 0.025883473321002333,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997254825994794,
+        "kind": "k",
+        "layer": 47,
+        "nrmse": 0.02381186798786231,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996703859518585,
+        "kind": "v",
+        "layer": 47,
+        "nrmse": 0.03082420895891661,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997121534391996,
+        "kind": "k",
+        "layer": 62,
+        "nrmse": 0.02421406105672134,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996203941570695,
+        "kind": "v",
+        "layer": 62,
+        "nrmse": 0.027554105598488948,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997176180674688,
+        "kind": "k",
+        "layer": 63,
+        "nrmse": 0.02390417832946465,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996089744687997,
+        "kind": "v",
+        "layer": 63,
+        "nrmse": 0.02801427386846431,
+        "prompt_length": 8192,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997478062107162,
+        "kind": "k",
+        "layer": 0,
+        "nrmse": 0.02336308752622557,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997330750038281,
+        "kind": "v",
+        "layer": 0,
+        "nrmse": 0.02323354849680887,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996779420821776,
+        "kind": "k",
+        "layer": 1,
+        "nrmse": 0.027744438057858107,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9995827169940327,
+        "kind": "v",
+        "layer": 1,
+        "nrmse": 0.02967591507487657,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996396414969424,
+        "kind": "k",
+        "layer": 7,
+        "nrmse": 0.026886902495230593,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9994936694681876,
+        "kind": "v",
+        "layer": 7,
+        "nrmse": 0.04686331022710383,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996326094011232,
+        "kind": "k",
+        "layer": 15,
+        "nrmse": 0.027108421053331635,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9995014283443282,
+        "kind": "v",
+        "layer": 15,
+        "nrmse": 0.03431613284914643,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997284560540824,
+        "kind": "k",
+        "layer": 31,
+        "nrmse": 0.0252525585230176,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9995719131987896,
+        "kind": "v",
+        "layer": 31,
+        "nrmse": 0.029332099252892548,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997187408700267,
+        "kind": "k",
+        "layer": 47,
+        "nrmse": 0.024270655960759537,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997072016149495,
+        "kind": "v",
+        "layer": 47,
+        "nrmse": 0.029968258569008786,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996901921248014,
+        "kind": "k",
+        "layer": 62,
+        "nrmse": 0.02490812836912239,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9995673913332238,
+        "kind": "v",
+        "layer": 62,
+        "nrmse": 0.029415092656236194,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997224605135402,
+        "kind": "k",
+        "layer": 63,
+        "nrmse": 0.023645110818470583,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9995720250713314,
+        "kind": "v",
+        "layer": 63,
+        "nrmse": 0.029253504704393255,
+        "prompt_length": 16384,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997730876021909,
+        "kind": "k",
+        "layer": 0,
+        "nrmse": 0.02348018035384286,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996489591385032,
+        "kind": "v",
+        "layer": 0,
+        "nrmse": 0.0265663147774818,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996117826329507,
+        "kind": "k",
+        "layer": 1,
+        "nrmse": 0.028169943766854607,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9995231610102951,
+        "kind": "v",
+        "layer": 1,
+        "nrmse": 0.030914172131853202,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.999598063276717,
+        "kind": "k",
+        "layer": 7,
+        "nrmse": 0.028570069658154878,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9993854597409151,
+        "kind": "v",
+        "layer": 7,
+        "nrmse": 0.04533597296253891,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996182217391028,
+        "kind": "k",
+        "layer": 15,
+        "nrmse": 0.02763132907323801,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.99943254760294,
+        "kind": "v",
+        "layer": 15,
+        "nrmse": 0.0355741620880353,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996841352219082,
+        "kind": "k",
+        "layer": 31,
+        "nrmse": 0.025269188415806058,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.999568029593965,
+        "kind": "v",
+        "layer": 31,
+        "nrmse": 0.029840984675092875,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996667642930367,
+        "kind": "k",
+        "layer": 47,
+        "nrmse": 0.026122012240189653,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9996950448178926,
+        "kind": "v",
+        "layer": 47,
+        "nrmse": 0.02870472769475039,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997227511521822,
+        "kind": "k",
+        "layer": 62,
+        "nrmse": 0.023605271979965873,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9995279884964205,
+        "kind": "v",
+        "layer": 62,
+        "nrmse": 0.03120869421581221,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.9997377524316396,
+        "kind": "k",
+        "layer": 63,
+        "nrmse": 0.023034745891404942,
+        "prompt_length": 32768,
+        "values": 16384
+      },
+      {
+        "cosine": 0.999669061226361,
+        "kind": "v",
+        "layer": 63,
+        "nrmse": 0.027738171525684308,
+        "prompt_length": 32768,
+        "values": 16384
+      }
+    ],
+    "outputs": [
+      {
+        "common_prefix_tokens": 16,
+        "compared_logprob_positions": 16,
+        "max_selected_logprob_abs_delta": 0.238608717918396,
+        "positions": 16,
+        "prompt_length": 8192,
+        "tokens_exact": true
+      },
+      {
+        "common_prefix_tokens": 1,
+        "compared_logprob_positions": 1,
+        "max_selected_logprob_abs_delta": 0.07106554508209229,
+        "positions": 16,
+        "prompt_length": 16384,
+        "tokens_exact": false
+      },
+      {
+        "common_prefix_tokens": 1,
+        "compared_logprob_positions": 1,
+        "max_selected_logprob_abs_delta": 0.15189170837402344,
+        "positions": 16,
+        "prompt_length": 32768,
+        "tokens_exact": false
+      }
+    ],
+    "write_audits": [
+      {
+        "calibration_sha256": "a42b3c3f53ce2aa05d3d32cca389c8ed54745a71d1eb79e97cf92eaef6320d64",
+        "calls": 1792,
+        "dequant_error_violation": 7149,
+        "input_dtype": "bfloat16",
+        "input_dtype_mismatch": 0,
+        "input_nonfinite": 0,
+        "input_overrange": 0,
+        "kind": "k",
+        "max_abs_error": 4.400000095367432,
+        "max_abs_input": 115.0,
+        "max_bound_excess": 5.421010862427522e-20,
+        "phase": "ragged_prefill",
+        "scale_mode": "per-layer-kv",
+        "schema_version": "kairyu.g4.e-kv.fp8-kv.v2",
+        "storage_dtype": "float8_e4m3fn",
+        "stored_byte_mismatch": 0,
+        "stored_nonfinite": 0,
+        "type": "write_audit",
+        "values": 3758096384
+      },
+      {
+        "calibration_sha256": "a42b3c3f53ce2aa05d3d32cca389c8ed54745a71d1eb79e97cf92eaef6320d64",
+        "calls": 1792,
+        "dequant_error_violation": 65536,
+        "input_dtype": "bfloat16",
+        "input_dtype_mismatch": 0,
+        "input_nonfinite": 0,
+        "input_overrange": 0,
+        "kind": "v",
+        "max_abs_error": 1.1875,
+        "max_abs_input": 32.0,
+        "max_bound_excess": 1.3552527156068805e-20,
+        "phase": "ragged_prefill",
+        "scale_mode": "per-layer-kv",
+        "schema_version": "kairyu.g4.e-kv.fp8-kv.v2",
+        "storage_dtype": "float8_e4m3fn",
+        "stored_byte_mismatch": 0,
+        "stored_nonfinite": 0,
+        "type": "write_audit",
+        "values": 3758096384
+      },
+      {
+        "calibration_sha256": "a42b3c3f53ce2aa05d3d32cca389c8ed54745a71d1eb79e97cf92eaef6320d64",
+        "calls": 2880,
+        "dequant_error_violation": 1,
+        "input_dtype": "bfloat16",
+        "input_dtype_mismatch": 0,
+        "input_nonfinite": 0,
+        "input_overrange": 1,
+        "kind": "k",
+        "max_abs_error": 4.400000095367432,
+        "max_abs_input": 113.5,
+        "max_bound_excess": 1.40625,
+        "phase": "tensor_decode",
+        "scale_mode": "per-layer-kv",
+        "schema_version": "kairyu.g4.e-kv.fp8-kv.v2",
+        "storage_dtype": "float8_e4m3fn",
+        "stored_byte_mismatch": 0,
+        "stored_nonfinite": 0,
+        "type": "write_audit",
+        "values": 2949120
+      },
+      {
+        "calibration_sha256": "a42b3c3f53ce2aa05d3d32cca389c8ed54745a71d1eb79e97cf92eaef6320d64",
+        "calls": 2880,
+        "dequant_error_violation": 17,
+        "input_dtype": "bfloat16",
+        "input_dtype_mismatch": 0,
+        "input_nonfinite": 0,
+        "input_overrange": 44,
+        "kind": "v",
+        "max_abs_error": 10.590624809265137,
+        "max_abs_input": 88.0,
+        "max_bound_excess": 9.309374809265137,
+        "phase": "tensor_decode",
+        "scale_mode": "per-layer-kv",
+        "schema_version": "kairyu.g4.e-kv.fp8-kv.v2",
+        "storage_dtype": "float8_e4m3fn",
+        "stored_byte_mismatch": 0,
+        "stored_nonfinite": 0,
+        "type": "write_audit",
+        "values": 2949120
+      }
+    ]
+  },
+  "passed": false,
+  "raw": {
+    "name": "fp8-kv-g4-ekv-raw.jsonl",
+    "rows": 783,
+    "sha256": "64b5b6d1f965d5b8bfacc37d1c9ebb0f29ec15731cc6ed93a54060cadc378575"
+  },
+  "schema_version": "kairyu.g4.e-kv.fp8-kv.v2",
+  "verdict": "FAIL"
+}

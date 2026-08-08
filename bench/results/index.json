@@ -280,6 +280,15 @@
       "verdict": "pass"
     },
     {
+      "artifact_path": "bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08",
+      "commit": "56e7c6a3ae827f13bd1cd3c313374e62cfa866d4",
+      "date": "2026-08-08",
+      "gate_id": "g4-e-kv",
+      "hardware": "nvidia-rtx-pro-6000-blackwell-sm120",
+      "summary_path": "bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08/fp8-kv-g4-ekv-manifest.json",
+      "verdict": "fail"
+    },
+    {
       "artifact_path": "bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-fail-2026-07-31",
       "commit": "81bf8e037b44f3d0b28d2306faa230a2de85dd23",
       "date": "2026-07-31",
