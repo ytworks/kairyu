@@ -939,7 +939,9 @@ async def test_native_tool_surface_walk_runs_off_event_loop():
 
 
 def test_validate_request_accepts_native_strict_tool_semantics():
-    backend = KairyuBackend()
+    tokenizer = ToyTokenizer()
+    tokenizer.eos_token_id = 0
+    backend = KairyuBackend(tokenizer=tokenizer)
     request = GenerationRequest(
         request_id="strict",
         prompt="hello",

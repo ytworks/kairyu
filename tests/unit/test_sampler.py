@@ -761,6 +761,45 @@ def test_grammar_termination_flag_set():
     assert token.grammar_terminated is True
 
 
+@pytest.mark.parametrize("device_path", [False, True])
+def test_terminated_grammar_replays_eos_without_advancing_matcher(device_path):
+    sampler, fake = _sampler_with_fake_enforcer()
+    fake.terminated_after = 1
+    logits = torch.zeros(VOCAB)
+    logits[4] = 1.0
+    first = sampler.sample(
+        "r",
+        EngineSampling(),
+        0,
+        logits,
+        eos_token_id=7,
+    )
+
+    if device_path:
+        replay = sampler.sample_device(
+            "r",
+            EngineSampling(),
+            1,
+            logits,
+            eos_token_id=7,
+        )
+        replay_id = int(replay.token_id)
+    else:
+        replay = sampler.sample(
+            "r",
+            EngineSampling(),
+            1,
+            logits,
+            eos_token_id=7,
+        )
+        replay_id = replay.token_id
+
+    assert first.grammar_terminated is True
+    assert replay_id == 7
+    assert replay.grammar_terminated is True
+    assert fake.accepted == [4]
+
+
 def test_grammar_requires_vocab_provider():
     with pytest.raises(RuntimeError, match="vocab_provider"):
         Sampler().sample("r", EngineSampling(json_mode=True), 0, torch.zeros(VOCAB))

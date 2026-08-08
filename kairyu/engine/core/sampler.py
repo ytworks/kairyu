@@ -741,6 +741,24 @@ class Sampler:
             position,
             logits.shape[-1],
         )
+        if state.enforcer is not None and state.enforcer.is_terminated():
+            assert eos_token_id is not None
+            raw_logsoftmax = (
+                torch.log_softmax(self._cpu_float_working_copy(logits), dim=-1)
+                if sampling.logprobs is not None
+                else None
+            )
+            logprob, top_logprobs = self._report(
+                raw_logsoftmax,
+                sampling,
+                eos_token_id,
+            )
+            return SampledToken(
+                eos_token_id,
+                logprob,
+                top_logprobs,
+                grammar_terminated=True,
+            )
         if self.can_argmax_logits(
             request_id,
             sampling,
@@ -761,13 +779,14 @@ class Sampler:
         if state.enforcer is not None:
             state.enforcer.mask_logits(logits)
 
-        self._apply_min_tokens_mask(
-            logits,
-            position=position,
-            min_tokens=min_tokens,
-            eos_token_id=eos_token_id,
-            stop_token_ids=stop_token_ids,
-        )
+        if state.enforcer is None:
+            self._apply_min_tokens_mask(
+                logits,
+                position=position,
+                min_tokens=min_tokens,
+                eos_token_id=eos_token_id,
+                stop_token_ids=stop_token_ids,
+            )
 
         self._apply_incremental_penalties(
             state,
@@ -826,6 +845,35 @@ class Sampler:
             logits.shape[-1],
         )
 
+        if state.enforcer is not None and state.enforcer.is_terminated():
+            assert eos_token_id is not None
+            work = self._float_working_copy(logits)
+            raw_logsoftmax = (
+                torch.log_softmax(work, dim=-1)
+                if sampling.logprobs is not None
+                else None
+            )
+            token_id = torch.tensor(
+                eos_token_id,
+                dtype=torch.int64,
+                device=work.device,
+            )
+            logprob = None
+            top_indices = None
+            top_logprobs = None
+            if raw_logsoftmax is not None:
+                logprob = raw_logsoftmax[eos_token_id]
+                if sampling.logprobs is not None and sampling.logprobs > 0:
+                    k = min(sampling.logprobs, raw_logsoftmax.shape[-1])
+                    top_logprobs, top_indices = torch.topk(raw_logsoftmax, k)
+            return DeviceSample(
+                token_id,
+                logprob,
+                top_indices,
+                top_logprobs,
+                grammar_terminated=True,
+            )
+
         work = self._float_working_copy(logits)
         raw_logsoftmax: torch.Tensor | None = None
         if sampling.logprobs is not None or forced_token_id is not None:
@@ -834,13 +882,14 @@ class Sampler:
         if state.enforcer is not None:
             state.enforcer.mask_logits(work)
 
-        self._apply_min_tokens_mask(
-            work,
-            position=position,
-            min_tokens=min_tokens,
-            eos_token_id=eos_token_id,
-            stop_token_ids=stop_token_ids,
-        )
+        if state.enforcer is None:
+            self._apply_min_tokens_mask(
+                work,
+                position=position,
+                min_tokens=min_tokens,
+                eos_token_id=eos_token_id,
+                stop_token_ids=stop_token_ids,
+            )
 
         self._apply_incremental_penalties(
             state,
@@ -936,6 +985,12 @@ class Sampler:
             )
             for row in rows
         )
+        completed_rows = tuple(
+            index
+            for index, state in enumerate(states)
+            if state.enforcer is not None and state.enforcer.is_terminated()
+        )
+        completed_row_set = frozenset(completed_rows)
 
         work = self._float_working_copy(logits)
         needs_raw = tuple(
@@ -947,13 +1002,15 @@ class Sampler:
         )
 
         for index, state in enumerate(states):
-            if state.enforcer is not None:
+            if state.enforcer is not None and index not in completed_row_set:
                 state.enforcer.mask_logits(work[index])
 
         blocked_rows: list[int] = []
         blocked_tokens: list[int] = []
         vocab_size = work.shape[-1]
         for index, row in enumerate(rows):
+            if states[index].enforcer is not None:
+                continue
             if row.position >= row.min_tokens:
                 continue
             seen: set[int] = set()
@@ -1038,6 +1095,24 @@ class Sampler:
             )
             token_ids = token_ids.index_copy(0, indices, values)
 
+        if completed_rows:
+            indices = _sampling_metadata_tensor(
+                completed_rows,
+                dtype=torch.long,
+                device=work.device,
+            )
+            completed_eos = []
+            for index in completed_rows:
+                eos_token_id = rows[index].eos_token_id
+                assert eos_token_id is not None
+                completed_eos.append(eos_token_id)
+            values = _sampling_metadata_tensor(
+                completed_eos,
+                dtype=torch.int64,
+                device=work.device,
+            )
+            token_ids = token_ids.index_copy(0, indices, values)
+
         selected_logprobs = None
         if raw_logsoftmax is not None:
             selected_logprobs = raw_logsoftmax.gather(
@@ -1063,11 +1138,11 @@ class Sampler:
                 dim=-1,
             )
 
-        terminated = [False] * len(rows)
+        terminated = [index in completed_row_set for index in range(len(rows))]
         structured_rows = tuple(
             index
             for index, state in enumerate(states)
-            if state.enforcer is not None
+            if state.enforcer is not None and index not in completed_row_set
         )
         if structured_rows:
             indices = _sampling_metadata_tensor(

@@ -347,8 +347,17 @@ def _strict_tool_response_format(
 
     if not request.tools:
         return None
-    tools = list(request.tools)
     choice = request.tool_choice
+    candidates: list[tuple[int, Mapping[str, object], Mapping[str, object]]] = []
+    for index, tool in enumerate(request.tools):
+        function = tool.get("function")
+        if not isinstance(function, Mapping):
+            continue
+        strict = function.get("strict")
+        if strict is not None and type(strict) is not bool:
+            raise ValueError(f"tools[{index}].function.strict must be a boolean")
+        candidates.append((index, tool, function))
+
     if isinstance(choice, Mapping):
         function_choice = choice.get("function")
         selected_name = (
@@ -356,34 +365,30 @@ def _strict_tool_response_format(
             if isinstance(function_choice, Mapping)
             else None
         )
-        tools = [
-            tool
-            for tool in tools
-            if isinstance(tool.get("function"), Mapping)
-            and tool["function"].get("name") == selected_name
+        candidates = [
+            candidate
+            for candidate in candidates
+            if candidate[2].get("name") == selected_name
         ]
 
+    if choice == "none":
+        return None
+    if not any(
+        function.get("strict") is True
+        for _index, _tool, function in candidates
+    ):
+        return None
+
     functions: list[Mapping[str, object]] = []
-    for index, tool in enumerate(tools):
+    for index, tool, function in candidates:
         if tool.get("type") != "function":
             raise ValueError(f"tools[{index}].type must be 'function'")
-        function = tool.get("function")
-        if not isinstance(function, Mapping):
-            raise ValueError(f"tools[{index}].function must be an object")
         name = function.get("name")
         if not isinstance(name, str) or _TOOL_FUNCTION_NAME_RE.fullmatch(name) is None:
             raise ValueError(
                 f"tools[{index}].function.name must match [A-Za-z0-9_-]{{1,64}}"
             )
-        strict = function.get("strict")
-        if strict is not None and type(strict) is not bool:
-            raise ValueError(f"tools[{index}].function.strict must be a boolean")
         functions.append(function)
-
-    if choice == "none":
-        return None
-    if not any(function.get("strict") is True for function in functions):
-        return None
 
     protocol = request.tool_call_protocol
     tags: list[dict[str, object]] = []

@@ -55,7 +55,11 @@ from kairyu.engine.core.engine_service import (
 )
 from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
 from kairyu.engine.core.sampling_types import stable_request_seed
-from kairyu.engine.engine_loop import _validate_max_model_len
+from kairyu.engine.engine_loop import (
+    _validate_max_model_len,
+    engine_sampling_from,
+    validate_structured_sampling,
+)
 from kairyu.engine.prompt import (
     PromptInput,
     TemplatedPrompt,
@@ -1898,6 +1902,14 @@ class ZmqEngineBackend:
     ) -> _PreparedProcPrompt:
         if validate_surface:
             validate_native_request_surface(request)
+        native_params = native_sampling_params(request)
+        if engine_sampling_from(native_params).needs_grammar:
+            tokenizer = self._get_preflight_tokenizer()
+            validate_structured_sampling(
+                native_params,
+                tokenizer,
+                tokenizer.eos_token_id,
+            )
         if prompt is None:
             prompt = prompt_with_tool_intent(request)
         max_model_len = self._max_model_len

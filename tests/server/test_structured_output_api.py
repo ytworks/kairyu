@@ -103,6 +103,82 @@ async def test_malformed_response_format_is_400_not_crash(app):
     assert missing_schema.status_code == 400
 
 
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        {"type": "regex", "pattern": "("},
+        {"type": "grammar", "grammar": "@@@"},
+        {"type": "structural_tag", "format": {}},
+    ],
+)
+async def test_uncompilable_response_format_is_request_local_400(
+    app,
+    response_format,
+):
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "x"}],
+                "response_format": response_format,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "invalid structured output" in response.json()["error"]["message"]
+
+
+async def test_structured_output_rejects_conflicting_min_tokens(app):
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "x"}],
+                "response_format": {"type": "regex", "pattern": "ab"},
+                "min_tokens": 3,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "min_tokens" in response.json()["error"]["message"]
+
+
+async def test_invalid_strict_tool_schema_is_400_and_engine_stays_healthy(app):
+    async with _client(app) as client:
+        invalid = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "call"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "broken",
+                            "strict": True,
+                            "parameters": {"type": "not-a-json-schema-type"},
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+        )
+        healthy = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "plain"}],
+                "max_tokens": 2,
+            },
+        )
+
+    assert invalid.status_code == 400
+    assert "invalid structured output" in invalid.json()["error"]["message"]
+    assert healthy.status_code == 200
+
+
 async def test_response_format_text_passes_through(app):
     async with _client(app) as client:
         response = await client.post(

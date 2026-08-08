@@ -12,12 +12,14 @@ import threading
 import time
 
 import pytest
+import torch
 
 import kairyu.engine.engine_loop as engine_loop_module
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest
 from kairyu.engine.core.pipeline import PipelinedModelRunner
 from kairyu.engine.core.radix_kv import RadixKVCache
+from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 from kairyu.engine.core.spec_runner import SpeculativeRunner
@@ -1279,6 +1281,87 @@ def test_grammar_termination_trims_scheduled_ahead_token_and_releases_late() -> 
     assert final.finish_reason == "stop"
     assert scheduler.states == {}
     assert runner.released == ["grammar"]
+    loop.close()
+
+
+def test_real_grammar_termination_survives_scheduled_ahead_sampling() -> None:
+    pytest.importorskip("xgrammar")
+    vocab = ["a", "b", "x", "<eos>"]
+    eos_token_id = 3
+
+    class _GrammarTokenizer:
+        eos_token_id = 3
+
+        @staticmethod
+        def encode(_text: str) -> tuple[int, ...]:
+            return (0,)
+
+        @staticmethod
+        def decode(token_ids) -> str:
+            return "".join(vocab[token_id] for token_id in token_ids if token_id != 3)
+
+        @staticmethod
+        def vocab() -> list[str]:
+            return vocab
+
+    class _RealGrammarRunner:
+        def __init__(self) -> None:
+            self.sampler = Sampler(vocab_provider=lambda: vocab)
+            self.positions: list[int] = []
+
+        def execute(self, scheduled, states):
+            sampled = {}
+            for chunk in scheduled:
+                state = states[chunk.request_id]
+                if chunk.is_prefill and not state.prefill_done:
+                    continue
+                logits = torch.zeros(len(vocab))
+                logits[min(chunk.position, 2)] = 10.0
+                token = self.sampler.sample(
+                    state.request.sampling_identity,
+                    state.request.sampling,
+                    chunk.position,
+                    logits,
+                    eos_token_id=eos_token_id,
+                )
+                self.positions.append(chunk.position)
+                sampled[chunk.request_id] = (token,)
+            return sampled
+
+        def release(self, request_id: str) -> None:
+            self.sampler.release(request_id)
+
+    runner = _RealGrammarRunner()
+    cache = RadixKVCache(num_pages=64, page_size=4)
+    scheduler = Scheduler(cache, max_num_batched_tokens=4, page_size=4)
+    loop = EngineLoop(
+        _GrammarTokenizer(),
+        scheduler,
+        runner,
+        pipeline_depth=2,
+        default_eos_token_id=eos_token_id,
+    )
+    loop.submit(
+        "grammar-real",
+        "prompt",
+        SamplingParams(
+            max_tokens=8,
+            temperature=0.0,
+            extra_args={
+                "response_format": {"type": "regex", "pattern": "ab"}
+            },
+        ),
+    )
+
+    final = next(
+        update
+        for request_id, update in _drive(loop)
+        if request_id == "grammar-real" and update.finished
+    )
+
+    assert final.text == "ab"
+    assert final.finish_reason == "stop"
+    assert max(runner.positions) > 2
     loop.close()
 
 

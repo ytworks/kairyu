@@ -2,7 +2,10 @@ import pytest
 
 from kairyu import SamplingParams
 from kairyu.engine.backend import GenerationRequest, native_sampling_params
+from kairyu.engine.core.structured import XGrammarEnforcer
 from kairyu.engine.engine_loop import engine_sampling_from
+
+_VOCAB = [chr(codepoint) for codepoint in range(32, 127)] + ["\n", "<eos>"]
 
 
 def _tool(name: str, *, strict: bool) -> dict[str, object]:
@@ -70,6 +73,11 @@ def test_native_strict_tool_builds_parser_matched_structural_tag(
         "strict_tool", strict=True
     )["function"]["parameters"]
     assert engine_sampling_from(params).needs_grammar is True
+    XGrammarEnforcer(
+        _VOCAB,
+        structural_tag=response_format,
+        stop_token_id=len(_VOCAB) - 1,
+    )
 
 
 def test_non_strict_tool_arguments_remain_unconstrained_in_mixed_request():
@@ -104,6 +112,25 @@ def test_named_non_strict_tool_does_not_activate_unselected_strict_grammar():
             "type": "function",
             "function": {"name": "ordinary_tool"},
         },
+    )
+
+    assert native_sampling_params(request) is request.sampling_params
+
+
+@pytest.mark.parametrize(
+    ("strict", "tool_choice"),
+    [(False, None), (True, "none")],
+)
+def test_non_enforced_legacy_tool_name_does_not_activate_new_validation(
+    strict,
+    tool_choice,
+):
+    request = GenerationRequest(
+        "legacy-name",
+        "prompt",
+        SamplingParams(),
+        tools=(_tool("legacy.name", strict=strict),),
+        tool_choice=tool_choice,
     )
 
     assert native_sampling_params(request) is request.sampling_params

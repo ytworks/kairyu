@@ -96,7 +96,7 @@ Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
 ### 2026-08-08 — [amendment] Structured generation uses the device sampling seam
-- What: regex, EBNF, and structural-tag formats join JSON grammars; native strict tools compile protocol-matched argument schemas; CUDA applies grammar masks without a full logits-row D2H copy.
+- What: regex, EBNF, and structural-tag formats join JSON grammars; native strict tools compile protocol-matched argument schemas; prepare-time compilation isolates malformed requests; CUDA masks avoid full logits-row D2H.
 - Why: structured and strict-tool requests must be correctness invariants without forcing every token through the vocabulary-sized CPU sampling path.
 - Refs: issue #363; M8 D2; `kairyu/engine/{backend.py,core/{structured,sampler}.py}`
 
