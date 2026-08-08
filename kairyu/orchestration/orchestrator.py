@@ -1590,7 +1590,8 @@ class Orchestrator:
             latest_usage = None
             started_at = utc_now_iso()
             first_token_at = None
-            previous_text = ""
+            emitted = 0
+            text_parts: list[str] = []
             try:
                 async for partial in engine.stream(request):
                     last = partial
@@ -1598,15 +1599,20 @@ class Orchestrator:
                         latest_usage = partial.usage
                         if usage_observer is not None:
                             usage_observer(latest_usage)
-                    text = partial.text
+                    completion = partial.completions[0] if partial.completions else None
+                    delta, emitted = (
+                        completion.delta_after(emitted)
+                        if completion is not None
+                        else ("", emitted)
+                    )
+                    text_parts.append(delta)
                     if first_token_at is None and partial.completions:
                         first_token_at = utc_now_iso()
                     yield OrchestratorEvent(
                         kind="delta",
-                        text=text[len(previous_text) :],
+                        text=delta,
                         completions=partial.completions,
                     )
-                    previous_text = text
                 if last is None:
                     raise RuntimeError("direct stream produced no result")
             except Exception as error:
@@ -1642,7 +1648,7 @@ class Orchestrator:
                 )
                 usage = latest_usage or GenerationUsage()
                 partial_result = result_with_trace(
-                    text=previous_text,
+                    text="".join(text_parts),
                     prompt_tokens=usage.prompt_tokens,
                     completion_tokens=usage.completion_tokens,
                     cached_tokens=usage.cached_tokens,
@@ -1694,7 +1700,11 @@ class Orchestrator:
             yield OrchestratorEvent(
                 kind="result",
                 result=result_with_trace(
-                    text=last.text if last is not None else "",
+                    text=(
+                        (last.text or "".join(text_parts))
+                        if last is not None
+                        else ""
+                    ),
                     completions=last.completions if last is not None else (),
                     prompt_tokens=usage[0],
                     completion_tokens=usage[1],

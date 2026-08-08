@@ -390,9 +390,10 @@ async def _stream_moa(
     )
     synthesis_backend = synthesizer or backend
     emitted = 0
+    text_parts: list[str] = []
+    legacy_text = ""
     last_result: GenerationResult | None = None
     latest_usage = None
-    previous_text = ""
     try:
         async for partial in synthesis_backend.stream(synthesis_request):
             last_result = partial
@@ -406,16 +407,32 @@ async def _stream_moa(
                             cached_tokens=usage_totals[2] + latest_usage.cached_tokens,
                         )
                     )
-            text = partial.text
-            if not text.startswith(previous_text):
-                raise RuntimeError("MoA synthesis stream must emit cumulative, prefix-stable text")
-            previous_text = text
+            completion = partial.completions[0] if partial.completions else None
+            if (
+                completion is not None
+                and completion.text_delta is None
+                and completion.text_offset is None
+            ):
+                text = completion.text
+                if not text.startswith(legacy_text):
+                    raise RuntimeError(
+                        "MoA synthesis stream must emit cumulative, prefix-stable text"
+                    )
+                delta = text[len(legacy_text) :]
+                legacy_text = text
+                emitted = len(text)
+            else:
+                delta, emitted = (
+                    completion.delta_after(emitted)
+                    if completion is not None
+                    else ("", emitted)
+                )
+            text_parts.append(delta)
             yield MoAEvent(
                 kind="delta",
-                text=text[emitted:],
+                text=delta,
                 completions=partial.completions,
             )
-            emitted = len(text)
         if last_result is None:
             raise RuntimeError("MoA synthesis stream produced no result")
     except Exception as error:
@@ -429,7 +446,7 @@ async def _stream_moa(
             proposals=proposals,
             usage=(usage_totals[0], usage_totals[1]),
             cached_tokens=usage_totals[2],
-            final_text=previous_text,
+            final_text="".join(text_parts),
         ) from error
     if latest_usage is not None:
         usage_totals[0] += latest_usage.prompt_tokens
@@ -438,7 +455,7 @@ async def _stream_moa(
     yield MoAEvent(
         kind="result",
         result=MoAResult(
-            final_text=last_result.text,
+            final_text=last_result.text or "".join(text_parts),
             proposals=proposals,
             completions=last_result.completions,
             usage=(usage_totals[0], usage_totals[1]),

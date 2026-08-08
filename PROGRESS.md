@@ -39,7 +39,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 | M5 Intra-node multi-GPU | CPU half done; TP/DP/P-D plumbing live; GPU phase per runbook |
 | M6 Inter-node multi-GPU | CPU half done; production stage-sharded PP remains a roadmap item |
 | M7 Productionization | CPU half done: serve CLI, gateway, batch, compose smoke; `kairyu validate` preflight |
-| M8 Engine CPU core | Complete (amended 2026-08-04) |
+| M8 Engine CPU core | Complete (amended 2026-08-08) |
 | M9 Truthful API | Complete |
 | M10a/M10b Fleet base + KV routing | Complete |
 | M11 Product surface + tenancy | Complete |
@@ -93,6 +93,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-08 — [amendment] Streaming results carry text deltas end to end
+- What: completion results expose offset-validated text deltas; native, process-split, and OpenAI-compatible streams feed server and orchestration consumers without rebuilding or rescanning cumulative text, while legacy cumulative text remains lazily compatible.
+- Why: flattening each token into a growing string at several serving layers caused quadratic copies and GIL-held allocation work per request.
+- Refs: issue #338; m8 wire v2; `kairyu/{outputs,engine,entrypoints/server,orchestration}`
 
 ### 2026-08-08 — [amendment] Learned draft heads enter native serving
 - What: public native config wires EAGLE-3/MTP checkpoints into stateful target-hidden capture, O(T+k) cached rollout, exact accepted-row commit, per-source acceptance evidence, and request-local speculative pipeline dependencies; missing Radix hidden history safely degrades to target decode.

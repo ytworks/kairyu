@@ -820,6 +820,8 @@ class Conductor:
         last_result: GenerationResult | None = None
         latest_usage = None
         first_token_at = None
+        text_parts: list[str] = []
+        legacy_text = ""
         from kairyu.telemetry import traced_span
 
         try:
@@ -840,22 +842,38 @@ class Conductor:
                     if partial.usage is not None:
                         latest_usage = partial.usage
                         self._observe_usage(run, latest_usage)
-                    text = partial.text
-                    if not text.startswith(run.outputs.get(spec.name, "")):
-                        raise RuntimeError(
-                            "final worker stream must emit cumulative, prefix-stable text"
+                    completion = partial.completions[0] if partial.completions else None
+                    if (
+                        completion is not None
+                        and completion.text_delta is None
+                        and completion.text_offset is None
+                    ):
+                        text = completion.text
+                        if not text.startswith(legacy_text):
+                            raise RuntimeError(
+                                "final worker stream must emit cumulative, "
+                                "prefix-stable text"
+                            )
+                        delta = text[len(legacy_text) :]
+                        legacy_text = text
+                        emitted = len(text)
+                    else:
+                        delta, emitted = (
+                            completion.delta_after(emitted)
+                            if completion is not None
+                            else ("", emitted)
                         )
-                    run.outputs[spec.name] = text
+                    text_parts.append(delta)
                     if first_token_at is None and partial.completions:
                         first_token_at = utc_now_iso()
                     yield ConductorEvent(
                         kind="delta",
-                        text=text[emitted:],
+                        text=delta,
                         completions=partial.completions,
                     )
-                    emitted = len(text)
                 if last_result is None:
                     raise RuntimeError("final worker stream produced no result")
+                run.outputs[spec.name] = last_result.text or "".join(text_parts)
                 actual_cost = self._cost_model(request, last_result)
                 reconciled = run.budget.reconcile_success(
                     cost=actual_cost,
@@ -864,6 +882,8 @@ class Conductor:
                 if span is not None:
                     span.set_attribute("kairyu.stage.status", "success")
         except Exception as error:
+            if text_parts:
+                run.outputs[spec.name] = "".join(text_parts)
             run.budget = run.budget.release(unknown_cost=unknown_cost)
             trace_usage = None
             if latest_usage is not None:

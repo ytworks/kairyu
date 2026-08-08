@@ -2058,7 +2058,13 @@ class KairyuBackend:
                     self._release_request_ids((request_id,))
             raise
 
-    def _result(self, request: GenerationRequest, update: StreamUpdate) -> GenerationResult:
+    def _result(
+        self,
+        request: GenerationRequest,
+        update: StreamUpdate,
+        *,
+        text_offset: int | None = None,
+    ) -> GenerationResult:
         completion = CompletionOutput(
             index=0,
             text=update.text,
@@ -2071,6 +2077,10 @@ class KairyuBackend:
                 if update.logprob_content is None
                 else tuple(update.logprob_content)
             ),
+            text_delta=(
+                None if text_offset is None else update.text[text_offset:]
+            ),
+            text_offset=text_offset,
         )
         return GenerationResult(
             request_id=request.request_id,
@@ -2156,6 +2166,7 @@ class KairyuBackend:
         request: GenerationRequest,
         latest: dict[int, StreamUpdate],
         finished: bool,
+        text_offsets: dict[int, int] | None = None,
     ) -> GenerationResult:
         completions = tuple(
             CompletionOutput(
@@ -2171,6 +2182,14 @@ class KairyuBackend:
                     None
                     if update.logprob_content is None
                     else tuple(update.logprob_content)
+                ),
+                text_delta=(
+                    None
+                    if text_offsets is None
+                    else update.text[text_offsets.get(index, 0) :]
+                ),
+                text_offset=(
+                    None if text_offsets is None else text_offsets.get(index, 0)
                 ),
             )
             for index, update in sorted(latest.items())
@@ -2299,6 +2318,7 @@ class KairyuBackend:
         pump_failed = False
         deferred: StreamUpdate | None = None
         first_token_seen = False
+        text_offset = 0
         try:
             while True:
                 update = deferred if deferred is not None else await queue.get()
@@ -2317,7 +2337,8 @@ class KairyuBackend:
                     or deferred is not None
                 ):
                     emitted = len(update.outputs)
-                    yield self._result(request, update)
+                    yield self._result(request, update, text_offset=text_offset)
+                    text_offset = len(update.text)
                 if update.finished:
                     return
         finally:
@@ -2351,6 +2372,7 @@ class KairyuBackend:
         queues: dict[int, _StreamUpdateQueue] = {}
         pending: dict[int, asyncio.Future] = {}
         latest: dict[int, StreamUpdate] = {}
+        text_offsets: dict[int, int] = {}
         finished: set[int] = set()
         first_token_seen: set[int] = set()
         pump_failed = False
@@ -2401,10 +2423,27 @@ class KairyuBackend:
                         pending[index] = asyncio.ensure_future(queues[index].get())
                 if ready_error is not None:
                     if updated:
-                        yield self._merged(request, latest, finished=False)
+                        yield self._merged(
+                            request,
+                            latest,
+                            finished=False,
+                            text_offsets=text_offsets,
+                        )
+                        text_offsets.update(
+                            (index, len(update.text))
+                            for index, update in latest.items()
+                        )
                     pump_failed = True
                     raise ready_error
-                yield self._merged(request, latest, finished=len(finished) == len(subs))
+                yield self._merged(
+                    request,
+                    latest,
+                    finished=len(finished) == len(subs),
+                    text_offsets=text_offsets,
+                )
+                text_offsets.update(
+                    (index, len(update.text)) for index, update in latest.items()
+                )
         except BaseException:
             if not pump_failed:
                 self._abort(*(sub.request_id for sub in subs))

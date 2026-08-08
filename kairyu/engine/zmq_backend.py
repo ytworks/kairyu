@@ -76,7 +76,7 @@ from kairyu.models.generation import (
     GenerationDefaults,
     validate_generation_config_mode,
 )
-from kairyu.outputs import CompletionOutput, TokenLogprob
+from kairyu.outputs import CompletionOutput, TokenLogprob, _lazy_text
 from kairyu.sampling_params import SamplingParams
 
 _SPAWN_TIMEOUT_S = 30.0
@@ -875,12 +875,9 @@ class _WireAccumulator:
                         f"engine wire stage metric {stage!r} decreased"
                     )
             self.stage_metrics = stage_metrics
-        if not materialize:
-            return {"finished": event["finished"]}
         normalized = {
             "request_id": event["request_id"],
             "outputs": self.outputs,
-            "text": "".join(self.text_parts),
             "finished": event["finished"],
             "finish_reason": event.get("finish_reason"),
             "num_prompt_tokens": self.num_prompt_tokens,
@@ -888,6 +885,16 @@ class _WireAccumulator:
             "cumulative_logprob": self.cumulative_logprob,
             "stage_metrics": self.stage_metrics,
         }
+        if event_type == "snapshot":
+            normalized["text_offset"] = 0
+            normalized["text_delta"] = event["text"]
+        else:
+            normalized["text_offset"] = event["text_offset"]
+            normalized["text_delta"] = event["text_delta"]
+        if materialize:
+            normalized["text"] = "".join(self.text_parts)
+        else:
+            normalized["text"] = _lazy_text(self.text_parts)
         if self.logprobs is not None:
             normalized["logprobs"] = self.logprobs
         if self.logprob_content is not None:
@@ -2400,7 +2407,13 @@ class ZmqEngineBackend:
         if generation is not None and generation not in self._queue_generations.values():
             self._failed_generations.discard(generation)
 
-    def _result(self, request: GenerationRequest, event: dict) -> GenerationResult:
+    def _result(
+        self,
+        request: GenerationRequest,
+        event: dict,
+        *,
+        delta_native: bool = False,
+    ) -> GenerationResult:
         logprobs = None
         if event.get("logprobs") is not None:
             logprobs = tuple(
@@ -2412,12 +2425,14 @@ class ZmqEngineBackend:
             content = tuple(_decode_token_logprob(raw) for raw in event["logprob_content"])
         completion = CompletionOutput(
             index=0,
-            text=event["text"],
+            text=event.get("text", ""),
             token_ids=tuple(event["outputs"]),
             cumulative_logprob=event.get("cumulative_logprob", 0.0),
             logprobs=logprobs,
             finish_reason=event.get("finish_reason"),
             logprob_content=content,
+            text_delta=event.get("text_delta") if delta_native else None,
+            text_offset=event.get("text_offset") if delta_native else None,
         )
         if request.trace_requested:
             decoded_stage_metrics = list(
@@ -2510,13 +2525,16 @@ class ZmqEngineBackend:
             while True:
                 event = await queue.get()
                 self._raise_on_error(event)
-                materialize = _stream_event_needs_materialization(event)
-                event = accumulator.apply(event, materialize=materialize)
-                if not materialize:
+                emit = _stream_event_needs_materialization(event)
+                event = accumulator.apply(
+                    event,
+                    materialize=bool(event.get("finished")),
+                )
+                if not emit:
                     continue
                 if len(event["outputs"]) > emitted or event["finished"]:
                     emitted = len(event["outputs"])
-                    yield self._result(request, event)
+                    yield self._result(request, event, delta_native=True)
                 if event["finished"]:
                     finished_cleanly = True
                     return
