@@ -1765,6 +1765,9 @@ class PagedModelRunner:
         if decode_tokens:
             # Callers append decode rows after every prefill row, so their
             # one-token queries form one contiguous suffix in the flat batch.
+            assert all(
+                not chunk.is_prefill for chunk in chunks[-len(decode_tokens) :]
+            ), "ragged decode rows must form a contiguous suffix"
             token_slots, _position_slots = self._decode_input_slots(
                 decode_tokens,
                 decode_positions,
