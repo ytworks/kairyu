@@ -9,6 +9,7 @@ schema_version = 1
 "bench.fleet_rollout_bench" = ["bench.fleet_churn_bench"]
 "bench.g2_a6_vllm_bench" = ["bench.multiturn_prefix", "bench.tp_kv_hit_g2_a7_bench"]
 "bench.g2_a9_dp_tp_crossover_bench" = ["bench.dp_scaling_g2_a8_bench"]
+"bench.g4_ma1_nvfp4_accuracy_bench" = ["bench.g4_ma1_qwen3_235b_nvfp4_bench", "bench.g4_ma1_qwen3_235b_nvfp4_capture"]
 "bench.g4_ma1_qwen3_235b_nvfp4_bench" = ["bench.parity_tp"]
 "bench.g4_ma1_qwen3_235b_nvfp4_capture" = ["bench.g4_ma1_qwen3_235b_nvfp4_bench"]
 "bench.g4_ma2_qwen3_235b_ep_kv_bench" = ["bench.g4_ma1_qwen3_235b_nvfp4_capture", "bench.tp_kv_hit_g2_a7_bench"]
@@ -204,6 +205,15 @@ module = "bench.g2_a9_dp_tp_crossover_bench"
 kind = "formal-gate"
 requires = ["docker", "engine", "gpu", "hf", "service"]
 documentation = ["bench/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "bench/g4_ma1_nvfp4_accuracy_bench.py"
+module = "bench.g4_ma1_nvfp4_accuracy_bench"
+kind = "formal-gate"
+requires = ["engine", "gpu", "hf"]
+documentation = ["docs/design/m14-quant-compute.md", "docs/gpu-runbook.md"]
 installed = false
 invocations = ["path", "module"]
 

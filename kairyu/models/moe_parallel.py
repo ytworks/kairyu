@@ -1413,6 +1413,7 @@ def _global_nvfp4_dtype_contract(
         for module_name, module in model.named_modules()
         if isinstance(module, NvFp4Linear)
         for buffer_name, buffer in module.named_buffers(recurse=False)
+        if buffer_name not in module._non_persistent_buffers_set
     }
     expected = dict(local)
     for block_name, block in blocks:
@@ -1667,6 +1668,7 @@ def build_ep_model(
     attention_backend=None,
     linear_capabilities=None,
     linear_selection_policy=None,
+    nvfp4_accuracy_profile=None,
     attention_dp: bool = False,
 ) -> tuple[nn.Module, object, ExpertParallelLoadInfo]:
     """Build one real Qwen3-MoE rank without materializing remote experts.
@@ -1725,6 +1727,23 @@ def build_ep_model(
         is_mla=config.is_mla,
         architecture=config.architecture,
     )
+    if linear_selection_policy is not None and nvfp4_accuracy_profile is not None:
+        raise ValueError(
+            "linear_selection_policy and nvfp4_accuracy_profile are mutually exclusive"
+        )
+    accuracy_profile = None
+    if nvfp4_accuracy_profile is not None:
+        from kairyu.engine.core.nvfp4_accuracy import resolve_nvfp4_accuracy_policy
+
+        accuracy_profile, linear_selection_policy = resolve_nvfp4_accuracy_policy(
+            quant,
+            nvfp4_accuracy_profile,
+            num_layers=config.num_hidden_layers,
+        )
+    if attention_dp and accuracy_profile is not None and accuracy_profile.active:
+        raise ValueError(
+            "NVFP4 accuracy profiles currently require replicated-attention EP"
+        )
     if attention_dp:
         _validate_attention_dp_build_envelope(
             config,
@@ -1826,12 +1845,14 @@ def build_ep_model(
         for module_name, module in model.named_modules()
         if isinstance(module, QuantizedLinearBase)
         for buffer_name, buffer in module.named_buffers(recurse=False)
+        if buffer_name not in module._non_persistent_buffers_set
     }
     strict_nvfp4_dtypes = {
         (f"{module_name}.{buffer_name}" if module_name else buffer_name): buffer.dtype
         for module_name, module in model.named_modules()
         if isinstance(module, NvFp4Linear)
         for buffer_name, buffer in module.named_buffers(recurse=False)
+        if buffer_name not in module._non_persistent_buffers_set
     }
     member_specs = checkpoint_member_specs(model)
     replicated_sources: dict[str, str] = {}
@@ -1962,9 +1983,20 @@ def build_ep_model(
             )
         _assign_checkpoint_tensor(model, name, local)
         del full, local
+    if accuracy_profile is not None and accuracy_profile.active:
+        from kairyu.engine.core.nvfp4_accuracy import materialize_fp8_weights
+
+        materialize_fp8_weights(model)
     if quant.method is QuantMethod.NVFP4 and torch.device(device).type == "cuda":
         for _block_name, block in blocks:
-            block.prepare_fused_nvfp4()
+            if all(
+                type(projection) is NvFp4Linear
+                and not projection.activation_dynamic
+                and not projection.observe_activation_saturation
+                for expert in block.local_experts
+                for projection in (expert.gate_proj, expert.up_proj, expert.down_proj)
+            ):
+                block.prepare_fused_nvfp4()
     owned = blocks[0][1].owned_expert_indices
     if any(block.owned_expert_indices != owned for _name, block in blocks):
         raise RuntimeError("expert ownership differs across sparse layers")

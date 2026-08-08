@@ -967,6 +967,7 @@ class ZmqEngineBackend:
         tensor_parallel_size: int = 1,
         max_num_partial_prefills: int = 2,
         draft_model_path: str | PathLike[str] | None = None,
+        nvfp4_accuracy_profile=None,
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
@@ -992,6 +993,13 @@ class ZmqEngineBackend:
             raise ValueError("death_timeout_s must be a positive finite number")
         _validate_max_model_len(max_model_len)
         generation_config = validate_generation_config_mode(generation_config)
+        from kairyu.engine.core.nvfp4_accuracy import NvFp4AccuracyProfile
+
+        accuracy_profile = NvFp4AccuracyProfile.parse(nvfp4_accuracy_profile)
+        if accuracy_profile.active and model_path is None:
+            raise ValueError(
+                "kairyu-proc NVFP4 accuracy profile requires a real model_path"
+            )
         kv_cache_dtype = validate_kv_cache_dtype(kv_cache_dtype)
         if kv_cache_dtype != "auto" and model_path is None:
             raise ValueError(
@@ -1066,6 +1074,9 @@ class ZmqEngineBackend:
                 else None
             ),
             "generation_config": generation_config,
+            "nvfp4_accuracy_profile": (
+                accuracy_profile.as_dict() if accuracy_profile.active else None
+            ),
         }
         self._sequence_budget = max_num_seqs
         self._death_timeout_s = death_timeout_s

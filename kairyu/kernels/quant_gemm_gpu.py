@@ -875,6 +875,7 @@ def nvfp4_linear_forward(
     add_bias: bool = True,
 ) -> torch.Tensor:
     flat, _ = _prepare(x, module, "nvfp4", allocate_output=False)
+    module._observe_activation(flat)
     try:
         from flashinfer import SfLayout, mm_fp4, nvfp4_quantize
     except ImportError as error:
@@ -890,12 +891,23 @@ def nvfp4_linear_forward(
     k_padded = native_weight.shape[1] * 2
     if flat.shape[1] != k_padded:
         flat = torch.nn.functional.pad(flat, (0, k_padded - flat.shape[1]))
-    x_fp4, x_scale = nvfp4_quantize(
-        flat,
-        input_scale_inv,
-        sfLayout=SfLayout.layout_128x4,
-        do_shuffle=False,
-    )
+    per_token_scale = None
+    if module.activation_dynamic:
+        x_fp4, x_scale, per_token_scale = nvfp4_quantize(
+            flat,
+            1.0 / (448.0 * 6.0),
+            sfLayout=SfLayout.layout_128x4,
+            do_shuffle=False,
+            per_token_activation=True,
+        )
+        alpha = module.weight_scale_2.float().reshape(())
+    else:
+        x_fp4, x_scale = nvfp4_quantize(
+            flat,
+            input_scale_inv,
+            sfLayout=SfLayout.layout_128x4,
+            do_shuffle=False,
+        )
     output = mm_fp4(
         x_fp4,
         native_weight.T,
@@ -905,6 +917,8 @@ def nvfp4_linear_forward(
         out_dtype=x.dtype,
         backend="auto",
     )
+    if per_token_scale is not None:
+        output.mul_(per_token_scale.reshape(-1, 1))
     if add_bias and module.bias is not None:
         output = output[:, : module.out_features] + module.bias
     else:

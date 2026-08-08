@@ -471,6 +471,7 @@ def build_engine_loop(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     generation_config: GenerationConfigMode = "auto",
+    nvfp4_accuracy_profile=None,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler | PDLoopAdapter]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
@@ -482,6 +483,10 @@ def build_engine_loop(
     caller-supplied ``runner`` is a single rank-local object and therefore
     requires both distributed sizes to remain 1.
     """
+    from kairyu.engine.core.nvfp4_accuracy import NvFp4AccuracyProfile
+
+    accuracy_profile = NvFp4AccuracyProfile.parse(nvfp4_accuracy_profile)
+    nvfp4_accuracy_profile = accuracy_profile.as_dict() if accuracy_profile.active else None
     _validate_max_model_len(max_model_len)
     generation_config = validate_generation_config_mode(generation_config)
     if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
@@ -545,6 +550,14 @@ def build_engine_loop(
         )
     if model_path is not None and runner is not None:
         raise ValueError("model_path and runner are mutually exclusive")
+    if accuracy_profile.active and model_path is None:
+        raise ValueError("nvfp4_accuracy_profile requires a real model_path")
+    if accuracy_profile.active and pd_separation:
+        raise ValueError("nvfp4_accuracy_profile does not support P-D separation")
+    if accuracy_profile.active and expert_parallel_attention_dp:
+        raise ValueError(
+            "nvfp4_accuracy_profile requires replicated-attention expert parallelism"
+        )
     if model_path is not None:
         max_model_len = _resolve_model_max_model_len(
             model_path,
@@ -719,6 +732,7 @@ def build_engine_loop(
             cuda_graph_warmup_iters=cuda_graph_warmup_iters,
             kv_cache_dtype=kv_cache_dtype,
             generation_config=generation_config,
+            nvfp4_accuracy_profile=nvfp4_accuracy_profile,
         )
     if pd_separation:
         if model_path is None:
@@ -772,6 +786,7 @@ def build_engine_loop(
             dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
             dram_kv_tier_profile=dram_kv_tier_profile,
             generation_config=generation_config,
+            nvfp4_accuracy_profile=nvfp4_accuracy_profile,
         )
     if speculative is not None and tensor_parallel_size > 1:
         # The FakeCommunicator TP path has rank-local toy runners but no
@@ -833,6 +848,7 @@ def build_engine_loop(
             attention_backend=attention_backend,
             target_device=compute_device,
             generation_config=generation_config,
+            nvfp4_accuracy_profile=nvfp4_accuracy_profile,
         )
         if loaded_generation != generation:
             raise RuntimeError("generation defaults changed during model loading")
@@ -844,6 +860,10 @@ def build_engine_loop(
             model_config,
         )
         model = model.to(compute_device)
+        if accuracy_profile.active:
+            from kairyu.engine.core.nvfp4_accuracy import materialize_fp8_weights
+
+            materialize_fp8_weights(model)
         default_eos = generation.eos_token_id
         default_stop_ids = generation.stop_token_ids
         num_kv_heads_for_tp = model_config.num_key_value_heads
@@ -1108,6 +1128,7 @@ def _build_dist_ep_loop(
     cuda_graph_warmup_iters: int = 3,
     kv_cache_dtype: str = "bfloat16",
     generation_config: GenerationConfigMode = "auto",
+    nvfp4_accuracy_profile=None,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Build the production replicated-attention or attention-DP EP loop."""
 
@@ -1163,6 +1184,7 @@ def _build_dist_ep_loop(
         dram_kv_tier_capacity_pages=0,
         dram_kv_tier_profile=None,
         speculative=None,
+        nvfp4_accuracy_profile=nvfp4_accuracy_profile,
     )
     try:
         loop = EngineLoop(
@@ -1216,6 +1238,7 @@ def _build_dist_tp_loop(
     dram_kv_tier_capacity_pages: int = 0,
     dram_kv_tier_profile: str | Path | None = None,
     generation_config: GenerationConfigMode = "auto",
+    nvfp4_accuracy_profile=None,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Real multi-process TP for `kairyu serve --tp N`: spawn the worker ranks,
     drive them through DistTPModelRunner, and expose the launcher on the loop so
@@ -1261,6 +1284,7 @@ def _build_dist_tp_loop(
         max_num_batched_tokens=max_num_batched_tokens,
         speculative=speculative,
         draft_model_path=draft_model_path,
+        nvfp4_accuracy_profile=nvfp4_accuracy_profile,
     )
     if launcher.dram_kv_binding is not None:
         cache.attach_dram_tier(
@@ -1348,6 +1372,7 @@ class KairyuBackend:
         expert_parallel_attention_dp: bool = False,
         generation_config: GenerationConfigMode = "auto",
         draft_model_path: str | Path | None = None,
+        nvfp4_accuracy_profile=None,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self.expert_parallel_size = expert_parallel_size
@@ -1382,6 +1407,7 @@ class KairyuBackend:
             dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
             dram_kv_tier_profile=dram_kv_tier_profile,
             generation_config=generation_config,
+            nvfp4_accuracy_profile=nvfp4_accuracy_profile,
         )
         self._sequence_budget = max_num_seqs
         self.generation_defaults = self._loop.generation_defaults

@@ -452,9 +452,9 @@ def RowParallelLinear(
     local.register_forward_hook(binding)
     object.__setattr__(local, "_kairyu_row_parallel", binding)
 
-    from kairyu.quant.linear import Fp8Linear
+    from kairyu.quant.linear import Fp8Linear, NvFp4ToFp8Linear
 
-    if isinstance(local, Fp8Linear) and local.activation_dynamic:
+    if isinstance(local, (Fp8Linear, NvFp4ToFp8Linear)) and local.activation_dynamic:
         object.__setattr__(local, "_row_parallel_comm", comm)
     return local
 
@@ -538,6 +538,7 @@ def load_tp_shard(
         for module_name, module in model.named_modules()
         if getattr(module, "is_quantized", False)
         for buffer_name, buffer in module.named_buffers(recurse=False)
+        if buffer_name not in module._non_persistent_buffers_set
     }
     for name, current in expected.items():
         if name == "lm_head.weight" and config.tie_word_embeddings:
@@ -584,6 +585,7 @@ def build_tp_model(
     sequence_parallel: bool = False,
     linear_capabilities=None,
     linear_selection_policy=None,
+    nvfp4_accuracy_profile=None,
 ):
     """Rank-sharded DenseDecoder: tp_view config + canonical TP/SP bindings.
 
@@ -602,6 +604,18 @@ def build_tp_model(
     quant = load_checkpoint_quantization(model_dir, raw).weights
     validate_tensor_parallel_quantization(quant)
     full_config = parse_model_config(raw)
+    if linear_selection_policy is not None and nvfp4_accuracy_profile is not None:
+        raise ValueError(
+            "linear_selection_policy and nvfp4_accuracy_profile are mutually exclusive"
+        )
+    if nvfp4_accuracy_profile is not None:
+        from kairyu.engine.core.nvfp4_accuracy import resolve_nvfp4_accuracy_policy
+
+        _profile, linear_selection_policy = resolve_nvfp4_accuracy_policy(
+            quant,
+            nvfp4_accuracy_profile,
+            num_layers=full_config.num_hidden_layers,
+        )
     local_config = tp_view(full_config, tp, rank)
     if sequence_parallel and tp < 2:
         raise ValueError("sequence parallelism needs tp >= 2")
@@ -653,4 +667,9 @@ def build_tp_model(
         dtype=dtype,
         quant=quant,
     )
-    return model.to(device), local_config, full_config
+    model = model.to(device)
+    if nvfp4_accuracy_profile is not None:
+        from kairyu.engine.core.nvfp4_accuracy import materialize_fp8_weights
+
+        materialize_fp8_weights(model)
+    return model, local_config, full_config

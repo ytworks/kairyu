@@ -308,6 +308,8 @@ class NvFp4LinearPack:
             return None
         if any(
             module.in_features != first.in_features
+            or bool(getattr(module, "activation_dynamic", False))
+            or bool(getattr(module, "observe_activation_saturation", False))
             or module.weight.device != first.weight.device
             or module.weight.dtype is not torch.uint8
             or module.weight.layout is not torch.strided

@@ -825,6 +825,7 @@ gateways, install `--extra fleet` and select `store: postgres`,
 |---|---|---|---|
 | `kairyu` | `model_path` | — | safetensors checkpoint dir (Llama-3.x / Qwen2 / Qwen3 / Qwen3-MoE / DeepSeek-V3; FP8/INT8/AWQ/GPTQ/NVFP4 quantized checkpoints auto-detected) |
 | | `generation_config` | `"auto"` | model sampling-default policy: `auto` applies the model file for omitted request fields, `vllm` uses neutral sampling defaults, and `none` ignores the file |
+| | `nvfp4_accuracy_profile` | `null` | opt-in NVFP4 projection selectors (`fp8`, `dynamic_activation`, `saturation_counters`) for measured accuracy/memory experiments; default execution is unchanged |
 | | `tokenizer` | model dir | HF tokenizer dir override (`tokenizer.json`) |
 | | `num_pages` | 4096 | KV pool pages |
 | | `page_size` | 16 | tokens per KV page |
