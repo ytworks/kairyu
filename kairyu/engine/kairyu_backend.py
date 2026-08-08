@@ -456,6 +456,7 @@ def build_engine_loop(
     tokenizer: str | Tokenizer | None = None,
     speculative: str | None = None,
     speculative_tokens: int = 4,
+    draft_model_path: str | Path | None = None,
     model_path: str | None = None,
     pd_separation: bool = False,
     pd_prefill_device: str | None = None,
@@ -511,8 +512,31 @@ def build_engine_loop(
         )
     if pipeline_depth < 1:
         raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
-    if speculative is not None and speculative != "ngram":
-        raise ValueError(f"unknown speculative mode {speculative!r} (only 'ngram')")
+    if speculative not in (None, "ngram", "eagle", "mtp"):
+        raise ValueError(
+            f"unknown speculative mode {speculative!r}; "
+            "choose one of: 'ngram', 'eagle', 'mtp'"
+        )
+    learned_speculative = speculative in ("eagle", "mtp")
+    if draft_model_path is not None and (
+        not isinstance(draft_model_path, (str, Path))
+        or not str(draft_model_path)
+    ):
+        raise ValueError("draft_model_path must be a non-empty local path or null")
+    if learned_speculative and draft_model_path is None:
+        raise ValueError(f"speculative={speculative!r} requires draft_model_path")
+    if not learned_speculative and draft_model_path is not None:
+        raise ValueError("draft_model_path requires speculative='eagle' or 'mtp'")
+    if learned_speculative and model_path is None:
+        raise ValueError(f"speculative={speculative!r} requires a real model_path")
+    if learned_speculative:
+        if decode_mode == "cuda_graph":
+            raise ValueError(
+                "learned speculative decoding requires decode_mode='eager' "
+                "to capture target hidden states"
+            )
+        if decode_mode is None:
+            decode_mode = "eager"
     if runner is not None and model_path is None and tensor_parallel_size > 1:
         raise ValueError(
             "custom runner with tensor_parallel_size > 1 is unsupported: "
@@ -738,6 +762,7 @@ def build_engine_loop(
             tokenizer=tokenizer,
             speculative=speculative,
             speculative_tokens=speculative_tokens,
+            draft_model_path=draft_model_path,
             pipeline_depth=pipeline_depth,
             graph_decode=graph_decode,
             graph_max_batch=cuda_graph_max_batch,
@@ -910,6 +935,18 @@ def build_engine_loop(
                 dram_kv_binding.tier,
                 min_restore_tokens=dram_kv_binding.policy.min_restore_tokens,
             )
+        learned_draft_source = None
+        if learned_speculative:
+            from kairyu.engine.core.draft import build_learned_draft_source
+
+            assert draft_model_path is not None
+            learned_draft_source = build_learned_draft_source(
+                speculative,
+                draft_model_path,
+                target_model=model,
+                target_config=model_config,
+            )
+            runner.set_learned_draft_source(learned_draft_source)
     if tensor_parallel_size > 1:
         # CPU-testable TP path (design m5 D1/D3): rank 0 is the only sampling
         # owner; followers enter the passive seam and adopt its fixed packet.
@@ -921,8 +958,13 @@ def build_engine_loop(
         )
     else:
         active = runner or _ToyRunner()
-    if speculative == "ngram":
-        active = SpeculativeRunner(active)
+    if speculative is not None:
+        active = SpeculativeRunner(
+            active,
+            draft_source=(
+                learned_draft_source if learned_speculative else None
+            ),
+        )
     loop = EngineLoop(
         resolved,
         scheduler,
@@ -1164,6 +1206,7 @@ def _build_dist_tp_loop(
     tokenizer: str | Tokenizer | None,
     speculative: str | None = None,
     speculative_tokens: int = 4,
+    draft_model_path: str | Path | None = None,
     pipeline_depth: int = 1,
     graph_decode: bool = False,
     graph_max_batch: int = 8,
@@ -1216,6 +1259,8 @@ def _build_dist_tp_loop(
         dram_kv_tier_capacity_pages=dram_kv_tier_capacity_pages,
         dram_kv_tier_profile=dram_kv_tier_profile,
         max_num_batched_tokens=max_num_batched_tokens,
+        speculative=speculative,
+        draft_model_path=draft_model_path,
     )
     if launcher.dram_kv_binding is not None:
         cache.attach_dram_tier(
@@ -1230,8 +1275,11 @@ def _build_dist_tp_loop(
     # unchanged. A rejected draft shortens the overlay's outputs, which StateSync
     # already handles — a shrinking output list re-sends the full snapshot.
     active: object = launcher.runner
-    if speculative == "ngram":
-        active = SpeculativeRunner(active)
+    if speculative is not None:
+        active = SpeculativeRunner(
+            active,
+            draft_source=getattr(launcher, "draft_source", None),
+        )
     loop = EngineLoop(
         resolved,
         scheduler,
@@ -1299,6 +1347,7 @@ class KairyuBackend:
         max_num_partial_prefills: int = 2,
         expert_parallel_attention_dp: bool = False,
         generation_config: GenerationConfigMode = "auto",
+        draft_model_path: str | Path | None = None,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self.expert_parallel_size = expert_parallel_size
@@ -1318,6 +1367,7 @@ class KairyuBackend:
             tokenizer=tokenizer,
             speculative=speculative,
             speculative_tokens=speculative_tokens,
+            draft_model_path=draft_model_path,
             model_path=model_path,
             pd_separation=pd_separation,
             pd_prefill_device=pd_prefill_device,

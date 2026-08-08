@@ -1163,17 +1163,13 @@ class EngineLoop:
         return self._pipeline_depth
 
     def _needs_commit_barrier(self, scheduled: tuple) -> bool:
-        """Whether the next plan depends on this step's variable-length result.
+        """Commit the prompt root before its first speculative decode.
 
-        A speculative chunk can accept anywhere from one to ``k+1`` tokens, so
-        its successor position cannot be snapshotted before verification. The
-        prompt-completing sample is also committed before the first speculative
-        decode; otherwise a depth>1 loop permanently keeps one plain token in
-        flight and the scheduler's safe ``in_flight == 0`` speculation gate is
-        never reached.
+        The scheduler blocks only a request whose variable-length speculative
+        chunk is still in flight, so other requests may continue to fill the
+        pipeline.  The prompt-completing target sample remains a barrier: it is
+        the learned/ngram draft root and must enter committed context first.
         """
-        if any(not chunk.is_prefill and chunk.num_tokens > 1 for chunk in scheduled):
-            return True
         if not getattr(self._scheduler, "speculative_tokens", 0):
             return False
         states = self._scheduler.states

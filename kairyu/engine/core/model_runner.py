@@ -628,6 +628,8 @@ class PagedModelRunner:
         self._verification_batched_groups = 0
         self._verification_sequential_positions = 0
         self._verification_graph_groups = 0
+        self._draft_source = None
+        self._draft_aux_layer_ids: tuple[int, ...] = ()
 
         # m17 D1 / runbook §6.3: decode capture. OFF unless a backend is passed —
         # the seam has existed since m17 with no caller, and enabling it by
@@ -693,6 +695,27 @@ class PagedModelRunner:
                     else None
                 ),
             )
+
+    def set_learned_draft_source(self, source: object) -> None:
+        """Capture target rows for the learned source used by SpeculativeRunner."""
+
+        if self._draft_source is not None:
+            raise RuntimeError("this model runner already has a learned draft source")
+        capture = getattr(source, "capture_target_rows", None)
+        kind = getattr(source, "capture_kind", None)
+        if not callable(capture) or kind not in ("eagle_aux", "final_hidden"):
+            raise TypeError("learned draft source has no supported target capture contract")
+        if self._graph is not None:
+            raise ValueError(
+                "learned speculative decoding requires eager target execution"
+            )
+        if kind == "eagle_aux":
+            from kairyu.models.eagle import default_eagle3_aux_layer_ids
+
+            self._draft_aux_layer_ids = default_eagle3_aux_layer_ids(
+                len(self._model.model.layers)
+            )
+        self._draft_source = source
 
     def _plan_graph_decode(self, batch) -> None:
         """Step-boundary host phase, run OUTSIDE the captured region ([P1]).
@@ -1663,15 +1686,36 @@ class PagedModelRunner:
         cached = state.allocation.num_cached_tokens if state.allocation else 0
         end = state.computed_prompt
         start = end - chunk.num_tokens
-        hidden = self._forward_sequential_tokens(
-            torch.tensor(prompt[start:end], dtype=torch.long, device=self._device),
-            torch.arange(start, end, device=self._device),
-            page_table,
-            seq_len=end,
-            write_from=cached,
-            chunk_start=start,
-            has_writable=end > cached,
+        token_ids = torch.tensor(
+            prompt[start:end], dtype=torch.long, device=self._device
         )
+        positions = torch.arange(start, end, device=self._device)
+        if self._draft_source is None:
+            hidden = self._forward_sequential_tokens(
+                token_ids,
+                positions,
+                page_table,
+                seq_len=end,
+                write_from=cached,
+                chunk_start=start,
+                has_writable=end > cached,
+            )
+        else:
+            hidden, aux_hidden = self._forward_sequential_tokens_for_draft(
+                token_ids,
+                positions,
+                page_table,
+                seq_len=end,
+                write_from=cached,
+                chunk_start=start,
+                has_writable=end > cached,
+            )
+            self._capture_draft_rows(
+                chunk.request_id,
+                tuple(range(start, end)),
+                hidden,
+                aux_hidden,
+            )
         self._prefill_rows_executed = (
             getattr(self, "_prefill_rows_executed", 0) + 1
         )
@@ -1714,6 +1758,66 @@ class PagedModelRunner:
             seq_len=seq_len,
             write_from=write_from,
             **metadata,
+        )
+
+    def _forward_sequential_tokens_for_draft(
+        self,
+        token_ids: torch.Tensor,
+        positions: torch.Tensor,
+        page_table: list[int],
+        *,
+        seq_len: int,
+        write_from: int,
+        chunk_start: int,
+        has_writable: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        metadata = {}
+        if getattr(self._model, "supports_sequential_host_metadata", False):
+            metadata = {
+                "chunk_start": chunk_start,
+                "has_writable": has_writable,
+            }
+        if self._draft_aux_layer_ids:
+            return self._model.forward_tokens_with_aux(
+                token_ids,
+                positions,
+                self._pool,
+                page_table,
+                seq_len=seq_len,
+                aux_layer_ids=self._draft_aux_layer_ids,
+                write_from=write_from,
+                **metadata,
+            )
+        return (
+            self._model.forward_tokens(
+                token_ids,
+                positions,
+                self._pool,
+                page_table,
+                seq_len=seq_len,
+                write_from=write_from,
+                **metadata,
+            ),
+            None,
+        )
+
+    def _capture_draft_rows(
+        self,
+        request_id: str,
+        positions: tuple[int, ...],
+        hidden: torch.Tensor,
+        aux_hidden: torch.Tensor | None,
+        *,
+        staged: bool = False,
+    ) -> None:
+        if self._draft_source is None:
+            return
+        self._draft_source.capture_target_rows(
+            request_id,
+            positions,
+            hidden,
+            aux_hidden=aux_hidden,
+            staged=staged,
         )
 
     def _execute_ragged_batch(
@@ -1787,7 +1891,25 @@ class PagedModelRunner:
             )
             decode_start = batch.qo_indptr[-len(decode_tokens) - 1]
             batch.token_ids[decode_start:].copy_(token_slots)
-        hidden = self._model.forward_prefill_batch(batch, self._pool)
+        aux_hidden = None
+        if self._draft_aux_layer_ids:
+            hidden, aux_hidden = self._model.forward_prefill_batch_with_aux(
+                batch,
+                self._pool,
+                self._draft_aux_layer_ids,
+            )
+        else:
+            hidden = self._model.forward_prefill_batch(batch, self._pool)
+        if self._draft_source is not None:
+            for index, (chunk, row) in enumerate(zip(chunks, rows, strict=True)):
+                start = batch.qo_indptr[index]
+                end = batch.qo_indptr[index + 1]
+                self._capture_draft_rows(
+                    chunk.request_id,
+                    tuple(range(row.chunk_start, row.chunk_start + end - start)),
+                    hidden[start:end],
+                    aux_hidden[start:end] if aux_hidden is not None else None,
+                )
         prefill_count = sum(chunk.is_prefill for chunk in chunks)
         self._prefill_rows_executed = (
             getattr(self, "_prefill_rows_executed", 0) + prefill_count
@@ -2030,22 +2152,45 @@ class PagedModelRunner:
         return self._decode_slots[:size], self._decode_positions[:size]
 
     def _execute_decode(
-        self, chunk: ScheduledChunk, state, sampled: dict | None
+        self,
+        chunk: ScheduledChunk,
+        state,
+        sampled: dict | None,
+        *,
+        draft_staged: bool = False,
     ) -> None:
         input_token, absolute, page_table, cached = self._decode_inputs(chunk, state)
         # the single-request path uses the SAME slots as the batched one: a
         # workload that drops to one request must not fall back to rebuilding a
         # fresh device tensor every step
         token_slot, position_slot = self._decode_input_slots([input_token], [absolute])
-        hidden = self._forward_sequential_tokens(
-            token_slot,
-            position_slot,
-            page_table,
-            seq_len=absolute + 1,
-            write_from=cached,
-            chunk_start=absolute,
-            has_writable=absolute >= cached,
-        )
+        if self._draft_source is None:
+            hidden = self._forward_sequential_tokens(
+                token_slot,
+                position_slot,
+                page_table,
+                seq_len=absolute + 1,
+                write_from=cached,
+                chunk_start=absolute,
+                has_writable=absolute >= cached,
+            )
+        else:
+            hidden, aux_hidden = self._forward_sequential_tokens_for_draft(
+                token_slot,
+                position_slot,
+                page_table,
+                seq_len=absolute + 1,
+                write_from=cached,
+                chunk_start=absolute,
+                has_writable=absolute >= cached,
+            )
+            self._capture_draft_rows(
+                chunk.request_id,
+                (absolute,),
+                hidden,
+                aux_hidden,
+                staged=draft_staged,
+            )
         if sampled is None:
             return
         logits = self._model.logits(hidden[-1])
@@ -2188,6 +2333,42 @@ class PagedModelRunner:
             batch.write_from,
         )
 
+    def _eager_tensor_hidden_for_draft(
+        self, batch
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Tensor decode while retaining learned-draft target rows."""
+
+        plan_kwargs = {}
+        if getattr(self._model, "supports_fast_replay_plan", False):
+            plan_kwargs["host_seq_lens"] = batch.host_seq_lens
+        self._model.plan_decode_tensors(
+            self._pool,
+            batch.page_tables,
+            batch.seq_lens,
+            **plan_kwargs,
+        )
+        if self._draft_aux_layer_ids:
+            return self._model.forward_decode_tensors_with_aux(
+                batch.token_ids,
+                batch.positions,
+                self._pool,
+                batch.page_tables,
+                batch.seq_lens,
+                batch.write_from,
+                self._draft_aux_layer_ids,
+            )
+        return (
+            self._model.forward_decode_tensors(
+                batch.token_ids,
+                batch.positions,
+                self._pool,
+                batch.page_tables,
+                batch.seq_lens,
+                batch.write_from,
+            ),
+            None,
+        )
+
     def _execute_decode_batch(
         self,
         chunks: list[ScheduledChunk],
@@ -2209,6 +2390,7 @@ class PagedModelRunner:
         # tensorizes page-table metadata.
         token_slots, position_slots = self._decode_input_slots(tokens, positions)
         row_owners = [DecodeRowOwner(chunk.request_id) for chunk in chunks]
+        aux_hidden = None
         if self._graph is not None:
             logits = self._graph_logits(
                 token_slots,
@@ -2229,17 +2411,50 @@ class PagedModelRunner:
                 write_from=write_from,
                 row_owners=row_owners,
             )
-            hidden = self._eager_tensor_hidden(batch)
+            if self._draft_source is None:
+                hidden = self._eager_tensor_hidden(batch)
+            else:
+                hidden, aux_hidden = self._eager_tensor_hidden_for_draft(batch)
             logits = self._model.logits(hidden) if sampled is not None else None
         else:
-            hidden = self._model.forward_decode_batch(
-                token_slots, position_slots,
-                self._pool, page_tables, seq_lens, write_from,
-                position_values=positions,
-            )
+            if self._draft_aux_layer_ids:
+                hidden, aux_hidden = self._model.forward_decode_batch_with_aux(
+                    token_slots,
+                    position_slots,
+                    self._pool,
+                    page_tables,
+                    seq_lens,
+                    write_from,
+                    self._draft_aux_layer_ids,
+                    position_values=positions,
+                )
+            else:
+                hidden = self._model.forward_decode_batch(
+                    token_slots,
+                    position_slots,
+                    self._pool,
+                    page_tables,
+                    seq_lens,
+                    write_from,
+                    position_values=positions,
+                )
             logits = (
                 self._model.logits(hidden) if sampled is not None else None
             )  # [B, vocab]
+        if self._draft_source is not None:
+            for index, (chunk, absolute) in enumerate(
+                zip(chunks, positions, strict=True)
+            ):
+                self._capture_draft_rows(
+                    chunk.request_id,
+                    (absolute,),
+                    hidden[index : index + 1],
+                    (
+                        aux_hidden[index : index + 1]
+                        if aux_hidden is not None
+                        else None
+                    ),
+                )
         if sampled is None:
             return
         assert logits is not None
@@ -2362,6 +2577,7 @@ class PagedModelRunner:
         token_slots, position_slots = self._decode_input_slots(
             tokens, positions
         )
+        aux_hidden = None
         if self._graph is not None:
             batch = self._build_tensor_decode_batch(
                 tokens=token_slots,
@@ -2388,19 +2604,47 @@ class PagedModelRunner:
                 write_from=write_from,
                 row_owners=row_owners,
             )
-            hidden = self._eager_tensor_hidden(batch)
+            if self._draft_source is None:
+                hidden = self._eager_tensor_hidden(batch)
+            else:
+                hidden, aux_hidden = self._eager_tensor_hidden_for_draft(batch)
             logits = self._model.logits(hidden) if sampled is not None else None
         else:
-            hidden = self._model.forward_decode_batch(
-                token_slots,
-                position_slots,
-                self._pool,
-                page_tables,
-                seq_lens,
-                write_from,
-                position_values=positions,
-            )
+            if self._draft_aux_layer_ids:
+                hidden, aux_hidden = self._model.forward_decode_batch_with_aux(
+                    token_slots,
+                    position_slots,
+                    self._pool,
+                    page_tables,
+                    seq_lens,
+                    write_from,
+                    self._draft_aux_layer_ids,
+                    position_values=positions,
+                )
+            else:
+                hidden = self._model.forward_decode_batch(
+                    token_slots,
+                    position_slots,
+                    self._pool,
+                    page_tables,
+                    seq_lens,
+                    write_from,
+                    position_values=positions,
+                )
             logits = self._model.logits(hidden) if sampled is not None else None
+
+        if self._draft_source is not None:
+            cursor = 0
+            for chunk in chunks:
+                end = cursor + chunk.num_tokens
+                self._capture_draft_rows(
+                    chunk.request_id,
+                    tuple(positions[cursor:end]),
+                    hidden[cursor:end],
+                    aux_hidden[cursor:end] if aux_hidden is not None else None,
+                    staged=True,
+                )
+                cursor = end
 
         if sampled is None:
             return
@@ -2448,7 +2692,10 @@ class PagedModelRunner:
                     tuple[SampledToken | _PendingDeviceToken, ...],
                 ] | None = {} if sampled is not None else None
                 self._execute_decode(
-                    logical, states[chunk.request_id], one
+                    logical,
+                    states[chunk.request_id],
+                    one,
+                    draft_staged=True,
                 )
                 if one is not None:
                     values.extend(one[chunk.request_id])

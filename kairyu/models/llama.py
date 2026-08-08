@@ -351,15 +351,7 @@ class DenseDecoder(nn.Module):
         writes target KV, and the ordinary post-final-norm output is unchanged.
         """
 
-        if not aux_layer_ids:
-            raise ValueError("aux_layer_ids must contain at least one layer")
-        if tuple(sorted(set(aux_layer_ids))) != aux_layer_ids:
-            raise ValueError("aux_layer_ids must be unique and strictly increasing")
-        if aux_layer_ids[0] < 0 or aux_layer_ids[-1] >= len(self.model.layers):
-            raise ValueError(
-                "aux_layer_ids must be within "
-                f"[0, {len(self.model.layers) - 1}], got {aux_layer_ids}"
-            )
+        self._validate_aux_layer_ids(aux_layer_ids)
 
         hidden = self.model.embed_tokens(token_ids)
         cos, sin = self.model.rotary_emb(positions)
@@ -386,6 +378,17 @@ class DenseDecoder(nn.Module):
             if index in capture_ids:
                 captures.append(hidden)
         return self.model.norm(hidden), torch.cat(captures, dim=-1)
+
+    def _validate_aux_layer_ids(self, aux_layer_ids: tuple[int, ...]) -> None:
+        if not aux_layer_ids:
+            raise ValueError("aux_layer_ids must contain at least one layer")
+        if tuple(sorted(set(aux_layer_ids))) != aux_layer_ids:
+            raise ValueError("aux_layer_ids must be unique and strictly increasing")
+        if aux_layer_ids[0] < 0 or aux_layer_ids[-1] >= len(self.model.layers):
+            raise ValueError(
+                "aux_layer_ids must be within "
+                f"[0, {len(self.model.layers) - 1}], got {aux_layer_ids}"
+            )
 
     @torch.no_grad()
     def forward_decode_batch(
@@ -420,6 +423,42 @@ class DenseDecoder(nn.Module):
         return self.model.norm(hidden)  # [B, H]
 
     @torch.no_grad()
+    def forward_decode_batch_with_aux(
+        self,
+        token_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_pool: PagedKVPool,
+        page_tables: list[list[int]],
+        seq_lens: list[int],
+        write_from: list[int],
+        aux_layer_ids: tuple[int, ...],
+        position_values: list[int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Batched decode plus EAGLE auxiliary residual capture."""
+
+        self._validate_aux_layer_ids(aux_layer_ids)
+        hidden = self.model.embed_tokens(token_ids)
+        cos, sin = self.model.rotary_emb(positions)
+        captures: list[torch.Tensor] = []
+        capture_ids = frozenset(aux_layer_ids)
+        for index, layer in enumerate(self.model.layers):
+            hidden = layer.forward_decode_batch(
+                hidden,
+                cos,
+                sin,
+                kv_pool,
+                index,
+                page_tables,
+                positions,
+                seq_lens,
+                write_from,
+                position_values,
+            )
+            if index in capture_ids:
+                captures.append(hidden)
+        return self.model.norm(hidden), torch.cat(captures, dim=-1)
+
+    @torch.no_grad()
     def forward_prefill_batch(
         self,
         batch: PrefillBatch,
@@ -438,6 +477,33 @@ class DenseDecoder(nn.Module):
                 batch,
             )
         return self.model.norm(hidden)
+
+    @torch.no_grad()
+    def forward_prefill_batch_with_aux(
+        self,
+        batch: PrefillBatch,
+        kv_pool: PagedKVPool,
+        aux_layer_ids: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Ragged prefill plus EAGLE auxiliary residual capture."""
+
+        self._validate_aux_layer_ids(aux_layer_ids)
+        hidden = self.model.embed_tokens(batch.token_ids)
+        cos, sin = self.model.rotary_emb(batch.positions)
+        captures: list[torch.Tensor] = []
+        capture_ids = frozenset(aux_layer_ids)
+        for index, layer in enumerate(self.model.layers):
+            hidden = layer.forward_prefill_batch(
+                hidden,
+                cos,
+                sin,
+                kv_pool,
+                index,
+                batch,
+            )
+            if index in capture_ids:
+                captures.append(hidden)
+        return self.model.norm(hidden), torch.cat(captures, dim=-1)
 
     @torch.no_grad()
     def forward_decode_tensors(
@@ -467,6 +533,40 @@ class DenseDecoder(nn.Module):
                 write_from,
             )
         return self.model.norm(hidden)
+
+    @torch.no_grad()
+    def forward_decode_tensors_with_aux(
+        self,
+        token_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_pool: PagedKVPool,
+        page_tables: torch.Tensor,
+        seq_lens: torch.Tensor,
+        write_from: torch.Tensor | None,
+        aux_layer_ids: tuple[int, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Tensor-metadata eager decode plus EAGLE auxiliary capture."""
+
+        self._validate_aux_layer_ids(aux_layer_ids)
+        hidden = self.model.embed_tokens(token_ids)
+        cos, sin = self.model.rotary_emb(positions)
+        captures: list[torch.Tensor] = []
+        capture_ids = frozenset(aux_layer_ids)
+        for index, layer in enumerate(self.model.layers):
+            hidden = layer.forward_decode_tensors(
+                hidden,
+                cos,
+                sin,
+                kv_pool,
+                index,
+                page_tables,
+                positions,
+                seq_lens,
+                write_from,
+            )
+            if index in capture_ids:
+                captures.append(hidden)
+        return self.model.norm(hidden), torch.cat(captures, dim=-1)
 
     @torch.no_grad()
     def plan_decode_tensors(

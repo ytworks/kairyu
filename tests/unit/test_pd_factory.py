@@ -1440,10 +1440,12 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
         "max_num_partial_prefills",
         "expert_parallel_attention_dp",
         "generation_config",
+        "draft_model_path",
     )
     assert parameters["max_num_partial_prefills"].default == 2
     assert parameters["expert_parallel_attention_dp"].default is False
     assert parameters["generation_config"].default == "auto"
+    assert parameters["draft_model_path"].default is None
 
 
 def test_pd_rejects_a_mixed_cpu_cuda_role_pair(model_dir):

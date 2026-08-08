@@ -959,9 +959,17 @@ class ZmqEngineBackend:
         generation_config: GenerationConfigMode = "auto",
         tensor_parallel_size: int = 1,
         max_num_partial_prefills: int = 2,
+        draft_model_path: str | PathLike[str] | None = None,
     ) -> None:
         if tokenizer is not None and not isinstance(tokenizer, str):
             raise ValueError("kairyu-proc requires a string tokenizer (name or path)")
+        if draft_model_path is not None and (
+            not isinstance(draft_model_path, (str, PathLike))
+            or not str(draft_model_path)
+        ):
+            raise ValueError(
+                "kairyu-proc draft_model_path must be a non-empty local path or null"
+            )
         if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
             raise ValueError("tensor_parallel_size must be a positive integer")
         if model_path is None:
@@ -1034,6 +1042,9 @@ class ZmqEngineBackend:
             "tokenizer": tokenizer,
             "speculative": speculative,
             "speculative_tokens": speculative_tokens,
+            "draft_model_path": (
+                str(draft_model_path) if draft_model_path is not None else None
+            ),
             "model_path": model_path,
             "pipeline_depth": pipeline_depth,
             "decode_mode": decode_mode,

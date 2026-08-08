@@ -2,7 +2,12 @@
 
 import torch
 
-from kairyu.engine.core.draft import ModelDraftSource, NGramDraftSource
+from kairyu.engine.core.draft import (
+    EagleDraftAdapter,
+    ModelDraftSource,
+    MtpDraftAdapter,
+    NGramDraftSource,
+)
 from kairyu.engine.core.spec_decode import propose_ngram
 
 
@@ -28,6 +33,97 @@ class TestModelDraftSource:
         assert source.propose((5,), 3) == [6, 7, 8]
         assert source.propose((31,), 2) == [0, 1]
         assert source.propose((5,), 0) == []
+
+
+def test_eagle_adapter_commits_only_authoritative_verification_rows():
+    class _Target(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.embed_tokens = torch.nn.Embedding(64, 4)
+
+    class _Head:
+        def __init__(self):
+            self.history_widths = []
+            self.history_ptrs = []
+
+        def fuse(self, aux):
+            assert not torch.is_grad_enabled()
+            return aux[:, :4]
+
+        def rollout_cached(self, shifted, hidden, embed_fn, k):
+            assert not torch.is_grad_enabled()
+            self.history_widths.append((shifted.shape[0], hidden.shape[0]))
+            self.history_ptrs.append(hidden.data_ptr())
+            embed_fn(7)
+            return list(range(10, 10 + k))
+
+    head = _Head()
+    source = EagleDraftAdapter(head, _Target())
+    source.capture_target_rows(
+        "r",
+        (0, 1),
+        torch.zeros(2, 4),
+        aux_hidden=torch.arange(24, dtype=torch.float32).view(2, 12),
+    )
+    assert source.propose_for_request("r", (1, 2, 3), 2) == [10, 11]
+
+    source.capture_target_rows(
+        "r",
+        (2, 3, 4),
+        torch.zeros(3, 4),
+        aux_hidden=torch.arange(36, dtype=torch.float32).view(3, 12),
+        staged=True,
+    )
+    source.commit_verification("r", accepted_draft_tokens=1)
+    assert source.propose_for_request("r", (1, 2, 3, 10, 19), 1) == [10]
+    assert head.history_widths == [(2, 2), (4, 4)]
+    assert head.history_ptrs[0] == head.history_ptrs[1]
+
+
+def test_eagle_adapter_degrades_when_radix_hit_omits_hidden_prefix():
+    class _Target(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.embed_tokens = torch.nn.Embedding(64, 4)
+
+    class _Head:
+        def fuse(self, aux):
+            return aux[:, :4]
+
+    source = EagleDraftAdapter(_Head(), _Target())
+    source.capture_target_rows(
+        "cached",
+        (4,),
+        torch.zeros(1, 4),
+        aux_hidden=torch.zeros(1, 12),
+    )
+    assert source.propose_for_request("cached", (1, 2, 3, 4, 5, 6), 3) == []
+
+
+def test_mtp_adapter_shifts_tokens_against_target_hidden_rows():
+    class _Target(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.rotary_emb = object()
+
+    class _Head:
+        def rollout_cached(self, token_ids, hidden, rotary_emb, k):
+            assert token_ids.tolist() == [2, 3]
+            assert torch.equal(hidden, torch.tensor([[1.0], [2.0]]))
+            assert rotary_emb is target.model.rotary_emb
+            return [20, 21][:k]
+
+    target = _Target()
+    source = MtpDraftAdapter(_Head(), target)
+    source.capture_target_rows(
+        "r",
+        (0, 1),
+        torch.tensor([[1.0], [2.0]]),
+    )
+    assert source.propose_for_request("r", (1, 2, 3), 2) == [20, 21]
 
 
 def test_spec_runner_with_model_draft_matches_plain_greedy():

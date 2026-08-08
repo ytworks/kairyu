@@ -48,15 +48,26 @@ def test_reservation_capped_by_remaining_tokens():
 
 
 def test_spec_requires_in_flight_zero():
-    # schedule twice without committing (overlap-style): the second chunk for
-    # the same request must be a plain 1-token chunk, scheduler-enforced
+    # schedule twice without committing (overlap-style): the same request stays
+    # out of later snapshots until its variable-length result commits
     scheduler, _ = _setup(k=3, budget=64)
     _to_decode(scheduler)
     first = scheduler.schedule().scheduled[0]
     assert first.num_tokens == 4
-    second = scheduler.schedule().scheduled[0]
-    assert second.num_tokens == 1
-    assert second.position == first.position + first.num_tokens
+    assert scheduler.schedule().scheduled == ()
+
+
+def test_unrelated_request_can_schedule_while_spec_result_is_in_flight():
+    scheduler, _ = _setup(k=3, budget=4)
+    scheduler.add_request(EngineRequest("a", (1,), max_new_tokens=16))
+    scheduler.add_request(EngineRequest("b", (9,), max_new_tokens=16))
+    scheduler.schedule()
+    scheduler.update({"a": 100, "b": 100})
+
+    first = scheduler.schedule().scheduled
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in first] == [("a", 4)]
+    second = scheduler.schedule().scheduled
+    assert [(chunk.request_id, chunk.num_tokens) for chunk in second] == [("b", 4)]
 
 
 def test_spec_chunk_consumes_budget_num_tokens():

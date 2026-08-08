@@ -6541,6 +6541,8 @@ class DistTPLauncher:
         dram_kv_tier_capacity_pages: int = 0,
         dram_kv_tier_profile: str | Path | None = None,
         max_num_batched_tokens: int = 2048,
+        speculative: str | None = None,
+        draft_model_path: str | Path | None = None,
     ) -> None:
         import tempfile
 
@@ -6653,6 +6655,21 @@ class DistTPLauncher:
                 dram_kv_tier_profile,
                 max_num_batched_tokens,
             )
+            self.draft_source = None
+            if speculative in ("eagle", "mtp"):
+                if draft_model_path is None:
+                    raise ValueError(
+                        f"speculative={speculative!r} requires draft_model_path"
+                    )
+                from kairyu.engine.core.draft import build_learned_draft_source
+
+                self.draft_source = build_learned_draft_source(
+                    speculative,
+                    draft_model_path,
+                    target_model=runner._model,
+                    target_config=self.full_config,
+                )
+                runner.set_learned_draft_source(self.draft_source)
             self.attention_backend_decision = runner.attention_backend_decision
             self.attention_backend_identity = runner.attention_backend_identity
             self.kv_cache_dtype_requested = runner.kv_cache_dtype_requested

@@ -69,6 +69,10 @@ class SpeculativeRunner:
         self.draft_accepted = 0
         self._overlay_epoch = 0
 
+    @property
+    def draft_source_name(self) -> str:
+        return str(getattr(self._draft_source, "source_name", "custom"))
+
     def _overlay(self, state: object, outputs: tuple[int, ...]) -> _OverlayState:
         """Give every replaceable draft prefix a distinct sync epoch."""
 
@@ -86,8 +90,21 @@ class SpeculativeRunner:
             return 0.0
         return self.draft_accepted / self.draft_proposed
 
+    def speculative_execution_stats(self) -> dict[str, object]:
+        """Machine-readable acceptance evidence for benchmark artifacts."""
+
+        return {
+            "draft_source": self.draft_source_name,
+            "draft_proposed": self.draft_proposed,
+            "draft_accepted": self.draft_accepted,
+            "mean_accepted": self.mean_accepted,
+        }
+
     def release(self, request_id: str) -> None:
         """Forward finish cleanup to the wrapped runner (E2)."""
+        draft_release = getattr(self._draft_source, "release", None)
+        if callable(draft_release):
+            draft_release(request_id)
         release = getattr(self._runner, "release", None)
         if release is not None:
             release(request_id)
@@ -158,11 +175,22 @@ class SpeculativeRunner:
     def _propose(self, chunk: ScheduledChunk, state: object) -> tuple[int, ...]:
         committed = tuple(state.outputs)
         context = state.request.prompt_token_ids + committed
-        return tuple(
-            self._draft_source.propose(
+        propose_for_request = getattr(
+            self._draft_source, "propose_for_request", None
+        )
+        if callable(propose_for_request):
+            proposed = propose_for_request(
+                chunk.request_id,
+                context,
+                chunk.num_tokens - 1,
+            )
+        else:
+            proposed = self._draft_source.propose(
                 context,
                 max_draft=chunk.num_tokens - 1,
             )
+        return tuple(
+            proposed
         )[: chunk.num_tokens - 1]
 
     def _finish_verification(
@@ -184,6 +212,9 @@ class SpeculativeRunner:
         )
         self.draft_proposed += len(draft)
         self.draft_accepted += result.accepted
+        commit = getattr(self._draft_source, "commit_verification", None)
+        if callable(commit):
+            commit(request_id, result.accepted)
         return tuple(target[: result.accepted + 1])
 
     def _execute_batched(

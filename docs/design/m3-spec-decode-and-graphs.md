@@ -1,9 +1,10 @@
 # M3 Design: Speculative Decoding, CUDA Graphs, P-D Separation
 
-Status: **Production GPU-validated for n-gram target verification** (2026-07-30;
+Status: **Production GPU-validated for n-gram target verification; learned
+draft serving integrated** (2026-08-08;
 reviewed APPROVE-WITH-AMENDMENTS on 2026-07-02, see §5). CUDA Graph serving
-and intra-node P-D are production-enabled through M17/M18; EAGLE runtime
-integration remains a G4 follow-up. Human sign-off pending.
+and intra-node P-D are production-enabled through M17/M18; EAGLE-3/MTP greedy
+serving is wired through M17 A30-A32. Human sign-off pending.
 Milestone: M3
 Date: 2026-07-02
 
@@ -44,10 +45,11 @@ overlap loop, `position = outputs + in_flight` is stale when acceptance counts v
 first integration runs with the overlap pipeline at depth 1 (serial) until the
 reconciliation protocol is specified and tested.
 
-## 3. Deferred to GPU phase (design sketch only)
+## 3. GPU-phase components
 
-- **EAGLE-family draft**: draft head on hidden states; requires the M2 runner's hidden
-  state plumbing. Same `propose/verify` seam.
+- **EAGLE/MTP draft**: implemented through the stateful target-hidden and
+  rollback contract in M17 A30-A32; learned drafts currently use greedy
+  verification and eager target execution.
 - **CUDA graphs**: capture decode-step graphs per batch-size bucket (vLLM V1 style);
   invalidated on page-table growth — the M2 page-granular KV layout was chosen so graph
   capture only depends on max page count, not radix topology.

@@ -177,8 +177,10 @@ def _timing_pair(*, graph_runner: bool):
                     "slot": slot,
                     "mode": mode,
                     "outputs": outputs,
+                    "draft_source": "ngram",
                     "draft_proposed": 24,
                     "draft_accepted": 12,
+                    "mean_accepted": 0.5,
                     "rank_stats": _rank_stats(
                         enabled=enabled,
                         graph_runner=graph_runner,

@@ -1457,6 +1457,25 @@ def test_production_builder_exposes_pipeline_depth() -> None:
     loop.close()
 
 
+def test_learned_speculation_requires_target_and_draft_checkpoints() -> None:
+    with pytest.raises(ValueError, match="draft_model_path"):
+        build_engine_loop(model_path="target", speculative="eagle")
+    with pytest.raises(ValueError, match="real model_path"):
+        build_engine_loop(
+            speculative="mtp",
+            draft_model_path="draft",
+        )
+    with pytest.raises(ValueError, match="requires speculative"):
+        build_engine_loop(draft_model_path="draft")
+    with pytest.raises(ValueError, match="requires decode_mode='eager'"):
+        build_engine_loop(
+            model_path="target",
+            speculative="eagle",
+            draft_model_path="draft",
+            decode_mode="cuda_graph",
+        )
+
+
 async def test_depth_one_backend_overlaps_output_with_next_step_and_returns_stop(
     monkeypatch,
 ) -> None:

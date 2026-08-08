@@ -422,8 +422,10 @@ def _run_end_to_end(
             prefix,
             expected_tokens=MAX_NEW_TOKENS,
         ),
+        "draft_source": speculative.draft_source_name,
         "draft_proposed": speculative.draft_proposed,
         "draft_accepted": speculative.draft_accepted,
+        "mean_accepted": speculative.mean_accepted,
         "rank_stats": rank_stats,
         "timing": {
             "binding": False,
@@ -1341,10 +1343,14 @@ def _timing_pair_gate(
             or sample.get("round") != round_index
             or sample.get("slot") != slot
             or sample.get("mode") != mode
+            or sample.get("draft_source") != "ngram"
             or type(sample.get("draft_proposed")) is not int
             or sample["draft_proposed"] < 1
             or type(sample.get("draft_accepted")) is not int
             or not 0 <= sample["draft_accepted"] <= sample["draft_proposed"]
+            or type(sample.get("mean_accepted")) not in (float, int)
+            or sample["mean_accepted"]
+            != sample["draft_accepted"] / sample["draft_proposed"]
             or not isinstance(sample.get("outputs"), list)
         ):
             return False
@@ -1394,8 +1400,10 @@ def _parity_gate(measurements: object) -> bool:
     if not cells or not structural_targets:
         return False
     first_outputs = cells[0].get("outputs")
+    first_source = cells[0].get("draft_source")
     first_proposed = cells[0].get("draft_proposed")
     first_accepted = cells[0].get("draft_accepted")
+    first_mean = cells[0].get("mean_accepted")
     return (
         isinstance(first_outputs, list)
         and len(first_outputs) == REQUEST_COUNT
@@ -1408,10 +1416,14 @@ def _parity_gate(measurements: object) -> bool:
         and type(first_proposed) is int
         and first_proposed > 0
         and type(first_accepted) is int
+        and first_source == "ngram"
+        and type(first_mean) in (float, int)
         and all(
             cell.get("outputs") == first_outputs
+            and cell.get("draft_source") == first_source
             and cell.get("draft_proposed") == first_proposed
             and cell.get("draft_accepted") == first_accepted
+            and cell.get("mean_accepted") == first_mean
             for cell in cells
         )
         and all(target == structural_targets[0] for target in structural_targets)

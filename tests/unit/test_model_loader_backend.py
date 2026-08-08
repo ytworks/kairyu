@@ -67,6 +67,59 @@ class _SmallVocabTokenizer:
         return [f"t{i}" for i in range(256)]
 
 
+def test_builder_wires_learned_draft_source_to_target_runner(
+    checkpoint, monkeypatch
+):
+    from kairyu.engine.core import draft as draft_module
+    from kairyu.engine.core.spec_runner import SpeculativeRunner
+
+    path, _ = checkpoint
+
+    class _Source:
+        source_name = "mtp"
+        capture_kind = "final_hidden"
+
+        def capture_target_rows(self, *args, **kwargs):
+            pass
+
+        def propose_for_request(self, request_id, context, max_draft):
+            return []
+
+        def commit_verification(self, request_id, accepted):
+            pass
+
+        def release(self, request_id):
+            pass
+
+    source = _Source()
+    seen = {}
+
+    def build(mode, draft_path, *, target_model, target_config):
+        seen.update(
+            mode=mode,
+            path=draft_path,
+            model=target_model,
+            config=target_config,
+        )
+        return source
+
+    monkeypatch.setattr(draft_module, "build_learned_draft_source", build)
+    loop, _cache, _scheduler = build_engine_loop(
+        model_path=str(path),
+        tokenizer=_SmallVocabTokenizer(),
+        speculative="mtp",
+        draft_model_path=str(path),
+        decode_mode="eager",
+    )
+
+    assert isinstance(loop._runner, SpeculativeRunner)
+    assert loop._runner.draft_source_name == "mtp"
+    assert loop._runner._runner._draft_source is source
+    assert seen["mode"] == "mtp"
+    assert seen["model"] is loop._runner._runner._model
+    loop.close()
+
+
 def test_loader_roundtrip_matches_source_model(checkpoint):
     path, hf_model = checkpoint
     model, config, generation = load_model(path)
