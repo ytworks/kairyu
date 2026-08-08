@@ -714,36 +714,41 @@ def test_attention_dp_startup_prepares_every_capture_forward_on_every_rank(
 
 
 @pytest.mark.parametrize(
-    ("stats", "message"),
+    ("stats", "unified_mixed_enabled", "message"),
     [
         (
             {
                 "enabled": False,
-                "unified_mixed_enabled": False,
                 "capability_gap": None,
             },
+            False,
             "remain enabled",
         ),
         (
             {
                 "enabled": True,
-                "unified_mixed_enabled": True,
                 "capability_gap": None,
             },
+            True,
             "mixed steps to remain split",
         ),
         (
             {
                 "enabled": True,
-                "unified_mixed_enabled": False,
                 "capability_gap": "backend has no native batched prefill",
             },
+            False,
             "requires native batched prefill",
         ),
     ],
 )
-def test_attention_dp_rejects_unsafe_prefill_runner(stats, message) -> None:
-    runner = SimpleNamespace(prefill_execution_stats=lambda *, reset: stats)
+def test_attention_dp_rejects_unsafe_prefill_runner(
+    stats, unified_mixed_enabled, message
+) -> None:
+    runner = SimpleNamespace(
+        prefill_execution_stats=lambda *, reset: stats,
+        unified_mixed_enabled=unified_mixed_enabled,
+    )
     with pytest.raises(RuntimeError, match=message):
         worker_module._validate_attention_dp_batched_prefill_runner(runner)
 
@@ -751,10 +756,12 @@ def test_attention_dp_rejects_unsafe_prefill_runner(stats, message) -> None:
 def test_attention_dp_accepts_split_mixed_native_prefill_runner() -> None:
     stats = {
         "enabled": True,
-        "unified_mixed_enabled": False,
         "capability_gap": None,
     }
-    runner = SimpleNamespace(prefill_execution_stats=lambda *, reset: stats)
+    runner = SimpleNamespace(
+        prefill_execution_stats=lambda *, reset: stats,
+        unified_mixed_enabled=False,
+    )
 
     worker_module._validate_attention_dp_batched_prefill_runner(runner)
 

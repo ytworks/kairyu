@@ -2929,7 +2929,7 @@ def _validate_attention_dp_batched_prefill_runner(local_runner) -> None:
         raise RuntimeError(
             "request-owned attention-DP requires batched prefill to remain enabled"
         )
-    if stats.get("unified_mixed_enabled") is not False:
+    if getattr(local_runner, "unified_mixed_enabled", None) is not False:
         raise RuntimeError(
             "request-owned attention-DP requires mixed steps to remain split"
         )

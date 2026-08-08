@@ -339,7 +339,6 @@ def test_runner_batches_multiple_prefills_and_emits_only_terminal_rows():
     assert len(result["done"]) == 1
     assert runner.prefill_execution_stats() == {
         "enabled": True,
-        "unified_mixed_enabled": True,
         "capability_gap": None,
         "rows": 2,
         "model_calls": 1,
@@ -419,7 +418,6 @@ def test_runner_unifies_mixed_prefill_and_decode_with_numeric_parity(monkeypatch
     assert torch.allclose(mixed_pool.v, split_pool.v, atol=1e-6)
     assert mixed_runner.prefill_execution_stats() == {
         "enabled": True,
-        "unified_mixed_enabled": True,
         "capability_gap": None,
         "rows": 1,
         "model_calls": 1,
@@ -605,7 +603,7 @@ def test_unified_mixed_disable_keeps_pure_prefill_batching(monkeypatch):
     assert set(pure_prefill) == {"a", "b"}
     assert token_calls == 2
     assert ragged_calls == 1
-    assert runner.prefill_execution_stats()["unified_mixed_enabled"] is False
+    assert runner.unified_mixed_enabled is False
 
 
 def test_runner_falls_back_for_torch_backend_and_single_request():

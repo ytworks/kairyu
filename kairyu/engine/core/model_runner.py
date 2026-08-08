@@ -903,6 +903,11 @@ class PagedModelRunner:
             raise TypeError("unified mixed enabled flag must be bool")
         self._unified_mixed_enabled = enabled
 
+    @property
+    def unified_mixed_enabled(self) -> bool:
+        """Whether compatible mixed steps may share one ragged model chain."""
+        return self._unified_mixed_enabled
+
     def prefill_execution_stats(self, *, reset: bool = False) -> dict[str, object]:
         """Return structural counters; optional reset is out-of-band only."""
         backend_rows: list[dict[str, object]] = []
@@ -924,9 +929,6 @@ class PagedModelRunner:
                 backend_rows.append(row)
         result = {
             "enabled": getattr(self, "_batched_prefill_enabled", True),
-            "unified_mixed_enabled": getattr(
-                self, "_unified_mixed_enabled", True
-            ),
             "capability_gap": getattr(self, "_prefill_batch_gap", None),
             "rows": getattr(self, "_prefill_rows_executed", 0),
             "model_calls": getattr(self, "_prefill_model_calls", 0),
