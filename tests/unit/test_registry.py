@@ -463,3 +463,14 @@ def test_builtin_name_override_uses_registered_factory_contract(monkeypatch):
 )
 def test_preflight_does_not_invent_constructor_constraints(backend, options):
     validate_backend_options(backend, options)
+
+
+def test_native_preflight_accepts_learned_speculative_paths():
+    validate_backend_options(
+        "kairyu",
+        {
+            "model_path": "/models/target",
+            "speculative": "eagle",
+            "draft_model_path": "/models/draft",
+        },
+    )

@@ -57,6 +57,7 @@ _KAIRYU_OPTIONS = frozenset(
         "tokenizer",
         "speculative",
         "speculative_tokens",
+        "draft_model_path",
         "model_path",
         "pd_separation",
         "pd_prefill_device",
@@ -86,6 +87,7 @@ _KAIRYU_PROC_OPTIONS = frozenset(
         "tokenizer",
         "speculative",
         "speculative_tokens",
+        "draft_model_path",
         "death_timeout_s",
         "model_path",
         "pipeline_depth",
@@ -298,7 +300,7 @@ def _validate_native_common(
     _validate_priority_age(backend, options.get("priority_age_s", 60.0))
 
     speculative = options.get("speculative")
-    if speculative not in (None, "ngram"):
+    if speculative not in (None, "ngram", "eagle", "mtp"):
         raise ValueError("native backend speculative mode is unsupported")
     if speculative is not None:
         _require_int_at_least(
@@ -315,6 +317,27 @@ def _validate_native_common(
         raise ValueError("native backend model_path must be a local path or null")
     if model_path is not None and runner is not None:
         raise ValueError("native backend model_path and runner are mutually exclusive")
+    draft_model_path = options.get("draft_model_path")
+    if draft_model_path is not None and (
+        not isinstance(draft_model_path, (str, PathLike))
+        or not str(draft_model_path)
+    ):
+        raise ValueError(
+            "native backend draft_model_path must be a non-empty local path or null"
+        )
+    if speculative in ("eagle", "mtp"):
+        if model_path is None or draft_model_path is None:
+            raise ValueError(
+                "native learned speculation requires model_path and draft_model_path"
+            )
+        if decode_mode == "cuda_graph":
+            raise ValueError(
+                "native learned speculation requires decode_mode='eager'"
+            )
+    elif draft_model_path is not None:
+        raise ValueError(
+            "native draft_model_path requires speculative='eagle' or 'mtp'"
+        )
     kv_cache_dtype = validate_kv_cache_dtype(options.get("kv_cache_dtype", "auto"))
     if kv_cache_dtype != "auto" and model_path is None:
         raise ValueError(

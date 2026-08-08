@@ -5,7 +5,9 @@ from __future__ import annotations
 import pytest
 import torch
 
+from kairyu.engine.core.attention import TorchAttentionBackend
 from kairyu.engine.core.kv_pool import PagedKVPool
+from kairyu.engine.core.prefill import PrefillSequence, build_prefill_batch
 from kairyu.models.config import parse_model_config
 from kairyu.models.llama import DenseDecoder
 
@@ -28,6 +30,38 @@ _CONFIG = parse_model_config(
 )
 
 
+class _NativeTorchBackend(TorchAttentionBackend):
+    supports_batched_prefill = True
+
+    def attend_prefill(
+        self,
+        query,
+        kv_pool,
+        layer,
+        page_tables,
+        seq_lens,
+        chunk_starts,
+        qo_indptr,
+    ):
+        rows = [
+            query[qo_indptr[index] : qo_indptr[index + 1]]
+            for index in range(len(seq_lens))
+        ]
+        return torch.cat(
+            [
+                self.attend(
+                    row,
+                    kv_pool,
+                    layer,
+                    list(page_tables[index]),
+                    seq_lens[index],
+                    chunk_starts[index],
+                )
+                for index, row in enumerate(rows)
+            ]
+        )
+
+
 def _pool() -> PagedKVPool:
     return PagedKVPool(
         num_layers=_CONFIG.num_hidden_layers,
@@ -41,7 +75,9 @@ def _pool() -> PagedKVPool:
 
 def test_aux_capture_matches_same_pass_layer_outputs_and_final_hidden():
     torch.manual_seed(234)
-    model = DenseDecoder(_CONFIG).eval()
+    model = DenseDecoder(
+        _CONFIG, attention_backend=_NativeTorchBackend()
+    ).eval()
     token_ids = torch.tensor([3, 5, 8, 13])
     positions = torch.arange(token_ids.numel())
     page_table = [0, 1]
@@ -76,6 +112,78 @@ def test_aux_capture_matches_same_pass_layer_outputs_and_final_hidden():
     )
     assert torch.equal(captured, ordinary)
     assert torch.equal(aux, torch.cat([observed[0], observed[2], observed[3]], dim=-1))
+
+
+def test_batched_target_paths_preserve_final_hidden_while_capturing_aux():
+    torch.manual_seed(235)
+    model = DenseDecoder(
+        _CONFIG, attention_backend=_NativeTorchBackend()
+    ).eval()
+    layer_ids = (0, 2, 3)
+
+    batch = build_prefill_batch(
+        [
+            PrefillSequence(
+                request_id="a",
+                token_ids=(3, 5, 8),
+                page_table=(0,),
+                chunk_start=0,
+                seq_len=3,
+                write_from=0,
+            )
+        ],
+        page_size=4,
+        device="cpu",
+    )
+    ordinary_prefill = model.forward_prefill_batch(batch, _pool())
+    captured_prefill, prefill_aux = model.forward_prefill_batch_with_aux(
+        batch, _pool(), layer_ids
+    )
+    assert torch.equal(captured_prefill, ordinary_prefill)
+    assert prefill_aux.shape == (3, 3 * _CONFIG.hidden_size)
+
+    tokens = torch.tensor([11, 17])
+    positions = torch.tensor([0, 0])
+    tables = [[0], [1]]
+    lengths = [1, 1]
+    write_from = [0, 0]
+    ordinary_list = model.forward_decode_batch(
+        tokens, positions, _pool(), tables, lengths, write_from
+    )
+    captured_list, list_aux = model.forward_decode_batch_with_aux(
+        tokens,
+        positions,
+        _pool(),
+        tables,
+        lengths,
+        write_from,
+        layer_ids,
+    )
+    assert torch.equal(captured_list, ordinary_list)
+    assert list_aux.shape == (2, 3 * _CONFIG.hidden_size)
+
+    tensor_tables = torch.tensor(tables, dtype=torch.int32)
+    tensor_lengths = torch.tensor(lengths, dtype=torch.int32)
+    tensor_write_from = torch.tensor(write_from, dtype=torch.int32)
+    ordinary_tensor = model.forward_decode_tensors(
+        tokens,
+        positions,
+        _pool(),
+        tensor_tables,
+        tensor_lengths,
+        tensor_write_from,
+    )
+    captured_tensor, tensor_aux = model.forward_decode_tensors_with_aux(
+        tokens,
+        positions,
+        _pool(),
+        tensor_tables,
+        tensor_lengths,
+        tensor_write_from,
+        layer_ids,
+    )
+    assert torch.equal(captured_tensor, ordinary_tensor)
+    assert tensor_aux.shape == (2, 3 * _CONFIG.hidden_size)
 
 
 @pytest.mark.parametrize(

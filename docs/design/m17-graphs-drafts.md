@@ -333,6 +333,30 @@ output (DeepSeek convention).
   owns host-side change detection. Legacy list compatibility paths remain
   unchanged rather than adding an unused generation contract.
 
+### 2026-08-08 learned-draft serving amendment
+
+- **A30 (stateful learned-draft contract):** native configuration admits
+  `speculative: eagle|mtp` only with an explicit target checkpoint and
+  `draft_model_path`. Learned drafting uses eager target execution so each
+  authoritative target input row can retain either the EAGLE auxiliary fusion
+  taps or the post-final-norm MTP hidden. Token inputs are shifted by one while
+  absolute positions stay unchanged: hidden row `t` pairs with token `t+1`,
+  including the target-produced root. A RadixKV prefix hit without matching
+  hidden history fails safe to ordinary target decode for that request. This
+  supersedes A25's native-serving scope boundary.
+- **A31 (rollout, rollback, and ownership):** one proposal cycle runs the
+  learned head over its context once, then appends one-token draft K/V for the
+  remaining proposals (`O(T+k)`, not `O(k*T)`). Target verification stages all
+  candidate input rows and retains exactly the accepted prefix plus one
+  correction/bonus input row. Single-rank serving owns the head locally; TP
+  rank 0 owns the learned head and capture history while all ranks still enter
+  identical target-model collectives. Draft source, proposed/accepted counts,
+  and mean acceptance are emitted together in benchmark evidence.
+- **A32 (request-local commit dependency):** an outstanding variable-length
+  speculative result blocks only its own next scheduler snapshot. Independent
+  requests may fill later pipeline slots; the prompt-completing root remains a
+  commit barrier before that request's first proposal.
+
 - **Measurement:** Qwen3-32B on 8x RTX PRO 6000 Blackwell, TP8, 8 concurrent
   synthetic requests x 32 output tokens, torch attention: tensor eager wall
   8.844 s, TPOT 192.075 ms/token, 0.90 req/s; CUDA graph wall 7.196 s,

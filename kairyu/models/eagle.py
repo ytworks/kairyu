@@ -15,8 +15,9 @@ Corrected pins:
 - ``embed_tokens`` is absent from SpecForge checkpoints (aliased from the
   target model); the loader handles both presence and absence.
 
-CPU reference runs the midlayer densely per call (the draft-KV paging is a
-deploy-day optimization; dense recompute sidesteps rejection bookkeeping).
+The public ``rollout`` remains the dense CPU reference.  Native serving uses
+``rollout_cached``: it computes the context K/V once, then appends one draft
+row at a time without re-running the context for every proposed token.
 """
 
 from __future__ import annotations
@@ -278,6 +279,93 @@ class _EagleMidLayer(nn.Module):
         )
         return hidden + mlp_out
 
+    def _project(
+        self,
+        embeds: torch.Tensor,
+        hidden: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Project and rotate one contiguous draft sequence."""
+
+        fused = torch.cat(
+            [self.input_layernorm(embeds), self.hidden_norm(hidden)], -1
+        )
+        length = fused.shape[0]
+
+        def heads_thd(projection: torch.Tensor, num_heads: int) -> torch.Tensor:
+            return projection.view(length, num_heads, self.head_dim)
+
+        query = heads_thd(self.self_attn["q_proj"](fused), self.num_heads)
+        key = heads_thd(self.self_attn["k_proj"](fused), self.num_kv_heads)
+        value = heads_thd(self.self_attn["v_proj"](fused), self.num_kv_heads)
+        freqs = positions.to(torch.float32)[:, None] * self.inv_freq[None, :]
+        rope = torch.cat((freqs, freqs), dim=-1)
+        query, key = apply_rope(query, key, rope.cos(), rope.sin())
+        return (
+            query.transpose(0, 1),
+            key.transpose(0, 1),
+            value.transpose(0, 1),
+        )
+
+    def _finish(self, context: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        length = context.shape[1]
+        attn_out = self.self_attn["o_proj"](
+            context.transpose(0, 1).reshape(length, -1)
+        )
+        residual = hidden + attn_out
+        normed = self.post_attention_layernorm(residual)
+        mlp_out = self.mlp["down_proj"](
+            nn.functional.silu(self.mlp["gate_proj"](normed))
+            * self.mlp["up_proj"](normed)
+        )
+        return residual + mlp_out
+
+    def prefill_cached(
+        self,
+        embeds: torch.Tensor,
+        hidden: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run the context once and return its last output plus reusable K/V."""
+
+        query, key, value = self._project(embeds, hidden, positions)
+        context = nn.functional.scaled_dot_product_attention(
+            query[None],
+            key[None],
+            value[None],
+            is_causal=query.shape[1] > 1,
+            enable_gqa=self.num_heads != self.num_kv_heads,
+        )[0]
+        return self._finish(context, hidden)[-1], key, value
+
+    def decode_cached(
+        self,
+        embed: torch.Tensor,
+        hidden: torch.Tensor,
+        position: int,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Append one feedback row to an existing linear-chain draft cache."""
+
+        positions = torch.tensor([position], dtype=torch.long, device=embed.device)
+        query, next_key, next_value = self._project(
+            embed[None], hidden[None], positions
+        )
+        key[:, position : position + 1].copy_(next_key)
+        value[:, position : position + 1].copy_(next_value)
+        # The sole query is the newest absolute position and may attend to every
+        # cached key.  ``is_causal=True`` would apply a length-1 local mask and
+        # incorrectly expose only the first key.
+        context = nn.functional.scaled_dot_product_attention(
+            query[None],
+            key[None, :, : position + 1],
+            value[None, :, : position + 1],
+            is_causal=False,
+            enable_gqa=self.num_heads != self.num_kv_heads,
+        )[0]
+        return self._finish(context, hidden[None])[0], key, value
+
 
 class EagleDraftHead(nn.Module):
     """SpecForge-shaped EAGLE-3 head: fc fusion + midlayer + reduced-vocab head."""
@@ -381,6 +469,77 @@ class EagleDraftHead(nn.Module):
                 )
             embeds = torch.cat([embeds, next_embed[None]], dim=0)
             hidden = torch.cat([hidden, out[-1:]], dim=0)  # append feedback only
+        return drafted
+
+    @torch.no_grad()
+    def rollout_cached(
+        self,
+        shifted_embeds: torch.Tensor,
+        initial_hidden: torch.Tensor,
+        embed_fn,
+        k: int,
+    ) -> list[int]:
+        """Greedy rollout with one context pass and incremental draft K/V."""
+
+        if type(k) is not int or k < 1:
+            raise ValueError("EAGLE rollout length must be a positive integer")
+        if (
+            initial_hidden.ndim != 2
+            or initial_hidden.shape[0] < 1
+            or initial_hidden.shape[1] != self.config.hidden_size
+        ):
+            raise ValueError(
+                "EAGLE initial hidden must be a nonempty rank-2 tensor with width "
+                f"{self.config.hidden_size}, got {tuple(initial_hidden.shape)}"
+            )
+        expected = (initial_hidden.shape[0], self.config.hidden_size)
+        if shifted_embeds.ndim != 2 or tuple(shifted_embeds.shape) != expected:
+            raise ValueError(
+                "EAGLE shifted embeddings must pair one-for-one with auxiliary "
+                f"hidden rows and have shape {expected}, got {tuple(shifted_embeds.shape)}"
+            )
+        if shifted_embeds.device != initial_hidden.device:
+            raise ValueError(
+                "EAGLE shifted embeddings and initial hidden must share a device: "
+                f"got {shifted_embeds.device} and {initial_hidden.device}"
+            )
+
+        length = shifted_embeds.shape[0]
+        positions = torch.arange(length, device=shifted_embeds.device)
+        output, key, value = self.midlayer.prefill_cached(
+            shifted_embeds, initial_hidden, positions
+        )
+        capacity = length + k - 1
+        key_cache = key.new_empty((key.shape[0], capacity, key.shape[2]))
+        value_cache = value.new_empty((value.shape[0], capacity, value.shape[2]))
+        key_cache[:, :length].copy_(key)
+        value_cache[:, :length].copy_(value)
+        drafted: list[int] = []
+        for index in range(k):
+            logits = self.lm_head(self.norm(output))
+            draft_id = int(torch.argmax(logits).item())
+            target_id = draft_id + int(self.d2t[draft_id].item())
+            drafted.append(target_id)
+            if index + 1 == k:
+                break
+            next_embed = embed_fn(target_id)
+            if tuple(next_embed.shape) != (self.config.hidden_size,):
+                raise ValueError(
+                    "EAGLE target embedding callback must return one hidden row with "
+                    f"shape ({self.config.hidden_size},), got {tuple(next_embed.shape)}"
+                )
+            if next_embed.device != shifted_embeds.device:
+                raise ValueError(
+                    "EAGLE target embedding callback returned the wrong device: "
+                    f"expected {shifted_embeds.device}, got {next_embed.device}"
+                )
+            output, key_cache, value_cache = self.midlayer.decode_cached(
+                next_embed,
+                output,
+                length + index,
+                key_cache,
+                value_cache,
+            )
         return drafted
 
 

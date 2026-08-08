@@ -1211,10 +1211,13 @@ class Scheduler:
             remaining = state.request.max_new_tokens - len(state.outputs) - state.in_flight
             if remaining < 1:
                 continue  # everything remaining is already in flight
-            # speculative chunks require in_flight == 0 (scheduler-enforced,
-            # m8 D3): under overlap-ahead planning a second chunk's position
-            # would assume full commit of the first, which rejection breaks
-            if self._spec_k > 0 and state.in_flight == 0:
+            # A speculative result has variable length. Keep only THIS request
+            # out of later snapshots until it commits; unrelated requests may
+            # still fill the configured pipeline instead of paying a global
+            # commit barrier.
+            if self._spec_k > 0 and state.in_flight > 0:
+                continue
+            if self._spec_k > 0:
                 reserve = min(self._spec_k + 1, remaining, budget)
             else:
                 reserve = 1

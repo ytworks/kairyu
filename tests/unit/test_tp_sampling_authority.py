@@ -401,6 +401,8 @@ def _passive_runner() -> tuple[PagedModelRunner, _PassiveModel]:
     runner._decode_batch_gap = None
     runner._verification_batch_gap = runner._decode_batch_gap
     runner._graph = None
+    runner._draft_source = None
+    runner._draft_aux_layer_ids = ()
     return runner, model
 
 

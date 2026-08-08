@@ -133,6 +133,102 @@ class MtpDraftHead(nn.Module):
     def logits(self, hidden: torch.Tensor) -> torch.Tensor:
         return self.head(self.shared_head["norm"](hidden))
 
+    @torch.no_grad()
+    def rollout_cached(
+        self,
+        token_ids: torch.Tensor,
+        target_hidden: torch.Tensor,
+        rotary_emb,
+        k: int,
+    ) -> list[int]:
+        """Greedy MTP rollout with one context pass and one persistent KV pool."""
+
+        if type(k) is not int or k < 1:
+            raise ValueError("MTP rollout length must be a positive integer")
+        if token_ids.ndim != 1 or token_ids.shape[0] < 1:
+            raise ValueError("MTP token ids must be a nonempty rank-1 tensor")
+        expected = (token_ids.shape[0], self.config.hidden_size)
+        if target_hidden.ndim != 2 or tuple(target_hidden.shape) != expected:
+            raise ValueError(
+                "MTP target hidden must pair one-for-one with token ids and have "
+                f"shape {expected}, got {tuple(target_hidden.shape)}"
+            )
+        if token_ids.device != target_hidden.device:
+            raise ValueError(
+                "MTP token ids and target hidden states must share a device: "
+                f"got {token_ids.device} and {target_hidden.device}"
+            )
+
+        page_size = 16
+        total = token_ids.shape[0] + k - 1
+        pool = self.fresh_pool(
+            num_pages=-(-total // page_size),
+            page_size=page_size,
+            dtype=target_hidden.dtype,
+            device=target_hidden.device,
+        )
+        page_table = list(range(pool.num_pages))
+        embeddings = self.embed_tokens(token_ids)
+        fused = self.eh_proj(
+            torch.cat(
+                [self.enorm(embeddings), self.hnorm(target_hidden)], dim=-1
+            )
+        )
+        length = token_ids.shape[0]
+        positions = torch.arange(length, device=target_hidden.device)
+        cos, sin = rotary_emb(positions)
+        output = self.decoder(
+            fused,
+            cos,
+            sin,
+            pool,
+            0,
+            page_table,
+            positions,
+            length,
+            0,
+            chunk_start=0,
+            has_writable=True,
+        )[-1]
+
+        drafted: list[int] = []
+        for index in range(k):
+            # DeepSeek recycles the post-shared-head-norm state into the next
+            # MTP step; logits consume that same once-normalized state.
+            recycled = self.shared_head["norm"](output)
+            token_id = int(torch.argmax(self.head(recycled)).item())
+            drafted.append(token_id)
+            if index + 1 == k:
+                break
+            position = length + index
+            token = torch.tensor(
+                [token_id], dtype=torch.long, device=target_hidden.device
+            )
+            embedding = self.embed_tokens(token)
+            fused = self.eh_proj(
+                torch.cat(
+                    [self.enorm(embedding), self.hnorm(recycled[None])], dim=-1
+                )
+            )
+            position_tensor = torch.tensor(
+                [position], dtype=torch.long, device=target_hidden.device
+            )
+            cos, sin = rotary_emb(position_tensor)
+            output = self.decoder(
+                fused,
+                cos,
+                sin,
+                pool,
+                0,
+                page_table,
+                position_tensor,
+                position + 1,
+                position,
+                chunk_start=position,
+                has_writable=True,
+            )[0]
+        return drafted
+
 
 def load_mtp_head(
     path,

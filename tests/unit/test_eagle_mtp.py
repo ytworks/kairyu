@@ -87,6 +87,40 @@ class TestEagleHead:
         second = head.rollout(embeds, fused, lambda t: embed[t], k=3)
         assert first == second and len(first) == 3
 
+    def test_cached_rollout_matches_dense_reference(self):
+        torch.manual_seed(17)
+        head = EagleDraftHead(EAGLE).eval()
+        embed = torch.randn(128, 32)
+        hidden = torch.randn(6, 32)
+        dense = head.rollout(embed[:6], hidden, lambda token: embed[token], k=4)
+        cached = head.rollout_cached(
+            embed[:6], hidden, lambda token: embed[token], k=4
+        )
+        assert cached == dense
+
+    def test_cached_rollout_appends_into_fixed_kv_buffers(self, monkeypatch):
+        torch.manual_seed(18)
+        head = EagleDraftHead(EAGLE).eval()
+        embed = torch.randn(128, 32)
+        hidden = torch.randn(6, 32)
+        buffers = []
+        original = head.midlayer.decode_cached
+
+        def capture(embed_row, feedback, position, key, value):
+            buffers.append(
+                (key.data_ptr(), value.data_ptr(), key.shape[1], position)
+            )
+            return original(embed_row, feedback, position, key, value)
+
+        monkeypatch.setattr(head.midlayer, "decode_cached", capture)
+        head.rollout_cached(embed[:6], hidden, lambda token: embed[token], k=4)
+
+        assert len(buffers) == 3
+        assert {row[:3] for row in buffers} == {
+            (buffers[0][0], buffers[0][1], 9)
+        }
+        assert [row[3] for row in buffers] == [6, 7, 8]
+
     def test_d2t_offsets_map_to_target_ids(self):
         torch.manual_seed(1)
         head = EagleDraftHead(EAGLE).eval()
@@ -353,6 +387,62 @@ class TestMtpHead:
         assert logits.shape == (128,)
         again = head.forward_chain(tokens, target_hidden, rotary)
         assert torch.allclose(out, again)
+
+    def test_cached_rollout_reuses_context_kv(self, monkeypatch):
+        from kairyu.models.layers import RotaryEmbedding
+
+        torch.manual_seed(31)
+        config = parse_model_config(DSV3_RAW)
+        head = MtpDraftHead(config).eval()
+        rotary = RotaryEmbedding(config)
+        tokens = torch.randint(0, 128, (5,))
+        hidden = torch.randn(5, 32)
+        expected_first = int(
+            torch.argmax(head.logits(head.forward_chain(tokens, hidden, rotary)[-1]))
+        )
+        widths = []
+        pools = []
+        original = head.decoder.forward
+
+        def capture(*args, **kwargs):
+            widths.append(args[0].shape[0])
+            pools.append(args[3])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(head.decoder, "forward", capture)
+        drafted = head.rollout_cached(tokens, hidden, rotary, 3)
+
+        assert drafted[0] == expected_first
+        assert widths == [5, 1, 1]
+        assert len({id(pool) for pool in pools}) == 1
+
+    def test_cached_rollout_recycles_post_shared_head_norm(self):
+        from kairyu.models.layers import RotaryEmbedding
+
+        torch.manual_seed(32)
+        config = parse_model_config(DSV3_RAW)
+        head = MtpDraftHead(config).eval()
+        rotary = RotaryEmbedding(config)
+        tokens = torch.randint(0, 128, (4,))
+        hidden = torch.randn(4, 32)
+        shared_outputs = []
+        hidden_inputs = []
+
+        shared_hook = head.shared_head["norm"].register_forward_hook(
+            lambda _module, _inputs, output: shared_outputs.append(output.detach().clone())
+        )
+        hidden_hook = head.hnorm.register_forward_pre_hook(
+            lambda _module, inputs: hidden_inputs.append(inputs[0].detach().clone())
+        )
+        try:
+            head.rollout_cached(tokens, hidden, rotary, 2)
+        finally:
+            shared_hook.remove()
+            hidden_hook.remove()
+
+        assert len(shared_outputs) == 2
+        assert len(hidden_inputs) == 2
+        assert torch.equal(hidden_inputs[1], shared_outputs[0][None])
 
     def test_loader_maps_extra_layer_names(self, tmp_path):
         from safetensors.torch import save_file
