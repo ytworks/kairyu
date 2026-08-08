@@ -1,5 +1,6 @@
-"""End-to-end speculative decoding: spec ≡ non-spec greedy (design m8 D4)."""
+"""End-to-end speculative decoding equivalence (design m8 D4)."""
 
+from collections import Counter
 from types import SimpleNamespace
 
 from kairyu.engine.core.engine_core import EngineCore
@@ -18,6 +19,19 @@ PROMPTS = [
     (17, 3, 17, 3, 17, 3),
     (100, 101, 102, 103, 104, 105, 106, 107),
 ]
+
+
+class _ReferenceDraft:
+    """Test oracle that makes the accepted stochastic path deterministic."""
+
+    def __init__(self, prompt, outputs):
+        self._prompt = prompt
+        self._outputs = outputs
+
+    def propose(self, context, max_draft):
+        assert context[: len(self._prompt)] == self._prompt
+        offset = len(context) - len(self._prompt)
+        return self._outputs[offset : offset + max_draft]
 
 
 def _plain_outputs(prompt, max_new=12, seed=0):
@@ -39,6 +53,44 @@ def _spec_engine(k=3, seed=0, sampler=None):
         TorchPagedRunner(model, num_pages=128, page_size=PAGE, sampler=sampler)
     )
     return EngineCore(scheduler, runner), runner
+
+
+def _sampled_outputs(
+    prompt,
+    sampling,
+    *,
+    speculative_tokens,
+    draft_source=None,
+):
+    model = TinyAttentionLM(seed=0)
+    cache = RadixKVCache(num_pages=128, page_size=PAGE)
+    scheduler = Scheduler(
+        cache,
+        max_num_batched_tokens=64,
+        page_size=PAGE,
+        speculative_tokens=speculative_tokens,
+    )
+    target = TorchPagedRunner(
+        model,
+        num_pages=128,
+        page_size=PAGE,
+        sampler=Sampler(),
+    )
+    runner = (
+        SpeculativeRunner(target, draft_source=draft_source)
+        if speculative_tokens
+        else target
+    )
+    engine = EngineCore(scheduler, runner)
+    engine.add_request(
+        EngineRequest(
+            "a",
+            prompt,
+            max_new_tokens=8,
+            sampling=sampling,
+        )
+    )
+    return engine.run_to_completion()["a"], runner
 
 
 def test_spec_equals_plain_greedy_across_prompts():
@@ -77,31 +129,122 @@ def test_spec_equals_plain_with_eos():
             assert out == plain_engine_out  # EOS mid-draft: identical truncation
 
 
-def test_non_greedy_requests_bypass_speculation():
-    engine, runner = _spec_engine(sampler=Sampler())
-    engine.add_request(
-        EngineRequest(
-            "a",
-            (1, 2, 3, 1, 2, 3),
-            max_new_tokens=8,
-            sampling=EngineSampling(temperature=1.0, seed=3),
-        )
+def test_stochastic_rejection_matches_plain_sampling_for_same_seed():
+    prompt = (1, 2, 3, 1, 2, 3)
+    sampling = EngineSampling(temperature=1.0, seed=3)
+    reference, _ = _sampled_outputs(
+        prompt,
+        sampling,
+        speculative_tokens=0,
     )
-    engine.run_to_completion()
-    assert runner.draft_proposed == 0  # bypassed: no draft ever scored
+    actual, runner = _sampled_outputs(
+        prompt,
+        sampling,
+        speculative_tokens=3,
+        draft_source=_ReferenceDraft(prompt, reference),
+    )
+
+    assert actual == reference
+    assert runner.draft_proposed > 0
+    assert runner.draft_accepted > 0
 
 
-def test_penalized_greedy_bypasses_speculation():
-    engine, runner = _spec_engine(sampler=Sampler())
-    engine.add_request(
-        EngineRequest(
-            "a",
-            (1, 2, 3, 1, 2, 3),
-            max_new_tokens=8,
-            sampling=EngineSampling(temperature=0.0, repetition_penalty=1.5),
+def test_penalized_verification_uses_only_preceding_draft_history():
+    prompt = (1, 2, 3, 1, 2, 3)
+    for temperature in (0.0, 0.8):
+        sampling = EngineSampling(
+            temperature=temperature,
+            repetition_penalty=1.5,
+            presence_penalty=0.2,
+            frequency_penalty=0.1,
+            seed=17,
         )
+        reference, _ = _sampled_outputs(
+            prompt,
+            sampling,
+            speculative_tokens=0,
+        )
+        actual, runner = _sampled_outputs(
+            prompt,
+            sampling,
+            speculative_tokens=3,
+            draft_source=_ReferenceDraft(prompt, reference),
+        )
+
+        assert actual == reference
+        assert runner.draft_proposed > 0
+        assert runner.draft_accepted > 0
+
+
+def test_stochastic_speculation_matches_plain_frequency_chi_square_gate():
+    prompt = (1, 2, 3, 1, 2, 3)
+    plain_counts = Counter()
+    speculative_counts = Counter()
+    proposed = 0
+    accepted = 0
+    for seed in range(4):
+        sampling = EngineSampling(temperature=0.9, top_p=0.9, seed=seed)
+        reference, _ = _sampled_outputs(
+            prompt,
+            sampling,
+            speculative_tokens=0,
+        )
+        actual, runner = _sampled_outputs(
+            prompt,
+            sampling,
+            speculative_tokens=3,
+            draft_source=_ReferenceDraft(prompt, reference),
+        )
+        plain_counts.update(reference)
+        speculative_counts.update(actual)
+        proposed += runner.draft_proposed
+        accepted += runner.draft_accepted
+
+    support = plain_counts.keys() | speculative_counts.keys()
+    chi_square = sum(
+        (plain_counts[token] - speculative_counts[token]) ** 2
+        / (plain_counts[token] + speculative_counts[token])
+        for token in support
+        if plain_counts[token] + speculative_counts[token]
     )
-    engine.run_to_completion()
+    # Coupling both paths by public seed is stronger than an ordinary
+    # distributional threshold: every count, and therefore chi-square, is exact.
+    assert chi_square <= 1e-12
+    assert proposed > 0
+    assert accepted > 0
+
+
+def test_structured_sampling_still_bypasses_without_matcher_rollback():
+    class _OneDraft:
+        def propose(self, context, max_draft):
+            return [context[-1]][:max_draft]
+
+    class _Target:
+        supports_batched_verification = True
+
+        def execute(self, scheduled, states):
+            return {
+                chunk.request_id: (SampledToken(7),)
+                for chunk in scheduled
+            }
+
+    runner = SpeculativeRunner(_Target(), draft_source=_OneDraft())
+    state = SimpleNamespace(
+        request=EngineRequest(
+            "r",
+            (4, 5),
+            max_new_tokens=4,
+            sampling=EngineSampling(temperature=0.8, json_mode=True),
+        ),
+        outputs=[6],
+    )
+
+    sampled = runner.execute(
+        (ScheduledChunk("r", 3, False, 1),),
+        {"r": state},
+    )
+
+    assert tuple(token.token_id for token in sampled["r"]) == (7,)
     assert runner.draft_proposed == 0
 
 

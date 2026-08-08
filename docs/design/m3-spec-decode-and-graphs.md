@@ -31,8 +31,8 @@ ModelRunner exists (the runner scores draft tokens in one batched forward pass).
   (one batched forward over draft positions on GPU). Invariant (tested at policy level):
   output equals plain autoregressive greedy decoding **given identical target logits**; on
   real GPUs batch-shape reduction-order nondeterminism can flip argmax ties, so the bench
-  measures output-match rate rather than asserting bit-exactness. Sampling verification
-  (rejection sampling) arrives with EAGLE in the GPU phase.
+  measures output-match rate rather than asserting bit-exactness. Issue #358 later added
+  point-mass rejection sampling for every deterministic n-gram/EAGLE/MTP draft at T>0.
 
 ### 2.1 Scheduler integration protocol (amendment — required before wiring in)
 

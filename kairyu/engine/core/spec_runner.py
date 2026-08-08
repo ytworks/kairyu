@@ -1,4 +1,4 @@
-"""SpeculativeRunner: n-gram draft + batched scoring + greedy verify (m8 D4).
+"""SpeculativeRunner: deterministic draft + target verification (m8 D4).
 
 A ``ModelRunner`` wrapper (composition — the scheduler is untouched beyond its
 D3 reservation contract). For a speculative decode chunk it proposes a draft
@@ -6,8 +6,8 @@ from the committed context, then sends every target-verification position to
 the wrapped runner as one multi-token chunk.  An immutable overlay state exposes
 the committed tokens plus the complete draft (draft tokens are not in scheduler
 state).  All compatible requests in the scheduler step share that one wrapped
-runner call before the existing ``verify_greedy`` policy returns each accepted
-prefix plus its bonus/correction token.
+runner call before greedy or point-mass rejection verification returns each
+accepted prefix plus its bonus/correction token.
 
 Multi-token chunks are an explicit optional ``ModelRunner`` capability.
 Targets must declare ``supports_batched_verification is True``; an undeclared
@@ -15,11 +15,10 @@ custom runner keeps the pre-#215 one-position-at-a-time contract. The branch is
 chosen before execution, so a malformed capable-runner result is never retried
 after model/KV side effects.
 
-Per-request gating (review amendment): speculation is bypassed unless the
-request is pure greedy (no penalties, no grammar) — penalties change the
-argmax so equivalence would not hold, and grammar would need per-position
-matcher rollback (M17). Bypassed chunks return a single token; the D3
-shortfall accounting absorbs the difference.
+Per-request gating: stochastic sampling and penalties are supported. Grammar
+and forced-token requests still bypass because matcher/continuation rollback is
+outside the deterministic-draft verification contract. Bypassed chunks return
+a single token; the D3 shortfall accounting absorbs the difference.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ from dataclasses import replace
 from kairyu.engine.core.draft import DraftSource, NGramDraftSource
 from kairyu.engine.core.engine_core import ModelRunner, StepOutput
 from kairyu.engine.core.scheduler import ScheduledChunk
-from kairyu.engine.core.spec_decode import verify_greedy
+from kairyu.engine.core.spec_decode import verify_greedy, verify_rejection
 
 
 class _OverlayState:
@@ -198,6 +197,8 @@ class SpeculativeRunner:
         request_id: str,
         draft: tuple[int, ...],
         target: tuple,
+        *,
+        stochastic: bool,
     ) -> tuple:
         expected = len(draft) + 1
         if len(target) != expected:
@@ -206,7 +207,8 @@ class SpeculativeRunner:
                 f"verification positions for {request_id!r}: "
                 f"got {len(target)}, expected {expected}"
             )
-        result = verify_greedy(
+        verify = verify_rejection if stochastic else verify_greedy
+        result = verify(
             draft,
             tuple(token.token_id for token in target),
         )
@@ -228,7 +230,9 @@ class SpeculativeRunner:
         for chunk in scheduled:
             if chunk.is_prefill or chunk.num_tokens == 1:
                 runner_chunks.append(chunk)
-            elif not states[chunk.request_id].request.sampling.is_greedy_pure:
+            elif not states[
+                chunk.request_id
+            ].request.sampling.is_speculative_eligible:
                 # bypass: score exactly one token; D3 shortfall releases the rest
                 runner_chunks.append(replace(chunk, num_tokens=1))
             else:
@@ -258,6 +262,9 @@ class SpeculativeRunner:
                 request_id,
                 draft,
                 target,
+                stochastic=(
+                    states[request_id].request.sampling.temperature != 0.0
+                ),
             )
         return sampled
 
@@ -272,7 +279,9 @@ class SpeculativeRunner:
         for chunk in scheduled:
             if chunk.is_prefill or chunk.num_tokens == 1:
                 plain.append(chunk)
-            elif not states[chunk.request_id].request.sampling.is_greedy_pure:
+            elif not states[
+                chunk.request_id
+            ].request.sampling.is_speculative_eligible:
                 plain.append(replace(chunk, num_tokens=1))
             else:
                 speculative.append(chunk)
@@ -313,5 +322,8 @@ class SpeculativeRunner:
                 chunk.request_id,
                 draft,
                 tuple(target),
+                stochastic=(
+                    state.request.sampling.temperature != 0.0
+                ),
             )
         return sampled

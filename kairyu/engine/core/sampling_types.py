@@ -54,7 +54,7 @@ class EngineSampling:
 
     @property
     def is_greedy_pure(self) -> bool:
-        """Greedy with no penalties/grammar — the spec-decode-eligible mode."""
+        """Greedy with no penalties/grammar — the direct argmax fast path."""
         return (
             self.temperature == 0.0
             and self.presence_penalty == 0.0
@@ -63,6 +63,16 @@ class EngineSampling:
             and self.forced_token_ids is None
             and not self.needs_grammar
         )
+
+    @property
+    def is_speculative_eligible(self) -> bool:
+        """Whether deterministic-draft verification can preserve this policy.
+
+        Grammar matchers need rollback after rejected draft suffixes, and a
+        forced continuation is not a sampled target distribution.  Temperature,
+        filters, penalties, and logprob reporting are otherwise compatible.
+        """
+        return self.forced_token_ids is None and not self.needs_grammar
 
 
 @dataclass(frozen=True)

@@ -131,7 +131,11 @@ class TorchPagedRunner:
             position,
             logits,
             prompt=state.request.prompt_token_ids,
-            outputs=state.outputs,
+            outputs=(
+                tuple(state.outputs[:position])
+                if getattr(state, "outputs_override", False)
+                else state.outputs
+            ),
             history_epoch=getattr(state, "output_epoch", 0),
             eos_token_id=state.request.eos_token_id,
             stop_token_ids=getattr(state.request, "stop_token_ids", ()),

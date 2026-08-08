@@ -55,8 +55,8 @@ CPU via the fake backend).
 `propose_ngram` (params: n, window). `ModelDraftSource` runs a draft head
 autoregressively for k tokens off the target model's last hidden state +
 sampled token. `SpeculativeRunner` gains a `draft_source` arg (default
-n-gram — existing behavior byte-identical); verify path unchanged (M8's
-verify_greedy is draft-agnostic).
+n-gram — existing behavior byte-identical); verification uses M8's greedy
+policy at T=0 and its point-mass rejection policy at T>0.
 
 ### D4 — EAGLE-3 head (`models/eagle.py`) + SpecForge loader
 

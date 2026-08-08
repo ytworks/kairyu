@@ -1,4 +1,8 @@
-from kairyu.engine.core.spec_decode import propose_ngram, verify_greedy
+from kairyu.engine.core.spec_decode import (
+    propose_ngram,
+    verify_greedy,
+    verify_rejection,
+)
 
 
 def test_repeating_context_proposes_continuation():
@@ -32,6 +36,17 @@ def test_verify_partial_acceptance_stops_at_first_mismatch():
     result = verify_greedy(draft=(4, 9, 6), target_tokens=(4, 5, 6, 7))
     assert result.accepted == 1
     assert result.tokens == (4, 5)  # accepted draft + target's correction
+
+
+def test_point_mass_rejection_uses_target_draw_as_acceptance_or_correction():
+    accepted = verify_rejection(draft=(4, 9), target_tokens=(4, 8, 7))
+    rejected = verify_rejection(draft=(4, 9), target_tokens=(3, 8, 7))
+
+    assert accepted == verify_greedy((4, 9), (4, 8, 7))
+    assert accepted.accepted == 1
+    assert accepted.tokens == (4, 8)
+    assert rejected.accepted == 0
+    assert rejected.tokens == (3,)
 
 
 def test_spec_decode_output_equals_plain_greedy_decoding():

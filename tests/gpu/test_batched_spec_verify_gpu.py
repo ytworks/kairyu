@@ -46,11 +46,12 @@ def cuda() -> torch.device:
     return torch.device("cuda")
 
 
-def _runner(cuda: torch.device, *, graph: bool):
+def _runner(cuda: torch.device, *, graph: bool, sampler: bool = False):
     from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
     from kairyu.engine.core.kv_pool import PagedKVPool
     from kairyu.engine.core.model_runner import PagedModelRunner
     from kairyu.engine.core.radix_kv import RadixKVCache
+    from kairyu.engine.core.sampler import Sampler
     from kairyu.models.config import parse_model_config
     from kairyu.models.llama import DenseDecoder
 
@@ -81,6 +82,7 @@ def _runner(cuda: torch.device, *, graph: bool):
         model,
         pool,
         cache=cache,
+        sampler=Sampler() if sampler else None,
         **graph_options,
     )
     return runner, model, backend, cache, pool
@@ -91,13 +93,16 @@ def _state(
     prompt: tuple[int, ...],
     pages: tuple[int, ...],
     outputs: tuple[int, ...],
+    sampling=None,
 ):
+    from kairyu.engine.core.sampling_types import EngineSampling
+
     return SimpleNamespace(
         request=SimpleNamespace(
             request_id=request_id,
             sampling_identity=request_id,
             prompt_token_ids=prompt,
-            sampling=None,
+            sampling=sampling or EngineSampling(),
             eos_token_id=None,
         ),
         allocation=SimpleNamespace(
@@ -113,7 +118,7 @@ def _state(
     )
 
 
-def _prepare_case(model, pool, cache, case, cuda: torch.device):
+def _prepare_case(model, pool, cache, case, cuda: torch.device, *, sampling=None):
     from kairyu.engine.core.scheduler import ScheduledChunk
 
     chunks = []
@@ -146,6 +151,7 @@ def _prepare_case(model, pool, cache, case, cuda: torch.device):
             prompt,
             pages,
             outputs,
+            sampling,
         )
         pages_by_request[request_id] = pages
     return tuple(chunks), states, pages_by_request
@@ -280,6 +286,48 @@ def test_flattened_flashinfer_verification_matches_sequential_targets_and_kv(
         "plans": POSITIONS,
         "runs": POSITIONS * LAYERS,
     }
+
+
+def test_flashinfer_stochastic_penalty_verification_matches_sequential(cuda):
+    from kairyu.engine.core.sampling_types import EngineSampling
+
+    sampling = EngineSampling(
+        temperature=0.8,
+        top_p=0.9,
+        repetition_penalty=1.2,
+        presence_penalty=0.1,
+        frequency_penalty=0.05,
+        seed=358,
+    )
+    candidate, candidate_model, _backend, candidate_cache, candidate_pool = (
+        _runner(cuda, graph=False, sampler=True)
+    )
+    reference, reference_model, _backend, reference_cache, reference_pool = (
+        _runner(cuda, graph=False, sampler=True)
+    )
+    candidate_case = _prepare_case(
+        candidate_model,
+        candidate_pool,
+        candidate_cache,
+        FIRST_CASE,
+        cuda,
+        sampling=sampling,
+    )
+    reference_case = _prepare_case(
+        reference_model,
+        reference_pool,
+        reference_cache,
+        FIRST_CASE,
+        cuda,
+        sampling=sampling,
+    )
+    reference.set_batched_verification_enabled(False)
+
+    actual = _execute_tokens(candidate, candidate_case[0], candidate_case[1])
+    expected = _execute_tokens(reference, reference_case[0], reference_case[1])
+    torch.cuda.synchronize()
+
+    assert actual == expected
 
 
 def test_flashinfer_verification_captures_once_then_replays_new_requests(
