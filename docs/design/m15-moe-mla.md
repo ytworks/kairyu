@@ -161,3 +161,7 @@ MLA fields from config). `validate_tp_degree`: MLA models report
   probe. Rows use prewarmed power-of-two plans up to the bounded hot-path
   maximum; larger prefills and unsupported runtimes retain D1's reference
   implementation. Empty inputs also remain on that reference path.
+- **A12 (PR #453 Fable 5 re-review)**: any ordinary capability or cuDNN graph
+  warmup exception declines the derived pack and preserves the reference path;
+  backend-specific exception hierarchies must not turn an optional
+  optimization into a model-load failure.

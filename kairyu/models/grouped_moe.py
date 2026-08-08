@@ -31,7 +31,7 @@ def _grouped_moe_capable(device_type: str, device_index: int) -> bool:
             and hasattr(cudnn, "moe_grouped_matmul_mode")
             and capability in _SUPPORTED_COMPUTE_CAPABILITIES
         )
-    except (ImportError, OSError, RuntimeError):
+    except Exception:
         return False
 
 
@@ -177,7 +177,7 @@ class GroupedExpertPack:
         if device.type == "cuda":
             try:
                 pack._warm_grouped_plans()
-            except (ImportError, OSError, RuntimeError):
+            except Exception:
                 return None
         return pack
 
