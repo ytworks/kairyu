@@ -1,5 +1,6 @@
 """Distributed TP driver/worker control protocol."""
 
+import dataclasses
 import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -10,6 +11,7 @@ import torch
 
 from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.comm import FakeCommunicator
+from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.core.step_executor import DecodeGraphCapturePlan
 from kairyu.engine.core.step_input import RequestSnapshot, StepDelta
@@ -618,6 +620,7 @@ class _RecordingControl:
     def __init__(self, comm) -> None:
         self._comm = comm
         self.payloads: list[object] = []
+        self.tensor_shapes: list[tuple[int, ...]] = []
 
     def __getattr__(self, name):
         return getattr(self._comm, name)
@@ -625,6 +628,83 @@ class _RecordingControl:
     def broadcast(self, payload, src):
         self.payloads.append(payload)
         return self._comm.broadcast(payload, src)
+
+    def tensor_broadcast(self, tensor, src):
+        self.tensor_shapes.append(tuple(tensor.shape))
+        return self._comm.tensor_broadcast(tensor, src)
+
+
+class _TensorStepCommunicator:
+    supports_step_tensor_transport = True
+    tensor_device = torch.device("cpu")
+
+    def __init__(self, comm) -> None:
+        self._comm = comm
+        self.packet_shapes: list[tuple[int, ...]] = []
+
+    def __getattr__(self, name):
+        return getattr(self._comm, name)
+
+    def tensor_broadcast(self, tensor, src):
+        self.packet_shapes.append(tuple(tensor.shape))
+        return self._comm.tensor_broadcast(tensor, src)
+
+
+def test_step_delta_uses_nccl_payload_while_rare_control_stays_object():
+    control = FakeCommunicator.create_group(2)
+    model = FakeCommunicator.create_group(2)
+    recorded_control = _RecordingControl(control[0])
+    tensor_model = tuple(_TensorStepCommunicator(comm) for comm in model)
+    local = (_AuthorityRunner((17,)), _AuthorityRunner((999,)))
+    driver = DistTPModelRunner(
+        recorded_control,
+        local[0],
+        tensor_model[0],
+    )
+    chunks = (ScheduledChunk("a", 1, True, 0),)
+    states = {"a": _snapshot("a")}
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        worker = pool.submit(
+            worker_step_loop,
+            control[1],
+            local[1],
+            tensor_model[1],
+        )
+        driver.execute(chunks, states)
+        driver.shutdown()
+        assert worker.result(timeout=5) == 1
+
+    assert not any(isinstance(payload, StepDelta) for payload in recorded_control.payloads)
+    assert len(recorded_control.payloads) == 1  # shutdown remains on object control
+    assert recorded_control.tensor_shapes == [(2,), (2,)]  # step + shutdown headers
+    assert tensor_model[0].packet_shapes[0][0] > 2  # encoded StepDelta payload
+    assert tensor_model[0].packet_shapes[1] == (1,)  # sampling token packet
+    assert local[0].adopted == [(17,)]
+    assert local[1].adopted == [(17,)]
+
+
+def test_unencodable_step_fails_before_header_without_poisoning_runner():
+    control = FakeCommunicator.create_group(2)
+    model = FakeCommunicator.create_group(2)
+    recorded_control = _RecordingControl(control[0])
+    tensor_model = _TensorStepCommunicator(model[0])
+    driver = DistTPModelRunner(
+        recorded_control,
+        _AuthorityRunner((17,)),
+        tensor_model,
+    )
+    state = dataclasses.replace(
+        _snapshot("a"),
+        sampling=EngineSampling(seed=1 << 64),
+    )
+
+    with pytest.raises(ValueError, match="outside 64-bit range"):
+        driver.execute((ScheduledChunk("a", 1, True, 0),), {"a": state})
+
+    assert recorded_control.tensor_shapes == []
+    assert tensor_model.packet_shapes == []
+    assert driver.fatal_error is None
 
 
 class _BlockingStepControl:

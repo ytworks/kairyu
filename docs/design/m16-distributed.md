@@ -6,7 +6,8 @@ Amended 2026-07-25 (D1: `tensor_reduce_scatter`, measured), 2026-07-26
 (**D4**: separate TP control/model serving groups; **D6**: opt-in sequence
 parallelism, lifting the §3 call-site non-goal), and 2026-07-27
 (**D2/A10**: compressed-FP8 dense TP), and 2026-07-30
-(**D2/A12**: canonical TP/EP parameter names).
+(**D2/A12**: canonical TP/EP parameter names), and 2026-08-08
+(**D4**: Gloo tensor headers with fixed-layout NCCL step payloads).
 Milestone: M16 (roadmap Track E3 local half; G2-as-amended multi-GPU gates'
 code, NCCL swapped in on deploy day)
 Date: 2026-07-03
@@ -205,15 +206,19 @@ positions; the final stage recvs, finishes, samples.
 > different-prefix position enters the compatibility verdict.
 
 > **Amended 2026-07-26 (issue #148, corrected after the #150 hardware
-> rerun).** TP serving has two operational groups, created in the same order on
-> every rank after the startup handshake:
+> rerun; amended 2026-08-08 by issue #323).** CUDA TP serving has two
+> operational groups, created in the same order on every rank after the startup
+> handshake:
 >
 > - **control:** gloo only, with an effectively process-lifetime idle timeout —
->   `StepDelta`, release, and shutdown object broadcasts;
+>   a fixed two-word tensor header for every transaction, followed by an object
+>   body only for rare controls such as probes, mode changes, and shutdown;
 > - **model:** the placement backend (NCCL on CUDA), with the 120 s fail-fast
->   timeout — tensor collectives only.
+>   timeout — a versioned, lossless int64 `StepDelta` payload plus model tensor
+>   collectives.
 >
-> The long-timeout startup group remains separate. Python object broadcasts must
+> CPU/Gloo TP retains the object-control fallback. The long-timeout startup
+> group remains separate. Python object broadcasts must
 > not share the model NCCL group: `broadcast_object_list` uses metadata and
 > payload collectives plus receiver-side host deserialization, so rank 0 can
 > enqueue the next model all-reduce while peers are still completing the control
@@ -223,7 +228,7 @@ positions; the final stage recvs, finishes, samples.
 > independent model group.
 >
 > The timeout asymmetry is load-bearing. Non-zero ranks wait *inside* the next
-> control broadcast while the server is idle. Giving that receive the model
+> Gloo control-header broadcast while the server is idle. Giving that receive the model
 > group's 120 s timeout killed a healthy deployment after 120 idle seconds; its
 > workers then entered graph teardown and produced a misleading NCCL barrier
 > watchdog. The model group has no collective pending while idle, so only it can
@@ -316,8 +321,10 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
   11 tokens across 2 ranks asserting an 11-row output — the gate that pins
   padding to the shard boundary (`tests/dist/test_distributed.py`); the same
   parity over real NCCL in bf16 (`tests/gpu/test_sequence_parallel_nccl.py`).
-- D4 control/model split: 512 alternating gloo-object/NCCL-tensor rounds on two
-  real GPUs (`tests/gpu/test_tp_control_plane_nccl.py`); a two-rank gloo gate
+- D4 control/model split: 512 production `DistTPModelRunner` steps on two real
+  GPUs prove that Gloo carries only tensor headers plus a mode-toggle/shutdown
+  object body while `StepDelta` payloads use NCCL (`tests/gpu/test_tp_control_plane_nccl.py`);
+  a two-rank gloo gate
   holds a worker receive beyond the model timeout before delivering the next
   step. Hardware validation also uses the exact
   Qwen3-32B TP=8 / Fugu LiveCodeBench 20-item / concurrency-8 workload. The
@@ -372,7 +379,8 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
 - **A6 harness pins**: test init_process_group(timeout=120s) — gloo's 30-min
   default turns test deadlocks into CI killers. Production TP control receives
   are intentionally exempt because idle workers wait inside that collective;
-  production model collectives retain 120 s. start_processes(join=False) +
+  production Gloo header receives retain the idle allowance while model
+  collectives retain 120 s. start_processes(join=False) +
   polled join; torch.set_num_threads(1) in children; module-level spawn
   targets; one rendezvous file per group; GLOO_SOCKET_IFNAME=lo0 fallback
   recorded.

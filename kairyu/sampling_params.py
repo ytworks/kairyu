@@ -27,6 +27,9 @@ GENERATION_CONFIG_SAMPLING_FIELDS = frozenset(
 RESPONSE_FORMAT_EXTRA_ARG = "response_format"
 STRUCTURED_OUTPUT_EXTRA_ARGS = frozenset({RESPONSE_FORMAT_EXTRA_ARG})
 PARALLEL_TOOL_CALLS_EXTRA_ARG = "parallel_tool_calls"
+_INT64_MAX = (1 << 63) - 1
+_INT64_MIN = -(1 << 63)
+_UINT64_MAX = (1 << 64) - 1
 
 
 class _FrozenDict(dict):
@@ -213,6 +216,29 @@ class SamplingParams:
 
     def _validate(self) -> None:
         validate_prompt_owned_extra_args(self.extra_args)
+        if self.seed is not None and (
+            type(self.seed) is not int
+            or not _INT64_MIN <= self.seed <= _UINT64_MAX
+        ):
+            raise ValueError("seed must fit signed or unsigned 64-bit range")
+        if type(self.top_k) is not int or self.top_k > _INT64_MAX:
+            raise ValueError("top_k must be a signed 64-bit integer")
+        for name, value in (
+            ("logprobs", self.logprobs),
+            ("prompt_logprobs", self.prompt_logprobs),
+        ):
+            if value is not None and (
+                type(value) is not int
+                or not _INT64_MIN <= value <= _INT64_MAX
+            ):
+                raise ValueError(f"{name} must be a signed 64-bit integer or None")
+        if any(
+            type(token_id) is not int or not 0 <= token_id <= _INT64_MAX
+            for token_id in self.stop_token_ids
+        ):
+            raise ValueError(
+                "stop_token_ids must contain only non-negative 64-bit integers"
+            )
         if self.n < 1:
             raise ValueError(f"n must be >= 1, got {self.n}")
         if self.temperature < 0.0:
@@ -229,9 +255,15 @@ class SamplingParams:
             raise ValueError(f"presence_penalty must be in [-2, 2], got {self.presence_penalty}")
         if not -2.0 <= self.frequency_penalty <= 2.0:
             raise ValueError(f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}")
-        if self.max_tokens is not None and self.max_tokens < 1:
+        if self.max_tokens is not None and (
+            type(self.max_tokens) is not int
+            or not 1 <= self.max_tokens <= _INT64_MAX
+        ):
             raise ValueError(f"max_tokens must be >= 1, got {self.max_tokens}")
-        if self.min_tokens < 0:
+        if (
+            type(self.min_tokens) is not int
+            or not 0 <= self.min_tokens <= _INT64_MAX
+        ):
             raise ValueError(f"min_tokens must be >= 0, got {self.min_tokens}")
         if self.max_tokens is not None and self.min_tokens > self.max_tokens:
             raise ValueError(
@@ -242,11 +274,12 @@ class SamplingParams:
             if not self.forced_token_ids:
                 raise ValueError("forced_token_ids must not be empty when set")
             if any(
-                type(token_id) is not int or token_id < 0
+                type(token_id) is not int
+                or not 0 <= token_id <= _INT64_MAX
                 for token_id in self.forced_token_ids
             ):
                 raise ValueError(
-                    "forced_token_ids must contain only non-negative integers"
+                    "forced_token_ids must contain only non-negative 64-bit integers"
                 )
             if self.max_tokens != len(self.forced_token_ids):
                 raise ValueError(

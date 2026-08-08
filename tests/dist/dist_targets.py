@@ -56,6 +56,85 @@ class _ReleaseRecordingRunner:
         self.runner.release(request_id)
 
 
+class _ControlTransportProbe:
+    def __init__(self, comm) -> None:
+        self._comm = comm
+        self.step_delta_objects = 0
+        self.object_broadcasts = 0
+        self.tensor_broadcasts = 0
+        self.step_headers = 0
+        self.object_headers = 0
+
+    def __getattr__(self, name):
+        return getattr(self._comm, name)
+
+    def broadcast(self, payload: object, src: int) -> object:
+        from kairyu.engine.core.step_input import StepDelta
+
+        delivered = self._comm.broadcast(payload, src)
+        observed = payload if self.rank == src else delivered
+        if isinstance(observed, StepDelta):
+            self.step_delta_objects += 1
+        else:
+            self.object_broadcasts += 1
+        return delivered
+
+    def tensor_broadcast(self, tensor, src):
+        delivered = self._comm.tensor_broadcast(tensor, src)
+        self.tensor_broadcasts += 1
+        kind, _ = (int(value) for value in tensor.tolist())
+        if kind == 1:
+            self.step_headers += 1
+        elif kind == 0:
+            self.object_headers += 1
+        return delivered
+
+
+class _TensorTransportProbe:
+    def __init__(self, comm) -> None:
+        self._comm = comm
+        self.broadcasts = 0
+        self.step_payloads = 0
+
+    def __getattr__(self, name):
+        return getattr(self._comm, name)
+
+    def tensor_broadcast(self, tensor, src):
+        delivered = self._comm.tensor_broadcast(tensor, src)
+        self.broadcasts += 1
+        if tensor.numel() > 1:
+            self.step_payloads += 1
+        return delivered
+
+
+class _TensorControlRunner:
+    def __init__(self, rank: int) -> None:
+        self.rank = rank
+        self.steps = 0
+        self.last_token = -1
+        self.mode_changes = 0
+
+    def execute(self, scheduled, states):
+        self.steps += 1
+        return {}
+
+    def execute_passive(self, scheduled, states) -> None:
+        self.steps += 1
+
+    def make_sampling_token_packet(self, scheduled, states, sampled=None):
+        value = self.steps if self.rank == 0 else -1
+        return torch.tensor([value], dtype=torch.int64, device=f"cuda:{self.rank}")
+
+    def adopt_sampling_token_packet(self, scheduled, states, packet) -> None:
+        self.last_token = int(packet.item())
+
+    def set_batched_prefill_enabled(self, enabled: bool) -> None:
+        self.mode_changes += 1
+
+    def release(self, request_id: str) -> None:
+        pass
+
+
 class _NcclScaleExpert(torch.nn.Module):
     def __init__(self, scale: float) -> None:
         super().__init__()
@@ -664,48 +743,86 @@ def reduce_scatter_nccl_equivalence(
 def tp_control_model_group_stress(
     rank: int, world_size: int, init_file: str, out_dir: str, rounds: int
 ) -> None:
-    """Alternate control objects and model tensors on their real backends."""
+    """Exercise fixed-layout step control and rare objects on real backends."""
     import torch.distributed as dist
 
     from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
-    from kairyu.engine.core.worker import serving_groups
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import ScheduledChunk
+    from kairyu.engine.core.step_input import RequestSnapshot
+    from kairyu.engine.core.worker import (
+        DistTPModelRunner,
+        serving_groups,
+        worker_step_loop,
+    )
 
     torch.cuda.set_device(rank)
     init_distributed(rank, world_size, f"file://{init_file}", backend="nccl")
+    groups = None
     try:
         groups = serving_groups("nccl")
-        control = TorchDistCommunicator(group=groups.control)
-        model = TorchDistCommunicator(group=groups.model, device=f"cuda:{rank}")
-        device = torch.device("cuda", rank)
-        expected = world_size * (world_size + 1) / 2
-        last_step = -1
-        for step in range(rounds):
-            payload = control.broadcast(
-                {"step": step, "request_id": f"request-{step % 8}"}
-                if rank == 0
-                else None,
-                src=0,
+        control = _ControlTransportProbe(
+            TorchDistCommunicator(group=groups.control)
+        )
+        model = _TensorTransportProbe(
+            TorchDistCommunicator(group=groups.model, device=f"cuda:{rank}")
+        )
+        runner = _TensorControlRunner(rank)
+        snapshot = RequestSnapshot(
+            request_id="request",
+            prompt_token_ids=(1,),
+            computed_prompt=0,
+            outputs=(),
+            in_flight=0,
+            page_ids=(0,),
+            decode_page_ids=(0,),
+            eos_token_id=None,
+            max_new_tokens=rounds,
+            sampling=EngineSampling(),
+        )
+        chunks = (ScheduledChunk("request", 1, True, 0),)
+        states = {"request": snapshot}
+        if rank == 0:
+            distributed = DistTPModelRunner(
+                control,
+                runner,
+                model,
             )
-            if payload["step"] != step:
-                raise AssertionError(f"control sequence diverged at {step}: {payload}")
-            reduced = model.tensor_all_reduce(
-                torch.tensor([float(rank + 1)], device=device)
+            distributed.set_batched_prefill_enabled(True)
+            for _ in range(rounds):
+                distributed.execute(chunks, states)
+            distributed.shutdown()
+            executed = runner.steps
+        else:
+            executed = worker_step_loop(
+                control,
+                runner,
+                model,
             )
-            if reduced.item() != expected:
-                raise AssertionError(
-                    f"model reduction diverged at {step}: {reduced.item()} != {expected}"
-                )
-            last_step = step
+        model.barrier()
         Path(out_dir, f"rank{rank}.json").write_text(
             json.dumps(
                 {
                     "control_backend": dist.get_backend(groups.control),
                     "model_backend": dist.get_backend(groups.model),
-                    "last_step": last_step,
+                    "steps": executed,
+                    "last_token": runner.last_token,
+                    "mode_changes": runner.mode_changes,
+                    "gloo_step_delta_objects": control.step_delta_objects,
+                    "object_broadcasts": control.object_broadcasts,
+                    "step_headers": control.step_headers,
+                    "object_headers": control.object_headers,
+                    "control_tensor_broadcasts": control.tensor_broadcasts,
+                    "step_payloads": model.step_payloads,
+                    "model_tensor_broadcasts": model.broadcasts,
                 }
             )
         )
     finally:
+        if groups is not None:
+            dist.destroy_process_group(groups.model)
+            dist.destroy_process_group(groups.startup_control)
+            dist.destroy_process_group(groups.control)
         dist.destroy_process_group()
 
 

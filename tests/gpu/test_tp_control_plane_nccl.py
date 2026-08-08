@@ -1,4 +1,4 @@
-"""TP control objects and model tensors must never share an NCCL group."""
+"""TP step deltas use NCCL tensors while rare controls stay on Gloo."""
 
 import json
 import time
@@ -17,7 +17,7 @@ ROUNDS = 512
 SPAWN_TIMEOUT_S = 120
 
 
-def test_tp_control_plane_stays_off_the_model_nccl_group(tmp_path: Path) -> None:
+def test_tp_step_delta_uses_nccl_tensor_control_group(tmp_path: Path) -> None:
     if not torch.cuda.is_available():  # pragma: no cover - CPU box
         pytest.skip("TP control-plane gate needs 2 CUDA devices; CUDA is unavailable")
     if torch.cuda.device_count() < WORLD_SIZE:  # pragma: no cover - small box
@@ -51,5 +51,14 @@ def test_tp_control_plane_stays_off_the_model_nccl_group(tmp_path: Path) -> None
         assert result == {
             "control_backend": "gloo",
             "model_backend": "nccl",
-            "last_step": ROUNDS - 1,
+            "steps": ROUNDS,
+            "last_token": ROUNDS,
+            "mode_changes": 1,
+            "gloo_step_delta_objects": 0,
+            "object_broadcasts": 2,
+            "step_headers": ROUNDS,
+            "object_headers": 2,
+            "control_tensor_broadcasts": ROUNDS + 2,
+            "step_payloads": ROUNDS,
+            "model_tensor_broadcasts": 2 * ROUNDS,
         }

@@ -14,6 +14,8 @@ so _ToyRunner-style runners execute unchanged on snapshots.
 from __future__ import annotations
 
 import dataclasses
+import json
+import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -164,6 +166,333 @@ class StepDelta:
     updates: tuple[RequestDelta, ...]
     dropped: tuple[str, ...]
     released_ids: tuple[str, ...] = ()
+
+
+_STEP_DELTA_TENSOR_MAGIC = 0x4B535444  # "KSTD"
+_STEP_DELTA_TENSOR_VERSION = 1
+_STEP_DELTA_STRING_BYTES_PER_WORD = 7
+_STEP_DELTA_INT64_MIN = -(1 << 63)
+_STEP_DELTA_INT64_MAX = (1 << 63) - 1
+_STEP_DELTA_UINT64_MODULUS = 1 << 64
+
+
+class _IntWriter:
+    def __init__(self) -> None:
+        self.values: list[int] = []
+
+    def integer(self, value: int) -> None:
+        if type(value) is not int:
+            raise TypeError(f"step tensor integer must be int, got {type(value).__name__}")
+        if not _STEP_DELTA_INT64_MIN <= value <= _STEP_DELTA_INT64_MAX:
+            raise ValueError(f"step tensor integer is outside int64 range: {value}")
+        self.values.append(value)
+
+    def boolean(self, value: bool) -> None:
+        if type(value) is not bool:
+            raise TypeError("step tensor boolean must be bool")
+        self.values.append(int(value))
+
+    def optional_integer(self, value: int | None) -> None:
+        self.boolean(value is not None)
+        if value is not None:
+            self.integer(value)
+
+    def optional_seed(self, value: int | None) -> None:
+        self.boolean(value is not None)
+        if value is None:
+            return
+        if type(value) is not int or not (
+            _STEP_DELTA_INT64_MIN <= value < _STEP_DELTA_UINT64_MODULUS
+        ):
+            raise ValueError(f"step tensor seed is outside 64-bit range: {value}")
+        unsigned_high = value > _STEP_DELTA_INT64_MAX
+        self.boolean(unsigned_high)
+        self.integer(value - _STEP_DELTA_UINT64_MODULUS if unsigned_high else value)
+
+    def floating(self, value: float) -> None:
+        self.integer(struct.unpack("!q", struct.pack("!d", float(value)))[0])
+
+    def string(self, value: str) -> None:
+        if not isinstance(value, str):
+            raise TypeError("step tensor string must be str")
+        encoded = value.encode("utf-8")
+        self.integer(len(encoded))
+        width = _STEP_DELTA_STRING_BYTES_PER_WORD
+        self.values.extend(
+            int.from_bytes(encoded[start : start + width], "little")
+            for start in range(0, len(encoded), width)
+        )
+
+    def optional_string(self, value: str | None) -> None:
+        self.boolean(value is not None)
+        if value is not None:
+            self.string(value)
+
+    def integers(self, values: Sequence[int]) -> None:
+        self.integer(len(values))
+        for value in values:
+            self.integer(value)
+
+    def strings(self, values: Sequence[str]) -> None:
+        self.integer(len(values))
+        for value in values:
+            self.string(value)
+
+    def optional_json_object(self, value: dict | None) -> None:
+        self.boolean(value is not None)
+        if value is not None:
+            self.string(
+                json.dumps(
+                    value,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+
+
+class _IntReader:
+    def __init__(self, values: Sequence[int]) -> None:
+        self._values = values
+        self._position = 0
+
+    def integer(self) -> int:
+        if self._position >= len(self._values):
+            raise ValueError("truncated step tensor payload")
+        value = self._values[self._position]
+        self._position += 1
+        if type(value) is not int:
+            raise TypeError("step tensor payload values must be integers")
+        return value
+
+    def count(self, label: str) -> int:
+        value = self.integer()
+        if value < 0 or value > len(self._values) - self._position:
+            raise ValueError(f"invalid step tensor {label} length {value}")
+        return value
+
+    def boolean(self) -> bool:
+        value = self.integer()
+        if value not in (0, 1):
+            raise ValueError(f"invalid step tensor boolean {value}")
+        return bool(value)
+
+    def optional_integer(self) -> int | None:
+        return self.integer() if self.boolean() else None
+
+    def optional_seed(self) -> int | None:
+        if not self.boolean():
+            return None
+        unsigned_high = self.boolean()
+        value = self.integer()
+        if unsigned_high:
+            if value >= 0:
+                raise ValueError("invalid unsigned-high step tensor seed")
+            return value + _STEP_DELTA_UINT64_MODULUS
+        return value
+
+    def floating(self) -> float:
+        return struct.unpack("!d", struct.pack("!q", self.integer()))[0]
+
+    def string(self) -> str:
+        size = self.integer()
+        if size < 0:
+            raise ValueError(f"invalid step tensor string length {size}")
+        width = _STEP_DELTA_STRING_BYTES_PER_WORD
+        words = (size + width - 1) // width
+        if words > len(self._values) - self._position:
+            raise ValueError(f"invalid step tensor string length {size}")
+        chunks = []
+        for _ in range(words):
+            value = self.integer()
+            if not 0 <= value < (1 << (8 * width)):
+                raise ValueError(f"invalid packed step tensor string word {value}")
+            chunks.append(value.to_bytes(width, "little"))
+        encoded = b"".join(chunks)[:size]
+        try:
+            return encoded.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("step tensor string is not valid UTF-8") from error
+
+    def optional_string(self) -> str | None:
+        return self.string() if self.boolean() else None
+
+    def integers(self) -> tuple[int, ...]:
+        return tuple(self.integer() for _ in range(self.count("integer tuple")))
+
+    def strings(self) -> tuple[str, ...]:
+        return tuple(self.string() for _ in range(self.count("string tuple")))
+
+    def optional_json_object(self) -> dict | None:
+        if not self.boolean():
+            return None
+        try:
+            value = json.loads(self.string())
+        except (TypeError, ValueError, RecursionError) as error:
+            raise ValueError("step tensor JSON object is malformed") from error
+        if not isinstance(value, dict):
+            raise ValueError("step tensor JSON value must be an object")
+        return value
+
+    def finish(self) -> None:
+        if self._position != len(self._values):
+            raise ValueError(
+                f"step tensor payload has {len(self._values) - self._position} "
+                "trailing values"
+            )
+
+
+def _write_sampling(writer: _IntWriter, sampling: EngineSampling) -> None:
+    writer.floating(sampling.temperature)
+    writer.integer(sampling.top_k)
+    writer.floating(sampling.top_p)
+    writer.floating(sampling.min_p)
+    writer.floating(sampling.presence_penalty)
+    writer.floating(sampling.frequency_penalty)
+    writer.floating(sampling.repetition_penalty)
+    writer.optional_seed(sampling.seed)
+    writer.optional_integer(sampling.logprobs)
+    writer.optional_json_object(sampling.json_schema)
+    writer.boolean(sampling.json_mode)
+    writer.optional_string(sampling.regex)
+    writer.optional_string(sampling.grammar)
+    writer.optional_json_object(sampling.structural_tag)
+    writer.boolean(sampling.forced_token_ids is not None)
+    if sampling.forced_token_ids is not None:
+        writer.integers(sampling.forced_token_ids)
+
+
+def _read_sampling(reader: _IntReader) -> EngineSampling:
+    return EngineSampling(
+        temperature=reader.floating(),
+        top_k=reader.integer(),
+        top_p=reader.floating(),
+        min_p=reader.floating(),
+        presence_penalty=reader.floating(),
+        frequency_penalty=reader.floating(),
+        repetition_penalty=reader.floating(),
+        seed=reader.optional_seed(),
+        logprobs=reader.optional_integer(),
+        json_schema=reader.optional_json_object(),
+        json_mode=reader.boolean(),
+        regex=reader.optional_string(),
+        grammar=reader.optional_string(),
+        structural_tag=reader.optional_json_object(),
+        forced_token_ids=reader.integers() if reader.boolean() else None,
+    )
+
+
+def _write_snapshot(writer: _IntWriter, snapshot: RequestSnapshot) -> None:
+    writer.string(snapshot.request_id)
+    writer.integers(snapshot.prompt_token_ids)
+    writer.integer(snapshot.computed_prompt)
+    writer.integers(snapshot.outputs)
+    writer.integer(snapshot.in_flight)
+    writer.integers(snapshot.page_ids)
+    writer.integers(snapshot.decode_page_ids)
+    writer.optional_integer(snapshot.eos_token_id)
+    writer.integer(snapshot.max_new_tokens)
+    writer.integer(snapshot.num_cached_tokens)
+    _write_sampling(writer, snapshot.sampling)
+    writer.integer(snapshot.output_epoch)
+    writer.boolean(snapshot.outputs_override)
+    writer.optional_string(snapshot.sampling_id)
+    writer.integers(snapshot.stop_token_ids)
+    writer.integer(snapshot.min_tokens)
+    writer.boolean(snapshot.ignore_eos)
+
+
+def _read_snapshot(reader: _IntReader) -> RequestSnapshot:
+    return RequestSnapshot(
+        request_id=reader.string(),
+        prompt_token_ids=reader.integers(),
+        computed_prompt=reader.integer(),
+        outputs=reader.integers(),
+        in_flight=reader.integer(),
+        page_ids=reader.integers(),
+        decode_page_ids=reader.integers(),
+        eos_token_id=reader.optional_integer(),
+        max_new_tokens=reader.integer(),
+        num_cached_tokens=reader.integer(),
+        sampling=_read_sampling(reader),
+        output_epoch=reader.integer(),
+        outputs_override=reader.boolean(),
+        sampling_id=reader.optional_string(),
+        stop_token_ids=reader.integers(),
+        min_tokens=reader.integer(),
+        ignore_eos=reader.boolean(),
+    )
+
+
+def encode_step_delta(delta: StepDelta) -> tuple[int, ...]:
+    """Encode the hot TP step control payload without pickle or object collectives."""
+
+    if not isinstance(delta, StepDelta):
+        raise TypeError("step tensor payload must be StepDelta")
+    writer = _IntWriter()
+    writer.integer(_STEP_DELTA_TENSOR_MAGIC)
+    writer.integer(_STEP_DELTA_TENSOR_VERSION)
+    writer.integer(len(delta.chunks))
+    for chunk in delta.chunks:
+        writer.string(chunk.request_id)
+        writer.integer(chunk.num_tokens)
+        writer.boolean(chunk.is_prefill)
+        writer.integer(chunk.position)
+    writer.integer(len(delta.new))
+    for snapshot in delta.new:
+        _write_snapshot(writer, snapshot)
+    writer.integer(len(delta.updates))
+    for update in delta.updates:
+        writer.string(update.request_id)
+        writer.integer(update.computed_prompt)
+        writer.integers(update.new_outputs)
+        writer.integer(update.in_flight)
+        writer.integers(update.new_decode_page_ids)
+        writer.integer(update.num_cached_tokens)
+    writer.strings(delta.dropped)
+    writer.strings(delta.released_ids)
+    return tuple(writer.values)
+
+
+def decode_step_delta(values: Sequence[int]) -> StepDelta:
+    """Decode and validate one tensor-transported TP step delta."""
+
+    reader = _IntReader(values)
+    if reader.integer() != _STEP_DELTA_TENSOR_MAGIC:
+        raise ValueError("step tensor payload has invalid magic")
+    version = reader.integer()
+    if version != _STEP_DELTA_TENSOR_VERSION:
+        raise ValueError(f"unsupported step tensor version {version}")
+    chunks = tuple(
+        ScheduledChunk(
+            reader.string(),
+            reader.integer(),
+            reader.boolean(),
+            reader.integer(),
+        )
+        for _ in range(reader.count("chunks"))
+    )
+    new = tuple(_read_snapshot(reader) for _ in range(reader.count("new snapshots")))
+    updates = tuple(
+        RequestDelta(
+            request_id=reader.string(),
+            computed_prompt=reader.integer(),
+            new_outputs=reader.integers(),
+            in_flight=reader.integer(),
+            new_decode_page_ids=reader.integers(),
+            num_cached_tokens=reader.integer(),
+        )
+        for _ in range(reader.count("updates"))
+    )
+    delta = StepDelta(
+        chunks=chunks,
+        new=new,
+        updates=updates,
+        dropped=reader.strings(),
+        released_ids=reader.strings(),
+    )
+    reader.finish()
+    return delta
 
 
 class StateSync:
