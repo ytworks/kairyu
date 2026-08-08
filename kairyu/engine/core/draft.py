@@ -60,7 +60,7 @@ class ModelDraftSource:
 
 @dataclass
 class _TargetTrace:
-    chunks: list[torch.Tensor] = field(default_factory=list)
+    history: torch.Tensor | None = None
     staged: list[torch.Tensor] = field(default_factory=list)
     rows: int = 0
     unavailable: bool = False
@@ -83,6 +83,19 @@ class _LearnedDraftAdapter:
     def __init__(self) -> None:
         self._traces: dict[str, _TargetTrace] = {}
 
+    @staticmethod
+    def _append_history(trace: _TargetTrace, rows: torch.Tensor) -> None:
+        required = trace.rows + rows.shape[0]
+        history = trace.history
+        if history is None or history.shape[0] < required:
+            capacity = max(16, 1 << (required - 1).bit_length())
+            grown = rows.new_empty((capacity, rows.shape[1]))
+            if history is not None:
+                grown[: trace.rows].copy_(history[: trace.rows])
+            trace.history = grown
+        trace.history[trace.rows : required].copy_(rows)
+        trace.rows = required
+
     def _transform(
         self,
         hidden: torch.Tensor,
@@ -90,6 +103,7 @@ class _LearnedDraftAdapter:
     ) -> torch.Tensor:
         raise NotImplementedError
 
+    @torch.no_grad()
     def capture_target_rows(
         self,
         request_id: str,
@@ -110,7 +124,7 @@ class _LearnedDraftAdapter:
         expected_start = trace.rows + (staged_rows if staged else 0)
         expected = tuple(range(expected_start, expected_start + len(positions)))
         if positions != expected or (not staged and trace.staged):
-            trace.chunks.clear()
+            trace.history = None
             trace.staged.clear()
             trace.rows = 0
             trace.unavailable = True
@@ -121,10 +135,7 @@ class _LearnedDraftAdapter:
         if staged:
             trace.staged.append(captured)
         else:
-            # A row can be a view into a multi-request ragged batch.  Give each
-            # request independent storage so releasing a peer releases its rows.
-            trace.chunks.append(captured.clone())
-            trace.rows += captured.shape[0]
+            self._append_history(trace, captured)
 
     def commit_verification(
         self,
@@ -145,8 +156,7 @@ class _LearnedDraftAdapter:
             if remaining == 0:
                 break
             take = min(remaining, chunk.shape[0])
-            trace.chunks.append(chunk[:take].clone())
-            trace.rows += take
+            self._append_history(trace, chunk[:take])
             remaining -= take
         trace.staged.clear()
 
@@ -168,7 +178,8 @@ class _LearnedDraftAdapter:
             or trace.rows != expected
         ):
             return None
-        return torch.cat(trace.chunks, dim=0)
+        assert trace.history is not None
+        return trace.history[: trace.rows]
 
 
 class EagleDraftAdapter(_LearnedDraftAdapter):
@@ -192,6 +203,7 @@ class EagleDraftAdapter(_LearnedDraftAdapter):
             raise ValueError("EAGLE target capture requires auxiliary hidden rows")
         return self._head.fuse(aux_hidden)
 
+    @torch.no_grad()
     def propose_for_request(
         self,
         request_id: str,
@@ -234,6 +246,7 @@ class MtpDraftAdapter(_LearnedDraftAdapter):
         del aux_hidden
         return hidden
 
+    @torch.no_grad()
     def propose_for_request(
         self,
         request_id: str,

@@ -45,12 +45,16 @@ def test_eagle_adapter_commits_only_authoritative_verification_rows():
     class _Head:
         def __init__(self):
             self.history_widths = []
+            self.history_ptrs = []
 
         def fuse(self, aux):
+            assert not torch.is_grad_enabled()
             return aux[:, :4]
 
         def rollout_cached(self, shifted, hidden, embed_fn, k):
+            assert not torch.is_grad_enabled()
             self.history_widths.append((shifted.shape[0], hidden.shape[0]))
+            self.history_ptrs.append(hidden.data_ptr())
             embed_fn(7)
             return list(range(10, 10 + k))
 
@@ -74,6 +78,7 @@ def test_eagle_adapter_commits_only_authoritative_verification_rows():
     source.commit_verification("r", accepted_draft_tokens=1)
     assert source.propose_for_request("r", (1, 2, 3, 10, 19), 1) == [10]
     assert head.history_widths == [(2, 2), (4, 4)]
+    assert head.history_ptrs[0] == head.history_ptrs[1]
 
 
 def test_eagle_adapter_degrades_when_radix_hit_omits_hidden_prefix():
