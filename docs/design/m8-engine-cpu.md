@@ -524,17 +524,28 @@ New `kairyu/engine/core/spec_runner.py`, a `ModelRunner` wrapper:
   radix-folded (`commit_and_release` keys pages by prompt+outputs; readers
   recompute beyond `num_cached_tokens`). The next step overwrites the first
   stale slot before any read.
-- **Per-request gating (amended)**: spec is bypassed per request (normal decode
-  path) unless `temperature == 0` AND no penalties AND no `json_schema` —
-  a constructor-time check cannot see per-request params, and penalties change
-  the argmax so equivalence would not hold; grammar would need per-position
-  `accept()`+rollback (xgrammar has `rollback`, deferred to M17). The
-  equivalence suite asserts the bypass behavior.
+- **Per-request gating (amended by #358)**: deterministic drafts support T=0
+  greedy verification plus T>0 point-mass rejection verification, including
+  filtered and penalized target distributions. Grammar and forced-token
+  requests keep the one-token bypass because they require rollback beyond the
+  current draft contract.
 - Wired via `KairyuBackend(speculative="ngram", speculative_tokens=k)`; default
   off. Acceptance-length counters exposed (G4 M-A4 lineage).
 
 Invariant pinned: spec ≡ non-spec greedy through the full engine, on repetitive
 prompts (accepts > 0) and adversarial ones (accepts 0).
+
+**2026-08-08 amendment (#358):** every serving draft source remains
+deterministic (n-gram lookup or learned-head argmax), so its proposal
+distribution is a point mass q(t)=1. For `temperature > 0`, one ordinary draw
+X from the processed target distribution implements standard rejection
+sampling exactly: X=t accepts the draft with probability p(t); conditioned on
+X!=t, X is already distributed as the normalized residual `max(0, p-q)`.
+`SpeculativeRunner` therefore reuses target samples as acceptance/correction
+records without transferring vocabulary-sized distributions. Penalties are
+supported by slicing each verification row's history at its logical position.
+Grammar and forced-token requests retain the one-token bypass because matcher
+or forced-continuation rollback is a separate contract.
 
 ### D5 — Quant detection, hardware profile, safetensors reader
 
@@ -704,8 +715,9 @@ GIL attribution or formal A6 verdict. Complete evidence is retained under
 - `n > 1` parallel sampling in the kairyu backend (M9, rides D2's seams).
 - Real model architectures / multi-layer KV pools (M12); `TinyAttentionLM`
   stays the oracle.
-- EAGLE/MTP draft sources and sampled-mode (rejection-sampling) or
-  grammar-composed speculation (M17/G4) — D3/D4 build the machinery.
+- The original M8 scope excluded EAGLE/MTP and sampled-mode verification;
+  M17 added deterministic learned drafts and #358 added their T>0 point-mass
+  rejection policy. Grammar-composed speculation remains excluded.
 - The original M8 scope excluded TP multi-process SPMD and gave the in-process
   `TPModelRunner` only the D2 return-type ripple. M16 later delivered SPMD, and
   issue #333's D6 amendment above exposes that implementation through

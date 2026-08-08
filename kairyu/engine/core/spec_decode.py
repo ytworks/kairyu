@@ -1,9 +1,9 @@
-"""N-gram draft speculative decoding policy (design doc m3 §2).
+"""Deterministic-draft speculative decoding policy (design doc m3 §2).
 
-Pure policy: drafting is a prompt lookup (no model), verification accepts the
-longest draft prefix matching the target model's greedy tokens plus one bonus
-token. The invariant — output identical to plain greedy decoding — is pinned
-by tests; the GPU runner only changes how target_tokens are produced.
+Drafting is deterministic (n-gram lookup or greedy learned-head rollout).
+Greedy verification accepts the longest matching prefix plus one bonus token.
+For stochastic target sampling, the same token comparison implements standard
+rejection sampling for the resulting point-mass draft distribution.
 """
 
 from __future__ import annotations
@@ -50,3 +50,18 @@ def verify_greedy(draft: tuple[int, ...], target_tokens: tuple[int, ...]) -> Ver
             break
         accepted += 1
     return VerificationResult(accepted=accepted, tokens=target_tokens[: accepted + 1])
+
+
+def verify_rejection(
+    draft: tuple[int, ...], target_tokens: tuple[int, ...]
+) -> VerificationResult:
+    """Standard rejection sampling for a deterministic draft distribution.
+
+    Every current ``DraftSource`` deterministically proposes one token ``t``,
+    hence q(t)=1 and q(x)=0 otherwise. One draw X~p_target implements the
+    rejection rule exactly: X=t occurs with acceptance probability p_target(t);
+    conditional on X!=t, X has the normalized residual distribution
+    p_target(x)/(1-p_target(t)). The first mismatch is therefore already the
+    correction token, while matching rows are accepted draft tokens.
+    """
+    return verify_greedy(draft, target_tokens)

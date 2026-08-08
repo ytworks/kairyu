@@ -1118,7 +1118,7 @@ class PagedModelRunner:
             # frequency and repetition penalties are computed over this history,
             # so an overlap snapshot missing the in-flight token would penalise a
             # different set of tokens than the eager path and pick differently
-            outputs=state.outputs,
+            outputs=self._sampling_outputs(state, position),
             pending_outputs=self._pending_host_outputs(state, position),
             history_epoch=getattr(state, "output_epoch", 0),
             eos_token_id=state.request.eos_token_id,
@@ -1197,13 +1197,22 @@ class PagedModelRunner:
             sampling=state.request.sampling,
             position=position,
             prompt=state.request.prompt_token_ids,
-            outputs=state.outputs,
+            outputs=self._sampling_outputs(state, position),
             pending_outputs=self._pending_device_outputs(state, position),
             history_epoch=getattr(state, "output_epoch", 0),
             eos_token_id=state.request.eos_token_id,
             stop_token_ids=tuple(getattr(state.request, "stop_token_ids", ())),
             min_tokens=getattr(state.request, "min_tokens", 0),
         )
+
+    @staticmethod
+    def _sampling_outputs(state: object, position: int) -> tuple[int, ...]:
+        """Return only history preceding a speculative verification row."""
+
+        outputs = tuple(state.outputs)
+        if getattr(state, "outputs_override", False):
+            return outputs[:position]
+        return outputs
 
     def _pending_device_sample(
         self,

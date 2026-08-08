@@ -71,7 +71,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - `kairyu serve --tp N` on real hardware: Qwen3-32B TP8, Llama-3.1-8B, Llama-3.3-70B FP8, Qwen3-VL-32B (via vLLM replica)
 - Attention backends: `auto`/torch/FlashInfer/FA3/FA4 with `/backends` reporting; capable CUDA models pre-capture decode graphs before readiness
 - Quantized serving: FP8/INT8/AWQ/GPTQ/NVFP4 without full dequantization; opt-in FP8 EAGLE/MTP draft loading
-- Fully device-side sampling, penalties, spec verification, page-table caching; n-gram/EAGLE-3/MTP greedy drafts; incremental detokenization and stop matching
+- Fully device-side sampling, penalties, spec verification, page-table caching; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling; incremental detokenization and stop matching
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-08 — [amendment] Deterministic drafts preserve sampled distributions
+- What: n-gram/EAGLE/MTP argmax drafts use point-mass rejection verification for T>0; per-row history slicing also enables penalties while grammar/forced continuations keep the safe bypass.
+- Why: one target draw exactly realizes acceptance plus residual correction for q(t)=1, avoiding vocabulary-sized draft/target probability transfer.
+- Refs: issue #358; M8 D4; `kairyu/engine/core/{spec_decode,spec_runner,model_runner}.py`
 
 ### 2026-08-08 — [amendment] FP8 audit separates arithmetic noise from error
 - What: calibrated dequant auditing permits a documented 2^-48 relative FP64 comparison slack while retaining exact stored-byte, finite, range, and physical E4M3 error checks.
