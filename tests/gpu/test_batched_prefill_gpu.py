@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -430,6 +431,105 @@ def test_real_flashinfer_ragged_prefill_matches_sequential_and_reduces_launches(
         f"batched CUDA events did not fall: {sequential_events} -> "
         f"{batched_events}"
     )
+
+
+def test_mixed_prefill_decode_matches_split_with_device_feedback(cuda):
+    from kairyu.engine.core.attention.flashinfer_gpu import FlashInferBackend
+    from kairyu.engine.core.engine_core import token_ids
+    from kairyu.engine.core.kv_pool import PagedKVPool
+    from kairyu.engine.core.model_runner import PagedModelRunner
+    from kairyu.engine.core.sampling_types import EngineSampling
+    from kairyu.engine.core.scheduler import ScheduledChunk
+    from kairyu.models.config import parse_model_config
+    from kairyu.models.llama import DenseDecoder
+
+    torch.manual_seed(317)
+    backend = FlashInferBackend(device=cuda)
+    model = DenseDecoder(
+        parse_model_config(TINY), attention_backend=backend
+    ).to(device=cuda, dtype=torch.bfloat16).eval()
+
+    def new_pool():
+        return PagedKVPool(
+            model.config.num_hidden_layers,
+            8,
+            PAGE,
+            model.config.num_key_value_heads,
+            model.config.head_dim,
+            dtype=torch.bfloat16,
+            device=cuda,
+        )
+
+    mixed_pool = new_pool()
+    split_pool = new_pool()
+    decode_prompt = (11, 12, 13, 14)
+    for pool in (mixed_pool, split_pool):
+        model.forward_tokens(
+            torch.tensor(decode_prompt, dtype=torch.long, device=cuda),
+            torch.arange(len(decode_prompt), device=cuda),
+            pool,
+            [0],
+            seq_len=len(decode_prompt),
+        )
+    mixed_runner = PagedModelRunner(model, mixed_pool)
+    split_runner = PagedModelRunner(model, split_pool)
+    split_runner.set_batched_prefill_enabled(False)
+    mixed_runner._future_device_tokens["decode"] = {
+        0: torch.tensor(9, dtype=torch.int64, device=cuda)
+    }
+    chunks = (
+        ScheduledChunk("prefill", 3, True),
+        ScheduledChunk("decode", 1, False, position=1),
+    )
+
+    def state(
+        request_id,
+        prompt,
+        pages,
+        *,
+        decode_pages=(),
+        outputs=(),
+    ):
+        return SimpleNamespace(
+            request=SimpleNamespace(
+                request_id=request_id,
+                sampling_identity=request_id,
+                prompt_token_ids=prompt,
+                sampling=EngineSampling(),
+                eos_token_id=None,
+            ),
+            allocation=SimpleNamespace(
+                pages=pages,
+                num_cached_tokens=0,
+            ),
+            decode_pages=list(decode_pages),
+            computed_prompt=len(prompt),
+            prefill_done=True,
+            outputs=list(outputs),
+            output_epoch=0,
+        )
+
+    def states(*, device_feedback):
+        return {
+            "prefill": state("prefill", (1, 2, 3), (2,)),
+            "decode": state(
+                "decode",
+                decode_prompt,
+                (0,),
+                decode_pages=(1,),
+                outputs=() if device_feedback else (9,),
+            ),
+        }
+
+    mixed = mixed_runner.execute(chunks, states(device_feedback=True))
+    split = split_runner.execute(chunks, states(device_feedback=False))
+    torch.cuda.synchronize(cuda)
+
+    assert token_ids(mixed) == token_ids(split)
+    assert torch.allclose(mixed_pool.k, split_pool.k, atol=2e-2)
+    assert torch.allclose(mixed_pool.v, split_pool.v, atol=2e-2)
+    assert mixed_runner.prefill_execution_stats()["model_calls"] == 1
+    assert split_runner.prefill_execution_stats()["model_calls"] == 1
 
 
 def _tp2_prefill_cell(launcher, *, enabled: bool, prefix: str):

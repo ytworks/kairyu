@@ -1,6 +1,6 @@
 # M13 Design: AttentionBackend Seam — Torch, MLA, FlashInfer, FlashAttention 3/4
 
-Status: **Implemented** (2026-07-03). Reviewed — APPROVE-WITH-AMENDMENTS (1-reviewer panel with web
+Status: **Implemented** (2026-07-03; D1 amended 2026-08-08). Reviewed — APPROVE-WITH-AMENDMENTS (1-reviewer panel with web
 verification of the FlashInfer 0.6.x API and the DeepSeek-V2 MLA paper,
 2026-07-03; amendments below are binding). The issue #277 FlashAttention-3/4
 extension is implemented (2026-07-30). FA4 has retained SM120 correctness and
@@ -59,6 +59,14 @@ laid out in one fresh per-batch buffer. CUDA uses pinned host storage and one
 non-blocking H2D copy. Application code has no reusable staging pool, and the
 pinned allocator defers recycling until the copy completes, so no overwrite
 race or application-owned staging event is introduced.
+
+Issue #317 extends the same ragged contract to a mixed scheduler step. When the
+backend declares native batched prefill, one-token decode rows are appended to
+the prefill rows and traverse one flat model chain. Device-owned overlap tokens
+enter that flat suffix through the existing decode input slots, without a host
+scalar read. A capability gap retains the split execution path; pure decode
+continues to use its eager or captured-graph path, and speculative verification
+remains separate.
 
 ### D2 — `TorchAttentionBackend` (`torch_backend.py`)
 
@@ -189,8 +197,8 @@ ownership.
 - Attention dtype policies beyond the pool's dtype.
 - MLA and custom/Torch backends without native ragged-prefill capability retain
   the established sequential prefill path. A single prefill request also stays
-  sequential to avoid plan/packing overhead. Mixed prefill/decode steps run one
-  prefill chain first and then the existing eager/graph decode chain.
+  sequential to avoid plan/packing overhead. Mixed prefill/decode steps likewise
+  retain split execution when that capability is unavailable.
 - Ragged prefill CUDA-graph capture is not claimed: FlashInfer planning is a
   host phase and ragged shapes vary. Decode graph capture remains unchanged.
 - Automatic FA3/FA4 promotion without retained profile-specific evidence.
@@ -218,6 +226,9 @@ ownership.
   instead of one chain per request; Qwen3-32B TP8 all-rank structural evidence.
   Fixed wall-clock thresholds are diagnostic only because OS jitter must not
   decide this gate.
+- Issue #317: CPU output/KV parity against split execution and one-versus-two
+  model-forward structure; real SM120 BF16 FlashInfer parity with a device-owned
+  decode token; unsupported-backend fallback and unchanged pure-decode dispatch.
 - Selector/Helm: all five public values render and resolve; invalid or
   unavailable explicit selections fail without fallback; an unavailable
   profile-selected optional backend falls from `auto` to torch and the actual
