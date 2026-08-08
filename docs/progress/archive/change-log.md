@@ -11,6 +11,30 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-08 — [progress] Calibrated FP8 KV re-bake retains FAIL
+- What: the clean Qwen3-32B SM120 re-bake passed cache cosine/NRMSE and selected-logprob bounds, but failed 16K/32K exact tokens and the disjoint calibration envelope; public FP8 KV remains rejected.
+- Refs: issue #357; `bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08/`; FlashInfer SM120 design
+
+### 2026-08-08 — [amendment] Calibrated FP8 KV writes use the exact path
+- What: correcting the preceding #357 entry, non-unit calibrated scales bypass the fused Triton writer and use the existing torch quantize-and-store path; unit-scale FP8 keeps the fused path.
+- Why: real Qwen3-32B writes showed backend FP8-cast byte differences beyond division rounding alone, so calibrated serving must prefer the gate oracle over an unproven fused fast path.
+- Refs: issue #357; G4 E-KV calibrated re-bake; `kairyu/{engine/core/kv_pool.py,kernels/paged_kv_write_gpu.py}`
+
+### 2026-08-08 — [amendment] FP8 KV scaling is correctly rounded
+- What: fused batched and ragged FP8 KV writers perform calibrated BF16-to-FP8 scaling through explicit FP32 round-to-nearest division; the gate audits dequantization error in FP64.
+- Why: Triton's approximate division crossed E4M3 byte boundaries for a small fraction of real calibrated writes, while FP32 audit multiplication introduced false bound excesses near zero.
+- Refs: issue #357; `kairyu/kernels/paged_kv_write_gpu.py`; `bench/fp8_kv_g4_ekv_bench.py`; `tests/gpu/test_paged_kv_write_gpu.py`
+
+### 2026-08-08 — [amendment] FP8 KV scales bind per layer and K/V kind
+- What: FP8 pools and fused writers apply validated static per-layer K/V scales; a disjoint long-context amax pass emits a checkpoint- and data-bound calibration artifact for the unchanged G4 E-KV thresholds.
+- Why: unit scale underused E4M3 range on small-value layers and caused the retained cache-quality and output failures.
+- Refs: issue #357; FlashInfer SM120 amendment; `kairyu/engine/core/{kv_pool,kv_scale_calibration}.py`; `bench/fp8_kv_g4_ekv_bench.py`
+
+### 2026-08-08 — [amendment] Generic EP combine is local and degree-invariant
+- What: correcting the preceding #359 entry, reverse all-to-all's complete returned rows are combined locally in fixed FP32 slot order, with no redundant combine collective.
+- Why: FP32 rank-partial reduction removed BF16 boundaries but retained ownership-dependent addition grouping and doubled combine traffic.
+- Refs: issue #359; PR #448 Fable 5 review; M16 D3; `kairyu/models/moe_parallel.py`
+
 ### 2026-08-08 — [amendment] Generic EP combine crosses one rounding boundary
 - What: generic all-to-all MoE keeps rank-owned weighted partials FP32 through the all-reduce and casts once afterward; EP2/4/8 ownership partitions are regression-pinned.
 - Why: casting every rank partial to BF16 before reduction made identical prompts depend on the configured EP degree.
