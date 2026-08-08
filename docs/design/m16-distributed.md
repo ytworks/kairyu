@@ -157,6 +157,13 @@ NCCL share the code path.
 > for the exercised EP2/4/8 ownership partitions. The homogeneous NVFP4 fused
 > correctness path retains G4 D3's explicitly measured BF16 finalize contract.
 
+> **Corrected 2026-08-08 (PR #448 Fable 5 review).** Reverse all-to-all already
+> returns the complete computed expert rows to each replicated source rank.
+> Generic EP therefore combines every slot locally in a fixed FP32 order and
+> casts once, without a redundant combine all-reduce. The result and its
+> addition grouping are independent of EP2/4/8 ownership; the NVFP4 carve-out
+> above remains unchanged.
+
 ### D4 — SPMD worker + PP stage (`engine/core/worker.py`, `pp_worker.py`)
 
 `worker.py`: `run_tp_worker(rank, world, init_method, model_dir, ...)` —

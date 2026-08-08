@@ -217,6 +217,17 @@ def test_ep2_moe_block_matches_single_process(spawn2, moe_dir):
         assert result["maxdiff"] < 1e-5  # accumulation-order tolerance (A7)
 
 
+def test_ep2_bf16_combine_is_exactly_degree_invariant(spawn2):
+    results = spawn2(dist_targets.ep_block_bf16_invariance)
+    for result in results:
+        assert result == {
+            "exact": True,
+            "actual": 0.455078125,
+            "reference": 0.455078125,
+            "dtype": "torch.bfloat16",
+        }
+
+
 def test_pp2_greedy_matches_single_process(spawn2, llama_dir):
     torch.manual_seed(89)
     prompt = torch.randint(0, 256, (9,)).tolist()

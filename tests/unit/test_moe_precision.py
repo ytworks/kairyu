@@ -213,41 +213,38 @@ def test_ep_moe_combines_fp32_router_weights_before_final_bf16_cast() -> None:
     ).sum(dim=1)
     torch.testing.assert_close(actual[:, 0], expected, rtol=0, atol=0)
     assert not torch.equal(actual[:, 0], premature_bf16)
-    assert communicator.all_reduce_dtypes == [torch.float32]
+    assert communicator.all_reduce_dtypes == []
 
 
-@pytest.mark.parametrize("ep_size", [2, 4, 8])
-def test_ep_finalize_reduces_owner_partials_in_fp32(ep_size: int) -> None:
-    from kairyu.models.moe_parallel import _ep_rank_partial
+def test_ep_finalize_combines_complete_rows_in_fp32_slot_order() -> None:
+    from kairyu.models.moe_parallel import _ep_combine_returned_rows
 
     expert_outputs = torch.tensor(
-        [[[-5.84375], [-7.5625]]],
+        [[[0.66015625], [0.061767578125], [0.267578125], [0.62109375]]],
         dtype=torch.bfloat16,
     )
-    indices = torch.tensor([[0, 4]])
-    weights = torch.tensor([[0.5715058445930481, 0.4284941852092743]])
+    weights = torch.tensor(
+        [[0.2010020762681961, 0.2674923539161682,
+          0.06888598203659058, 0.4626196026802063]]
+    )
 
-    partials = [
-        _ep_rank_partial(
-            expert_outputs,
-            indices,
-            weights,
-            ep_rank=rank,
-            experts_per_rank=8 // ep_size,
-        )
-        for rank in range(ep_size)
-    ]
-    actual = torch.stack(partials).sum(dim=0).to(torch.bfloat16)
+    actual = _ep_combine_returned_rows(expert_outputs, weights).to(torch.bfloat16)
 
     expected = (
         expert_outputs.float() * weights[:, :, None]
     ).sum(dim=1).to(torch.bfloat16)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert all(partial.dtype is torch.float32 for partial in partials)
 
-    premature_bf16 = torch.stack(
-        [partial.to(torch.bfloat16) for partial in partials]
-    ).sum(dim=0)
+    # EP2 owners hold slots [0, 2] and [1, 3]. The old per-rank BF16 boundary
+    # produces a different result for this associativity-sensitive fixture.
+    premature_bf16 = (
+        (expert_outputs[:, [0, 2]].float() * weights[:, [0, 2], None])
+        .sum(dim=1)
+        .to(torch.bfloat16)
+        + (expert_outputs[:, [1, 3]].float() * weights[:, [1, 3], None])
+        .sum(dim=1)
+        .to(torch.bfloat16)
+    )
     assert not torch.equal(actual, premature_bf16)
 
 

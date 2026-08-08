@@ -85,8 +85,7 @@ def test_ep_forward_allocates_every_collective_buffer_on_payload_device(
         output.device == input_.device == hidden.device
         for output, input_ in communicator.pairs
     )
-    assert len(communicator.reductions) == 1
-    assert communicator.reductions[0].device == hidden.device
+    assert communicator.reductions == []
     torch.testing.assert_close(actual, reference)
 
 
