@@ -47,10 +47,25 @@ def test_int8_activation_quantization_matches_torch_rounding(cuda, k_size):
     torch.manual_seed(356)
     values = torch.randn(4, k_size, device=cuda, dtype=torch.bfloat16)
     values[0].zero_()
-    expected, expected_scale = quantize_int8_activation(values.float())
+    expected, expected_scale = quantize_int8_activation(values.cpu().float())
     actual, actual_scale = _quantize_activation(values, torch.int8, 127.0)
 
-    torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(actual_scale.cpu(), expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(actual.cpu(), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    ("k_size", "seed"), [(64, 1174), (1536, 357), (8960, 357)]
+)
+def test_int8_fused_output_is_bit_exact_with_biased_oracle(cuda, k_size, seed):
+    torch.manual_seed(seed)
+    module = _int8_module(k_size, 128)
+    module.bias.data.normal_()
+    module.bias.data = module.bias.data.to(torch.bfloat16)
+    values = torch.randn(4, k_size, dtype=torch.bfloat16)
+    expected = module.forward_reference(values)
+    actual = module.to(cuda)(values.to(cuda)).cpu()
+
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 

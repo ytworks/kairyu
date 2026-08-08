@@ -95,6 +95,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] INT8 bias addition preserves oracle rounding
+- What: the fused INT8 kernel now uses explicit round-to-nearest bias addition after the rounded scale product, with a compact FMA-sensitive seed and production-width GPU coverage.
+- Why: compiler FMA fusion skipped the CPU oracle's intermediate FP32 rounding and caused one real-checkpoint token disagreement despite exact q/scale and int32 accumulation.
+- Refs: issue #356; PR #447 Fable 5 review; `kairyu/kernels/quant_gemm_gpu.py`; `tests/gpu/test_quant_kernels.py`
+
 ### 2026-08-08 — [amendment] INT8 scale division is exact and zero-row aligned
 - What: dynamic INT8 scale calculation now clamps amax before correctly rounded division, matching the CPU oracle for ordinary and all-zero rows.
 - Why: exact activation rounding also requires an exact scale; an approximate reciprocal one operation earlier could move the same half-integer ties.

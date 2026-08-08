@@ -207,8 +207,13 @@ if triton is not None:
         )
         output = accumulator.to(tl.float32) * x_scale[:, None] * weight_scale[None, :]
         if HAS_BIAS:
-            bias = tl.load(bias_ptr + offs_n, mask=offs_n < n_size, other=0.0)
-            output += bias[None, :]
+            bias = tl.load(
+                bias_ptr + offs_n, mask=offs_n < n_size, other=0.0
+            ).to(tl.float32)
+            # Keep the reference's rounded scale product distinct from the
+            # bias addition; ordinary + may fuse into an FMA and skip that
+            # intermediate FP32 rounding.
+            output = libdevice.add_rn(output, bias[None, :])
         tl.store(
             out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on,
             output,
