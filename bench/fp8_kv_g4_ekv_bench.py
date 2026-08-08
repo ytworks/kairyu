@@ -1147,6 +1147,7 @@ class _FP8WriteAuditor:
             source_f64.abs() / 16.0,
             torch.full_like(source_f64, FP8_MIN_ABS_ERROR * scale),
         )
+        bound = torch.nextafter(bound, torch.full_like(bound, torch.inf))
         stats = self._stats[(phase, kind)]
         stats["calls"] += 1
         stats["values"] += source.numel()

@@ -197,7 +197,9 @@ def test_fp8_batched_write_uses_satfinite_bytes(monkeypatch):
     assert torch.isfinite(stored_v.float()).all()
 
 
-def test_fp8_fused_writes_apply_independent_calibrated_scales():
+def test_fp8_writes_apply_independent_calibrated_scales(monkeypatch):
+    from kairyu.kernels import paged_kv_write_gpu
+
     device = _require_cuda()
     k_scale = 0.27773437500000003
     v_scale = 0.0013641357421875
@@ -211,6 +213,22 @@ def test_fp8_fused_writes_apply_independent_calibrated_scales():
     torch.manual_seed(357)
     keys = torch.randn(1, 2, 128, dtype=torch.bfloat16, device=device) * 30
     values = torch.randn_like(keys) * 0.1
+    fused_results = []
+    fused_batched = paged_kv_write_gpu.try_write_batched
+    fused_ragged = paged_kv_write_gpu.try_write_ragged
+
+    def spy_batched(*args, **kwargs):
+        result = fused_batched(*args, **kwargs)
+        fused_results.append(result)
+        return result
+
+    def spy_ragged(*args, **kwargs):
+        result = fused_ragged(*args, **kwargs)
+        fused_results.append(result)
+        return result
+
+    monkeypatch.setattr(paged_kv_write_gpu, "try_write_batched", spy_batched)
+    monkeypatch.setattr(paged_kv_write_gpu, "try_write_ragged", spy_ragged)
 
     def quantized(tensor, scale):
         return (tensor.float() / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
@@ -243,6 +261,7 @@ def test_fp8_fused_writes_apply_independent_calibrated_scales():
     assert torch.equal(
         pool.v[0, 0, 1], quantized(values * 2, v_scale)[0]
     )
+    assert fused_results == [False, False]
 
 
 def test_batched_write_cuda_graph_replay_reads_current_buffers(monkeypatch):

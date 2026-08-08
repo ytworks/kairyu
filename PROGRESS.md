@@ -95,6 +95,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] Calibrated FP8 KV writes use the exact path
+- What: correcting the preceding #357 entry, non-unit calibrated scales bypass the fused Triton writer and use the existing torch quantize-and-store path; unit-scale FP8 keeps the fused path.
+- Why: real Qwen3-32B writes showed backend FP8-cast byte differences beyond division rounding alone, so calibrated serving must prefer the gate oracle over an unproven fused fast path.
+- Refs: issue #357; G4 E-KV calibrated re-bake; `kairyu/{engine/core/kv_pool.py,kernels/paged_kv_write_gpu.py}`
+
 ### 2026-08-08 — [amendment] FP8 KV scaling is correctly rounded
 - What: fused batched and ragged FP8 KV writers perform calibrated BF16-to-FP8 scaling through explicit FP32 round-to-nearest division; the gate audits dequantization error in FP64.
 - Why: Triton's approximate division crossed E4M3 byte boundaries for a small fraction of real calibrated writes, while FP32 audit multiplication introduced false bound excesses near zero.

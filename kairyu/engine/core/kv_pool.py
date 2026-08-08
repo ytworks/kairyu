@@ -110,7 +110,9 @@ class PagedKVPool:
             # of saturating them, which would poison every later attention
             # result that reads the affected cache slot.
             limit = torch.finfo(dtype).max
-            return (payload / scale).clamp(min=-limit, max=limit).to(dtype=dtype)
+            return (payload.float() / scale).clamp(
+                min=-limit, max=limit
+            ).to(dtype=dtype)
         return payload
 
     def _layer_scale(
