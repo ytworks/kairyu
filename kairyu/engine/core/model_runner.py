@@ -1206,13 +1206,12 @@ class PagedModelRunner:
         )
 
     @staticmethod
-    def _sampling_outputs(state: object, position: int) -> tuple[int, ...]:
+    def _sampling_outputs(state: object, position: int) -> Sequence[int]:
         """Return only history preceding a speculative verification row."""
 
-        outputs = tuple(state.outputs)
         if getattr(state, "outputs_override", False):
-            return outputs[:position]
-        return outputs
+            return tuple(state.outputs[:position])
+        return state.outputs
 
     def _pending_device_sample(
         self,

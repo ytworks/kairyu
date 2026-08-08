@@ -21,11 +21,17 @@ PROMPTS = [
 ]
 
 
-class _LastTokenDraft:
-    """Deterministic point-mass draft that always exercises verification."""
+class _ReferenceDraft:
+    """Test oracle that makes the accepted stochastic path deterministic."""
+
+    def __init__(self, prompt, outputs):
+        self._prompt = prompt
+        self._outputs = outputs
 
     def propose(self, context, max_draft):
-        return [context[-1]] * max_draft
+        assert context[: len(self._prompt)] == self._prompt
+        offset = len(context) - len(self._prompt)
+        return self._outputs[offset : offset + max_draft]
 
 
 def _plain_outputs(prompt, max_new=12, seed=0):
@@ -49,7 +55,13 @@ def _spec_engine(k=3, seed=0, sampler=None):
     return EngineCore(scheduler, runner), runner
 
 
-def _sampled_outputs(prompt, sampling, *, speculative_tokens):
+def _sampled_outputs(
+    prompt,
+    sampling,
+    *,
+    speculative_tokens,
+    draft_source=None,
+):
     model = TinyAttentionLM(seed=0)
     cache = RadixKVCache(num_pages=128, page_size=PAGE)
     scheduler = Scheduler(
@@ -65,7 +77,7 @@ def _sampled_outputs(prompt, sampling, *, speculative_tokens):
         sampler=Sampler(),
     )
     runner = (
-        SpeculativeRunner(target, draft_source=_LastTokenDraft())
+        SpeculativeRunner(target, draft_source=draft_source)
         if speculative_tokens
         else target
     )
@@ -129,10 +141,12 @@ def test_stochastic_rejection_matches_plain_sampling_for_same_seed():
         prompt,
         sampling,
         speculative_tokens=3,
+        draft_source=_ReferenceDraft(prompt, reference),
     )
 
     assert actual == reference
     assert runner.draft_proposed > 0
+    assert runner.draft_accepted > 0
 
 
 def test_penalized_verification_uses_only_preceding_draft_history():
@@ -154,10 +168,12 @@ def test_penalized_verification_uses_only_preceding_draft_history():
             prompt,
             sampling,
             speculative_tokens=3,
+            draft_source=_ReferenceDraft(prompt, reference),
         )
 
         assert actual == reference
         assert runner.draft_proposed > 0
+        assert runner.draft_accepted > 0
 
 
 def test_stochastic_speculation_matches_plain_frequency_chi_square_gate():
@@ -165,6 +181,7 @@ def test_stochastic_speculation_matches_plain_frequency_chi_square_gate():
     plain_counts = Counter()
     speculative_counts = Counter()
     proposed = 0
+    accepted = 0
     for seed in range(4):
         sampling = EngineSampling(temperature=0.9, top_p=0.9, seed=seed)
         reference, _ = _sampled_outputs(
@@ -176,10 +193,12 @@ def test_stochastic_speculation_matches_plain_frequency_chi_square_gate():
             prompt,
             sampling,
             speculative_tokens=3,
+            draft_source=_ReferenceDraft(prompt, reference),
         )
         plain_counts.update(reference)
         speculative_counts.update(actual)
         proposed += runner.draft_proposed
+        accepted += runner.draft_accepted
 
     support = plain_counts.keys() | speculative_counts.keys()
     chi_square = sum(
@@ -192,6 +211,7 @@ def test_stochastic_speculation_matches_plain_frequency_chi_square_gate():
     # distributional threshold: every count, and therefore chi-square, is exact.
     assert chi_square <= 1e-12
     assert proposed > 0
+    assert accepted > 0
 
 
 def test_structured_sampling_still_bypasses_without_matcher_rollback():

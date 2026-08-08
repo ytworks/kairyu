@@ -9,6 +9,8 @@ and route the flattened row count through the existing graph buckets.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
 
 # Reuse the issue #224 tiny native model/state fixtures instead of carrying a
@@ -93,6 +95,15 @@ def _score_sequential(runner, chunk: ScheduledChunk, state) -> tuple:
 
 def _token_ids(records: tuple) -> tuple[int, ...]:
     return tuple(record.token_id for record in records)
+
+
+def test_sampling_history_copy_is_limited_to_speculative_overlays():
+    outputs = [11, 12, 13]
+    ordinary = SimpleNamespace(outputs=outputs, outputs_override=False)
+    overlay = SimpleNamespace(outputs=outputs, outputs_override=True)
+
+    assert PagedModelRunner._sampling_outputs(ordinary, 2) is outputs
+    assert PagedModelRunner._sampling_outputs(overlay, 2) == (11, 12)
 
 
 def _mla_model():
