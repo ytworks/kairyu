@@ -366,3 +366,14 @@ small random gate missed. Dynamic W8A8 uses the CPU oracle's FP32
 may lower to an approximate reciprocal and move a half-integer across its tie,
 so the INT8 branch uses libdevice round-to-nearest division before `rint`.
 FP8 keeps its existing division because it does not perform integer rounding.
+
+The retained SM120 run at clean source `953a703` completed every required
+position and kept the measured 2.875-nat BF16 tie floor unchanged. INT8 has
+1 substantive disagreement, AWQ 5, and GPTQ 2, so all three arms and the
+combined verdict remain formal FAIL. Independent exact-reference replays at
+those positions matched the production candidate; the INT8 replay uses the
+same BF16 activations with PyTorch exact-int32 accumulation, while the W4
+replays use their CPU unpack/dequant oracles. These residuals are therefore
+published checkpoint quantization loss, not relabeled parity or missing data.
+The raw authority and combined summary live under
+`bench/results/issue-356-qwen25-1.5b-quant-parity-sm120/`.

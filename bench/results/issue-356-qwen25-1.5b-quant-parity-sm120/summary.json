@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "gate": "issue-356-real-checkpoint-quant-parity",
+  "workload": {
+    "prompts": 64,
+    "positions_per_prompt": 16,
+    "expected_positions_per_arm": 1024,
+    "top_logprobs": 64
+  },
+  "reference": {
+    "checkpoint_repo": "Qwen/Qwen2.5-1.5B-Instruct",
+    "checkpoint_revision": "989aa7980e4cf806f80c7fef2b1adb7bc71aa306",
+    "checkpoint_weight_files": {
+      "model.safetensors": "dd924a11b4c220f385b51ffa522daea7c9f3d850e31b162bb5661df483c6d3ee"
+    },
+    "noise_floor": {
+      "self_agreement_rate": 0.9072265625,
+      "tie_gap_nats": 2.875
+    }
+  },
+  "source_commit": "953a703c76b4c2651819df2c87d7d67951aa80be",
+  "arms": {
+    "int8": {
+      "checkpoint_repo": "RedHatAI/Qwen2.5-1.5B-Instruct-quantized.w8a8",
+      "checkpoint_revision": "876ae8e2b9982d9603afd3c71add6b3b4b0bc0b6",
+      "checkpoint_weight_files": {
+        "model.safetensors": "6ab2d4b73b7664e7449e18402345abe99fcc03a792e260f82b2d6109ab9110bb"
+      },
+      "agreed": 876,
+      "agreement_rate": 0.85546875,
+      "substantive_disagreements": 1,
+      "missing_predictions": 0,
+      "tie_gap_nats": 2.875,
+      "max_agreeing_logprob_abs_delta_diagnostic": 0.52676,
+      "passed": false
+    },
+    "awq": {
+      "checkpoint_repo": "Qwen/Qwen2.5-1.5B-Instruct-AWQ",
+      "checkpoint_revision": "3ecffa0ceb27851800f45519bab9c457a04405e1",
+      "checkpoint_weight_files": {
+        "model.safetensors": "5b29ed6f80e422c3ae7d40dc76fd8983501bbd7489cf84a72a5c5fe20bcf2813"
+      },
+      "agreed": 833,
+      "agreement_rate": 0.8134765625,
+      "substantive_disagreements": 5,
+      "missing_predictions": 0,
+      "tie_gap_nats": 2.875,
+      "max_agreeing_logprob_abs_delta_diagnostic": 1.57305,
+      "passed": false
+    },
+    "gptq": {
+      "checkpoint_repo": "Qwen/Qwen2.5-1.5B-Instruct-GPTQ-Int4",
+      "checkpoint_revision": "4f5a0e31008e2966e8f787964bcc4e1105e03dc3",
+      "checkpoint_weight_files": {
+        "model.safetensors": "8917a0c73051fd3d1c41d4e1584a6283d0bf1282bf6bbbff1f1ebf01f4cf216b"
+      },
+      "agreed": 829,
+      "agreement_rate": 0.8095703125,
+      "substantive_disagreements": 2,
+      "missing_predictions": 0,
+      "tie_gap_nats": 2.875,
+      "max_agreeing_logprob_abs_delta_diagnostic": 1.34719,
+      "passed": false
+    }
+  },
+  "passed": false,
+  "verdict": "FAIL"
+}
