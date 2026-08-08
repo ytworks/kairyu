@@ -453,7 +453,36 @@ mask-first is an invariant violation → raise into the engine error path (the
 pump already propagates). `response_format` mapping (P-A gate):
 `{"type":"json_object"}` → builtin JSON grammar; `{"type":"json_schema",
 "json_schema":{"schema":{...}}}` → `EngineSampling.json_schema`; enforcer built
-per-request in `_submit` from the tokenizer's `GrammarVocabulary`.
+per-request by the sampler from the tokenizer's `GrammarVocabulary`.
+
+**Structured formats/device path (issue #363 amendment)**: the same
+`response_format` seam also maps `regex.pattern`, `grammar.grammar` (EBNF), and
+the xgrammar `structural_tag` object to their corresponding compiler. Native
+`tools[].function.strict=true` requests synthesize a parser-attested structural
+tag for the generic, Llama, or Qwen tool-call protocol; strict tool argument
+objects use their declared JSON schema while non-strict siblings retain an
+unconstrained JSON object. Explicit structured response formats and strict-tool
+formats are mutually exclusive.
+
+On CUDA the matcher still owns host-side state, but its next-token bitmask is
+copied to a cached device tensor and applied to the device logits row. Sampling
+therefore transfers only the selected structured token IDs back to advance the
+matcher, never the vocabulary-sized logits row. Batched ordinary and structured
+rows share `sample_batch_device`; the sampling owner advances each matcher once
+and carries `grammar_terminated` through the deferred public-token boundary.
+The bounded request-preparation lane first compiles the same format so malformed
+regex/EBNF/structural tags fail only their request as a 400, before admission;
+the process-split parent's synchronous validation does the same even without a
+context limit. Enforcers sharing one tokenizer vocabulary reuse its xgrammar
+compiler, so admission and first-token sampling do not rebuild tokenizer state;
+the process parent caches that vocabulary once. The cache lock covers only
+compiler lookup/construction, never grammar compilation, so an admission compile
+cannot block another request's engine-step sampling.
+Llama structural tags stop after one call because its attested parser accepts
+exactly one bare call object; generic and Qwen retain their parallel-call form.
+`min_tokens` is rejected with structured output because masking grammar-terminal
+EOS would create empty support. If overlap has already scheduled the next row
+when a matcher terminates, that row replays EOS without advancing the matcher.
 
 Logprobs land in `CompletionOutput.logprobs`/`cumulative_logprob`, filled by the
 backend from accumulated `SampledToken`s.

@@ -470,6 +470,7 @@ class Orchestrator:
                         tool_choice=call.tool_choice,
                         tools_in_prompt=call.tools_in_prompt,
                         parallel_tool_calls=call.parallel_tool_calls,
+                        tool_call_protocol=call.tool_call_protocol,
                     ),
                 )
             )
@@ -492,6 +493,7 @@ class Orchestrator:
             tool_choice=call.tool_choice,
             tools_in_prompt=call.tools_in_prompt,
             parallel_tool_calls=call.parallel_tool_calls,
+            tool_call_protocol=call.tool_call_protocol,
         )
 
     def _internal_intent_requests(
@@ -949,6 +951,7 @@ class Orchestrator:
                 tool_choice=call.tool_choice,
                 tools_in_prompt=call.tools_in_prompt,
                 parallel_tool_calls=call.parallel_tool_calls,
+                tool_call_protocol=call.tool_call_protocol,
             )
         )
         # The last stage can ingest every preceding private output. Candidate
@@ -991,6 +994,7 @@ class Orchestrator:
             final_tool_choice=call.tool_choice,
             final_tools_in_prompt=call.tools_in_prompt,
             final_parallel_tool_calls=call.parallel_tool_calls,
+            final_tool_call_protocol=call.tool_call_protocol,
             cost_model=self._cost_model,
             worker_trace=self._conductor_worker_trace(),
             usage_observer=usage_observer,
@@ -1229,6 +1233,7 @@ class Orchestrator:
                             final_tool_choice=call.tool_choice,
                             final_tools_in_prompt=call.tools_in_prompt,
                             final_parallel_tool_calls=call.parallel_tool_calls,
+                            final_tool_call_protocol=call.tool_call_protocol,
                             shared_prefix=self._shared_prefix,
                         )
                     # M3: the deep MoA tier was invisible to the cost model / budget.
@@ -1243,6 +1248,7 @@ class Orchestrator:
                             tool_choice=call.tool_choice,
                             tools_in_prompt=call.tools_in_prompt,
                             parallel_tool_calls=call.parallel_tool_calls,
+                            tool_call_protocol=call.tool_call_protocol,
                         ),
                         GenerationResult(
                             request_id="moa",
@@ -1786,6 +1792,7 @@ class Orchestrator:
                         final_tool_choice=call.tool_choice,
                         final_tools_in_prompt=call.tools_in_prompt,
                         final_parallel_tool_calls=call.parallel_tool_calls,
+                        final_tool_call_protocol=call.tool_call_protocol,
                         shared_prefix=self._shared_prefix,
                         usage_observer=observe_moa_usage,
                     )
@@ -1813,6 +1820,7 @@ class Orchestrator:
                         tool_choice=call.tool_choice,
                         tools_in_prompt=call.tools_in_prompt,
                         parallel_tool_calls=call.parallel_tool_calls,
+                        tool_call_protocol=call.tool_call_protocol,
                     ),
                     GenerationResult(
                         request_id="moa",

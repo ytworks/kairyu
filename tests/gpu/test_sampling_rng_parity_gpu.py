@@ -213,7 +213,7 @@ def test_penalties_and_min_tokens_preserve_cpu_cuda_rng_parity() -> None:
 
 
 class _PermissiveEnforcer:
-    """Stateful CPU matcher whose support is identical to the CUDA request."""
+    """Stateful matcher whose support is identical across CPU and CUDA."""
 
     def __init__(self) -> None:
         self.accepted: list[int] = []
@@ -230,7 +230,7 @@ class _PermissiveEnforcer:
 
 
 class _EvenEnforcer(_PermissiveEnforcer):
-    """CPU matcher stand-in whose legal support is reproduced on CUDA."""
+    """Matcher stand-in that keeps only even token IDs."""
 
     @staticmethod
     def mask_logits(logits: torch.Tensor) -> torch.Tensor:
@@ -238,7 +238,7 @@ class _EvenEnforcer(_PermissiveEnforcer):
         return logits
 
 
-def test_permissive_structured_cpu_matcher_matches_same_support_on_cuda() -> None:
+def test_permissive_structured_matcher_matches_on_cpu_and_cuda() -> None:
     sampling = EngineSampling(
         temperature=0.72,
         min_p=0.01,
@@ -252,13 +252,17 @@ def test_permissive_structured_cpu_matcher_matches_same_support_on_cuda() -> Non
     cpu_sampler._state_for("structured", sampling).enforcer = enforcer
 
     cpu = cpu_sampler.sample("structured", sampling, 13, logits)
-    cuda = Sampler().sample_device("plain", sampling, 13, logits.cuda())
+    cuda_sampler = Sampler()
+    cuda_enforcer = _PermissiveEnforcer()
+    cuda_sampler._state_for("structured-cuda", sampling).enforcer = cuda_enforcer
+    cuda = cuda_sampler.sample_device("structured-cuda", sampling, 13, logits.cuda())
 
     assert int(cuda.token_id.cpu()) == cpu.token_id
     assert enforcer.accepted == [cpu.token_id]
+    assert cuda_enforcer.accepted == [cpu.token_id]
 
 
-def test_restrictive_structured_mask_matches_pre_masked_cuda_support() -> None:
+def test_restrictive_structured_mask_matches_on_cpu_and_cuda() -> None:
     sampling = EngineSampling(
         temperature=0.69,
         min_p=0.01,
@@ -270,15 +274,22 @@ def test_restrictive_structured_mask_matches_pre_masked_cuda_support() -> None:
     cpu_sampler = Sampler()
     enforcer = _EvenEnforcer()
     cpu_sampler._state_for("structured-even", sampling).enforcer = enforcer
-    cuda_logits = logits.cuda()
-    cuda_logits[1::2] = float("-inf")
+    cuda_sampler = Sampler()
+    cuda_enforcer = _EvenEnforcer()
+    cuda_sampler._state_for("structured-even-cuda", sampling).enforcer = cuda_enforcer
 
     cpu = cpu_sampler.sample("structured-even", sampling, 9, logits)
-    cuda = Sampler().sample_device("plain-even", sampling, 9, cuda_logits)
+    cuda = cuda_sampler.sample_device(
+        "structured-even-cuda",
+        sampling,
+        9,
+        logits.cuda(),
+    )
 
     assert cpu.token_id % 2 == 0
     assert int(cuda.token_id.cpu()) == cpu.token_id
     assert enforcer.accepted == [cpu.token_id]
+    assert cuda_enforcer.accepted == [cpu.token_id]
 
 
 def test_raw_logprobs_are_unchanged_while_selected_tokens_match() -> None:

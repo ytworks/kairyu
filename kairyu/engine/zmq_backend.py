@@ -39,6 +39,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationStageMetric,
     GenerationUsage,
+    native_sampling_params,
     prompt_with_tool_intent,
     validate_backend_request_before_prepare,
     validate_native_request_surface,
@@ -54,7 +55,11 @@ from kairyu.engine.core.engine_service import (
 )
 from kairyu.engine.core.kv_cache_dtype import validate_kv_cache_dtype
 from kairyu.engine.core.sampling_types import stable_request_seed
-from kairyu.engine.engine_loop import _validate_max_model_len
+from kairyu.engine.engine_loop import (
+    _validate_max_model_len,
+    engine_sampling_from,
+    validate_structured_sampling,
+)
 from kairyu.engine.prompt import (
     PromptInput,
     TemplatedPrompt,
@@ -66,7 +71,9 @@ from kairyu.engine.prompt import (
 )
 from kairyu.engine.registry import register_backend
 from kairyu.engine.tokenizer import (
+    GrammarVocabulary,
     Tokenizer,
+    grammar_vocabulary,
     resolve_tokenizer,
     tokenize_loglikelihood_continuation,
     tokenizer_encode_is_concurrent_safe,
@@ -1165,6 +1172,7 @@ class ZmqEngineBackend:
             max_model_len,
         )
         self._preflight_tokenizer: Tokenizer | None = None
+        self._preflight_grammar_vocab: GrammarVocabulary | None = None
         self._preflight_tokenizer_lock = threading.Lock()
         # Validation may be called more than once by wrapping orchestration
         # layers. Retain only this exact immutable request object, consume the
@@ -1897,6 +1905,15 @@ class ZmqEngineBackend:
     ) -> _PreparedProcPrompt:
         if validate_surface:
             validate_native_request_surface(request)
+        native_params = native_sampling_params(request)
+        if engine_sampling_from(native_params).needs_grammar:
+            tokenizer = self._get_preflight_tokenizer()
+            validate_structured_sampling(
+                native_params,
+                tokenizer,
+                tokenizer.eos_token_id,
+                self._get_preflight_grammar_vocab(),
+            )
         if prompt is None:
             prompt = prompt_with_tool_intent(request)
         max_model_len = self._max_model_len
@@ -2028,6 +2045,18 @@ class ZmqEngineBackend:
                 self._preflight_tokenizer = tokenizer
         return tokenizer
 
+    def _get_preflight_grammar_vocab(self) -> GrammarVocabulary:
+        vocabulary = self._preflight_grammar_vocab
+        if vocabulary is not None:
+            return vocabulary
+        tokenizer = self._get_preflight_tokenizer()
+        with self._preflight_tokenizer_lock:
+            vocabulary = self._preflight_grammar_vocab
+            if vocabulary is None:
+                vocabulary = grammar_vocabulary(tokenizer)
+                self._preflight_grammar_vocab = vocabulary
+        return vocabulary
+
     def tokenize_loglikelihood(
         self,
         context: str,
@@ -2088,16 +2117,25 @@ class ZmqEngineBackend:
         ZmqEngineBackend.validate_request_before_prepare(self, request)
         validate_native_request_surface(request)
         prompt = prompt_with_tool_intent(request)
-        if (
-            self._max_model_len is not None
-            and self._peek_prepared_request(request) is None
-        ):
+        if self._peek_prepared_request(request) is not None:
+            return
+        if self._max_model_len is not None:
             prepared = self._prepare_request(
                 request,
                 validate_surface=False,
                 prompt=prompt,
             )
             self._retain_prepared_request(request, prepared)
+            return
+        native_params = native_sampling_params(request)
+        if engine_sampling_from(native_params).needs_grammar:
+            tokenizer = self._get_preflight_tokenizer()
+            validate_structured_sampling(
+                native_params,
+                tokenizer,
+                tokenizer.eos_token_id,
+                self._get_preflight_grammar_vocab(),
+            )
 
     def _reserve_request_id(self, request_id: str) -> None:
         if request_id in self._active_request_ids:
@@ -2274,7 +2312,7 @@ class ZmqEngineBackend:
 
         _, msgpack = _import_deps()
         sampling = sampling_params_to_wire(
-            generation_defaults.apply(request.sampling_params)
+            generation_defaults.apply(native_sampling_params(request))
         )
         if sampling["seed"] is None:
             # The child schedules by the generation-unique wire ID. Make the

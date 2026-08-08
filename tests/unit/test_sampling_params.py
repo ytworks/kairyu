@@ -93,6 +93,41 @@ def test_forced_token_ids_leave_unrecognized_extra_args_unchanged():
 
 
 @pytest.mark.parametrize(
+    ("response_format", "field", "value"),
+    [
+        ({"type": "regex", "pattern": "a+"}, "regex", "a+"),
+        (
+            {"type": "grammar", "grammar": 'root ::= "a"'},
+            "grammar",
+            'root ::= "a"',
+        ),
+        (
+            {
+                "type": "structural_tag",
+                "format": {"type": "const_string", "value": "a"},
+            },
+            "structural_tag",
+            {
+                "type": "structural_tag",
+                "format": {"type": "const_string", "value": "a"},
+            },
+        ),
+    ],
+)
+def test_extended_structured_formats_map_to_engine_sampling(
+    response_format,
+    field,
+    value,
+):
+    sampling = engine_sampling_from(
+        SamplingParams(extra_args={"response_format": response_format})
+    )
+
+    assert getattr(sampling, field) == value
+    assert sampling.needs_grammar is True
+
+
+@pytest.mark.parametrize(
     "kwargs",
     [
         {"temperature": -0.1},

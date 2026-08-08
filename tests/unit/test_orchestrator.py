@@ -257,6 +257,7 @@ async def test_async_prepare_binds_one_route_and_preserves_final_intent() -> Non
         tool_choice="required",
         tools_in_prompt=True,
         parallel_tool_calls=False,
+        tool_call_protocol="qwen",
     )
 
     prepared_call = await orchestrator.prepare_request(call)
@@ -273,6 +274,7 @@ async def test_async_prepare_binds_one_route_and_preserves_final_intent() -> Non
     assert prepared.tool_choice == "required"
     assert prepared.tools_in_prompt is True
     assert prepared.parallel_tool_calls is False
+    assert prepared.tool_call_protocol == "qwen"
 
     result = await orchestrator.run(call, prepared=prepared_call)
 

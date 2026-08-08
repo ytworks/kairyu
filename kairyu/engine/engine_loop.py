@@ -17,7 +17,7 @@ loop; there is no alternate production overlap core.
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import Lock
@@ -30,6 +30,7 @@ from kairyu.engine.core.frozen_prefix import FrozenPrefix
 from kairyu.engine.core.sampling_types import EngineSampling, SampledToken
 from kairyu.engine.core.scheduler import EngineRequest, Scheduler
 from kairyu.engine.core.step_input import snapshot_step
+from kairyu.engine.core.structured import XGrammarEnforcer
 from kairyu.engine.prompt import (
     PromptInput,
     prompt_kind,
@@ -37,8 +38,10 @@ from kairyu.engine.prompt import (
     supplied_prompt_token_ids,
 )
 from kairyu.engine.tokenizer import (
+    GrammarVocabulary,
     IncrementalDetokenizer,
     Tokenizer,
+    grammar_vocabulary,
     tokenize_loglikelihood_continuation,
     tokenizer_encode_is_concurrent_safe,
     tokenizer_prompt_preparation_is_concurrent_safe,
@@ -126,18 +129,46 @@ class PreparedPrompt:
     max_new_tokens: int
     _owner: object
     tokenize_duration_ns: int | None = None
+    _structured_output: object = None
 
 
 def engine_sampling_from(params: SamplingParams) -> EngineSampling:
     """Map API SamplingParams (+ response_format in extra_args) to the engine
-    subset (m8 D2): {"type": "json_object"} -> builtin JSON grammar;
-    {"type": "json_schema", "json_schema": {"schema": ...}} -> schema."""
+    structured-output subset."""
     response_format = (params.extra_args or {}).get(RESPONSE_FORMAT_EXTRA_ARG) or {}
+    if not isinstance(response_format, Mapping):
+        raise ValueError("response_format must be an object")
     kind = response_format.get("type")
+    if kind not in {
+        None,
+        "text",
+        "json_object",
+        "json_schema",
+        "regex",
+        "grammar",
+        "structural_tag",
+    }:
+        raise ValueError(f"unsupported response_format.type {kind!r}")
     json_schema = None
     json_mode = kind == "json_object"
     if kind == "json_schema":
-        json_schema = (response_format.get("json_schema") or {}).get("schema") or {}
+        descriptor = response_format.get("json_schema")
+        if not isinstance(descriptor, Mapping) or not isinstance(
+            descriptor.get("schema"), Mapping
+        ):
+            raise ValueError(
+                "response_format.json_schema.schema must be a JSON schema object"
+            )
+        json_schema = dict(descriptor["schema"])
+    regex = response_format.get("pattern") if kind == "regex" else None
+    if kind == "regex" and not isinstance(regex, str):
+        raise ValueError("response_format.pattern must be a regex string")
+    grammar = response_format.get("grammar") if kind == "grammar" else None
+    if kind == "grammar" and not isinstance(grammar, str):
+        raise ValueError("response_format.grammar must be an EBNF string")
+    structural_tag = dict(response_format) if kind == "structural_tag" else None
+    if kind == "structural_tag" and not isinstance(response_format.get("format"), Mapping):
+        raise ValueError("response_format.format must be a structural-tag object")
     return EngineSampling(
         temperature=params.temperature,
         top_k=params.top_k,
@@ -151,7 +182,38 @@ def engine_sampling_from(params: SamplingParams) -> EngineSampling:
         forced_token_ids=params.forced_token_ids,
         json_schema=json_schema,
         json_mode=json_mode,
+        regex=regex,
+        grammar=grammar,
+        structural_tag=structural_tag,
     )
+
+
+def validate_structured_sampling(
+    params: SamplingParams,
+    tokenizer: Tokenizer,
+    eos_token_id: int | None,
+    grammar_vocab: GrammarVocabulary | None = None,
+) -> None:
+    """Compile structured intent before admission so failures stay request-local."""
+
+    sampling = engine_sampling_from(params)
+    if not sampling.needs_grammar:
+        return
+    if params.min_tokens:
+        raise ValueError("min_tokens cannot be combined with structured output")
+    if eos_token_id is None:
+        raise ValueError("structured output requires an eos token id")
+    try:
+        XGrammarEnforcer(
+            grammar_vocab or grammar_vocabulary(tokenizer),
+            json_schema=sampling.json_schema,
+            regex=sampling.regex,
+            grammar=sampling.grammar,
+            structural_tag=sampling.structural_tag,
+            stop_token_id=eos_token_id,
+        )
+    except Exception as error:
+        raise ValueError(f"invalid structured output: {error}") from error
 
 
 def _logprob_fields(
@@ -425,6 +487,7 @@ class EngineLoop:
         pipeline_depth: int = _DEFAULT_PIPELINE_DEPTH,
         max_model_len: int | None = None,
         generation_defaults: GenerationDefaults | None = None,
+        grammar_vocab: GrammarVocabulary | None = None,
     ) -> None:
         if pipeline_depth < 1:
             raise ValueError(f"pipeline_depth must be >= 1, got {pipeline_depth}")
@@ -436,6 +499,7 @@ class EngineLoop:
         self._runner = runner
         self._pipeline_depth = pipeline_depth
         self._max_model_len = max_model_len
+        self._grammar_vocab = grammar_vocab
         self.generation_defaults = generation_defaults or GenerationDefaults(
             mode="none",
             source="disabled",
@@ -583,6 +647,20 @@ class EngineLoop:
         prompt_token_ids = self.resolve_prompt_token_ids(prompt)
         max_new_tokens = self._max_new_tokens(params)
         self._validate_context_length(prompt_token_ids, max_new_tokens)
+        if (
+            engine_sampling_from(params).needs_grammar
+            and self._grammar_vocab is None
+        ):
+            self._grammar_vocab = grammar_vocabulary(self._tokenizer)
+        validate_structured_sampling(
+            params,
+            self._tokenizer,
+            self._default_eos,
+            self._grammar_vocab,
+        )
+        structured_output = (params.extra_args or {}).get(
+            RESPONSE_FORMAT_EXTRA_ARG
+        )
         tokenize_duration_ns = (
             max(0, perf_counter_ns() - tokenize_started_ns)
             if tokenize_started_ns is not None
@@ -594,6 +672,7 @@ class EngineLoop:
             max_new_tokens=max_new_tokens,
             _owner=self._prepared_prompt_owner,
             tokenize_duration_ns=tokenize_duration_ns,
+            _structured_output=structured_output,
         )
 
     def validate_prompt_length(
@@ -638,6 +717,14 @@ class EngineLoop:
             if prepared_prompt.max_new_tokens != max_new_tokens:
                 raise ValueError(
                     "prepared prompt max_tokens does not match the submitted request"
+                )
+            structured_output = (params.extra_args or {}).get(
+                RESPONSE_FORMAT_EXTRA_ARG
+            )
+            if prepared_prompt._structured_output != structured_output:
+                raise ValueError(
+                    "prepared prompt structured output does not match the "
+                    "submitted request"
                 )
             self._validate_context_length(
                 prepared_prompt.prompt_token_ids,

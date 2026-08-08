@@ -61,9 +61,18 @@ def test_parallel_tool_fields_preserve_existing_public_positional_abi():
     assert request.trace_requested is True
     assert request.parallel_tool_calls is None
 
-    assert list(inspect.signature(Conductor).parameters)[-1] == ("final_parallel_tool_calls")
-    assert list(inspect.signature(run_moa).parameters)[-1] == ("final_parallel_tool_calls")
-    assert list(inspect.signature(stream_moa).parameters)[-1] == ("final_parallel_tool_calls")
+    assert list(inspect.signature(Conductor).parameters)[-2:] == [
+        "final_parallel_tool_calls",
+        "final_tool_call_protocol",
+    ]
+    assert list(inspect.signature(run_moa).parameters)[-2:] == [
+        "final_parallel_tool_calls",
+        "final_tool_call_protocol",
+    ]
+    assert list(inspect.signature(stream_moa).parameters)[-2:] == [
+        "final_parallel_tool_calls",
+        "final_tool_call_protocol",
+    ]
 
 
 class IntentBackend:

@@ -175,6 +175,7 @@ class Conductor:
         worker_trace: Mapping[str, WorkerTraceIdentity] | None = None,
         usage_observer: Callable[[GenerationUsage], None] | None = None,
         final_parallel_tool_calls: bool | None = None,
+        final_tool_call_protocol: str = "generic",
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -194,6 +195,7 @@ class Conductor:
         self._final_tool_choice = final_tool_choice
         self._final_tools_in_prompt = final_tools_in_prompt
         self._final_parallel_tool_calls = final_parallel_tool_calls
+        self._final_tool_call_protocol = final_tool_call_protocol
         self._cost_model = cost_model
         self._usage_observer = usage_observer
         supplied_trace = dict(worker_trace or {})
@@ -228,6 +230,7 @@ class Conductor:
         str | Mapping[str, object] | None,
         bool,
         bool | None,
+        str,
     ]:
         if spec.name == self._selected_final_unit().name:
             return (
@@ -236,8 +239,9 @@ class Conductor:
                 self._final_tool_choice,
                 self._final_tools_in_prompt,
                 self._final_parallel_tool_calls,
+                self._final_tool_call_protocol,
             )
-        return self._sampling_params, (), None, False, None
+        return self._sampling_params, (), None, False, None, "generic"
 
     def _observe_usage(
         self,
@@ -349,7 +353,14 @@ class Conductor:
         for spec in self._units:
             if self._unit_deps[spec.name]:
                 continue
-            sampling_params, tools, tool_choice, tools_in_prompt, parallel_tool_calls = (
+            (
+                sampling_params,
+                tools,
+                tool_choice,
+                tools_in_prompt,
+                parallel_tool_calls,
+                tool_call_protocol,
+            ) = (
                 self._request_intent(spec)
             )
             requests.append(
@@ -364,6 +375,7 @@ class Conductor:
                         tool_choice=tool_choice,
                         tools_in_prompt=tools_in_prompt,
                         parallel_tool_calls=parallel_tool_calls,
+                        tool_call_protocol=tool_call_protocol,
                     ),
                 )
             )
@@ -379,7 +391,14 @@ class Conductor:
     ) -> GenerationRequest:
         """Consume an exact first-wave preflight request when one is bound."""
 
-        sampling_params, tools, tool_choice, tools_in_prompt, parallel_tool_calls = (
+        (
+            sampling_params,
+            tools,
+            tool_choice,
+            tools_in_prompt,
+            parallel_tool_calls,
+            tool_call_protocol,
+        ) = (
             self._request_intent(spec)
         )
         candidate = GenerationRequest(
@@ -391,6 +410,7 @@ class Conductor:
             tool_choice=tool_choice,
             tools_in_prompt=tools_in_prompt,
             parallel_tool_calls=parallel_tool_calls,
+            tool_call_protocol=tool_call_protocol,
         )
         if attempt != 0:
             return candidate

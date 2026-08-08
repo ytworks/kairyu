@@ -156,6 +156,7 @@ def _build_synthesis_request(
     final_tool_choice: str | Mapping[str, object] | None,
     final_tools_in_prompt: bool,
     final_parallel_tool_calls: bool | None,
+    final_tool_call_protocol: str,
 ) -> GenerationRequest:
     numbered = "\n\n".join(
         f"Candidate {index + 1}:\n{proposal}" for index, proposal in enumerate(proposals)
@@ -169,6 +170,7 @@ def _build_synthesis_request(
         tool_choice=final_tool_choice,
         tools_in_prompt=final_tools_in_prompt,
         parallel_tool_calls=final_parallel_tool_calls,
+        tool_call_protocol=final_tool_call_protocol,
     )
 
 
@@ -183,6 +185,7 @@ async def _prepare_moa(
     final_tool_choice: str | Mapping[str, object] | None,
     final_tools_in_prompt: bool,
     final_parallel_tool_calls: bool | None,
+    final_tool_call_protocol: str,
     shared_prefix: str,
     usage_observer: Callable[[GenerationUsage], None] | None,
     prepared_setup: _MoASetup | None,
@@ -254,6 +257,7 @@ async def _prepare_moa(
         final_tool_choice,
         final_tools_in_prompt,
         final_parallel_tool_calls,
+        final_tool_call_protocol,
     )
     return proposals, usage_totals, synthesis_request
 
@@ -271,6 +275,7 @@ async def run_moa(
     shared_prefix: str = "",
     usage_observer: Callable[[GenerationUsage], None] | None = None,
     final_parallel_tool_calls: bool | None = None,
+    final_tool_call_protocol: str = "generic",
 ) -> MoAResult:
     proposals, usage_totals, synthesis_request = await _prepare_moa(
         backend,
@@ -282,6 +287,7 @@ async def run_moa(
         final_tool_choice=final_tool_choice,
         final_tools_in_prompt=final_tools_in_prompt,
         final_parallel_tool_calls=final_parallel_tool_calls,
+        final_tool_call_protocol=final_tool_call_protocol,
         shared_prefix=shared_prefix,
         usage_observer=usage_observer,
         prepared_setup=_prepared_setup.get(),
@@ -331,6 +337,7 @@ def stream_moa(
     shared_prefix: str = "",
     usage_observer: Callable[[GenerationUsage], None] | None = None,
     final_parallel_tool_calls: bool | None = None,
+    final_tool_call_protocol: str = "generic",
 ) -> AsyncIterator[MoAEvent]:
     """Capture any exact internal setup before returning the public iterator."""
 
@@ -347,6 +354,7 @@ def stream_moa(
         shared_prefix=shared_prefix,
         usage_observer=usage_observer,
         final_parallel_tool_calls=final_parallel_tool_calls,
+        final_tool_call_protocol=final_tool_call_protocol,
         prepared_setup=_prepared_setup.get(),
     )
 
@@ -365,6 +373,7 @@ async def _stream_moa(
     shared_prefix: str,
     usage_observer: Callable[[GenerationUsage], None] | None,
     final_parallel_tool_calls: bool | None,
+    final_tool_call_protocol: str,
     prepared_setup: _MoASetup | None,
 ) -> AsyncIterator[MoAEvent]:
     """Generate proposals concurrently and pull synthesis deltas through.
@@ -384,6 +393,7 @@ async def _stream_moa(
         final_tool_choice=final_tool_choice,
         final_tools_in_prompt=final_tools_in_prompt,
         final_parallel_tool_calls=final_parallel_tool_calls,
+        final_tool_call_protocol=final_tool_call_protocol,
         shared_prefix=shared_prefix,
         usage_observer=usage_observer,
         prepared_setup=prepared_setup,

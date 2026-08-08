@@ -1719,19 +1719,6 @@ async def test_model_less_constructor_rejects_unshardable_tp_degree():
         ({"best_of": 2}, (), "best_of"),
         ({"prompt_logprobs": 1}, (), "prompt_logprobs"),
         ({"extra_args": {"unsupported": True}}, (), "extra_args.unsupported"),
-        (
-            {},
-            (
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "strict_tool",
-                        "strict": True,
-                    },
-                },
-            ),
-            "tools[0].function.strict",
-        ),
     ],
 )
 async def test_native_process_layouts_reject_the_same_unsupported_surface(
@@ -1760,6 +1747,45 @@ async def test_native_process_layouts_reject_the_same_unsupported_surface(
     finally:
         await in_process.shutdown()
         await process_split.shutdown()
+
+
+async def test_process_wire_carries_native_strict_tool_structural_tag():
+    request = GenerationRequest(
+        "strict-wire",
+        "prompt",
+        SamplingParams(),
+        tools=(
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "strict": True,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        ),
+        tool_call_protocol="qwen",
+    )
+
+    packed = ZmqEngineBackend._pack_add_message(
+        request,
+        None,
+        GenerationDefaults(),
+        "wire-strict",
+        "stream-strict",
+        WIRE_VERSION,
+    )
+    message = msgpack.unpackb(packed)
+    response_format = message["sampling"]["extra_args"]["response_format"]
+
+    assert response_format["type"] == "structural_tag"
+    assert response_format["format"]["tags"][0]["content"]["style"] == (
+        "qwen_xml"
+    )
 
 
 async def test_derived_full_validator_is_not_bypassed_by_builtin_fast_hook():
@@ -1792,14 +1818,76 @@ async def test_native_process_layouts_accept_response_format_extension():
         max_tokens=1,
         extra_args={"response_format": {"type": "json_object"}},
     )
-    in_process = KairyuBackend(num_pages=64)
-    process_split = ZmqEngineBackend(num_pages=64)
+    tokenizer = ToyTokenizer()
+    tokenizer.eos_token_id = 0
+    in_process = KairyuBackend(
+        num_pages=64,
+        tokenizer=tokenizer,
+        max_model_len=32,
+    )
+    process_split = ZmqEngineBackend(num_pages=64, max_model_len=32)
+    process_split._preflight_tokenizer = tokenizer
     try:
         in_process.validate_request(request)
         process_split.validate_request(request)
     finally:
         await in_process.shutdown()
         await process_split.shutdown()
+
+
+async def test_process_sync_validation_rejects_malformed_grammar_without_context_limit():
+    tokenizer = ToyTokenizer()
+    tokenizer.eos_token_id = 0
+    backend = ZmqEngineBackend(num_pages=64)
+    backend._preflight_tokenizer = tokenizer
+    request = _request(
+        "malformed-grammar",
+        "surface parity",
+        max_tokens=1,
+        extra_args={"response_format": {"type": "regex", "pattern": "("}},
+    )
+
+    try:
+        with pytest.raises(ValueError, match="invalid structured output"):
+            backend.validate_request(request)
+
+        assert backend._process is None
+    finally:
+        await backend.shutdown()
+
+
+async def test_process_structured_validation_caches_fresh_custom_vocabulary():
+    class FreshVocabularyTokenizer(ToyTokenizer):
+        def __init__(self) -> None:
+            self.eos_token_id = 0
+            self.vocab_calls = 0
+
+        def vocab(self) -> list[str]:
+            self.vocab_calls += 1
+            return super().vocab()
+
+    tokenizer = FreshVocabularyTokenizer()
+    backend = ZmqEngineBackend(num_pages=64)
+    backend._preflight_tokenizer = tokenizer
+    try:
+        for request_id, pattern in (("first", "a+"), ("second", "b+")):
+            backend.validate_request(
+                _request(
+                    request_id,
+                    "surface parity",
+                    max_tokens=1,
+                    extra_args={
+                        "response_format": {
+                            "type": "regex",
+                            "pattern": pattern,
+                        }
+                    },
+                )
+            )
+
+        assert tokenizer.vocab_calls == 1
+    finally:
+        await backend.shutdown()
 
 
 async def test_native_sync_validation_rejects_unserializable_tool_schema():

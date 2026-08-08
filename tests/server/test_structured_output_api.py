@@ -74,7 +74,7 @@ async def test_json_schema_yields_valid_json_and_stop(app, schema):
                 },
             },
         )
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     choice = response.json()["choices"][0]
     parsed = json.loads(choice["message"]["content"])
     assert isinstance(parsed, dict)
@@ -103,6 +103,82 @@ async def test_malformed_response_format_is_400_not_crash(app):
     assert missing_schema.status_code == 400
 
 
+@pytest.mark.parametrize(
+    "response_format",
+    [
+        {"type": "regex", "pattern": "("},
+        {"type": "grammar", "grammar": "@@@"},
+        {"type": "structural_tag", "format": {}},
+    ],
+)
+async def test_uncompilable_response_format_is_request_local_400(
+    app,
+    response_format,
+):
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "x"}],
+                "response_format": response_format,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "invalid structured output" in response.json()["error"]["message"]
+
+
+async def test_structured_output_rejects_conflicting_min_tokens(app):
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "x"}],
+                "response_format": {"type": "regex", "pattern": "ab"},
+                "min_tokens": 3,
+            },
+        )
+
+    assert response.status_code == 400
+    assert "min_tokens" in response.json()["error"]["message"]
+
+
+async def test_invalid_strict_tool_schema_is_400_and_engine_stays_healthy(app):
+    async with _client(app) as client:
+        invalid = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "call"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "broken",
+                            "strict": True,
+                            "parameters": {"type": "not-a-json-schema-type"},
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+        )
+        healthy = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "plain"}],
+                "max_tokens": 2,
+            },
+        )
+
+    assert invalid.status_code == 400
+    assert "invalid structured output" in invalid.json()["error"]["message"]
+    assert healthy.status_code == 200
+
+
 async def test_response_format_text_passes_through(app):
     async with _client(app) as client:
         response = await client.post(
@@ -115,3 +191,72 @@ async def test_response_format_text_passes_through(app):
             },
         )
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("response_format", "expected"),
+    [
+        ({"type": "regex", "pattern": "ab"}, "ab"),
+        ({"type": "grammar", "grammar": 'root ::= "cd"'}, "cd"),
+        (
+            {
+                "type": "structural_tag",
+                "format": {"type": "const_string", "value": "ef"},
+            },
+            "ef",
+        ),
+    ],
+)
+async def test_extended_response_formats_are_enforced(app, response_format, expected):
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "structured"}],
+                "max_tokens": 10,
+                "temperature": 0.0,
+                "response_format": response_format,
+            },
+        )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["message"]["content"] == expected
+    assert choice["finish_reason"] == "stop"
+
+
+async def test_native_strict_tool_arguments_follow_the_declared_schema(app):
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "call the tool"}],
+                "max_tokens": 100,
+                "temperature": 0.0,
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "record",
+                            "strict": True,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"value": {"type": "integer", "enum": [1]}},
+                                "required": ["value"],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": "required",
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    choice = response.json()["choices"][0]
+    call = choice["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "record"
+    assert json.loads(call["function"]["arguments"])["value"] == 1
+    assert choice["finish_reason"] == "tool_calls"

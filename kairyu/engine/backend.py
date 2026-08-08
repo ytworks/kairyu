@@ -30,6 +30,7 @@ from kairyu.sampling_params import (
 )
 
 _GENERATION_STAGE_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
+_TOOL_FUNCTION_NAME_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _MAX_STAGE_DURATION_NS = (1 << 63) - 1
 _MAX_STAGE_OCCURRENCES = (1 << 31) - 1
 
@@ -185,6 +186,10 @@ class GenerationRequest:
     # fields so positional callers retain their historical argument binding.
     # The public boundary still enforces cardinality after generation.
     parallel_tool_calls: bool | None = None
+    # Parser-attested chat-template family used only by native strict-tool
+    # grammar construction. Engine layers intentionally keep this as a small
+    # string instead of importing the L3 enum.
+    tool_call_protocol: str = "generic"
 
     def __post_init__(self) -> None:
         # Defense in depth for callers holding a SamplingParams created by an
@@ -196,6 +201,10 @@ class GenerationRequest:
         )
         if type(self.trace_requested) is not bool:
             raise ValueError("trace_requested must be a boolean")
+        if self.tool_call_protocol not in {"generic", "llama", "qwen"}:
+            raise ValueError(
+                "tool_call_protocol must be generic, llama or qwen"
+            )
         kind = prompt_kind(self.prompt)
         if (
             kind != "text"
@@ -331,6 +340,132 @@ def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
     return TextPrompt(rendered) if isinstance(request.prompt, TextPrompt) else rendered
 
 
+def _strict_tool_response_format(
+    request: GenerationRequest,
+) -> dict[str, object] | None:
+    """Build the parser-matched xgrammar format for selected strict tools."""
+
+    if not request.tools:
+        return None
+    choice = request.tool_choice
+    candidates: list[tuple[int, Mapping[str, object], Mapping[str, object]]] = []
+    for index, tool in enumerate(request.tools):
+        function = tool.get("function")
+        if not isinstance(function, Mapping):
+            continue
+        strict = function.get("strict")
+        if strict is not None and type(strict) is not bool:
+            raise ValueError(f"tools[{index}].function.strict must be a boolean")
+        candidates.append((index, tool, function))
+
+    if isinstance(choice, Mapping):
+        function_choice = choice.get("function")
+        selected_name = (
+            function_choice.get("name")
+            if isinstance(function_choice, Mapping)
+            else None
+        )
+        candidates = [
+            candidate
+            for candidate in candidates
+            if candidate[2].get("name") == selected_name
+        ]
+
+    if choice == "none":
+        return None
+    if not any(
+        function.get("strict") is True
+        for _index, _tool, function in candidates
+    ):
+        return None
+
+    functions: list[Mapping[str, object]] = []
+    for index, tool, function in candidates:
+        if tool.get("type") != "function":
+            raise ValueError(f"tools[{index}].type must be 'function'")
+        name = function.get("name")
+        if not isinstance(name, str) or _TOOL_FUNCTION_NAME_RE.fullmatch(name) is None:
+            raise ValueError(
+                f"tools[{index}].function.name must match [A-Za-z0-9_-]{{1,64}}"
+            )
+        functions.append(function)
+
+    protocol = request.tool_call_protocol
+    tags: list[dict[str, object]] = []
+    for function in functions:
+        name = function["name"]
+        parameters = function.get("parameters")
+        if function.get("strict") is True:
+            if not isinstance(parameters, Mapping):
+                raise ValueError(
+                    f"strict tool {name!r} requires a JSON-schema parameters object"
+                )
+            schema: object = dict(parameters)
+        else:
+            schema = True
+        style = "json"
+        if protocol == "generic":
+            begin = f'<tool_call>{{"name":{json.dumps(name)},"arguments":'
+            end = "}</tool_call>"
+        elif protocol == "llama":
+            begin = f'<|python_tag|>{{"name": {json.dumps(name)}, "parameters": '
+            end = "}"
+        else:
+            begin = f"<tool_call>\n<function={name}>\n"
+            end = "\n</function>\n</tool_call>"
+            style = "qwen_xml"
+        tags.append(
+            {
+                "type": "tag",
+                "begin": begin,
+                "content": {
+                    "type": "json_schema",
+                    "json_schema": schema,
+                    "style": style,
+                    "any_order": False,
+                },
+                "end": end,
+            }
+        )
+
+    trigger = {
+        "generic": "<tool_call>",
+        "llama": "<|python_tag|>",
+        "qwen": "<tool_call>\n<function=",
+    }[protocol]
+    parallel = resolve_parallel_tool_calls(
+        request.parallel_tool_calls,
+        request.sampling_params.extra_args,
+    )
+    return {
+        "type": "structural_tag",
+        "format": {
+            "type": "triggered_tags",
+            "triggers": [trigger],
+            "tags": tags,
+            "at_least_one": choice == "required" or isinstance(choice, Mapping),
+            "stop_after_first": protocol == "llama" or parallel is False,
+            "excludes": [],
+        },
+    }
+
+
+def native_sampling_params(request: GenerationRequest) -> SamplingParams:
+    """Return native sampling with strict tool semantics made executable."""
+
+    response_format = _strict_tool_response_format(request)
+    if response_format is None:
+        return request.sampling_params
+    extra_args = dict(request.sampling_params.extra_args)
+    explicit = extra_args.get("response_format")
+    if isinstance(explicit, Mapping) and explicit.get("type") not in {None, "text"}:
+        raise ValueError(
+            "strict tools cannot be combined with a structured response_format"
+        )
+    extra_args["response_format"] = response_format
+    return request.sampling_params.clone(extra_args=extra_args)
+
+
 def validate_native_request_surface_before_prepare(
     request: GenerationRequest,
 ) -> None:
@@ -372,10 +507,7 @@ def validate_native_request_surface(request: GenerationRequest) -> None:
         for key in params.extra_args
         if key not in STRUCTURED_OUTPUT_EXTRA_ARGS
     ]
-    for index, tool in enumerate(request.tools):
-        function = tool.get("function")
-        if isinstance(function, Mapping) and function.get("strict") is True:
-            unsupported.append(f"tools[{index}].function.strict")
+    native_sampling_params(request)
     if unsupported:
         raise ValueError(
             "Kairyu backend does not support request fields: "

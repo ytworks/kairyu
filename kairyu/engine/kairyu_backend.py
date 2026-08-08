@@ -32,6 +32,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationStageMetric,
     GenerationUsage,
+    native_sampling_params,
     prompt_with_tool_intent,
     validate_backend_request_before_prepare,
     validate_native_request_surface,
@@ -877,6 +878,7 @@ def build_engine_loop(
         grammar_vocab = grammar_vocabulary(resolved, model_vocab_size=model_config.vocab_size)
     else:
         resolved = resolve_tokenizer(tokenizer if tokenizer is not None else "toy")
+        grammar_vocab = None
 
     validate_tp_degree(
         tensor_parallel_size,
@@ -994,6 +996,7 @@ def build_engine_loop(
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
         generation_defaults=generation,
+        grammar_vocab=grammar_vocab,
     )
     loop.parallel_launcher = None  # single-process: nothing to tear down
     loop.tp_launcher = None  # compatibility alias for TP-specific callers
@@ -1066,6 +1069,11 @@ def _build_pd_loop(
 
     generation = load_generation_defaults(model_path, generation_config)
     resolved = resolve_tokenizer(tokenizer if tokenizer is not None else model_path)
+    raw_config = json.loads((Path(model_path) / "config.json").read_text())
+    grammar_vocab = grammar_vocabulary(
+        resolved,
+        model_vocab_size=int(raw_config["vocab_size"]),
+    )
     coordinator = build_pd_coordinator(
         model_path=model_path,
         num_pages=num_pages,
@@ -1090,6 +1098,7 @@ def _build_pd_loop(
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
         generation_defaults=generation,
+        grammar_vocab=grammar_vocab,
     )
     loop.parallel_launcher = None
     loop.tp_launcher = None
@@ -1196,6 +1205,7 @@ def _build_dist_ep_loop(
             pipeline_depth=pipeline_depth,
             max_model_len=max_model_len,
             generation_defaults=generation,
+            grammar_vocab=grammar_vocab,
         )
     except BaseException:
         launcher.shutdown()
@@ -1313,6 +1323,7 @@ def _build_dist_tp_loop(
         pipeline_depth=pipeline_depth,
         max_model_len=max_model_len,
         generation_defaults=generation,
+        grammar_vocab=grammar_vocab,
     )
     loop.parallel_launcher = launcher
     loop.tp_launcher = launcher  # compatibility alias for TP-specific callers
@@ -1591,7 +1602,7 @@ class KairyuBackend:
         validate_native_request_surface(request)
         return self._loop.prepare_prompt(
             prompt_with_tool_intent(request),
-            request.sampling_params,
+            native_sampling_params(request),
             trace_requested=request.trace_requested,
         )
 
@@ -2062,7 +2073,7 @@ class KairyuBackend:
             self._loop.submit(
                 request_id,
                 prepared_prompt.prompt,
-                request.sampling_params,
+                native_sampling_params(request),
                 priority=request.priority,
                 scheduling_class=request.scheduling_class,
                 prepared_prompt=prepared_prompt,
@@ -2146,6 +2157,7 @@ class KairyuBackend:
                     tools_in_prompt=request.tools_in_prompt,
                     trace_requested=request.trace_requested,
                     parallel_tool_calls=request.parallel_tool_calls,
+                    tool_call_protocol=request.tool_call_protocol,
                 )
             )
         return subs
