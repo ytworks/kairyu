@@ -980,6 +980,12 @@ async def test_stream_yields_incremental_partials():
     lengths = [len(p.completions[0].token_ids) for p in partials]
     assert lengths == sorted(lengths)  # monotonically growing
     assert lengths[-1] == 5
+    offset = 0
+    text_parts = []
+    for partial in partials:
+        delta, offset = partial.completions[0].delta_after(offset)
+        text_parts.append(delta)
+    assert "".join(text_parts) == partials[-1].text
 
 
 async def test_stream_coalesces_backlogged_cumulative_updates_to_terminal(

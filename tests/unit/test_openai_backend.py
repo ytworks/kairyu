@@ -1982,8 +1982,12 @@ async def test_stream_parses_sse_into_cumulative_partials(monkeypatch):
     results = [result async for result in backend.stream(_request("stream it"))]
 
     assert captured["body"]["stream"] is True
-    texts = [result.completions[0].text for result in results]
-    assert texts == ["hel", "hello", "hello"]
+    completions = [result.completions[0] for result in results]
+    assert not isinstance(completions[0].__dict__["text"], str)
+    assert not isinstance(completions[1].__dict__["text"], str)
+    assert [completion.text for completion in completions] == ["hel", "hello", "hello"]
+    assert [completion.text_delta for completion in completions] == ["hel", "lo", ""]
+    assert [completion.text_offset for completion in completions] == [0, 3, 5]
     assert [result.finished for result in results] == [False, False, True]
     assert results[-1].completions[0].finish_reason == "stop"
     await backend.shutdown()
@@ -2171,6 +2175,7 @@ async def test_stream_preserves_unicode_line_separators_inside_json():
     results = [result async for result in backend.stream(_request("stream it"))]
 
     assert [result.text for result in results] == [separators, separators]
+    assert [result.text_delta for result in results] == [separators, ""]
     assert results[-1].finished is True
 
 
@@ -2204,6 +2209,7 @@ async def test_stream_parses_fragmented_multiline_sse_data_event():
     results = [result async for result in backend.stream(_request("stream it"))]
 
     assert [result.text for result in results] == ["hello", "hello"]
+    assert [result.text_delta for result in results] == ["hello", ""]
     assert results[-1].completions[0].finish_reason == "stop"
 
 

@@ -859,11 +859,12 @@ async def _stream_engine(
                 last = partial
                 owner.observe(partial.usage, partial.completions)
                 for completion in partial.completions:
-                    delta_text = completion.text[sent.get(completion.index, 0) :]
+                    previous_offset = sent.get(completion.index, 0)
+                    delta_text, next_offset = completion.delta_after(previous_offset)
                     if not delta_text and not partial.finished:
                         continue
                     is_first = completion.index not in sent
-                    sent[completion.index] = len(completion.text)
+                    sent[completion.index] = next_offset
                     chunk_logprobs = None
                     if request.logprobs and completion.logprob_content is not None:
                         seen = logprobs_sent.get(completion.index, 0)
@@ -994,6 +995,8 @@ async def _stream_orchestrator(
     logprobs_sent: dict[int, int] = {}
     final_result = None
     completion_text = ""
+    completion_parts: list[str] = []
+    completion_length = 0
     completions: tuple[CompletionOutput, ...] = ()
     reported_usage: GenerationUsage | None = None
     terminal_error_type: str | None = None
@@ -1013,7 +1016,7 @@ async def _stream_orchestrator(
     ):
         for completion in sorted(snapshot, key=lambda item: item.index):
             seen_text = sent.get(completion.index, 0)
-            delta_text = completion.text[seen_text:]
+            delta_text, next_text = completion.delta_after(seen_text)
             seen_logprobs = logprobs_sent.get(completion.index, 0)
             fresh_logprobs = (
                 completion.logprob_content[seen_logprobs:]
@@ -1023,7 +1026,7 @@ async def _stream_orchestrator(
             if not delta_text and not fresh_logprobs and completion.index in sent:
                 continue
             is_first = completion.index not in sent
-            sent[completion.index] = len(completion.text)
+            sent[completion.index] = next_text
             if completion.logprob_content is not None:
                 logprobs_sent[completion.index] = len(completion.logprob_content)
             yield (
@@ -1068,15 +1071,18 @@ async def _stream_orchestrator(
                                 logprobs=chunk_logprobs,
                             )
                     else:
-                        completion_text += event.text
+                        completion_parts.append(event.text)
                         completions = (
                             CompletionOutput(
                                 index=0,
-                                text=completion_text,
+                                text="",
                                 token_ids=(),
                                 finish_reason=None,
+                                text_delta=event.text,
+                                text_offset=completion_length,
                             ),
                         )
+                        completion_length += len(event.text)
                         owner.observe(None, completions)
                         is_first = first
                         first = False
@@ -1094,7 +1100,7 @@ async def _stream_orchestrator(
                 elif event.kind in {"result", "error"}:
                     final_result = event.result
                     if final_result is not None:
-                        completion_text = final_result.text or completion_text
+                        completion_text = final_result.text or "".join(completion_parts)
                         completions = final_result.completions or (
                             CompletionOutput(
                                 index=0,
@@ -1581,10 +1587,11 @@ async def _stream_completions(
                 last = partial
                 owner.observe(partial.usage, partial.completions)
                 for completion in partial.completions:
-                    delta = completion.text[sent.get(completion.index, 0) :]
+                    previous_offset = sent.get(completion.index, 0)
+                    delta, next_offset = completion.delta_after(previous_offset)
                     if not delta and not partial.finished:
                         continue
-                    sent[completion.index] = len(completion.text)
+                    sent[completion.index] = next_offset
                     finish = (completion.finish_reason or "stop") if partial.finished else None
                     if finish is None and type(completion.index) is int and type(delta) is str:
                         yield text_encoder.encode(completion.index, delta)

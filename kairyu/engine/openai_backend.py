@@ -53,7 +53,7 @@ from kairyu.engine.prompt import (
 )
 from kairyu.engine.registry import register_backend
 from kairyu.engine.vision import ImageInputPolicy, InvalidImageInput
-from kairyu.outputs import CompletionOutput, TokenLogprob
+from kairyu.outputs import CompletionOutput, TokenLogprob, _lazy_text
 from kairyu.sampling_params import (
     GENERATION_CONFIG_SAMPLING_FIELDS,
     SamplingParams,
@@ -1335,7 +1335,9 @@ class OpenAICompatBackend:
     def _partial(
         self,
         request: GenerationRequest,
-        texts: dict[int, str],
+        text_parts: dict[int, list[str]],
+        text_lengths: dict[int, int],
+        text_deltas: dict[int, str],
         finish: dict[int, str],
         deltas_seen: dict[int, int],
         logprobs: dict[int, list[TokenLogprob]],
@@ -1346,15 +1348,21 @@ class OpenAICompatBackend:
         completions = tuple(
             CompletionOutput(
                 index=index,
-                text=texts.get(index, ""),
+                text=(
+                    "".join(text_parts.get(index, ()))
+                    if finished
+                    else _lazy_text(text_parts.get(index, []))
+                ),
                 token_ids=(tuple(range(deltas_seen.get(index, 0))) if finished else ()),
                 finish_reason=finish.get(index, "stop") if finished else None,
                 cumulative_logprob=(
                     sum(item.logprob for item in logprobs[index]) if index in logprobs else None
                 ),
                 logprob_content=(tuple(logprobs[index]) if index in logprobs else None),
+                text_delta=text_deltas.get(index, ""),
+                text_offset=text_lengths.get(index, 0) - len(text_deltas.get(index, "")),
             )
-            for index in sorted(texts.keys() | finish.keys() | logprobs.keys())
+            for index in sorted(text_parts.keys() | finish.keys() | logprobs.keys())
         )
         return GenerationResult(
             request_id=request.request_id,
@@ -1366,7 +1374,7 @@ class OpenAICompatBackend:
         )
 
     async def stream(self, request: GenerationRequest) -> AsyncIterator[GenerationResult]:
-        """Real SSE streaming: yields cumulative partials, then the final result."""
+        """Real SSE streaming with delta-native partial results."""
         payload = await self._payload_for_dispatch(
             request,
             stream=True,
@@ -1381,7 +1389,8 @@ class OpenAICompatBackend:
             if response.status_code != 200:
                 body = (await response.aread()).decode(errors="replace")
                 _raise_for_status(self._base_url, response.status_code, body)
-            texts: dict[int, str] = {}
+            text_parts: dict[int, list[str]] = {}
+            text_lengths: dict[int, int] = {}
             finish: dict[int, str] = {}
             deltas_seen: dict[int, int] = {}
             logprobs: dict[int, list[TokenLogprob]] = {}
@@ -1406,7 +1415,9 @@ class OpenAICompatBackend:
                         if stage_metrics:
                             yield self._partial(
                                 request,
-                                texts,
+                                text_parts,
+                                text_lengths,
+                                {},
                                 finish,
                                 deltas_seen,
                                 logprobs,
@@ -1445,12 +1456,16 @@ class OpenAICompatBackend:
                 if chunk.get("usage"):  # final usage chunk has empty choices
                     usage = _usage_from(chunk["usage"])
                 changed = False
+                text_deltas: dict[int, str] = {}
                 for choice in chunk.get("choices", []):
                     index = choice.get("index", 0)
-                    texts.setdefault(index, "")
+                    text_parts.setdefault(index, [])
+                    text_lengths.setdefault(index, 0)
                     content = (choice.get("delta") or {}).get("content")
                     if content:
-                        texts[index] = texts.get(index, "") + content
+                        text_parts[index].append(content)
+                        text_lengths[index] += len(content)
+                        text_deltas[index] = text_deltas.get(index, "") + content
                         deltas_seen[index] = deltas_seen.get(index, 0) + 1
                         changed = True
                     if choice.get("finish_reason"):
@@ -1464,7 +1479,9 @@ class OpenAICompatBackend:
                 if changed:
                     yield self._partial(
                         request,
-                        texts,
+                        text_parts,
+                        text_lengths,
+                        text_deltas,
                         finish,
                         deltas_seen,
                         logprobs,
@@ -1472,12 +1489,14 @@ class OpenAICompatBackend:
                     )
             if trace_seen and not done_seen:
                 raise RuntimeError("Kairyu upstream stage trace omitted SSE [DONE]")
-        if not texts and not finish:
+        if not text_parts and not finish:
             raise RuntimeError(f"backend {self._base_url} streamed no choices")
         self._require_exact_multimodal_usage(request, usage)
         yield self._partial(
             request,
-            texts,
+            text_parts,
+            text_lengths,
+            {},
             finish,
             deltas_seen,
             logprobs,

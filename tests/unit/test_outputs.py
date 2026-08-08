@@ -43,3 +43,21 @@ def test_outputs_are_immutable():
     out = _completion()
     with pytest.raises(AttributeError):
         out.text = "changed"
+
+
+def test_completion_output_prefers_delta_native_stream_contract():
+    out = CompletionOutput(
+        index=0,
+        text="unused cumulative snapshot",
+        token_ids=(1,),
+        text_delta="lo",
+        text_offset=3,
+    )
+
+    assert out.delta_after(3) == ("lo", 5)
+    with pytest.raises(ValueError, match="offset mismatch"):
+        out.delta_after(2)
+
+
+def test_completion_output_falls_back_to_cumulative_text():
+    assert _completion(text="hello").delta_after(3) == ("lo", 5)

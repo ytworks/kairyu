@@ -1438,7 +1438,12 @@ class EngineLoop:
                 finish_early=True,
             )
         visible_end = max(0, len(track.stable) - track.holdback)
+        visible = (
+            track.stable
+            if visible_end == len(track.stable)
+            else track.stable[:visible_end]
+        )
         return _TrackUpdateResult(
             item.request_id,
-            _update(track.stable[:visible_end], False, None),
+            _update(visible, False, None),
         )

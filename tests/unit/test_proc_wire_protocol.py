@@ -517,7 +517,9 @@ def test_generate_style_reconstruction_materializes_only_the_terminal_text():
             materialize=event["finished"],
         )
         if not event["finished"]:
-            assert normalized == {"finished": False}
+            assert not isinstance(normalized["text"], str)
+            assert normalized["text_offset"] == length - 1
+            assert normalized["text_delta"] == "x"
     assert normalized["outputs"] == list(range(total))
     assert normalized["text"] == "x" * total
     assert normalized["finished"] is True

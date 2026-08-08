@@ -1,6 +1,6 @@
 # M8 Design: Engine CPU Core — Real Tokens, Real Sampling, Multi-Token Commit
 
-Status: **Implemented** (2026-07-03; D1/D2/D6 amended 2026-08-07). Reviewed — APPROVE-WITH-AMENDMENTS
+Status: **Implemented** (2026-07-03; D1/D2/D6 amended 2026-08-08). Reviewed — APPROVE-WITH-AMENDMENTS
 (3-reviewer agent panel, 2026-07-03; all amendments applied inline, see §6).
 All six phases (D1–D6) landed with tests: 328 → 437 tests, 95% coverage.
 The original M8 deliverables remain implemented and CPU-tested. Issue #333's
@@ -201,6 +201,14 @@ media bytes.
   CUDA sampler compatibility paths likewise make exactly one mutable fp32 copy:
   an existing CPU fp32 tensor is cloned, while a device or dtype conversion is
   itself the copy.
+- **Delta-result amendment (2026-08-08, issue #338)**: public streaming
+  completions carry `text_delta` plus its cumulative `text_offset`. Native,
+  process-split, and OpenAI-compatible adapters preserve those deltas through
+  the API and orchestration layers; legacy cumulative-only backends fall back
+  to suffix slicing. Cumulative `text` remains compatible and is backed by an
+  append-only lazy snapshot where flattening would otherwise repeat per token.
+  Offset validation replaces repeated full-prefix scans and fails closed if a
+  backend changes text that has already crossed the streaming boundary.
 - **Stream-backpressure conflation (2026-08-04, issue #335)**: the in-process
   `KairyuBackend` publishes cumulative `StreamUpdate` values through one bounded,
   single-consumer mailbox per request. The first token-bearing state is retained

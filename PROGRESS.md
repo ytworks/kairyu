@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] Streaming results carry text deltas end to end
+- What: completion results expose offset-validated text deltas; native, process-split, and OpenAI-compatible streams feed server and orchestration consumers without rebuilding or rescanning cumulative text, while legacy cumulative text remains lazily compatible.
+- Why: flattening each token into a growing string at several serving layers caused quadratic copies and GIL-held allocation work per request.
+- Refs: issue #338; m8 wire v2; `kairyu/{outputs,engine,entrypoints/server,orchestration}`
+
 ### 2026-08-08 — [amendment] Learned draft heads enter native serving
 - What: public native config wires EAGLE-3/MTP checkpoints into stateful target-hidden capture, O(T+k) cached rollout, exact accepted-row commit, per-source acceptance evidence, and request-local speculative pipeline dependencies; missing Radix hidden history safely degrades to target decode.
 - Why: the trained heads and batched teacher path existed, but public serving exposed only low-acceptance n-gram proposals and serialized unrelated pipeline work behind a global barrier.

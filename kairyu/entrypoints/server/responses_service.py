@@ -1039,8 +1039,7 @@ async def _live_text_events(
                 completion = min(partial.completions, key=lambda item: item.index, default=None)
                 if completion is None:
                     continue
-                delta = completion.text[sent:]
-                sent = len(completion.text)
+                delta, sent = completion.delta_after(sent)
                 if not delta:
                     continue
                 if type(delta) is str:

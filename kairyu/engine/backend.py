@@ -567,6 +567,16 @@ class GenerationResult:
         """Convenience accessor for the first completion's text."""
         return self.completions[0].text if self.completions else ""
 
+    @property
+    def text_delta(self) -> str | None:
+        """Newly visible text for the first completion, when delta-native."""
+        return self.completions[0].text_delta if self.completions else None
+
+    @property
+    def text_offset(self) -> int | None:
+        """Cumulative start offset of ``text_delta`` when delta-native."""
+        return self.completions[0].text_offset if self.completions else None
+
 
 @runtime_checkable
 class EngineBackend(Protocol):
