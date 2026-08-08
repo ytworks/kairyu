@@ -131,16 +131,25 @@ def test_extended_structured_formats_map_to_engine_sampling(
     "kwargs",
     [
         {"temperature": -0.1},
+        {"seed": 1 << 64},
+        {"seed": -(1 << 63) - 1},
         {"top_p": 0.0},
         {"top_p": 1.5},
         {"n": 0},
+        {"top_k": 1 << 63},
+        {"logprobs": 1 << 63},
+        {"prompt_logprobs": 1 << 63},
+        {"stop_token_ids": [1 << 63]},
         {"max_tokens": 0},
+        {"max_tokens": 1 << 63},
         {"min_p": -0.5},
         {"repetition_penalty": 0.0},
         {"min_tokens": -1},
+        {"min_tokens": 1 << 63},
         {"max_tokens": 1, "min_tokens": 2},
         {"forced_token_ids": []},
         {"forced_token_ids": [-1]},
+        {"forced_token_ids": [1 << 63]},
         {"forced_token_ids": [True]},
         {"forced_token_ids": ["7"]},
         {"forced_token_ids": 7},
@@ -170,6 +179,27 @@ def test_invalid_values_raise_value_error(kwargs):
 def test_error_message_names_field():
     with pytest.raises(ValueError, match="temperature"):
         SamplingParams(temperature=-1.0)
+
+
+def test_tensor_sampling_integer_boundaries_are_accepted():
+    maximum = (1 << 63) - 1
+    params = SamplingParams(
+        seed=(1 << 64) - 1,
+        top_k=maximum,
+        logprobs=maximum,
+        prompt_logprobs=maximum,
+        stop_token_ids=(maximum,),
+        max_tokens=maximum,
+        min_tokens=maximum,
+    )
+    forced = SamplingParams(
+        max_tokens=1,
+        forced_token_ids=(maximum,),
+        ignore_eos=True,
+    )
+
+    assert params.stop_token_ids == (maximum,)
+    assert forced.forced_token_ids == (maximum,)
 
 
 def test_clone_returns_new_object_and_leaves_original_unchanged():

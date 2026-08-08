@@ -61,25 +61,25 @@ _CONTROL_HEADER_WORDS = 2
 _MAX_STEP_DELTA_WORDS = 16 * 1024 * 1024
 
 
-def _supports_step_tensor_transport(step_comm) -> bool:
-    return getattr(step_comm, "supports_step_tensor_transport", False) is True
+def _supports_step_tensor_transport(model_comm) -> bool:
+    return getattr(model_comm, "supports_step_tensor_transport", False) is True
 
 
-def _control_tensor(step_comm, values=None, *, size: int | None = None):
+def _control_tensor(comm, values=None, *, size: int | None = None):
     import torch
 
-    device = getattr(step_comm, "tensor_device", None)
+    device = getattr(comm, "tensor_device", None)
     if values is not None:
         return torch.tensor(values, dtype=torch.int64, device=device)
     assert size is not None
     return torch.empty(size, dtype=torch.int64, device=device)
 
 
-def _receive_control(control_comm, step_comm) -> object:
-    if not _supports_step_tensor_transport(step_comm):
+def _receive_control(control_comm, model_comm, *, tensor_steps: bool) -> object:
+    if not tensor_steps or not _supports_step_tensor_transport(model_comm):
         return control_comm.broadcast(_SHUTDOWN, src=0)
-    header = _control_tensor(step_comm, size=_CONTROL_HEADER_WORDS)
-    step_comm.tensor_broadcast(header, src=0)
+    header = _control_tensor(control_comm, size=_CONTROL_HEADER_WORDS)
+    control_comm.tensor_broadcast(header, src=0)
     kind, size = (int(value) for value in header.tolist())
     if kind == _CONTROL_OBJECT:
         if size != 0:
@@ -89,8 +89,8 @@ def _receive_control(control_comm, step_comm) -> object:
         raise RuntimeError(f"unknown tensor control kind {kind}")
     if not 0 < size <= _MAX_STEP_DELTA_WORDS:
         raise RuntimeError(f"invalid step delta tensor length {size}")
-    packet = _control_tensor(step_comm, size=size)
-    step_comm.tensor_broadcast(packet, src=0)
+    packet = _control_tensor(model_comm, size=size)
+    model_comm.tensor_broadcast(packet, src=0)
     return decode_step_delta(tuple(int(value) for value in packet.tolist()))
 
 
@@ -3466,14 +3466,17 @@ class DistTPModelRunner:
         local_runner,
         model_comm=None,
         *,
-        step_comm=None,
         parallelism_display: str = "tensor-parallel",
         parallelism_prefix: str = "TP",
     ) -> None:
         self._control_comm = control_comm
         self._model_comm = model_comm if model_comm is not None else control_comm
-        self._step_comm = step_comm
-        self._step_tensor_transport = _supports_step_tensor_transport(step_comm)
+        # Issue #323 is a TP hot-path change. EP's replicated and attention-DP
+        # protocols retain their established object ordering.
+        self._step_tensor_transport = (
+            parallelism_prefix == "TP"
+            and _supports_step_tensor_transport(self._model_comm)
+        )
         self._local = local_runner
         self._parallelism_display = parallelism_display
         self._parallelism_prefix = parallelism_prefix
@@ -3506,29 +3509,34 @@ class DistTPModelRunner:
 
         if self._step_tensor_transport:
             header = _control_tensor(
-                self._step_comm,
+                self._control_comm,
                 (_CONTROL_OBJECT, 0),
             )
-            self._step_comm.tensor_broadcast(header, src=0)
+            self._control_comm.tensor_broadcast(header, src=0)
         return self._control_comm.broadcast(payload, src=0)
 
-    def _broadcast_step(self, delta: StepDelta) -> StepDelta:
+    def _prepare_step_packet(self, delta: StepDelta):
         if not self._step_tensor_transport:
-            self._broadcast_control(delta)
-            return delta
+            return None
         values = encode_step_delta(delta)
         if len(values) > _MAX_STEP_DELTA_WORDS:
             raise RuntimeError(
                 f"step delta tensor has {len(values)} words; maximum is "
                 f"{_MAX_STEP_DELTA_WORDS}"
             )
+        return _control_tensor(self._model_comm, values)
+
+    def _broadcast_step(self, delta: StepDelta, packet) -> StepDelta:
+        if not self._step_tensor_transport:
+            self._broadcast_control(delta)
+            return delta
+        assert packet is not None
         header = _control_tensor(
-            self._step_comm,
-            (_CONTROL_STEP_DELTA, len(values)),
+            self._control_comm,
+            (_CONTROL_STEP_DELTA, packet.numel()),
         )
-        self._step_comm.tensor_broadcast(header, src=0)
-        packet = _control_tensor(self._step_comm, values)
-        self._step_comm.tensor_broadcast(packet, src=0)
+        self._control_comm.tensor_broadcast(header, src=0)
+        self._model_comm.tensor_broadcast(packet, src=0)
         return delta
 
     def _snapshot_pending_releases(self) -> tuple[tuple[str, int], ...]:
@@ -3568,7 +3576,15 @@ class DistTPModelRunner:
                     states,
                     released_ids=released_ids,
                 )
-                self._broadcast_step(delta)
+            except Exception as error:
+                self._fatal_error = error
+                raise
+            # Encode and stage before entering the collective transaction. A
+            # malformed request cannot announce a packet, poison the collective
+            # sequence, or make an otherwise healthy TP group fatal.
+            step_packet = self._prepare_step_packet(delta)
+            try:
+                self._broadcast_step(delta, step_packet)
                 # Match the worker ordering: stale per-request local state and
                 # StateSync identity are gone before a new snapshot with the
                 # same request id is installed or executed.
@@ -5789,7 +5805,6 @@ def worker_step_loop(
     local_runner,
     model_comm=None,
     *,
-    step_comm=None,
     parallelism_prefix: str = "TP",
 ) -> int:
     """Non-zero-rank main loop: execute passive steps until shutdown.
@@ -5806,7 +5821,11 @@ def worker_step_loop(
         else None
     )
     while True:
-        payload = _receive_control(control_comm, step_comm)
+        payload = _receive_control(
+            control_comm,
+            model_comm,
+            tensor_steps=parallelism_prefix == "TP",
+        )
         if isinstance(payload, _EPAttentionDPStep):
             _release_runner_requests(
                 local_runner,
@@ -6063,17 +6082,15 @@ class ServingGroups:
     deserializing it.  A source rank can therefore enqueue the following model
     all-reduce while peers are still completing the object broadcast.  Keeping
     the Python control protocol on gloo makes that hand-off blocking and leaves
-    the NCCL groups with tensor collectives only. TP may additionally request a
-    long-idle NCCL group for its fixed-layout step packet: workers wait inside
-    that receive while idle, so it cannot reuse the fail-fast model group.
-    Startup graph status uses a second Gloo group with the same fail-fast bound
-    as model work; the ordinary control group must also remain able to wait for
-    traffic indefinitely.
+    the NCCL group with tensor collectives only. The hot-step header is itself a
+    two-word Gloo tensor, so workers sleep and retain TCP parent-death detection
+    while idle; only the encoded payload uses the NCCL model group. Startup graph
+    status uses a second Gloo group with the same fail-fast bound as model work;
+    the ordinary control group must remain able to wait for traffic indefinitely.
     """
 
     control: object
     startup_control: object
-    step_control: object | None
     model: object
 
 
@@ -6096,7 +6113,6 @@ def serving_groups(
     *,
     control_timeout_s: float = _CONTROL_IDLE_TIMEOUT_S,
     model_timeout_s: float = _SERVE_OP_TIMEOUT_S,
-    step_tensor_transport: bool = False,
 ) -> ServingGroups:
     """Create idle-control/readiness/model groups in the same rank order.
 
@@ -6104,19 +6120,10 @@ def serving_groups(
     wait *inside* its receive. Readiness and model groups have no pending
     operation while idle, so both keep the short fail-fast bound.
     """
-    control = serving_group("gloo", timeout_s=control_timeout_s)
-    startup_control = serving_group("gloo", timeout_s=model_timeout_s)
-    step_control = (
-        serving_group(model_backend, timeout_s=control_timeout_s)
-        if step_tensor_transport and model_backend == "nccl"
-        else None
-    )
-    model = serving_group(model_backend, timeout_s=model_timeout_s)
     return ServingGroups(
-        control=control,
-        startup_control=startup_control,
-        step_control=step_control,
-        model=model,
+        control=serving_group("gloo", timeout_s=control_timeout_s),
+        startup_control=serving_group("gloo", timeout_s=model_timeout_s),
+        model=serving_group(model_backend, timeout_s=model_timeout_s),
     )
 
 
@@ -6561,15 +6568,10 @@ def _tp_worker_entry(
         runner.kv_cache_dtype_resolved,
         runner.dram_kv_tier_identity,
     )
-    groups = serving_groups(placement.backend, step_tensor_transport=True)
+    groups = serving_groups(placement.backend)
     comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
     control_comm = TorchDistCommunicator(group=groups.control)
     startup_control_comm = TorchDistCommunicator(group=groups.startup_control)
-    step_comm = (
-        TorchDistCommunicator(group=groups.step_control, device=placement.device)
-        if groups.step_control is not None
-        else None
-    )
     try:
         if graph_scratch_page is not None:
             _capture_decode_graphs_transaction(
@@ -6577,7 +6579,7 @@ def _tp_worker_entry(
                 runner,
                 attention_dp=False,
             )
-        worker_step_loop(control_comm, runner, comm, step_comm=step_comm)
+        worker_step_loop(control_comm, runner, comm)
     finally:
         import torch.distributed as dist
 
@@ -6593,8 +6595,6 @@ def _tp_worker_entry(
             torch.cuda.synchronize()
             comm.barrier()
         dist.destroy_process_group(comm.group)
-        if step_comm is not None:
-            dist.destroy_process_group(step_comm.group)
         dist.destroy_process_group(startup_control_comm.group)
         dist.destroy_process_group(control_comm.group)
         dist.destroy_process_group()
@@ -6918,29 +6918,16 @@ class DistTPLauncher:
                 src=0,
             )
             # Every failure-prone step is done: now the step loop gets its
-            # operational groups. Fixed-layout state deltas use the long-idle
-            # tensor-control group; rare Python controls stay on Gloo and model
-            # wrappers use only the bounded tensor/NCCL group.
-            groups = serving_groups(placement.backend, step_tensor_transport=True)
+            # operational groups. Fixed-layout state-delta headers and rare
+            # Python controls use the long-idle Gloo group; encoded payloads and
+            # model work use the bounded tensor/NCCL group.
+            groups = serving_groups(placement.backend)
             self._comm.bind(TorchDistCommunicator(group=groups.model, device=placement.device))
             self._control_comm = TorchDistCommunicator(group=groups.control)
             self._startup_control_comm = TorchDistCommunicator(
                 group=groups.startup_control
             )
-            self._step_comm = (
-                TorchDistCommunicator(
-                    group=groups.step_control,
-                    device=placement.device,
-                )
-                if groups.step_control is not None
-                else None
-            )
-            self.runner = DistTPModelRunner(
-                self._control_comm,
-                runner,
-                self._comm,
-                step_comm=self._step_comm,
-            )
+            self.runner = DistTPModelRunner(self._control_comm, runner, self._comm)
             if graph_scratch_page is not None:
                 _capture_decode_graphs_transaction(
                     self._startup_control_comm,
@@ -7009,11 +6996,11 @@ class DistTPLauncher:
     def _abort_communicator(self) -> None:
         """NCCL only: drop every live communicator without waiting for peers.
 
-        The operational model and step-control subgroups are distinct NCCL
-        communicators from the startup/default group. Aborting only the latter
-        leaves a worker stuck in either the next step receive or sampling-token
-        broadcast after rank 0 fails. Gloo needs no abort, and the hook is absent
-        on older torch — both are "nothing to abort" rather than an error.
+        The operational model subgroup is a distinct NCCL communicator from the
+        startup/default group. Aborting only the latter leaves a worker stuck in
+        the sampling-token broadcast when rank 0 fails after model execution.
+        Gloo needs no abort, and the hook is absent on older torch — both are
+        "nothing to abort" rather than an error.
         """
         import contextlib
 
@@ -7028,9 +7015,6 @@ class DistTPLauncher:
             with contextlib.suppress(Exception):
                 model_comm.abort_direct_nccl()
             groups.append(model_comm.group)
-        step_comm = getattr(self, "_step_comm", None)
-        if step_comm is not None:
-            groups.append(step_comm.group)
         groups.append(dist.distributed_c10d._get_default_group())
         seen: set[int] = set()
         device = torch.device("cuda", torch.cuda.current_device())
@@ -7094,8 +7078,6 @@ class DistTPLauncher:
             # order on every rank.  Reverse creation order keeps the graph-owning
             # NCCL subgroup ahead of the gloo control and startup groups.
             dist.destroy_process_group(self._comm.group)
-            if self._step_comm is not None:
-                dist.destroy_process_group(self._step_comm.group)
             dist.destroy_process_group(self._startup_control_comm.group)
             dist.destroy_process_group(self._control_comm.group)
             dist.destroy_process_group()

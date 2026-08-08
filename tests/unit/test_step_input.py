@@ -244,7 +244,7 @@ def test_step_delta_tensor_codec_round_trips_every_field():
         presence_penalty=0.25,
         frequency_penalty=-0.5,
         repetition_penalty=1.125,
-        seed=(1 << 63) - 1,
+        seed=(1 << 64) - 1,
         logprobs=4,
         json_schema={"type": "object", "required": ["資料"]},
         json_mode=True,

@@ -171,6 +171,9 @@ class StepDelta:
 _STEP_DELTA_TENSOR_MAGIC = 0x4B535444  # "KSTD"
 _STEP_DELTA_TENSOR_VERSION = 1
 _STEP_DELTA_STRING_BYTES_PER_WORD = 7
+_STEP_DELTA_INT64_MIN = -(1 << 63)
+_STEP_DELTA_INT64_MAX = (1 << 63) - 1
+_STEP_DELTA_UINT64_MODULUS = 1 << 64
 
 
 class _IntWriter:
@@ -180,6 +183,8 @@ class _IntWriter:
     def integer(self, value: int) -> None:
         if type(value) is not int:
             raise TypeError(f"step tensor integer must be int, got {type(value).__name__}")
+        if not _STEP_DELTA_INT64_MIN <= value <= _STEP_DELTA_INT64_MAX:
+            raise ValueError(f"step tensor integer is outside int64 range: {value}")
         self.values.append(value)
 
     def boolean(self, value: bool) -> None:
@@ -191,6 +196,18 @@ class _IntWriter:
         self.boolean(value is not None)
         if value is not None:
             self.integer(value)
+
+    def optional_seed(self, value: int | None) -> None:
+        self.boolean(value is not None)
+        if value is None:
+            return
+        if type(value) is not int or not (
+            _STEP_DELTA_INT64_MIN <= value < _STEP_DELTA_UINT64_MODULUS
+        ):
+            raise ValueError(f"step tensor seed is outside 64-bit range: {value}")
+        unsigned_high = value > _STEP_DELTA_INT64_MAX
+        self.boolean(unsigned_high)
+        self.integer(value - _STEP_DELTA_UINT64_MODULUS if unsigned_high else value)
 
     def floating(self, value: float) -> None:
         self.integer(struct.unpack("!q", struct.pack("!d", float(value)))[0])
@@ -263,6 +280,17 @@ class _IntReader:
     def optional_integer(self) -> int | None:
         return self.integer() if self.boolean() else None
 
+    def optional_seed(self) -> int | None:
+        if not self.boolean():
+            return None
+        unsigned_high = self.boolean()
+        value = self.integer()
+        if unsigned_high:
+            if value >= 0:
+                raise ValueError("invalid unsigned-high step tensor seed")
+            return value + _STEP_DELTA_UINT64_MODULUS
+        return value
+
     def floating(self) -> float:
         return struct.unpack("!d", struct.pack("!q", self.integer()))[0]
 
@@ -322,7 +350,7 @@ def _write_sampling(writer: _IntWriter, sampling: EngineSampling) -> None:
     writer.floating(sampling.presence_penalty)
     writer.floating(sampling.frequency_penalty)
     writer.floating(sampling.repetition_penalty)
-    writer.optional_integer(sampling.seed)
+    writer.optional_seed(sampling.seed)
     writer.optional_integer(sampling.logprobs)
     writer.optional_json_object(sampling.json_schema)
     writer.boolean(sampling.json_mode)
@@ -343,7 +371,7 @@ def _read_sampling(reader: _IntReader) -> EngineSampling:
         presence_penalty=reader.floating(),
         frequency_penalty=reader.floating(),
         repetition_penalty=reader.floating(),
-        seed=reader.optional_integer(),
+        seed=reader.optional_seed(),
         logprobs=reader.optional_integer(),
         json_schema=reader.optional_json_object(),
         json_mode=reader.boolean(),

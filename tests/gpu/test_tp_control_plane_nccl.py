@@ -50,7 +50,6 @@ def test_tp_step_delta_uses_nccl_tensor_control_group(tmp_path: Path) -> None:
         result = json.loads(result_file.read_text())
         assert result == {
             "control_backend": "gloo",
-            "step_backend": "nccl",
             "model_backend": "nccl",
             "steps": ROUNDS,
             "last_token": ROUNDS,
@@ -59,6 +58,7 @@ def test_tp_step_delta_uses_nccl_tensor_control_group(tmp_path: Path) -> None:
             "object_broadcasts": 2,
             "step_headers": ROUNDS,
             "object_headers": 2,
-            "step_tensor_broadcasts": 2 * ROUNDS + 2,
-            "model_tensor_broadcasts": ROUNDS,
+            "control_tensor_broadcasts": ROUNDS + 2,
+            "step_payloads": ROUNDS,
+            "model_tensor_broadcasts": 2 * ROUNDS,
         }

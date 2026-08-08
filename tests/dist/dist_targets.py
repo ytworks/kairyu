@@ -61,6 +61,9 @@ class _ControlTransportProbe:
         self._comm = comm
         self.step_delta_objects = 0
         self.object_broadcasts = 0
+        self.tensor_broadcasts = 0
+        self.step_headers = 0
+        self.object_headers = 0
 
     def __getattr__(self, name):
         return getattr(self._comm, name)
@@ -76,13 +79,22 @@ class _ControlTransportProbe:
             self.object_broadcasts += 1
         return delivered
 
+    def tensor_broadcast(self, tensor, src):
+        delivered = self._comm.tensor_broadcast(tensor, src)
+        self.tensor_broadcasts += 1
+        kind, _ = (int(value) for value in tensor.tolist())
+        if kind == 1:
+            self.step_headers += 1
+        elif kind == 0:
+            self.object_headers += 1
+        return delivered
+
 
 class _TensorTransportProbe:
     def __init__(self, comm) -> None:
         self._comm = comm
         self.broadcasts = 0
-        self.step_headers = 0
-        self.object_headers = 0
+        self.step_payloads = 0
 
     def __getattr__(self, name):
         return getattr(self._comm, name)
@@ -90,12 +102,8 @@ class _TensorTransportProbe:
     def tensor_broadcast(self, tensor, src):
         delivered = self._comm.tensor_broadcast(tensor, src)
         self.broadcasts += 1
-        if tensor.numel() == 2:
-            kind, _ = (int(value) for value in tensor.tolist())
-            if kind == 1:
-                self.step_headers += 1
-            elif kind == 0:
-                self.object_headers += 1
+        if tensor.numel() > 1:
+            self.step_payloads += 1
         return delivered
 
 
@@ -752,17 +760,9 @@ def tp_control_model_group_stress(
     init_distributed(rank, world_size, f"file://{init_file}", backend="nccl")
     groups = None
     try:
-        groups = serving_groups("nccl", step_tensor_transport=True)
-        if groups.step_control is None:
-            raise AssertionError("NCCL step-control group was not created")
+        groups = serving_groups("nccl")
         control = _ControlTransportProbe(
             TorchDistCommunicator(group=groups.control)
-        )
-        step = _TensorTransportProbe(
-            TorchDistCommunicator(
-                group=groups.step_control,
-                device=f"cuda:{rank}",
-            )
         )
         model = _TensorTransportProbe(
             TorchDistCommunicator(group=groups.model, device=f"cuda:{rank}")
@@ -787,7 +787,6 @@ def tp_control_model_group_stress(
                 control,
                 runner,
                 model,
-                step_comm=step,
             )
             distributed.set_batched_prefill_enabled(True)
             for _ in range(rounds):
@@ -799,23 +798,22 @@ def tp_control_model_group_stress(
                 control,
                 runner,
                 model,
-                step_comm=step,
             )
         model.barrier()
         Path(out_dir, f"rank{rank}.json").write_text(
             json.dumps(
                 {
                     "control_backend": dist.get_backend(groups.control),
-                    "step_backend": dist.get_backend(groups.step_control),
                     "model_backend": dist.get_backend(groups.model),
                     "steps": executed,
                     "last_token": runner.last_token,
                     "mode_changes": runner.mode_changes,
                     "gloo_step_delta_objects": control.step_delta_objects,
                     "object_broadcasts": control.object_broadcasts,
-                    "step_headers": step.step_headers,
-                    "object_headers": step.object_headers,
-                    "step_tensor_broadcasts": step.broadcasts,
+                    "step_headers": control.step_headers,
+                    "object_headers": control.object_headers,
+                    "control_tensor_broadcasts": control.tensor_broadcasts,
+                    "step_payloads": model.step_payloads,
                     "model_tensor_broadcasts": model.broadcasts,
                 }
             )
@@ -823,8 +821,6 @@ def tp_control_model_group_stress(
     finally:
         if groups is not None:
             dist.destroy_process_group(groups.model)
-            if groups.step_control is not None:
-                dist.destroy_process_group(groups.step_control)
             dist.destroy_process_group(groups.startup_control)
             dist.destroy_process_group(groups.control)
         dist.destroy_process_group()
