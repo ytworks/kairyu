@@ -39,7 +39,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 | M5 Intra-node multi-GPU | CPU half done; TP/DP/P-D plumbing live; GPU phase per runbook |
 | M6 Inter-node multi-GPU | CPU half done; production stage-sharded PP remains a roadmap item |
 | M7 Productionization | CPU half done: serve CLI, gateway, batch, compose smoke; `kairyu validate` preflight |
-| M8 Engine CPU core | Complete (amended 2026-08-04) |
+| M8 Engine CPU core | Complete (amended 2026-08-08) |
 | M9 Truthful API | Complete |
 | M10a/M10b Fleet base + KV routing | Complete |
 | M11 Product surface + tenancy | Complete |
