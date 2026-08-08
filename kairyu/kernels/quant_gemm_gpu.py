@@ -54,9 +54,15 @@ if triton is not None:
             scale = tl.load(input_scale_ptr + row).to(tl.float32)
         else:
             scale = tl.load(input_scale_ptr).to(tl.float32)
-        scaled = tl.maximum(tl.minimum(values / scale, QUANT_MAX), -QUANT_MAX)
         if ROUND_TO_INT:
+            # Triton's ordinary division may lower to an approximate reciprocal.
+            # At x/scale == n + 0.5 that can cross the tie and disagree with
+            # torch.round(), so use IEEE round-to-nearest division for INT8.
+            scaled = libdevice.div_rn(values, scale)
+            scaled = tl.maximum(tl.minimum(scaled, QUANT_MAX), -QUANT_MAX)
             scaled = libdevice.rint(scaled)
+        else:
+            scaled = tl.maximum(tl.minimum(values / scale, QUANT_MAX), -QUANT_MAX)
         tl.store(
             quant_ptr + row * stride_qm + offsets * stride_qk,
             scaled,

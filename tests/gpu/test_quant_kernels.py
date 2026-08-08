@@ -39,6 +39,20 @@ def _int8_module(in_features=64, out_features=32):
     return module
 
 
+@pytest.mark.parametrize("k_size", [1536, 8960])
+def test_int8_activation_quantization_matches_torch_rounding(cuda, k_size):
+    from kairyu.kernels.quant_gemm_gpu import _quantize_activation
+    from kairyu.quant.int8 import quantize_int8_activation
+
+    torch.manual_seed(356)
+    values = torch.randn(4, k_size, device=cuda, dtype=torch.bfloat16)
+    expected, expected_scale = quantize_int8_activation(values.float())
+    actual, actual_scale = _quantize_activation(values, torch.int8, 127.0)
+
+    torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def _awq_module(in_features=64, out_features=32):
     from kairyu.quant.awq import quantize_awq
     from kairyu.quant.linear import AwqLinear

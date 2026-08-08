@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] INT8 activation rounding matches its exact oracle
+- What: dynamic INT8 activation quantization now uses round-to-nearest division before tie-to-even integer rounding, with production-width GPU regression coverage.
+- Why: approximate Triton division crossed half-integer ties and the real-checkpoint gate exposed a model-output disagreement that small random tolerances missed.
+- Refs: issue #356; m14 real-checkpoint parity amendment; `kairyu/kernels/quant_gemm_gpu.py`; `tests/gpu/test_quant_kernels.py`
+
 ### 2026-08-08 — [amendment] Real checkpoints gate INT8 and W4 formats
 - What: one pinned BF16 Qwen2.5-1.5B reference now drives 64x16 teacher-forced top-64 parity arms for public compressed-tensors INT8, AWQ, and GPTQ checkpoints; raw replay binds exact ABIs, revisions, completeness, and the measured tie floor.
 - Why: tiny random weights and GEMM error metrics could not expose subtle real-checkpoint packing or zero-point convention errors at model output.
