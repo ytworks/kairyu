@@ -95,6 +95,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] FP8 audit separates arithmetic noise from error
+- What: calibrated dequant auditing permits a documented 2^-48 relative FP64 comparison slack while retaining exact stored-byte, finite, range, and physical E4M3 error checks.
+- Why: byte-perfect writes could exceed the theoretical error boundary by a few FP64 ulps, making the calibrated gate unsatisfiable independently of model quality.
+- Refs: issue #357; PR #449 Fable 5 review; `bench/fp8_kv_g4_ekv_bench.py`; `tests/bench/test_fp8_kv_g4_ekv_bench.py`
+
 ### 2026-08-08 — [progress] Calibrated FP8 KV re-bake retains FAIL
 - What: the clean Qwen3-32B SM120 re-bake passed cache cosine/NRMSE and selected-logprob bounds, but failed 16K/32K exact tokens and the disjoint calibration envelope; public FP8 KV remains rejected.
 - Refs: issue #357; `bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08/`; FlashInfer SM120 design

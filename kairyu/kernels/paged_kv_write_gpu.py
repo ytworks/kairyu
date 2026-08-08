@@ -306,6 +306,8 @@ def try_write_batched(
 
     if not _supported_payload(k_pool, v_pool, keys, values):
         return False
+    # Runtime calibrated scales stay on the torch oracle path: Triton's FP8
+    # cast is not byte-identical for non-unit scales on the reviewed SM120.
     if k_pool.dtype == torch.float8_e4m3fn and (
         k_scale != 1.0 or v_scale != 1.0
     ):
@@ -388,6 +390,7 @@ def try_write_ragged(
 
     if not _supported_payload(k_pool, v_pool, keys, values):
         return False
+    # Keep this fused FP8 writer unit-scale-only; see the batched guard above.
     if k_pool.dtype == torch.float8_e4m3fn and (
         k_scale != 1.0 or v_scale != 1.0
     ):

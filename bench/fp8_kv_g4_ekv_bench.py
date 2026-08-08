@@ -89,6 +89,7 @@ VOCAB_SIZE = 151_936
 ARMS = ("bf16", "fp8_e4m3")
 FP8_MAX = 448.0
 FP8_MIN_ABS_ERROR = 2.0**-10
+FP8_AUDIT_REL_SLACK = 2.0**-48
 LOGPROB_ABS_DELTA_MAX = 0.25
 CACHE_NRMSE_MAX = 0.05
 CACHE_COSINE_MIN = 0.99
@@ -910,7 +911,7 @@ def formal_config() -> dict[str, object]:
             ),
             "fp8_dequant_error": (
                 "abs(stored.float32*scale-input.float32) <= "
-                "max(abs(input.float32)/16, scale*2^-10)"
+                "max(abs(input.float32)/16, scale*2^-10) * (1 + 2^-48)"
             ),
             "cache_sample_nrmse_max": CACHE_NRMSE_MAX,
             "cache_sample_cosine_min": CACHE_COSINE_MIN,
@@ -1147,7 +1148,7 @@ class _FP8WriteAuditor:
             source_f64.abs() / 16.0,
             torch.full_like(source_f64, FP8_MIN_ABS_ERROR * scale),
         )
-        bound = torch.nextafter(bound, torch.full_like(bound, torch.inf))
+        bound = bound * (1.0 + FP8_AUDIT_REL_SLACK)
         stats = self._stats[(phase, kind)]
         stats["calls"] += 1
         stats["values"] += source.numel()

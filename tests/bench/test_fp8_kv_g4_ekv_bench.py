@@ -552,6 +552,33 @@ def test_satfinite_oracle_does_not_conflate_overrange_with_bytes() -> None:
     assert torch.isfinite(pool.k.to(torch.float32)).all()
 
 
+def test_dequant_audit_absorbs_only_fp64_boundary_noise() -> None:
+    scale = 0.0035156250000000005
+    pool = PagedKVPool(
+        num_layers=1,
+        num_pages=1,
+        page_size=1,
+        num_kv_heads=1,
+        head_dim=1,
+        dtype=torch.float8_e4m3fn,
+        k_scales=[scale],
+        v_scales=[scale],
+    )
+    auditor = gate._FP8WriteAuditor(pool, gate._load_calibration().sha256)
+    source = torch.tensor([5.14984130859375e-05], dtype=torch.bfloat16)
+    actual = (source.float() / scale).to(torch.float8_e4m3fn)
+
+    auditor._audit("ragged_prefill", 0, "k", source, actual)
+    row = next(
+        row
+        for row in auditor.rows()
+        if row["phase"] == "ragged_prefill" and row["kind"] == "k"
+    )
+    assert row["stored_byte_mismatch"] == 0
+    assert row["dequant_error_violation"] == 0
+    assert row["max_bound_excess"] == 0.0
+
+
 def test_calibration_observer_records_independent_layer_kv_amax() -> None:
     pool = PagedKVPool(
         num_layers=2,
