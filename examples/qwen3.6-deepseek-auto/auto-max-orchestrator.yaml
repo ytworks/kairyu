@@ -1,0 +1,28 @@
+# Quality-max tier: three independent Qwen3.6-27B proposals — one per DP
+# replica, each with a distinct perspective header and seed — then one
+# DeepSeek-V4-Flash synthesis pass over the numbered candidates.
+shared_prefix: |
+  Work carefully, checking calculations and edge cases.
+  Produce the requested artifact immediately. For programming tasks, put the
+  complete solution in a Python code block before any explanation.
+
+moa_samples: 3
+
+workers:
+  - name: tier1
+    backend: openai
+    base_url: http://vllm-qwen:8000/v1
+    model: qwen3.6-27b
+    api_key_env: null
+    options: {upstream: vllm}
+  - name: tier2
+    backend: openai
+    base_url: http://vllm-deepseek:8000/v1
+    model: deepseek-v4-flash-0731
+    api_key_env: null
+    options: {upstream: vllm}
+
+budget:
+  # Three proposals plus one synthesis call.
+  max_steps: 4
+  max_refine_depth: 0

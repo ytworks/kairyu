@@ -1,0 +1,24 @@
+# Kairyu gateway fronting one stock-vLLM DeepSeek-V4-Flash-0731 replica.
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  max_concurrency: 64
+
+pools:
+  deepseek-v4-flash-0731:
+    replicas:
+      - backend: openai
+        health_url: http://vllm:8000/health
+        options:
+          base_url: http://vllm:8000/v1
+          model: deepseek-v4-flash-0731
+          api_key_env: null
+          upstream: vllm
+    unhealthy_after: 1
+    queue_depth_threshold: 8
+    probe_interval_s: 2.0
+
+# The stock vLLM replica owns the checkpoint's chat template; Kairyu's
+# text-only compatibility path is opted in explicitly for this served model.
+legacy_chat_models: [deepseek-v4-flash-0731]
