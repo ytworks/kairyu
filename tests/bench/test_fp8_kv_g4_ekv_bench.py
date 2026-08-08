@@ -158,6 +158,7 @@ def _update_end_counts(rows: list[dict[str, object]]) -> None:
 def valid_rows() -> list[dict[str, object]]:
     source = _source()
     environment = _environment()
+    calibration = gate._load_calibration()
     rows: list[dict[str, object]] = [
         {
             "schema_version": gate.SCHEMA_VERSION,
@@ -205,8 +206,11 @@ def valid_rows() -> list[dict[str, object]]:
                         if arm == "bf16"
                         else "float8_e4m3fn"
                     ),
-                    "k_scale": None if arm == "bf16" else 1.0,
-                    "v_scale": None if arm == "bf16" else 1.0,
+                    "k_scale": None if arm == "bf16" else "per-layer",
+                    "v_scale": None if arm == "bf16" else "per-layer",
+                    "calibration_sha256": (
+                        None if arm == "bf16" else calibration.sha256
+                    ),
                     "output_token_ids": tokens,
                     "output_token_ids_sha256": gate.sha256_json(tokens),
                     "selected_logprobs": [-1.0] * gate.OUTPUT_TOKENS,
@@ -226,7 +230,8 @@ def valid_rows() -> list[dict[str, object]]:
                 "kind": kind,
                 "input_dtype": "bfloat16",
                 "storage_dtype": "float8_e4m3fn",
-                "scale": 1.0,
+                "scale_mode": "per-layer-kv",
+                "calibration_sha256": calibration.sha256,
                 "calls": expected["calls"],
                 "values": expected["values"],
                 "input_nonfinite": 0,
@@ -266,7 +271,11 @@ def valid_rows() -> list[dict[str, object]]:
                             ).decode(),
                             "bf16_sha256": gate.sha256_bytes(bf16_raw),
                             "fp8_dtype": "float8_e4m3fn",
-                            "fp8_scale": 1.0,
+                            "fp8_scale": (
+                                calibration.k_scales[layer]
+                                if kind == "k"
+                                else calibration.v_scales[layer]
+                            ),
                             "fp8_base64": base64.b64encode(fp8_raw).decode(),
                             "fp8_sha256": gate.sha256_bytes(fp8_raw),
                         }
@@ -513,7 +522,7 @@ def test_satfinite_oracle_does_not_conflate_overrange_with_bytes() -> None:
         head_dim=gate.HEAD_DIM,
         dtype=torch.float8_e4m3fn,
     )
-    auditor = gate._FP8WriteAuditor(pool)
+    auditor = gate._FP8WriteAuditor(pool, gate._load_calibration().sha256)
     auditor.install()
     source = torch.full(
         (1, gate.NUM_KV_HEADS, gate.HEAD_DIM),

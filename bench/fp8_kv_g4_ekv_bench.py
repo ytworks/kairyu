@@ -5,7 +5,7 @@ The formal run compares one loaded Qwen3-32B model with two fresh paged-cache
 arms on one RTX PRO 6000 Blackwell GPU:
 
 * BF16 KV, which remains the product default.
-* explicit E4M3 KV with a fixed unit K/V scale.
+* explicit E4M3 KV with checkpoint-bound per-layer K/V scales.
 
 Both arms execute the same exact 8K/16K/32K text prompts through B=1 native
 FlashInfer ragged prefill in 2,048-token chunks, followed by sixteen greedy
@@ -60,7 +60,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if __package__ in {None, ""}:
     sys.path.insert(0, str(_REPO_ROOT))
 
-SCHEMA_VERSION = "kairyu.g4.e-kv.fp8-kv.v1"
+SCHEMA_VERSION = "kairyu.g4.e-kv.fp8-kv.v2"
 GATE = "G4-E-KV"
 RAW_NAME = "fp8-kv-g4-ekv-raw.jsonl"
 MANIFEST_NAME = "fp8-kv-g4-ekv-manifest.json"
@@ -87,7 +87,6 @@ NUM_KV_HEADS = 8
 HEAD_DIM = 128
 VOCAB_SIZE = 151_936
 ARMS = ("bf16", "fp8_e4m3")
-FP8_SCALE = 1.0
 FP8_MAX = 448.0
 FP8_MIN_ABS_ERROR = 2.0**-10
 LOGPROB_ABS_DELTA_MAX = 0.25
@@ -99,9 +98,17 @@ _PROMPT_CONSTRUCTION = "stable-single-token-repeat-v1"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+CALIBRATION_PATH = _REPO_ROOT / "bench/calibration/qwen3-32b-fp8-kv.json"
+CALIBRATION_FILE_SHA256 = (
+    "9cbf0505163c9e80fead4385827629b5939428ddef169955bda89655e1d890d8"
+)
+CHECKPOINT_SNAPSHOT_SHA256 = (
+    "f4ce9c344ff38eb415e190ead9d4a60c649caca85b2d94f45d43b3b8029f644b"
+)
 
 BOUND_SOURCE_FILES = (
     "Dockerfile.cuda",
+    "bench/calibration/qwen3-32b-fp8-kv.json",
     "bench/fp8_kv_g4_ekv_bench.py",
     "kairyu/engine/config_validation.py",
     "kairyu/engine/core/attention/__init__.py",
@@ -817,7 +824,39 @@ def sample_positions(length: int) -> tuple[int, ...]:
     return candidates
 
 
+def _load_calibration() -> object:
+    from kairyu.engine.core.kv_scale_calibration import KvScaleCalibration
+
+    if sha256_file(CALIBRATION_PATH) != CALIBRATION_FILE_SHA256:
+        raise ValueError("FP8 KV calibration file digest does not match")
+    envelope = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+    calibration_payload = (
+        envelope.get("calibration") if isinstance(envelope, dict) else None
+    )
+    if (
+        not isinstance(envelope, dict)
+        or not isinstance(calibration_payload, dict)
+        or envelope.get("type") != "fp8_kv_calibration"
+        or envelope.get("model") != MODEL
+        or envelope.get("model_revision") != MODEL_REVISION
+        or envelope.get("calibration_data_sha256")
+        != calibration_payload.get("calibration_data_sha256")
+    ):
+        raise ValueError("FP8 KV calibration envelope identity is invalid")
+    calibration = KvScaleCalibration.from_artifact(
+        calibration_payload,
+        expected_layers=NUM_LAYERS,
+        expected_checkpoint_sha256=CHECKPOINT_SNAPSHOT_SHA256,
+    )
+    if envelope.get("calibration_sha256") != calibration.sha256:
+        raise ValueError("FP8 KV calibration digest does not match its payload")
+    if sha256_json(envelope.get("checkpoint")) != calibration.checkpoint_sha256:
+        raise ValueError("FP8 KV calibration checkpoint envelope does not match")
+    return calibration
+
+
 def formal_config() -> dict[str, object]:
+    calibration = _load_calibration()
     return {
         "gate": GATE,
         "model": MODEL,
@@ -836,8 +875,11 @@ def formal_config() -> dict[str, object]:
             },
             "fp8_e4m3": {
                 "kv_dtype": "float8_e4m3fn",
-                "k_scale": FP8_SCALE,
-                "v_scale": FP8_SCALE,
+                "k_scale": "per-layer",
+                "v_scale": "per-layer",
+                "calibration_sha256": calibration.sha256,
+                "calibration_file_sha256": CALIBRATION_FILE_SHA256,
+                "headroom": calibration.headroom,
                 "default": False,
             },
         },
@@ -862,10 +904,13 @@ def formal_config() -> dict[str, object]:
             "finish_reason": "exact-length",
             "selected_logprob_max_abs_delta": LOGPROB_ABS_DELTA_MAX,
             "fp8_max_finite": FP8_MAX,
-            "fp8_quantization": "SATFINITE clamp[-448,448] then E4M3",
+            "fp8_quantization": (
+                "SATFINITE clamp((input / per-layer-KV-scale), -448, 448) "
+                "then E4M3"
+            ),
             "fp8_dequant_error": (
-                "abs(stored.float32-input.float32) <= "
-                "max(abs(input.float32)/16, 2^-10)"
+                "abs(stored.float32*scale-input.float32) <= "
+                "max(abs(input.float32)/16, scale*2^-10)"
             ),
             "cache_sample_nrmse_max": CACHE_NRMSE_MAX,
             "cache_sample_cosine_min": CACHE_COSINE_MIN,
@@ -1015,10 +1060,11 @@ def _cache_sample_payload(
 class _FP8WriteAuditor:
     """Test-only observer around the production FP8 ragged/decode writes."""
 
-    def __init__(self, pool: object) -> None:
+    def __init__(self, pool: object, calibration_sha256: str) -> None:
         import torch
 
         self.pool = pool
+        self.calibration_sha256 = calibration_sha256
         self.torch = torch
         self._original_write = pool.write
         self._original_ragged = pool.write_ragged
@@ -1073,24 +1119,31 @@ class _FP8WriteAuditor:
     def _audit(
         self,
         phase: str,
+        layer: int,
         kind: str,
         source: object,
         actual: object,
     ) -> None:
         torch = self.torch
         source_f32 = source.to(torch.float32)
+        scale = (
+            self.pool.k_scale(layer)
+            if kind == "k"
+            else self.pool.v_scale(layer)
+        )
         finite_source = torch.isfinite(source_f32)
         source_for_math = torch.where(
             finite_source, source_f32, torch.zeros_like(source_f32)
         )
-        expected = source_f32.clamp(-FP8_MAX, FP8_MAX).to(
+        scaled_source = source_f32 / scale
+        expected = scaled_source.clamp(-FP8_MAX, FP8_MAX).to(
             torch.float8_e4m3fn
         )
-        actual_f32 = actual.to(torch.float32)
+        actual_f32 = actual.to(torch.float32) * scale
         error = (actual_f32 - source_for_math).abs()
         bound = torch.maximum(
             source_for_math.abs() / 16.0,
-            torch.full_like(source_for_math, FP8_MIN_ABS_ERROR),
+            torch.full_like(source_for_math, FP8_MIN_ABS_ERROR * scale),
         )
         stats = self._stats[(phase, kind)]
         stats["calls"] += 1
@@ -1101,7 +1154,7 @@ class _FP8WriteAuditor:
             torch.count_nonzero(~finite_source)
         )
         stats["overrange"].add_(
-            torch.count_nonzero(source_for_math.abs() > FP8_MAX)
+            torch.count_nonzero(scaled_source.abs() > FP8_MAX)
         )
         stats["stored_nonfinite"].add_(
             torch.count_nonzero(~torch.isfinite(actual_f32))
@@ -1163,8 +1216,8 @@ class _FP8WriteAuditor:
         actual_v = self.pool.v[layer].reshape(
             -1, self.pool.num_kv_heads, self.pool.v_head_dim
         )[flat]
-        self._audit("ragged_prefill", "k", keys[writable], actual_k)
-        self._audit("ragged_prefill", "v", values[writable], actual_v)
+        self._audit("ragged_prefill", layer, "k", keys[writable], actual_k)
+        self._audit("ragged_prefill", layer, "v", values[writable], actual_v)
 
     def write_batched(
         self,
@@ -1203,8 +1256,8 @@ class _FP8WriteAuditor:
         actual_v = self.pool.v[layer].reshape(
             -1, self.pool.num_kv_heads, self.pool.v_head_dim
         )[flat]
-        self._audit("tensor_decode", "k", keys[writable], actual_k)
-        self._audit("tensor_decode", "v", values[writable], actual_v)
+        self._audit("tensor_decode", layer, "k", keys[writable], actual_k)
+        self._audit("tensor_decode", layer, "v", values[writable], actual_v)
 
     def rows(self) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
@@ -1218,7 +1271,8 @@ class _FP8WriteAuditor:
                     "kind": kind,
                     "input_dtype": "bfloat16",
                     "storage_dtype": "float8_e4m3fn",
-                    "scale": FP8_SCALE,
+                    "scale_mode": "per-layer-kv",
+                    "calibration_sha256": self.calibration_sha256,
                     "calls": stats["calls"],
                     "values": stats["values"],
                     "input_nonfinite": int(stats["nonfinite"].item()),
@@ -1340,7 +1394,13 @@ class _KvAmaxObserver:
         )
 
 
-def _new_pool(config: object, *, dtype: object, device: object) -> object:
+def _new_pool(
+    config: object,
+    *,
+    dtype: object,
+    device: object,
+    calibration: object | None = None,
+) -> object:
     from kairyu.engine.core.kv_pool import PagedKVPool
 
     num_pages = math.ceil(
@@ -1355,6 +1415,8 @@ def _new_pool(config: object, *, dtype: object, device: object) -> object:
         dtype=dtype,
         device=str(device),
         v_head_dim=config.kv_cache_v_head_dim,
+        k_scales=None if calibration is None else calibration.k_scales,
+        v_scales=None if calibration is None else calibration.v_scales,
     )
 
 
@@ -1473,6 +1535,7 @@ def _run_arm(
     *,
     arm: str,
     device: object,
+    calibration: object,
 ) -> tuple[
     list[dict[str, object]],
     dict[tuple[str, int, int, str], bytes],
@@ -1486,16 +1549,31 @@ def _run_arm(
         dtype = torch.float8_e4m3fn
     else:
         raise ValueError(f"unknown arm {arm!r}")
-    pool = _new_pool(config, dtype=dtype, device=device)
-    auditor = _FP8WriteAuditor(pool) if arm == "fp8_e4m3" else None
+    pool = _new_pool(
+        config,
+        dtype=dtype,
+        device=device,
+        calibration=calibration if arm == "fp8_e4m3" else None,
+    )
+    auditor = (
+        _FP8WriteAuditor(pool, calibration.sha256)
+        if arm == "fp8_e4m3"
+        else None
+    )
     if auditor is not None:
         if (
             pool.k.dtype is not torch.float8_e4m3fn
             or pool.v.dtype is not torch.float8_e4m3fn
-            or any(pool.k_scale(layer) != FP8_SCALE for layer in SAMPLE_LAYERS)
-            or any(pool.v_scale(layer) != FP8_SCALE for layer in SAMPLE_LAYERS)
+            or any(
+                pool.k_scale(layer) != calibration.k_scales[layer]
+                for layer in SAMPLE_LAYERS
+            )
+            or any(
+                pool.v_scale(layer) != calibration.v_scales[layer]
+                for layer in SAMPLE_LAYERS
+            )
         ):
-            raise RuntimeError("FP8 pool does not expose the unit-scale contract")
+            raise RuntimeError("FP8 pool does not expose calibrated layer scales")
         auditor.install()
 
     output_rows: list[dict[str, object]] = []
@@ -1520,8 +1598,11 @@ def _run_arm(
                         if arm == "bf16"
                         else "float8_e4m3fn"
                     ),
-                    "k_scale": None if arm == "bf16" else FP8_SCALE,
-                    "v_scale": None if arm == "bf16" else FP8_SCALE,
+                    "k_scale": None if arm == "bf16" else "per-layer",
+                    "v_scale": None if arm == "bf16" else "per-layer",
+                    "calibration_sha256": (
+                        None if arm == "bf16" else calibration.sha256
+                    ),
                     "output_token_ids": result["output_token_ids"],
                     "output_token_ids_sha256": sha256_json(
                         result["output_token_ids"]
@@ -1554,6 +1635,7 @@ def _cache_rows(
     prompts: Sequence[Mapping[str, object]],
     bf16: Mapping[tuple[str, int, int, str], bytes],
     fp8: Mapping[tuple[str, int, int, str], bytes],
+    calibration: object,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for prompt in prompts:
@@ -1581,7 +1663,11 @@ def _cache_rows(
                             ).decode("ascii"),
                             "bf16_sha256": sha256_bytes(bf16_raw),
                             "fp8_dtype": "float8_e4m3fn",
-                            "fp8_scale": FP8_SCALE,
+                            "fp8_scale": (
+                                calibration.k_scales[layer]
+                                if kind == "k"
+                                else calibration.v_scales[layer]
+                            ),
                             "fp8_base64": base64.b64encode(
                                 fp8_raw
                             ).decode("ascii"),
@@ -1718,6 +1804,7 @@ def measure(
     source_start: dict[str, object] = {}
     environment_start: dict[str, object] = {}
     checkpoint: dict[str, object] = {}
+    calibration = _load_calibration()
     model = None
     try:
         if _IMAGE_ID.fullmatch(image_id) is None:
@@ -1738,6 +1825,8 @@ def measure(
             raise RuntimeError(
                 "--model-path is not the exact reviewed Qwen3-32B checkpoint"
             )
+        if sha256_json(checkpoint) != calibration.checkpoint_sha256:
+            raise RuntimeError("FP8 KV calibration does not match the checkpoint")
         backend = select_backend(probe(), device="cuda:0")
         environment_start = _environment_snapshot(
             backend_decision=backend.selection_decision
@@ -1790,6 +1879,7 @@ def measure(
             prompts,
             arm="bf16",
             device=device,
+            calibration=calibration,
         )
         rows.extend(bf16_outputs)
         fp8_outputs, fp8_samples, audits = _run_arm(
@@ -1799,10 +1889,13 @@ def measure(
             prompts,
             arm="fp8_e4m3",
             device=device,
+            calibration=calibration,
         )
         rows.extend(fp8_outputs)
         rows.extend(audits)
-        rows.extend(_cache_rows(prompts, bf16_samples, fp8_samples))
+        rows.extend(
+            _cache_rows(prompts, bf16_samples, fp8_samples, calibration)
+        )
     except BaseException as error:
         if not rows or rows[0].get("type") != "run":
             rows.insert(
@@ -1885,6 +1978,7 @@ def _decode_sample(
         torch.frombuffer(bytearray(fp8_raw), dtype=torch.uint8)
         .view(torch.float8_e4m3fn)
         .to(torch.float64)
+        * float(row["fp8_scale"])
     )
     return bf16, fp8
 
@@ -1987,6 +2081,7 @@ def _output_valid(row: object) -> bool:
         "kv_dtype",
         "k_scale",
         "v_scale",
+        "calibration_sha256",
         "output_token_ids",
         "output_token_ids_sha256",
         "selected_logprobs",
@@ -1999,7 +2094,8 @@ def _output_valid(row: object) -> bool:
     expected_dtype = (
         "bfloat16" if arm == "bf16" else "float8_e4m3fn"
     )
-    expected_scale = None if arm == "bf16" else FP8_SCALE
+    expected_scale = None if arm == "bf16" else "per-layer"
+    expected_calibration = None if arm == "bf16" else _load_calibration().sha256
     tokens = row["output_token_ids"]
     logprobs = row["selected_logprobs"]
     output_text = row["output_text"]
@@ -2013,13 +2109,7 @@ def _output_valid(row: object) -> bool:
         and row["kv_dtype"] == expected_dtype
         and row["k_scale"] == expected_scale
         and row["v_scale"] == expected_scale
-        and (
-            arm == "bf16"
-            or (
-                type(row["k_scale"]) is float
-                and type(row["v_scale"]) is float
-            )
-        )
+        and row["calibration_sha256"] == expected_calibration
         and isinstance(tokens, list)
         and len(tokens) == OUTPUT_TOKENS
         and all(type(token) is int and 0 <= token < VOCAB_SIZE for token in tokens)
@@ -2041,7 +2131,8 @@ def _audit_valid(row: object) -> bool:
         "kind",
         "input_dtype",
         "storage_dtype",
-        "scale",
+        "scale_mode",
+        "calibration_sha256",
         "calls",
         "values",
         "input_nonfinite",
@@ -2078,8 +2169,8 @@ def _audit_valid(row: object) -> bool:
         and expected is not None
         and row["input_dtype"] == "bfloat16"
         and row["storage_dtype"] == "float8_e4m3fn"
-        and type(row["scale"]) is float
-        and row["scale"] == FP8_SCALE
+        and row["scale_mode"] == "per-layer-kv"
+        and row["calibration_sha256"] == _load_calibration().sha256
         and all(type(value) is int and value >= 0 for value in integers)
         and row["calls"] == expected["calls"]
         and row["values"] == expected["values"]
@@ -2131,7 +2222,12 @@ def _cache_row_valid(row: object) -> bool:
         or row["bf16_dtype"] != "bfloat16"
         or row["fp8_dtype"] != "float8_e4m3fn"
         or type(row["fp8_scale"]) is not float
-        or row["fp8_scale"] != FP8_SCALE
+        or row["fp8_scale"]
+        != (
+            _load_calibration().k_scales[row["layer"]]
+            if row["kind"] == "k"
+            else _load_calibration().v_scales[row["layer"]]
+        )
         or not isinstance(row["bf16_base64"], str)
         or not isinstance(row["fp8_base64"], str)
         or not isinstance(row["bf16_sha256"], str)
