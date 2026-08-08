@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-08 — [amendment] Generic EP combine crosses one rounding boundary
+- What: generic all-to-all MoE keeps rank-owned weighted partials FP32 through the all-reduce and casts once afterward; EP2/4/8 ownership partitions are regression-pinned.
+- Why: casting every rank partial to BF16 before reduction made identical prompts depend on the configured EP degree.
+- Refs: issue #359; M16 D3; `kairyu/models/moe_parallel.py`; `tests/unit/test_moe_precision.py`
+
+### 2026-08-08 — [amendment] INT8 bias addition preserves oracle rounding
+- What: the fused INT8 kernel now uses explicit round-to-nearest bias addition after the rounded scale product, with a compact FMA-sensitive seed and production-width GPU coverage.
+- Why: compiler FMA fusion skipped the CPU oracle's intermediate FP32 rounding and caused one real-checkpoint token disagreement despite exact q/scale and int32 accumulation.
+- Refs: issue #356; PR #447 Fable 5 review; `kairyu/kernels/quant_gemm_gpu.py`; `tests/gpu/test_quant_kernels.py`
+
+### 2026-08-08 — [amendment] INT8 scale division is exact and zero-row aligned
+- What: dynamic INT8 scale calculation now clamps amax before correctly rounded division, matching the CPU oracle for ordinary and all-zero rows.
+- Why: exact activation rounding also requires an exact scale; an approximate reciprocal one operation earlier could move the same half-integer ties.
+- Refs: issue #356; PR #447 Fable 5 review; `kairyu/kernels/quant_gemm_gpu.py`; `tests/gpu/test_quant_kernels.py`
+
+### 2026-08-08 — [amendment] INT8 activation rounding matches its exact oracle
+- What: dynamic INT8 activation quantization now uses round-to-nearest division before tie-to-even integer rounding, with production-width GPU regression coverage.
+- Why: approximate Triton division crossed half-integer ties and the real-checkpoint gate exposed a model-output disagreement that small random tolerances missed.
+- Refs: issue #356; m14 real-checkpoint parity amendment; `kairyu/kernels/quant_gemm_gpu.py`; `tests/gpu/test_quant_kernels.py`
+
+### 2026-08-08 — [amendment] Real checkpoints gate INT8 and W4 formats
+- What: one pinned BF16 Qwen2.5-1.5B reference now drives 64x16 teacher-forced top-64 parity arms for public compressed-tensors INT8, AWQ, and GPTQ checkpoints; raw replay binds exact ABIs, revisions, completeness, and the measured tie floor.
+- Why: tiny random weights and GEMM error metrics could not expose subtle real-checkpoint packing or zero-point convention errors at model output.
+- Refs: issue #356; m14 real-checkpoint parity amendment; `bench/{parity_hf,quant_checkpoint_parity_bench}.py`
+
 ### 2026-08-08 — [amendment] NVFP4 exposes measured projection accuracy levers
 - What: opt-in projection selectors can observe group-16 activation saturation, use per-token NVFP4 scaling, or convert checkpoint NVFP4 weights once to FP8 runtime storage after TP/EP slicing; a strict M-A1 companion records accuracy, resident memory, and saturation curves.
 - Why: the retained 235B NVFP4 gate failure had no clipping visibility or bounded way to trade memory and activation precision while preserving the default fused path.

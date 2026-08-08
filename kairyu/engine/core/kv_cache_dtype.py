@@ -2,9 +2,9 @@
 
 The public option is intentionally smaller than ``torch.dtype``.  In
 particular, FP8 is an execution contract rather than an allocation shortcut.
-The 2026-07-31 G4 E-KV bake rejected the unit-scale candidate, so the public
-request remains disabled while the internal candidate stays available for
-calibration work and offline evidence replay.
+The 2026-08-08 calibrated G4 E-KV re-bake still failed exact long-context
+outputs and its decode calibration envelope, so the public request remains
+disabled while the internal candidate stays available for offline evidence.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ SUPPORTED_KV_CACHE_DTYPES = ("auto", "bfloat16")
 FP8_KV_CACHE_DTYPE = "fp8_e4m3"
 FP8_KV_DISABLED_REASON = (
     "kv_cache_dtype='fp8_e4m3' is disabled because the G4 E-KV "
-    "Qwen3-32B SM120 bake failed its output/logprob/cache-quality gates; "
-    "calibrated per-layer K/V scales require a new bake before serving"
+    "Qwen3-32B SM120 calibrated re-bake failed exact 16K/32K output and "
+    "decode-envelope gates; a passing bake is required before serving"
 )
 
 

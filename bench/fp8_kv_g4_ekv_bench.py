@@ -5,7 +5,7 @@ The formal run compares one loaded Qwen3-32B model with two fresh paged-cache
 arms on one RTX PRO 6000 Blackwell GPU:
 
 * BF16 KV, which remains the product default.
-* explicit E4M3 KV with a fixed unit K/V scale.
+* explicit E4M3 KV with checkpoint-bound per-layer K/V scales.
 
 Both arms execute the same exact 8K/16K/32K text prompts through B=1 native
 FlashInfer ragged prefill in 2,048-token chunks, followed by sixteen greedy
@@ -60,7 +60,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if __package__ in {None, ""}:
     sys.path.insert(0, str(_REPO_ROOT))
 
-SCHEMA_VERSION = "kairyu.g4.e-kv.fp8-kv.v1"
+SCHEMA_VERSION = "kairyu.g4.e-kv.fp8-kv.v2"
 GATE = "G4-E-KV"
 RAW_NAME = "fp8-kv-g4-ekv-raw.jsonl"
 MANIFEST_NAME = "fp8-kv-g4-ekv-manifest.json"
@@ -87,9 +87,9 @@ NUM_KV_HEADS = 8
 HEAD_DIM = 128
 VOCAB_SIZE = 151_936
 ARMS = ("bf16", "fp8_e4m3")
-FP8_SCALE = 1.0
 FP8_MAX = 448.0
 FP8_MIN_ABS_ERROR = 2.0**-10
+FP8_AUDIT_REL_SLACK = 2.0**-48
 LOGPROB_ABS_DELTA_MAX = 0.25
 CACHE_NRMSE_MAX = 0.05
 CACHE_COSINE_MIN = 0.99
@@ -99,9 +99,17 @@ _PROMPT_CONSTRUCTION = "stable-single-token-repeat-v1"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+CALIBRATION_PATH = _REPO_ROOT / "bench/calibration/qwen3-32b-fp8-kv.json"
+CALIBRATION_FILE_SHA256 = (
+    "9cbf0505163c9e80fead4385827629b5939428ddef169955bda89655e1d890d8"
+)
+CHECKPOINT_SNAPSHOT_SHA256 = (
+    "f4ce9c344ff38eb415e190ead9d4a60c649caca85b2d94f45d43b3b8029f644b"
+)
 
 BOUND_SOURCE_FILES = (
     "Dockerfile.cuda",
+    "bench/calibration/qwen3-32b-fp8-kv.json",
     "bench/fp8_kv_g4_ekv_bench.py",
     "kairyu/engine/config_validation.py",
     "kairyu/engine/core/attention/__init__.py",
@@ -111,6 +119,7 @@ BOUND_SOURCE_FILES = (
     "kairyu/engine/core/engine_service.py",
     "kairyu/engine/core/kv_cache_dtype.py",
     "kairyu/engine/core/kv_pool.py",
+    "kairyu/engine/core/kv_scale_calibration.py",
     "kairyu/engine/core/prefill.py",
     "kairyu/engine/core/worker.py",
     "kairyu/engine/kairyu_backend.py",
@@ -816,7 +825,39 @@ def sample_positions(length: int) -> tuple[int, ...]:
     return candidates
 
 
+def _load_calibration() -> object:
+    from kairyu.engine.core.kv_scale_calibration import KvScaleCalibration
+
+    if sha256_file(CALIBRATION_PATH) != CALIBRATION_FILE_SHA256:
+        raise ValueError("FP8 KV calibration file digest does not match")
+    envelope = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+    calibration_payload = (
+        envelope.get("calibration") if isinstance(envelope, dict) else None
+    )
+    if (
+        not isinstance(envelope, dict)
+        or not isinstance(calibration_payload, dict)
+        or envelope.get("type") != "fp8_kv_calibration"
+        or envelope.get("model") != MODEL
+        or envelope.get("model_revision") != MODEL_REVISION
+        or envelope.get("calibration_data_sha256")
+        != calibration_payload.get("calibration_data_sha256")
+    ):
+        raise ValueError("FP8 KV calibration envelope identity is invalid")
+    calibration = KvScaleCalibration.from_artifact(
+        calibration_payload,
+        expected_layers=NUM_LAYERS,
+        expected_checkpoint_sha256=CHECKPOINT_SNAPSHOT_SHA256,
+    )
+    if envelope.get("calibration_sha256") != calibration.sha256:
+        raise ValueError("FP8 KV calibration digest does not match its payload")
+    if sha256_json(envelope.get("checkpoint")) != calibration.checkpoint_sha256:
+        raise ValueError("FP8 KV calibration checkpoint envelope does not match")
+    return calibration
+
+
 def formal_config() -> dict[str, object]:
+    calibration = _load_calibration()
     return {
         "gate": GATE,
         "model": MODEL,
@@ -835,8 +876,11 @@ def formal_config() -> dict[str, object]:
             },
             "fp8_e4m3": {
                 "kv_dtype": "float8_e4m3fn",
-                "k_scale": FP8_SCALE,
-                "v_scale": FP8_SCALE,
+                "k_scale": "per-layer",
+                "v_scale": "per-layer",
+                "calibration_sha256": calibration.sha256,
+                "calibration_file_sha256": CALIBRATION_FILE_SHA256,
+                "headroom": calibration.headroom,
                 "default": False,
             },
         },
@@ -861,10 +905,13 @@ def formal_config() -> dict[str, object]:
             "finish_reason": "exact-length",
             "selected_logprob_max_abs_delta": LOGPROB_ABS_DELTA_MAX,
             "fp8_max_finite": FP8_MAX,
-            "fp8_quantization": "SATFINITE clamp[-448,448] then E4M3",
+            "fp8_quantization": (
+                "SATFINITE clamp((input / per-layer-KV-scale), -448, 448) "
+                "then E4M3"
+            ),
             "fp8_dequant_error": (
-                "abs(stored.float32-input.float32) <= "
-                "max(abs(input.float32)/16, 2^-10)"
+                "abs(stored.float32*scale-input.float32) <= "
+                "max(abs(input.float32)/16, scale*2^-10) * (1 + 2^-48)"
             ),
             "cache_sample_nrmse_max": CACHE_NRMSE_MAX,
             "cache_sample_cosine_min": CACHE_COSINE_MIN,
@@ -959,6 +1006,26 @@ def _prompt_rows(tokenizer: object) -> list[dict[str, object]]:
     return rows
 
 
+def _calibration_prompt_rows(tokenizer: object) -> list[dict[str, object]]:
+    pieces = _stable_token_pieces(tokenizer, required=2 * len(PROMPT_LENGTHS))[
+        len(PROMPT_LENGTHS) :
+    ]
+    rows: list[dict[str, object]] = []
+    for length, (token_id, piece) in zip(PROMPT_LENGTHS, pieces, strict=True):
+        token_ids = (token_id,) * length
+        rows.append(
+            {
+                "prompt_id": f"calibration-long-{length}",
+                "length": length,
+                "piece_token_id": token_id,
+                "piece_text": piece,
+                "token_ids": list(token_ids),
+                "token_ids_sha256": sha256_json(list(token_ids)),
+            }
+        )
+    return rows
+
+
 def _tensor_bytes(tensor: object) -> bytes:
     import torch
 
@@ -994,10 +1061,11 @@ def _cache_sample_payload(
 class _FP8WriteAuditor:
     """Test-only observer around the production FP8 ragged/decode writes."""
 
-    def __init__(self, pool: object) -> None:
+    def __init__(self, pool: object, calibration_sha256: str) -> None:
         import torch
 
         self.pool = pool
+        self.calibration_sha256 = calibration_sha256
         self.torch = torch
         self._original_write = pool.write
         self._original_ragged = pool.write_ragged
@@ -1052,25 +1120,35 @@ class _FP8WriteAuditor:
     def _audit(
         self,
         phase: str,
+        layer: int,
         kind: str,
         source: object,
         actual: object,
     ) -> None:
         torch = self.torch
         source_f32 = source.to(torch.float32)
+        scale = (
+            self.pool.k_scale(layer)
+            if kind == "k"
+            else self.pool.v_scale(layer)
+        )
         finite_source = torch.isfinite(source_f32)
         source_for_math = torch.where(
             finite_source, source_f32, torch.zeros_like(source_f32)
         )
-        expected = source_f32.clamp(-FP8_MAX, FP8_MAX).to(
+        scaled_source = source_f32 / scale
+        expected = scaled_source.clamp(-FP8_MAX, FP8_MAX).to(
             torch.float8_e4m3fn
         )
         actual_f32 = actual.to(torch.float32)
-        error = (actual_f32 - source_for_math).abs()
+        actual_f64 = actual_f32.to(torch.float64) * scale
+        source_f64 = source_for_math.to(torch.float64)
+        error = (actual_f64 - source_f64).abs()
         bound = torch.maximum(
-            source_for_math.abs() / 16.0,
-            torch.full_like(source_for_math, FP8_MIN_ABS_ERROR),
+            source_f64.abs() / 16.0,
+            torch.full_like(source_f64, FP8_MIN_ABS_ERROR * scale),
         )
+        bound = bound * (1.0 + FP8_AUDIT_REL_SLACK)
         stats = self._stats[(phase, kind)]
         stats["calls"] += 1
         stats["values"] += source.numel()
@@ -1080,7 +1158,7 @@ class _FP8WriteAuditor:
             torch.count_nonzero(~finite_source)
         )
         stats["overrange"].add_(
-            torch.count_nonzero(source_for_math.abs() > FP8_MAX)
+            torch.count_nonzero(scaled_source.abs() > FP8_MAX)
         )
         stats["stored_nonfinite"].add_(
             torch.count_nonzero(~torch.isfinite(actual_f32))
@@ -1142,8 +1220,8 @@ class _FP8WriteAuditor:
         actual_v = self.pool.v[layer].reshape(
             -1, self.pool.num_kv_heads, self.pool.v_head_dim
         )[flat]
-        self._audit("ragged_prefill", "k", keys[writable], actual_k)
-        self._audit("ragged_prefill", "v", values[writable], actual_v)
+        self._audit("ragged_prefill", layer, "k", keys[writable], actual_k)
+        self._audit("ragged_prefill", layer, "v", values[writable], actual_v)
 
     def write_batched(
         self,
@@ -1182,8 +1260,8 @@ class _FP8WriteAuditor:
         actual_v = self.pool.v[layer].reshape(
             -1, self.pool.num_kv_heads, self.pool.v_head_dim
         )[flat]
-        self._audit("tensor_decode", "k", keys[writable], actual_k)
-        self._audit("tensor_decode", "v", values[writable], actual_v)
+        self._audit("tensor_decode", layer, "k", keys[writable], actual_k)
+        self._audit("tensor_decode", layer, "v", values[writable], actual_v)
 
     def rows(self) -> list[dict[str, object]]:
         rows: list[dict[str, object]] = []
@@ -1197,7 +1275,8 @@ class _FP8WriteAuditor:
                     "kind": kind,
                     "input_dtype": "bfloat16",
                     "storage_dtype": "float8_e4m3fn",
-                    "scale": FP8_SCALE,
+                    "scale_mode": "per-layer-kv",
+                    "calibration_sha256": self.calibration_sha256,
                     "calls": stats["calls"],
                     "values": stats["values"],
                     "input_nonfinite": int(stats["nonfinite"].item()),
@@ -1228,7 +1307,104 @@ class _FP8WriteAuditor:
         return rows
 
 
-def _new_pool(config: object, *, dtype: object, device: object) -> object:
+class _KvAmaxObserver:
+    """Calibration-only observer for production ragged/decode K/V payloads."""
+
+    def __init__(self, pool: object) -> None:
+        import torch
+
+        self.pool = pool
+        self.torch = torch
+        self._original_ragged = pool.write_ragged
+        self._original_batched = pool.write_batched
+        self.k_amax = torch.zeros(
+            pool.num_layers, dtype=torch.float32, device=pool.k.device
+        )
+        self.v_amax = torch.zeros_like(self.k_amax)
+
+    def install(self) -> None:
+        self.pool.write_ragged = self.write_ragged
+        self.pool.write_batched = self.write_batched
+
+    def restore(self) -> None:
+        self.pool.write_ragged = self._original_ragged
+        self.pool.write_batched = self._original_batched
+
+    def _observe(
+        self,
+        layer: int,
+        keys: object,
+        values: object,
+        writable: object,
+    ) -> None:
+        if bool(self.torch.any(writable)):
+            self.k_amax[layer] = self.torch.maximum(
+                self.k_amax[layer], keys[writable].float().abs().max()
+            )
+            self.v_amax[layer] = self.torch.maximum(
+                self.v_amax[layer], values[writable].float().abs().max()
+            )
+
+    def write_ragged(
+        self,
+        layer: int,
+        page_tables: object,
+        row_ids: object,
+        positions: object,
+        keys: object,
+        values: object,
+        write_from: object,
+    ) -> None:
+        owners = row_ids.long()
+        self._observe(layer, keys, values, positions >= write_from[owners])
+        self._original_ragged(
+            layer,
+            page_tables,
+            row_ids,
+            positions,
+            keys,
+            values,
+            write_from,
+        )
+
+    def write_batched(
+        self,
+        layer: int,
+        page_tables: object,
+        positions: object,
+        keys: object,
+        values: object,
+        write_from: object | None = None,
+    ) -> None:
+        writable = (
+            self.torch.ones_like(positions, dtype=self.torch.bool)
+            if write_from is None
+            else positions >= write_from
+        )
+        self._observe(layer, keys, values, writable)
+        self._original_batched(
+            layer,
+            page_tables,
+            positions,
+            keys,
+            values,
+            write_from,
+        )
+
+    def values(self) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        return (
+            tuple(float(value) for value in self.k_amax.cpu().tolist()),
+            tuple(float(value) for value in self.v_amax.cpu().tolist()),
+        )
+
+
+def _new_pool(
+    config: object,
+    *,
+    dtype: object,
+    device: object,
+    calibration: object | None = None,
+) -> object:
     from kairyu.engine.core.kv_pool import PagedKVPool
 
     num_pages = math.ceil(
@@ -1243,6 +1419,8 @@ def _new_pool(config: object, *, dtype: object, device: object) -> object:
         dtype=dtype,
         device=str(device),
         v_head_dim=config.kv_cache_v_head_dim,
+        k_scales=None if calibration is None else calibration.k_scales,
+        v_scales=None if calibration is None else calibration.v_scales,
     )
 
 
@@ -1361,6 +1539,7 @@ def _run_arm(
     *,
     arm: str,
     device: object,
+    calibration: object,
 ) -> tuple[
     list[dict[str, object]],
     dict[tuple[str, int, int, str], bytes],
@@ -1374,16 +1553,31 @@ def _run_arm(
         dtype = torch.float8_e4m3fn
     else:
         raise ValueError(f"unknown arm {arm!r}")
-    pool = _new_pool(config, dtype=dtype, device=device)
-    auditor = _FP8WriteAuditor(pool) if arm == "fp8_e4m3" else None
+    pool = _new_pool(
+        config,
+        dtype=dtype,
+        device=device,
+        calibration=calibration if arm == "fp8_e4m3" else None,
+    )
+    auditor = (
+        _FP8WriteAuditor(pool, calibration.sha256)
+        if arm == "fp8_e4m3"
+        else None
+    )
     if auditor is not None:
         if (
             pool.k.dtype is not torch.float8_e4m3fn
             or pool.v.dtype is not torch.float8_e4m3fn
-            or any(pool.k_scale(layer) != FP8_SCALE for layer in SAMPLE_LAYERS)
-            or any(pool.v_scale(layer) != FP8_SCALE for layer in SAMPLE_LAYERS)
+            or any(
+                pool.k_scale(layer) != calibration.k_scales[layer]
+                for layer in SAMPLE_LAYERS
+            )
+            or any(
+                pool.v_scale(layer) != calibration.v_scales[layer]
+                for layer in SAMPLE_LAYERS
+            )
         ):
-            raise RuntimeError("FP8 pool does not expose the unit-scale contract")
+            raise RuntimeError("FP8 pool does not expose calibrated layer scales")
         auditor.install()
 
     output_rows: list[dict[str, object]] = []
@@ -1408,8 +1602,11 @@ def _run_arm(
                         if arm == "bf16"
                         else "float8_e4m3fn"
                     ),
-                    "k_scale": None if arm == "bf16" else FP8_SCALE,
-                    "v_scale": None if arm == "bf16" else FP8_SCALE,
+                    "k_scale": None if arm == "bf16" else "per-layer",
+                    "v_scale": None if arm == "bf16" else "per-layer",
+                    "calibration_sha256": (
+                        None if arm == "bf16" else calibration.sha256
+                    ),
                     "output_token_ids": result["output_token_ids"],
                     "output_token_ids_sha256": sha256_json(
                         result["output_token_ids"]
@@ -1442,6 +1639,7 @@ def _cache_rows(
     prompts: Sequence[Mapping[str, object]],
     bf16: Mapping[tuple[str, int, int, str], bytes],
     fp8: Mapping[tuple[str, int, int, str], bytes],
+    calibration: object,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for prompt in prompts:
@@ -1469,7 +1667,11 @@ def _cache_rows(
                             ).decode("ascii"),
                             "bf16_sha256": sha256_bytes(bf16_raw),
                             "fp8_dtype": "float8_e4m3fn",
-                            "fp8_scale": FP8_SCALE,
+                            "fp8_scale": (
+                                calibration.k_scales[layer]
+                                if kind == "k"
+                                else calibration.v_scales[layer]
+                            ),
                             "fp8_base64": base64.b64encode(
                                 fp8_raw
                             ).decode("ascii"),
@@ -1487,6 +1689,105 @@ def _sanitize_failure(error: BaseException) -> dict[str, object]:
         "error_type": type(error).__name__,
         "message": message[:2_000],
     }
+
+
+def calibrate(
+    *,
+    model_path: Path,
+    image_id: str,
+    headroom: float,
+) -> dict[str, object]:
+    """Measure per-layer K/V amax on disjoint long-context prompts."""
+    import gc
+
+    import torch
+
+    from kairyu.engine.core.attention import select_backend
+    from kairyu.engine.core.hw_profile import probe
+    from kairyu.engine.core.kv_scale_calibration import KvScaleCalibration
+    from kairyu.engine.tokenizer import HFTokenizer
+    from kairyu.models.loader import load_model
+
+    if _IMAGE_ID.fullmatch(image_id) is None:
+        raise ValueError("--image-id must be sha256:<64 lowercase hex>")
+    if os.environ.get("KAIRYU_ATTENTION_BACKEND") != "flashinfer":
+        raise RuntimeError(
+            "FP8 KV calibration requires explicit KAIRYU_ATTENTION_BACKEND=flashinfer"
+        )
+    source = _source_snapshot()
+    if not _source_snapshot_valid(source):
+        raise RuntimeError("FP8 KV calibration requires a clean bound source commit")
+    checkpoint = _checkpoint_snapshot(model_path)
+    if not _checkpoint_valid(checkpoint):
+        raise RuntimeError("calibration requires the reviewed Qwen3-32B checkpoint")
+    backend = select_backend(probe(), device="cuda:0")
+    environment = _environment_snapshot(
+        backend_decision=backend.selection_decision
+    )
+    if not _environment_valid(environment):
+        raise RuntimeError(
+            "FP8 KV calibration requires one visible SM120 GPU and FlashInfer"
+        )
+
+    tokenizer = HFTokenizer(model_path)
+    prompts = _calibration_prompt_rows(tokenizer)
+    data_sha256 = sha256_json(prompts)
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
+    model = None
+    pool = None
+    observer = None
+    try:
+        model, config, _generation = load_model(
+            model_path,
+            dtype=torch.bfloat16,
+            attention_backend=backend,
+            target_device=device,
+        )
+        model = model.to(device)
+        pool = _new_pool(config, dtype=torch.bfloat16, device=device)
+        observer = _KvAmaxObserver(pool)
+        observer.install()
+        for prompt in prompts:
+            _run_prompt(model, pool, prompt, device=device)
+        observer.restore()
+        k_amax, v_amax = observer.values()
+        calibration = KvScaleCalibration.from_amax(
+            checkpoint_sha256=sha256_json(checkpoint),
+            calibration_data_sha256=data_sha256,
+            headroom=headroom,
+            k_amax=k_amax,
+            v_amax=v_amax,
+        )
+        return {
+            "type": "fp8_kv_calibration",
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "model": MODEL,
+            "model_revision": MODEL_REVISION,
+            "image_id": image_id,
+            "source": source,
+            "checkpoint": checkpoint,
+            "environment": environment,
+            "calibration_prompts": [
+                {
+                    "prompt_id": row["prompt_id"],
+                    "length": row["length"],
+                    "piece_token_id": row["piece_token_id"],
+                    "piece_text": row["piece_text"],
+                    "token_ids_sha256": row["token_ids_sha256"],
+                }
+                for row in prompts
+            ],
+            "calibration_data_sha256": data_sha256,
+            "calibration": calibration.artifact(),
+            "calibration_sha256": calibration.sha256,
+        }
+    finally:
+        if observer is not None:
+            observer.restore()
+        del observer, pool, model
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 def measure(
@@ -1507,6 +1808,7 @@ def measure(
     source_start: dict[str, object] = {}
     environment_start: dict[str, object] = {}
     checkpoint: dict[str, object] = {}
+    calibration = _load_calibration()
     model = None
     try:
         if _IMAGE_ID.fullmatch(image_id) is None:
@@ -1527,6 +1829,8 @@ def measure(
             raise RuntimeError(
                 "--model-path is not the exact reviewed Qwen3-32B checkpoint"
             )
+        if sha256_json(checkpoint) != calibration.checkpoint_sha256:
+            raise RuntimeError("FP8 KV calibration does not match the checkpoint")
         backend = select_backend(probe(), device="cuda:0")
         environment_start = _environment_snapshot(
             backend_decision=backend.selection_decision
@@ -1579,6 +1883,7 @@ def measure(
             prompts,
             arm="bf16",
             device=device,
+            calibration=calibration,
         )
         rows.extend(bf16_outputs)
         fp8_outputs, fp8_samples, audits = _run_arm(
@@ -1588,10 +1893,13 @@ def measure(
             prompts,
             arm="fp8_e4m3",
             device=device,
+            calibration=calibration,
         )
         rows.extend(fp8_outputs)
         rows.extend(audits)
-        rows.extend(_cache_rows(prompts, bf16_samples, fp8_samples))
+        rows.extend(
+            _cache_rows(prompts, bf16_samples, fp8_samples, calibration)
+        )
     except BaseException as error:
         if not rows or rows[0].get("type") != "run":
             rows.insert(
@@ -1674,6 +1982,7 @@ def _decode_sample(
         torch.frombuffer(bytearray(fp8_raw), dtype=torch.uint8)
         .view(torch.float8_e4m3fn)
         .to(torch.float64)
+        * float(row["fp8_scale"])
     )
     return bf16, fp8
 
@@ -1776,6 +2085,7 @@ def _output_valid(row: object) -> bool:
         "kv_dtype",
         "k_scale",
         "v_scale",
+        "calibration_sha256",
         "output_token_ids",
         "output_token_ids_sha256",
         "selected_logprobs",
@@ -1788,7 +2098,8 @@ def _output_valid(row: object) -> bool:
     expected_dtype = (
         "bfloat16" if arm == "bf16" else "float8_e4m3fn"
     )
-    expected_scale = None if arm == "bf16" else FP8_SCALE
+    expected_scale = None if arm == "bf16" else "per-layer"
+    expected_calibration = None if arm == "bf16" else _load_calibration().sha256
     tokens = row["output_token_ids"]
     logprobs = row["selected_logprobs"]
     output_text = row["output_text"]
@@ -1802,13 +2113,7 @@ def _output_valid(row: object) -> bool:
         and row["kv_dtype"] == expected_dtype
         and row["k_scale"] == expected_scale
         and row["v_scale"] == expected_scale
-        and (
-            arm == "bf16"
-            or (
-                type(row["k_scale"]) is float
-                and type(row["v_scale"]) is float
-            )
-        )
+        and row["calibration_sha256"] == expected_calibration
         and isinstance(tokens, list)
         and len(tokens) == OUTPUT_TOKENS
         and all(type(token) is int and 0 <= token < VOCAB_SIZE for token in tokens)
@@ -1830,7 +2135,8 @@ def _audit_valid(row: object) -> bool:
         "kind",
         "input_dtype",
         "storage_dtype",
-        "scale",
+        "scale_mode",
+        "calibration_sha256",
         "calls",
         "values",
         "input_nonfinite",
@@ -1867,8 +2173,8 @@ def _audit_valid(row: object) -> bool:
         and expected is not None
         and row["input_dtype"] == "bfloat16"
         and row["storage_dtype"] == "float8_e4m3fn"
-        and type(row["scale"]) is float
-        and row["scale"] == FP8_SCALE
+        and row["scale_mode"] == "per-layer-kv"
+        and row["calibration_sha256"] == _load_calibration().sha256
         and all(type(value) is int and value >= 0 for value in integers)
         and row["calls"] == expected["calls"]
         and row["values"] == expected["values"]
@@ -1920,7 +2226,12 @@ def _cache_row_valid(row: object) -> bool:
         or row["bf16_dtype"] != "bfloat16"
         or row["fp8_dtype"] != "float8_e4m3fn"
         or type(row["fp8_scale"]) is not float
-        or row["fp8_scale"] != FP8_SCALE
+        or row["fp8_scale"]
+        != (
+            _load_calibration().k_scales[row["layer"]]
+            if row["kind"] == "k"
+            else _load_calibration().v_scales[row["layer"]]
+        )
         or not isinstance(row["bf16_base64"], str)
         or not isinstance(row["fp8_base64"], str)
         or not isinstance(row["bf16_sha256"], str)
@@ -2276,6 +2587,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    calibrate_parser = subparsers.add_parser(
+        "calibrate", help="record static per-layer K/V scales"
+    )
+    calibrate_parser.add_argument("--model-path", type=Path, required=True)
+    calibrate_parser.add_argument("--image-id", required=True)
+    calibrate_parser.add_argument("--output", type=Path, required=True)
+    calibrate_parser.add_argument("--headroom", type=float, default=1.05)
+
     measure_parser = subparsers.add_parser(
         "measure", help="run the real one-GPU BF16/FP8 bake"
     )
@@ -2300,7 +2619,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.command == "measure":
+    if args.command == "calibrate":
+        result = calibrate(
+            model_path=args.model_path.resolve(),
+            image_id=args.image_id,
+            headroom=args.headroom,
+        )
+        output = args.output.resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(canonical_json(result) + "\n", encoding="utf-8")
+    elif args.command == "measure":
         rows = measure(
             model_path=args.model_path.resolve(),
             image_id=args.image_id,
@@ -2311,7 +2639,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         result = replay_artifact(args.artifact.resolve())
     print(canonical_json(result))
-    return 1 if args.assert_gate and result["passed"] is not True else 0
+    return (
+        1
+        if getattr(args, "assert_gate", False) and result["passed"] is not True
+        else 0
+    )
 
 
 if __name__ == "__main__":

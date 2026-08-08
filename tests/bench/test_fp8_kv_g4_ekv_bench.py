@@ -158,6 +158,7 @@ def _update_end_counts(rows: list[dict[str, object]]) -> None:
 def valid_rows() -> list[dict[str, object]]:
     source = _source()
     environment = _environment()
+    calibration = gate._load_calibration()
     rows: list[dict[str, object]] = [
         {
             "schema_version": gate.SCHEMA_VERSION,
@@ -205,8 +206,11 @@ def valid_rows() -> list[dict[str, object]]:
                         if arm == "bf16"
                         else "float8_e4m3fn"
                     ),
-                    "k_scale": None if arm == "bf16" else 1.0,
-                    "v_scale": None if arm == "bf16" else 1.0,
+                    "k_scale": None if arm == "bf16" else "per-layer",
+                    "v_scale": None if arm == "bf16" else "per-layer",
+                    "calibration_sha256": (
+                        None if arm == "bf16" else calibration.sha256
+                    ),
                     "output_token_ids": tokens,
                     "output_token_ids_sha256": gate.sha256_json(tokens),
                     "selected_logprobs": [-1.0] * gate.OUTPUT_TOKENS,
@@ -226,7 +230,8 @@ def valid_rows() -> list[dict[str, object]]:
                 "kind": kind,
                 "input_dtype": "bfloat16",
                 "storage_dtype": "float8_e4m3fn",
-                "scale": 1.0,
+                "scale_mode": "per-layer-kv",
+                "calibration_sha256": calibration.sha256,
                 "calls": expected["calls"],
                 "values": expected["values"],
                 "input_nonfinite": 0,
@@ -266,7 +271,11 @@ def valid_rows() -> list[dict[str, object]]:
                             ).decode(),
                             "bf16_sha256": gate.sha256_bytes(bf16_raw),
                             "fp8_dtype": "float8_e4m3fn",
-                            "fp8_scale": 1.0,
+                            "fp8_scale": (
+                                calibration.k_scales[layer]
+                                if kind == "k"
+                                else calibration.v_scales[layer]
+                            ),
                             "fp8_base64": base64.b64encode(fp8_raw).decode(),
                             "fp8_sha256": gate.sha256_bytes(fp8_raw),
                         }
@@ -513,7 +522,7 @@ def test_satfinite_oracle_does_not_conflate_overrange_with_bytes() -> None:
         head_dim=gate.HEAD_DIM,
         dtype=torch.float8_e4m3fn,
     )
-    auditor = gate._FP8WriteAuditor(pool)
+    auditor = gate._FP8WriteAuditor(pool, gate._load_calibration().sha256)
     auditor.install()
     source = torch.full(
         (1, gate.NUM_KV_HEADS, gate.HEAD_DIM),
@@ -541,3 +550,81 @@ def test_satfinite_oracle_does_not_conflate_overrange_with_bytes() -> None:
     assert row["stored_nonfinite"] == 0
     assert row["stored_byte_mismatch"] == 0
     assert torch.isfinite(pool.k.to(torch.float32)).all()
+
+
+def test_dequant_audit_absorbs_only_fp64_boundary_noise() -> None:
+    scale = 0.0035156250000000005
+    pool = PagedKVPool(
+        num_layers=1,
+        num_pages=1,
+        page_size=1,
+        num_kv_heads=1,
+        head_dim=1,
+        dtype=torch.float8_e4m3fn,
+        k_scales=[scale],
+        v_scales=[scale],
+    )
+    auditor = gate._FP8WriteAuditor(pool, gate._load_calibration().sha256)
+    source = torch.tensor([5.14984130859375e-05], dtype=torch.bfloat16)
+    actual = (source.float() / scale).to(torch.float8_e4m3fn)
+
+    auditor._audit("ragged_prefill", 0, "k", source, actual)
+    row = next(
+        row
+        for row in auditor.rows()
+        if row["phase"] == "ragged_prefill" and row["kind"] == "k"
+    )
+    assert row["stored_byte_mismatch"] == 0
+    assert row["dequant_error_violation"] == 0
+    assert row["max_bound_excess"] == 0.0
+
+
+def test_calibration_observer_records_independent_layer_kv_amax() -> None:
+    pool = PagedKVPool(
+        num_layers=2,
+        num_pages=1,
+        page_size=2,
+        num_kv_heads=1,
+        head_dim=2,
+        dtype=torch.bfloat16,
+    )
+    observer = gate._KvAmaxObserver(pool)
+    observer.install()
+    try:
+        pool.write_ragged(
+            0,
+            torch.tensor([[0]], dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+            torch.tensor([0]),
+            torch.tensor([[[2.0, -3.0]]], dtype=torch.bfloat16),
+            torch.tensor([[[4.0, -1.0]]], dtype=torch.bfloat16),
+            torch.tensor([0]),
+        )
+        pool.write_batched(
+            1,
+            torch.tensor([[0]], dtype=torch.int32),
+            torch.tensor([1]),
+            torch.tensor([[[5.0, -2.0]]], dtype=torch.bfloat16),
+            torch.tensor([[[1.0, -6.0]]], dtype=torch.bfloat16),
+        )
+    finally:
+        observer.restore()
+
+    assert observer.values() == ((3.0, 5.0), (4.0, 6.0))
+
+
+def test_checked_in_calibrated_failure_raw_replays_portably() -> None:
+    artifact = (
+        Path(__file__).resolve().parents[2]
+        / "bench/results/"
+        "g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08"
+    )
+    replayed = gate.replay_artifact(artifact)
+
+    assert replayed["raw"]["sha256"] == (
+        "45078bda9f8e9f1c60cf7d9f42b1a56411c7d31ae7c7c879cd643b0cd89fdcf8"
+    )
+    assert replayed["verdict"] == "FAIL"
+    assert {
+        name for name, passed in replayed["checks"].items() if not passed
+    } == {"all_fp8_writes_audited", "exact_output_tokens_and_stopping"}

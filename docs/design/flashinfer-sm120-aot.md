@@ -8,6 +8,27 @@ verification below before any FP8-KV path is declared deployable.
 
 Date: 2026-07-13; updated 2026-07-31 for E4M3 KV-cache support.
 
+> **Amended 2026-08-08 (issue #357).** The replacement candidate uses one
+> positive static scale per layer and independently for K and V. A disjoint
+> long-context calibration pass records production ragged-prefill and decode
+> payload amax, applies explicit headroom, and binds the derived scales to the
+> exact checkpoint and calibration-data digests. Every FP8 write stores
+> `SATFINITE(input / scale)` and FlashInfer receives the same scale for reads.
+> Unit-scale fallback remains offline-only; public FP8 KV stays disabled until
+> the unchanged G4 E-KV quality thresholds pass on a clean calibrated rerun.
+
+> **Re-bake outcome 2026-08-08.** The clean calibrated Qwen3-32B run retained
+> `FAIL`. All sampled cache cosine/NRMSE and selected-logprob thresholds passed,
+> and 8K generated tokens matched exactly, but 16K/32K diverged after one token
+> and 45 decode payload values exceeded the disjoint calibration envelope. A
+> 2^-48 relative FP64 comparison allowance removes arithmetic-only audit noise;
+> all prefill writes then have zero byte mismatch, overrange, and error-bound
+> violations, so the retained audit failure reflects only the decode envelope.
+> Non-unit calibrated writes use the exact torch quantize/store path because
+> the fused Triton FP8 cast did not reproduce the gate's storage-byte oracle.
+> Public `fp8_e4m3` therefore remains rejected. Evidence:
+> `bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08/`.
+
 ## Decision
 
 - Build FlashInfer's `flashinfer-jit-cache` wheel in a CUDA 13.0.1 `-devel`

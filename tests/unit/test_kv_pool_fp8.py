@@ -6,7 +6,12 @@ import torch
 from kairyu.engine.core.kv_pool import PagedKVPool
 
 
-def _pool(*, dtype: torch.dtype = torch.float8_e4m3fn) -> PagedKVPool:
+def _pool(
+    *,
+    dtype: torch.dtype = torch.float8_e4m3fn,
+    k_scales=None,
+    v_scales=None,
+) -> PagedKVPool:
     return PagedKVPool(
         num_layers=2,
         num_pages=4,
@@ -14,6 +19,8 @@ def _pool(*, dtype: torch.dtype = torch.float8_e4m3fn) -> PagedKVPool:
         num_kv_heads=1,
         head_dim=2,
         dtype=dtype,
+        k_scales=k_scales,
+        v_scales=v_scales,
     )
 
 
@@ -28,6 +35,32 @@ def test_fp8_pool_exposes_unit_scales_per_layer():
         pool.k_scale(2)
     with pytest.raises(IndexError, match="outside"):
         pool.v_scale(-1)
+
+
+def test_fp8_pool_validates_and_exposes_calibrated_layer_scales():
+    pool = _pool(k_scales=[0.25, 0.5], v_scales=[0.125, 0.75])
+
+    assert [pool.k_scale(layer) for layer in range(2)] == [0.25, 0.5]
+    assert [pool.v_scale(layer) for layer in range(2)] == [0.125, 0.75]
+    with pytest.raises(ValueError, match="both K and V"):
+        _pool(k_scales=[1.0, 1.0])
+    with pytest.raises(ValueError, match="contain 2 layers"):
+        _pool(k_scales=[1.0], v_scales=[1.0])
+    with pytest.raises(ValueError, match="finite and positive"):
+        _pool(k_scales=[1.0, 0.0], v_scales=[1.0, 1.0])
+    with pytest.raises(ValueError, match="require an FP8 cache"):
+        _pool(dtype=torch.bfloat16, k_scales=[1.0, 1.0], v_scales=[1.0, 1.0])
+
+
+def test_fp8_direct_write_applies_independent_kv_layer_scales():
+    pool = _pool(k_scales=[1.0, 0.5], v_scales=[1.0, 0.25])
+    keys = torch.tensor([[[0.5, -1.0]]], dtype=torch.bfloat16)
+    values = torch.tensor([[[0.25, -0.5]]], dtype=torch.bfloat16)
+
+    pool.write(1, [0], torch.tensor([0]), keys, values)
+
+    assert torch.equal(pool.k[1, 0, 0], (keys / 0.5).to(torch.float8_e4m3fn)[0])
+    assert torch.equal(pool.v[1, 0, 0], (values / 0.25).to(torch.float8_e4m3fn)[0])
 
 
 def test_fp8_direct_write_explicitly_quantizes_sources():
