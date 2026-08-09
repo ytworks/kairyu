@@ -93,7 +93,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 compose_file="$script_dir/a9-tp8-compose.yaml"
-repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd -P)
+repo_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd -P)
 a8_source_commit=86d49223ffcdba6052428474bf0d9094c6791fed
 a8_source_archive_sha256=18ff0eabe0dd63862e00230d93cc8edb18c52c97f9544b7ded3e8088e5e3d66d
 a8_runtime_files_sha256=2e695979ef6cf4eb9e5708549af82f8ee6776a49765f1f1408a598ceac893417

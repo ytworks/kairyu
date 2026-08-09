@@ -48,6 +48,50 @@ def _save_qwen_outer(
     save_file(state, directory / "model.safetensors")
 
 
+def test_deepseek_v4_public_compress_ratios_define_native_cache() -> None:
+    raw = {
+        "architectures": ["DeepseekV4ForCausalLM"],
+        "hidden_size": 64,
+        "moe_intermediate_size": 32,
+        "num_hidden_layers": 5,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 1,
+        "head_dim": 16,
+        "vocab_size": 128,
+        "n_routed_experts": 16,
+        "num_experts_per_tok": 4,
+        "n_shared_experts": 1,
+        "max_position_embeddings": 1_048_576,
+        "sliding_window": 128,
+        "compress_ratios": [0, 0, 4, 128, 4, 0],
+        "index_topk": 32,
+        "index_n_heads": 8,
+        "index_head_dim": 8,
+        "hc_mult": 4,
+        "hc_sinkhorn_iters": 20,
+        "expert_dtype": "fp4",
+        "dspark_block_size": 5,
+        "num_nextn_predict_layers": 1,
+        "quantization_config": {"quant_method": "fp8"},
+    }
+
+    parsed = parse_model_config(raw)
+
+    assert parsed.frontier_cache is not None
+    assert parsed.frontier_cache.layer_types == (
+        "sliding_attention",
+        "sliding_attention",
+        "compressed_sparse_attention",
+        "heavily_compressed_attention",
+        "compressed_sparse_attention",
+    )
+    assert parsed.frontier_cache.compress_rate_csa == 4
+    assert parsed.frontier_cache.compress_rate_hca == 128
+    assert parsed.frontier_cache.expert_dtype == "fp4"
+    assert parsed.frontier_cache.nonexpert_dtype == "fp8"
+    assert parsed.frontier_cache.dspark_block_size == 5
+
+
 @pytest.mark.parametrize(
     ("moe", "per_expert"),
     [

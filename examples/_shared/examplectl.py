@@ -249,8 +249,17 @@ def _materialize_models(spec: dict, env: dict[str, str], backend: str) -> None:
 
 def _compose(spec_dir: Path, spec: dict, env: dict[str, str], backend: str, args: list[str]):
     compose_env = dict(env)
-    compose_env["COMPOSE_PROJECT_NAME"] = f"kairyu-{spec['environment']}-{backend}"
-    compose_env["COMPOSE_PROFILES"] = backend
+    profile = backend
+    if backend == "kairyu" and spec["environment"] == "deepseek-v4-flash-0731-8gpu":
+        topology = env.get("KAIRYU_TOPOLOGY", "ep4")
+        if topology not in {"ep4", "ep8"}:
+            raise SystemExit("KAIRYU_TOPOLOGY must be ep4 or ep8")
+        if topology == "ep8":
+            profile = "kairyu-ep8"
+    compose_env["COMPOSE_PROJECT_NAME"] = (
+        f"kairyu-{spec['environment']}-{profile}"
+    )
+    compose_env["COMPOSE_PROFILES"] = profile
     compose_env["BACKEND"] = backend
     command = ["docker", "compose"]
     if (spec_dir / ".env").exists():

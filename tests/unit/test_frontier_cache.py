@@ -84,12 +84,15 @@ def test_deepseek_frontier_descriptor_exposes_compressed_sparse_layout() -> None
 
     assert descriptor.supported_expert_parallel_sizes == (1, 2, 4, 8)
     assert [component.kind for component in descriptor.components] == [
+        "sliding-window-kv",
         "heavily-compressed-attention",
         "compressed-sparse-attention",
+        "top-k-sparse-index",
         "mhc-state",
     ]
-    assert descriptor.components[1].block_size == 256
-    assert descriptor.components[1].metadata["fp4_indexer_cache"] is True
+    assert descriptor.components[2].block_size == 256
+    assert descriptor.components[3].dtype == "e2m1-ue8m0"
+    assert descriptor.components[3].metadata["streaming_topk"] is True
 
 
 def test_cache_handle_transaction_clones_state_for_rollback() -> None:

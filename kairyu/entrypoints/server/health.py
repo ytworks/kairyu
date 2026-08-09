@@ -62,7 +62,8 @@ def _expert_parallel_metadata(value: object) -> dict[str, object] | None:
         or type(pipeline_depth) is not int
         or pipeline_depth < 1
         or decode_mode not in {"eager", "cuda_graph"}
-        or value.get("kv_cache_dtype") != "bfloat16"
+        or value.get("kv_cache_dtype")
+        not in {"bfloat16", "checkpoint-native-hca-csa"}
     ):
         return None
     execution_mode = value.get("execution_mode")
@@ -78,7 +79,7 @@ def _expert_parallel_metadata(value: object) -> dict[str, object] | None:
         "execution_mode": execution_mode,
         "pipeline_depth": pipeline_depth,
         "decode_mode": decode_mode,
-        "kv_cache_dtype": "bfloat16",
+        "kv_cache_dtype": value.get("kv_cache_dtype"),
     }
     if execution_mode == "replicated-attention-correctness":
         if (
@@ -92,7 +93,10 @@ def _expert_parallel_metadata(value: object) -> dict[str, object] | None:
         ):
             return None
         return common
-    if execution_mode != "request-owned-attention-dp":
+    if execution_mode not in {
+        "request-owned-attention-dp",
+        "deepseek-v4-native-attention-dp",
+    }:
         return None
     transport = value.get("moe_collective_transport")
     if not isinstance(transport, Mapping) or set(transport) != (
@@ -139,17 +143,32 @@ def _expert_parallel_metadata(value: object) -> dict[str, object] | None:
     decode_scratch = value.get("attention_dp_decode_scratch_pages")
     graph_scratch = value.get("attention_dp_graph_scratch_pages")
     total_scratch = value.get("attention_dp_scratch_pages")
+    deepseek_v4 = execution_mode == "deepseek-v4-native-attention-dp"
+    expected_dispatcher = (
+        "fixed-nccl-all-to-all-packed-fp4"
+        if deepseek_v4
+        else "nvfp4_allgather_reduce_scatter"
+    )
     if (
-        expert_parallel_size != 4
+        (deepseek_v4 and expert_parallel_size not in {2, 4, 8})
+        or (not deepseek_v4 and expert_parallel_size != 4)
         or output_parallel_size != 1
         or common["attention_placement"] != "request_owned_data_parallel"
         or common["attention_output_placement"] != "replicated"
         or common["attention_output_partial_dtype"] is not None
-        or value.get("attention_data_parallel_size") != 4
+        or value.get("attention_data_parallel_size") != expert_parallel_size
         or value.get("attention_tensor_parallel_size") != 1
-        or value.get("moe_dispatcher") != "nvfp4_allgather_reduce_scatter"
+        or value.get("moe_dispatcher") != expected_dispatcher
         or value.get("sampling_ownership") != "request_owner"
         or value.get("kv_cache_ownership") != "request_owner"
+        or (
+            deepseek_v4
+            and (
+                common["kv_cache_dtype"] != "checkpoint-native-hca-csa"
+                or decode_mode != "eager"
+            )
+        )
+        or (not deepseek_v4 and common["kv_cache_dtype"] != "bfloat16")
         or type(cuda_graph_decode) is not bool
         or cuda_graph_decode != (decode_mode == "cuda_graph")
         or not isinstance(graph_buckets, (tuple, list))
@@ -171,9 +190,9 @@ def _expert_parallel_metadata(value: object) -> dict[str, object] | None:
         return None
     return {
         **common,
-        "attention_data_parallel_size": 4,
+        "attention_data_parallel_size": expert_parallel_size,
         "attention_tensor_parallel_size": 1,
-        "moe_dispatcher": "nvfp4_allgather_reduce_scatter",
+        "moe_dispatcher": expected_dispatcher,
         "sampling_ownership": "request_owner",
         "kv_cache_ownership": "request_owner",
         "cuda_graph_decode": cuda_graph_decode,

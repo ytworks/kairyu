@@ -1708,6 +1708,7 @@ fleet = [
 ]
 gpu = [
     { name = "flashinfer-python", marker = "sys_platform == 'linux'" },
+    { name = "kernels", marker = "sys_platform == 'linux'" },
     { name = "nixl", marker = "sys_platform == 'linux'" },
     { name = "triton", marker = "sys_platform == 'linux'" },
 ]
@@ -1763,6 +1764,7 @@ requires-dist = [
     { name = "immutabledict", marker = "extra == 'bench'", specifier = ">=4.2" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "jsonschema", marker = "extra == 'bench'", specifier = "==4.26.0" },
+    { name = "kernels", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = "==0.12.3" },
     { name = "langdetect", marker = "extra == 'bench'", specifier = "==1.0.9" },
     { name = "mini-swe-agent", marker = "extra == 'bench-agentic'", specifier = ">=2" },
     { name = "msgpack", marker = "extra == 'fleet'", specifier = ">=1.0" },
@@ -1785,8 +1787,8 @@ requires-dist = [
     { name = "tokenizers", marker = "extra == 'engine'", specifier = ">=0.21.1" },
     { name = "tokenizers", marker = "extra == 'hf'", specifier = ">=0.21.1" },
     { name = "torch", marker = "extra == 'engine'", specifier = ">=2.6" },
-    { name = "transformers", marker = "extra == 'engine'", specifier = ">=5.12,<5.13" },
     { name = "tqdm", marker = "extra == 'bench'", specifier = ">=4.66" },
+    { name = "transformers", marker = "extra == 'engine'", specifier = ">=5.12,<5.13" },
     { name = "triton", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=3.0" },
     { name = "uvicorn", specifier = ">=0.30" },
     { name = "uvloop", marker = "sys_platform == 'linux'", specifier = ">=0.22.1" },
@@ -1819,6 +1821,20 @@ dev = [
     { name = "torch", specifier = ">=2.6" },
     { name = "transformers", specifier = ">=5.12,<5.13" },
     { name = "xgrammar", specifier = ">=0.2.3" },
+]
+
+[[package]]
+name = "kernels"
+version = "0.12.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "packaging" },
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b3/84/9f68f355f6ce99e977872021fbdbafadcf2820f51d3f7bd697ec3801cb7a/kernels-0.12.3.tar.gz", hash = "sha256:87e29716578e7e71dc5a7578e0132bfdae305bedaeb602698f87c88ca6c60e32", size = 57407, upload-time = "2026-03-20T10:20:42.166Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/3e/778e4a86830e9139df2d16d86c4488fce426ec19daa83cbd2854ef389030/kernels-0.12.3-py3-none-any.whl", hash = "sha256:5d1d33fcb774e03bb7f0688ac24d91ef6b963692f80f0a85ddd2286e69f3cf2f", size = 55501, upload-time = "2026-03-20T10:20:40.643Z" },
 ]
 
 [[package]]

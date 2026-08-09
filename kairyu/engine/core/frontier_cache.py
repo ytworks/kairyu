@@ -118,10 +118,18 @@ def cache_descriptor_for_model(config: ModelConfig) -> CacheDescriptor:
             supported_expert_parallel_sizes=(1, 2, 4, 8),
             components=(
                 CacheComponentDescriptor(
+                    name="sliding-kv",
+                    kind="sliding-window-kv",
+                    layer_count=config.num_hidden_layers,
+                    dtype="bfloat16",
+                    block_size=frontier.block_size,
+                    metadata={"sliding_window": frontier.sliding_window},
+                ),
+                CacheComponentDescriptor(
                     name="hca",
                     kind="heavily-compressed-attention",
                     layer_count=counts["heavily_compressed_attention"],
-                    dtype="float8_e4m3fn",
+                    dtype="bfloat16",
                     block_size=frontier.block_size,
                     metadata={
                         "compress_rate": frontier.compress_rate_hca,
@@ -132,7 +140,7 @@ def cache_descriptor_for_model(config: ModelConfig) -> CacheDescriptor:
                     name="csa",
                     kind="compressed-sparse-attention",
                     layer_count=counts["compressed_sparse_attention"],
-                    dtype="float8_e4m3fn",
+                    dtype="bfloat16",
                     block_size=frontier.block_size,
                     metadata={
                         "compress_rate": frontier.compress_rate_csa,
@@ -140,7 +148,19 @@ def cache_descriptor_for_model(config: ModelConfig) -> CacheDescriptor:
                         "index_topk": frontier.index_topk,
                         "index_heads": frontier.index_n_heads,
                         "index_head_dim": frontier.index_head_dim,
-                        "fp4_indexer_cache": frontier.fp4_indexer_cache,
+                    },
+                ),
+                CacheComponentDescriptor(
+                    name="csa-indexer",
+                    kind="top-k-sparse-index",
+                    layer_count=counts["compressed_sparse_attention"],
+                    dtype="e2m1-ue8m0" if frontier.fp4_indexer_cache else "bfloat16",
+                    block_size=32,
+                    metadata={
+                        "index_topk": frontier.index_topk,
+                        "index_heads": frontier.index_n_heads,
+                        "index_head_dim": frontier.index_head_dim,
+                        "streaming_topk": True,
                     },
                 ),
                 CacheComponentDescriptor(

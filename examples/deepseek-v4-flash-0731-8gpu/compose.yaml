@@ -133,6 +133,33 @@ services:
     depends_on: [kairyu-a, kairyu-b]
     ports: ["127.0.0.1:${PORT:-8002}:8000"]
 
+  kairyu-ep8:
+    <<: *native
+    profiles: [kairyu-ep8]
+    cpuset: ${GPU_PAIR_0_1_CPUSET},${GPU_PAIR_2_3_CPUSET},${GPU_PAIR_4_5_CPUSET},${GPU_PAIR_6_7_CPUSET}
+    volumes:
+      - models:/models:ro
+      - ./kairyu-ep8.yaml:/etc/kairyu/config.yaml:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0", "1", "2", "3", "4", "5", "6", "7"]
+              capabilities: [gpu]
+
+  kairyu-ep8-gateway:
+    profiles: [kairyu-ep8]
+    image: ${KAIRYU_CPU_IMAGE}
+    command: [/etc/kairyu/config.yaml]
+    environment:
+      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_CPU_IMAGE}
+    volumes:
+      - models:/models:ro
+      - ./kairyu-ep8-gateway.yaml:/etc/kairyu/config.yaml:ro
+    depends_on: [kairyu-ep8]
+    ports: ["127.0.0.1:${PORT:-8002}:8000"]
+
 volumes:
   models:
     external: true

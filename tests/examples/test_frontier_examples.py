@@ -71,6 +71,20 @@ def test_new_configs_never_enable_legacy_chat_or_shrink_context() -> None:
     assert "dspark_enabled: false" in serialized
 
 
+def test_deepseek_native_example_exposes_ep4_and_ep8_without_context_shrink() -> None:
+    environment = EXAMPLES / "deepseek-v4-flash-0731-8gpu"
+    ep4 = yaml.safe_load((environment / "kairyu-replica.yaml").read_text())
+    ep8 = yaml.safe_load((environment / "kairyu-ep8.yaml").read_text())
+    for config, size in ((ep4, 4), (ep8, 8)):
+        options = config["engines"]["deepseek-v4-flash-0731"]["options"]
+        assert options["expert_parallel_size"] == size
+        assert options["expert_parallel_attention_dp"] is True
+        assert options["max_model_len"] == 1_048_576
+    gate = ROOT / "scripts/gpu_gates/deepseek_v4_native_1m.sh"
+    assert gate.stat().st_mode & 0o111
+    assert "long-context:ruler-niah-1024k" in gate.read_text()
+
+
 def test_orchestration_router_digest_matches_every_deployment() -> None:
     environment = EXAMPLES / "qwen3.6-deepseek-v4-8gpu"
     artifact = environment / "router.json"

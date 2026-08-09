@@ -80,6 +80,10 @@ RUN uv sync --frozen --no-install-project --no-dev --extra gpu --extra engine --
 COPY kairyu ./kairyu
 RUN uv sync --frozen --no-dev --extra gpu --extra engine --extra fleet \
     --extra flashattention4
+# Bake the exact SM120 FP8xFP4 Triton package used by DeepSeek V4.  Runtime
+# remaps Transformers' version selector to this commit and runs offline.
+ENV HF_HOME=/opt/kairyu-hf
+RUN /app/.venv/bin/python -c 'from kernels import get_kernel; get_kernel("kernels-community/finegrained-fp8", revision="061130fedf845f320c56de4425f7404f6512c87e")'
 # Install the AOT FlashInfer kernel cache into the venv. NOT via `uv sync --frozen`
 # (it rejects lockfile drift); --no-deps keeps the frozen env intact (flashinfer-python
 # is already present from the sync above).

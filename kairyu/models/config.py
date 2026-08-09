@@ -140,6 +140,10 @@ class FrontierCacheConfig:
     hc_mult: int | None = None
     hc_sinkhorn_iters: int | None = None
     fp4_indexer_cache: bool = False
+    expert_dtype: str | None = None
+    nonexpert_dtype: str | None = None
+    dspark_block_size: int = 0
+    dspark_layer_count: int = 0
 
     @property
     def full_attention_layers(self) -> tuple[int, ...]:
@@ -399,14 +403,44 @@ def _frontier_cache_fields(
         )
     if architecture == "DeepseekV4ForCausalLM":
         layer_types = tuple(config.get("layer_types") or ())
+        compress_ratios = tuple(config.get("compress_ratios") or ())
+        if not layer_types and compress_ratios:
+            if len(compress_ratios) < int(config["num_hidden_layers"]):
+                raise ValueError(
+                    "DeepSeek V4 compress_ratios must cover every hidden layer"
+                )
+            ratio_to_type = {
+                0: "sliding_attention",
+                4: "compressed_sparse_attention",
+                128: "heavily_compressed_attention",
+            }
+            try:
+                layer_types = tuple(
+                    ratio_to_type[int(ratio)]
+                    for ratio in compress_ratios[: int(config["num_hidden_layers"])]
+                )
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(
+                    "DeepSeek V4 compress_ratios support only 0, 4, and 128"
+                ) from error
         if len(layer_types) != int(config["num_hidden_layers"]):
             raise ValueError("DeepSeek V4 layer_types must cover every hidden layer")
-        allowed = {"heavily_compressed_attention", "compressed_sparse_attention"}
+        allowed = {
+            "sliding_attention",
+            "heavily_compressed_attention",
+            "compressed_sparse_attention",
+        }
         if any(kind not in allowed for kind in layer_types):
             raise ValueError("DeepSeek V4 layer_types contain an unsupported cache family")
         rates = config.get("compress_rates")
         if not isinstance(rates, dict):
-            raise ValueError("DeepSeek V4 requires compress_rates")
+            rates = {
+                "compressed_sparse_attention": 4,
+                "heavily_compressed_attention": 128,
+            }
+        quantization = config.get("quantization_config") or {}
+        if not isinstance(quantization, dict):
+            raise ValueError("DeepSeek V4 quantization_config must be an object")
         return FrontierCacheConfig(
             family="deepseek-v4-hca-csa",
             layer_types=layer_types,
@@ -420,6 +454,10 @@ def _frontier_cache_fields(
             hc_mult=int(config["hc_mult"]),
             hc_sinkhorn_iters=int(config["hc_sinkhorn_iters"]),
             fp4_indexer_cache=bool(config.get("use_fp4_indexer_cache", True)),
+            expert_dtype=str(config.get("expert_dtype", "fp4")),
+            nonexpert_dtype=str(quantization.get("quant_method", "fp8")),
+            dspark_block_size=int(config.get("dspark_block_size", 0)),
+            dspark_layer_count=int(config.get("num_nextn_predict_layers", 0)),
         )
     return None
 

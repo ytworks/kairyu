@@ -12,7 +12,9 @@ engines:
       expert_parallel_attention_dp: true
       num_pages: 8192
       page_size: 256
-      max_num_batched_tokens: 1048576
+      # Chunked prefill bounds transient attention matrices without changing
+      # the admitted 1,048,576-token context or any cached history.
+      max_num_batched_tokens: 4096
       max_num_seqs: 64
       prefix_state_capacity_bytes: 34359738368
       dspark_enabled: false

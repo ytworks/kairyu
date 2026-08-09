@@ -11,5 +11,16 @@ cp .env.example .env
 
 An EP8 topology lock is intentionally absent. It may be generated only after
 the EP4/EP8 quality, 1M-context, stability, and 2% SLO-goodput gates complete.
-The current native DeepSeek distributed worker is still an open GPU gate; see
-the [frontier native runtime design](../../docs/design/frontier-native-runtime.md).
+
+The committed native 1M gate starts the same EP4/Attention-DP example, runs the
+exact tokenizer-attested 1,048,576-token NIAH row, and finalizes its ordinary
+JSON/Markdown evidence even on failure:
+
+```sh
+../../scripts/gpu_gates/deepseek_v4_native_1m.sh
+../../scripts/gpu_gates/deepseek_v4_native_1m.sh ep8
+```
+
+The packed-FP4 and two-rank NCCL smoke tests are
+`tests/gpu/test_deepseek_v4_{fp4,ep}_gpu.py`. Full-checkpoint gate completion is
+recorded only after the script above actually finishes on the pinned model.

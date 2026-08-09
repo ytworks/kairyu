@@ -541,9 +541,9 @@ def build_engine_loop(
     expert_parallel = expert_parallel_size > 1
     if type(expert_parallel_attention_dp) is not bool:
         raise TypeError("expert_parallel_attention_dp must be a boolean")
-    if expert_parallel_attention_dp and expert_parallel_size != 4:
+    if expert_parallel_attention_dp and expert_parallel_size not in {2, 4, 8}:
         raise ValueError(
-            "expert_parallel_attention_dp requires expert_parallel_size=4"
+            "expert_parallel_attention_dp requires expert_parallel_size in {2, 4, 8}"
         )
     if expert_parallel and tensor_parallel_size > 1:
         raise ValueError(
@@ -646,12 +646,17 @@ def build_engine_loop(
                         "hybrid reference execution does not use a KV cache"
                     )
             elif stateful_frontier:
-                if expert_parallel:
+                deepseek_native_ep = (
+                    reference_config.architecture == "DeepseekV4ForCausalLM"
+                    and expert_parallel
+                    and expert_parallel_attention_dp
+                )
+                if expert_parallel and not deepseek_native_ep:
                     raise ValueError(
-                        "frontier native expert parallel execution is not production-ready; "
-                        "the current DistEP worker supports Qwen3MoeForCausalLM only"
+                        "frontier native expert parallelism is implemented only for "
+                        "DeepSeek V4 request-owned Attention-DP"
                     )
-                if tensor_parallel_size != 1 or pd_separation:
+                if (tensor_parallel_size != 1 and not deepseek_native_ep) or pd_separation:
                     raise ValueError(
                         "frontier native cache supports TP1 and no P-D separation; "
                         "DeepSeek distributed serving uses expert parallelism"
@@ -815,9 +820,26 @@ def build_engine_loop(
                 "replicated-attention expert parallelism requires "
                 "decode_mode='eager'"
             )
-        if kv_cache_dtype != "bfloat16":
+        deepseek_native_ep = (
+            reference_config is not None
+            and reference_config.architecture == "DeepseekV4ForCausalLM"
+            and expert_parallel_attention_dp
+        )
+        if expert_parallel_attention_dp:
+            supported_ep = {2, 4, 8} if deepseek_native_ep else {4}
+        else:
+            supported_ep = {2, 4}
+        if expert_parallel_size not in supported_ep:
             raise ValueError(
-                "expert parallelism requires kv_cache_dtype='bfloat16'"
+                "selected model/execution mode requires expert_parallel_size in "
+                f"{sorted(supported_ep)}; got {expert_parallel_size}"
+            )
+        if kv_cache_dtype != "bfloat16" and not (
+            deepseek_native_ep and kv_cache_dtype == "auto"
+        ):
+            raise ValueError(
+                "expert parallelism requires kv_cache_dtype='bfloat16'; DeepSeek V4 "
+                "uses checkpoint-owned cache roles via kv_cache_dtype='auto'"
             )
         if pd_separation:
             raise ValueError("expert parallelism does not support P-D separation")
@@ -847,6 +869,7 @@ def build_engine_loop(
             kv_cache_dtype=kv_cache_dtype,
             generation_config=generation_config,
             nvfp4_accuracy_profile=nvfp4_accuracy_profile,
+            prefix_state_capacity_bytes=prefix_state_capacity_bytes,
         )
     if pd_separation:
         if model_path is None:
@@ -1267,6 +1290,7 @@ def _build_dist_ep_loop(
     kv_cache_dtype: str = "bfloat16",
     generation_config: GenerationConfigMode = "auto",
     nvfp4_accuracy_profile=None,
+    prefix_state_capacity_bytes: int = 0,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler]:
     """Build the production replicated-attention or attention-DP EP loop."""
 
@@ -1323,6 +1347,7 @@ def _build_dist_ep_loop(
         dram_kv_tier_profile=None,
         speculative=None,
         nvfp4_accuracy_profile=nvfp4_accuracy_profile,
+        prefix_state_capacity_bytes=prefix_state_capacity_bytes,
     )
     try:
         loop = EngineLoop(

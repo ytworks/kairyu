@@ -8,12 +8,10 @@ engines:
       max_model_len: 1048576
       quantization_format: mixed-fp4-fp8
       execution_mode: native
-      expert_parallel_size: 4
+      expert_parallel_size: 8
       expert_parallel_attention_dp: true
       num_pages: 8192
       page_size: 256
-      # Chunked prefill bounds transient attention matrices without changing
-      # the admitted 1,048,576-token context or any cached history.
       max_num_batched_tokens: 4096
       max_num_seqs: 64
       prefix_state_capacity_bytes: 34359738368

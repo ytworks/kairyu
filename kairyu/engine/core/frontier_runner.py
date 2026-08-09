@@ -99,7 +99,11 @@ class NativeFrontierModelRunner:
         handle.replace(prefix, cache, last_logits, handle.output_epoch)
         self._cache_hits += 1
 
-    def _ensure_sequence(self, state: object, desired: tuple[int, ...]) -> CacheHandle:
+    def _ensure_sequence_with_result(
+        self,
+        state: object,
+        desired: tuple[int, ...],
+    ) -> tuple[CacheHandle, bool]:
         request_id = state.request.request_id
         epoch = getattr(state, "output_epoch", 0)
         handle = self._handles.get(request_id)
@@ -111,7 +115,8 @@ class NativeFrontierModelRunner:
             handle.output_epoch = epoch
             self._restore_prefix(handle, desired)
         suffix = desired[len(handle.token_ids) :]
-        if suffix:
+        forwarded = bool(suffix)
+        if forwarded:
             ids = torch.tensor(suffix, dtype=torch.long, device=self._device)
             logits, cache = self._model.forward_cached(
                 ids,
@@ -121,6 +126,10 @@ class NativeFrontierModelRunner:
             handle.replace(desired, cache, logits[-1], epoch)
         if handle.last_logits is None:
             raise RuntimeError("frontier cache reached an empty sequence without logits")
+        return handle, forwarded
+
+    def _ensure_sequence(self, state: object, desired: tuple[int, ...]) -> CacheHandle:
+        handle, _forwarded = self._ensure_sequence_with_result(state, desired)
         return handle
 
     def _sample(self, state: object, logits: torch.Tensor, position: int) -> SampledToken:
@@ -156,6 +165,34 @@ class NativeFrontierModelRunner:
         self._future_tokens.setdefault(state.request.request_id, {})[position] = token.token_id
         return token
 
+    def _advance_prefill(self, state: object) -> tuple[SampledToken | None, bool]:
+        """Advance exactly the scheduler-admitted prompt prefix.
+
+        Chunked prefill must not defer a native-max prompt to one final model
+        call: a 1M request is advanced in the same bounded chunks admitted by
+        the scheduler while the architecture cache preserves full context.
+        """
+
+        prompt = tuple(state.request.prompt_token_ids)
+        computed = int(state.computed_prompt)
+        if not 0 < computed <= len(prompt):
+            raise RuntimeError(
+                f"frontier prefill cursor {computed} is outside prompt length {len(prompt)}"
+            )
+        desired = prompt[:computed]
+        if len(desired) > self.cache_descriptor.max_context_tokens:
+            raise ValueError(
+                f"request has {len(desired)} tokens but native model context is "
+                f"{self.cache_descriptor.max_context_tokens}; truncation is disabled"
+            )
+        handle, forwarded = self._ensure_sequence_with_result(state, desired)
+        if not state.prefill_done or computed != len(prompt):
+            return None, forwarded
+        self._prefixes.put(prompt, (handle.state, handle.last_logits))
+        token = self._sample(state, handle.last_logits, 0)
+        self._future_tokens.setdefault(state.request.request_id, {})[0] = token.token_id
+        return token, forwarded
+
     def execute(
         self,
         scheduled: tuple[ScheduledChunk, ...],
@@ -165,10 +202,9 @@ class NativeFrontierModelRunner:
         for chunk in scheduled:
             state = states[chunk.request_id]
             if chunk.is_prefill:
-                if state.prefill_done and state.computed_prompt == len(
-                    state.request.prompt_token_ids
-                ):
-                    sampled[chunk.request_id] = (self._score(state, 0),)
+                token, _forwarded = self._advance_prefill(state)
+                if token is not None:
+                    sampled[chunk.request_id] = (token,)
                 continue
             if chunk.num_tokens != 1:
                 raise ValueError(

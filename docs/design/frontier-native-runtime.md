@@ -1,7 +1,7 @@
 # Frontier model native runtime and example boundary
 
-Status: **Implemented for single-rank incremental execution and CPU/tiny-fixture
-contracts; production GPU and DeepSeek distributed gates are open** (2026-08-09)
+Status: **DeepSeek native EP/Attention-DP and SM120 packed-FP4 execution are
+implemented; full-checkpoint 262K/1M production gates remain open** (2026-08-10)
 
 This document amends FZ-D1 in `frontier-model-zoo.md`. It records what the
 frontier example rebuild may claim before full-checkpoint GPU evidence exists.
@@ -40,10 +40,13 @@ commit/rollback require their separate GPU gates before they can be enabled.
 ## FN-D3 — Checkpoint and parser trust boundary
 
 Qwen3.6 and DeepSeek V4 are loaded through pinned Transformers architecture
-classes with remote code disabled in the Kairyu process. The DeepSeek public
-block-FP8 loader delegates tensor materialization to the official class without
-requantization. The mixed FP4-expert/FP8-nonexpert full-checkpoint tensor ABI
-and SM120 packed kernels still require full-checkpoint GPU validation.
+classes with remote code disabled in the Kairyu process. The DeepSeek loader
+validates every official checkpoint header, shards only routed experts,
+preserves packed E2M1/UE8M0 experts and block-FP8 nonexperts, and disables
+remote code. The pinned fine-grained Triton kernel executes FP8 activations
+against the checkpoint's FP4 bytes directly on SM120; single-GPU kernel and
+two-rank NCCL dispatch smokes are green. Full-checkpoint numerical and 1M
+evidence remains a separate gate.
 
 The L3 API carries `reasoning_effort: low|high|max`, preserves
 `reasoning_content` in complete and streamed responses, and parses the pinned
@@ -51,20 +54,21 @@ DeepSeek DSML tool-call envelope. OpenAI-compatible replica gateways render the
 checkpoint chat template before sending an identity-wrapped request; Kairyu
 does not use legacy role concatenation.
 
-## FN-D4 — DeepSeek distributed target and open gate
+## FN-D4 — DeepSeek native distributed execution
 
-The committed descriptor and validation surface recognize EP 1/2/4/8 and the
-example topology is locked to two EP4 + Attention-DP replicas. The required
-native DeepSeek worker must shard experts at load time, retain replicated
-attention state per DP rank, and perform fixed-capacity NCCL all-to-all
-dispatch/combine without host-derived split vectors.
+The native worker supports request-owned Attention-DP with EP2/4/8. Each rank
+retains its own sliding/HCA/CSA state, while every prefill/decode phase agrees
+its forward count and pads missing-rank work before entering expert
+collectives. Routed experts use equal-capacity NCCL all-to-all dispatch and
+combine; ragged rank token counts require no host-derived split vectors and
+top-k contributions are restored in deterministic slot order before one BF16
+cast.
 
-That worker is **not GPU-validated or production-complete in this change**.
-The existing `DistEPLauncher` remains Qwen3-MoE-specific; it must not be
-reported as DeepSeek V4 support. Consequently DeepSeek Kairyu readiness,
-EP4/EP8 selection, 1M context, CUDA Graph, DSpark, soak, and failure-recovery
-remain formal open gates. No EP8 topology lock is generated until all gates
-pass and SLO-goodput exceeds EP4 by at least 2%.
+Two EP4 replicas remain the default example. A separate one-replica EP8 Compose
+profile is selected only by the committed topology gate. No EP8 topology lock
+is generated until real-checkpoint EP4/EP8 quality, 1M context, stability and
+SLO-goodput evidence passes, with EP8 at least 2% ahead. CUDA Graph, DSpark,
+30-minute soak, failure recovery and full-checkpoint 1M results remain open.
 
 ## FN-D5 — Orchestration policy
 
@@ -96,7 +100,7 @@ CPU/static gates. Full benchmark completion is intentionally a later GPU gate.
 
 - Qwen MTP stays off until greedy equality, sampling non-inferiority, the full
   quality suite, and at least 5% SLO-goodput improvement pass.
-- DeepSeek DSpark stays off under the equivalent 7-token gate.
+- DeepSeek DSpark stays off under the checkpoint-declared 5-token gate.
 - Kairyu performance is not publishable when paired quality is inferior.
 - `PROGRESS.md` must not claim production frontier support until the real
   Qwen 262K and DeepSeek EP4/EP8 1M GPU runs, 30-minute soak, OOM/worker-failure

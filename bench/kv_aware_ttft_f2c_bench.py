@@ -60,6 +60,13 @@ DEFAULT_CONFIG_PATHS = (
     "bench/deploy/qwen3-32b-multi-gpu/f2c-replica.yaml",
     "bench/deploy/qwen3-32b-multi-gpu/f2c-stack.sh",
 )
+_LEGACY_CONFIG_PATHS = tuple(
+    path.replace(
+        "bench/deploy/qwen3-32b-multi-gpu/",
+        "examples/qwen3-32b-multi-gpu/",
+    )
+    for path in DEFAULT_CONFIG_PATHS
+)
 F2C_SERVICES = ("replica-a0", "replica-a1", "replica-b0", "replica-b1")
 F2C_SERVICE_GPU_IDS = {
     "replica-a0": ("0", "1"),
@@ -98,6 +105,13 @@ _SOURCE_PATHS = (
     "kairyu/sampling_params.py",
     "pyproject.toml",
     "uv.lock",
+)
+_LEGACY_SOURCE_PATHS = tuple(
+    path.replace(
+        "bench/deploy/qwen3-32b-multi-gpu/",
+        "examples/qwen3-32b-multi-gpu/",
+    )
+    for path in _SOURCE_PATHS
 )
 _HEX = frozenset("0123456789abcdef")
 _NANOSECONDS = 1_000_000_000
@@ -379,7 +393,7 @@ def valid_runtime_attestation(
     image = value["image"]
     if not (
         value["schema_version"] == 1
-        and value["compose_file"] == DEFAULT_CONFIG_PATHS[0]
+        and value["compose_file"] in (DEFAULT_CONFIG_PATHS[0], _LEGACY_CONFIG_PATHS[0])
         and value["runtime_image"] == runtime_image
         and valid_runtime_image(runtime_image)
         and _valid_git_commit(expected_commit)
@@ -1054,7 +1068,7 @@ def _valid_source_value(value: object) -> bool:
     files_valid = (
         isinstance(files, list)
         and [item.get("path") for item in files if isinstance(item, dict)]
-        == list(_SOURCE_PATHS)
+        in (list(_SOURCE_PATHS), list(_LEGACY_SOURCE_PATHS))
         and all(
             isinstance(item, dict)
             and set(item) == {"path", "sha256"}
@@ -1150,7 +1164,7 @@ def _valid_configuration_value(
             }
             and _valid_git_commit(value["model_revision"])
             and [item["path"] for item in files]
-            == list(DEFAULT_CONFIG_PATHS)
+            in (list(DEFAULT_CONFIG_PATHS), list(_LEGACY_CONFIG_PATHS))
         )
     return True
 
