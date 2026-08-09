@@ -1,6 +1,11 @@
-# Frontier text model zoo reference path
+# Frontier text model zoo reference and native paths
 
-Status: **Implemented** (2026-08-09)
+Status: **Implemented for reference plus single-rank incremental execution;
+production frontier GPU/distributed gates remain open** (2026-08-09)
+
+Amendment: `frontier-native-runtime.md` adds an architecture-state cache and
+production selection boundary. FZ-D1 remains the diagnostic reference contract;
+it is no longer the production selection for Qwen3.6 or DeepSeek V4.
 
 ## Scope
 
@@ -20,7 +25,7 @@ available when this support landed.
 
 ## Decisions
 
-### FZ-D1 — Recompute complete text sequences
+### FZ-D1 — Recompute complete text sequences (diagnostic/reference mode)
 
 The new families mix full attention with recurrent, compressed, or delta
 attention state. They therefore use `RecomputeModelRunner`: each emitted token
@@ -28,7 +33,8 @@ runs the complete prompt plus committed completion through the text decoder.
 This is slower but preserves Kairyu scheduling and sampling semantics without
 pretending that recurrent state is ordinary paged KV.
 
-The reference path is eager and single-device. It rejects CUDA graphs,
+The reference path is eager and single-device. Production configs select the
+incremental native path described by FN-D1/FN-D2. Reference mode rejects CUDA graphs,
 speculative verification, DRAM KV tiering, TP/EP, and P-D separation. Those
 features require architecture-specific cache and sharding work with separate
 correctness/performance evidence.

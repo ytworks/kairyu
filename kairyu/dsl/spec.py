@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from kairyu.engine.openai_capabilities import resolve_openai_capabilities
@@ -47,12 +49,32 @@ class BudgetSpec(BaseModel):
     cost_per_1k_chars_usd: float | None = Field(default=None, gt=0)
 
 
+class RouterSpec(BaseModel):
+    """Immutable routing policy loaded from a calibrated artifact."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["rules", "calibrated"] = "rules"
+    artifact: str | None = None
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    target_mode: Literal["auto", "auto-max"] = "auto"
+
+    @model_validator(mode="after")
+    def _calibrated_artifact_is_pinned(self) -> RouterSpec:
+        if self.kind == "calibrated" and (self.artifact is None or self.sha256 is None):
+            raise ValueError("calibrated router requires artifact and sha256")
+        if self.kind == "rules" and (self.artifact is not None or self.sha256 is not None):
+            raise ValueError("rules router cannot specify artifact or sha256")
+        return self
+
+
 class OrchestratorSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     workers: tuple[WorkerSpec, ...] = Field(min_length=1)
     roles: tuple[RoleNodeSpec, ...] = ()
     budget: BudgetSpec = BudgetSpec()
+    router: RouterSpec = RouterSpec()
     shared_prefix: str = ""
     # Zero keeps the standard Conductor route. A positive value turns the
     # multi-agent route into that many parallel MoA proposals plus synthesis.

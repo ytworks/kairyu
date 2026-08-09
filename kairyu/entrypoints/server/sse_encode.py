@@ -63,7 +63,8 @@ class ChatContentSSEEncoder:
         )
         self._suffix = b"".join(
             (
-                b',"tool_calls":null},"finish_reason":null,"logprobs":null}]',
+                b',"reasoning_content":null,"tool_calls":null},'
+                b'"finish_reason":null,"logprobs":null}]',
                 b',"usage":null}' if include_usage else b"}",
                 b"\n\n",
             )

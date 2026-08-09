@@ -471,6 +471,7 @@ class Orchestrator:
                         tools_in_prompt=call.tools_in_prompt,
                         parallel_tool_calls=call.parallel_tool_calls,
                         tool_call_protocol=call.tool_call_protocol,
+                        reasoning_effort=call.reasoning_effort,
                     ),
                 )
             )
@@ -494,6 +495,7 @@ class Orchestrator:
             tools_in_prompt=call.tools_in_prompt,
             parallel_tool_calls=call.parallel_tool_calls,
             tool_call_protocol=call.tool_call_protocol,
+            reasoning_effort=call.reasoning_effort,
         )
 
     def _internal_intent_requests(
@@ -522,6 +524,7 @@ class Orchestrator:
                         request_id=f"preflight-internal-{key}",
                         prompt=f"{self._shared_prefix}{call.prompt}",
                         sampling_params=sampling_params,
+                        reasoning_effort=call.reasoning_effort,
                     ),
                 )
             )
@@ -952,6 +955,7 @@ class Orchestrator:
                 tools_in_prompt=call.tools_in_prompt,
                 parallel_tool_calls=call.parallel_tool_calls,
                 tool_call_protocol=call.tool_call_protocol,
+                reasoning_effort=call.reasoning_effort,
             )
         )
         # The last stage can ingest every preceding private output. Candidate
@@ -1249,6 +1253,7 @@ class Orchestrator:
                             tools_in_prompt=call.tools_in_prompt,
                             parallel_tool_calls=call.parallel_tool_calls,
                             tool_call_protocol=call.tool_call_protocol,
+                            reasoning_effort=call.reasoning_effort,
                         ),
                         GenerationResult(
                             request_id="moa",
@@ -1448,10 +1453,25 @@ class Orchestrator:
             )
         except _DirectExecutionError as error:
             trace_events.append(error.event)
-            raise OrchestratorExecutionError(
-                error.cause,
-                result_with_trace(text=""),
-            ) from error.cause
+            if decision.target == "tier1" and "tier2" in self._engines:
+                notes.append("failover: tier1 failed; retrying once on tier2")
+                try:
+                    direct_result, usage, direct_event = await self._run_direct(
+                        call,
+                        "tier2",
+                        notes,
+                    )
+                except _DirectExecutionError as failover_error:
+                    trace_events.append(failover_error.event)
+                    raise OrchestratorExecutionError(
+                        failover_error.cause,
+                        result_with_trace(text=""),
+                    ) from failover_error.cause
+            else:
+                raise OrchestratorExecutionError(
+                    error.cause,
+                    result_with_trace(text=""),
+                ) from error.cause
         trace_events.append(direct_event)
         return result_with_trace(
             text=direct_result.text,
@@ -1652,6 +1672,139 @@ class Orchestrator:
                         error=TraceError(type=type(error).__name__),
                     )
                 )
+                if (
+                    decision.target == "tier1"
+                    and "tier2" in self._engines
+                    and not "".join(text_parts)
+                ):
+                    notes.append("failover: tier1 failed before output; retrying once on tier2")
+                    failover_queued_at = utc_now_iso()
+                    failover_engine = self._engines["tier2"]
+                    failover_descriptor = self._engine_descriptors["tier2"]
+                    failover_request = await run_prompt_work(
+                        self._direct_generation_request,
+                        call,
+                        f"direct-{uuid.uuid4().hex[:12]}",
+                    )
+                    failover_last = None
+                    failover_usage = None
+                    failover_started_at = utc_now_iso()
+                    failover_first_token_at = None
+                    failover_emitted = 0
+                    failover_text_parts: list[str] = []
+                    try:
+                        async for partial in failover_engine.stream(failover_request):
+                            failover_last = partial
+                            if partial.usage is not None:
+                                failover_usage = partial.usage
+                                if usage_observer is not None:
+                                    usage_observer(failover_usage)
+                            completion = (
+                                partial.completions[0] if partial.completions else None
+                            )
+                            delta, failover_emitted = (
+                                completion.delta_after(failover_emitted)
+                                if completion is not None
+                                else ("", failover_emitted)
+                            )
+                            failover_text_parts.append(delta)
+                            if failover_first_token_at is None and partial.completions:
+                                failover_first_token_at = utc_now_iso()
+                            yield OrchestratorEvent(
+                                kind="delta",
+                                text=delta,
+                                completions=partial.completions,
+                            )
+                        if failover_last is None:
+                            raise RuntimeError("tier2 failover stream produced no result")
+                    except Exception as failover_error:
+                        failover_trace_usage = (
+                            TraceUsage(
+                                prompt_tokens=failover_usage.prompt_tokens,
+                                completion_tokens=failover_usage.completion_tokens,
+                                cached_tokens=failover_usage.cached_tokens,
+                            )
+                            if failover_usage is not None
+                            else None
+                        )
+                        trace_events.append(
+                            TraceEvent(
+                                node="tier2",
+                                kind="failed",
+                                operation="generation",
+                                status="failed",
+                                role="direct",
+                                worker="tier2",
+                                engine="tier2",
+                                model=failover_descriptor.model,
+                                timing=TraceTiming(
+                                    queued_at=failover_queued_at,
+                                    started_at=failover_started_at,
+                                    first_token_at=failover_first_token_at,
+                                    completed_at=utc_now_iso(),
+                                ),
+                                usage=failover_trace_usage,
+                                metadata={"streamed": True, "failover": True},
+                                error=TraceError(type=type(failover_error).__name__),
+                            )
+                        )
+                        usage = failover_usage or latest_usage or GenerationUsage()
+                        partial_result = result_with_trace(
+                            text="".join(failover_text_parts),
+                            prompt_tokens=usage.prompt_tokens,
+                            completion_tokens=usage.completion_tokens,
+                            cached_tokens=usage.cached_tokens,
+                        )
+                        yield OrchestratorEvent(
+                            kind="error",
+                            result=partial_result,
+                            error_type=type(failover_error).__name__,
+                        )
+                        return
+                    failover_trace_usage = (
+                        TraceUsage(
+                            prompt_tokens=failover_usage.prompt_tokens,
+                            completion_tokens=failover_usage.completion_tokens,
+                            cached_tokens=failover_usage.cached_tokens,
+                        )
+                        if failover_usage is not None
+                        else None
+                    )
+                    trace_events.append(
+                        TraceEvent(
+                            node="tier2",
+                            kind="generated",
+                            operation="generation",
+                            status="success",
+                            role="direct",
+                            worker="tier2",
+                            engine="tier2",
+                            model=failover_descriptor.model,
+                            timing=TraceTiming(
+                                queued_at=failover_queued_at,
+                                started_at=failover_started_at,
+                                first_token_at=failover_first_token_at,
+                                completed_at=utc_now_iso(),
+                            ),
+                            usage=failover_trace_usage,
+                            metadata={"streamed": True, "failover": True},
+                        )
+                    )
+                    usage = failover_usage or GenerationUsage()
+                    yield OrchestratorEvent(
+                        kind="result",
+                        result=result_with_trace(
+                            text=(
+                                failover_last.text
+                                or "".join(failover_text_parts)
+                            ),
+                            completions=failover_last.completions,
+                            prompt_tokens=usage.prompt_tokens,
+                            completion_tokens=usage.completion_tokens,
+                            cached_tokens=usage.cached_tokens,
+                        ),
+                    )
+                    return
                 usage = latest_usage or GenerationUsage()
                 partial_result = result_with_trace(
                     text="".join(text_parts),
@@ -1821,6 +1974,7 @@ class Orchestrator:
                         tools_in_prompt=call.tools_in_prompt,
                         parallel_tool_calls=call.parallel_tool_calls,
                         tool_call_protocol=call.tool_call_protocol,
+                        reasoning_effort=call.reasoning_effort,
                     ),
                     GenerationResult(
                         request_id="moa",

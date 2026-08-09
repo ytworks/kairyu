@@ -16,7 +16,7 @@
 # 0.6.14 itself is pure-python (py3-none-any), so `pip install .` is fast; only
 # the flashinfer-jit-cache build below runs nvcc (the slow step). Scope to
 # 12.0f (SM120) only — a full-arch build can trip unrelated FP4-kernel failures.
-FROM nvidia/cuda:13.0.1-devel-ubuntu24.04 AS flashinfer-build
+FROM nvidia/cuda:13.0.1-devel-ubuntu24.04@sha256:7d2f6a8c2071d911524f95061a0db363e24d27aa51ec831fcccf9e76eb72bc92 AS flashinfer-build
 ARG FLASHINFER_REF=v0.6.14                 # keep in sync with uv.lock flashinfer-python
 ARG FLASHINFER_CUDA_ARCH_LIST=12.0f        # SM120-only (Blackwell / RTX PRO 6000)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -56,7 +56,7 @@ ENV FLASHINFER_CUDA_ARCH_LIST=${FLASHINFER_CUDA_ARCH_LIST}
 RUN cd flashinfer-jit-cache && python -m build --no-isolation --wheel && ls -la dist/
 
 # ---- Stage 2: revision-independent runtime payload (no nvcc) -----------------
-FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04 AS runtime-payload
+FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04@sha256:c3fde347d52d578c84fd644bc177bc7ec333feaf11550d990da4084d7612e4c7 AS runtime-payload
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-dev python3.12-venv gcc curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
@@ -64,7 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # FP8/INT8/AWQ/GPTQ GEMMs then JIT device code through Triton's bundled NVIDIA
 # toolchain; nvcc remains absent. The FlashInfer jit-cache wheel above includes
 # the default FP4 quant/GEMM AOT modules in addition to scoped attention.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 /uv /usr/local/bin/uv
 WORKDIR /app
 # Bytecode compilation is disabled: with the full GPU dep set (torch + CUDA
 # libs) uv's parallel compile exhausts file descriptors (EMFILE / os error 24).

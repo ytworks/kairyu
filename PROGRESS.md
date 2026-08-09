@@ -71,12 +71,13 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - `kairyu serve --tp N` on real hardware: Qwen3-32B TP8, Llama-3.1-8B, Llama-3.3-70B FP8, Qwen3-VL-32B (via vLLM replica)
 - Attention backends: `auto`/torch/FlashInfer/FA3/FA4 with `/backends` reporting; capable CUDA models pre-capture decode graphs before readiness
 - Quantized serving: FP8/INT8/AWQ/GPTQ/NVFP4 without full dequantization; opt-in FP8 EAGLE/MTP draft loading
-- Single-device eager text reference path for Qwen3.6 dense/MoE, DeepSeek V4, and Kimi K3; Qwen3.8 remains excluded until public
+- Single-device incremental architecture-state path for Qwen3.6 and DeepSeek V4 plus an explicit recompute diagnostic mode; tiny-fixture parity is green, production GPU/distributed gates are not
 - Device-side sampling, penalties, spec verification, page-table caching; TP step headers sleep on Gloo while fixed-layout delta payloads use the bounded NCCL model group and rare controls remain Gloo objects; structured masks stay on CUDA with only selected IDs returned to the host matcher; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
+- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with pinned revisions/images, offline model attestations, unified lifecycle/benchmark CLIs, and per-attempt reports
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -87,7 +88,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
 - Production stage-sharded pipeline parallelism is a separate roadmap dependency (current PP report is not it)
 - Learned-draft real-checkpoint acceptance/performance evidence remains open; FP8-E4M3 KV remains disabled after its calibrated re-bake failed exact-output and decode-envelope checks
-- Frontier hybrid models still need architecture-native recurrent/KV caching, graph/spec support, distributed execution, and full-checkpoint performance evidence
+- Frontier architecture-state caching is implemented for single-rank eager execution; CUDA Graph pointer stability, MTP/DSpark selection, mixed-FP4 DeepSeek kernels, DeepSeek EP/Attention-DP workers, EP4/EP8 selection, and full-checkpoint 262K/1M evidence remain open
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Human sign-off pending on M2–M4 design reviews
@@ -96,6 +97,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-09 — [amendment] Frontier production selection uses architecture state
+- What: Qwen3.6/DeepSeek V4 gained composite cache descriptors, complete-prefix snapshots, transactional rollback, and a single-rank incremental runner; the example surface was rebuilt around three pinned offline environments and a report-owning benchmark CLI.
+- Why: full-sequence recomputation cannot exercise native context or serving performance, while generic paged KV cannot represent DeltaNet or HCA/CSA state. DeepSeek EP/Attention-DP and GPU gates remain explicitly open.
+- Refs: FN-D1–FN-D7; `docs/design/frontier-native-runtime.md`; `examples/`; `kairyu/engine/core/frontier_{cache,runner}.py`
 
 ### 2026-08-09 — [progress] Accuracy reports add sourced frontier gaps and target timing
 - What: Accuracy comparison artifacts now carry a SHA-bound six-model public-score catalog and per-reference gaps; direct generation rows retain streamed TTFT/TPS evidence and every scoreboard renders target-only performance coverage.

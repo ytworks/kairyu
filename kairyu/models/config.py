@@ -39,13 +39,18 @@ _MOE_ARCHITECTURES = (
 
 _REFERENCE_ARCHITECTURES = frozenset(
     {
+        "KimiLinearForCausalLM",
+        "KimiK3ForConditionalGeneration",
+    }
+)
+
+_STATEFUL_FRONTIER_ARCHITECTURES = frozenset(
+    {
         "DeepseekV4ForCausalLM",
         "Qwen3_5ForCausalLM",
         "Qwen3_5ForConditionalGeneration",
         "Qwen3_5MoeForCausalLM",
         "Qwen3_5MoeForConditionalGeneration",
-        "KimiLinearForCausalLM",
-        "KimiK3ForConditionalGeneration",
     }
 )
 
@@ -109,6 +114,43 @@ class MlaConfig:
 
 
 @dataclass(frozen=True)
+class FrontierCacheConfig:
+    """Architecture-native state carried between frontier decoder steps.
+
+    The dimensions are deliberately checkpoint-derived.  They are used for
+    admission/provenance and cache construction; no generic paged-KV fallback
+    is allowed to guess a layout for these hybrid architectures.
+    """
+
+    family: str
+    layer_types: tuple[str, ...]
+    block_size: int
+    recurrent_state_dtype: str | None = None
+    linear_conv_kernel_dim: int | None = None
+    linear_num_key_heads: int | None = None
+    linear_num_value_heads: int | None = None
+    linear_key_head_dim: int | None = None
+    linear_value_head_dim: int | None = None
+    sliding_window: int | None = None
+    compress_rate_csa: int | None = None
+    compress_rate_hca: int | None = None
+    index_topk: int | None = None
+    index_n_heads: int | None = None
+    index_head_dim: int | None = None
+    hc_mult: int | None = None
+    hc_sinkhorn_iters: int | None = None
+    fp4_indexer_cache: bool = False
+
+    @property
+    def full_attention_layers(self) -> tuple[int, ...]:
+        return tuple(
+            index
+            for index, layer_type in enumerate(self.layer_types)
+            if layer_type == "full_attention"
+        )
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     architecture: str
     hidden_size: int
@@ -126,6 +168,7 @@ class ModelConfig:
     max_position_embeddings: int = 4096
     moe: MoeConfig | None = None
     mla: MlaConfig | None = None
+    frontier_cache: FrontierCacheConfig | None = None
 
     @property
     def qkv_bias(self) -> bool:
@@ -156,6 +199,12 @@ class ModelConfig:
     def requires_full_recompute(self) -> bool:
         """Whether this architecture uses the correctness-first sequence runner."""
         return self.architecture in _REFERENCE_ARCHITECTURES
+
+    @property
+    def uses_stateful_frontier_cache(self) -> bool:
+        """Whether production execution must use the model-native state cache."""
+
+        return self.architecture in _STATEFUL_FRONTIER_ARCHITECTURES
 
     @property
     def is_mla(self) -> bool:
@@ -322,6 +371,59 @@ def _mla_fields(config: dict, architecture: str) -> MlaConfig | None:
     )
 
 
+def _frontier_cache_fields(
+    config: dict,
+    architecture: str,
+) -> FrontierCacheConfig | None:
+    if architecture in {
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+    }:
+        layer_types = tuple(config.get("layer_types") or ())
+        if len(layer_types) != int(config["num_hidden_layers"]):
+            raise ValueError("Qwen3.5 layer_types must cover every hidden layer")
+        if any(kind not in {"linear_attention", "full_attention"} for kind in layer_types):
+            raise ValueError("Qwen3.5 layer_types contain an unsupported cache family")
+        return FrontierCacheConfig(
+            family="qwen3.5-hybrid-deltanet",
+            layer_types=layer_types,
+            block_size=16,
+            recurrent_state_dtype=str(config.get("mamba_ssm_dtype", "float32")),
+            linear_conv_kernel_dim=int(config["linear_conv_kernel_dim"]),
+            linear_num_key_heads=int(config["linear_num_key_heads"]),
+            linear_num_value_heads=int(config["linear_num_value_heads"]),
+            linear_key_head_dim=int(config["linear_key_head_dim"]),
+            linear_value_head_dim=int(config["linear_value_head_dim"]),
+        )
+    if architecture == "DeepseekV4ForCausalLM":
+        layer_types = tuple(config.get("layer_types") or ())
+        if len(layer_types) != int(config["num_hidden_layers"]):
+            raise ValueError("DeepSeek V4 layer_types must cover every hidden layer")
+        allowed = {"heavily_compressed_attention", "compressed_sparse_attention"}
+        if any(kind not in allowed for kind in layer_types):
+            raise ValueError("DeepSeek V4 layer_types contain an unsupported cache family")
+        rates = config.get("compress_rates")
+        if not isinstance(rates, dict):
+            raise ValueError("DeepSeek V4 requires compress_rates")
+        return FrontierCacheConfig(
+            family="deepseek-v4-hca-csa",
+            layer_types=layer_types,
+            block_size=256,
+            sliding_window=int(config["sliding_window"]),
+            compress_rate_csa=int(rates["compressed_sparse_attention"]),
+            compress_rate_hca=int(rates["heavily_compressed_attention"]),
+            index_topk=int(config["index_topk"]),
+            index_n_heads=int(config["index_n_heads"]),
+            index_head_dim=int(config["index_head_dim"]),
+            hc_mult=int(config["hc_mult"]),
+            hc_sinkhorn_iters=int(config["hc_sinkhorn_iters"]),
+            fp4_indexer_cache=bool(config.get("use_fp4_indexer_cache", True)),
+        )
+    return None
+
+
 def _required_int(
     config: dict,
     field: str,
@@ -360,7 +462,7 @@ def parse_model_config(config: dict) -> ModelConfig:
             raise ValueError(f"{architecture} requires a text_config object")
         config = text_config
     if (
-        architecture not in _REFERENCE_ARCHITECTURES
+        architecture not in (_REFERENCE_ARCHITECTURES | _STATEFUL_FRONTIER_ARCHITECTURES)
         and config.get("sliding_window")
         and config.get("use_sliding_window", True)
     ):
@@ -419,6 +521,7 @@ def parse_model_config(config: dict) -> ModelConfig:
         max_position_embeddings=max_position_embeddings,
         moe=_moe_fields(config, architecture),
         mla=mla,
+        frontier_cache=_frontier_cache_fields(config, architecture),
     )
     object.__setattr__(model_config, "_attention_bias", bool(config.get("attention_bias")))
     return model_config

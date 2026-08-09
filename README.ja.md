@@ -286,9 +286,8 @@ vLLM は Linux GPU ホストで `vllm` バックエンドを使う場合のみ�
 
 ```bash
 uv run pytest                                        # フルスイート, カバレッジゲート 80%
-uv run python examples/basic_offline_inference.py    # vLLM 流の LLM API (mock バックエンド)
-uv run python examples/run_yaml_pool.py              # 宣言的マルチエージェントプール
-uv run python examples/serve.py                      # OpenAI 互換サーバ (:8000)
+./examples/qwen3.6-27b-1gpu/bench.sh list             # frontier ベンチマーク一覧
+./examples/qwen3.6-27b-1gpu/run.sh kairyu             # 固定済み OpenAI 互換 1 GPU 環境
 ```
 
 そのまま [単一モデル版](#5-単一モデル版--セットアップと使い方) か
@@ -844,7 +843,7 @@ uv run kairyu bench run --base-url http://localhost:8000/v1 \
     --model m1 --model kairyu-auto --model kairyu-auto-max
 uv run kairyu bench run --suite core --smoke \
     --base-url http://localhost:8000/v1 --model m1
-uv run kairyu bench run --config examples/bench_structured.yaml
+uv run kairyu bench run --config bench/configs/structured.yaml
 ```
 
 Structured 適合性スイートは nested、recursive、enum、pattern、union の各 schema

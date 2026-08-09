@@ -51,6 +51,23 @@ class _StartupBackend(MockBackend):
         self.startup_count += 1
 
 
+class _FailingBackend(MockBackend):
+    def __init__(self, message: str = "backend failed") -> None:
+        super().__init__()
+        self.message = message
+        self.generate_calls = 0
+        self.stream_calls = 0
+
+    async def generate(self, request: GenerationRequest):
+        self.generate_calls += 1
+        raise RuntimeError(self.message)
+
+    async def stream(self, request: GenerationRequest):
+        self.stream_calls += 1
+        raise RuntimeError(self.message)
+        yield  # pragma: no cover - makes this an async generator
+
+
 class _PreparingBackend(MockBackend):
     def __init__(
         self,
@@ -167,6 +184,43 @@ def test_preview_route_rejects_router_without_preview():
     orchestrator = _orchestrator(router=RouteOnly())
     with pytest.raises(PreviewNotSupportedError, match="does not support preview"):
         orchestrator.preview_route(SIMPLE)
+
+
+async def test_tier1_direct_failure_retries_tier2_once() -> None:
+    tier1 = _FailingBackend()
+    tier2 = MockBackend({SIMPLE: "tier2 answer"})
+    orchestrator = _orchestrator(engines={"tier1": tier1, "tier2": tier2})
+
+    result = await orchestrator.run(SIMPLE)
+
+    assert result.text == "tier2 answer"
+    assert tier1.generate_calls == 1
+    assert len(tier2.prompts_seen) == 1
+    assert any("retrying once on tier2" in note for note in result.trace)
+    assert [event.node for event in result.structured_trace.events] == [
+        "router",
+        "tier1",
+        "tier2",
+    ]
+
+
+async def test_tier1_stream_failure_before_output_retries_tier2_once() -> None:
+    tier1 = _FailingBackend()
+    tier2 = MockBackend({SIMPLE: "tier2 answer"})
+    orchestrator = _orchestrator(engines={"tier1": tier1, "tier2": tier2})
+
+    events = [
+        event
+        async for event in await orchestrator.run_chat(SIMPLE, stream=True)
+    ]
+
+    assert tier1.stream_calls == 1
+    assert len(tier2.prompts_seen) == 1
+    assert events[-1].kind == "result"
+    assert events[-1].result.text == "tier2 answer"
+    assert any(
+        "retrying once on tier2" in note for note in events[-1].result.trace
+    )
 
 
 def test_auto_admission_bound_accounts_for_internal_fanout() -> None:

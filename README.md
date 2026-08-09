@@ -306,9 +306,8 @@ environment).
 
 ```bash
 uv run pytest                                        # full suite, coverage gate 80%
-uv run python examples/basic_offline_inference.py    # vLLM-style LLM API (mock backend)
-uv run python examples/run_yaml_pool.py              # declarative multi-agent pool
-uv run python examples/serve.py                      # OpenAI-compatible server on :8000
+./examples/qwen3.6-27b-1gpu/bench.sh list             # inspect the frontier benchmark surface
+./examples/qwen3.6-27b-1gpu/run.sh kairyu             # pinned OpenAI-compatible 1-GPU stack
 ```
 
 Then pick your path: [single model](#5-single-model-setup--usage) or
@@ -1016,7 +1015,7 @@ uv run kairyu bench run --base-url http://localhost:8000/v1 \
     --model m1 --model kairyu-auto --model kairyu-auto-max
 uv run kairyu bench run --suite core --smoke \
     --base-url http://localhost:8000/v1 --model m1
-uv run kairyu bench run --config examples/bench_structured.yaml
+uv run kairyu bench run --config bench/configs/structured.yaml
 ```
 
 Structured conformance pairs the same prompt and seed with and without

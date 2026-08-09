@@ -1,0 +1,22 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  max_concurrency: 64
+
+engines:
+  qwen3.6-27b:
+    backend: kairyu
+    options:
+      model_path: /models/qwen3.6-27b
+      model_revision: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+      max_model_len: 262144
+      quantization_format: bfloat16
+      execution_mode: native
+      tensor_parallel_size: 1
+      num_pages: 32768
+      page_size: 16
+      max_num_batched_tokens: 262144
+      max_num_seqs: 64
+      prefix_state_capacity_bytes: 8589934592
+      mtp_enabled: false

@@ -103,7 +103,7 @@ _TRACE_CONSTRUCTION = "stable-single-token-repeat-v1"
 _CHECKPOINT_ROOT = "/models/qwen3-32b"
 _ENGINE_CONFIG_PATH = "/tmp/kairyu.yaml"
 _GATEWAY_CONFIG_PATH = (
-    "/workspace/examples/qwen3-32b-multi-gpu/auto-gateway.yaml"
+    "/workspace/bench/deploy/qwen3-32b-multi-gpu/auto-gateway.yaml"
 )
 _ENGINE_SERVICE = "kairyu"
 _GATEWAY_SERVICE = "auto-gateway"
@@ -860,7 +860,7 @@ def _engine_config_valid(text: object, tensor_parallel_size: int) -> bool:
         return False
     expected = (
         _REPO_ROOT
-        / "examples/qwen3-32b-multi-gpu/kairyu.template.yaml"
+        / "bench/deploy/qwen3-32b-multi-gpu/kairyu.template.yaml"
     ).read_text(encoding="utf-8").replace(
         "__TENSOR_PARALLEL_SIZE__",
         str(tensor_parallel_size),
@@ -985,7 +985,7 @@ def _runtime_attestation_valid(
             destination="/etc/kairyu/config.template.yaml",
         )
         and engine["template_mount"]["source"]
-        == "repo:examples/qwen3-32b-multi-gpu/kairyu.template.yaml"
+        == "repo:bench/deploy/qwen3-32b-multi-gpu/kairyu.template.yaml"
         and _engine_port_binding_valid(engine["port_binding"])
         and _device_request_valid(
             engine["device_request"],
@@ -1053,7 +1053,7 @@ def _runtime_attestation_valid(
         and gateway_config["value"]
         == (
             _REPO_ROOT
-            / "examples/qwen3-32b-multi-gpu/auto-gateway.yaml"
+            / "bench/deploy/qwen3-32b-multi-gpu/auto-gateway.yaml"
         ).read_text(encoding="utf-8")
     )
 
@@ -1083,7 +1083,7 @@ def capture_runtime_attestation(
     )
     if (
         template_mount["source"]
-        != "repo:examples/qwen3-32b-multi-gpu/kairyu.template.yaml"
+        != "repo:bench/deploy/qwen3-32b-multi-gpu/kairyu.template.yaml"
     ):
         raise ValueError("engine template mount is not this checkout")
     engine = {

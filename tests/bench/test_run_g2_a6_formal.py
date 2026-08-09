@@ -172,7 +172,7 @@ def test_kairyu_template_pins_context_cache_pipeline_and_access_log(
     del tmp_path
     template = (
         a6._REPO_ROOT
-        / "examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
+        / "bench/deploy/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
     ).read_text(encoding="utf-8")
     rendered = runner.render_kairyu_config(a6, template, 8)
 
@@ -293,7 +293,7 @@ def test_dry_fixture_satisfies_the_full_32_plus_20_live_schema(
     }
     template = (
         a6._REPO_ROOT
-        / "examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
+        / "bench/deploy/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
     ).read_text(encoding="utf-8")
 
     runner.dry_validate_provenance(
@@ -319,7 +319,7 @@ def test_live_container_attestation_binds_image_mounts_and_imports(
     (tmp_path / "kairyu").mkdir()
     template = (
         a6._REPO_ROOT
-        / "examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
+        / "bench/deploy/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
     ).read_text(encoding="utf-8")
     rendered = runner.render_kairyu_config(a6, template, 4)
     config_path = tmp_path / "config.yaml"

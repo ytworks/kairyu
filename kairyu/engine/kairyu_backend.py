@@ -76,7 +76,8 @@ from kairyu.outputs import CompletionOutput
 
 _VOCAB_SIZE = 50_000
 _DECODE_MODES = frozenset({"eager", "cuda_graph"})
-_EXPERT_PARALLEL_SIZES = frozenset({1, 2, 4})
+_EXPERT_PARALLEL_SIZES = frozenset({1, 2, 4, 8})
+_FRONTIER_EXECUTION_MODES = frozenset({"auto", "native", "reference"})
 logger = logging.getLogger(__name__)
 _TokenizerWorkT = TypeVar("_TokenizerWorkT")
 
@@ -133,8 +134,10 @@ def _resolve_decode_mode(
 
             model_config = parse_model_config(raw_config)
     if model_config is not None:
-        if getattr(model_config, "is_mla", False) or getattr(
-            model_config, "requires_full_recompute", False
+        if (
+            getattr(model_config, "is_mla", False)
+            or getattr(model_config, "requires_full_recompute", False)
+            or getattr(model_config, "uses_stateful_frontier_cache", False)
         ):
             return "eager"
     from kairyu.engine.core.hw_profile import probe
@@ -493,6 +496,8 @@ def build_engine_loop(
     dram_kv_tier_profile: str | Path | None = None,
     generation_config: GenerationConfigMode = "auto",
     nvfp4_accuracy_profile=None,
+    execution_mode: str = "auto",
+    prefix_state_capacity_bytes: int = 0,
 ) -> tuple[EngineLoop, RadixKVCache, Scheduler | PDLoopAdapter]:
     """Assemble the engine stack; shared by KairyuBackend and the ZMQ service.
 
@@ -509,9 +514,15 @@ def build_engine_loop(
     accuracy_profile = NvFp4AccuracyProfile.parse(nvfp4_accuracy_profile)
     nvfp4_accuracy_profile = accuracy_profile.as_dict() if accuracy_profile.active else None
     reference_recompute = False
+    stateful_frontier = False
     raw_model_config = None
     reference_config = None
     _validate_max_model_len(max_model_len)
+    if execution_mode not in _FRONTIER_EXECUTION_MODES:
+        known = ", ".join(sorted(_FRONTIER_EXECUTION_MODES))
+        raise ValueError(f"execution_mode must be one of: {known}")
+    if type(prefix_state_capacity_bytes) is not int or prefix_state_capacity_bytes < 0:
+        raise ValueError("prefix_state_capacity_bytes must be a non-negative integer")
     generation_config = validate_generation_config_mode(generation_config)
     if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
         raise ValueError(
@@ -595,7 +606,14 @@ def build_engine_loop(
             raw_model_config=raw_model_config,
         )
         if reference_config is not None:
-            reference_recompute = reference_config.requires_full_recompute
+            stateful_frontier = reference_config.uses_stateful_frontier_cache
+            if execution_mode == "native" and not stateful_frontier:
+                raise ValueError(
+                    "execution_mode='native' requires Qwen3.5/3.6 or DeepSeek V4"
+                )
+            reference_recompute = reference_config.requires_full_recompute or (
+                stateful_frontier and execution_mode == "reference"
+            )
             if reference_recompute:
                 if (
                     tensor_parallel_size != 1
@@ -626,6 +644,36 @@ def build_engine_loop(
                 if kv_cache_dtype != "auto":
                     raise ValueError(
                         "hybrid reference execution does not use a KV cache"
+                    )
+            elif stateful_frontier:
+                if expert_parallel:
+                    raise ValueError(
+                        "frontier native expert parallel execution is not production-ready; "
+                        "the current DistEP worker supports Qwen3MoeForCausalLM only"
+                    )
+                if tensor_parallel_size != 1 or pd_separation:
+                    raise ValueError(
+                        "frontier native cache supports TP1 and no P-D separation; "
+                        "DeepSeek distributed serving uses expert parallelism"
+                    )
+                if speculative is not None:
+                    raise ValueError(
+                        "frontier draft decoding is disabled until its model-specific "
+                        "parity/goodput gate selects it"
+                    )
+                if decode_mode == "cuda_graph":
+                    raise ValueError(
+                        "frontier native cache graph capture is disabled until its "
+                        "pointer-stability gate passes"
+                    )
+                if dram_kv_tier_capacity_pages:
+                    raise ValueError(
+                        "frontier native cache does not use the generic DRAM KV tier"
+                    )
+                if kv_cache_dtype != "auto":
+                    raise ValueError(
+                        "frontier native cache dtype is checkpoint-owned; use "
+                        "kv_cache_dtype='auto'"
                     )
     decode_mode = _resolve_decode_mode(
         decode_mode,
@@ -918,7 +966,7 @@ def build_engine_loop(
         )
         if loaded_generation != generation:
             raise RuntimeError("generation defaults changed during model loading")
-        if not reference_recompute:
+        if not reference_recompute and not stateful_frontier:
             resolved_kv_cache_dtype = resolve_kv_cache_dtype(
                 kv_cache_dtype,
                 compute_dtype,
@@ -968,6 +1016,14 @@ def build_engine_loop(
         runner = RecomputeModelRunner(
             model,
             sampler=Sampler(vocab_provider=lambda: grammar_vocab),
+        )
+    elif model_path is not None and stateful_frontier:
+        from kairyu.engine.core.frontier_runner import NativeFrontierModelRunner
+
+        runner = NativeFrontierModelRunner(
+            model,
+            sampler=Sampler(vocab_provider=lambda: grammar_vocab),
+            prefix_state_capacity_bytes=prefix_state_capacity_bytes,
         )
     elif model_path is not None:
         pool = PagedKVPool.for_cache(
@@ -1457,10 +1513,23 @@ class KairyuBackend:
         generation_config: GenerationConfigMode = "auto",
         draft_model_path: str | Path | None = None,
         nvfp4_accuracy_profile=None,
+        execution_mode: str = "auto",
+        prefix_state_capacity_bytes: int = 0,
+        model_revision: str | None = None,
+        quantization_format: str | None = None,
+        container_image_digest: str | None = None,
+        mtp_enabled: bool = False,
+        dspark_enabled: bool = False,
     ) -> None:
         self.tensor_parallel_size = tensor_parallel_size
         self.expert_parallel_size = expert_parallel_size
         self.expert_parallel_attention_dp = expert_parallel_attention_dp
+        self.model_revision = model_revision
+        self.max_model_len = max_model_len
+        self.quantization_format = quantization_format
+        self.container_image_digest = container_image_digest
+        self.mtp_enabled = mtp_enabled
+        self.dspark_enabled = dspark_enabled
         self._loop, self._cache, self._scheduler = build_engine_loop(
             num_pages=num_pages,
             page_size=page_size,
@@ -1492,6 +1561,8 @@ class KairyuBackend:
             dram_kv_tier_profile=dram_kv_tier_profile,
             generation_config=generation_config,
             nvfp4_accuracy_profile=nvfp4_accuracy_profile,
+            execution_mode=execution_mode,
+            prefix_state_capacity_bytes=prefix_state_capacity_bytes,
         )
         self._sequence_budget = max_num_seqs
         self.generation_defaults = self._loop.generation_defaults
@@ -1520,6 +1591,12 @@ class KairyuBackend:
         self.dram_kv_tier_min_restore_tokens = (
             self._loop.dram_kv_tier_min_restore_tokens
         )
+        loop_runner = getattr(self._loop, "_runner", None)
+        descriptor = getattr(loop_runner, "cache_descriptor", None)
+        self.cache_descriptor = (
+            descriptor.as_dict() if callable(getattr(descriptor, "as_dict", None)) else None
+        )
+        self.execution_mode = getattr(loop_runner, "execution_mode", "paged_kv")
         if tokenizer is None:
             validation_tokenizer_source = model_path or "toy"
         elif isinstance(tokenizer, str):
@@ -2231,6 +2308,7 @@ class KairyuBackend:
                     trace_requested=request.trace_requested,
                     parallel_tool_calls=request.parallel_tool_calls,
                     tool_call_protocol=request.tool_call_protocol,
+                    reasoning_effort=request.reasoning_effort,
                 )
             )
         return subs

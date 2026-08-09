@@ -56,9 +56,9 @@ DEFAULT_COHORT_B_ENDPOINTS = (
     "http://127.0.0.1:8103/v1",
 )
 DEFAULT_CONFIG_PATHS = (
-    "examples/qwen3-32b-multi-gpu/f2c-compose.yaml",
-    "examples/qwen3-32b-multi-gpu/f2c-replica.yaml",
-    "examples/qwen3-32b-multi-gpu/f2c-stack.sh",
+    "bench/deploy/qwen3-32b-multi-gpu/f2c-compose.yaml",
+    "bench/deploy/qwen3-32b-multi-gpu/f2c-replica.yaml",
+    "bench/deploy/qwen3-32b-multi-gpu/f2c-stack.sh",
 )
 F2C_SERVICES = ("replica-a0", "replica-a1", "replica-b0", "replica-b1")
 F2C_SERVICE_GPU_IDS = {
@@ -84,9 +84,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SOURCE_PATHS = (
     "bench/kv_aware_ttft_f2c_bench.py",
     "Dockerfile.cuda",
-    "examples/qwen3-32b-multi-gpu/f2c-compose.yaml",
-    "examples/qwen3-32b-multi-gpu/f2c-replica.yaml",
-    "examples/qwen3-32b-multi-gpu/f2c-stack.sh",
+    "bench/deploy/qwen3-32b-multi-gpu/f2c-compose.yaml",
+    "bench/deploy/qwen3-32b-multi-gpu/f2c-replica.yaml",
+    "bench/deploy/qwen3-32b-multi-gpu/f2c-stack.sh",
     "bench/results/env-2026-07-25.json",
     "bench/results/parity-tp-qwen3-32b-2026-07-26.json",
     "bench/results/hf-reference-qwen3-32b.json",

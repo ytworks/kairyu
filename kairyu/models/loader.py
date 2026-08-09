@@ -128,7 +128,10 @@ def load_model(
     )
     config = parse_model_config(raw_config)
     declared_quant = declared_quantization_config(raw_config)
-    if config.requires_full_recompute:
+    official_frontier_decoder = (
+        config.requires_full_recompute or config.uses_stateful_frontier_cache
+    )
+    if official_frontier_decoder:
         if linear_selection_policy is not None:
             raise ValueError(
                 "hybrid reference execution does not support linear_selection_policy"
@@ -165,11 +168,11 @@ def load_model(
         else raw_config
     )
     quant = load_checkpoint_quantization(directory, quant_config).weights
-    if config.requires_full_recompute:
+    if official_frontier_decoder:
         if quant.method is not QuantMethod.NONE:
             raise ValueError(
-                f"{config.architecture} reference execution currently requires "
-                "an unquantized checkpoint"
+                f"{config.architecture} official decoder has no registered loader "
+                f"for quantization method {quant.method.value!r}"
             )
         from kairyu.models.reference import load_reference_decoder
 

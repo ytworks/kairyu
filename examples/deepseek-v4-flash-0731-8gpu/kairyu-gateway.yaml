@@ -1,0 +1,29 @@
+server: {host: 0.0.0.0, port: 8000, api_keys_env: null, max_concurrency: 128}
+pools:
+  deepseek-v4-flash-0731:
+    replicas:
+      - backend: openai
+        health_url: http://kairyu-a:8000/readyz
+        options: &native
+          base_url: http://kairyu-a:8000/v1
+          model: deepseek-v4-flash-0731
+          api_key_env: null
+          upstream: kairyu
+          allow_templated_chat_passthrough: true
+          chat_tokenizer: /models/deepseek-v4-flash-0731
+          model_revision: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+          max_model_len: 1048576
+          quantization_format: mixed-fp4-fp8
+          cache_descriptor: {family: deepseek-v4-hca-csa-dsa, block_size: 256}
+          expert_parallel_size: 4
+          attention_data_parallel_size: 4
+          dspark_enabled: false
+      - backend: openai
+        health_url: http://kairyu-b:8000/readyz
+        options:
+          <<: *native
+          base_url: http://kairyu-b:8000/v1
+    unhealthy_after: 1
+    queue_depth_threshold: 16
+    prefix_index: true
+    probe_interval_s: 2.0

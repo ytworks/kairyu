@@ -56,7 +56,7 @@ def _expert_parallel_metadata(value: object) -> dict[str, object] | None:
     decode_mode = value.get("decode_mode")
     if (
         type(expert_parallel_size) is not int
-        or expert_parallel_size not in {2, 4}
+        or expert_parallel_size not in {2, 4, 8}
         or type(output_parallel_size) is not int
         or output_parallel_size < 1
         or type(pipeline_depth) is not int
@@ -583,6 +583,24 @@ def add_health_routes(
                 entry["requested_kv_cache_dtype"] = requested_kv_dtype
             if isinstance(resolved_kv_dtype, str) and resolved_kv_dtype:
                 entry["kv_cache_dtype"] = resolved_kv_dtype
+            for field in (
+                "model_revision",
+                "max_model_len",
+                "quantization_format",
+                "cache_descriptor",
+                "execution_mode",
+                "attention_data_parallel_size",
+                "mtp_enabled",
+                "dspark_enabled",
+                "container_image_digest",
+            ):
+                value = getattr(engine, field, None)
+                if value is not None:
+                    entry[field] = value
+            if "container_image_digest" not in entry:
+                image_digest = os.environ.get("KAIRYU_CONTAINER_IMAGE_DIGEST")
+                if image_digest:
+                    entry["container_image_digest"] = image_digest
             generation_defaults = getattr(
                 engine,
                 "generation_defaults",

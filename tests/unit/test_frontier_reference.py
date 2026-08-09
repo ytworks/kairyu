@@ -122,7 +122,7 @@ def test_qwen36_outer_checkpoint_logits_parity(
         ).logits[0]
         actual = loaded.forward_sequence(tokens)
     assert config.architecture == architecture
-    assert config.requires_full_recompute
+    assert config.uses_stateful_frontier_cache
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
@@ -162,7 +162,7 @@ def test_deepseek_v4_checkpoint_logits_parity(tmp_path) -> None:
         ).logits[0]
         actual = loaded.forward_sequence(tokens)
     assert config.architecture == "DeepseekV4ForCausalLM"
-    assert config.requires_full_recompute
+    assert config.uses_stateful_frontier_cache
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
     bf16_loaded, _, _ = load_model(tmp_path, dtype=torch.bfloat16)
@@ -386,6 +386,12 @@ def test_qwen36_quantized_reference_is_rejected_by_load_and_validation(
         "intermediate_size": 24,
         "vocab_size": 32,
         "sliding_window": 8,
+        "layer_types": ["linear_attention", "full_attention"],
+        "linear_conv_kernel_dim": 4,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_key_head_dim": 4,
+        "linear_value_head_dim": 4,
         "quantization_config": {
             "quant_method": "awq",
             "bits": 4,
@@ -402,7 +408,7 @@ def test_qwen36_quantized_reference_is_rejected_by_load_and_validation(
         with pytest.raises(ValueError, match=option):
             load_model(tmp_path, **{option: {}})
 
-    with pytest.raises(ValueError, match="requires an unquantized checkpoint"):
+    with pytest.raises(ValueError, match="has no registered loader for quantization method"):
         load_model(tmp_path)
     findings = _validate_model(
         str(tmp_path),
@@ -460,7 +466,6 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
     from transformers import Qwen3_5ForCausalLM, Qwen3_5TextConfig
 
     from kairyu.engine.core import hw_profile
-    from kairyu.engine.core.recompute_runner import RecomputeModelRunner
     from kairyu.engine.kairyu_backend import build_engine_loop
 
     text_config = Qwen3_5TextConfig(
@@ -505,7 +510,7 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
         "probe",
         lambda: hw_profile.HardwareProfile(arch="cpu"),
     )
-    with pytest.raises(ValueError, match="single-device only"):
+    with pytest.raises(ValueError, match="supports TP1"):
         build_engine_loop(
             model_path=str(tmp_path),
             tokenizer=_Tokenizer(),
@@ -513,7 +518,7 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
             tensor_parallel_size=2,
         )
 
-    with pytest.raises(ValueError, match="does not use a KV cache"):
+    with pytest.raises(ValueError, match="checkpoint-owned"):
         build_engine_loop(
             model_path=str(tmp_path),
             tokenizer=_Tokenizer(),
@@ -529,7 +534,9 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
         page_size=4,
     )
     try:
-        assert isinstance(loop._runner, RecomputeModelRunner)
+        from kairyu.engine.core.frontier_runner import NativeFrontierModelRunner
+
+        assert isinstance(loop._runner, NativeFrontierModelRunner)
         from kairyu import SamplingParams
         from kairyu.engine.prompt import TokensPrompt
 

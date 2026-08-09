@@ -190,6 +190,7 @@ class GenerationRequest:
     # grammar construction. Engine layers intentionally keep this as a small
     # string instead of importing the L3 enum.
     tool_call_protocol: str = "generic"
+    reasoning_effort: str | None = None
 
     def __post_init__(self) -> None:
         # Defense in depth for callers holding a SamplingParams created by an
@@ -201,10 +202,12 @@ class GenerationRequest:
         )
         if type(self.trace_requested) is not bool:
             raise ValueError("trace_requested must be a boolean")
-        if self.tool_call_protocol not in {"generic", "llama", "qwen"}:
+        if self.tool_call_protocol not in {"generic", "llama", "qwen", "deepseek_v4"}:
             raise ValueError(
-                "tool_call_protocol must be generic, llama or qwen"
+                "tool_call_protocol must be generic, llama, qwen or deepseek_v4"
             )
+        if self.reasoning_effort not in {None, "low", "high", "max"}:
+            raise ValueError("reasoning_effort must be low, high, max, or null")
         kind = prompt_kind(self.prompt)
         if (
             kind != "text"

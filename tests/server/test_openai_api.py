@@ -1587,6 +1587,66 @@ class TemplatedStubBackend(StubBackend):
         """The template-focused test double accepts template-owned text."""
 
 
+@pytest.mark.parametrize(
+    ("generated", "reasoning", "content"),
+    [
+        ("plain answer", None, "plain answer"),
+        ("<think>private work</think>final answer", "private work", "final answer"),
+    ],
+)
+async def test_reasoning_effort_preserves_or_splits_nonstream_content(
+    generated,
+    reasoning,
+    content,
+):
+    app = create_legacy_app(
+        engines={"stub": StubBackend(text=generated, finish_reason="stop")}
+    )
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("reason", model="stub", reasoning_effort="high"),
+        )
+
+    assert response.status_code == 200
+    message = response.json()["choices"][0]["message"]
+    assert message["content"] == content
+    assert message["reasoning_content"] == reasoning
+
+
+async def test_reasoning_effort_stream_separates_reasoning_and_content():
+    app = create_legacy_app(
+        engines={
+            "stub": StubBackend(
+                text="<think>private work</think>final answer",
+                finish_reason="stop",
+            )
+        }
+    )
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body(
+                "reason",
+                model="stub",
+                reasoning_effort="max",
+                stream=True,
+            ),
+        )
+
+    assert response.status_code == 200
+    chunks = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: {")
+    ]
+    deltas = [choice["delta"] for chunk in chunks for choice in chunk["choices"]]
+    assert "".join(delta.get("reasoning_content") or "" for delta in deltas) == (
+        "private work"
+    )
+    assert "".join(delta.get("content") or "" for delta in deltas) == "final answer"
+
+
 class MultiChoiceToolBackend:
     def __init__(self, texts, usage=None):
         self._texts = texts

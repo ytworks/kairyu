@@ -109,6 +109,146 @@ class RuleRouter:
         }
 
 
+@dataclass(frozen=True)
+class CalibratedRouterArtifact:
+    artifact_id: str
+    thresholds: RouteThresholds
+    tier1_max_input_tokens: int
+    tier1_max_input_chars: int
+    quality_ci_lower: float
+    train_split_sha256: str
+    holdout_split_sha256: str
+
+
+class CalibratedRuleRouter(RuleRouter):
+    """A hash-pinned threshold router that carries its quality attestation.
+
+    ``input_tokens`` can be supplied through ``context`` by tokenizer-aware
+    callers. The character guard is deliberately conservative for callers
+    that do not own a tokenizer: it may escalate early, but never truncates.
+    """
+
+    def __init__(
+        self,
+        artifact: CalibratedRouterArtifact,
+        *,
+        artifact_sha256: str,
+        target_mode: Literal["auto", "auto-max"] = "auto",
+    ) -> None:
+        super().__init__(artifact.thresholds)
+        self._artifact = artifact
+        self._artifact_sha256 = artifact_sha256
+        self._target_mode = target_mode
+
+    def _decide_with_context(self, query: str, context: dict | None) -> RouteDecision:
+        features = extract_features(query)
+        if self._target_mode == "auto-max":
+            return RouteDecision(
+                target="multi_agent",
+                confidence=1.0,
+                features=features,
+                reason="auto-max: three tier1 proposals and tier2 synthesis",
+            )
+        supplied_tokens = None if context is None else context.get("input_tokens")
+        if supplied_tokens is not None:
+            if not isinstance(supplied_tokens, int) or supplied_tokens < 0:
+                raise ValueError("router context input_tokens must be a non-negative integer")
+            if supplied_tokens > self._artifact.tier1_max_input_tokens:
+                return RouteDecision(
+                    target="tier2",
+                    confidence=1.0,
+                    features=features,
+                    reason=(
+                        f"input_tokens={supplied_tokens} exceeds tier1 limit "
+                        f"{self._artifact.tier1_max_input_tokens}"
+                    ),
+                )
+        if features.char_len > self._artifact.tier1_max_input_chars:
+            return RouteDecision(
+                target="tier2",
+                confidence=1.0,
+                features=features,
+                reason=(
+                    f"char_len={features.char_len} exceeds conservative tier1 guard "
+                    f"{self._artifact.tier1_max_input_chars}"
+                ),
+            )
+        decision = super()._decide(query)
+        if decision.target == "multi_agent":
+            return RouteDecision(
+                target="tier2",
+                confidence=decision.confidence,
+                features=decision.features,
+                reason=f"auto escalates multi-agent signal to tier2: {decision.reason}",
+            )
+        return decision
+
+    def route(self, query: str, context: dict | None = None) -> RouteDecision:
+        return self._decide_with_context(query, context)
+
+    def preview(self, query: str, context: dict | None = None) -> RouteDecision:
+        return self._decide_with_context(query, context)
+
+    def describe(self) -> dict[str, object]:
+        return {
+            "router_type": type(self).__name__,
+            "artifact_id": self._artifact.artifact_id,
+            "artifact_sha256": self._artifact_sha256,
+            "target_mode": self._target_mode,
+            "thresholds": asdict(self._artifact.thresholds),
+            "tier1_max_input_tokens": self._artifact.tier1_max_input_tokens,
+            "tier1_max_input_chars": self._artifact.tier1_max_input_chars,
+            "quality_ci_lower": self._artifact.quality_ci_lower,
+            "train_split_sha256": self._artifact.train_split_sha256,
+            "holdout_split_sha256": self._artifact.holdout_split_sha256,
+        }
+
+
+def load_calibrated_router(
+    path: str | Path,
+    *,
+    expected_sha256: str,
+    target_mode: Literal["auto", "auto-max"] = "auto",
+) -> CalibratedRuleRouter:
+    """Load and verify a calibrated router artifact without remote code."""
+
+    artifact_path = Path(path)
+    payload = artifact_path.read_bytes()
+    actual_sha256 = hashlib.sha256(payload).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            f"router artifact SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}"
+        )
+    raw = json.loads(payload)
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+        raise ValueError("router artifact must use schema_version 1")
+    if raw.get("kind") != "kairyu-calibrated-rule-router":
+        raise ValueError("unsupported router artifact kind")
+    quality_ci_lower = float(raw["quality_ci_lower"])
+    if quality_ci_lower < 0.99:
+        raise ValueError("router artifact fails the 0.99 quality CI lower-bound gate")
+    thresholds_raw = raw.get("thresholds")
+    if not isinstance(thresholds_raw, dict):
+        raise ValueError("router artifact thresholds must be an object")
+    thresholds = RouteThresholds(**thresholds_raw)
+    artifact = CalibratedRouterArtifact(
+        artifact_id=str(raw["artifact_id"]),
+        thresholds=thresholds,
+        tier1_max_input_tokens=int(raw["tier1_max_input_tokens"]),
+        tier1_max_input_chars=int(raw["tier1_max_input_chars"]),
+        quality_ci_lower=quality_ci_lower,
+        train_split_sha256=str(raw["train_split_sha256"]),
+        holdout_split_sha256=str(raw["holdout_split_sha256"]),
+    )
+    if artifact.tier1_max_input_tokens <= 0 or artifact.tier1_max_input_chars <= 0:
+        raise ValueError("router tier1 limits must be positive")
+    return CalibratedRuleRouter(
+        artifact,
+        artifact_sha256=actual_sha256,
+        target_mode=target_mode,
+    )
+
+
 class JsonlRouterLog:
     """Bounded asynchronous JSONL; raw query text is never stored.
 
