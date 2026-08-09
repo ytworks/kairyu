@@ -1,11 +1,11 @@
-# Fugu-suite bench config: one deployed gateway, three scoreboard columns
+# Accuracy-suite bench config: one deployed gateway, three scoreboard columns
 # (a single model and two orchestration tiers), judge served by the same
 # gateway. Run with:
 #
-#   kairyu bench run --config examples/bench_fugu.yaml
+#   kairyu bench run --config examples/bench_accuracy.yaml
 #
 # CLI flags override any field here (e.g. --smoke, --limit 50).
-suite: fugu
+suite: accuracy
 
 # Generated-code execution is part of the run fingerprint. `local` is for
 # trusted development only. For unattended LiveCodeBench/SciCode, build
@@ -70,5 +70,5 @@ judge:
 # attempts: 4                # grouped chat sweep; unset target seed gives 0..3
 # exclude: [swe-bench-pro, terminal-bench, tau-bench-banking]  # for chat-only policy
 # concurrency: 8
-# results_dir: bench/results/fugu
+# results_dir: bench/results/accuracy
 # cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE

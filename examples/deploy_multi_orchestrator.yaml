@@ -1,5 +1,5 @@
 # Gateway serving single models AND named orchestrations side by side —
-# the shape the Fugu benchmark suite measures. Benchmarking orchestration
+# the shape the Accuracy benchmark suite measures. Benchmarking orchestration
 # is just another model name: --model m1 vs --model kairyu-auto-max.
 #
 #   kairyu serve examples/deploy_multi_orchestrator.yaml

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Start (or reuse) Qwen3-32B, provision every benchmark dependency, run the
-# Fugu quality suite, and print the accuracy report against the published
+# Accuracy suite, and print the accuracy report against the published
 # Fugu scores.  The only required operator input is HF_TOKEN after accepting
 # the gated dataset licenses on Hugging Face.
 #
@@ -19,7 +19,7 @@ judge_model="${JUDGE_MODEL:-$model}"
 bench_limit="${BENCH_LIMIT:-20}"
 attempts="${ATTEMPTS:-1}"
 concurrency="${BENCH_CONCURRENCY:-8}"
-results_dir="${RESULTS_DIR:-$(pwd)/results/fugu}"
+results_dir="${RESULTS_DIR:-$(pwd)/results/accuracy}"
 run_id="${RUN_ID:-$(date -u +%Y%m%d-%H%M%S)}"
 extra_body_default='{"chat_template_kwargs":{"enable_thinking":true}}'
 extra_body="${EXTRA_BODY:-$extra_body_default}"
@@ -59,7 +59,7 @@ datasets. Accept their Hugging Face licenses, export it in the host environment,
 then run:
 
   export HF_TOKEN=hf_...
-  ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh
+  ./examples/qwen3-32b-multi-gpu/accuracy-benchmark.sh
 MSG
   exit 2
 fi
@@ -75,7 +75,7 @@ export HF_TOKEN
 # genuinely multimodal deployment.
 if [ -n "${VISION:-}" ]; then
   vision_flag=""
-  printf '[fugu] target declared vision-capable (VISION set)\n'
+  printf '[accuracy] target declared vision-capable (VISION set)\n'
 else
   vision_flag="--no-vision"
 fi
@@ -169,7 +169,7 @@ case "$exec_image" in
 esac
 printf '[setup] sandbox image %s\n' "$exec_image"
 
-# fugu-benchmark.sh is itself the one-command entry point. Reuse a healthy
+# accuracy-benchmark.sh is itself the one-command entry point. Reuse a healthy
 # service, otherwise let the sibling hardware-checked launcher download the
 # model, build the serving image, and start Compose on the selected port.
 if curl --fail --silent "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1; then
@@ -179,7 +179,7 @@ else
   HF_TOKEN="$HF_TOKEN" PORT="$port" ./run.sh --detach
 fi
 
-printf '[fugu] waiting for %s\n' "http://127.0.0.1:${port}/readyz"
+printf '[accuracy] waiting for %s\n' "http://127.0.0.1:${port}/readyz"
 attempt=0
 until curl --fail --silent "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1; do
   attempt=$((attempt + 1))
@@ -218,7 +218,7 @@ if [ "$found" -ne 1 ]; then
   printf '%s\n' "$served" >&2
   exit 1
 fi
-printf '[fugu] serving %s\n' "$model"
+printf '[accuracy] serving %s\n' "$model"
 
 # readyz and /models prove process/model identity, not that the exact request
 # contract used below can execute. In particular, an older Kairyu process can
@@ -233,7 +233,7 @@ if ! curl --fail --silent --show-error --max-time 300 \
   echo "Kairyu failed the Qwen chat-template/generation preflight; refusing to benchmark" >&2
   exit 1
 fi
-printf '[fugu] Qwen chat-template/generation preflight passed\n'
+printf '[accuracy] Qwen chat-template/generation preflight passed\n'
 
 set -- \
   --base-url "$base_url" \
@@ -251,26 +251,26 @@ set -- \
   --run-id "$run_id"
 
 if [ "$bench_limit" -gt 0 ]; then
-  printf '[fugu] SUBSET RUN: at most %s items per benchmark (BENCH_LIMIT=0 for the full suite)\n' \
+  printf '[accuracy] SUBSET RUN: at most %s items per benchmark (BENCH_LIMIT=0 for the full suite)\n' \
     "$bench_limit"
-  printf '[fugu] subset and fixture runs are marked in scoreboard.md and comparison.md,\n'
-  printf '[fugu] which withhold every delta against the published Fugu scores\n'
+  printf '[accuracy] subset and fixture runs are marked in scoreboard.md and comparison.md,\n'
+  printf '[accuracy] which withhold every delta against the published Fugu scores\n'
   set -- "$@" --limit "$bench_limit"
 else
-  printf '[fugu] FULL RUN: every item in every slot; this takes hours\n'
+  printf '[accuracy] FULL RUN: every item in every slot; this takes hours\n'
 fi
 
 # Plumbing check: committed synthetic fixtures, no dataset downloads at all.
 # Scores from a fixture run are meaningless and the scoreboard says so.
 if [ -n "${OFFLINE_FIXTURES:-}" ]; then
-  printf '[fugu] OFFLINE FIXTURES: synthetic stand-in data, scores are not meaningful\n'
+  printf '[accuracy] OFFLINE FIXTURES: synthetic stand-in data, scores are not meaningful\n'
   set -- "$@" --offline-fixtures
 fi
 
 [ -n "${BENCH_ONLY:-}" ] && set -- "$@" --only "$BENCH_ONLY"
 [ -n "${BENCH_EXCLUDE:-}" ] && set -- "$@" --exclude "$BENCH_EXCLUDE"
 
-printf '[fugu] run id %s -> %s\n' "$run_id" "$results_dir"
+printf '[accuracy] run id %s -> %s\n' "$run_id" "$results_dir"
 cd "$repo_root"
 # `bench` owns datasets/reporting, `bench-agentic` owns SWE-Bench Pro and
 # Harbor, and the pinned --with requirement owns official tau-three (whose
@@ -281,5 +281,5 @@ uv run --frozen \
   --with "$tau_requirement" \
   kairyu bench run "$@"
 
-printf '\n[fugu] scoreboard: %s/%s/scoreboard.md\n' "$results_dir" "$run_id"
-printf '[fugu] accuracy report: %s/%s/comparison.md\n' "$results_dir" "$run_id"
+printf '\n[accuracy] scoreboard: %s/%s/scoreboard.md\n' "$results_dir" "$run_id"
+printf '[accuracy] accuracy report: %s/%s/comparison.md\n' "$results_dir" "$run_id"

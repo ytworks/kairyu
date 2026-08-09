@@ -1,4 +1,4 @@
-"""Static contract for the Qwen3-32B Fugu-suite example scripts.
+"""Static contract for the Qwen3-32B Accuracy-suite example scripts.
 
 The scripts cannot be executed here (they need GPUs and a served model), so the
 properties that would silently produce a wrong or misleading number are pinned
@@ -53,21 +53,21 @@ def _run_args(**overrides):
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
-FUGU = EXAMPLE / "fugu-benchmark.sh"
-RUN_FUGU = EXAMPLE / "run-fugu-benchmark.sh"
+ACCURACY = EXAMPLE / "accuracy-benchmark.sh"
+RUN_ACCURACY = EXAMPLE / "run-accuracy-benchmark.sh"
 
 
 @pytest.fixture(scope="module")
-def fugu_text() -> str:
-    return FUGU.read_text(encoding="utf-8")
+def accuracy_text() -> str:
+    return ACCURACY.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
-def run_fugu_text() -> str:
-    return RUN_FUGU.read_text(encoding="utf-8")
+def run_accuracy_text() -> str:
+    return RUN_ACCURACY.read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("script", [FUGU, RUN_FUGU])
+@pytest.mark.parametrize("script", [ACCURACY, RUN_ACCURACY])
 def test_scripts_are_executable_posix_sh(script):
     assert script.is_file(), script
     assert script.read_text(encoding="utf-8").startswith("#!/bin/sh")
@@ -76,54 +76,54 @@ def test_scripts_are_executable_posix_sh(script):
     assert "set -eu" in script.read_text(encoding="utf-8")
 
 
-def test_readiness_is_waited_for_before_benchmarking(fugu_text, run_fugu_text):
-    for text in (fugu_text, run_fugu_text):
+def test_readiness_is_waited_for_before_benchmarking(accuracy_text, run_accuracy_text):
+    for text in (accuracy_text, run_accuracy_text):
         assert "/readyz" in text
 
 
-def test_served_model_is_preflighted_by_exact_id(fugu_text):
+def test_served_model_is_preflighted_by_exact_id(accuracy_text):
     """A healthy gateway can pass readyz while serving a different model."""
-    assert "/models" in fugu_text
+    assert "/models" in accuracy_text
     # ids come out of the response, then compare as STRINGS: MODEL must never be
     # interpolated into the pattern, or the "exact id" check is a glob
-    assert '[ "$served_id" = "$model" ]' in fugu_text
-    assert "${model}" not in fugu_text.split("served_ids=")[1].split("found=0")[0]
+    assert '[ "$served_id" = "$model" ]' in accuracy_text
+    assert "${model}" not in accuracy_text.split("served_ids=")[1].split("found=0")[0]
     # and the run stops rather than benchmarking the wrong deployment
-    assert re.search(r"is not served at.*\n.*exit 1", fugu_text, re.S)
+    assert re.search(r"is not served at.*\n.*exit 1", accuracy_text, re.S)
 
 
-def test_request_contract_is_preflighted_before_benchmarking(fugu_text):
-    preflight = fugu_text.index("Qwen chat-template/generation preflight")
-    benchmark = fugu_text.index("kairyu bench run")
+def test_request_contract_is_preflighted_before_benchmarking(accuracy_text):
+    preflight = accuracy_text.index("Qwen chat-template/generation preflight")
+    benchmark = accuracy_text.index("kairyu bench run")
 
     assert preflight < benchmark
-    assert '"chat_template_kwargs"' in fugu_text
-    assert '\"enable_thinking\":true' in fugu_text
-    assert '"${base_url}/chat/completions"' in fugu_text
-    assert "--max-time 300" in fugu_text
+    assert '"chat_template_kwargs"' in accuracy_text
+    assert '\"enable_thinking\":true' in accuracy_text
+    assert '"${base_url}/chat/completions"' in accuracy_text
+    assert "--max-time 300" in accuracy_text
 
 
-def test_judge_defaults_to_the_same_gateway(fugu_text):
+def test_judge_defaults_to_the_same_gateway(accuracy_text):
     """The tau user simulator must share one OPENAI_BASE_URL with the target."""
-    assert "--judge-base-url" in fugu_text
-    assert 'judge_model="${JUDGE_MODEL:-$model}"' in fugu_text
+    assert "--judge-base-url" in accuracy_text
+    assert 'judge_model="${JUDGE_MODEL:-$model}"' in accuracy_text
 
 
-def test_subset_and_full_runs_are_both_announced(fugu_text):
+def test_subset_and_full_runs_are_both_announced(accuracy_text):
     """A capped run must never be mistaken for a full-suite number."""
-    assert "SUBSET RUN" in fugu_text
-    assert "FULL RUN" in fugu_text
-    assert 'bench_limit="${BENCH_LIMIT:-20}"' in fugu_text
-    assert "--limit" in fugu_text
+    assert "SUBSET RUN" in accuracy_text
+    assert "FULL RUN" in accuracy_text
+    assert 'bench_limit="${BENCH_LIMIT:-20}"' in accuracy_text
+    assert "--limit" in accuracy_text
 
 
-def test_fixture_mode_says_its_scores_are_meaningless(fugu_text):
-    assert "OFFLINE FIXTURES" in fugu_text
-    assert "not meaningful" in fugu_text
-    assert "--offline-fixtures" in fugu_text
+def test_fixture_mode_says_its_scores_are_meaningless(accuracy_text):
+    assert "OFFLINE FIXTURES" in accuracy_text
+    assert "not meaningful" in accuracy_text
+    assert "--offline-fixtures" in accuracy_text
 
 
-def test_fugu_conditions_are_reachable_from_the_environment(fugu_text):
+def test_published_conditions_are_reachable_from_the_environment(accuracy_text):
     for flag in (
         "--extra-body",
         "--judge-extra-body",
@@ -131,66 +131,66 @@ def test_fugu_conditions_are_reachable_from_the_environment(fugu_text):
         "--only",
         "--exclude",
     ):
-        assert flag in fugu_text, flag
+        assert flag in accuracy_text, flag
 
 
-def test_operator_is_pointed_at_both_artifacts(fugu_text):
-    assert "scoreboard.md" in fugu_text
-    assert "comparison.md" in fugu_text
+def test_operator_is_pointed_at_both_artifacts(accuracy_text):
+    assert "scoreboard.md" in accuracy_text
+    assert "comparison.md" in accuracy_text
 
 
-def test_dataset_extra_is_installed_for_the_run(fugu_text):
+def test_dataset_extra_is_installed_for_the_run(accuracy_text):
     """The serving image has no dataset deps; the suite runs on the host."""
-    assert "--extra bench" in fugu_text
-    assert "--extra bench-agentic" in fugu_text
-    assert "--with \"$tau_requirement\"" in fugu_text
-    assert "fc0055dc4e0a316c3f83133267fbd6faaa770992" in fugu_text
-    assert "TAU2_DATA_DIR" in fugu_text
-    assert "banking_knowledge" in fugu_text
-    assert "command -v uv" in fugu_text
+    assert "--extra bench" in accuracy_text
+    assert "--extra bench-agentic" in accuracy_text
+    assert "--with \"$tau_requirement\"" in accuracy_text
+    assert "fc0055dc4e0a316c3f83133267fbd6faaa770992" in accuracy_text
+    assert "TAU2_DATA_DIR" in accuracy_text
+    assert "banking_knowledge" in accuracy_text
+    assert "command -v uv" in accuracy_text
 
 
-def test_only_required_operator_setting_is_hf_token(fugu_text):
-    assert 'if [ -z "${HF_TOKEN:-}" ]' in fugu_text
-    assert "export HF_TOKEN" in fugu_text
-    assert 'HF_TOKEN="$HF_TOKEN" PORT="$port" ./run.sh --detach' in fugu_text
-    assert ".env file" in fugu_text
-    assert "./run.sh --detach" in fugu_text
+def test_only_required_operator_setting_is_hf_token(accuracy_text):
+    assert 'if [ -z "${HF_TOKEN:-}" ]' in accuracy_text
+    assert "export HF_TOKEN" in accuracy_text
+    assert 'HF_TOKEN="$HF_TOKEN" PORT="$port" ./run.sh --detach' in accuracy_text
+    assert ".env file" in accuracy_text
+    assert "./run.sh --detach" in accuracy_text
 
 
-def test_generated_code_uses_an_immutable_docker_runner(fugu_text):
-    assert "deploy/bench/Dockerfile.exec" in fugu_text
-    assert "docker image inspect --format '{{.Id}}'" in fugu_text
-    assert "--exec-runner docker" in fugu_text
-    assert '--exec-image "$exec_image"' in fugu_text
+def test_generated_code_uses_an_immutable_docker_runner(accuracy_text):
+    assert "deploy/bench/Dockerfile.exec" in accuracy_text
+    assert "docker image inspect --format '{{.Id}}'" in accuracy_text
+    assert "--exec-runner docker" in accuracy_text
+    assert '--exec-image "$exec_image"' in accuracy_text
 
 
-def test_qwen_sampling_defaults_use_supported_template_controls(fugu_text):
-    assert "--reasoning-effort" not in fugu_text
-    assert "--judge-reasoning-effort" not in fugu_text
-    assert "extra_body_default=" in fugu_text
-    assert "judge_extra_body_default=" in fugu_text
-    assert '"enable_thinking":true' in fugu_text
-    assert '"enable_thinking":false' in fugu_text
+def test_qwen_sampling_defaults_use_supported_template_controls(accuracy_text):
+    assert "--reasoning-effort" not in accuracy_text
+    assert "--judge-reasoning-effort" not in accuracy_text
+    assert "extra_body_default=" in accuracy_text
+    assert "judge_extra_body_default=" in accuracy_text
+    assert '"enable_thinking":true' in accuracy_text
+    assert '"enable_thinking":false' in accuracy_text
 
 
-def test_one_command_entry_point_starts_then_benchmarks(run_fugu_text):
-    assert "./run.sh --detach" in run_fugu_text
-    assert "exec ./fugu-benchmark.sh" in run_fugu_text
+def test_one_command_entry_point_starts_then_benchmarks(run_accuracy_text):
+    assert "./run.sh --detach" in run_accuracy_text
+    assert "exec ./accuracy-benchmark.sh" in run_accuracy_text
     # an already-running service is reused rather than restarted
-    assert "already ready" in run_fugu_text
+    assert "already ready" in run_accuracy_text
 
 
-def test_text_only_target_is_declared_text_only(fugu_text):
+def test_text_only_target_is_declared_text_only(accuracy_text):
     """Qwen3-32B is a causal LM; the vision family is the separate Qwen3-VL.
 
     Declaring it vision-capable would let CharXiv and HLE image rows be measured
     on prompts whose image parts the text-only chat template drops.
     """
-    assert "--no-vision" in fugu_text
-    assert 'vision_flag="--no-vision"' in fugu_text
-    assert "VISION" in fugu_text  # an opt-in for a genuinely multimodal deployment
-    assert "$vision_flag" in fugu_text
+    assert "--no-vision" in accuracy_text
+    assert 'vision_flag="--no-vision"' in accuracy_text
+    assert "VISION" in accuracy_text  # an opt-in for a genuinely multimodal deployment
+    assert "$vision_flag" in accuracy_text
 
 
 def test_no_vision_flag_narrows_the_target():
@@ -236,16 +236,16 @@ def test_vision_slots_skip_on_a_text_only_target(tmp_path):
     assert isinstance(HleAdapter().build_request(image_item, target, ctx), SkipItem)
 
 
-def test_subset_warning_is_said_to_survive_into_the_artifacts(fugu_text):
-    assert "scoreboard.md and comparison.md" in fugu_text
-    assert "withhold every delta" in fugu_text
+def test_subset_warning_is_said_to_survive_into_the_artifacts(accuracy_text):
+    assert "scoreboard.md and comparison.md" in accuracy_text
+    assert "withhold every delta" in accuracy_text
 
 
-def test_port_reaches_the_compose_mapping(run_fugu_text):
+def test_port_reaches_the_compose_mapping(run_accuracy_text):
     """PORT=9000 must not start a healthy service on 8001 and then time out."""
     compose = (EXAMPLE / "compose.yaml").read_text(encoding="utf-8")
     assert '"127.0.0.1:${PORT:-8001}:8000"' in compose
-    assert 'export PORT="$port"' in run_fugu_text
+    assert 'export PORT="$port"' in run_accuracy_text
     assert "export PORT" in (EXAMPLE / "run.sh").read_text(encoding="utf-8")
 
 
@@ -282,7 +282,7 @@ def test_compose_serves_with_the_checkpoint_owned_qwen_chat_template():
 
 def test_readme_documents_the_quality_suite():
     readme = (EXAMPLE / "README.md").read_text(encoding="utf-8")
-    assert "run-fugu-benchmark.sh" in readme
+    assert "run-accuracy-benchmark.sh" in readme
     assert "BENCH_LIMIT" in readme
     assert "comparison.md" in readme
 
@@ -351,7 +351,7 @@ def _run_script(
     port: int | None = None,
     provision_tau_data: bool = True,
 ):
-    """Run fugu-benchmark.sh with a stub uv; returns (CompletedProcess, marker)."""
+    """Run accuracy-benchmark.sh with a stub uv; return process and marker."""
     import os
     import subprocess
 
@@ -370,7 +370,7 @@ def _run_script(
     if port is not None:
         environ["PORT"] = str(port)
     completed = subprocess.run(
-        ["sh", str(FUGU)],
+        ["sh", str(ACCURACY)],
         capture_output=True,
         text=True,
         timeout=120,
