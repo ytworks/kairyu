@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 
 import torch
 
@@ -28,12 +28,6 @@ class RecomputeModelRunner:
             self._sampler.release(request_id)
         self._future_tokens.pop(request_id, None)
 
-    @staticmethod
-    def _sampling_outputs(state: object, position: int) -> Sequence[int]:
-        if getattr(state, "outputs_override", False):
-            return tuple(state.outputs[:position])
-        return state.outputs
-
     def _pending_outputs(self, state: object, position: int) -> tuple[int, ...]:
         committed = len(state.outputs)
         if position <= committed:
@@ -50,10 +44,13 @@ class RecomputeModelRunner:
         return tuple(values)
 
     def _history(self, state: object, position: int) -> tuple[int, ...]:
-        if getattr(state, "outputs_override", False):
-            return tuple(state.outputs[:position])
-        committed = tuple(state.outputs)
-        return committed[:position] + self._pending_outputs(state, position)
+        return tuple(state.outputs[:position]) + self._pending_outputs(state, position)
+
+    def _forget_committed(self, request_id: str, committed: int) -> None:
+        pending = self._future_tokens.get(request_id)
+        if pending:
+            for position in [key for key in pending if key < committed]:
+                del pending[position]
 
     def _sample(self, state: object, logits: torch.Tensor, position: int) -> SampledToken:
         if self._sampler is None:
@@ -64,7 +61,7 @@ class RecomputeModelRunner:
             position,
             logits,
             prompt=state.request.prompt_token_ids,
-            outputs=self._sampling_outputs(state, position),
+            outputs=state.outputs[:position],
             pending_outputs=self._pending_outputs(state, position),
             history_epoch=getattr(state, "output_epoch", 0),
             eos_token_id=state.request.eos_token_id,
@@ -73,6 +70,7 @@ class RecomputeModelRunner:
         )
 
     def _score(self, state: object, position: int) -> SampledToken:
+        self._forget_committed(state.request.request_id, len(state.outputs))
         sequence = state.request.prompt_token_ids + self._history(state, position)
         token_ids = torch.tensor(sequence, dtype=torch.long, device=self._device)
         logits = self._model.forward_sequence(token_ids)[-1]

@@ -66,6 +66,37 @@ def build_model(
     )
 
 
+def reference_quant_loader_kind(
+    raw_config: dict,
+    architecture: str,
+) -> str | None:
+    """Return the official loader for one published reference checkpoint."""
+
+    text_config = raw_config.get("text_config")
+    nested_quant = (
+        text_config.get("quantization_config")
+        if isinstance(text_config, dict)
+        else None
+    )
+    declared_quant = raw_config.get("quantization_config") or nested_quant
+    if not isinstance(declared_quant, dict):
+        return None
+    method = str(declared_quant.get("quant_method", "")).lower()
+    if (
+        architecture == "DeepseekV4ForCausalLM"
+        and method == "fp8"
+        and declared_quant.get("weight_block_size") is not None
+    ):
+        return "deepseek-v4-block-fp8"
+    if (
+        architecture in ("KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+        and method == "compressed-tensors"
+        and str(declared_quant.get("format", "")).lower() == "mxfp4-pack-quantized"
+    ):
+        return "kimi-k3-mxfp4"
+    return None
+
+
 def load_model(
     path: str | Path,
     dtype: torch.dtype = torch.float32,
@@ -96,8 +127,10 @@ def load_model(
         if isinstance(text_config, dict)
         else None
     )
-    declared_quant = raw_config.get("quantization_config") or nested_quant
-    if config.architecture == "DeepseekV4ForCausalLM" and declared_quant:
+    reference_quant_loader = reference_quant_loader_kind(
+        raw_config, config.architecture
+    )
+    if reference_quant_loader == "deepseek-v4-block-fp8":
         from kairyu.models.reference import load_deepseek_public_decoder
 
         model = load_deepseek_public_decoder(
@@ -107,11 +140,7 @@ def load_model(
             dtype=dtype,
         )
         return model, config, generation
-    if (
-        config.architecture
-        in ("KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
-        and declared_quant
-    ):
+    if reference_quant_loader == "kimi-k3-mxfp4":
         from kairyu.models.reference import load_kimi_public_decoder
 
         model = load_kimi_public_decoder(

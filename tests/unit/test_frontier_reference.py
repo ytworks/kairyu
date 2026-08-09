@@ -11,7 +11,14 @@ from kairyu.models.config import parse_model_config
 from kairyu.models.loader import load_model
 
 
-def _save_qwen_outer(directory, model, text_config, architecture: str) -> None:
+def _save_qwen_outer(
+    directory,
+    model,
+    text_config,
+    architecture: str,
+    *,
+    per_expert: bool = False,
+) -> None:
     from transformers import Qwen3_5Config
 
     implementation = model.config._attn_implementation
@@ -26,12 +33,34 @@ def _save_qwen_outer(directory, model, text_config, architecture: str) -> None:
             if name.startswith("model.")
             else name
         )
-        state[checkpoint_name] = tensor.detach().clone()
+        if per_expert and checkpoint_name.endswith(".experts.gate_up_proj"):
+            prefix = checkpoint_name.removesuffix(".gate_up_proj")
+            for expert_index, packed in enumerate(tensor):
+                gate, up = packed.chunk(2, dim=0)
+                state[f"{prefix}.{expert_index}.gate_proj.weight"] = gate.detach().clone()
+                state[f"{prefix}.{expert_index}.up_proj.weight"] = up.detach().clone()
+        elif per_expert and checkpoint_name.endswith(".experts.down_proj"):
+            prefix = checkpoint_name.removesuffix(".down_proj")
+            for expert_index, down in enumerate(tensor):
+                state[f"{prefix}.{expert_index}.down_proj.weight"] = down.detach().clone()
+        else:
+            state[checkpoint_name] = tensor.detach().clone()
     save_file(state, directory / "model.safetensors")
 
 
-@pytest.mark.parametrize("moe", [False, True])
-def test_qwen36_outer_checkpoint_logits_parity(tmp_path, moe: bool) -> None:
+@pytest.mark.parametrize(
+    ("moe", "per_expert"),
+    [
+        pytest.param(False, False, id="dense-packed"),
+        pytest.param(True, False, id="moe-packed"),
+        pytest.param(True, True, id="moe-per-expert"),
+    ],
+)
+def test_qwen36_outer_checkpoint_logits_parity(
+    tmp_path,
+    moe: bool,
+    per_expert: bool,
+) -> None:
     if moe:
         from transformers import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
 
@@ -78,7 +107,13 @@ def test_qwen36_outer_checkpoint_logits_parity(tmp_path, moe: bool) -> None:
         oracle = Qwen3_5ForCausalLM(text_config).eval()
         architecture = "Qwen3_5ForConditionalGeneration"
 
-    _save_qwen_outer(tmp_path, oracle, text_config, architecture)
+    _save_qwen_outer(
+        tmp_path,
+        oracle,
+        text_config,
+        architecture,
+        per_expert=per_expert,
+    )
     loaded, config, _ = load_model(tmp_path, dtype=torch.float32)
     tokens = torch.tensor([1, 2, 3, 4])
     with torch.inference_mode():
@@ -125,6 +160,11 @@ def test_deepseek_v4_checkpoint_logits_parity(tmp_path) -> None:
     assert config.architecture == "DeepseekV4ForCausalLM"
     assert config.requires_full_recompute
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+
+    bf16_loaded, _, _ = load_model(tmp_path, dtype=torch.bfloat16)
+    hf_model = bf16_loaded.hf_model
+    assert hf_model.model.embed_tokens.weight.dtype is torch.bfloat16
+    assert hf_model.model.layers[0].input_layernorm.weight.dtype is torch.float32
 
 
 def test_deepseek_v4_public_block_fp8_uses_official_loader(tmp_path, monkeypatch) -> None:
@@ -183,6 +223,13 @@ def test_deepseek_v4_public_block_fp8_uses_official_loader(tmp_path, monkeypatch
     assert seen["kwargs"]["attn_implementation"] == "eager"
     assert loaded.forward_sequence(torch.tensor([1, 2])).shape == (2, 32)
 
+    def invalid_checkpoint(*_args, **_kwargs):
+        raise ValueError("invalid DeepSeek checkpoint")
+
+    monkeypatch.setattr(DeepseekV4ForCausalLM, "from_pretrained", invalid_checkpoint)
+    with pytest.raises(ValueError, match="invalid DeepSeek checkpoint"):
+        load_model(tmp_path)
+
 
 def test_kimi_k3_public_text_config_is_recognized() -> None:
     raw = {
@@ -197,6 +244,7 @@ def test_kimi_k3_public_text_config_is_recognized() -> None:
             "num_key_value_heads": 4,
             "head_dim": 8,
             "max_position_embeddings": 128,
+            "sliding_window": 16,
             "moe_intermediate_size": 16,
             "num_experts": 8,
             "num_experts_per_token": 2,
@@ -304,6 +352,55 @@ def test_kimi_k3_public_mxfp4_uses_official_loader(tmp_path, monkeypatch) -> Non
     assert seen["kwargs"]["trust_remote_code"] is True
     assert actual.shape == (3, 32)
 
+    def invalid_checkpoint(*_args, **_kwargs):
+        raise ValueError("invalid Kimi checkpoint")
+
+    monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_pretrained", invalid_checkpoint)
+    with pytest.raises(ValueError, match="invalid Kimi checkpoint"):
+        load_model(tmp_path)
+
+
+def test_qwen36_quantized_reference_is_rejected_by_load_and_validation(
+    tmp_path,
+) -> None:
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+
+    from kairyu.deploy.validation import _validate_model
+
+    raw = {
+        "architectures": ["Qwen3_5ForCausalLM"],
+        "hidden_size": 16,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+        "num_key_value_heads": 1,
+        "intermediate_size": 24,
+        "vocab_size": 32,
+        "sliding_window": 8,
+        "quantization_config": {
+            "quant_method": "awq",
+            "bits": 4,
+            "group_size": 16,
+            "version": "gemm",
+        },
+    }
+    (tmp_path / "config.json").write_text(json.dumps(raw))
+    save_file({"unused": torch.zeros(1)}, tmp_path / "model.safetensors")
+    tokenizer = Tokenizer(WordLevel({"[UNK]": 0, "token": 1}, unk_token="[UNK]"))
+    tokenizer.save(str(tmp_path / "tokenizer.json"))
+
+    with pytest.raises(ValueError, match="requires an unquantized checkpoint"):
+        load_model(tmp_path)
+    findings = _validate_model(
+        str(tmp_path),
+        field="engines.local.options.model_path",
+        tokenizer=None,
+        tensor_parallel_size=1,
+        reference_artifact=tmp_path / "deploy.yaml",
+        generation_config="none",
+    )
+    assert any(finding.code == "schema.incompatible_model" for finding in findings)
+
 
 def test_recompute_runner_uses_complete_committed_history() -> None:
     from kairyu.engine.core.recompute_runner import RecomputeModelRunner
@@ -342,6 +439,8 @@ def test_recompute_runner_uses_complete_committed_history() -> None:
         {"r": state},
     )["r"][0]
     assert second.token_id == 6
+
+    assert runner._future_tokens == {"r": {1: 6}}
 
 
 def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> None:
@@ -401,6 +500,14 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
             tensor_parallel_size=2,
         )
 
+    with pytest.raises(ValueError, match="does not use a KV cache"):
+        build_engine_loop(
+            model_path=str(tmp_path),
+            tokenizer=_Tokenizer(),
+            decode_mode="eager",
+            kv_cache_dtype="bfloat16",
+        )
+
     loop, _cache, _scheduler = build_engine_loop(
         model_path=str(tmp_path),
         tokenizer=_Tokenizer(),
@@ -412,6 +519,8 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
         assert isinstance(loop._runner, RecomputeModelRunner)
         from kairyu import SamplingParams
         from kairyu.engine.prompt import TokensPrompt
+
+        assert loop.kv_cache_dtype_resolved == "not-applicable"
 
         loop.submit(
             "reference",

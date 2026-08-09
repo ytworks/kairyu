@@ -605,10 +605,28 @@ def _validate_model(
     if config is not None:
         try:
             model_config = parse_model_config(config)
-            if not model_config.requires_full_recompute:
+            from kairyu.models.loader import reference_quant_loader_kind
+
+            text_config = config.get("text_config")
+            nested_quant = (
+                text_config.get("quantization_config")
+                if isinstance(text_config, dict)
+                else None
+            )
+            quant_source = config
+            if nested_quant and not config.get("quantization_config"):
+                quant_source = {
+                    **config,
+                    "quantization_config": nested_quant,
+                }
+            reference_loader = reference_quant_loader_kind(
+                config, model_config.architecture
+            )
+            if reference_loader is None:
                 quant_config = load_checkpoint_quantization(
-                    model_dir, config
+                    model_dir, quant_source
                 ).weights
+            if not model_config.requires_full_recompute:
                 validate_model_quantization(
                     quant_config,
                     is_mla=model_config.is_mla,
@@ -620,6 +638,10 @@ def _validate_model(
                 ) = _expected_checkpoint_contract(
                     model_config,
                     quant_config,
+                )
+            elif reference_loader is None and quant_config.method is not QuantMethod.NONE:
+                raise ValueError(
+                    "reference execution requires an unquantized checkpoint"
                 )
         except Exception:
             findings.append(

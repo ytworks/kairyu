@@ -495,6 +495,7 @@ def build_engine_loop(
 
     accuracy_profile = NvFp4AccuracyProfile.parse(nvfp4_accuracy_profile)
     nvfp4_accuracy_profile = accuracy_profile.as_dict() if accuracy_profile.active else None
+    reference_recompute = False
     _validate_max_model_len(max_model_len)
     generation_config = validate_generation_config_mode(generation_config)
     if type(tensor_parallel_size) is not int or tensor_parallel_size < 1:
@@ -578,7 +579,8 @@ def build_engine_loop(
             reference_config = parse_model_config(
                 json.loads(config_path.read_text())
             )
-            if reference_config.requires_full_recompute:
+            reference_recompute = reference_config.requires_full_recompute
+            if reference_recompute:
                 if (
                     tensor_parallel_size != 1
                     or expert_parallel
@@ -604,6 +606,10 @@ def build_engine_loop(
                     raise ValueError(
                         "hybrid reference execution does not support "
                         "nvfp4_accuracy_profile"
+                    )
+                if kv_cache_dtype != "auto":
+                    raise ValueError(
+                        "hybrid reference execution does not use a KV cache"
                     )
     decode_mode = _resolve_decode_mode(
         decode_mode,
@@ -894,30 +900,15 @@ def build_engine_loop(
         )
         if loaded_generation != generation:
             raise RuntimeError("generation defaults changed during model loading")
-        resolved_kv_cache_dtype = resolve_kv_cache_dtype(
-            kv_cache_dtype,
-            compute_dtype,
-            profile,
-            attention_backend,
-            model_config,
-        )
+        if not reference_recompute:
+            resolved_kv_cache_dtype = resolve_kv_cache_dtype(
+                kv_cache_dtype,
+                compute_dtype,
+                profile,
+                attention_backend,
+                model_config,
+            )
         model = model.to(compute_device)
-        reference_recompute = bool(
-            getattr(model_config, "requires_full_recompute", False)
-        )
-        if reference_recompute:
-            if graph_decode:
-                raise ValueError(
-                    "hybrid reference execution does not support CUDA graphs"
-                )
-            if speculative is not None:
-                raise ValueError(
-                    "hybrid reference execution does not support speculative decoding"
-                )
-            if dram_kv_tier_capacity_pages:
-                raise ValueError(
-                    "hybrid reference execution does not use a DRAM KV tier"
-                )
         if accuracy_profile.active:
             from kairyu.engine.core.nvfp4_accuracy import materialize_fp8_weights
 

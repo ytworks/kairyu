@@ -356,7 +356,7 @@ def parse_model_config(config: dict) -> ModelConfig:
             raise ValueError(f"{architecture} requires a text_config object")
         config = text_config
     if (
-        architecture != "DeepseekV4ForCausalLM"
+        architecture not in _REFERENCE_ARCHITECTURES
         and config.get("sliding_window")
         and config.get("use_sliding_window", True)
     ):

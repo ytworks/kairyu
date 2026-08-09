@@ -20,13 +20,26 @@ from kairyu.models.config import ModelConfig
 class ReferenceDecoder(nn.Module):
     """Small Kairyu-facing wrapper around an official text-only decoder."""
 
-    def __init__(self, model: nn.Module, config: ModelConfig) -> None:
+    def __init__(
+        self,
+        model: nn.Module,
+        config: ModelConfig,
+        *,
+        autocast_dtype: torch.dtype | None = None,
+    ) -> None:
         super().__init__()
         self.hf_model = model
         self.config = config
+        self._autocast_dtype = autocast_dtype
 
     @torch.inference_mode()
     def forward_sequence(self, token_ids: torch.Tensor) -> torch.Tensor:
+        if self._autocast_dtype is not None and token_ids.device.type == "cuda":
+            with torch.autocast("cuda", dtype=self._autocast_dtype):
+                return self._forward_sequence(token_ids)
+        return self._forward_sequence(token_ids)
+
+    def _forward_sequence(self, token_ids: torch.Tensor) -> torch.Tensor:
         outputs = self.hf_model(
             input_ids=token_ids.unsqueeze(0),
             use_cache=False,
@@ -117,12 +130,19 @@ def _packed_expert_tensor(
 
     packed_prefix = name.rsplit(".experts.", 1)[0] + ".experts"
     mapped_prefix = _checkpoint_candidates(packed_prefix, config.architecture)[0]
+    qwen_names = config.architecture in (
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+    )
+    gate_projection = "gate_proj" if qwen_names else "w1"
+    up_projection = "up_proj" if qwen_names else "w3"
+    down_projection = "down_proj" if qwen_names else "w2"
     experts: list[torch.Tensor] = []
     for expert_index in range(config.moe.num_experts):
         prefix = f"{mapped_prefix}.{expert_index}"
         if suffix == "gate_up":
-            gate_name = f"{prefix}.w1.weight"
-            up_name = f"{prefix}.w3.weight"
+            gate_name = f"{prefix}.{gate_projection}.weight"
+            up_name = f"{prefix}.{up_projection}.weight"
             if gate_name not in reader or up_name not in reader:
                 return None
             experts.append(
@@ -132,7 +152,7 @@ def _packed_expert_tensor(
                 )
             )
         else:
-            down_name = f"{prefix}.w2.weight"
+            down_name = f"{prefix}.{down_projection}.weight"
             if down_name not in reader:
                 return None
             experts.append(reader.tensor(down_name))
@@ -193,7 +213,7 @@ def load_deepseek_public_decoder(
             low_cpu_mem_usage=True,
             attn_implementation="eager",
         )
-    except (ImportError, OSError, ValueError) as exc:
+    except ImportError as exc:
         raise RuntimeError(
             "published DeepSeek V4 block-FP8 loading requires the "
             "transformers fine-grained FP8 runtime"
@@ -220,7 +240,7 @@ def load_kimi_public_decoder(
             local_files_only=True,
             low_cpu_mem_usage=True,
         )
-    except (ImportError, OSError, ValueError) as exc:
+    except ImportError as exc:
         raise RuntimeError(
             "published Kimi K3 MXFP4 loading requires the checkpoint's custom "
             "code plus fla-core and compressed-tensors"
@@ -257,10 +277,15 @@ def load_reference_decoder(
             local_files_only=True,
             attn_implementation="eager",
         )
-        model.to(dtype=dtype)
     else:
         model = model_cls(hf_config)
         model.config._attn_implementation = "eager"
         _load_reference_weights(model, directory, config, dtype)
     model.eval()
-    return ReferenceDecoder(model, config)
+    autocast_dtype = (
+        dtype
+        if config.architecture == "DeepseekV4ForCausalLM"
+        and dtype in (torch.float16, torch.bfloat16)
+        else None
+    )
+    return ReferenceDecoder(model, config, autocast_dtype=autocast_dtype)
