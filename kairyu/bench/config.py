@@ -46,6 +46,7 @@ def _cli_sampling(args) -> dict:
         # only ever narrows the default; `--no-vision` absent means "unspecified"
         "supports_vision": False if getattr(args, "no_vision", False) else None,
         "max_context_tokens": getattr(args, "max_context_tokens", None),
+        "max_output_tokens": getattr(args, "max_output_tokens", None),
     }
     return {key: value for key, value in options.items() if value is not None}
 

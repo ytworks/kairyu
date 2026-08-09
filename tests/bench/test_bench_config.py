@@ -114,6 +114,38 @@ def test_long_context_cli_applies_declared_target_limit():
         build_config(invalid)
 
 
+def test_max_output_tokens_cli_applies_target_generation_limit():
+    args = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--max-output-tokens",
+            "81920",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.targets[0].max_output_tokens == 81_920
+
+    invalid = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--max-output-tokens",
+            "0",
+        ]
+    )
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        build_config(invalid)
+
+
 def test_served_config_identity_normalizes_label_and_requires_lowercase_sha256():
     identity = ServedConfigIdentity(label="  fp8-kv production  ", sha256="a" * 64)
 

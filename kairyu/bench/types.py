@@ -201,7 +201,7 @@ class BenchTarget(SamplingOptions):
     temperature: float | None = Field(default=None, ge=0.0)
     api_key_env: str | None = None  # env var NAME, never the key itself
     max_context_tokens: int | None = Field(default=None, ge=1)  # long-context gate
-    max_output_tokens: int = 8192
+    max_output_tokens: int = Field(default=8192, ge=1)
     supports_vision: bool = True
 
     @field_validator("base_url")
