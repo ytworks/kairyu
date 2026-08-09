@@ -2,7 +2,7 @@
 
 ## Goal
 
-Rename Kairyu's internally named `fugu` benchmark suite to `accuracy` so the
+Rename Kairyu's vendor-derived benchmark suite key to `accuracy` so the
 name describes its purpose: validating model and orchestration answer quality.
 The benchmark's behavior, methodology, data, scoring, ordering, thresholds,
 and comparison calculations must remain unchanged.
@@ -18,7 +18,7 @@ The canonical internal name becomes `accuracy`, with the display name
 - tests, fixtures, function names, and assertions that describe the suite;
 - operator documentation and current-status descriptions of Kairyu's suite.
 
-No `fugu` compatibility alias is retained because that would preserve the
+No compatibility alias for the legacy key is retained because that would preserve the
 inappropriate internal name. Existing untracked result directories are not
 moved or rewritten; new runs use `bench/results/accuracy` (or
 `results/accuracy` in the Qwen example).
@@ -35,8 +35,8 @@ the old suite name exactly as originally recorded, as required by
 
 ## Implementation
 
-The suite registry changes from `fugu`/`FUGU_ROW_ORDER` to
-`accuracy`/`ACCURACY_ROW_ORDER`, while preserving the exact eleven-element row
+The suite registry changes to `accuracy`/`ACCURACY_ROW_ORDER`, while preserving
+the exact eleven-element row
 tuple. All consumers receive the new suite identity through their existing
 interfaces; no benchmark adapter or scoring implementation changes.
 
@@ -69,12 +69,12 @@ Run focused benchmark, CLI, wheel, and example-contract tests, followed by the
 full test suite and Ruff. Compare the old and new eleven-row constants directly
 during review to confirm that only the identifier changed.
 
-Finally, scan filenames and live source/documentation for case-insensitive
-`fugu`. Every remaining match must be either:
+Finally, scan filenames and live source/documentation for the legacy
+vendor-derived name. Every remaining match must be either:
 
 1. an immutable historical progress entry, or
 2. a factual Sakana product, score-column, URL, asset-path, or methodology
    attribution.
 
-Any remaining use of `fugu` as a Kairyu suite, file, test, result directory,
+Any remaining use of that name as a Kairyu suite, file, test, result directory,
 log prefix, or display label fails the migration.

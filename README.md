@@ -1006,7 +1006,7 @@ returns `invoice_ledger_invalid` instead of a partial invoice.
 
 `kairyu bench` runs answer-quality suites against any deployed gateway — single
 models and orchestration tiers become scoreboard columns. The default is the
-11-benchmark Fugu-release suite; `--suite core` selects the deterministic
+11-benchmark Accuracy suite based on Sakana's Fugu release; `--suite core` selects the deterministic
 GSM8K/MMLU/IFEval regression suite; and `--suite structured` selects the fixed
 five-case JSON-Schema conformance corpus:
 

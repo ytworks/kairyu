@@ -98,8 +98,8 @@ all 24 candidate/task gates, evidence hashes, and the FP8-KV support warning.
 The aggregate files and quantization scoreboard index are explicitly eligible
 for Git retention; raw routine pair data stays ignored.
 
-Fugu and Core CLI defaults, row orders, result paths, and recorded target shape
-remain unchanged. `BenchTarget.quantization` is optional, and absent values are
+Accuracy and Core row orders and recorded target shape remain unchanged by the
+quantization sweep. `BenchTarget.quantization` is optional, and absent values are
 omitted from durable configuration rather than adding `quantization: null` to
 older run identities. Ordinary configuration A/B now treats a declared
 quantization profile as an intended deployment-arm difference while preserving

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rename Kairyu's internal `fugu` benchmark suite to `accuracy` everywhere without changing benchmark behavior.
+**Goal:** Rename Kairyu's vendor-derived benchmark suite key to `accuracy` everywhere without changing benchmark behavior.
 
 **Architecture:** Keep the existing suite registry, adapters, schemas, runner, aggregation, comparison, and example flow intact. Apply one canonical naming map at every interface boundary, rename the four tracked paths containing the old name, and retain `Fugu` only when it is Sakana's real product, a published score column/URL, or immutable progress history.
 
@@ -15,7 +15,7 @@
 - Canonical row-order constant: `ACCURACY_ROW_ORDER`.
 - Default package result directory: `bench/results/accuracy`.
 - Default Qwen example result directory: `results/accuracy`.
-- Do not retain a `fugu` compatibility alias.
+- Do not retain a compatibility alias for the legacy suite key.
 - Do not change the eleven adapter identifiers or their order.
 - Do not change datasets, prompts, sampling, limits, attempts, scoring, aggregation, withholding, calibration, published values, or schema version.
 - Preserve `Fugu` and `Fugu Ultra` as Sakana product/model names and preserve their source URLs/assets.
@@ -63,17 +63,17 @@ Run:
 uv run pytest tests/bench/test_bench_aggregate.py::test_only_and_exclude_names_are_validated_within_the_selected_suite tests/bench/test_bench_config.py::test_models_shorthand_builds_targets -q
 ```
 
-Expected: FAIL because `accuracy` is not registered and `BenchConfig` still defaults to `fugu`.
+Expected: FAIL because `accuracy` is not registered and `BenchConfig` still uses the legacy default.
 
 - [ ] **Step 3: Apply the minimal production rename**
 
 Apply this exact mapping without changing the tuple contents:
 
 ```text
-FUGU_ROW_ORDER             -> ACCURACY_ROW_ORDER
-suite key/name "fugu"      -> "accuracy"
-suite display name "Fugu"  -> "Accuracy"
-bench/results/fugu         -> bench/results/accuracy
+legacy row-order constant -> ACCURACY_ROW_ORDER
+canonical suite key/name  -> "accuracy"
+suite display name        -> "Accuracy"
+default result directory  -> bench/results/accuracy
 ```
 
 Update the registry, Pydantic literal/default/path derivation, CLI defaults/help/fallbacks, aggregation fallback, calibration default, and wheel smoke expectation. Do not replace `Fugu` in sampling-methodology prose because it identifies the source product.
@@ -141,7 +141,7 @@ Expected: FAIL at stale internal suite values, imports, or headings.
 
 - [ ] **Step 3: Rename production fallbacks and internal prose**
 
-Change only Kairyu-owned suite fallbacks from `fugu` to `accuracy`. Rename test/function/docstring wording such as `full_fugu_history` and `non_fugu_suite` to `full_accuracy_history` and `non_accuracy_suite`. Retain `Fugu` in `DELTA_AGAINST`, published comparison headings, source conditions, and annotations.
+Change only Kairyu-owned suite fallbacks to `accuracy`. Rename test/function/docstring wording to describe the Accuracy suite. Retain `Fugu` in `DELTA_AGAINST`, published comparison headings, source conditions, and annotations.
 
 - [ ] **Step 4: Update all Task 2 test consumers**
 
@@ -167,10 +167,10 @@ git commit -m "refactor(bench): migrate accuracy suite consumers"
 ### Task 3: Qwen example, configuration, and tracked paths
 
 **Files:**
-- Rename: `examples/bench_fugu.yaml` -> `examples/bench_accuracy.yaml`
-- Rename: `examples/qwen3-32b-multi-gpu/fugu-benchmark.sh` -> `examples/qwen3-32b-multi-gpu/accuracy-benchmark.sh`
-- Rename: `examples/qwen3-32b-multi-gpu/run-fugu-benchmark.sh` -> `examples/qwen3-32b-multi-gpu/run-accuracy-benchmark.sh`
-- Rename: `tests/unit/test_qwen_fugu_example.py` -> `tests/unit/test_qwen_accuracy_example.py`
+- Rename: legacy config filename -> `examples/bench_accuracy.yaml`
+- Rename: legacy direct-run script -> `examples/qwen3-32b-multi-gpu/accuracy-benchmark.sh`
+- Rename: legacy one-command script -> `examples/qwen3-32b-multi-gpu/run-accuracy-benchmark.sh`
+- Rename: legacy static-contract test -> `tests/unit/test_qwen_accuracy_example.py`
 - Modify: `.gitignore`
 - Modify: `examples/qwen3-32b-multi-gpu/README.md`
 - Modify: `examples/deploy_multi_orchestrator.yaml`
@@ -206,12 +206,12 @@ Expected: FAIL because the renamed scripts/config still contain old internal sui
 Apply this exact internal mapping:
 
 ```text
-bench_fugu.yaml          -> bench_accuracy.yaml
-fugu-benchmark.sh        -> accuracy-benchmark.sh
-run-fugu-benchmark.sh    -> run-accuracy-benchmark.sh
-suite: fugu              -> suite: accuracy
-results/fugu             -> results/accuracy
-[fugu]                   -> [accuracy]
+config filename         -> bench_accuracy.yaml
+direct-run script       -> accuracy-benchmark.sh
+one-command script      -> run-accuracy-benchmark.sh
+suite key               -> accuracy
+default results path    -> results/accuracy
+shell log prefix        -> [accuracy]
 ```
 
 Update `.gitignore`, shell usage text, README commands, deployment comment, and the pyproject comment. Retain factual descriptions of published Sakana scores and run conditions.
@@ -264,7 +264,7 @@ git commit -m "docs(bench): rename accuracy benchmark examples"
 Use `Accuracy suite`, `accuracy`, `examples/bench_accuracy.yaml`, and
 `bench/results/accuracy` for Kairyu's suite, config, commands, and result paths.
 Where the eleven rows are introduced, say they follow or are based on Sakana's
-published release table rather than calling the Kairyu suite `Fugu`.
+published release table rather than naming the Kairyu suite after that product.
 
 - [ ] **Step 2: Preserve factual third-party references**
 
@@ -275,8 +275,8 @@ and methodology statements in benchmark docs and code.
 
 - [ ] **Step 3: Update the current status without adding history**
 
-In `PROGRESS.md` change only the current-status suite list from `Fugu/Core/...`
-to `Accuracy/Core/...`. Do not modify `## Product` or any Change Log entry; this
+In `PROGRESS.md` change only the current-status suite list to
+`Accuracy/Core/...`. Do not modify `## Product` or any Change Log entry; this
 routine naming refactor does not require a new entry under the progress rules.
 
 - [ ] **Step 4: Audit live internal names**
@@ -363,8 +363,8 @@ no diff in `kairyu/bench/reference.py`.
 - [ ] **Step 5: Push and create the PR**
 
 ```bash
-git push -u origin codex/rename-fugu-accuracy-benchmark
-gh pr create --base main --head codex/rename-fugu-accuracy-benchmark --title "refactor(bench): rename Fugu suite to Accuracy" --body-file /tmp/kairyu-accuracy-pr.md
+git push -u origin codex/rename-benchmark-suite-to-accuracy
+gh pr create --base main --head codex/rename-benchmark-suite-to-accuracy --title "refactor(bench): rename default suite to Accuracy" --body-file /tmp/kairyu-accuracy-pr.md
 ```
 
 The PR body must summarize the internal naming migration, explicitly state the
