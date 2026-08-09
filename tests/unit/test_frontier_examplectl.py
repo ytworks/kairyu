@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -115,3 +116,19 @@ def test_compose_ignores_dotenv_files(monkeypatch, tmp_path: Path) -> None:
     assert observed["env"]["COMPOSE_PROJECT_NAME"] == (
         "kairyu-qwen3-6-27b-1gpu-vllm"
     )
+
+
+def test_qwen_vllm_services_cap_sequences_for_hybrid_cache() -> None:
+    single = yaml.safe_load(
+        (ROOT / "examples/qwen3.6-27b-1gpu/compose.yaml").read_text()
+    )
+    orchestration = yaml.safe_load(
+        (ROOT / "examples/qwen3.6-deepseek-v4-8gpu/compose.yaml").read_text()
+    )
+
+    for command in (
+        single["services"]["vllm"]["command"],
+        orchestration["x-qwen-vllm"]["command"],
+    ):
+        option = command.index("--max-num-seqs")
+        assert command[option + 1] == "64"

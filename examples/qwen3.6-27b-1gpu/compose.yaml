@@ -20,6 +20,8 @@ services:
       - qwen3.6-27b
       - --max-model-len
       - "262144"
+      - --max-num-seqs
+      - "64"
       - --dtype
       - bfloat16
       - --chat-template
