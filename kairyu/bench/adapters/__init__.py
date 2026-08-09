@@ -17,10 +17,10 @@ class SuiteInfo:
     published_comparison: bool = False
 
 
-# Row order of the Fugu release table (sakana.ai/fugu-release). Slots land
-# phase by phase; the registry below holds the implemented ones and suites
+# Row order of the Accuracy suite, based on Sakana's Fugu release table. Slots
+# land phase by phase; the registry below holds the implemented ones and suites
 # are filtered to what exists, so the scoreboard grows without reordering.
-FUGU_ROW_ORDER: tuple[str, ...] = (
+ACCURACY_ROW_ORDER: tuple[str, ...] = (
     "swe-bench-pro",
     "terminal-bench",
     "livecodebench",
@@ -57,10 +57,10 @@ LONG_CONTEXT_ROW_ORDER: tuple[str, ...] = (
 )
 
 SUITES: dict[str, SuiteInfo] = {
-    "fugu": SuiteInfo(
-        name="fugu",
-        display_name="Fugu",
-        row_order=FUGU_ROW_ORDER,
+    "accuracy": SuiteInfo(
+        name="accuracy",
+        display_name="Accuracy",
+        row_order=ACCURACY_ROW_ORDER,
         published_comparison=True,
     ),
     "core": SuiteInfo(

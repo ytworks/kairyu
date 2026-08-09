@@ -93,7 +93,7 @@ def add_bench_parser(subparsers) -> None:
         ' {"enable_thinking": true}}\'',
     )
     run.add_argument(
-        "--suite", choices=suites, default=None, help="Benchmark suite (default: fugu)"
+        "--suite", choices=suites, default=None, help="Benchmark suite (default: accuracy)"
     )
     run.add_argument("--only", action="append", default=None, help="Comma-separated names")
     run.add_argument("--exclude", action="append", default=None, help="Comma-separated names")
@@ -177,7 +177,7 @@ def add_bench_parser(subparsers) -> None:
     download = commands.add_parser(
         "download", help="Fetch and normalize the suite's datasets into the cache."
     )
-    download.add_argument("--suite", choices=suites, default="fugu")
+    download.add_argument("--suite", choices=suites, default="accuracy")
     download.add_argument("--only", action="append", default=None)
     download.add_argument("--exclude", action="append", default=None)
     download.add_argument("--cache-dir", default=None)
@@ -191,7 +191,7 @@ def add_bench_parser(subparsers) -> None:
         help="Rebuild a suite scoreboard and its published comparison when available.",
     )
     report.add_argument("run", help="Run id (under the suite results dir) or a run directory")
-    report.add_argument("--suite", choices=suites, default="fugu")
+    report.add_argument("--suite", choices=suites, default="accuracy")
     report.add_argument(
         "--results-dir",
         default=None,
@@ -209,7 +209,7 @@ def add_bench_parser(subparsers) -> None:
     )
     compare_runs.add_argument("baseline", help="Baseline run id")
     compare_runs.add_argument("candidate", help="Candidate run id")
-    compare_runs.add_argument("--suite", choices=suites, default="fugu")
+    compare_runs.add_argument("--suite", choices=suites, default="accuracy")
     compare_runs.add_argument(
         "--results-dir",
         default=None,
@@ -245,7 +245,7 @@ def add_bench_parser(subparsers) -> None:
             "(repeatable; every configured row must pass)"
         ),
     )
-    compare.add_argument("--suite", choices=suites, default="fugu")
+    compare.add_argument("--suite", choices=suites, default="accuracy")
     compare.add_argument(
         "--results-dir",
         default=None,
@@ -297,7 +297,7 @@ def add_bench_parser(subparsers) -> None:
             "Bind headline calibration to a benchmark run id (under --results-dir) or run directory"
         ),
     )
-    calibrate.add_argument("--results-dir", default="bench/results/fugu")
+    calibrate.add_argument("--results-dir", default="bench/results/accuracy")
     calibrate.add_argument("--config", default=None, help="bench.yaml judge block")
     calibrate.add_argument("--judge-base-url", default=None)
     calibrate.add_argument("--judge-model", default=None)
@@ -327,7 +327,7 @@ def add_bench_parser(subparsers) -> None:
     )
 
     listing = commands.add_parser("list", help="List benchmarks, requirements, and cache status.")
-    listing.add_argument("--suite", choices=suites, default="fugu")
+    listing.add_argument("--suite", choices=suites, default="accuracy")
 
     entrypoints = commands.add_parser(
         "entrypoints",
@@ -416,7 +416,7 @@ def _handle_report(args) -> int:
     run_dir = Path(args.run)
     if not run_dir.is_dir():
         results_dir = getattr(args, "results_dir", None) or (
-            f"bench/results/{getattr(args, 'suite', 'fugu')}"
+            f"bench/results/{getattr(args, 'suite', 'accuracy')}"
         )
         run_dir = Path(results_dir) / args.run
     if not run_dir.is_dir():
@@ -536,7 +536,7 @@ def _handle_report(args) -> int:
     elif raw_judge is not None:
         judge = JudgeConfig(model="identity-unavailable")
         judge_identity_incomplete = True
-    suite = config.get("suite", getattr(args, "suite", "fugu"))
+    suite = config.get("suite", getattr(args, "suite", "accuracy"))
     scoreboard = build_scoreboard(
         run_id=run_meta.get("run_id", run_dir.name),
         suite=suite,
@@ -570,7 +570,8 @@ def _handle_compare_runs(args) -> int:
     from kairyu.bench.store import ResultStore
 
     results_dir = Path(
-        getattr(args, "results_dir", None) or f"bench/results/{getattr(args, 'suite', 'fugu')}"
+        getattr(args, "results_dir", None)
+        or f"bench/results/{getattr(args, 'suite', 'accuracy')}"
     )
     try:
         store = ResultStore(results_dir, args.baseline)
@@ -654,7 +655,8 @@ def _handle_compare(args) -> int:
     from kairyu.bench.store import ResultStore
 
     results_dir = Path(
-        getattr(args, "results_dir", None) or f"bench/results/{getattr(args, 'suite', 'fugu')}"
+        getattr(args, "results_dir", None)
+        or f"bench/results/{getattr(args, 'suite', 'accuracy')}"
     )
     try:
         tolerances = _config_tolerances(args.tolerance)
@@ -785,7 +787,7 @@ def _handle_list(args) -> int:
 
     cache = BenchCache(resolve_cache_root())
     registry = all_adapters()
-    definition = suite_info(getattr(args, "suite", "fugu"))
+    definition = suite_info(getattr(args, "suite", "accuracy"))
     print(f"suite {definition.name} ({len(definition.row_order)} slots), cache: {cache.root}")
     for name in definition.row_order:
         adapter = registry.get(name)

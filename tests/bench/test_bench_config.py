@@ -73,8 +73,8 @@ def test_models_shorthand_builds_targets():
     config = build_config(args)
     assert [t.model for t in config.targets] == ["m", "kairyu-auto"]
     assert config.targets[0].label() == "m"
-    assert config.suite == "fugu"
-    assert config.results_dir == "bench/results/fugu"
+    assert config.suite == "accuracy"
+    assert config.results_dir == "bench/results/accuracy"
     assert config.limit is None  # full run is the default
 
 
@@ -610,11 +610,11 @@ def test_calibration_subcommand_accepts_a_bound_benchmark_run():
             "--run",
             "headline-run",
             "--results-dir",
-            "/results/fugu",
+            "/results/accuracy",
         ]
     )
     assert args.run == "headline-run"
-    assert args.results_dir == "/results/fugu"
+    assert args.results_dir == "/results/accuracy"
 
 
 def test_execution_config_requires_an_immutable_docker_image():

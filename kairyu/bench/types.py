@@ -413,8 +413,8 @@ class BenchConfig(BaseModel):
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
     suite: Literal[
-        "fugu", "core", "quantization", "structured", "long-context"
-    ] = "fugu"
+        "accuracy", "core", "quantization", "structured", "long-context"
+    ] = "accuracy"
     targets: tuple[BenchTarget, ...] = Field(min_length=1)
     judge: JudgeConfig = JudgeConfig()
     execution: ExecutionConfig = ExecutionConfig()
@@ -433,7 +433,7 @@ class BenchConfig(BaseModel):
     request_timeout_s: float = Field(default=600.0, gt=0)
     retries: int = Field(default=2, ge=0)
     cache_dir: str | None = None
-    results_dir: str = "bench/results/fugu"
+    results_dir: str = "bench/results/accuracy"
     run_id: str | None = None  # reuse an id to resume
     rerun: bool = False  # ignore existing pair results
     download: bool = True  # auto-download missing datasets before running
@@ -457,7 +457,7 @@ class BenchConfig(BaseModel):
         if isinstance(value, dict) and value.get("results_dir") is None:
             value = {
                 **value,
-                "results_dir": f"bench/results/{value.get('suite', 'fugu')}",
+                "results_dir": f"bench/results/{value.get('suite', 'accuracy')}",
             }
         return value
 
@@ -1043,7 +1043,7 @@ class PairResult(BaseModel):
     comparable: bool = True
     incomparable_reasons: tuple[str, ...] = ()
     # Separate from published-score comparability. An unresolved harness/data
-    # runtime may remain visible in a complete Fugu scoreboard, but can never
+    # runtime may remain visible in a complete Accuracy scoreboard, but can never
     # produce a cross-commit regression delta even when both runs share it.
     cross_run_policy: CrossRunPolicy = "allowed"
     cross_run_reason: str | None = None
