@@ -1,4 +1,4 @@
-"""Accuracy report: a finished run next to the published Fugu-release scores.
+"""Accuracy report: a finished run next to committed frontier reference scores.
 
 The scoreboard says what kairyu measured. This says how that sits against the
 numbers Sakana published — with the deltas, and with every reason the delta may
@@ -21,11 +21,12 @@ import math
 import re
 
 from kairyu.bench.reference import (
+    COMPARISON_MODELS,
     NOT_COMPARABLE,
     PROVIDER_REPORTED,
     PUBLISHED_VARIANTS,
-    published,
-    published_models,
+    comparison_published,
+    comparison_records,
     reference_metadata,
 )
 
@@ -58,7 +59,7 @@ def build_comparison(scoreboard: dict) -> dict:
     rows = []
     for benchmark in scoreboard.get("benchmarks") or []:
         cells = (scoreboard.get("cells") or {}).get(benchmark, {})
-        reference = published(benchmark)
+        reference = comparison_published(benchmark)
         measured = {}
         for target in targets:
             cell = cells.get(target) or {}
@@ -87,11 +88,19 @@ def build_comparison(scoreboard: dict) -> dict:
                 "display_name": (scoreboard.get("display_names") or {}).get(benchmark, benchmark),
                 "measured": measured,
                 "published": reference,
-                "published_models": list(published_models(benchmark)),
+                "published_models": list(COMPARISON_MODELS),
+                "published_records": comparison_records(benchmark),
                 "variant": PUBLISHED_VARIANTS.get(benchmark),
                 "not_comparable": NOT_COMPARABLE.get(benchmark),
                 "deltas": {
                     target: _delta(values, reference) for target, values in measured.items()
+                },
+                "deltas_by_reference": {
+                    target: {
+                        model: _delta_against(values, reference.get(model))
+                        for model in COMPARISON_MODELS
+                    }
+                    for target, values in measured.items()
                 },
             }
         )
@@ -119,6 +128,12 @@ def _delta(values: dict, reference: dict[str, float]) -> float | None:
     if values["score"] is None or baseline is None:
         return None
     if not values["comparable"]:
+        return None
+    return round(values["score"] - baseline, 1)
+
+
+def _delta_against(values: dict, baseline: float | None) -> float | None:
+    if values["score"] is None or baseline is None or not values["comparable"]:
         return None
     return round(values["score"] - baseline, 1)
 
@@ -155,11 +170,12 @@ def render_comparison_markdown(comparison: dict) -> str:
     reference = comparison["reference"]
     targets = comparison["targets"]
     lines = [
-        f"# Accuracy vs published Fugu scores — run {comparison['run_id']}",
+        f"# Accuracy vs published frontier scores — run {comparison['run_id']}",
         "",
-        f"Published values transcribed from {reference['source_url']} on "
-        f"{reference['retrieved_on']} (the page publishes them as images, so they "
-        "cannot be fetched programmatically).",
+        "Published values come from committed provider pages, papers, and launch-table "
+        f"transcriptions (catalog `{reference['catalog_sha256']}`). The Fugu table was "
+        f"transcribed from image assets on {reference['retrieved_on']} and cannot be "
+        "fetched programmatically.",
         "",
         f"`Δ` is measured minus published **{comparison['delta_against']}**, and "
         "only for a cell that is a full-suite measurement of the same thing. "
@@ -170,11 +186,7 @@ def render_comparison_markdown(comparison: dict) -> str:
     lines += _banner(comparison)
 
     header = ["Benchmark"] + list(targets)
-    published_columns: list[str] = []
-    for row in comparison["rows"]:
-        for model in row["published_models"]:
-            if model not in published_columns:
-                published_columns.append(model)
+    published_columns = list(COMPARISON_MODELS)
     header += published_columns + [f"Δ {target}" for target in targets]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|---" * len(header) + "|")
@@ -188,6 +200,30 @@ def render_comparison_markdown(comparison: dict) -> str:
         cells += [_delta_text(row["deltas"][target], row["measured"][target]) for target in targets]
         lines.append("| " + " | ".join(cells) + " |")
 
+    lines += [
+        "",
+        "## Measured score gaps by reference model",
+        "",
+        "Each value is the local measured score minus that published reference. "
+        "Missing public values stay `—`; `n/c` means the local cell is not a "
+        "full like-for-like measurement.",
+        "",
+    ]
+    gap_header = ["Benchmark", "Target"] + published_columns
+    lines.append("| " + " | ".join(gap_header) + " |")
+    lines.append("|---" * len(gap_header) + "|")
+    for row in comparison["rows"]:
+        for target in targets:
+            values = row["measured"][target]
+            cells = [row["display_name"], target]
+            for model in published_columns:
+                delta = row["deltas_by_reference"][target][model]
+                if row["published"].get(model) is None:
+                    cells.append("—")
+                else:
+                    cells.append(_delta_text(delta, values))
+            lines.append("| " + " | ".join(cells) + " |")
+
     lines += ["", "## Reading this table", ""]
     for note in reference["footnotes"]:
         lines.append(f"- {note}")
@@ -197,6 +233,12 @@ def render_comparison_markdown(comparison: dict) -> str:
         "unknown conditions; treat them as orientation, not as a measurement "
         "made under this harness."
     )
+    lines += ["", "## Published-source catalog", ""]
+    for source in reference["sources"].values():
+        lines.append(
+            f"- [{source['title']}]({source['url']}) — {source['publisher']}; "
+            f"{source['tier']}; retrieved {source['retrieved_on']}."
+        )
 
     caveats = _caveats(comparison)
     if caveats:
@@ -249,6 +291,19 @@ def _caveats(comparison: dict) -> list[str]:
             caveats.append(
                 f"**{name}**: the release also publishes a {variant['label']} "
                 f"({published_variant}); the row above uses the headline table."
+            )
+        frontier_variants = [
+            record for record in row.get("published_records", []) if record.get("variant")
+        ]
+        if frontier_variants:
+            values = ", ".join(
+                f"{record['model']} {float(record['score']):.1f} "
+                f"({record['condition']})"
+                for record in frontier_variants
+            )
+            caveats.append(
+                f"**{name}**: alternate published conditions retained but not used "
+                f"for deltas — {values}."
             )
         for target, values in row["measured"].items():
             if values["status"] in ("partial", "failed") and values["reason"]:

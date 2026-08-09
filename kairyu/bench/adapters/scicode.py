@@ -505,6 +505,7 @@ class SciCodeAdapter(GenerativeAdapter):
                                 update={
                                     "item_id": item.id,
                                     "latency_s": round(attempt.latency_s, 3),
+                                    "timing": attempt.timing,
                                 }
                             )
                         )

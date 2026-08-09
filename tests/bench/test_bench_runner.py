@@ -306,8 +306,9 @@ def test_core_evaluators_are_content_bound_to_adapter_identity(tmp_path, monkeyp
         ("kairyu.bench", "aggregate.py"),
         ("kairyu.bench", "cache.py"),
         ("kairyu.bench", "runner.py"),
-        ("kairyu.bench", "sampling.py"),
-        ("kairyu.bench", "types.py"),
+            ("kairyu.bench", "sampling.py"),
+            ("kairyu.bench", "streaming.py"),
+            ("kairyu.bench", "types.py"),
         ("kairyu.bench", "targets.py"),
     }
 

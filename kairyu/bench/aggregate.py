@@ -12,7 +12,11 @@ from collections.abc import Sequence
 from statistics import NormalDist, mean, stdev
 
 from kairyu.bench.adapters import all_adapters, suite_info
-from kairyu.bench.adapters.base import GenerativeAdapter, normalize_base_url
+from kairyu.bench.adapters.base import (
+    GenerativeAdapter,
+    LogLikelihoodAdapter,
+    normalize_base_url,
+)
 from kairyu.bench.sampling import (
     PROTOCOL_ID as SAMPLING_PROTOCOL_ID,
 )
@@ -30,6 +34,8 @@ from kairyu.bench.structured import (
 from kairyu.bench.types import (
     SCHEMA_VERSION,
     BenchTarget,
+    GenerationTimingEvidence,
+    ItemResult,
     JudgeConfig,
     PairResult,
     pair_result_evidence_error,
@@ -212,6 +218,100 @@ def _sampling_sensitivity(pair: PairResult, *, declared_binary: bool) -> dict | 
         "mode": mode,
         "wire_omitted": list(wire_omitted),
         "recommended_defaults_attested": False,
+    }
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def _item_performance_evidence(
+    item: ItemResult,
+) -> tuple[list[GenerationTimingEvidence], int, int, int]:
+    """Return timings, requests, errors, and unmeasured streamed requests."""
+
+    if item.sampling_attempts is not None:
+        timings: list[GenerationTimingEvidence] = []
+        requests = errors = unmeasured = 0
+        for attempt in item.sampling_attempts:
+            child_timings, child_requests, child_errors, child_unmeasured = (
+                _item_performance_evidence(attempt.result)
+            )
+            timings.extend(child_timings)
+            requests += child_requests
+            errors += child_errors
+            unmeasured += child_unmeasured
+        return timings, requests, errors, unmeasured
+    if item.structured_output is not None:
+        arms = (
+            item.structured_output.constrained,
+            item.structured_output.unconstrained,
+        )
+        timings = [arm.timing for arm in arms if arm.timing is not None]
+        errors = sum(arm.outcome == "failed" for arm in arms)
+        return timings, len(arms), errors, len(arms) - len(timings)
+    if item.latency_s is None:
+        return [], 0, 0, 0
+    timings = [item.timing] if item.timing is not None else []
+    return timings, 1, int(item.status == "failed"), int(item.timing is None)
+
+
+def _performance_summary(pair: PairResult, adapter: object | None) -> dict:
+    if isinstance(adapter, LogLikelihoodAdapter):
+        return {
+            "status": "not_applicable",
+            "reason": "teacher-forced log-likelihood does not emit generation tokens",
+            "protocol": None,
+        }
+    timings: list[GenerationTimingEvidence] = []
+    requests = errors = unmeasured = 0
+    for item in pair.items:
+        retained, item_requests, item_errors, item_unmeasured = (
+            _item_performance_evidence(item)
+        )
+        timings.extend(retained)
+        requests += item_requests
+        errors += item_errors
+        unmeasured += item_unmeasured
+    if not timings:
+        reason = (
+            "external harness did not return target-request timing evidence"
+            if getattr(getattr(adapter, "info", None), "agentic", False)
+            else "endpoint returned no measurable streamed target completion"
+        )
+        return {
+            "status": "unavailable",
+            "reason": reason,
+            "protocol": "openai-chat-sse-v1",
+            "requests": requests,
+            "errors": errors,
+            "unmeasured_requests": unmeasured,
+        }
+    ttft = [timing.ttft_s for timing in timings]
+    tps = [timing.tps for timing in timings if timing.tps is not None]
+    return {
+        "status": "measured",
+        "reason": None,
+        "protocol": "openai-chat-sse-v1",
+        "requests": requests,
+        "valid_ttft": len(ttft),
+        "valid_tps": len(tps),
+        "unmeasured_requests": unmeasured,
+        "missing_usage": sum(timing.usage_missing for timing in timings),
+        "errors": errors,
+        "retry_attempts": sum(timing.request_attempts - 1 for timing in timings),
+        "ttft_p50_ms": _percentile(ttft, 0.50) * 1000,
+        "ttft_p95_ms": _percentile(ttft, 0.95) * 1000,
+        "tps_p50": _percentile(tps, 0.50),
     }
 
 
@@ -432,6 +532,7 @@ def build_scoreboard(
                 "cross_run_policy": pair.cross_run_policy,
                 "cross_run_reason": pair.cross_run_reason,
                 "footnotes": notes,
+                "performance": _performance_summary(pair, adapters.get(benchmark)),
             }
             if sensitivity is not None:
                 cell["sampling_sensitivity"] = sensitivity
@@ -729,6 +830,86 @@ def _number(value: object) -> str:
     return "—" if number is None else f"{number:.2f}"
 
 
+def _performance_markdown(scoreboard: dict) -> list[str]:
+    rows: list[list[str]] = []
+    for benchmark in scoreboard.get("benchmarks", []):
+        display = scoreboard.get("display_names", {}).get(benchmark, benchmark)
+        for target in scoreboard.get("targets", []):
+            cell = scoreboard.get("cells", {}).get(benchmark, {}).get(target, {})
+            summary = cell.get("performance") if isinstance(cell, dict) else None
+            if not isinstance(summary, dict):
+                rows.append([display, target, "unmeasured", "—", "—", "—", "0/0", "—", "—", "—"])
+                continue
+            status = summary.get("status")
+            if status == "not_applicable":
+                rows.append(
+                    [
+                        display,
+                        target,
+                        "not applicable",
+                        "—",
+                        "—",
+                        "—",
+                        "0/0",
+                        "—",
+                        "—",
+                        "—",
+                    ]
+                )
+                continue
+            requests = _whole_count(summary.get("requests")) or 0
+            valid_ttft = _whole_count(summary.get("valid_ttft")) or 0
+            if status != "measured":
+                rows.append(
+                    [
+                        display,
+                        target,
+                        "unavailable",
+                        "—",
+                        "—",
+                        "—",
+                        f"0/{requests}",
+                        "—",
+                        str(_whole_count(summary.get("errors")) or 0),
+                        "—",
+                    ]
+                )
+                continue
+            valid_tps = _whole_count(summary.get("valid_tps")) or 0
+            rows.append(
+                [
+                    display,
+                    target,
+                    "measured",
+                    _number(summary.get("ttft_p50_ms")),
+                    _number(summary.get("ttft_p95_ms")),
+                    _number(summary.get("tps_p50")),
+                    f"{valid_ttft}/{requests} TTFT; {valid_tps}/{requests} TPS",
+                    str(_whole_count(summary.get("missing_usage")) or 0),
+                    str(_whole_count(summary.get("errors")) or 0),
+                    str(_whole_count(summary.get("retry_attempts")) or 0),
+                ]
+            )
+    if not rows:
+        return []
+    lines = [
+        "",
+        "## Target generation performance",
+        "",
+        "TTFT is request start to the first non-empty content, reasoning, refusal, "
+        "or tool-call delta. TPS is `(completion_tokens - 1) / (last semantic "
+        "delta - first semantic delta)` and is withheld without endpoint usage, "
+        "at least two completion tokens, and a positive span. These values cover "
+        "only the configured target; no published-model performance is compared.",
+        "",
+        "| Benchmark | Target | Status | TTFT p50 (ms) | TTFT p95 (ms) | "
+        "TPS p50 | Valid/requests | Missing usage | Errors | Retry attempts |",
+        "|---|---|---|---:|---:|---:|---|---:|---:|---:|",
+    ]
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    return lines
+
+
 def _structured_markdown(scoreboard: dict) -> list[str]:
     benchmark_cells = scoreboard.get("cells", {}).get("structured-output", {})
     retained: list[tuple[str, dict]] = []
@@ -879,6 +1060,7 @@ def render_markdown(scoreboard: dict) -> str:
             for target in targets
         ]
         lines.append("| " + " | ".join(row) + " |")
+    lines.extend(_performance_markdown(scoreboard))
     lines.extend(_structured_markdown(scoreboard))
     if scoreboard["footnotes"]:
         lines.append("")
