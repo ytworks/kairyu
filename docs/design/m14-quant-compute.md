@@ -249,10 +249,21 @@ buffers, so checkpoint keys and tensor ownership do not change.
 
 Selection is fail-closed. The default policy first applies hard architectural
 constraints, then checkpoint `ignore` entries (literal prefixes or explicit
-`re:` full matches), then the pre-existing dense defaults for routers, output
-heads, and draft fusion projections. All remaining projections use the
-checkpoint format. A specialized policy may select another compatible format
-or kernel explicitly; it cannot override an architectural prohibition.
+`re:` full matches), then the accuracy-preserving dense defaults for routers,
+output heads, and draft fusion projections. Router and vocabulary near-ties can
+change selected experts or tokens, while draft-fusion error feeds speculative
+acceptance/correction; keeping these small projections dense is therefore a
+numerical invariant, not merely compatibility with older construction. All
+remaining projections use the checkpoint format. A specialized, evidence-backed
+policy may select another compatible format or kernel explicitly; it cannot
+override an architectural prohibition.
+
+AWQ/GPTQ W4A16 consumes checkpoint FP16 scales without first rounding the
+dequantized weights to the resident activation dtype. Both FP16 and BF16 model
+activations enter the tensor-core dot as FP16 operands and accumulate in FP32;
+the output is cast back to the resident activation dtype. This preserves the
+checkpoint scale precision instead of discarding roughly three mantissa bits
+for BF16 serving.
 Quantized CUDA selections may choose only a fused CUDA family. They never fall
 back to the CPU oracle, dense `F.linear`, full-weight dequantization, or an
 emulation kernel.

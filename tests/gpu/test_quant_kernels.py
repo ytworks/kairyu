@@ -161,6 +161,36 @@ def test_fused_kernel_matches_cpu_oracle_without_dequantizing_weight(
         torch.testing.assert_close(gpu_out, cpu_out, rtol=0.03, atol=atol)
 
 
+@pytest.mark.parametrize("factory", [_awq_module, _gptq_module], ids=["awq", "gptq"])
+@pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
+def test_w4a16_uses_fp16_checkpoint_scale_precision(cuda, factory, activation_dtype):
+    """W4A16 always preserves the checkpoint's FP16 scale precision."""
+    torch.manual_seed(366)
+    module = factory(64, 32)
+    module.bias.data.zero_()
+    # Exactly halfway between adjacent BF16 values around one, but exactly
+    # representable in FP16.  The old activation-dtype dequant path loses it.
+    module.scales.fill_(1.00390625)
+    activation = torch.ones(3, 64, dtype=activation_dtype)
+    weight = module.dequantize()
+    expected = torch.mm(
+        activation.to(device=cuda, dtype=torch.float16),
+        weight.to(device=cuda, dtype=torch.float16).T.contiguous(),
+        out_dtype=torch.float32,
+    ).to(activation_dtype)
+
+    actual = module.to(cuda)(activation.to(cuda))
+
+    if activation_dtype is torch.bfloat16:
+        bf16_rounded = torch.mm(
+            activation.to(cuda),
+            weight.to(device=cuda, dtype=torch.bfloat16).T.contiguous(),
+            out_dtype=torch.float32,
+        ).to(torch.bfloat16)
+        assert not torch.equal(expected, bf16_rounded)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_nvfp4_qkv_pack_matches_separate_and_replays_cuda_graph(cuda):
     """One activation quantization must preserve Q/K/V values and graph safety."""
     from kairyu.models.packed_linear import NvFp4LinearPack

@@ -878,10 +878,11 @@ def default_linear_selection(
                 None,
                 f"checkpoint-ignore:{pattern}",
             )
-    # These projections were dense before contextual construction was added.
-    # Keeping that as the default *policy* (rather than an architectural ban)
-    # preserves existing checkpoint behavior while allowing an explicit
-    # specialized policy to opt into a compatible packed representation.
+    # Router near-ties, vocabulary near-ties, and draft/target correction are
+    # unusually sensitive to quantization error.  Keep these projections dense
+    # as the accuracy-preserving default policy.  This is not an architectural
+    # ban: an explicit, evidence-backed policy may still select a compatible
+    # packed representation.
     if context.role in {
         LinearRole.MOE_ROUTER,
         LinearRole.DRAFT_FUSION,
