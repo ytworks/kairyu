@@ -64,7 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # FP8/INT8/AWQ/GPTQ GEMMs then JIT device code through Triton's bundled NVIDIA
 # toolchain; nvcc remains absent. The FlashInfer jit-cache wheel above includes
 # the default FP4 quant/GEMM AOT modules in addition to scoped attention.
-COPY --from=ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:python3.12-bookworm-slim@sha256:e5b65587bce7de595f299855d7385fe7fca39b8a74baa261ba1b7147afa78e58 /usr/local/bin/uv /usr/local/bin/uv
 WORKDIR /app
 # Bytecode compilation is disabled: with the full GPU dep set (torch + CUDA
 # libs) uv's parallel compile exhausts file descriptors (EMFILE / os error 24).
