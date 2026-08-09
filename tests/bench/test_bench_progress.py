@@ -270,7 +270,7 @@ async def test_pair_play_by_play_is_not_duplicated_on_stdout(tmp_path, http_fact
     await runner.run()
     out = capsys.readouterr().out
     assert "[run] gpqa-diamond" not in out
-    assert "# Fugu benchmark scoreboard" in out  # the artifact still prints
+    assert "# Accuracy benchmark scoreboard" in out  # the artifact still prints
 
 
 async def test_cached_pairs_are_reported_as_cached(tmp_path, http_factory):

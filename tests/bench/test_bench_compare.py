@@ -27,7 +27,7 @@ def _scoreboard(**cells) -> dict:
     benchmarks = list(cells)
     return {
         "run_id": "r1",
-        "suite": "fugu",
+        "suite": "accuracy",
         "targets": ["qwen3-32b"],
         "benchmarks": benchmarks,
         "display_names": {name: name for name in benchmarks},
@@ -42,17 +42,26 @@ def _scoreboard(**cells) -> dict:
 
 
 def test_every_suite_row_has_published_scores():
-    from kairyu.bench.adapters import FUGU_ROW_ORDER
+    from kairyu.bench.adapters import ACCURACY_ROW_ORDER
 
-    assert set(PUBLISHED_SCORES) == set(FUGU_ROW_ORDER)
+    assert set(PUBLISHED_SCORES) == set(ACCURACY_ROW_ORDER)
 
 
-def test_non_fugu_suite_has_no_published_comparison():
+def test_non_accuracy_suite_has_no_published_comparison():
     board = _scoreboard(**{"gsm8k": {"status": "completed", "score": 1.0}})
     board["suite"] = "core"
 
     with pytest.raises(ValueError, match="has no published comparison"):
         build_comparison(board)
+
+
+def test_missing_suite_uses_accuracy_as_the_default():
+    board = _scoreboard(**{"gpqa-diamond": {"status": "completed", "score": 0.9}})
+    del board["suite"]
+
+    comparison = build_comparison(board)
+
+    assert comparison["rows"][0]["published"]["Fugu"] == 95.5
 
 
 def test_published_scores_are_percentages_with_fugu_present():
@@ -236,7 +245,9 @@ async def test_comparison_is_printed_after_the_scoreboard(tmp_path, http_factory
     runner = SuiteRunner(config, http_factory=http_factory, probe_docker=lambda: (False, "t"))
     await runner.run()
     out = capsys.readouterr().out
-    assert out.index("# Fugu benchmark scoreboard") < out.index("# Accuracy vs published")
+    assert out.index("# Accuracy benchmark scoreboard") < out.index(
+        "# Accuracy vs published"
+    )
 
 
 # -- subset / fixture runs are not full-suite measurements ----------------------
