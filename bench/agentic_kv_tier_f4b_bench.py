@@ -59,6 +59,9 @@ from kairyu.bench.evidence import (  # noqa: E402
     read_jsonl as evidence_read_jsonl,
 )
 from kairyu.bench.evidence import (  # noqa: E402
+    read_jsonl_with_sha256 as evidence_read_jsonl_with_sha256,
+)
+from kairyu.bench.evidence import (  # noqa: E402
     replay_manifest as evidence_replay_manifest,
 )
 from kairyu.bench.evidence import (  # noqa: E402
@@ -3206,21 +3209,20 @@ def _quality_distribution_comparison(
 
 
 def recompute_quality_manifest(
-    performance_raw_path: Path,
+    performance_rows: Sequence[Mapping[str, object]],
     quality_rows: Sequence[Mapping[str, object]],
     *,
+    performance_raw_sha256: str,
     quality_raw_sha256: str,
 ) -> dict[str, object]:
     _require(
-        performance_raw_path.is_file(),
-        f"parent performance raw is missing: {performance_raw_path}",
+        _valid_sha256(performance_raw_sha256),
+        "parent performance combined raw digest is invalid",
     )
     _require(
         _valid_sha256(quality_raw_sha256),
         "quality combined raw digest is invalid",
     )
-    performance_raw_sha256 = sha256_file(performance_raw_path)
-    performance_rows = read_jsonl(performance_raw_path)
     performance_manifest = recompute_manifest(
         performance_rows,
         raw_sha256=performance_raw_sha256,
@@ -3954,20 +3956,31 @@ def _artifact_paths(path: Path) -> tuple[Path, Path]:
     )
 
 
-def verify_artifact(path: Path, *, assert_gate: bool = False) -> dict[str, object]:
+def _verify_artifact_with_rows(
+    path: Path,
+    *,
+    assert_gate: bool = False,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
     raw_path, _manifest_path = _artifact_paths(path)
+    replayed_rows: list[dict[str, object]] | None = None
+
+    def recompute_and_capture(
+        rows: Sequence[dict[str, object]],
+        raw_sha256: str,
+    ) -> dict[str, object]:
+        nonlocal replayed_rows
+        replayed_rows = list(rows)
+        return recompute_manifest(rows, raw_sha256=raw_sha256)
+
     recomputed = verify_replayed_manifest(
         path,
         raw_name=RAW_NAME,
         manifest_name=MANIFEST_NAME,
-        recompute=lambda rows, raw_sha256: recompute_manifest(
-            rows,
-            raw_sha256=raw_sha256,
-        ),
+        recompute=recompute_and_capture,
         error_type=EvidenceError,
     )
-    rows = read_jsonl(raw_path)
-    embedded_lifecycle = rows[0].get("container_lifecycle")
+    _require(replayed_rows is not None, "performance raw replay returned no rows")
+    embedded_lifecycle = replayed_rows[0].get("container_lifecycle")
     retained_lifecycle = _load_container_lifecycle(raw_path.parent / CONTAINER_METADATA_DIR)
     _require(
         retained_lifecycle == embedded_lifecycle,
@@ -3976,6 +3989,11 @@ def verify_artifact(path: Path, *, assert_gate: bool = False) -> dict[str, objec
     if assert_gate and recomputed["passed"] is not True:
         failed = [name for name, passed in recomputed["checks"].items() if not passed]
         raise EvidenceError(f"G5 F4b evidence failed: {', '.join(failed)}")
+    return recomputed, replayed_rows
+
+
+def verify_artifact(path: Path, *, assert_gate: bool = False) -> dict[str, object]:
+    recomputed, _rows = _verify_artifact_with_rows(path, assert_gate=assert_gate)
     return recomputed
 
 
@@ -3985,11 +4003,19 @@ def replay_quality_raw(
     *,
     assert_gate: bool = False,
 ) -> dict[str, object]:
-    rows = read_jsonl(quality_raw_path)
-    manifest = recompute_quality_manifest(
+    performance_rows, performance_raw_sha256 = evidence_read_jsonl_with_sha256(
         performance_raw_path,
-        rows,
-        quality_raw_sha256=sha256_file(quality_raw_path),
+        error_type=EvidenceError,
+    )
+    manifest = evidence_replay_manifest(
+        quality_raw_path,
+        recompute=lambda quality_rows, quality_raw_sha256: recompute_quality_manifest(
+            performance_rows,
+            quality_rows,
+            performance_raw_sha256=performance_raw_sha256,
+            quality_raw_sha256=quality_raw_sha256,
+        ),
+        error_type=EvidenceError,
     )
     if assert_gate and manifest["passed"] is not True:
         failed = [
@@ -4018,7 +4044,14 @@ def seal_quality_artifact(
     performance_raw_path, _performance_manifest_path = _artifact_paths(
         performance_artifact
     )
-    performance_raw_sha256 = sha256_file(performance_raw_path)
+    performance_raw = performance_manifest.get("raw")
+    _require(isinstance(performance_raw, dict), "performance raw manifest is invalid")
+    performance_raw_sha256 = performance_raw.get("sha256")
+    _require(
+        _valid_sha256(performance_raw_sha256),
+        "performance raw manifest digest is invalid",
+    )
+    assert isinstance(performance_raw_sha256, str)
     combined_quality = assemble_quality_rows(
         quality_raw_paths,
         parent_performance_raw_sha256=performance_raw_sha256,
@@ -4082,34 +4115,41 @@ def verify_quality_artifact(
     assert_gate: bool = False,
 ) -> dict[str, object]:
     _require(path.is_dir(), "quality artifact must be a directory")
-    performance_manifest = verify_artifact(path, assert_gate=False)
-    performance_raw_path = path / RAW_NAME
-    quality_raw_path = path / QUALITY_RAW_NAME
-    quality_manifest_path = path / QUALITY_MANIFEST_NAME
-    _require(
-        quality_raw_path.is_file(),
-        f"combined quality raw is missing: {quality_raw_path}",
-    )
-    _require(
-        quality_manifest_path.is_file(),
-        f"quality manifest is missing: {quality_manifest_path}",
-    )
-    recomputed = replay_quality_raw(
-        performance_raw_path,
-        quality_raw_path,
+    performance_manifest, performance_rows = _verify_artifact_with_rows(
+        path,
         assert_gate=False,
     )
-    try:
-        retained = json.loads(
-            quality_manifest_path.read_text(encoding="utf-8")
-        )
-    except (OSError, json.JSONDecodeError) as error:
-        raise EvidenceError("cannot read retained quality manifest") from error
+    performance_raw = performance_manifest.get("raw")
+    _require(isinstance(performance_raw, dict), "performance raw manifest is invalid")
+    performance_raw_sha256 = performance_raw.get("sha256")
     _require(
-        isinstance(retained, dict) and retained == recomputed,
-        "retained quality manifest differs from independent raw replay",
+        _valid_sha256(performance_raw_sha256),
+        "performance raw manifest digest is invalid",
     )
-    quality_rows = read_jsonl(quality_raw_path)
+    assert isinstance(performance_raw_sha256, str)
+    quality_rows: list[dict[str, object]] | None = None
+
+    def recompute_and_capture(
+        rows: Sequence[dict[str, object]],
+        quality_raw_sha256: str,
+    ) -> dict[str, object]:
+        nonlocal quality_rows
+        quality_rows = list(rows)
+        return recompute_quality_manifest(
+            performance_rows,
+            rows,
+            performance_raw_sha256=performance_raw_sha256,
+            quality_raw_sha256=quality_raw_sha256,
+        )
+
+    recomputed = verify_replayed_manifest(
+        path,
+        raw_name=QUALITY_RAW_NAME,
+        manifest_name=QUALITY_MANIFEST_NAME,
+        recompute=recompute_and_capture,
+        error_type=EvidenceError,
+    )
+    _require(quality_rows is not None, "quality raw replay returned no rows")
     embedded_lifecycle = quality_rows[0].get("container_lifecycle")
     retained_lifecycle = _load_container_lifecycle(
         path / QUALITY_CONTAINER_METADATA_DIR,

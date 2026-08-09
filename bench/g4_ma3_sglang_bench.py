@@ -1546,9 +1546,10 @@ def _capture_command(command: Sequence[str]) -> str:
 
 
 def _capture_single_object(command: Sequence[str], *, label: str) -> dict[str, object]:
+    output = _capture_command(command)
     try:
-        value = strict_json_loads(_capture_command(command))
-    except json.JSONDecodeError as error:
+        value = strict_json_loads(output)
+    except GateEvidenceError as error:
         raise GateEvidenceError(f"{label} is not valid JSON") from error
     if (
         not isinstance(value, list)
@@ -1652,11 +1653,10 @@ def _capture_checkpoint_volume(
     )
     if container_id not in consumer_ids:
         raise GateEvidenceError("running server is absent from Docker volume consumers")
+    consumer_output = _capture_command(("docker", "inspect", *consumer_ids))
     try:
-        consumers = strict_json_loads(
-            _capture_command(("docker", "inspect", *consumer_ids))
-        )
-    except json.JSONDecodeError as error:
+        consumers = strict_json_loads(consumer_output)
+    except GateEvidenceError as error:
         raise GateEvidenceError("Docker volume consumer inspect is not valid JSON") from error
     if (
         not isinstance(consumers, list)
@@ -1844,7 +1844,7 @@ def _capture_runtime_versions(container_name: str, arm: str) -> dict[str, str]:
     output = _capture_command(("docker", "exec", container_name, python, "-c", probe))
     try:
         value = strict_json_loads(output.strip().splitlines()[-1])
-    except (IndexError, json.JSONDecodeError) as error:
+    except (IndexError, GateEvidenceError) as error:
         raise GateEvidenceError("container runtime-version probe is not valid JSON") from error
     if not isinstance(value, dict) or set(value) != {
         "cuda",
