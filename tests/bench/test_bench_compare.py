@@ -14,10 +14,15 @@ from conftest import make_config
 
 from kairyu.bench.compare import build_comparison, render_comparison_markdown
 from kairyu.bench.reference import (
+    COMPARISON_MODELS,
+    FRONTIER_SCORE_RECORDS,
+    FRONTIER_SCORE_VARIANTS,
     HEADLINE_MODELS,
     NOT_COMPARABLE,
     PROVIDER_REPORTED,
     PUBLISHED_SCORES,
+    REFERENCE_SOURCES,
+    catalog_sha256,
     published_models,
 )
 from kairyu.bench.runner import SuiteRunner
@@ -81,6 +86,22 @@ def test_baselines_are_declared_provider_reported():
     assert "Opus 4.8" in PROVIDER_REPORTED
     assert "Fugu" not in PROVIDER_REPORTED
     assert "Fugu Ultra" not in PROVIDER_REPORTED
+
+
+def test_frontier_catalog_records_are_source_bound_and_unambiguous():
+    assert len(catalog_sha256()) == 64
+    for benchmark, records in FRONTIER_SCORE_RECORDS.items():
+        models = [record["model"] for record in records]
+        assert len(models) == len(set(models)), benchmark
+        for record in records:
+            assert record["model"] in COMPARISON_MODELS
+            assert record["source"] in REFERENCE_SOURCES
+            assert 0 <= record["score"] <= 100
+            assert record["condition"]
+    for records in FRONTIER_SCORE_VARIANTS.values():
+        for record in records:
+            assert record["source"] in REFERENCE_SOURCES
+            assert record["condition"]
 
 
 # -- delta semantics -----------------------------------------------------------
@@ -191,9 +212,24 @@ def test_published_columns_appear_for_every_rendered_row():
     )
     markdown = render_comparison_markdown(build_comparison(board))
     header = [line for line in markdown.splitlines() if line.startswith("| Benchmark")][0]
-    for model in HEADLINE_MODELS:
+    for model in COMPARISON_MODELS:
         assert model in header
     assert "Δ qwen3-32b" in header
+
+
+def test_frontier_catalog_keeps_missing_values_and_all_model_gap_columns():
+    comparison = build_comparison(
+        _scoreboard(**{"livecodebench-pro": {"status": "completed", "score": 0.8}})
+    )
+    row = comparison["rows"][0]
+
+    assert row["published_models"] == list(COMPARISON_MODELS)
+    assert row["published"] == {"Fugu": 87.8}
+    assert row["deltas_by_reference"]["qwen3-32b"]["Fugu"] == -7.8
+    assert row["deltas_by_reference"]["qwen3-32b"]["GPT-5.6 Sol"] is None
+    markdown = render_comparison_markdown(comparison)
+    assert "## Measured score gaps by reference model" in markdown
+    assert "catalog `" in markdown
 
 
 # -- runner integration --------------------------------------------------------
@@ -207,11 +243,15 @@ async def test_run_writes_the_comparison_next_to_the_scoreboard(tmp_path, http_f
     run_dir = tmp_path / "results" / "test-run"
     assert (run_dir / "comparison.md").exists()
     comparison = json.loads((run_dir / "comparison.json").read_text(encoding="utf-8"))
+    scoreboard = json.loads((run_dir / "scoreboard.json").read_text(encoding="utf-8"))
     assert comparison["delta_against"] == "Fugu"
     assert comparison["reference"]["retrieved_on"] == "2026-07-25"
     row = comparison["rows"][0]
     assert row["benchmark"] == "gpqa-diamond"
     assert row["published"]["Fugu"] == 95.5
+    performance = scoreboard["cells"]["gpqa-diamond"]["m"]["performance"]
+    assert performance["status"] == "measured"
+    assert performance["valid_ttft"] == performance["requests"]
 
 
 async def test_core_run_writes_three_rows_without_a_published_comparison(

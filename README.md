@@ -1036,6 +1036,14 @@ cannot provide exact continuation evidence are skipped rather than scored, and
 a fixed MMLU token-boundary failure on the serialized probe stops dataset
 fan-out.
 
+Scoreboards also report target-only streamed TTFT p50/p95 and TPS p50 for direct
+generation rows. TPS is withheld without endpoint usage; MMLU is marked not
+applicable, and external agentic harness rows remain explicitly unavailable
+unless their own artifacts provide target-request timing. Accuracy comparison
+reports use a committed six-model source catalog (Fable 5, GPT-5.6 Sol,
+DeepSeek-V4-Flash-0731, Qwen3.8 MAX, Kimi K3, and Fugu) and never fill missing
+public values from another model or condition.
+
 Datasets download to `~/.cache/kairyu/benchmarks` (never committed); unmet preconditions
 (no docker, gated dataset, no judge) become annotated `skipped` cells, so the run always
 completes. Subcommands: `bench run`, `bench download`, `bench report <run>`, `bench list`,

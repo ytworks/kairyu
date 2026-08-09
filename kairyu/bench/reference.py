@@ -32,6 +32,9 @@ travel with each cell as annotations and are reprinted in the comparison report.
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 SOURCE_URL = "https://sakana.ai/fugu-release/"
 SOURCE_ASSETS = (
     "/assets/fugu-release/benchmark-table.png",
@@ -45,7 +48,96 @@ HEADLINE_MODELS = ("Fugu", "Fugu Ultra", "Opus 4.8", "Gemini 3.1 Pro", "GPT 5.5"
 FIGURE_MODELS = ("Fable 5", "Mythos Preview")
 #: Models whose published numbers the page attributes to the provider, not to
 #: Sakana's own measurement.
-PROVIDER_REPORTED = frozenset(HEADLINE_MODELS[2:] + FIGURE_MODELS)
+PROVIDER_REPORTED = frozenset(
+    HEADLINE_MODELS[2:]
+    + FIGURE_MODELS
+    + (
+        "GPT-5.6 Sol",
+        "DeepSeek-V4-Flash-0731",
+        "Qwen3.8 MAX",
+        "Kimi K3",
+    )
+)
+
+#: Stable columns requested for the frontier-quality comparison.  A model stays
+#: in the report even when no like-for-like public value exists for a row; that
+#: absence is rendered as ``—`` and is never filled from an older model.
+COMPARISON_MODELS = (
+    "Fable 5",
+    "GPT-5.6 Sol",
+    "DeepSeek-V4-Flash-0731",
+    "Qwen3.8 MAX",
+    "Kimi K3",
+    "Fugu",
+)
+
+# Source records are committed rather than fetched at report time.  This keeps
+# old reports reproducible when a provider edits a launch page.  ``tier`` is
+# deliberately visible: provider pages/papers are primary, while an article
+# transcribing a provider image is secondary.
+REFERENCE_SOURCES: dict[str, dict[str, object]] = {
+    "fugu-release": {
+        "title": "Fugu release",
+        "url": SOURCE_URL,
+        "publisher": "Sakana AI",
+        "published_on": "2026-07-23",
+        "retrieved_on": RETRIEVED_ON,
+        "tier": "primary",
+    },
+    "openai-gpt-5-6": {
+        "title": "Introducing GPT-5.6",
+        "url": "https://openai.com/index/gpt-5-6/",
+        "publisher": "OpenAI",
+        "published_on": "2026-07-28",
+        "retrieved_on": "2026-08-09",
+        "tier": "primary",
+    },
+    "deepseek-updates": {
+        "title": "DeepSeek API updates — DeepSeek-V4-Flash-0731",
+        "url": "https://api-docs.deepseek.com/updates/",
+        "publisher": "DeepSeek",
+        "published_on": "2026-07-31",
+        "retrieved_on": "2026-08-09",
+        "tier": "primary",
+    },
+    "qwen-3-8-launch": {
+        "title": "Qwen3.8 launch benchmark table",
+        "url": "https://qwen.ai/blog?id=qwen3.8",
+        "publisher": "Qwen",
+        "published_on": "2026-08-03",
+        "retrieved_on": "2026-08-09",
+        "tier": "primary-image-transcription",
+    },
+    "kimi-k3-report": {
+        "title": "Kimi K3: Technical Report",
+        "url": "https://arxiv.org/abs/2607.24653",
+        "publisher": "Moonshot AI",
+        "published_on": "2026-07-29",
+        "retrieved_on": "2026-08-09",
+        "tier": "primary",
+    },
+}
+
+
+def _record(
+    model: str,
+    score: float,
+    source: str,
+    *,
+    condition: str,
+    metric: str = "score_percent",
+    comparable: bool = True,
+    notes: str | None = None,
+) -> dict[str, object]:
+    return {
+        "model": model,
+        "score": score,
+        "metric": metric,
+        "condition": condition,
+        "source": source,
+        "comparable": comparable,
+        "notes": notes,
+    }
 
 #: Verbatim from the release page. The page's own `*`/`†` markers are spelled
 #: out here so they cannot be confused with this report's `*` (partial cell).
@@ -161,6 +253,101 @@ PUBLISHED_VARIANTS: dict[str, dict[str, object]] = {
     },
 }
 
+# Compact rows expand into artifact-friendly records below. Equal benchmark names
+# do not imply equal tools, attempts, or populations, so conditions stay explicit.
+_FRONTIER_ROWS: dict[str, tuple[tuple[str, float, str, str], ...]] = {
+    "swe-bench-pro": (
+        ("Fable 5", 80.0, "openai-gpt-5-6", "provider baseline in GPT-5.6 table"),
+        ("GPT-5.6 Sol", 64.6, "openai-gpt-5-6", "launch-table condition"),
+        ("Qwen3.8 MAX", 67.7, "qwen-3-8-launch", "launch-table condition"),
+    ),
+    "terminal-bench": (
+        ("Fable 5", 83.1, "openai-gpt-5-6", "Terminal-Bench 2.1 provider baseline"),
+        ("GPT-5.6 Sol", 88.8, "openai-gpt-5-6", "Terminal-Bench 2.1"),
+        (
+            "DeepSeek-V4-Flash-0731",
+            82.7,
+            "deepseek-updates",
+            "Terminal-Bench 2.1; max effort; temperature=1; top_p=.95",
+        ),
+        ("Qwen3.8 MAX", 86.6, "qwen-3-8-launch", "Terminal-Bench 2.1"),
+        ("Kimi K3", 88.3, "kimi-k3-report", "Terminal-Bench 2.1; max; top_p=1"),
+    ),
+    "livecodebench": (
+        ("Fable 5", 89.8, "fugu-release", "provider baseline in Fugu figure"),
+    ),
+    "hle": (
+        ("Fable 5", 53.3, "kimi-k3-report", "HLE-Full; no tools"),
+        ("GPT-5.6 Sol", 44.5, "kimi-k3-report", "HLE-Full; no tools"),
+        ("Qwen3.8 MAX", 43.6, "qwen-3-8-launch", "launch-table condition"),
+        ("Kimi K3", 43.5, "kimi-k3-report", "HLE-Full; no tools; max; temperature=1"),
+    ),
+    "charxiv-reasoning": (
+        ("Fable 5", 88.9, "kimi-k3-report", "CharXiv RQ; no tools"),
+        ("GPT-5.6 Sol", 84.6, "kimi-k3-report", "CharXiv RQ; no tools"),
+        ("Kimi K3", 84.8, "kimi-k3-report", "CharXiv RQ; no tools; max"),
+    ),
+    "gpqa-diamond": (
+        ("Fable 5", 92.6, "openai-gpt-5-6", "provider baseline in GPT-5.6 table"),
+        ("GPT-5.6 Sol", 94.6, "openai-gpt-5-6", "launch-table condition"),
+        ("Kimi K3", 93.5, "kimi-k3-report", "max; temperature=1; top_p=.95"),
+    ),
+    "scicode": (
+        ("Fable 5", 60.2, "kimi-k3-report", "SciCode"),
+        ("GPT-5.6 Sol", 56.1, "kimi-k3-report", "SciCode"),
+        ("Kimi K3", 58.7, "kimi-k3-report", "SciCode; max; temperature=1; top_p=.95"),
+    ),
+    "tau-bench-banking": (
+        ("Fable 5", 26.8, "kimi-k3-report", "tau3-bench Banking"),
+        ("GPT-5.6 Sol", 33.0, "kimi-k3-report", "tau3-bench Banking"),
+        ("Kimi K3", 33.4, "kimi-k3-report", "tau3-bench Banking; max; top_p=1"),
+    ),
+}
+
+FRONTIER_SCORE_RECORDS: dict[str, tuple[dict[str, object], ...]] = {
+    benchmark: (
+        _record(
+            "Fugu",
+            scores["Fugu"],
+            "fugu-release",
+            condition="Sakana release-table condition; no common provider harness",
+            notes="mini-swe-agent scaffolding" if benchmark == "swe-bench-pro" else None,
+        ),
+        *(
+            _record(model, score, source, condition=condition)
+            for model, score, source, condition in _FRONTIER_ROWS.get(benchmark, ())
+        ),
+    )
+    for benchmark, scores in PUBLISHED_SCORES.items()
+}
+
+_VARIANT_ROWS: dict[str, tuple[tuple[str, float, str, str], ...]] = {
+    "hle": (
+        ("Fable 5", 63.0, "kimi-k3-report", "HLE-Full; with tools"),
+        ("GPT-5.6 Sol", 58.0, "kimi-k3-report", "HLE-Full; with tools"),
+        ("Kimi K3", 56.0, "kimi-k3-report", "HLE-Full; with tools"),
+    ),
+    "charxiv-reasoning": (
+        ("Fable 5", 93.5, "kimi-k3-report", "CharXiv RQ; with tools"),
+        ("GPT-5.6 Sol", 89.1, "kimi-k3-report", "CharXiv RQ; with tools"),
+        ("Kimi K3", 91.3, "kimi-k3-report", "CharXiv RQ; with tools"),
+    ),
+    "gpqa-diamond": (
+        ("GPT-5.6 Sol", 94.1, "kimi-k3-report", "value reproduced in Kimi K3 Table 2"),
+    ),
+    "mrcr-v2": (
+        ("GPT-5.6 Sol", 91.5, "openai-gpt-5-6", "MRCR v2 256K–512K bucket"),
+        ("GPT-5.6 Sol", 73.8, "openai-gpt-5-6", "MRCR v2 512K–1M bucket"),
+    ),
+}
+FRONTIER_SCORE_VARIANTS = {
+    benchmark: tuple(
+        _record(model, score, source, condition=condition, comparable=False)
+        for model, score, source, condition in rows
+    )
+    for benchmark, rows in _VARIANT_ROWS.items()
+}
+
 #: Published rows that kairyu deliberately measures differently. The per-cell
 #: annotations carry the detail; this is the "do not read the delta as parity"
 #: flag for the row as a whole.
@@ -183,6 +370,49 @@ def published_models(benchmark: str) -> tuple[str, ...]:
     return tuple(ordered)
 
 
+def comparison_published(benchmark: str) -> dict[str, float]:
+    """Return only the six requested frontier columns for one row."""
+
+    records = FRONTIER_SCORE_RECORDS.get(benchmark, ())
+    return {
+        str(record["model"]): float(record["score"])
+        for record in records
+        if record.get("model") in COMPARISON_MODELS
+    }
+
+
+def comparison_records(benchmark: str) -> list[dict[str, object]]:
+    """Return detached primary and variant records for artifact embedding."""
+
+    return [
+        {**record, "variant": False}
+        for record in FRONTIER_SCORE_RECORDS.get(benchmark, ())
+    ] + [
+        {**record, "variant": True}
+        for record in FRONTIER_SCORE_VARIANTS.get(benchmark, ())
+    ]
+
+
+def _catalog_payload() -> dict[str, object]:
+    return {
+        "models": list(COMPARISON_MODELS),
+        "sources": REFERENCE_SOURCES,
+        "scores": FRONTIER_SCORE_RECORDS,
+        "variants": FRONTIER_SCORE_VARIANTS,
+    }
+
+
+def catalog_sha256() -> str:
+    encoded = json.dumps(
+        _catalog_payload(),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def reference_metadata() -> dict:
     return {
         "source_url": SOURCE_URL,
@@ -191,4 +421,11 @@ def reference_metadata() -> dict:
         "transcribed_from_images": True,
         "provider_reported_models": sorted(PROVIDER_REPORTED),
         "footnotes": list(PAGE_FOOTNOTES),
+        "comparison_models": list(COMPARISON_MODELS),
+        "sources": REFERENCE_SOURCES,
+        "catalog_sha256": catalog_sha256(),
+        "catalog_policy": (
+            "committed primary/provider records; missing stays missing; variants are not "
+            "silently promoted"
+        ),
     }

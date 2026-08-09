@@ -280,6 +280,7 @@ class StructuredOutputAdapter(GenerativeAdapter):
             message_auxiliary=completion.message_auxiliary,
             finish_reason=completion.finish_reason,
             usage=usage,
+            timing=completion.timing,
             latency_s=time.perf_counter() - started,
         )
 

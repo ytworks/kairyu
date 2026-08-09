@@ -76,7 +76,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
+- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -96,6 +96,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-09 — [progress] Accuracy reports add sourced frontier gaps and target timing
+- What: Accuracy comparison artifacts now carry a SHA-bound six-model public-score catalog and per-reference gaps; direct generation rows retain streamed TTFT/TPS evidence and every scoreboard renders target-only performance coverage.
+- Refs: `kairyu/bench/{reference,compare,streaming,aggregate,types}.py`; `docs/benchmarks.md`
 
 ### 2026-08-09 — [progress] Portable CPU CI schedules valid jobs again
 - What: tokenizer cache setup moved from job-level runner context into a runtime environment step, restoring the full Python 3.11/3.12 CPU matrix.

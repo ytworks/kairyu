@@ -36,6 +36,7 @@ from kairyu.bench.sampling import (
     sampling_summary,
     seed_schedule,
 )
+from kairyu.bench.streaming import ChatSSEAccumulator, StreamingProtocolError
 from kairyu.bench.targets import normalize_base_url, target_api_key
 from kairyu.bench.types import (
     JSON_SAFE_INTEGER_MAX,
@@ -44,6 +45,7 @@ from kairyu.bench.types import (
     ChatRequestSpec,
     ContinuationLogLikelihood,
     DownloadReport,
+    GenerationTimingEvidence,
     ItemResult,
     LogLikelihoodRequestSpec,
     LogLikelihoodResponse,
@@ -329,6 +331,7 @@ def evaluation_protocol_identity(adapter: BenchmarkAdapter) -> dict:
             ("kairyu.bench", "cache.py"),
             ("kairyu.bench", "runner.py"),
             ("kairyu.bench", "sampling.py"),
+            ("kairyu.bench", "streaming.py"),
             ("kairyu.bench", "types.py"),
             ("kairyu.bench", "targets.py"),
         )
@@ -469,6 +472,7 @@ def chat_request_body(
     *,
     sampling_seed: int | None = None,
     response_format: dict | None = None,
+    stream: bool = False,
 ) -> dict:
     """Build the shared chat body while preserving the legacy key order."""
 
@@ -480,7 +484,9 @@ def chat_request_body(
         body["temperature"] = (
             request.temperature if target.temperature is None else target.temperature
         )
-    body["stream"] = False
+    body["stream"] = stream
+    if stream:
+        body["stream_options"] = {"include_usage": True}
     if request.max_tokens is not None:
         body["max_tokens"] = request.max_tokens
     body.update(target.wire_overrides())
@@ -500,6 +506,7 @@ class ChatCompletionEvidence:
     message_auxiliary: str | None
     finish_reason: str
     usage: tuple[int, int, int] | None
+    timing: GenerationTimingEvidence | None = None
 
 
 def _invalid_chat_response(message: str) -> RequestFailed:
@@ -628,7 +635,102 @@ def _strict_chat_response(response: httpx.Response) -> ChatCompletionEvidence:
         message_auxiliary=message_auxiliary,
         finish_reason=finish_reason,
         usage=usage,
+        timing=None,
     )
+
+
+def _permissive_chat_response(response: httpx.Response) -> ChatCompletionEvidence:
+    """Compatibility fallback for JSON-only test and legacy endpoints.
+
+    A JSON response to a request carrying ``stream=true`` cannot yield TTFT/TPS,
+    so the returned timing is explicitly absent. Structured-output evidence uses
+    the strict fallback instead.
+    """
+
+    try:
+        data = response.json()
+        choice = data["choices"][0]
+        message = choice["message"]
+        content = message.get("content")
+    except (IndexError, KeyError, TypeError, ValueError) as error:
+        raise _invalid_chat_response(f"JSON fallback parse failed: {error}") from error
+    if content is not None and not isinstance(content, str):
+        raise _invalid_chat_response("JSON fallback content must be text or null")
+    return ChatCompletionEvidence(
+        content=content,
+        refusal=None,
+        message_auxiliary=None,
+        finish_reason=choice.get("finish_reason") or "stop",
+        usage=None,
+        timing=None,
+    )
+
+
+async def _call_streaming_chat_evidence(
+    client: httpx.AsyncClient,
+    target: BenchTarget,
+    request: ChatRequestSpec,
+    *,
+    response_format: dict | None,
+    retries: int,
+    timeout_s: float,
+    api_key: str | None,
+    sampling_seed: int | None,
+    strict_json_fallback: bool,
+) -> ChatCompletionEvidence:
+    url = f"{normalize_base_url(target.base_url)}/chat/completions"
+    body = chat_request_body(
+        target,
+        request,
+        sampling_seed=sampling_seed,
+        response_format=response_format,
+        stream=True,
+    )
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    attempt = 0
+    while True:
+        started = time.perf_counter()
+        try:
+            async with client.stream(
+                "POST", url, json=body, headers=headers, timeout=timeout_s
+            ) as response:
+                if response.status_code == 200:
+                    content_type = response.headers.get("content-type", "").lower()
+                    if "text/event-stream" not in content_type:
+                        await response.aread()
+                        return (
+                            _strict_chat_response(response)
+                            if strict_json_fallback
+                            else _permissive_chat_response(response)
+                        )
+                    accumulator = ChatSSEAccumulator(request_attempts=attempt + 1)
+                    try:
+                        async for line in response.aiter_lines():
+                            accumulator.feed_line(line, time.perf_counter() - started)
+                        streamed = accumulator.finish()
+                    except StreamingProtocolError as error:
+                        raise _invalid_chat_response(str(error)) from error
+                    return ChatCompletionEvidence(
+                        content=streamed.content,
+                        refusal=streamed.refusal,
+                        message_auxiliary=streamed.message_auxiliary,
+                        finish_reason=streamed.finish_reason,
+                        usage=streamed.usage,
+                        timing=streamed.timing,
+                    )
+                await response.aread()
+                if response.status_code in _RETRYABLE_STATUS and attempt < retries:
+                    await asyncio.sleep(0.5 * 2**attempt)
+                    attempt += 1
+                    continue
+                raise RequestFailed(response.status_code, response.text)
+        except RequestFailed:
+            raise
+        except httpx.HTTPError as error:
+            if attempt >= retries:
+                raise RequestFailed(0, f"transport error: {type(error).__name__}") from error
+            await asyncio.sleep(0.5 * 2**attempt)
+            attempt += 1
 
 
 async def call_chat_evidence(
@@ -642,33 +744,19 @@ async def call_chat_evidence(
     api_key: str | None = None,
     sampling_seed: int | None = None,
 ) -> ChatCompletionEvidence:
-    """Call Chat Completions and validate the evidence-bearing 200 envelope."""
+    """Stream Chat Completions and validate the evidence-bearing envelope."""
 
-    url = f"{normalize_base_url(target.base_url)}/chat/completions"
-    body = chat_request_body(
+    return await _call_streaming_chat_evidence(
+        client,
         target,
         request,
-        sampling_seed=sampling_seed,
         response_format=response_format,
+        retries=retries,
+        timeout_s=timeout_s,
+        api_key=api_key,
+        sampling_seed=sampling_seed,
+        strict_json_fallback=True,
     )
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    attempt = 0
-    while True:
-        try:
-            response = await client.post(url, json=body, headers=headers, timeout=timeout_s)
-        except httpx.HTTPError as error:
-            if attempt >= retries:
-                raise RequestFailed(0, f"transport error: {type(error).__name__}") from error
-            await asyncio.sleep(0.5 * 2**attempt)
-            attempt += 1
-            continue
-        if response.status_code == 200:
-            return _strict_chat_response(response)
-        if response.status_code in _RETRYABLE_STATUS and attempt < retries:
-            await asyncio.sleep(0.5 * 2**attempt)
-            attempt += 1
-            continue
-        raise RequestFailed(response.status_code, response.text)
 
 
 async def call_chat(
@@ -920,6 +1008,7 @@ class ItemAttempt:
 
     text: str | None = None
     latency_s: float = 0.0
+    timing: GenerationTimingEvidence | None = None
     failure: ItemResult | None = None
 
 
@@ -951,14 +1040,16 @@ async def attempt_item(
     """
     start = time.perf_counter()
     try:
-        text = await call_chat(
+        completion = await _call_streaming_chat_evidence(
             client,
             target,
             request,
+            response_format=None,
             retries=ctx.retries,
             timeout_s=ctx.request_timeout_s,
             api_key=api_key,
             sampling_seed=sampling_seed,
+            strict_json_fallback=False,
         )
     except RequestFailed as error:
         lowered = error.body.lower()
@@ -975,6 +1066,7 @@ async def attempt_item(
             )
         )
     latency_s = time.perf_counter() - start
+    text = completion.content or ""
     if not text.strip():
         return ItemAttempt(
             failure=ItemResult(
@@ -985,7 +1077,7 @@ async def attempt_item(
                 latency_s=round(latency_s, 3),
             )
         )
-    return ItemAttempt(text=text, latency_s=latency_s)
+    return ItemAttempt(text=text, latency_s=latency_s, timing=completion.timing)
 
 
 def _explicitly_unsupported_loglikelihood(error: RequestFailed) -> bool:
@@ -1465,7 +1557,12 @@ class GenerativeAdapter(DatasetAdapter):
                 if attempt.failure is not None:
                     return attempt.failure
                 result = await self.score(item, attempt.text or "", ctx)
-                return result.model_copy(update={"latency_s": round(attempt.latency_s, 3)})
+                return result.model_copy(
+                    update={
+                        "latency_s": round(attempt.latency_s, 3),
+                        "timing": attempt.timing,
+                    }
+                )
 
             results = await asyncio.gather(*(run_item(item) for item in items))
 

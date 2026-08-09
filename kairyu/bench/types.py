@@ -644,6 +644,77 @@ class SkipItem(BaseModel):
 ItemStatus = Literal["completed", "failed", "unjudged", "skipped"]
 
 
+class GenerationTimingEvidence(BaseModel):
+    """Replayable timing facts from one successful streamed target request."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    protocol: Literal["openai-chat-sse-v1"] = "openai-chat-sse-v1"
+    ttft_s: float
+    generation_span_s: float
+    completion_tokens: int | None = None
+    tps: float | None = None
+    semantic_events: int = Field(ge=1)
+    request_attempts: int = Field(default=1, ge=1)
+    usage_missing: bool
+
+    @field_validator("ttft_s", "generation_span_s", "tps", mode="before")
+    @classmethod
+    def _validate_timing_number(cls, value, info):
+        if value is None and info.field_name == "tps":
+            return None
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(f"generation timing {info.field_name} must be finite and non-negative")
+        return float(value)
+
+    @field_validator("completion_tokens", mode="before")
+    @classmethod
+    def _validate_completion_tokens(cls, value):
+        if value is None:
+            return None
+        if type(value) is not int or not 0 <= value <= JSON_SAFE_INTEGER_MAX:
+            raise ValueError("generation completion_tokens must be a safe non-negative integer")
+        return value
+
+    @field_validator("semantic_events", "request_attempts", mode="before")
+    @classmethod
+    def _validate_positive_count(cls, value, info):
+        if type(value) is not int or not 1 <= value <= JSON_SAFE_INTEGER_MAX:
+            raise ValueError(f"generation timing {info.field_name} must be a safe positive integer")
+        return value
+
+    @field_validator("usage_missing", mode="before")
+    @classmethod
+    def _validate_usage_missing(cls, value):
+        if type(value) is not bool:
+            raise ValueError("generation timing usage_missing must be a boolean")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_derived_rate(self) -> GenerationTimingEvidence:
+        if self.usage_missing != (self.completion_tokens is None):
+            raise ValueError("generation timing usage_missing disagrees with completion_tokens")
+        rate_is_defined = (
+            self.completion_tokens is not None
+            and self.completion_tokens >= 2
+            and self.generation_span_s > 0
+        )
+        if not rate_is_defined:
+            if self.tps is not None:
+                raise ValueError("generation timing TPS is defined without enough evidence")
+            return self
+        expected = (self.completion_tokens - 1) / self.generation_span_s
+        if self.tps is None or not math.isclose(
+            self.tps, expected, rel_tol=1e-9, abs_tol=1e-12
+        ):
+            raise ValueError("generation timing TPS disagrees with raw timing evidence")
+        return self
+
+
 class StructuredTokenUsage(BaseModel):
     """Strict token accounting retained from one Chat Completions arm."""
 
@@ -680,6 +751,7 @@ class StructuredArmEvidence(BaseModel):
     message_auxiliary: str | None = None
     finish_reason: str | None = None
     usage: StructuredTokenUsage | None = None
+    timing: GenerationTimingEvidence | None = None
     latency_s: float
     error: str | None = None
 
@@ -789,6 +861,7 @@ class StructuredArmEvidence(BaseModel):
                 or self.message_auxiliary is not None
                 or self.finish_reason is not None
                 or self.usage is not None
+                or self.timing is not None
                 or self.error is None
             ):
                 raise ValueError("schema-rejected structured arm has inconsistent evidence")
@@ -799,6 +872,7 @@ class StructuredArmEvidence(BaseModel):
             or self.message_auxiliary is not None
             or self.finish_reason is not None
             or self.usage is not None
+            or self.timing is not None
             or self.error is None
         ):
             raise ValueError("failed structured arm has inconsistent response evidence")
@@ -852,6 +926,9 @@ class ItemResult(BaseModel):
     # Single: {model, correct, raw_excerpt}; panels add aggregation + ordered votes.
     judge: dict | None = None
     latency_s: float | None = None
+    # Successful streamed target-call timing. Judge/user-simulator calls are not
+    # attached here, so the performance report cannot mix them with the target.
+    timing: GenerationTimingEvidence | None = None
     # Raw paired-arm evidence for the structured-output conformance adapter.
     structured_output: StructuredOutputEvidence | None = None
     # Multi-seed chat evidence stays grouped under its source dataset item.

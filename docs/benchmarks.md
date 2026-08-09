@@ -195,7 +195,7 @@ run.json                                      # fingerprint + identity + config 
 scoreboard.json                               # machine-readable table
 scoreboard.md                                 # Accuracy-suite table (also printed to stdout)
 comparison.json                               # measured vs published, machine-readable
-comparison.md                                 # accuracy report vs the Fugu release table
+comparison.md                                 # accuracy report vs six frontier references
 config-comparison.json                        # optional config A/B gate artifact
 config-comparison.md                          # optional config A/B gate report
 quantization-sweep.json                       # seven-arm task-accuracy artifact
@@ -207,8 +207,8 @@ default to `bench/results/structured/<run_id>/`; quantization results default
 to `bench/results/quantization/<run_id>/`; and long-context results default to
 `bench/results/long-context/<run_id>/`. All four contain the same
 run, pair, and scoreboard artifacts. They intentionally omit
-`comparison.json` and `comparison.md`: the published reference table is a Fugu
-contract, not a generic benchmark baseline. A completed quantization run adds
+`comparison.json` and `comparison.md`: the published reference catalog is an
+Accuracy-suite contract, not a generic benchmark baseline. A completed quantization run adds
 its dedicated `quantization-sweep.{json,md}` only after the strict sweep command
 validates all raw evidence.
 
@@ -804,20 +804,21 @@ The play-by-play goes to **stderr** and the artifacts (download notes, the
 scoreboard, and the accuracy report when the suite has one) to **stdout**, so
 `kairyu bench run … > scoreboard.txt` keeps the two apart.
 
-## Accuracy report vs the published Fugu scores
+## Accuracy report vs published frontier scores
 
 Every Accuracy run also writes `comparison.md` / `comparison.json` (and prints the
-report), placing each measured cell next to the values published on
-[sakana.ai/fugu-release](https://sakana.ai/fugu-release/) — Fugu, Fugu Ultra,
-Opus 4.8, Gemini 3.1 Pro, GPT 5.5, plus the Fable 5 / Mythos Preview columns
-that appear only in the per-benchmark figure — with `Δ` = measured − published
-**Fugu**. `kairyu bench report <run_id>` rebuilds it (`--no-comparison` to skip).
+report), placing each measured cell next to the available published values for
+**Fable 5, GPT-5.6 Sol, DeepSeek-V4-Flash-0731, Qwen3.8 MAX, Kimi K3, and
+Fugu**. A second table reports measured-minus-reference gaps for every available
+model value; the legacy `Δ target` column remains measured minus Fugu.
+`kairyu bench report <run_id>` rebuilds it (`--no-comparison` to skip).
 
-The published values are **committed constants** in `kairyu/bench/reference.py`,
-transcribed from the release page's two figures on 2026-07-25. The page renders
-its table as a **PNG**, so there is nothing to scrape; the module records the
-source URLs, both asset paths, and the retrieval date, and refreshing means
-re-reading those images.
+The published values are a **committed, SHA-256 identified catalog** in
+`kairyu/bench/reference.py`, sourced from provider launch pages, the Kimi K3
+technical report, and the Fugu release figures. Reports embed source URL, tier,
+retrieval date, exact condition text, and alternate-condition records. Missing
+values remain `—`; an older model, a preview, a tool-enabled score, or a different
+context bucket is never substituted.
 
 What the report refuses to do:
 
@@ -848,6 +849,28 @@ It also reprints the run's own methodology footnotes (substituted datasets,
 uncompiled checkers, self-judging, degraded cells) and the release's HLE
 **text-only** variant, which the figure reports separately from the headline
 table's full set.
+
+## Target generation TTFT and TPS
+
+Every scoreboard includes a target-only generation-performance table. Direct
+chat adapters request SSE with endpoint usage and retain one timing record per
+successful target call:
+
+- **TTFT** (the requested “TFTT” metric) is request start to the first non-empty
+  content, reasoning, refusal, or tool-call delta. Role-only and usage-only
+  chunks do not count.
+- **TPS** is `(completion_tokens - 1) / (last semantic delta - first semantic
+  delta)`. It is `—` when usage is absent, fewer than two completion tokens are
+  reported, or the measured span is zero.
+- The report shows TTFT p50/p95, TPS p50, valid/total coverage, missing usage,
+  request errors, and retry attempts. It never compares these values with the
+  six published models.
+
+MMLU's teacher-forced log-likelihood row is `not applicable`, because it does
+not generate an output stream. SWE-Bench Pro, Terminal-Bench, and τ³-Bench run
+inside external harnesses that do not currently return per-target SSE timing;
+their performance cells are explicitly `unavailable` rather than mixing in
+harness wall time, judge traffic, or user-simulator traffic.
 
 ## Degradation model (why one command always completes)
 
