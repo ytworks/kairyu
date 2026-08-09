@@ -13,6 +13,7 @@ The checked-in router is the structurally safe all-Tier2 baseline (quality ratio
 Configuration is inherited only from the invoking process environment; dotenv
 files are not read. Export `HF_TOKEN` when Hugging Face authentication is
 required and optionally set an absolute `MODEL_STORAGE_ROOT` for bind-backed
-model volumes.
+model volumes. Quality runs that include Qwen preserve its documented 81,920
+output-token thinking budget.
 
 Inputs above 1,048,576 tokens fail with HTTP 400; no tier truncates them. AUTO chat uses a deterministic role-preserving L2 JSON envelope, not tokenizer control tokens or the legacy renderer.

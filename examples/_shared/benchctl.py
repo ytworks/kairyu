@@ -172,6 +172,11 @@ def _quality_command(
         model["max_context_tokens"] for model in spec["models"]
     )
     command.extend(["--max-context-tokens", str(max_context)])
+    output_budgets = [model.get("max_output_tokens", 8192) for model in spec["models"]]
+    if any(type(budget) is not int or budget < 1 for budget in output_budgets):
+        raise ValueError("model max_output_tokens must be a positive integer")
+    max_output = max(output_budgets)
+    command.extend(["--max-output-tokens", str(max_output)])
     return command
 
 

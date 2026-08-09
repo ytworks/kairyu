@@ -8,4 +8,4 @@ One selected SM120 GPU serves the pinned BF16 checkpoint at its native 262,144-t
 ./bench.sh compare all
 ```
 
-The first start verifies GPU/VRAM/model-storage space, builds content-addressed Kairyu images, downloads revision `6a9e13b…`, hashes every model file, and then reuses the read-only model volume offline. The token is forwarded to the downloader by environment-variable name and is never placed in a command argument. MTP remains off until the parity and 5% goodput gate selects it.
+The first start verifies GPU/VRAM/model-storage space, builds content-addressed Kairyu images, downloads revision `6a9e13b…`, hashes every model file, and then reuses the read-only model volume offline. The token is forwarded to the downloader by environment-variable name and is never placed in a command argument. Quality runs preserve the checkpoint's documented thinking budget of 81,920 output tokens instead of the benchmark harness's generic 8,192-token default. MTP remains off until the parity and 5% goodput gate selects it.

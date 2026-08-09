@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-10 — [progress] Qwen quality runs retain the checkpoint thinking budget
+- What: Single-GPU and combined Qwen3.6 examples now pin an 81,920-token quality-output budget from the checkpoint documentation, and the shared benchmark controller forwards and validates it instead of silently truncating every LiveCodeBench response at the generic 8,192-token default.
+- Refs: PR #465; `examples/_shared/benchctl.py`; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/example.json`
+
 ### 2026-08-10 — [progress] Gateways attest unanimous replica deployment metadata
 - What: Replica pools now publish revision, native context, quantization, cache, parallelism, feature, and image metadata when every configured replica agrees, even when an external engine such as vLLM has no Kairyu `/backends` endpoint; disagreement remains fail-closed and unreported.
 - Refs: PR #465; `kairyu/orchestration/replica.py`; `kairyu/entrypoints/server/health.py`; `tests/server/test_backends.py`

@@ -23,6 +23,17 @@ def _load_examplectl():
     return module
 
 
+def _load_benchctl():
+    module_spec = importlib.util.spec_from_file_location(
+        "frontier_benchctl",
+        ROOT / "examples/_shared/benchctl.py",
+    )
+    assert module_spec is not None and module_spec.loader is not None
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    return module
+
+
 def test_model_storage_root_is_absolute_and_environment_scoped(tmp_path: Path) -> None:
     examplectl = _load_examplectl()
     spec = {"environment": "qwen3.6-27b-1gpu"}
@@ -134,6 +145,24 @@ def test_qwen_vllm_services_cap_sequences_for_hybrid_cache() -> None:
     ):
         option = command.index("--max-num-seqs")
         assert command[option + 1] == "64"
+
+
+def test_qwen_quality_command_preserves_documented_thinking_budget(tmp_path: Path) -> None:
+    benchctl = _load_benchctl()
+    spec = yaml.safe_load(
+        (ROOT / "examples/qwen3.6-27b-1gpu/example.json").read_text()
+    )
+
+    command = benchctl._quality_command(
+        ROOT,
+        spec,
+        "accuracy:livecodebench",
+        8001,
+        tmp_path,
+    )
+
+    option = command.index("--max-output-tokens")
+    assert command[option + 1] == "81920"
 
 
 def test_all_frontier_gateway_backend_options_pass_static_validation() -> None:
