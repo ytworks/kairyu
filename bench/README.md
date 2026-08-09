@@ -932,10 +932,10 @@ or GPU result. The complete contract is in
 
 ## Fixtures, results, and wheel verification
 
-The 11 installed benchmark stand-ins are synthetic plumbing inputs, never
+The 17 installed benchmark stand-ins are synthetic plumbing inputs, never
 substitutes for publishable benchmark measurements. The package also contains
 the fixed five-row structured-output conformance corpus and the separately
-licensed published-gold judge-calibration corpus, for 13 JSONL resources total:
+licensed published-gold judge-calibration corpus, for 19 JSONL resources total:
 
 ```text
 charxiv-reasoning.jsonl
@@ -949,6 +949,12 @@ livecodebench.jsonl
 long-context-reasoning.jsonl
 mmlu.jsonl
 mrcr-v2.jsonl
+ruler-niah-128k.jsonl
+ruler-niah-16k.jsonl
+ruler-niah-32k.jsonl
+ruler-niah-4k.jsonl
+ruler-niah-64k.jsonl
+ruler-niah-8k.jsonl
 scicode.jsonl
 structured-output.jsonl
 ```
@@ -967,7 +973,7 @@ summary number.
 
 The packaging gate builds a real wheel, inspects its contents, and imports it
 from an isolated temporary directory. It proves that the console dispatch,
-entrypoint manifest, all 13 fixtures, the LLMBar license, and the vendored
+entrypoint manifest, all 19 fixtures, the LLMBar license, and the vendored
 IFEval `LICENSE`/`NOTICE` are present, while the top-level `bench/`,
 `bench/results/`, and `tests/` trees are absent:
 

@@ -21,8 +21,8 @@ The complete ownership policy and wrapper inventory live in
 
 `kairyu/bench/` is the single owner of reusable benchmark config, target types,
 credential resolution, statistics, atomic reporting, adapters, the public
-`kairyu bench` CLI, 11 synthetic benchmark stand-ins, the fixed structured
-conformance corpus, and the published-gold judge calibration corpus. All 13
+`kairyu bench` CLI, 17 synthetic benchmark stand-ins, the fixed structured
+conformance corpus, and the published-gold judge calibration corpus. All 19
 JSONL resources ship in the wheel.
 `kairyu/bench/entrypoints.toml` is also packaged and records every supported
 repository-only benchmark executable.
@@ -58,7 +58,7 @@ After the declared development dependencies are synced, the first verifier
 exercises all 66 registered wrappers through their 130 declared `--help` forms
 without executing workloads or contacting external runtimes.
 The last command builds and imports a real wheel from an isolated temporary
-directory. It verifies the public CLI dispatch, packaged manifest and all 13
+directory. It verifies the public CLI dispatch, packaged manifest and all 19
 JSONL fixtures, and rejects accidental inclusion of top-level benchmark
 scripts, results, or tests. Gate-specific code stays in its stable wrapper;
 semantics shared by the installed CLI and gate scripts belong in
@@ -910,7 +910,7 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
 - Cache dir: `--cache-dir` > `$KAIRYU_BENCH_CACHE` > `~/.cache/kairyu/benchmarks`.
   Datasets are normalized to JSONL once at download; nothing is committed to
   the repo (`bench/results/` and `bench/data/` are git-ignored; the committed
-  fixture set contains 11 tiny synthetic stand-ins for offline testing, one
+  fixture set contains 17 tiny synthetic stand-ins for offline testing, one
   fixed five-row structured conformance corpus, and one judge-calibration
   corpus).
 - A cache entry is ready only when `manifest.json` and `data.jsonl` exist, the

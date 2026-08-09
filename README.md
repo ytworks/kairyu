@@ -1044,8 +1044,8 @@ The structured corpus is installed package data verified by its exact content
 SHA-256, rather than a remotely downloaded dataset identified by an HF Git pin.
 
 The wheel includes the reusable `kairyu.bench` library, public CLI, entrypoint
-manifest, 11 synthetic benchmark stand-ins, the structured conformance corpus,
-and the judge-calibration corpus (13 JSONL resources total). Top-level
+manifest, 17 synthetic benchmark stand-ins, the structured conformance corpus,
+and the judge-calibration corpus (19 JSONL resources total). Top-level
 `bench/*.py` developer/formal wrappers, `bench/results/`, and `tests/` remain
 checkout-only; their stable inventory and compatibility policy are in
 [`bench/README.md`](bench/README.md).
