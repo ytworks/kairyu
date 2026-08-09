@@ -220,7 +220,11 @@ def validate_tensor_parallel_config(config: ModelConfig, tp: int) -> None:
         )
 
 
-def _rope_fields(config: dict) -> tuple[float, RopeScaling | None]:
+def _rope_fields(
+    config: dict,
+    *,
+    allow_unsupported: bool = False,
+) -> tuple[float, RopeScaling | None]:
     """Both generations: rope_parameters (nested theta) or rope_scaling + theta."""
     parameters = config.get("rope_parameters") or config.get("rope_scaling") or {}
     theta = config.get("rope_theta", parameters.get("rope_theta", 10000.0))
@@ -249,7 +253,7 @@ def _rope_fields(config: dict) -> tuple[float, RopeScaling | None]:
                 config.get("max_position_embeddings", 4096),
             ),
         )
-    elif kind not in (None, "default"):
+    elif kind not in (None, "default") and not allow_unsupported:
         # unsupported kinds (linear/dynamic/longrope) must fail fast, not be
         # silently dropped to None — that would load fine and then generate
         # confidently wrong tokens vs hf.generate (M3), a silent parity break
@@ -377,7 +381,10 @@ def parse_model_config(config: dict) -> ModelConfig:
     max_position_embeddings = config.get("max_position_embeddings", 4096)
     if type(max_position_embeddings) is not int or max_position_embeddings < 1:
         raise ValueError("max_position_embeddings must be an integer >= 1")
-    rope_theta, rope_scaling = _rope_fields(config)
+    rope_theta, rope_scaling = _rope_fields(
+        config,
+        allow_unsupported=architecture in _REFERENCE_ARCHITECTURES,
+    )
     mla = _mla_fields(config, architecture)
     # A7: DeepSeek saved configs carry head_dim == qk_rope_head_dim; hub
     # originals omit it — for MLA the GQA head_dim is never used, so pin it

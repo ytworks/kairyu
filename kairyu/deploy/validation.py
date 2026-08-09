@@ -605,20 +605,16 @@ def _validate_model(
     if config is not None:
         try:
             model_config = parse_model_config(config)
-            from kairyu.models.loader import reference_quant_loader_kind
-
-            text_config = config.get("text_config")
-            nested_quant = (
-                text_config.get("quantization_config")
-                if isinstance(text_config, dict)
-                else None
+            from kairyu.models.loader import (
+                declared_quantization_config,
+                reference_quant_loader_kind,
             )
-            quant_source = config
-            if nested_quant and not config.get("quantization_config"):
-                quant_source = {
-                    **config,
-                    "quantization_config": nested_quant,
-                }
+            declared_quant = declared_quantization_config(config)
+            quant_source = (
+                {**config, "quantization_config": declared_quant}
+                if declared_quant is not None
+                else config
+            )
             reference_loader = reference_quant_loader_kind(
                 config, model_config.architecture
             )

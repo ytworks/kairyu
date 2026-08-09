@@ -117,7 +117,9 @@ def test_qwen36_outer_checkpoint_logits_parity(
     loaded, config, _ = load_model(tmp_path, dtype=torch.float32)
     tokens = torch.tensor([1, 2, 3, 4])
     with torch.inference_mode():
-        expected = oracle(tokens.unsqueeze(0), use_cache=False).logits[0]
+        expected = oracle(
+            tokens.unsqueeze(0), use_cache=False, logits_to_keep=1
+        ).logits[0]
         actual = loaded.forward_sequence(tokens)
     assert config.architecture == architecture
     assert config.requires_full_recompute
@@ -155,7 +157,9 @@ def test_deepseek_v4_checkpoint_logits_parity(tmp_path) -> None:
     loaded, config, _ = load_model(tmp_path, dtype=torch.float32)
     tokens = torch.tensor([1, 2, 3, 4])
     with torch.inference_mode():
-        expected = oracle(tokens.unsqueeze(0), use_cache=False).logits[0]
+        expected = oracle(
+            tokens.unsqueeze(0), use_cache=False, logits_to_keep=1
+        ).logits[0]
         actual = loaded.forward_sequence(tokens)
     assert config.architecture == "DeepseekV4ForCausalLM"
     assert config.requires_full_recompute
@@ -204,8 +208,11 @@ def test_deepseek_v4_public_block_fp8_uses_official_loader(tmp_path, monkeypatch
             super().__init__()
             self.anchor = torch.nn.Parameter(torch.zeros(1))
 
-        def forward(self, input_ids, **_kwargs):
-            return SimpleNamespace(logits=torch.zeros(*input_ids.shape, 32))
+        def forward(self, input_ids, logits_to_keep=None, **_kwargs):
+            logits = torch.zeros(*input_ids.shape, 32)
+            if logits_to_keep is not None:
+                logits = logits[:, -logits_to_keep:]
+            return SimpleNamespace(logits=logits)
 
     seen = {}
 
@@ -221,7 +228,7 @@ def test_deepseek_v4_public_block_fp8_uses_official_loader(tmp_path, monkeypatch
     loaded, config, _ = load_model(tmp_path)
     assert config.architecture == "DeepseekV4ForCausalLM"
     assert seen["kwargs"]["attn_implementation"] == "eager"
-    assert loaded.forward_sequence(torch.tensor([1, 2])).shape == (2, 32)
+    assert loaded.forward_sequence(torch.tensor([1, 2])).shape == (1, 32)
 
     def invalid_checkpoint(*_args, **_kwargs):
         raise ValueError("invalid DeepSeek checkpoint")
@@ -244,6 +251,7 @@ def test_kimi_k3_public_text_config_is_recognized() -> None:
             "num_key_value_heads": 4,
             "head_dim": 8,
             "max_position_embeddings": 128,
+            "rope_scaling": {"type": "dynamic", "factor": 4.0},
             "sliding_window": 16,
             "moe_intermediate_size": 16,
             "num_experts": 8,
@@ -258,6 +266,7 @@ def test_kimi_k3_public_text_config_is_recognized() -> None:
     config = parse_model_config(raw)
     assert config.architecture == "KimiK3ForConditionalGeneration"
     assert config.requires_full_recompute
+    assert config.rope_scaling is None
     assert config.moe is not None
     assert config.moe.num_experts_per_tok == 2
 
@@ -330,7 +339,7 @@ def test_kimi_k3_public_mxfp4_uses_official_loader(tmp_path, monkeypatch) -> Non
             super().__init__()
             self.anchor = torch.nn.Parameter(torch.zeros(1))
 
-        def forward(self, input_ids, **_kwargs):
+        def forward(self, input_ids, use_cache, return_dict):
             logits = torch.nn.functional.one_hot(input_ids, num_classes=32).to(torch.float32)
             return SimpleNamespace(logits=logits)
 
@@ -388,6 +397,10 @@ def test_qwen36_quantized_reference_is_rejected_by_load_and_validation(
     save_file({"unused": torch.zeros(1)}, tmp_path / "model.safetensors")
     tokenizer = Tokenizer(WordLevel({"[UNK]": 0, "token": 1}, unk_token="[UNK]"))
     tokenizer.save(str(tmp_path / "tokenizer.json"))
+
+    for option in ("linear_selection_policy", "nvfp4_accuracy_profile"):
+        with pytest.raises(ValueError, match=option):
+            load_model(tmp_path, **{option: {}})
 
     with pytest.raises(ValueError, match="requires an unquantized checkpoint"):
         load_model(tmp_path)

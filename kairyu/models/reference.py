@@ -40,11 +40,21 @@ class ReferenceDecoder(nn.Module):
         return self._forward_sequence(token_ids)
 
     def _forward_sequence(self, token_ids: torch.Tensor) -> torch.Tensor:
-        outputs = self.hf_model(
-            input_ids=token_ids.unsqueeze(0),
-            use_cache=False,
-            return_dict=True,
-        )
+        try:
+            outputs = self.hf_model(
+                input_ids=token_ids.unsqueeze(0),
+                use_cache=False,
+                return_dict=True,
+                logits_to_keep=1,
+            )
+        except TypeError as exc:
+            if "logits_to_keep" not in str(exc):
+                raise
+            outputs = self.hf_model(
+                input_ids=token_ids.unsqueeze(0),
+                use_cache=False,
+                return_dict=True,
+            )
         return outputs.logits[0]
 
 
