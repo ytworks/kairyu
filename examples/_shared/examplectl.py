@@ -48,6 +48,23 @@ def _save_runtime_env(path: Path, env: dict[str, str]) -> None:
     )
 
 
+def _model_storage_directory(spec: dict, env: dict[str, str], root: Path) -> Path:
+    configured = env.get("MODEL_STORAGE_ROOT", "").strip()
+    if not configured:
+        return root
+    storage_root = Path(configured).expanduser()
+    if not storage_root.is_absolute():
+        raise SystemExit("MODEL_STORAGE_ROOT must be an absolute path")
+    directory = storage_root / spec["environment"]
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise SystemExit(f"cannot create model storage directory {directory}: {error}") from error
+    if not directory.is_dir():
+        raise SystemExit(f"model storage path is not a directory: {directory}")
+    return directory.resolve()
+
+
 def _gpu_inventory() -> dict[int, dict[str, object]]:
     query = "index,memory.total,compute_cap,pci.bus_id"
     try:
@@ -127,10 +144,12 @@ def _preflight(spec: dict, env: dict[str, str], root: Path) -> dict[str, str]:
             cpu_list = Path(f"/sys/devices/system/node/node{left_node}/cpulist")
             env[f"GPU_PAIR_{left}_{right}_CPUSET"] = cpu_list.read_text().strip()
             env[f"GPU_PAIR_{left}_{right}_NUMA"] = str(left_node)
-    free_gib = shutil.disk_usage(root).free // (1024**3)
+    storage_directory = _model_storage_directory(spec, env, root)
+    free_gib = shutil.disk_usage(storage_directory).free // (1024**3)
     if free_gib < spec["minimum_free_disk_gib"]:
         raise SystemExit(
-            f"only {free_gib} GiB free; {spec['minimum_free_disk_gib']} GiB is required"
+            f"only {free_gib} GiB free at {storage_directory}; "
+            f"{spec['minimum_free_disk_gib']} GiB is required"
         )
     for image in spec["images"].values():
         if "@sha256:" not in image:
@@ -205,34 +224,60 @@ if attestation.exists():
         if current.get('tree_sha256') != tree or current.get('files') != rows:
             raise SystemExit('local model volume differs from its pinned attestation')
         raise SystemExit(0)
-if not os.environ.get('HF_TOKEN'):
-    raise SystemExit('HF_TOKEN is required for the first pinned model download')
-snapshot_download(repo, revision=revision, local_dir=target, token=os.environ['HF_TOKEN'])
+snapshot_download(repo, revision=revision, local_dir=target,
+                  token=os.environ.get('HF_TOKEN') or None)
 rows, tree = inventory()
 attestation.write_text(json.dumps({'schema_version': 1, 'repo': repo, 'revision': revision,
                                     'tree_sha256': tree, 'files': rows}, sort_keys=True))
 """
 
 
-def _materialize_models(spec: dict, env: dict[str, str], backend: str) -> None:
+def _ensure_model_volume(spec: dict, env: dict[str, str], root: Path) -> str:
     volume = f"kairyu-models-{spec['environment']}"
-    _run(["docker", "volume", "create", volume], capture=True)
-    env["MODEL_VOLUME"] = volume
-    image = (
-        env["KAIRYU_GPU_IMAGE"]
-        if backend == "kairyu"
-        else env[spec["vllm_download_image_env"]]
-    )
-    token = env.get("HF_TOKEN", "")
-    for model in spec["models"]:
-        command = [
-            "docker",
-            "run",
-            "--rm",
-            "--entrypoint",
-            "python",
-            "--env",
-            f"HF_TOKEN={token}",
+    configured = env.get("MODEL_STORAGE_ROOT", "").strip()
+    if not configured:
+        _run(["docker", "volume", "create", volume], capture=True)
+        return volume
+    directory = _model_storage_directory(spec, env, root)
+    options = {
+        "device": str(directory),
+        "o": "bind",
+        "type": "none",
+    }
+    command = ["docker", "volume", "create", "--driver", "local"]
+    for key in ("type", "o", "device"):
+        command.extend(["--opt", f"{key}={options[key]}"])
+    command.append(volume)
+    _run(command, capture=True)
+    inspection = _run(["docker", "volume", "inspect", volume], capture=True)
+    payload = json.loads(inspection.stdout)
+    if len(payload) != 1 or payload[0].get("Options") != options:
+        raise SystemExit(
+            f"existing model volume {volume} is not bound to {directory}; "
+            "remove or migrate it before setting MODEL_STORAGE_ROOT"
+        )
+    return volume
+
+
+def _download_command(
+    volume: str,
+    image: str,
+    model: dict,
+    env: dict[str, str],
+) -> list[str]:
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--entrypoint",
+        "python3",
+    ]
+    if env.get("HF_TOKEN"):
+        # Forward by name so the credential is never embedded in argv, reports,
+        # or a CalledProcessError rendered by the lifecycle controller.
+        command.extend(["--env", "HF_TOKEN"])
+    command.extend(
+        [
             "--env",
             "HF_HUB_DISABLE_TELEMETRY=1",
             "--volume",
@@ -244,6 +289,20 @@ def _materialize_models(spec: dict, env: dict[str, str], backend: str) -> None:
             model["revision"],
             model["slug"],
         ]
+    )
+    return command
+
+
+def _materialize_models(spec: dict, env: dict[str, str], backend: str, root: Path) -> None:
+    volume = _ensure_model_volume(spec, env, root)
+    env["MODEL_VOLUME"] = volume
+    image = (
+        env["KAIRYU_GPU_IMAGE"]
+        if backend == "kairyu"
+        else env[spec["vllm_download_image_env"]]
+    )
+    for model in spec["models"]:
+        command = _download_command(volume, image, model, env)
         _run(command, env=env)
 
 
@@ -338,7 +397,7 @@ def main() -> None:
     flavors = ("cpu", "gpu") if args.backend == "kairyu" else ("cpu",)
     _build_kairyu_images(root, spec, env, flavors=flavors)
     env.setdefault("KAIRYU_GPU_IMAGE", env["KAIRYU_CPU_IMAGE"])
-    _materialize_models(spec, env, args.backend)
+    _materialize_models(spec, env, args.backend, root)
     _save_runtime_env(spec_dir / ".runtime.env", env)
     _compose(spec_dir, spec, env, args.backend, ["up", "--detach", "--pull", "missing"])
     _wait_ready(spec, args.backend, env)

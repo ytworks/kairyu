@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
-- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with pinned revisions/images, offline model attestations, unified lifecycle/benchmark CLIs, and per-attempt reports
+- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with pinned revisions/images, bind-backed external model storage, credential-safe offline model attestations, unified lifecycle/benchmark CLIs, and per-attempt reports
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-10 — [amendment] Frontier examples use external model storage safely
+- What: Frontier lifecycle preflight and model volumes now honor an absolute external storage root, download images use their available `python3`, and inherited HF credentials are forwarded by name rather than embedded in process arguments.
+- Why: The Qwen3.6 1-GPU example checked the repository filesystem instead of its model volume, assumed an absent `python` executable in the pinned vLLM image, and could expose a token through failure diagnostics.
+- Refs: `examples/_shared/examplectl.py`; `examples/qwen3.6-27b-1gpu/`
 
 ### 2026-08-10 — [amendment] DeepSeek V4 native EP runs packed checkpoint experts
 - What: DeepSeek V4 gained strict official-checkpoint validation, direct SM120 E2M1/UE8M0 expert kernels, bounded FP4 Lightning Indexer state, request-owned EP2/4/8 Attention-DP, fixed NCCL all-to-all, EP8 example selection, and a committed 1M gate; single-GPU FP4 and two-rank ragged EP smokes pass.
