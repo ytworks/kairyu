@@ -10,8 +10,6 @@ jobs:
     name: Portable CPU tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken-cache
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +22,9 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Configure tokenizer cache
+        run: >-
+          echo "TIKTOKEN_CACHE_DIR=$RUNNER_TEMP/tiktoken-cache" >> "$GITHUB_ENV"
       - name: Sync dependencies
         run: uv sync --frozen --dev
       - name: Restore pinned o200k_base tokenizer data
