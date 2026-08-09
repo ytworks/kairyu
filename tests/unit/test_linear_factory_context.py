@@ -393,6 +393,24 @@ def test_architectural_exclusion_cannot_be_overridden():
         )
 
 
+@pytest.mark.parametrize(
+    "role",
+    [LinearRole.MOE_ROUTER, LinearRole.OUTPUT_HEAD, LinearRole.DRAFT_FUSION],
+)
+def test_accuracy_sensitive_roles_default_to_dense(role):
+    module = make_linear(
+        linear_factory(QuantConfig(QuantMethod.FP8)),
+        32,
+        16,
+        False,
+        qualified_name=f"test.{role.value}",
+        role=role,
+    )
+
+    assert isinstance(module, torch.nn.Linear)
+    assert module.linear_selection.reason == f"default-dense-role:{role.value}"
+
+
 def test_loader_threads_logical_target_without_allocating_it(tmp_path):
     from kairyu.models.loader import load_model
 

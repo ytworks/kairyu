@@ -243,7 +243,6 @@ if triton is not None:
         stride_on,
         GROUP_SIZE: tl.constexpr,
         HAS_BIAS: tl.constexpr,
-        X_IS_BF16: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -292,9 +291,20 @@ if triton is not None:
                 mask=(offs_m[:, None] < m_size) & (current_k[None, :] < k_size),
                 other=0.0,
             )
-            weight = (quant - zero).to(tl.float32) * scales
-            weight = weight.to(tl.bfloat16) if X_IS_BF16 else weight.to(tl.float16)
-            accumulator += tl.dot(x, weight)
+            # AWQ checkpoints store FP16 scales.  Preserve that precision even
+            # when the resident model activations are BF16, and keep the dot
+            # accumulator in FP32.
+            weight = ((quant - zero).to(tl.float32) * scales).to(tl.float16)
+            if x.dtype == tl.bfloat16:
+                x = x.to(tl.float32)
+                x = tl.where(
+                    (x > 65504.0) & (x < float("inf")),
+                    65504.0,
+                    tl.where(
+                        (x < -65504.0) & (x > -float("inf")), -65504.0, x
+                    ),
+                )
+            accumulator += tl.dot(x.to(tl.float16), weight, out_dtype=tl.float32)
         if HAS_BIAS:
             bias = tl.load(bias_ptr + offs_n, mask=offs_n < n_size, other=0.0)
             accumulator += bias[None, :]
@@ -327,7 +337,6 @@ if triton is not None:
         stride_om,
         stride_on,
         HAS_BIAS: tl.constexpr,
-        X_IS_BF16: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
@@ -374,9 +383,20 @@ if triton is not None:
                 mask=(offs_m[:, None] < m_size) & (current_k[None, :] < k_size),
                 other=0.0,
             )
-            weight = (quant - zero).to(tl.float32) * scales
-            weight = weight.to(tl.bfloat16) if X_IS_BF16 else weight.to(tl.float16)
-            accumulator += tl.dot(x, weight)
+            # GPTQ checkpoints store FP16 scales.  Preserve that precision even
+            # when the resident model activations are BF16, and keep the dot
+            # accumulator in FP32.
+            weight = ((quant - zero).to(tl.float32) * scales).to(tl.float16)
+            if x.dtype == tl.bfloat16:
+                x = x.to(tl.float32)
+                x = tl.where(
+                    (x > 65504.0) & (x < float("inf")),
+                    65504.0,
+                    tl.where(
+                        (x < -65504.0) & (x > -float("inf")), -65504.0, x
+                    ),
+                )
+            accumulator += tl.dot(x.to(tl.float16), weight, out_dtype=tl.float32)
         if HAS_BIAS:
             bias = tl.load(bias_ptr + offs_n, mask=offs_n < n_size, other=0.0)
             accumulator += bias[None, :]
@@ -696,7 +716,6 @@ def awq_linear_forward(
         output.stride(1),
         GROUP_SIZE=module.group_size,
         HAS_BIAS=add_bias and module.bias is not None,
-        X_IS_BF16=x.dtype is torch.bfloat16,
         BLOCK_M=16,
         BLOCK_N=32,
         BLOCK_K=32,
@@ -734,7 +753,6 @@ def gptq_linear_forward(
         output.stride(0),
         output.stride(1),
         HAS_BIAS=add_bias and module.bias is not None,
-        X_IS_BF16=x.dtype is torch.bfloat16,
         BLOCK_M=16,
         BLOCK_N=32,
         BLOCK_K=32,

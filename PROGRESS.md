@@ -95,6 +95,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-08 — [amendment] W4A16 preserves FP16 scales; cache salt stays explicit
+- What: AWQ/GPTQ uses FP16 dot operands with FP32 accumulation for either model dtype; router/output/draft projections remain accuracy-default dense; native cache identity remains the exact token tuple without an in-process tenant salt.
+- Why: BF16 dequantization discarded checkpoint scale precision, while mapping `cache_salt` to affinity would falsely claim partitioning across RadixKV, tier, event, and routing identities.
+- Refs: issue #366; M1 D5; M14 §8; `kairyu/kernels/quant_gemm_gpu.py`
+
 ### 2026-08-08 — [design] Long-context accuracy is a fixed-length NIAH curve
 - What: a package-owned suite runs one deterministic exact-retrieval task at 4K/8K/16K/32K/64K/128K, with 20 evenly positioned needles per row and whole-row target-window gating.
 - Why: one aggregate MRCR/LongBench score cannot show the context length where accuracy collapses; ordinary rows reuse the existing evidence and comparison contracts without a parallel harness.

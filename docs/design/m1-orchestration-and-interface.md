@@ -134,6 +134,17 @@ orchestration to the same engine so vLLM's block-hash prefix cache already gets 
 The `GenerationRequest.cache_hint` field (session id + prefix fingerprint) is plumbed
 through now so M2 can consume it without interface changes.
 
+**Cache-partition amendment (2026-08-08, issue #366):** `CacheHint` controls
+placement and affinity; it is not part of native RadixKV identity. A native
+engine process deliberately reuses pages only by the exact processed token
+tuple and therefore shares identical prefixes across its callers. Kairyu does
+not currently claim an in-process tenant cache-partition boundary. Deployments
+that require cache isolation must use separate backend pools/processes; the
+vLLM prompt-owned `cache_salt` remains rejected rather than being silently
+dropped or misleadingly mapped to an affinity hint. Adding an identity salt
+requires a separate end-to-end design across RadixKV, DRAM tier keys, KV events,
+and fleet routing.
+
 ### D6. Server is FastAPI + SSE, one process, engine-agnostic
 
 `kairyu.entrypoints.server` exposes `/v1/chat/completions`, `/v1/completions`, `/v1/models`.
