@@ -263,7 +263,9 @@ dequantized weights to the resident activation dtype. Both FP16 and BF16 model
 activations enter the tensor-core dot as FP16 operands and accumulate in FP32;
 the output is cast back to the resident activation dtype. This preserves the
 checkpoint scale precision instead of discarding roughly three mantissa bits
-for BF16 serving.
+for BF16 serving. BF16 inputs outside FP16's finite range are saturated to
+±65504 before conversion: W4A16 accepts the narrower exponent range explicitly
+and never turns a finite activation into an infinity at this boundary.
 Quantized CUDA selections may choose only a fused CUDA family. They never fall
 back to the CPU oracle, dense `F.linear`, full-weight dequantization, or an
 emulation kernel.

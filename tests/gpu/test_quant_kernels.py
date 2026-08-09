@@ -191,6 +191,28 @@ def test_w4a16_uses_fp16_checkpoint_scale_precision(cuda, factory, activation_dt
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("factory", [_awq_module, _gptq_module], ids=["awq", "gptq"])
+def test_w4a16_saturates_bf16_activations_to_finite_fp16_range(cuda, factory):
+    torch.manual_seed(367)
+    module = factory(64, 32)
+    module.bias.data.zero_()
+    activation = torch.full((3, 64), 70_000.0, dtype=torch.bfloat16)
+    activation[1].neg_()
+    weight = module.dequantize().to(device=cuda, dtype=torch.float16)
+    expected = torch.mm(
+        activation.float().clamp(-65_504.0, 65_504.0).to(
+            device=cuda, dtype=torch.float16
+        ),
+        weight.T.contiguous(),
+        out_dtype=torch.float32,
+    ).to(torch.bfloat16)
+
+    actual = module.to(cuda)(activation.to(cuda))
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_nvfp4_qkv_pack_matches_separate_and_replays_cuda_graph(cuda):
     """One activation quantization must preserve Q/K/V values and graph safety."""
     from kairyu.models.packed_linear import NvFp4LinearPack
