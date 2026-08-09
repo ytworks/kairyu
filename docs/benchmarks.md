@@ -64,6 +64,14 @@ scripts, results, or tests. Gate-specific code stays in its stable wrapper;
 semantics shared by the installed CLI and gate scripts belong in
 `kairyu.bench`.
 
+The package-owned `kairyu.bench.evidence` module provides the narrow common
+artifact substrate used by repository-only formal gates: canonical JSON and
+SHA-256, atomic indexed JSONL, strict fail-closed framing, artifact path
+resolution, raw-only replay, and exact retained-manifest verification. It does
+not define gate row schemas, acceptance thresholds, diagnostics, or verdicts;
+those remain with each stable `bench/*.py` owner. The boundary and migration
+are recorded in `docs/design/issue-382-evidence-library.md`.
+
 The shared target form is `name=base_url=model[=api_key_env]`; the fourth
 field names an environment variable and is never a literal secret. This
 corrects the old `frontier_compare.py` interpretation. Export the credential

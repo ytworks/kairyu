@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
-import hashlib
 import json
 import math
 import re
@@ -40,7 +39,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if __package__ in {None, ""}:
@@ -51,6 +50,31 @@ import httpx  # noqa: E402
 from bench import g2_a6_vllm_bench as a6  # noqa: E402
 from bench import g4_ma1_qwen3_235b_nvfp4_bench as ma1  # noqa: E402
 from bench import g4_ma1_qwen3_235b_nvfp4_capture as ma1_capture  # noqa: E402
+from kairyu.bench.evidence import (  # noqa: E402
+    artifact_paths as evidence_artifact_paths,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    canonical_json,
+    sha256_file,
+    sha256_json,
+    sha256_text,
+    verify_replayed_manifest,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    read_json_object as evidence_read_json_object,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    read_jsonl as evidence_read_jsonl,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    replay_manifest as evidence_replay_manifest,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    strict_json_loads as evidence_strict_json_loads,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    write_jsonl as evidence_write_jsonl,
+)
 from kairyu.bench.reporting import atomic_write_json, atomic_write_text  # noqa: E402
 from kairyu.engine.tokenizer import HFTokenizer  # noqa: E402
 
@@ -318,53 +342,11 @@ class PlannedRequest:
         return sha256_json(list(self.prompt_token_ids))
 
 
-def canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    value: dict[str, Any] = {}
-    for key, item in pairs:
-        if key in value:
-            raise GateEvidenceError(f"duplicate JSON key {key!r}")
-        value[key] = item
-    return value
-
-
 def strict_json_loads(value: str) -> object:
-    return json.loads(
+    return evidence_strict_json_loads(
         value,
-        object_pairs_hook=_strict_object,
-        parse_constant=lambda constant: (_ for _ in ()).throw(
-            GateEvidenceError(f"non-finite JSON constant {constant}")
-        ),
+        error_type=GateEvidenceError,
     )
-
-
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def sha256_text(value: str) -> str:
-    return sha256_bytes(value.encode())
-
-
-def sha256_json(value: object) -> str:
-    return sha256_text(canonical_json(value))
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def hashed_descriptor(value: object) -> dict[str, object]:
@@ -529,42 +511,15 @@ def nearest_rank(values: Sequence[int], quantile: float) -> int:
 
 
 def _read_json_object(path: Path) -> dict[str, object]:
-    value = strict_json_loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise GateEvidenceError(f"{path} is not a JSON object")
-    return value
+    return evidence_read_json_object(path, error_type=GateEvidenceError)
 
 
 def _write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
-    normalized: list[dict[str, object]] = []
-    for index, row in enumerate(rows):
-        value = strict_json_loads(canonical_json(dict(row)))
-        if not isinstance(value, dict):
-            raise TypeError("raw row did not normalize to an object")
-        value["row_index"] = index
-        normalized.append(value)
-    atomic_write_text(
-        path,
-        "".join(canonical_json(row) + "\n" for row in normalized),
-        encoding="utf-8",
-    )
+    evidence_write_jsonl(path, rows)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    with path.open(encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, 1):
-            if not line.endswith("\n") or not line.strip():
-                raise GateEvidenceError(f"invalid JSONL framing at {path}:{line_number}")
-            value = strict_json_loads(line)
-            if not isinstance(value, dict):
-                raise GateEvidenceError(f"non-object JSONL row at {path}:{line_number}")
-            rows.append(value)
-    if not rows:
-        raise GateEvidenceError(f"{path} contains no rows")
-    if any(row.get("row_index") != index for index, row in enumerate(rows)):
-        raise GateEvidenceError(f"non-contiguous row indices in {path}")
-    return rows
+    return evidence_read_jsonl(path, error_type=GateEvidenceError)
 
 
 def request_config(output_tokens: int) -> dict[str, object]:
@@ -5337,26 +5292,25 @@ def write_artifact(
 
 
 def _artifact_paths(path: Path) -> tuple[Path, Path]:
-    if path.is_dir():
-        return path / RAW_NAME, path / MANIFEST_NAME
-    if path.name == RAW_NAME:
-        return path, path.with_name(MANIFEST_NAME)
-    if path.name == MANIFEST_NAME:
-        return path.with_name(RAW_NAME), path
-    raise GateEvidenceError(f"artifact must be a directory, {RAW_NAME}, or {MANIFEST_NAME}")
+    return evidence_artifact_paths(
+        path,
+        raw_name=RAW_NAME,
+        manifest_name=MANIFEST_NAME,
+        error_type=GateEvidenceError,
+    )
 
 
 def verify_artifact(path: Path, *, assert_gate: bool = False) -> dict[str, object]:
-    raw_path, manifest_path = _artifact_paths(path)
-    rows = _read_jsonl(raw_path)
-    manifest = _read_json_object(manifest_path)
-    raw_sha256 = sha256_file(raw_path)
-    raw = manifest.get("raw")
-    if not isinstance(raw, dict) or raw.get("sha256") != raw_sha256:
-        raise GateEvidenceError("raw SHA-256 does not match the manifest")
-    replayed = recompute_manifest(rows, raw_sha256=raw_sha256)
-    if manifest != replayed:
-        raise GateEvidenceError("manifest differs from independent raw replay")
+    replayed = verify_replayed_manifest(
+        path,
+        raw_name=RAW_NAME,
+        manifest_name=MANIFEST_NAME,
+        recompute=lambda rows, raw_sha256: recompute_manifest(
+            rows,
+            raw_sha256=raw_sha256,
+        ),
+        error_type=GateEvidenceError,
+    )
     if assert_gate and replayed["passed"] is not True:
         raise RuntimeError("G4 M-A3 artifact does not pass every binding check")
     return replayed
@@ -5364,9 +5318,13 @@ def verify_artifact(path: Path, *, assert_gate: bool = False) -> dict[str, objec
 
 def replay_artifact(path: Path, *, assert_gate: bool = False) -> dict[str, object]:
     raw_path, _manifest_path = _artifact_paths(path)
-    replayed = recompute_manifest(
-        _read_jsonl(raw_path),
-        raw_sha256=sha256_file(raw_path),
+    replayed = evidence_replay_manifest(
+        raw_path,
+        recompute=lambda rows, raw_sha256: recompute_manifest(
+            rows,
+            raw_sha256=raw_sha256,
+        ),
+        error_type=GateEvidenceError,
     )
     if assert_gate and replayed["passed"] is not True:
         raise RuntimeError("G4 M-A3 raw replay does not pass every binding check")

@@ -45,6 +45,26 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from kairyu.bench.evidence import (  # noqa: E402
+    artifact_paths as evidence_artifact_paths,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    canonical_json,
+    sha256_bytes,
+    sha256_file,
+    sha256_json,
+    verify_replayed_manifest,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    read_jsonl as evidence_read_jsonl,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    replay_manifest as evidence_replay_manifest,
+)
+from kairyu.bench.evidence import (  # noqa: E402
+    write_jsonl as evidence_write_jsonl,
+)
+
 SCHEMA_VERSION = "kairyu.g5.f4b.agentic-kv-tier.v1"
 VERDICT_REVISION = "kairyu.g5.f4b.agentic-kv-tier-verdict.v2"
 PROFILE_SCHEMA_VERSION = "kairyu.dram-kv-crossover.v2"
@@ -172,32 +192,6 @@ class EvidenceError(ValueError):
 def _require(condition: object, message: str) -> None:
     if not condition:
         raise EvidenceError(message)
-
-
-def canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def sha256_json(value: object) -> str:
-    return sha256_bytes(canonical_json(value).encode())
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def hashed_descriptor(value: object) -> dict[str, object]:
@@ -1477,32 +1471,11 @@ async def _run_live_quality_shard(
 
 
 def write_jsonl(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for index, row in enumerate(rows):
-            handle.write(canonical_json({**dict(row), "row_index": index}) + "\n")
+    evidence_write_jsonl(path, rows)
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    with path.open("rb") as handle:
-        for line_number, raw in enumerate(handle, 1):
-            _require(
-                raw.endswith(b"\n") and bool(raw.strip()),
-                f"invalid JSONL framing at {path}:{line_number}",
-            )
-            try:
-                row = json.loads(raw)
-            except json.JSONDecodeError as error:
-                raise EvidenceError(f"invalid JSON at {path}:{line_number}") from error
-            _require(isinstance(row, dict), f"JSONL row is not an object at {path}:{line_number}")
-            rows.append(row)
-    _require(rows, f"raw evidence is empty: {path}")
-    _require(
-        all(row.get("row_index") == index for index, row in enumerate(rows)),
-        f"raw row indices are not contiguous: {path}",
-    )
-    return rows
+    return evidence_read_jsonl(path, error_type=EvidenceError)
 
 
 def _validate_source(value: object) -> dict[str, object]:
@@ -3927,8 +3900,14 @@ def recompute_manifest(
 
 
 def replay_raw(path: Path, *, assert_gate: bool = False) -> dict[str, object]:
-    rows = read_jsonl(path)
-    manifest = recompute_manifest(rows, raw_sha256=sha256_file(path))
+    manifest = evidence_replay_manifest(
+        path,
+        recompute=lambda rows, raw_sha256: recompute_manifest(
+            rows,
+            raw_sha256=raw_sha256,
+        ),
+        error_type=EvidenceError,
+    )
     if assert_gate and manifest["passed"] is not True:
         failed = [name for name, passed in manifest["checks"].items() if not passed]
         raise EvidenceError(f"G5 F4b evidence failed: {', '.join(failed)}")
@@ -3967,26 +3946,26 @@ def assemble_artifact(
 
 
 def _artifact_paths(path: Path) -> tuple[Path, Path]:
-    if path.is_dir():
-        return path / RAW_NAME, path / MANIFEST_NAME
-    if path.name == RAW_NAME:
-        return path, path.with_name(MANIFEST_NAME)
-    if path.name == MANIFEST_NAME:
-        return path.with_name(RAW_NAME), path
-    raise EvidenceError(f"artifact must be a directory, {RAW_NAME}, or {MANIFEST_NAME}")
+    return evidence_artifact_paths(
+        path,
+        raw_name=RAW_NAME,
+        manifest_name=MANIFEST_NAME,
+        error_type=EvidenceError,
+    )
 
 
 def verify_artifact(path: Path, *, assert_gate: bool = False) -> dict[str, object]:
-    raw_path, manifest_path = _artifact_paths(path)
-    _require(raw_path.is_file(), f"combined raw is missing: {raw_path}")
-    _require(manifest_path.is_file(), f"manifest is missing: {manifest_path}")
-    recomputed = replay_raw(raw_path, assert_gate=False)
-    try:
-        retained = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise EvidenceError("cannot read retained manifest") from error
-    _require(isinstance(retained, dict), "retained manifest is not an object")
-    _require(retained == recomputed, "retained manifest differs from independent raw replay")
+    raw_path, _manifest_path = _artifact_paths(path)
+    recomputed = verify_replayed_manifest(
+        path,
+        raw_name=RAW_NAME,
+        manifest_name=MANIFEST_NAME,
+        recompute=lambda rows, raw_sha256: recompute_manifest(
+            rows,
+            raw_sha256=raw_sha256,
+        ),
+        error_type=EvidenceError,
+    )
     rows = read_jsonl(raw_path)
     embedded_lifecycle = rows[0].get("container_lifecycle")
     retained_lifecycle = _load_container_lifecycle(raw_path.parent / CONTAINER_METADATA_DIR)
