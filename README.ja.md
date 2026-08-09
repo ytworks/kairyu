@@ -865,8 +865,8 @@ structured コーパスは HF Git pin で識別するリモート dataset では
 SHA-256 を厳密に検証するインストール済み package data です。
 
 wheel に含まれるのは、再利用可能な `kairyu.bench` ライブラリ、公開 CLI、
-エントリポイント台帳、11 個の合成ベンチマーク stand-in、structured 適合性
-コーパス、judge calibration コーパス（合計 13 個の JSONL）です。トップレベルの
+エントリポイント台帳、17 個の合成ベンチマーク stand-in、structured 適合性
+コーパス、judge calibration コーパス（合計 19 個の JSONL）です。トップレベルの
 `bench/*.py` 開発／正式ゲート用ラッパー、
 `bench/results/`、`tests/` はソース checkout 専用です。安定した一覧と
 互換性ポリシーは [`bench/README.md`](bench/README.md) を参照してください。
