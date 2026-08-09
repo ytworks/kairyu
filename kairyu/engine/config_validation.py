@@ -38,6 +38,18 @@ _OPENAI_OPTIONS = frozenset(
         "upstream",
         "capabilities",
         "image_input_policy",
+        "allow_templated_chat_passthrough",
+        "chat_tokenizer",
+        "model_revision",
+        "max_model_len",
+        "quantization_format",
+        "cache_descriptor",
+        "tensor_parallel_size",
+        "expert_parallel_size",
+        "attention_data_parallel_size",
+        "mtp_enabled",
+        "dspark_enabled",
+        "container_image_digest",
         "client",
         "client_factory",
     }
@@ -119,8 +131,12 @@ def _require_exact_options(
     options: Mapping[str, object],
     allowed: frozenset[str],
 ) -> None:
-    if set(options) - allowed:
-        raise ValueError(f"{backend} backend has unsupported configuration options")
+    unsupported = sorted(set(options) - allowed)
+    if unsupported:
+        names = ", ".join(unsupported)
+        raise ValueError(
+            f"{backend} backend has unsupported configuration options: {names}"
+        )
 
 
 def _require_string(
@@ -222,6 +238,35 @@ def _validate_openai(options: Mapping[str, object]) -> None:
             "openai backend multimodal streaming requires "
             "request_stream_usage=true"
         )
+    allow_passthrough = options.get("allow_templated_chat_passthrough", False)
+    if type(allow_passthrough) is not bool:
+        raise ValueError(
+            "openai backend allow_templated_chat_passthrough must be a boolean"
+        )
+    for field in (
+        "chat_tokenizer",
+        "model_revision",
+        "quantization_format",
+        "container_image_digest",
+    ):
+        value = options.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"openai backend {field} must be a string or null")
+    max_model_len = options.get("max_model_len")
+    if max_model_len is not None:
+        _require_int_at_least("openai", "max_model_len", max_model_len, 1)
+    for field in (
+        "tensor_parallel_size",
+        "expert_parallel_size",
+        "attention_data_parallel_size",
+    ):
+        _require_int_at_least("openai", field, options.get(field, 1), 1)
+    cache_descriptor = options.get("cache_descriptor")
+    if cache_descriptor is not None and not isinstance(cache_descriptor, Mapping):
+        raise ValueError("openai backend cache_descriptor must be a mapping or null")
+    for field in ("mtp_enabled", "dspark_enabled"):
+        if type(options.get(field, False)) is not bool:
+            raise ValueError(f"openai backend {field} must be a boolean")
 
 
 def _validate_vllm(options: Mapping[str, object]) -> None:

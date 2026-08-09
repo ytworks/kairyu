@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-10 — [progress] Frontier gateway metadata passes static validation
+- What: OpenAI-compatible replicas now statically accept and type-check the full constructor metadata contract used by every Qwen, DeepSeek, and orchestration gateway; unsupported-option errors name the drifting fields.
+- Refs: PR #465; `kairyu/engine/config_validation.py`; `examples/*/*gateway.yaml`
+
 ### 2026-08-10 — [progress] Qwen3.6 vLLM examples fit the hybrid cache budget
 - What: Qwen3.6 vLLM services in the single-GPU and combined orchestration examples now cap active sequences at 64, matching the native backend and fitting the measured 714-block Mamba cache ceiling at native context.
 - Refs: PR #465; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/compose.yaml`

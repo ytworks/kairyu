@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from kairyu.engine.config_validation import validate_backend_options
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -132,3 +134,18 @@ def test_qwen_vllm_services_cap_sequences_for_hybrid_cache() -> None:
     ):
         option = command.index("--max-num-seqs")
         assert command[option + 1] == "64"
+
+
+def test_all_frontier_gateway_backend_options_pass_static_validation() -> None:
+    gateway_paths = sorted((ROOT / "examples").glob("*/*gateway.yaml"))
+    assert gateway_paths
+    validated = 0
+
+    for path in gateway_paths:
+        config = yaml.safe_load(path.read_text())
+        for pool in (config.get("pools") or {}).values():
+            for replica in pool["replicas"]:
+                validate_backend_options(replica["backend"], replica["options"])
+                validated += 1
+
+    assert validated >= 10
