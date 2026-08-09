@@ -66,6 +66,12 @@ def add_bench_parser(subparsers) -> None:
         help="Maximum completion tokens sent by adapters to every CLI target",
     )
     run.add_argument(
+        "--request-timeout-s",
+        type=float,
+        default=None,
+        help="Per-read request timeout in seconds for target generation",
+    )
+    run.add_argument(
         "--reasoning-effort",
         default=None,
         help="reasoning_effort sent to every target (Fugu reports max effort)",

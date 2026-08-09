@@ -207,6 +207,7 @@ def build_config(args) -> BenchConfig:
         "seed": args.seed,
         "attempts": getattr(args, "attempts", None),
         "concurrency": args.concurrency,
+        "request_timeout_s": getattr(args, "request_timeout_s", None),
         "results_dir": args.results_dir,
         "run_id": args.run_id,
         "cache_dir": args.cache_dir,

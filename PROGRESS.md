@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-10 — [progress] Frontier quality runs survive long reasoning phases
+- What: Benchmark CLI now accepts a positive generation read timeout, and Qwen, DeepSeek, and combined frontier examples pin a one-day allowance so reasoning-only streams cannot be retried or failed by the generic 600-second limit before final code appears.
+- Refs: PR #465; `kairyu/bench/{cli,config}.py`; `examples/{_shared,qwen3.6-27b-1gpu,deepseek-v4-flash-0731-8gpu,qwen3.6-deepseek-v4-8gpu}/`
+
 ### 2026-08-10 — [progress] Benchmark CLI preserves explicit output budgets
 - What: `kairyu bench run` now accepts a positive `--max-output-tokens` override and applies it to every CLI-declared target, so frontier example budgets reach adapters instead of failing at argument parsing or reverting to 8,192 tokens.
 - Refs: PR #465; `kairyu/bench/{cli,config,types}.py`; `tests/bench/test_bench_config.py`

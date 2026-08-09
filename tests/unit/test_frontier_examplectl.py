@@ -163,6 +163,8 @@ def test_qwen_quality_command_preserves_documented_thinking_budget(tmp_path: Pat
 
     option = command.index("--max-output-tokens")
     assert command[option + 1] == "81920"
+    timeout = command.index("--request-timeout-s")
+    assert command[timeout + 1] == "86400"
 
 
 def test_all_frontier_gateway_backend_options_pass_static_validation() -> None:

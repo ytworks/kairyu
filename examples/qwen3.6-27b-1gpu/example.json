@@ -17,7 +17,8 @@
       "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
       "slug": "qwen3.6-27b",
       "max_context_tokens": 262144,
-      "max_output_tokens": 81920
+      "max_output_tokens": 81920,
+      "request_timeout_s": 86400
     }
   ]
 }

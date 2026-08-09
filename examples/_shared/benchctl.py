@@ -177,6 +177,13 @@ def _quality_command(
         raise ValueError("model max_output_tokens must be a positive integer")
     max_output = max(output_budgets)
     command.extend(["--max-output-tokens", str(max_output)])
+    request_timeouts = [model.get("request_timeout_s", 600) for model in spec["models"]]
+    if any(
+        type(timeout) not in (int, float) or isinstance(timeout, bool) or timeout <= 0
+        for timeout in request_timeouts
+    ):
+        raise ValueError("model request_timeout_s must be a positive number")
+    command.extend(["--request-timeout-s", str(max(request_timeouts))])
     return command
 
 

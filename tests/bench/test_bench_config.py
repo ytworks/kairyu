@@ -146,6 +146,38 @@ def test_max_output_tokens_cli_applies_target_generation_limit():
         build_config(invalid)
 
 
+def test_request_timeout_cli_applies_generation_read_timeout():
+    args = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--request-timeout-s",
+            "86400",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.request_timeout_s == 86_400
+
+    invalid = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--request-timeout-s",
+            "0",
+        ]
+    )
+    with pytest.raises(ValueError, match="greater than 0"):
+        build_config(invalid)
+
+
 def test_served_config_identity_normalizes_label_and_requires_lowercase_sha256():
     identity = ServedConfigIdentity(label="  fp8-kv production  ", sha256="a" * 64)
 

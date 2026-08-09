@@ -16,7 +16,8 @@
       "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
       "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
       "slug": "deepseek-v4-flash-0731",
-      "max_context_tokens": 1048576
+      "max_context_tokens": 1048576,
+      "request_timeout_s": 86400
     }
   ]
 }
