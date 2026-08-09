@@ -10,6 +10,8 @@ jobs:
     name: Portable CPU tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken-cache
     strategy:
       fail-fast: false
       matrix:
@@ -24,6 +26,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Sync dependencies
         run: uv sync --frozen --dev
+      - name: Restore pinned o200k_base tokenizer data
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tiktoken-cache
+          key: tiktoken-o200k-base-446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d
+      - name: Prefetch pinned o200k_base tokenizer data
+        run: >-
+          uv run --frozen python -c
+          "import tiktoken; tiktoken.get_encoding('o200k_base')"
       - name: Verify required test dependencies
         run: >-
           uv run --frozen python scripts/test_prerequisites.py

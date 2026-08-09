@@ -47,6 +47,15 @@ QUANTIZATION_ROW_ORDER: tuple[str, ...] = (
 
 STRUCTURED_ROW_ORDER: tuple[str, ...] = ("structured-output",)
 
+LONG_CONTEXT_ROW_ORDER: tuple[str, ...] = (
+    "ruler-niah-4k",
+    "ruler-niah-8k",
+    "ruler-niah-16k",
+    "ruler-niah-32k",
+    "ruler-niah-64k",
+    "ruler-niah-128k",
+)
+
 SUITES: dict[str, SuiteInfo] = {
     "fugu": SuiteInfo(
         name="fugu",
@@ -68,6 +77,11 @@ SUITES: dict[str, SuiteInfo] = {
         name="structured",
         display_name="Structured Output",
         row_order=STRUCTURED_ROW_ORDER,
+    ),
+    "long-context": SuiteInfo(
+        name="long-context",
+        display_name="Long Context",
+        row_order=LONG_CONTEXT_ROW_ORDER,
     ),
 }
 
@@ -104,6 +118,7 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
     from kairyu.bench.adapters.longbench_v2 import LongBenchV2Adapter
     from kairyu.bench.adapters.mmlu import MmluAdapter
     from kairyu.bench.adapters.mrcr import MrcrAdapter
+    from kairyu.bench.adapters.ruler_niah import ruler_niah_adapters
     from kairyu.bench.adapters.scicode import SciCodeAdapter
     from kairyu.bench.adapters.structured_output import StructuredOutputAdapter
     from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
@@ -126,6 +141,7 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
         SweBenchProAdapter(),
         TauBenchBankingAdapter(),
         TerminalBenchAdapter(),
+        *ruler_niah_adapters(),
     ]
     from kairyu.bench.pins import apply_pins
 

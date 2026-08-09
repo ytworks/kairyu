@@ -200,7 +200,7 @@ class BenchTarget(SamplingOptions):
     sampling_mode: Literal["adapter", "recommended"] = "adapter"
     temperature: float | None = Field(default=None, ge=0.0)
     api_key_env: str | None = None  # env var NAME, never the key itself
-    max_context_tokens: int | None = None  # gate for long-context items
+    max_context_tokens: int | None = Field(default=None, ge=1)  # long-context gate
     max_output_tokens: int = 8192
     supports_vision: bool = True
 
@@ -412,7 +412,9 @@ class ExecutionConfig(BaseModel):
 class BenchConfig(BaseModel):
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
-    suite: Literal["fugu", "core", "quantization", "structured"] = "fugu"
+    suite: Literal[
+        "fugu", "core", "quantization", "structured", "long-context"
+    ] = "fugu"
     targets: tuple[BenchTarget, ...] = Field(min_length=1)
     judge: JudgeConfig = JudgeConfig()
     execution: ExecutionConfig = ExecutionConfig()
