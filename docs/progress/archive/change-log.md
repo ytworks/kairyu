@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-08 — [amendment] TP step headers remain on sleeping Gloo transport
+- What: correcting the preceding #323 entry, a two-word Gloo tensor header frames every transaction; only encoded `StepDelta` payloads use the bounded NCCL model group.
+- Why: posting a process-lifetime NCCL receive while idle burns resources and can strand orphaned GPU workers after rank-0 death; a Gloo tensor header avoids pickle while retaining sleeping TCP liveness.
+- Refs: issue #323; PR #452 Fable 5 review; M16 D4; `kairyu/engine/core/worker.py`
+
+### 2026-08-08 — [amendment] TP step control uses a dedicated NCCL tensor channel
+- What: hot-path `StepDelta` state is losslessly encoded into int64 tensors on a long-idle NCCL subgroup; rare controls remain Gloo objects and model collectives retain their short fail-fast subgroup.
+- Why: removing per-step pickle/TCP overhead must not make healthy idle workers time out or weaken bounded model-operation failure detection.
+- Refs: issue #323; M16 D4; `kairyu/engine/core/{step_input,worker}.py`
+
+### 2026-08-08 — [amendment] Structured generation uses the device sampling seam
+- What: regex, EBNF, and structural-tag formats join JSON grammars; native strict tools compile parser-matched schemas (one call for Llama); both layouts synchronously isolate malformed requests; per-process vocabulary/compiler caches avoid rebuilds without compile-time global locking; CUDA masks avoid full logits-row D2H.
+- Why: structured and strict-tool requests must be correctness invariants without forcing every token through the vocabulary-sized CPU sampling path.
+- Refs: issue #363; M8 D2; `kairyu/engine/{backend.py,core/{structured,sampler}.py}`
+
+### 2026-08-08 — [amendment] Deterministic drafts preserve sampled distributions
+- What: n-gram/EAGLE/MTP argmax drafts use point-mass rejection verification for T>0; per-row history slicing also enables penalties while grammar/forced continuations keep the safe bypass.
+- Why: one target draw exactly realizes acceptance plus residual correction for q(t)=1, avoiding vocabulary-sized draft/target probability transfer.
+- Refs: issue #358; M8 D4; `kairyu/engine/core/{spec_decode,spec_runner,model_runner}.py`
+
+### 2026-08-08 — [amendment] FP8 audit separates arithmetic noise from error
+- What: calibrated dequant auditing permits a documented 2^-48 relative FP64 comparison slack while retaining exact stored-byte, finite, range, and physical E4M3 error checks.
+- Why: byte-perfect writes could exceed the theoretical error boundary by a few FP64 ulps, making the calibrated gate unsatisfiable independently of model quality.
+- Refs: issue #357; PR #449 Fable 5 review; `bench/fp8_kv_g4_ekv_bench.py`; `tests/bench/test_fp8_kv_g4_ekv_bench.py`
+
 ### 2026-08-08 — [progress] Calibrated FP8 KV re-bake retains FAIL
 - What: the clean Qwen3-32B SM120 re-bake passed cache cosine/NRMSE and selected-logprob bounds, but failed 16K/32K exact tokens and the disjoint calibration envelope; public FP8 KV remains rejected.
 - Refs: issue #357; `bench/results/g4-ekv-fp8-kv-qwen3-32b-sm120-calibrated-fail-2026-08-08/`; FlashInfer SM120 design

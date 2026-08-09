@@ -6,7 +6,8 @@ a target is just a model name on an OpenAI-compatible endpoint), scores,
 and writes per-pair JSON plus an aggregated scoreboard to the results dir.
 
 The perf harnesses in the top-level `bench/` directory are separate: they
-measure serving latency/throughput; this package measures answer quality.
+measure serving latency/throughput. Reusable evidence-artifact mechanics live
+in this installed package; gate schemas and verdicts remain in those wrappers.
 """
 
 from kairyu.bench.types import BenchConfig, BenchTarget, JudgeConfig, PairResult

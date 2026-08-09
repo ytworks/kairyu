@@ -941,6 +941,23 @@ def test_trace_bundle_fails_closed_without_client_lifecycle_contract(tmp_path: P
         gate.load_trace_bundle(path, dataset_sha256=a6.SHAREGPT_DATASET_SHA256)
 
 
+def test_provenance_json_capture_preserves_observation_label(monkeypatch) -> None:
+    monkeypatch.setattr(gate, "_capture_command", lambda _command: "{")
+
+    with pytest.raises(gate.GateEvidenceError, match="Docker inspect is not valid JSON"):
+        gate._capture_single_object(("docker", "inspect"), label="Docker inspect")
+
+
+def test_runtime_version_capture_preserves_probe_label(monkeypatch) -> None:
+    monkeypatch.setattr(gate, "_capture_command", lambda _command: "{")
+
+    with pytest.raises(
+        gate.GateEvidenceError,
+        match="runtime-version probe is not valid JSON",
+    ):
+        gate._capture_runtime_versions("server", "kairyu")
+
+
 @pytest.mark.parametrize(
     "captured",
     (

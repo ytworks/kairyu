@@ -1243,6 +1243,25 @@ def test_verify_quality_detects_retained_metadata_byte_tamper(
         gate.verify_quality_artifact(output)
 
 
+def test_verify_quality_rejects_duplicate_manifest_keys(
+    passing_quality_artifact,
+    tmp_path: Path,
+) -> None:
+    passing_output, _sealed, _performance_sha = passing_quality_artifact
+    output = tmp_path / "sealed"
+    shutil.copytree(passing_output, output)
+    manifest_path = output / gate.QUALITY_MANIFEST_NAME
+    retained = manifest_path.read_text(encoding="utf-8")
+    assert retained.startswith("{")
+    manifest_path.write_text(
+        '{"passed":false,' + retained[1:],
+        encoding="utf-8",
+    )
+
+    with pytest.raises(gate.EvidenceError, match="duplicate JSON key 'passed'"):
+        gate.verify_quality_artifact(output)
+
+
 def _one_position_quality_request(
     selected_token: int,
     selected_logprob: float,

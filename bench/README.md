@@ -10,7 +10,7 @@ preserving the affected command and evidence paths.
 
 | Surface | Owner | Distribution and compatibility contract |
 |---|---|---|
-| Reusable config, target types, credential resolution, statistics, atomic reporting, adapters, and runners | `kairyu/bench/` | Installed in the Kairyu wheel; may be imported by both the public CLI and checkout-only wrappers |
+| Reusable config, target types, credential resolution, statistics, atomic reporting, evidence-artifact mechanics, adapters, and runners | `kairyu/bench/` | Installed in the Kairyu wheel; may be imported by both the public CLI and checkout-only wrappers |
 | Public benchmark CLI | `kairyu bench` | Installed console surface: `run`, `download`, `report`, `compare-runs`, `compare`, `quant-sweep`, `calibrate-judge`, `list`, and `entrypoints` |
 | Offline benchmark/calibration fixtures | `kairyu/bench/fixtures/` | Installed package data: 17 synthetic stand-ins, one fixed structured-output corpus, and one judge-calibration corpus; all 19 JSONL files must be readable through `importlib.resources` |
 | Entrypoint inventory | `kairyu/bench/entrypoints.toml` | Installed, machine-readable source of truth for every supported top-level wrapper |
@@ -56,6 +56,13 @@ Installed `kairyu` code must not import the repository-only `bench` namespace.
 If two wrappers need the same config, type, statistics, result writer, or
 provenance rule, put that reusable contract in `kairyu.bench` and keep each
 top-level file as a thin composition layer.
+
+`kairyu.bench.evidence` owns canonical JSON encoding, SHA-256 helpers, atomic
+indexed JSONL publication, strict object/JSONL framing, artifact-pair path
+resolution, and exact retained-manifest comparison against raw-only replay.
+It hashes the exact raw bytes parsed from one open descriptor. Gate-specific
+row and manifest schemas, thresholds, diagnostics, and pass/fail verdicts stay
+in the top-level wrapper. See `docs/design/issue-382-evidence-library.md`.
 
 ## Inventory and checkout validation
 

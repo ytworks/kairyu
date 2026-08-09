@@ -75,7 +75,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: Fugu/Core/Quantization/Structured/Long Context suites, hash-chained quality history, config A/B and quant sweeps
+- Benchmark/eval tooling: Fugu/Core/Quantization/Structured/Long Context suites, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -94,6 +94,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-08 — [design] Evidence mechanics are package-owned; gate meaning stays local
+- What: canonical JSON/hash, strict indexed JSONL, artifact paths, raw-only replay, and exact retained-manifest verification moved to `kairyu.bench.evidence`; G4 M-A3 and G5 F4b use the full path, while F1a shares only its compatible file digest.
+- Why: new gates should not duplicate tamper-resistant framing and replay, but package code must not absorb repository-only schemas, thresholds, verdicts, or heterogeneous sidecar contracts.
+- Refs: issue #382; `docs/design/issue-382-evidence-library.md`; `kairyu/bench/evidence.py`
 
 ### 2026-08-08 — [amendment] W4A16 preserves FP16 scales; cache salt stays explicit
 - What: AWQ/GPTQ uses FP16 dot operands with FP32 accumulation for either model dtype; router/output/draft projections remain accuracy-default dense; native cache identity remains the exact token tuple without an in-process tenant salt.
@@ -119,28 +124,3 @@ in `.claude/rules/progress-log.md`).
 - What: CUDA BF16 experts use canonical-storage packs, device-side sort/offsets, and two FlashInfer cuDNN grouped GEMMs; generic EP uses fixed peer-capacity forward/reverse all-to-all buffers with host-constant splits.
 - Why: data-dependent `unique`/`nonzero` expert loops and count `.item()`/`.tolist()` forced up to one host synchronization and small GEMM per expert, preventing CUDA graph capture.
 - Refs: issue #331; M15 A10; M16 D3; `kairyu/models/{grouped_moe,moe,moe_parallel}.py`
-
-### 2026-08-08 — [amendment] TP step headers remain on sleeping Gloo transport
-- What: correcting the preceding #323 entry, a two-word Gloo tensor header frames every transaction; only encoded `StepDelta` payloads use the bounded NCCL model group.
-- Why: posting a process-lifetime NCCL receive while idle burns resources and can strand orphaned GPU workers after rank-0 death; a Gloo tensor header avoids pickle while retaining sleeping TCP liveness.
-- Refs: issue #323; PR #452 Fable 5 review; M16 D4; `kairyu/engine/core/worker.py`
-
-### 2026-08-08 — [amendment] TP step control uses a dedicated NCCL tensor channel
-- What: hot-path `StepDelta` state is losslessly encoded into int64 tensors on a long-idle NCCL subgroup; rare controls remain Gloo objects and model collectives retain their short fail-fast subgroup.
-- Why: removing per-step pickle/TCP overhead must not make healthy idle workers time out or weaken bounded model-operation failure detection.
-- Refs: issue #323; M16 D4; `kairyu/engine/core/{step_input,worker}.py`
-
-### 2026-08-08 — [amendment] Structured generation uses the device sampling seam
-- What: regex, EBNF, and structural-tag formats join JSON grammars; native strict tools compile parser-matched schemas (one call for Llama); both layouts synchronously isolate malformed requests; per-process vocabulary/compiler caches avoid rebuilds without compile-time global locking; CUDA masks avoid full logits-row D2H.
-- Why: structured and strict-tool requests must be correctness invariants without forcing every token through the vocabulary-sized CPU sampling path.
-- Refs: issue #363; M8 D2; `kairyu/engine/{backend.py,core/{structured,sampler}.py}`
-
-### 2026-08-08 — [amendment] Deterministic drafts preserve sampled distributions
-- What: n-gram/EAGLE/MTP argmax drafts use point-mass rejection verification for T>0; per-row history slicing also enables penalties while grammar/forced continuations keep the safe bypass.
-- Why: one target draw exactly realizes acceptance plus residual correction for q(t)=1, avoiding vocabulary-sized draft/target probability transfer.
-- Refs: issue #358; M8 D4; `kairyu/engine/core/{spec_decode,spec_runner,model_runner}.py`
-
-### 2026-08-08 — [amendment] FP8 audit separates arithmetic noise from error
-- What: calibrated dequant auditing permits a documented 2^-48 relative FP64 comparison slack while retaining exact stored-byte, finite, range, and physical E4M3 error checks.
-- Why: byte-perfect writes could exceed the theoretical error boundary by a few FP64 ulps, making the calibrated gate unsatisfiable independently of model quality.
-- Refs: issue #357; PR #449 Fable 5 review; `bench/fp8_kv_g4_ekv_bench.py`; `tests/bench/test_fp8_kv_g4_ekv_bench.py`
