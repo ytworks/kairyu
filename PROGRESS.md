@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-10 — [progress] Frontier Compose identities accept model-version names
+- What: The shared lifecycle now normalizes environment and profile text into a Docker Compose-compatible project identity, with Qwen3.6 single-model and orchestration coverage.
+- Refs: PR #465; `examples/_shared/examplectl.py`; `tests/unit/test_frontier_examplectl.py`
+
 ### 2026-08-10 — [amendment] Frontier examples use process-only configuration
 - What: Qwen 1-GPU, DeepSeek 8-GPU, and combined orchestration lifecycle configuration now comes only from inherited environment variables; user and runtime dotenv files were removed, Compose's implicit dotenv loading is disabled, and compose paths no longer depend on the caller's working directory.
 - Why: Repository-local dotenv files mixed credentials and operator state with examples, made non-interactive inheritance ambiguous, and allowed Docker Compose to silently substitute different inputs than the lifecycle preflight used.

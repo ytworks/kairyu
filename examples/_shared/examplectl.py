@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -292,9 +293,11 @@ def _compose(spec_dir: Path, spec: dict, env: dict[str, str], backend: str, args
             raise SystemExit("KAIRYU_TOPOLOGY must be ep4 or ep8")
         if topology == "ep8":
             profile = "kairyu-ep8"
-    compose_env["COMPOSE_PROJECT_NAME"] = (
-        f"kairyu-{spec['environment']}-{profile}"
-    )
+    raw_project_name = f"kairyu-{spec['environment']}-{profile}".lower()
+    project_name = re.sub(r"[^a-z0-9_-]+", "-", raw_project_name).strip("-_")
+    if not project_name:
+        raise SystemExit("example environment does not produce a valid Compose project name")
+    compose_env["COMPOSE_PROJECT_NAME"] = project_name
     compose_env["COMPOSE_PROFILES"] = profile
     compose_env["COMPOSE_DISABLE_ENV_FILE"] = "1"
     compose_env["BACKEND"] = backend
