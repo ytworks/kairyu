@@ -2,7 +2,7 @@
 
 This is deliberately a small, package-owned NIAH probe, not an implementation
 of the complete 13-task NVIDIA RULER suite.  One adapter instance represents
-one point on the 4K--128K length curve, so the ordinary benchmark scoreboard,
+one point on the 4K--1M length curve, so the ordinary benchmark scoreboard,
 history, and paired config comparison machinery remain the only reporting
 path.
 """
@@ -30,7 +30,17 @@ from kairyu.bench.types import (
 
 _SPECIFICATION = {
     "schema": "kairyu-ruler-style-niah-v1",
-    "context_lengths": [4_096, 8_192, 16_384, 32_768, 65_536, 131_072],
+    "context_lengths": [
+        4_096,
+        8_192,
+        16_384,
+        32_768,
+        65_536,
+        131_072,
+        262_144,
+        524_288,
+        1_048_576,
+    ],
     "samples_per_length": 20,
     "encoding": "o200k_base",
     "output_tokens": 32,

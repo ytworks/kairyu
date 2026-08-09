@@ -70,6 +70,18 @@ _QWEN_PARAMETER_PATTERN = re.compile(
 )
 _LLAMA_TOOL_PREFIX = "<|python_tag|>"
 _LLAMA_TOOL_SUFFIXES = ("<|eom_id|>", "<|eot_id|>")
+_DSML_BLOCK_PATTERN = re.compile(
+    r"<｜DSML｜tool_calls>\s*(.*?)\s*</｜DSML｜tool_calls>", re.DOTALL
+)
+_DSML_INVOKE_PATTERN = re.compile(
+    r'<｜DSML｜invoke name="([^"\n]+)">\s*(.*?)\s*</｜DSML｜invoke>',
+    re.DOTALL,
+)
+_DSML_PARAMETER_PATTERN = re.compile(
+    r'<｜DSML｜parameter name="([^"\n]+)" string="(true|false)">'
+    r"(.*?)</｜DSML｜parameter>",
+    re.DOTALL,
+)
 _SINGLE_TOOL_CONSTRAINT = "Call at most one function in this response."
 logger = logging.getLogger(__name__)
 
@@ -571,6 +583,10 @@ def _render_prepared_prompt(
             insert_if_missing=template is None,
         )
     tools = None if request.tool_choice == "none" else request.tools
+    template_kwargs = dict(request.chat_template_kwargs or {})
+    if request.reasoning_effort is not None:
+        template_kwargs.setdefault("reasoning_effort", request.reasoning_effort)
+        template_kwargs.setdefault("thinking_mode", "thinking")
     if template is None:
         if request.model not in (legacy_chat_models or ()):
             raise ChatRequestError(
@@ -601,7 +617,7 @@ def _render_prepared_prompt(
             template.render(
                 messages,
                 tools=tools,
-                template_kwargs=request.chat_template_kwargs,
+                template_kwargs=template_kwargs or None,
             )
         )
     # Jinja preserves Python exceptions raised by expressions (for example a
@@ -772,6 +788,58 @@ async def validate_chat_input_async(
     )
 
 
+def validate_orchestration_chat_input(
+    request: ChatCompletionRequest,
+) -> ValidatedChatInput:
+    """Render a role-preserving L2 conversation, not a model chat template."""
+
+    if request.model_extra:
+        raise ChatRequestError(
+            "unsupported request fields: " + ", ".join(sorted(request.model_extra))
+        )
+    normalized_tool_choice = _normalize_tool_choice(request)
+    if request.stream_options is not None and not request.stream:
+        raise ChatRequestError("stream_options is only allowed when stream is true")
+    if request.top_logprobs is not None and not request.logprobs:
+        raise ChatRequestError("top_logprobs requires logprobs to be true")
+    _validate_response_format(request.response_format)
+    prepared = _prepare_chat_messages(request, validate_message_fields=True)
+    if prepared.has_images:
+        raise ChatRequestError("orchestration input is text-only")
+    messages = [dict(message.text_message) for message in prepared.messages]
+    prompt = "Kairyu L2 conversation (JSON):\n" + json.dumps(
+        messages,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    current_user = next(
+        (
+            message.display_content
+            for message in reversed(prepared.messages)
+            if message.role == "user"
+        ),
+        "",
+    )
+    if current_user:
+        prompt += "\nCurrent user request:\n" + current_user
+    return ValidatedChatInput(
+        request=request,
+        prompt=prompt,
+        normalized_tool_choice=normalized_tool_choice,
+        tool_call_protocol=ToolCallProtocol.GENERIC,
+        parallel_tool_calls=_resolved_parallel_tool_calls(request),
+        tools_in_prompt=False,
+        include_usage=bool(request.stream_options and request.stream_options.include_usage),
+    )
+
+
+async def validate_orchestration_chat_input_async(
+    request: ChatCompletionRequest,
+) -> ValidatedChatInput:
+    return await run_prompt_work(validate_orchestration_chat_input, request)
+
+
 def _chat_engine(
     request: ChatCompletionRequest,
     engines: Mapping[str, EngineBackend],
@@ -819,6 +887,7 @@ def _finish_chat_request_validation(
         parallel_tool_calls=request.parallel_tool_calls,
         tools_in_prompt=validated_input.tools_in_prompt,
         tool_call_protocol=validated_input.tool_call_protocol.value,
+        reasoning_effort=request.reasoning_effort,
     )
     try:
         if before_prepare:
@@ -1187,6 +1256,45 @@ def _parse_tool_calls(
 
     if protocol is ToolCallProtocol.QWEN:
         return _qwen_tool_calls(text, tools)
+    if protocol is ToolCallProtocol.DEEPSEEK_V4:
+        block = _DSML_BLOCK_PATTERN.fullmatch(text.strip())
+        if block is None:
+            return []
+        parsed: list[ToolCall] = []
+        cursor = 0
+        for invoke in _DSML_INVOKE_PATTERN.finditer(block.group(1)):
+            if block.group(1)[cursor : invoke.start()].strip():
+                return []
+            name = invoke.group(1).strip()
+            schema = _tool_parameters_schema(tools, name)
+            if schema is None:
+                return []
+            arguments: dict[str, object] = {}
+            parameter_cursor = 0
+            for parameter in _DSML_PARAMETER_PATTERN.finditer(invoke.group(2)):
+                if invoke.group(2)[parameter_cursor : parameter.start()].strip():
+                    return []
+                key, is_string, value = parameter.groups()
+                if key in arguments:
+                    return []
+                if is_string == "true":
+                    arguments[key] = value
+                else:
+                    try:
+                        arguments[key] = _strict_json_loads(value)
+                    except (TypeError, ValueError, RecursionError):
+                        return []
+                parameter_cursor = parameter.end()
+            if invoke.group(2)[parameter_cursor:].strip():
+                return []
+            call = _tool_call_from_payload({"name": name, "arguments": arguments})
+            if call is None:
+                return []
+            parsed.append(call)
+            cursor = invoke.end()
+        if block.group(1)[cursor:].strip():
+            return []
+        return parsed
     if protocol is not ToolCallProtocol.LLAMA:
         return []
 
@@ -1241,7 +1349,18 @@ def _build_choice(
     logprobs: ChoiceLogprobs | None = None,
     tools: Sequence[Mapping[str, object]] = (),
     tool_call_protocol: ToolCallProtocol = ToolCallProtocol.GENERIC,
+    reasoning_content: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> Choice:
+    if reasoning_content is None and reasoning_effort is not None:
+        candidate = text
+        has_opening = candidate.startswith("<think>")
+        if has_opening:
+            candidate = candidate[len("<think>") :]
+        if "</think>" in candidate:
+            reasoning_content, text = candidate.split("</think>", 1)
+        elif has_opening:
+            reasoning_content, text = candidate, ""
     tool_calls = []
     if tool_choice.mode != "none":
         tool_calls = [
@@ -1253,13 +1372,17 @@ def _build_choice(
     if tool_calls:
         return Choice(
             index=index,
-            message=ResponseMessage(content=None, tool_calls=tool_calls),
+            message=ResponseMessage(
+                content=None,
+                reasoning_content=reasoning_content,
+                tool_calls=tool_calls,
+            ),
             finish_reason="tool_calls",
             logprobs=logprobs,
         )
     return Choice(
         index=index,
-        message=ResponseMessage(content=text),
+        message=ResponseMessage(content=text, reasoning_content=reasoning_content),
         finish_reason="stop" if finish_reason == "tool_calls" else finish_reason or "stop",
         logprobs=logprobs,
     )
@@ -1308,6 +1431,8 @@ def completion_response(
             _choice_logprobs(completion),
             request.tools or (),
             tool_call_protocol,
+            completion.reasoning_content,
+            request.reasoning_effort,
         )
         for completion in completions
     ]

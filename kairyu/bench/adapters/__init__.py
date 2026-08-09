@@ -54,6 +54,9 @@ LONG_CONTEXT_ROW_ORDER: tuple[str, ...] = (
     "ruler-niah-32k",
     "ruler-niah-64k",
     "ruler-niah-128k",
+    "ruler-niah-256k",
+    "ruler-niah-512k",
+    "ruler-niah-1024k",
 )
 
 SUITES: dict[str, SuiteInfo] = {

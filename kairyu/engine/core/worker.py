@@ -2859,7 +2859,8 @@ def validate_handshake(
 
 _EP_CORRECTNESS_MODE = "replicated-attention-correctness"
 _EP_ATTENTION_DP_MODE = "request-owned-attention-dp"
-_EP_SUPPORTED_SIZES = frozenset({2, 4})
+_EP_CORRECTNESS_SIZES = frozenset({2, 4})
+_DEEPSEEK_V4_EP_SIZES = frozenset({2, 4, 8})
 _EP_ATTENTION_DP_SIZE = 4
 _EP_ATTENTION_DP_SCRATCH_PAGES = 2
 _EP_ATTENTION_DP_DISPATCHER = "nvfp4_allgather_reduce_scatter"
@@ -2902,9 +2903,9 @@ def _validate_ep_correctness_mode(
 
     if (
         type(expert_parallel_size) is not int
-        or expert_parallel_size not in _EP_SUPPORTED_SIZES
+        or expert_parallel_size not in _EP_CORRECTNESS_SIZES
     ):
-        supported = ", ".join(str(size) for size in sorted(_EP_SUPPORTED_SIZES))
+        supported = ", ".join(str(size) for size in sorted(_EP_CORRECTNESS_SIZES))
         raise ValueError(
             "replicated-QKV/KV EP correctness mode supports only "
             f"expert_parallel_size in {{{supported}}}; got {expert_parallel_size!r}"
@@ -2961,17 +2962,26 @@ def _validate_ep_attention_dp_mode(
     dram_kv_tier_capacity_pages: object = 0,
     dram_kv_tier_profile: object = None,
     speculative: object = None,
+    deepseek_v4: object = False,
 ) -> None:
     """Fail closed outside the first measured Qwen3-235B attention-DP path."""
 
+    if type(deepseek_v4) is not bool:
+        raise TypeError("deepseek_v4 must be a boolean")
+    supported = _DEEPSEEK_V4_EP_SIZES if deepseek_v4 else {_EP_ATTENTION_DP_SIZE}
     if (
         type(expert_parallel_size) is not int
-        or expert_parallel_size != _EP_ATTENTION_DP_SIZE
+        or expert_parallel_size not in supported
     ):
+        if not deepseek_v4:
+            raise ValueError(
+                "request-owned attention-DP currently requires "
+                f"expert_parallel_size={_EP_ATTENTION_DP_SIZE}; "
+                f"got {expert_parallel_size!r}"
+            )
         raise ValueError(
-            "request-owned attention-DP currently requires "
-            f"expert_parallel_size={_EP_ATTENTION_DP_SIZE}; "
-            f"got {expert_parallel_size!r}"
+            "DeepSeek V4 attention-DP requires expert_parallel_size in "
+            f"{sorted(supported)}; got {expert_parallel_size!r}"
         )
     if type(pipeline_depth) is not int or pipeline_depth < 1:
         raise ValueError(
@@ -3073,7 +3083,11 @@ def _validate_ep_mode(
         if attention_dp
         else _validate_ep_correctness_mode
     )
-    validator(**options)
+    if attention_dp:
+        validator(**options)
+    else:
+        options.pop("deepseek_v4", None)
+        validator(**options)
 
 
 def _ep_checkpoint_identity(model_dir: str) -> dict[str, object]:
@@ -5155,8 +5169,13 @@ class DistEPModelRunner:
         graph_max_pages: int = 0,
         graph_warmup_iters: int = 3,
     ) -> None:
+        deepseek_v4 = (
+            getattr(local_runner, "execution_mode", None)
+            == "deepseek-v4-native-attention-dp"
+        )
         _validate_ep_mode(
             attention_dp=attention_dp,
+            deepseek_v4=deepseek_v4,
             expert_parallel_size=expert_parallel_size,
             pipeline_depth=pipeline_depth,
             decode_mode=decode_mode,
@@ -5247,6 +5266,8 @@ class DistEPModelRunner:
     def parallelism_metadata(self) -> dict[str, object]:
         """Unambiguous topology metadata for gates and serving surfaces."""
 
+        delegate = object.__getattribute__(self, "_delegate")
+        local = delegate._local
         metadata: dict[str, object] = {
             "parallelism": self.parallelism,
             "expert_parallel_size": self.expert_parallel_size,
@@ -5254,15 +5275,18 @@ class DistEPModelRunner:
             "attention_output_placement": self.attention_output_placement,
             "attention_output_parallel_size": self.attention_output_parallel_size,
             "attention_output_partial_dtype": self.attention_output_partial_dtype,
-            "execution_mode": self.execution_mode,
+            "execution_mode": getattr(local, "execution_mode", self.execution_mode),
             "pipeline_depth": self.pipeline_depth,
             "decode_mode": self.decode_mode,
-            "kv_cache_dtype": "bfloat16",
+            "kv_cache_dtype": getattr(
+                local,
+                "kv_cache_dtype_resolved",
+                "bfloat16",
+            ),
         }
         if self._attention_dp:
-            delegate = object.__getattribute__(self, "_delegate")
             graph_probe = getattr(
-                delegate._local,
+                local,
                 "decode_graph_metadata",
                 None,
             )
@@ -5309,7 +5333,11 @@ class DistEPModelRunner:
                 {
                     "attention_data_parallel_size": self.expert_parallel_size,
                     "attention_tensor_parallel_size": 1,
-                    "moe_dispatcher": _EP_ATTENTION_DP_DISPATCHER,
+                    "moe_dispatcher": getattr(
+                        local,
+                        "moe_dispatcher",
+                        _EP_ATTENTION_DP_DISPATCHER,
+                    ),
                     "sampling_ownership": "request_owner",
                     "kv_cache_ownership": "request_owner",
                     **graph_metadata,
@@ -5318,7 +5346,7 @@ class DistEPModelRunner:
                     ),
                     "attention_dp_decode_scratch_pages": len(
                         getattr(
-                            delegate._local,
+                            local,
                             "attention_dp_decode_scratch_pages",
                             (0,),
                         )
@@ -5327,7 +5355,7 @@ class DistEPModelRunner:
                         graph_metadata["cuda_graph_decode"]
                     ),
                     "attention_dp_scratch_pages": getattr(
-                        delegate._local,
+                        local,
                         "attention_dp_reserved_page_count",
                         _EP_ATTENTION_DP_SCRATCH_PAGES + 1,
                     )
@@ -5336,6 +5364,13 @@ class DistEPModelRunner:
                 }
             )
         return metadata
+
+    @property
+    def cache_descriptor(self):
+        """Expose a rank-identical architecture cache contract to L3."""
+
+        local = object.__getattribute__(self, "_delegate")._local
+        return getattr(local, "cache_descriptor", None)
 
     @staticmethod
     def _state_page_contract(
@@ -6020,6 +6055,9 @@ def tp_placement(tp: int, rank: int, force_cpu: bool = False) -> TPPlacement:
 def _ep_placement(
     expert_parallel_size: int,
     rank: int,
+    *,
+    attention_dp: bool = False,
+    deepseek_v4: bool = False,
 ) -> _EPPlacement:
     """Rank-local placement for the EP2/EP4 correctness path."""
 
@@ -6027,9 +6065,13 @@ def _ep_placement(
 
     from kairyu.engine.core.hw_profile import probe
 
-    _validate_ep_correctness_mode(
-        expert_parallel_size=expert_parallel_size,
-    )
+    if attention_dp:
+        _validate_ep_attention_dp_mode(
+            expert_parallel_size=expert_parallel_size,
+            deepseek_v4=deepseek_v4,
+        )
+    else:
+        _validate_ep_correctness_mode(expert_parallel_size=expert_parallel_size)
     if not 0 <= rank < expert_parallel_size:
         raise ValueError(
             f"expert-parallel rank {rank} is outside size {expert_parallel_size}"
@@ -6046,6 +6088,17 @@ def _ep_placement(
             f"{expert_parallel_size} CUDA devices; found {profile.device_count}"
         )
     return _EPPlacement(f"cuda:{rank}", torch.bfloat16, "nccl")
+
+
+def _model_dir_is_deepseek_v4(model_dir: str | Path) -> bool:
+    """Inspect only a present config; missing test doubles remain generic."""
+
+    config_path = Path(model_dir) / "config.json"
+    if not config_path.is_file():
+        return False
+    raw = json.loads(config_path.read_text())
+    architectures = raw.get("architectures", ())
+    return isinstance(architectures, list) and "DeepseekV4ForCausalLM" in architectures
 
 
 class _DeferredComm:
@@ -6293,6 +6346,7 @@ def build_ep_runner(
     dram_kv_tier_profile: str | Path | None = None,
     speculative: str | None = None,
     nvfp4_accuracy_profile=None,
+    prefix_state_capacity_bytes: int = 0,
 ):
     """Build one explicit replicated-attention or request-owned EP rank."""
 
@@ -6310,12 +6364,16 @@ def build_ep_runner(
     from kairyu.engine.core.sampler import Sampler
     from kairyu.models.moe_parallel import build_ep_model
 
+    deepseek_v4 = _model_dir_is_deepseek_v4(model_dir)
     _validate_ep_mode(
         attention_dp=attention_dp,
+        deepseek_v4=deepseek_v4,
         expert_parallel_size=expert_parallel_size,
         pipeline_depth=pipeline_depth,
         decode_mode=decode_mode,
-        kv_cache_dtype=kv_cache_dtype,
+        kv_cache_dtype=(
+            "bfloat16" if deepseek_v4 and kv_cache_dtype == "auto" else kv_cache_dtype
+        ),
         pd_separation=pd_separation,
         graph_scratch_page=graph_scratch_page,
         graph_max_batch=graph_max_batch,
@@ -6330,7 +6388,16 @@ def build_ep_runner(
             f"expert-parallel rank {rank} is outside size {expert_parallel_size}"
         )
     if placement is None:
-        placement = _ep_placement(expert_parallel_size, rank)
+        placement = (
+            _ep_placement(
+                expert_parallel_size,
+                rank,
+                attention_dp=True,
+                deepseek_v4=True,
+            )
+            if deepseek_v4
+            else _ep_placement(expert_parallel_size, rank)
+        )
     if (
         placement.backend != "nccl"
         or not str(placement.device).startswith("cuda:")
@@ -6339,6 +6406,73 @@ def build_ep_runner(
         raise ValueError(
             "expert parallelism requires a CUDA/NCCL BF16 placement"
         )
+    if deepseek_v4:
+        raw_config = json.loads((Path(model_dir) / "config.json").read_text())
+        from kairyu.models.config import parse_model_config
+
+        parsed_config = parse_model_config(raw_config)
+        if not attention_dp:
+            raise ValueError("DeepSeek V4 native EP requires request-owned Attention-DP")
+        if decode_mode != "eager":
+            raise ValueError("DeepSeek V4 native EP currently requires eager decode")
+        if graph_scratch_page is not None:
+            raise ValueError("DeepSeek V4 eager Attention-DP cannot reserve graph scratch")
+        from kairyu.engine.core.deepseek_v4_runner import DeepseekV4DistributedRunner
+        from kairyu.engine.core.sampler import Sampler
+        from kairyu.models.deepseek_v4 import load_deepseek_v4_native_ep
+
+        grammar_vocab = (
+            vocab if isinstance(vocab, GrammarVocabulary) else GrammarVocabulary(list(vocab))
+        )
+        model, load_info = load_deepseek_v4_native_ep(
+            model_dir,
+            raw_config,
+            parsed_config,
+            ep_size=expert_parallel_size,
+            ep_rank=rank,
+            comm=comm,
+            dtype=placement.dtype,
+            device=placement.device,
+        )
+        runner = DeepseekV4DistributedRunner(
+            model,
+            Sampler(vocab_provider=lambda: grammar_vocab),
+            process_group=(comm.group if comm.group is not None else torch.distributed.group.WORLD),
+            prefix_state_capacity_bytes=prefix_state_capacity_bytes,
+        )
+        decode_scratch_capacity = 1
+        reserved_pages = _EP_ATTENTION_DP_SCRATCH_PAGES + decode_scratch_capacity
+        runner.attention_backend_decision = {
+            "selected": "deepseek-v4-eager-hca-csa",
+            "reason": "head_dim=512 and compressed sparse cache require native eager attention",
+        }
+        runner.attention_backend_identity = "deepseek-v4-eager-hca-csa-sm120"
+        runner.kv_cache_dtype_requested = kv_cache_dtype
+        runner.kv_cache_dtype_resolved = "checkpoint-native-hca-csa"
+        runner.dram_kv_binding = None
+        runner.dram_kv_tier = None
+        runner.dram_kv_policy = None
+        runner.dram_kv_tier_identity = None
+        runner.parallelism = "expert_parallel"
+        runner.expert_parallel_size = expert_parallel_size
+        runner.expert_parallel_rank = rank
+        runner.attention_placement = "request_owned_data_parallel"
+        runner.attention_output_placement = "replicated"
+        runner.attention_output_parallel_size = 1
+        runner.attention_output_partial_dtype = None
+        runner.pipeline_depth = pipeline_depth
+        runner.decode_mode = decode_mode
+        runner.attention_data_parallel_size = expert_parallel_size
+        runner.attention_tensor_parallel_size = 1
+        runner.moe_dispatcher = "fixed-nccl-all-to-all-packed-fp4"
+        runner.attention_dp_scratch_pages = (num_pages, num_pages + 1)
+        runner.attention_dp_decode_scratch_pages = (num_pages + 2,)
+        runner.attention_dp_graph_scratch_page = None
+        runner.attention_dp_reserved_page_count = reserved_pages
+        runner.usable_kv_pages = num_pages
+        runner.physical_kv_pages = num_pages + reserved_pages
+        runner.expert_parallel_load_info = load_info
+        return runner, parsed_config, load_info
     profile = probe(placement.device)
     attention_backend = select_backend(profile, device=placement.device)
     selected_attention_backend_identity = attention_backend_identity(
@@ -6616,6 +6750,8 @@ def _ep_worker_entry(
     graph_max_pages: int = 0,
     graph_warmup_iters: int = 3,
     nvfp4_accuracy_profile=None,
+    prefix_state_capacity_bytes: int = 0,
+    deepseek_v4: bool = False,
 ) -> None:
     """Spawned EP worker; rank 0 remains in the driver process."""
 
@@ -6625,6 +6761,7 @@ def _ep_worker_entry(
 
     _validate_ep_mode(
         attention_dp=attention_dp,
+        deepseek_v4=deepseek_v4,
         expert_parallel_size=expert_parallel_size,
         pipeline_depth=pipeline_depth,
         decode_mode=decode_mode,
@@ -6632,10 +6769,20 @@ def _ep_worker_entry(
         graph_max_batch=graph_max_batch,
         graph_max_pages=graph_max_pages,
         graph_warmup_iters=graph_warmup_iters,
+        kv_cache_dtype="bfloat16",
     )
     rank = spawn_index + 1
     torch.set_num_threads(1)
-    placement = _ep_placement(expert_parallel_size, rank)
+    placement = (
+        _ep_placement(
+            expert_parallel_size,
+            rank,
+            attention_dp=True,
+            deepseek_v4=True,
+        )
+        if deepseek_v4
+        else _ep_placement(expert_parallel_size, rank)
+    )
     if placement.backend == "nccl":
         torch.cuda.set_device(rank)
     init_distributed(
@@ -6664,6 +6811,7 @@ def _ep_worker_entry(
         graph_max_pages=graph_max_pages,
         graph_warmup_iters=graph_warmup_iters,
         nvfp4_accuracy_profile=nvfp4_accuracy_profile,
+        prefix_state_capacity_bytes=prefix_state_capacity_bytes,
     )
     if (
         runner.expert_parallel_size != expert_parallel_size
@@ -7126,6 +7274,7 @@ class DistEPLauncher(_DistLauncherLifecycle):
         dram_kv_tier_profile: str | Path | None = None,
         speculative: str | None = None,
         nvfp4_accuracy_profile=None,
+        prefix_state_capacity_bytes: int = 0,
     ) -> None:
         import tempfile
 
@@ -7134,12 +7283,16 @@ class DistEPLauncher(_DistLauncherLifecycle):
 
         from kairyu.engine.core.dist_comm import TorchDistCommunicator, init_distributed
 
+        deepseek_v4 = _model_dir_is_deepseek_v4(model_dir)
         _validate_ep_mode(
             attention_dp=attention_dp,
+            deepseek_v4=deepseek_v4,
             expert_parallel_size=expert_parallel_size,
             pipeline_depth=pipeline_depth,
             decode_mode=decode_mode,
-            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_dtype=(
+                "bfloat16" if deepseek_v4 and kv_cache_dtype == "auto" else kv_cache_dtype
+            ),
             pd_separation=pd_separation,
             graph_scratch_page=graph_scratch_page,
             graph_max_batch=graph_max_batch,
@@ -7186,7 +7339,16 @@ class DistEPLauncher(_DistLauncherLifecycle):
         self.pipeline_depth = pipeline_depth
         self.decode_mode = decode_mode
         self._init_file = tempfile.mktemp(prefix="kairyu-ep-")  # noqa: S306
-        placement = _ep_placement(expert_parallel_size, 0)
+        placement = (
+            _ep_placement(
+                expert_parallel_size,
+                0,
+                attention_dp=True,
+                deepseek_v4=True,
+            )
+            if deepseek_v4
+            else _ep_placement(expert_parallel_size, 0)
+        )
         self._placement_backend = placement.backend
         self._ctx = mp.spawn(
             _ep_worker_entry,
@@ -7205,6 +7367,8 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 graph_max_pages,
                 graph_warmup_iters,
                 nvfp4_accuracy_profile,
+                prefix_state_capacity_bytes,
+                deepseek_v4,
             ),
             nprocs=expert_parallel_size - 1,
             join=False,
@@ -7243,6 +7407,7 @@ class DistEPLauncher(_DistLauncherLifecycle):
                 dram_kv_tier_profile=dram_kv_tier_profile,
                 speculative=speculative,
                 nvfp4_accuracy_profile=nvfp4_accuracy_profile,
+                prefix_state_capacity_bytes=prefix_state_capacity_bytes,
             )
             self.attention_backend_decision = runner.attention_backend_decision
             self.attention_backend_identity = runner.attention_backend_identity

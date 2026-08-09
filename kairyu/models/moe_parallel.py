@@ -1351,6 +1351,11 @@ def prepare_attention_dp_layouts(
 ) -> None:
     """Arm every sparse layer with one immutable per-forward row-layout queue."""
 
+    native = getattr(model, "_kairyu_prepare_attention_dp_layouts", None)
+    if callable(native):
+        native(layouts)
+        return
+
     blocks = _model_ep_blocks(model)
     if not blocks:
         raise ValueError("attention-DP model has no EpMoeBlock layers")
@@ -1366,6 +1371,11 @@ def prepare_attention_dp_layouts(
 
 def assert_attention_dp_layouts_consumed(model: nn.Module) -> None:
     """Fail a step with missing model forwards, then release its layout queue."""
+
+    native = getattr(model, "_kairyu_assert_attention_dp_layouts_consumed", None)
+    if callable(native):
+        native()
+        return
 
     blocks = _model_ep_blocks(model)
     if not blocks:
@@ -1384,6 +1394,10 @@ def assert_attention_dp_layouts_idle(model: nn.Module) -> None:
     clean replay from accidentally leaving a prior step's queue armed.
     """
 
+    native = getattr(model, "_kairyu_assert_attention_dp_layouts_idle", None)
+    if callable(native):
+        native()
+        return
     blocks = _model_ep_blocks(model)
     if not blocks:
         raise ValueError("attention-DP model has no EpMoeBlock layers")

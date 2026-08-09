@@ -82,7 +82,7 @@ That Qwen path was validated on gpu02 on 2026-08-04. The 16-shard
 `Qwen3-Coder-30B-A3B-Instruct` checkpoint was downloaded directly to
 `/models`, avoiding a second local copy or tar archive, and passed Kairyu's
 checkpoint validation. The isolated TP1 replica uses
-`examples/ide-client/qwen3-coder-gpu-replica.yaml` on GPU 2 / host port 8003.
+`deploy/ide-client/qwen3-coder-gpu-replica.yaml` on GPU 2 / host port 8003.
 Qwen3-Coder emits its native
 `<function=name><parameter=name>...</parameter></function>` XML inside
 `<tool_call>` rather than JSON; Kairyu parses that form and converts parameter

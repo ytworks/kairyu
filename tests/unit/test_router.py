@@ -1,10 +1,17 @@
+import hashlib
 import json
 import threading
 import time
 
+import pytest
+
 import kairyu.orchestration.router as router_module
 from kairyu.orchestration.features import extract_features
-from kairyu.orchestration.router import JsonlRouterLog, RuleRouter
+from kairyu.orchestration.router import (
+    JsonlRouterLog,
+    RuleRouter,
+    load_calibrated_router,
+)
 
 SIMPLE_QUERY = "What is the capital of France?"
 REASONING_QUERY = (
@@ -53,6 +60,32 @@ def test_code_query_routes_to_tier2():
 
 def test_multi_step_query_routes_to_multi_agent():
     assert RuleRouter().route(MULTI_STEP_QUERY).target == "multi_agent"
+
+
+def test_calibrated_router_rejects_hash_and_quality_gate(tmp_path) -> None:
+    path = tmp_path / "router.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "kairyu-calibrated-rule-router",
+                "artifact_id": "unsafe",
+                "quality_ci_lower": 0.98,
+                "tier1_max_input_tokens": 262_144,
+                "tier1_max_input_chars": 262_144,
+                "train_split_sha256": "a" * 64,
+                "holdout_split_sha256": "b" * 64,
+                "thresholds": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        load_calibrated_router(path, expected_sha256="0" * 64)
+    with pytest.raises(ValueError, match="0.99 quality"):
+        load_calibrated_router(path, expected_sha256=digest)
 
 
 def test_routing_p99_latency_under_10ms():

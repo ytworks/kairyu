@@ -48,6 +48,50 @@ def _save_qwen_outer(
     save_file(state, directory / "model.safetensors")
 
 
+def test_deepseek_v4_public_compress_ratios_define_native_cache() -> None:
+    raw = {
+        "architectures": ["DeepseekV4ForCausalLM"],
+        "hidden_size": 64,
+        "moe_intermediate_size": 32,
+        "num_hidden_layers": 5,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 1,
+        "head_dim": 16,
+        "vocab_size": 128,
+        "n_routed_experts": 16,
+        "num_experts_per_tok": 4,
+        "n_shared_experts": 1,
+        "max_position_embeddings": 1_048_576,
+        "sliding_window": 128,
+        "compress_ratios": [0, 0, 4, 128, 4, 0],
+        "index_topk": 32,
+        "index_n_heads": 8,
+        "index_head_dim": 8,
+        "hc_mult": 4,
+        "hc_sinkhorn_iters": 20,
+        "expert_dtype": "fp4",
+        "dspark_block_size": 5,
+        "num_nextn_predict_layers": 1,
+        "quantization_config": {"quant_method": "fp8"},
+    }
+
+    parsed = parse_model_config(raw)
+
+    assert parsed.frontier_cache is not None
+    assert parsed.frontier_cache.layer_types == (
+        "sliding_attention",
+        "sliding_attention",
+        "compressed_sparse_attention",
+        "heavily_compressed_attention",
+        "compressed_sparse_attention",
+    )
+    assert parsed.frontier_cache.compress_rate_csa == 4
+    assert parsed.frontier_cache.compress_rate_hca == 128
+    assert parsed.frontier_cache.expert_dtype == "fp4"
+    assert parsed.frontier_cache.nonexpert_dtype == "fp8"
+    assert parsed.frontier_cache.dspark_block_size == 5
+
+
 @pytest.mark.parametrize(
     ("moe", "per_expert"),
     [
@@ -122,7 +166,7 @@ def test_qwen36_outer_checkpoint_logits_parity(
         ).logits[0]
         actual = loaded.forward_sequence(tokens)
     assert config.architecture == architecture
-    assert config.requires_full_recompute
+    assert config.uses_stateful_frontier_cache
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
@@ -162,7 +206,7 @@ def test_deepseek_v4_checkpoint_logits_parity(tmp_path) -> None:
         ).logits[0]
         actual = loaded.forward_sequence(tokens)
     assert config.architecture == "DeepseekV4ForCausalLM"
-    assert config.requires_full_recompute
+    assert config.uses_stateful_frontier_cache
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
     bf16_loaded, _, _ = load_model(tmp_path, dtype=torch.bfloat16)
@@ -386,6 +430,12 @@ def test_qwen36_quantized_reference_is_rejected_by_load_and_validation(
         "intermediate_size": 24,
         "vocab_size": 32,
         "sliding_window": 8,
+        "layer_types": ["linear_attention", "full_attention"],
+        "linear_conv_kernel_dim": 4,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_key_head_dim": 4,
+        "linear_value_head_dim": 4,
         "quantization_config": {
             "quant_method": "awq",
             "bits": 4,
@@ -402,7 +452,7 @@ def test_qwen36_quantized_reference_is_rejected_by_load_and_validation(
         with pytest.raises(ValueError, match=option):
             load_model(tmp_path, **{option: {}})
 
-    with pytest.raises(ValueError, match="requires an unquantized checkpoint"):
+    with pytest.raises(ValueError, match="has no registered loader for quantization method"):
         load_model(tmp_path)
     findings = _validate_model(
         str(tmp_path),
@@ -460,7 +510,6 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
     from transformers import Qwen3_5ForCausalLM, Qwen3_5TextConfig
 
     from kairyu.engine.core import hw_profile
-    from kairyu.engine.core.recompute_runner import RecomputeModelRunner
     from kairyu.engine.kairyu_backend import build_engine_loop
 
     text_config = Qwen3_5TextConfig(
@@ -505,7 +554,7 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
         "probe",
         lambda: hw_profile.HardwareProfile(arch="cpu"),
     )
-    with pytest.raises(ValueError, match="single-device only"):
+    with pytest.raises(ValueError, match="supports TP1"):
         build_engine_loop(
             model_path=str(tmp_path),
             tokenizer=_Tokenizer(),
@@ -513,7 +562,7 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
             tensor_parallel_size=2,
         )
 
-    with pytest.raises(ValueError, match="does not use a KV cache"):
+    with pytest.raises(ValueError, match="checkpoint-owned"):
         build_engine_loop(
             model_path=str(tmp_path),
             tokenizer=_Tokenizer(),
@@ -529,7 +578,9 @@ def test_backend_selects_recompute_runner_for_qwen36(tmp_path, monkeypatch) -> N
         page_size=4,
     )
     try:
-        assert isinstance(loop._runner, RecomputeModelRunner)
+        from kairyu.engine.core.frontier_runner import NativeFrontierModelRunner
+
+        assert isinstance(loop._runner, NativeFrontierModelRunner)
         from kairyu import SamplingParams
         from kairyu.engine.prompt import TokensPrompt
 

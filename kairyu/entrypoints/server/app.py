@@ -66,6 +66,7 @@ from kairyu.entrypoints.server.chat_service import (
     validate_chat_input_async,
     validate_chat_policy,
     validate_chat_request_async,
+    validate_orchestration_chat_input_async,
 )
 from kairyu.entrypoints.server.chat_service import (
     render_prompt as render_prompt,
@@ -827,6 +828,8 @@ async def _stream_engine(
         include_usage=include_usage,
     )
     sent: dict[int, int] = {}
+    reasoning_sent: dict[int, int] = {}
+    wire_started: set[int] = set()
     logprobs_sent: dict[int, int] = {}
     last = None
     sse_write_ns = 0
@@ -835,6 +838,46 @@ async def _stream_engine(
     want_trace = generation_request.trace_requested
     if want_trace and trace_started_at is None:
         trace_started_at = utc_now_iso()
+
+    class ReasoningDeltaParser:
+        marker = "</think>"
+
+        def __init__(self) -> None:
+            self.pending = ""
+            self.reasoning: bool | None = None
+
+        def feed(self, delta: str, *, final: bool) -> tuple[str, str]:
+            if self.reasoning is False:
+                return "", delta
+            self.pending += delta
+            if self.reasoning is None:
+                opening = "<think>"
+                if opening.startswith(self.pending) and not final:
+                    return "", ""
+                if self.pending.startswith(opening):
+                    self.pending = self.pending[len(opening) :]
+                    self.reasoning = True
+                else:
+                    content, self.pending = self.pending, ""
+                    self.reasoning = False
+                    return "", content
+            marker_at = self.pending.find(self.marker)
+            if marker_at >= 0:
+                reasoning = self.pending[:marker_at]
+                content = self.pending[marker_at + len(self.marker) :]
+                self.pending = ""
+                self.reasoning = False
+                return reasoning, content
+            if final:
+                reasoning, self.pending = self.pending, ""
+                return reasoning, ""
+            keep = len(self.marker) - 1
+            if len(self.pending) <= keep:
+                return "", ""
+            reasoning, self.pending = self.pending[:-keep], self.pending[-keep:]
+            return reasoning, ""
+
+    reasoning_parsers: dict[int, ReasoningDeltaParser] = {}
 
     def stage_metrics() -> tuple[GenerationStageMetric, ...]:
         metrics = tuple(last.stage_metrics) if last is not None else ()
@@ -861,9 +904,22 @@ async def _stream_engine(
                 for completion in partial.completions:
                     previous_offset = sent.get(completion.index, 0)
                     delta_text, next_offset = completion.delta_after(previous_offset)
-                    if not delta_text and not partial.finished:
+                    remote_reasoning, next_reasoning_offset = completion.reasoning_delta_after(
+                        reasoning_sent.get(completion.index, 0)
+                    )
+                    reasoning_sent[completion.index] = next_reasoning_offset
+                    if request.reasoning_effort is not None and not remote_reasoning:
+                        parser = reasoning_parsers.setdefault(
+                            completion.index, ReasoningDeltaParser()
+                        )
+                        parsed_reasoning, delta_text = parser.feed(
+                            delta_text,
+                            final=partial.finished,
+                        )
+                    else:
+                        parsed_reasoning = remote_reasoning
+                    if not delta_text and not parsed_reasoning and not partial.finished:
                         continue
-                    is_first = completion.index not in sent
                     sent[completion.index] = next_offset
                     chunk_logprobs = None
                     if request.logprobs and completion.logprob_content is not None:
@@ -873,19 +929,39 @@ async def _stream_engine(
                         if fresh:
                             chunk_logprobs = ChoiceLogprobs(content=_logprob_entries(fresh))
                     write_started_ns = time.perf_counter_ns() if want_trace else None
-                    chunk = _chat_content_sse_chunk(
-                        content_encoder,
-                        response_id,
-                        created,
-                        model,
-                        completion.index,
-                        delta_text,
-                        is_first=is_first,
-                        include_usage=include_usage,
-                        logprobs=chunk_logprobs,
-                    )
-                    yield chunk
-                    if delta_text and not first_token_observed:
+                    wrote_chunk = False
+                    if parsed_reasoning:
+                        is_first = completion.index not in wire_started
+                        yield _sse_chunk(
+                            response_id,
+                            created,
+                            model,
+                            completion.index,
+                            ChunkDelta(
+                                role="assistant" if is_first else None,
+                                reasoning_content=parsed_reasoning,
+                            ),
+                            include_usage=include_usage,
+                        )
+                        wrote_chunk = True
+                        wire_started.add(completion.index)
+                    if delta_text or chunk_logprobs is not None:
+                        is_first = completion.index not in wire_started
+                        chunk = _chat_content_sse_chunk(
+                            content_encoder,
+                            response_id,
+                            created,
+                            model,
+                            completion.index,
+                            delta_text,
+                            is_first=is_first,
+                            include_usage=include_usage,
+                            logprobs=chunk_logprobs,
+                        )
+                        yield chunk
+                        wrote_chunk = True
+                        wire_started.add(completion.index)
+                    if (delta_text or parsed_reasoning) and not first_token_observed:
                         lease = getattr(
                             http_request.state,
                             _SLO_ADMISSION_LEASE_STATE_KEY,
@@ -894,7 +970,7 @@ async def _stream_engine(
                         if lease is not None:
                             lease.finished_first_token()
                         first_token_observed = True
-                    if write_started_ns is not None:
+                    if write_started_ns is not None and wrote_chunk:
                         sse_write_ns += time.perf_counter_ns() - write_started_ns
                         sse_write_count += 1
         except Exception as error:  # surface backend failures inside the SSE stream
@@ -982,6 +1058,7 @@ async def _stream_orchestrator(
             parallel_tool_calls=request.parallel_tool_calls,
             response_format=request.response_format,
             tool_call_protocol="generic",
+            reasoning_effort=request.reasoning_effort,
         )
     response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
     created = int(time.time())
@@ -1253,6 +1330,7 @@ async def _stream_choices(
             ChunkDelta(
                 role="assistant",
                 content=choice.message.content,
+                reasoning_content=choice.message.reasoning_content,
                 tool_calls=tool_calls,
             ),
             include_usage=include_usage,
@@ -1720,9 +1798,11 @@ def create_app(
     resolved_admin_keys: frozenset[str] | None = None,
     price_sheet: PriceSheet | None = None,
     legacy_chat_models: AbstractSet[str] | None = None,
+    orchestration_chat_models: AbstractSet[str] | None = None,
 ) -> FastAPI:
     settings = settings or ServerSettings()
     legacy_chat_models = frozenset(legacy_chat_models or ())
+    orchestration_chat_models = frozenset(orchestration_chat_models or ())
     validate_chat_policy(chat_templates, legacy_chat_models)
     if price_sheet is not None and settings.usage_ledger_path is None:
         raise ValueError("price_sheet requires usage_ledger_path")
@@ -1749,6 +1829,12 @@ def create_app(
     auto_models: dict[str, Orchestrator] = dict(orchestrators or {})
     if orchestrator is not None:
         auto_models.setdefault(AUTO_MODEL, orchestrator)
+    unknown_orchestration_chat = orchestration_chat_models - set(auto_models)
+    if unknown_orchestration_chat:
+        raise ValueError(
+            "orchestration_chat_models contains non-orchestrated models: "
+            f"{sorted(unknown_orchestration_chat)}"
+        )
     templated_auto_models = set(auto_models) & set(chat_templates or {})
     if templated_auto_models:
         raise ValueError(
@@ -1769,14 +1855,14 @@ def create_app(
             f"{sorted(collisions)}"
         )
     missing_chat_policy = (
-        (set(served_engines) | set(auto_models))
+        set(served_engines)
         - set(chat_templates or {})
         - set(legacy_chat_models)
     )
     if missing_chat_policy:
         logger.warning(
             "served models have no configured chat rendering policy; chat "
-            "requests will be rejected before dispatch until each model has a "
+            "direct chat requests will be rejected before dispatch until each model has a "
             "ChatTemplate or legacy_chat_models membership: %s",
             sorted(missing_chat_policy),
         )
@@ -2020,7 +2106,9 @@ def create_app(
             validation_started_ns = time.perf_counter_ns()
             try:
                 prompt = (
-                    await validate_chat_input_async(
+                    await validate_orchestration_chat_input_async(chat_request)
+                    if request.model in orchestration_chat_models
+                    else await validate_chat_input_async(
                         chat_request,
                         chat_templates,
                         legacy_chat_models=legacy_chat_models,
@@ -2089,10 +2177,14 @@ def create_app(
         if request.model in auto_models:
             validation_started_ns = time.perf_counter_ns()
             try:
-                validated_input = await validate_chat_input_async(
-                    request,
-                    chat_templates,
-                    legacy_chat_models=legacy_chat_models,
+                validated_input = (
+                    await validate_orchestration_chat_input_async(request)
+                    if request.model in orchestration_chat_models
+                    else await validate_chat_input_async(
+                        request,
+                        chat_templates,
+                        legacy_chat_models=legacy_chat_models,
+                    )
                 )
             except ChatRequestError as error:
                 return JSONResponse(
@@ -2123,6 +2215,7 @@ def create_app(
                     tools_in_prompt=validated_input.tools_in_prompt,
                     response_format=request.response_format,
                     tool_call_protocol=validated_input.tool_call_protocol.value,
+                    reasoning_effort=request.reasoning_effort,
                 )
                 selected = auto_models[request.model]
                 try:

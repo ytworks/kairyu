@@ -48,8 +48,18 @@ def _item(context_tokens: int = 4_096) -> BenchItem:
     )
 
 
-def test_long_context_suite_is_the_ordered_4k_to_128k_curve():
-    assert CONTEXT_LENGTHS == (4_096, 8_192, 16_384, 32_768, 65_536, 131_072)
+def test_long_context_suite_is_the_ordered_4k_to_1m_curve():
+    assert CONTEXT_LENGTHS == (
+        4_096,
+        8_192,
+        16_384,
+        32_768,
+        65_536,
+        131_072,
+        262_144,
+        524_288,
+        1_048_576,
+    )
     assert [adapter.info.name for adapter in suite_adapters("long-context")] == list(
         LONG_CONTEXT_ROW_ORDER
     )
@@ -81,7 +91,7 @@ def test_normalization_is_deterministic_exact_length_and_position_swept(
     assert len({row["answer"] for row in first}) == SAMPLES_PER_LENGTH
 
 
-@pytest.mark.parametrize("context_tokens", [4_096, 131_072])
+@pytest.mark.parametrize("context_tokens", [4_096, 262_144])
 def test_real_o200k_generator_covers_curve_endpoints(tmp_path, context_tokens):
     import tiktoken
 

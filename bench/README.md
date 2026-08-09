@@ -50,7 +50,7 @@ diagnostic latency. Rate denominators remain explicit; paired token deltas use
 only observations with usage from both arms, and no currency cost is inferred.
 HTTP 200 refusals and other valid non-text completions are retained as accepted
 non-JSON/task-failure evidence instead of malformed API envelopes.
-See `docs/benchmarks.md` and `examples/bench_structured.yaml`.
+See `docs/benchmarks.md` and `bench/configs/structured.yaml`.
 
 Installed `kairyu` code must not import the repository-only `bench` namespace.
 If two wrappers need the same config, type, statistics, result writer, or

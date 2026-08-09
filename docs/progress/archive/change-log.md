@@ -11,6 +11,31 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-08 — [amendment] W4A16 preserves FP16 scales; cache salt stays explicit
+- What: AWQ/GPTQ uses FP16 dot operands with FP32 accumulation for either model dtype; router/output/draft projections remain accuracy-default dense; native cache identity remains the exact token tuple without an in-process tenant salt.
+- Why: BF16 dequantization discarded checkpoint scale precision, while mapping `cache_salt` to affinity would falsely claim partitioning across RadixKV, tier, event, and routing identities.
+- Refs: issue #366; M1 D5; M14 §8; `kairyu/kernels/quant_gemm_gpu.py`
+
+### 2026-08-08 — [design] Long-context accuracy is a fixed-length NIAH curve
+- What: a package-owned suite runs one deterministic exact-retrieval task at 4K/8K/16K/32K/64K/128K, with 20 evenly positioned needles per row and whole-row target-window gating.
+- Why: one aggregate MRCR/LongBench score cannot show the context length where accuracy collapses; ordinary rows reuse the existing evidence and comparison contracts without a parallel harness.
+- Refs: issue #374; `docs/design/issue-374-long-context-sweep.md`; `kairyu/bench/adapters/ruler_niah.py`
+
+### 2026-08-08 — [amendment] Grouped-MoE probe failures always fall back
+- What: capability and plan-warmup probes catch backend-specific ordinary exceptions and decline the derived grouped pack.
+- Why: cuDNN graph-support errors do not consistently inherit `RuntimeError`; an optional optimization must not abort otherwise supported reference serving.
+- Refs: issue #331; PR #453 Fable 5 re-review; M15 A12; `kairyu/models/grouped_moe.py`
+
+### 2026-08-08 — [amendment] Grouped MoE is capability-probed and decode-bounded
+- What: correcting the preceding #331 entry, grouped plans are power-of-two bucketed and prewarmed through 8,192 total rows before graph capture; larger EP prefills and unsupported/custom runtimes keep the reference transport/math.
+- Why: unconditional fixed capacity multiplied prefill memory/FLOPs by EP degree, while late cuDNN plan/workspace growth could invalidate captured graph pointers.
+- Refs: issue #331; PR #453 Fable 5 review; M15 A11; M16 D3; `kairyu/models/grouped_moe.py`
+
+### 2026-08-08 — [amendment] Dense MoE uses grouped GEMM and fixed EP capacity
+- What: CUDA BF16 experts use canonical-storage packs, device-side sort/offsets, and two FlashInfer cuDNN grouped GEMMs; generic EP uses fixed peer-capacity forward/reverse all-to-all buffers with host-constant splits.
+- Why: data-dependent `unique`/`nonzero` expert loops and count `.item()`/`.tolist()` forced up to one host synchronization and small GEMM per expert, preventing CUDA graph capture.
+- Refs: issue #331; M15 A10; M16 D3; `kairyu/models/{grouped_moe,moe,moe_parallel}.py`
+
 ### 2026-08-08 — [amendment] TP step headers remain on sleeping Gloo transport
 - What: correcting the preceding #323 entry, a two-word Gloo tensor header frames every transaction; only encoded `StepDelta` payloads use the bounded NCCL model group.
 - Why: posting a process-lifetime NCCL receive while idle burns resources and can strand orphaned GPU workers after rank-0 death; a Gloo tensor header avoids pickle while retaining sleeping TCP liveness.

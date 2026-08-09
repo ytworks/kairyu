@@ -31,6 +31,7 @@ class OrchestrationRequest:
     response_format: Mapping[str, object] | None = None
     parallel_tool_calls: bool | None = None
     tool_call_protocol: str = "generic"
+    reasoning_effort: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -41,8 +42,12 @@ class OrchestrationRequest:
             self.parallel_tool_calls,
             self.sampling_params.extra_args,
         )
-        if self.tool_call_protocol not in {"generic", "llama", "qwen"}:
-            raise ValueError("tool_call_protocol must be generic, llama or qwen")
+        if self.tool_call_protocol not in {"generic", "llama", "qwen", "deepseek_v4"}:
+            raise ValueError(
+                "tool_call_protocol must be generic, llama, qwen or deepseek_v4"
+            )
+        if self.reasoning_effort not in {None, "low", "high", "max"}:
+            raise ValueError("reasoning_effort must be low, high, max, or null")
 
     def internal_sampling_params(
         self,

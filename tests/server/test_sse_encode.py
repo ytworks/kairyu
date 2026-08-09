@@ -47,7 +47,7 @@ def test_chat_content_encoder_has_explicit_golden_wire() -> None:
     assert encoded == (
         b'data: {"id":"chatcmpl-id","object":"chat.completion.chunk",'
         b'"created":123,"model":"model","choices":[{"index":0,"delta":'
-        b'{"role":null,"content":"tok","tool_calls":null},'
+        b'{"role":null,"content":"tok","reasoning_content":null,"tool_calls":null},'
         b'"finish_reason":null,"logprobs":null}]}\n\n'
     )
 

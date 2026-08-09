@@ -140,10 +140,10 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 SSE_PREFIX = "data: "
 CONFIG_PATHS = (
     Path("bench/dp_scaling_g2_a8_bench.py"),
-    Path("examples/qwen3-32b-multi-gpu/a8-compose.yaml"),
-    Path("examples/qwen3-32b-multi-gpu/a8-replica.yaml"),
-    Path("examples/qwen3-32b-multi-gpu/a8-gateway.yaml"),
-    Path("examples/qwen3-32b-multi-gpu/a8-stack.sh"),
+    Path("bench/deploy/qwen3-32b-multi-gpu/a8-compose.yaml"),
+    Path("bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml"),
+    Path("bench/deploy/qwen3-32b-multi-gpu/a8-gateway.yaml"),
+    Path("bench/deploy/qwen3-32b-multi-gpu/a8-stack.sh"),
 )
 CHECKPOINT_HASH_SCRIPT = r"""
 import concurrent.futures
@@ -699,9 +699,20 @@ def _validate_container_provenance(value: object, image_id: str) -> None:
     _require(isinstance(value, dict), "container provenance missing")
     _require(value.get("project") == "kairyu-qwen3-32b-a8", "compose project mismatch")
     compose_file = value.get("compose_file")
+    legacy_prefix = "repo:examples/qwen3-32b-multi-gpu"
+    current_prefix = "repo:bench/deploy/qwen3-32b-multi-gpu"
     _require(
-        compose_file == "repo:examples/qwen3-32b-multi-gpu/a8-compose.yaml",
+        compose_file
+        in {
+            f"{legacy_prefix}/a8-compose.yaml",
+            f"{current_prefix}/a8-compose.yaml",
+        },
         "compose file identity mismatch",
+    )
+    provenance_prefix = (
+        legacy_prefix
+        if compose_file == f"{legacy_prefix}/a8-compose.yaml"
+        else current_prefix
     )
     services = value.get("services")
     _require(
@@ -722,9 +733,9 @@ def _validate_container_provenance(value: object, image_id: str) -> None:
     expected_ports = {"replica0": "8200", "replica1": "8201", "gateway": "8202"}
     expected_source = "repo:kairyu"
     expected_configs = {
-        "replica0": "repo:examples/qwen3-32b-multi-gpu/a8-replica.yaml",
-        "replica1": "repo:examples/qwen3-32b-multi-gpu/a8-replica.yaml",
-        "gateway": "repo:examples/qwen3-32b-multi-gpu/a8-gateway.yaml",
+        "replica0": f"{provenance_prefix}/a8-replica.yaml",
+        "replica1": f"{provenance_prefix}/a8-replica.yaml",
+        "gateway": f"{provenance_prefix}/a8-gateway.yaml",
     }
     for service, expected_gpu_ids in expected_devices.items():
         descriptor = services[service]
@@ -929,7 +940,14 @@ def _validate_provenance(value: object) -> dict[str, object]:
         "live model-volume bytes differ from the pinned checkpoint",
     )
     config_hashes = provenance.get("config_file_sha256")
-    expected_config_paths = {
+    current_config_paths = {
+        "bench/dp_scaling_g2_a8_bench.py",
+        "bench/deploy/qwen3-32b-multi-gpu/a8-compose.yaml",
+        "bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml",
+        "bench/deploy/qwen3-32b-multi-gpu/a8-gateway.yaml",
+        "bench/deploy/qwen3-32b-multi-gpu/a8-stack.sh",
+    }
+    legacy_config_paths = {
         "bench/dp_scaling_g2_a8_bench.py",
         "examples/qwen3-32b-multi-gpu/a8-compose.yaml",
         "examples/qwen3-32b-multi-gpu/a8-replica.yaml",
@@ -938,9 +956,20 @@ def _validate_provenance(value: object) -> dict[str, object]:
     }
     _require(
         isinstance(config_hashes, dict)
-        and set(config_hashes) == expected_config_paths
-        and config_hashes
-        == _committed_config_file_hashes(str(provenance["source_commit"])),
+        and set(config_hashes) in (current_config_paths, legacy_config_paths),
+        "formal config source hashes are incomplete",
+    )
+    assert isinstance(config_hashes, dict)
+    committed_hashes = (
+        _committed_config_file_hashes(str(provenance["source_commit"]))
+        if set(config_hashes) == current_config_paths
+        else _committed_config_file_hashes(
+            str(provenance["source_commit"]),
+            paths=tuple(Path(path) for path in config_hashes),
+        )
+    )
+    _require(
+        config_hashes == committed_hashes,
         "formal config source hashes are incomplete or differ from the source commit",
     )
     return provenance
@@ -1998,11 +2027,15 @@ def _config_file_hashes() -> dict[str, str]:
     return result
 
 
-def _committed_config_file_hashes(commit: str) -> dict[str, str]:
+def _committed_config_file_hashes(
+    commit: str,
+    *,
+    paths: tuple[Path, ...] = CONFIG_PATHS,
+) -> dict[str, str]:
     if COMMIT_RE.fullmatch(commit) is None:
         raise RuntimeError("cannot resolve config files from an invalid source commit")
     result: dict[str, str] = {}
-    for path in CONFIG_PATHS:
+    for path in paths:
         completed = subprocess.run(
             ("git", "show", f"{commit}:{path.as_posix()}"),
             check=False,
@@ -2109,7 +2142,7 @@ def _docker_stack_provenance(
     evidence_dir: Path,
 ) -> dict[str, object]:
     compose_path = Path(
-        "examples/qwen3-32b-multi-gpu/a8-compose.yaml"
+        "bench/deploy/qwen3-32b-multi-gpu/a8-compose.yaml"
     ).resolve()
     compose_prefix = (
         "docker",
@@ -2137,13 +2170,13 @@ def _docker_stack_provenance(
     expected_source = str(Path("kairyu").resolve())
     expected_configs = {
         "replica0": str(
-            Path("examples/qwen3-32b-multi-gpu/a8-replica.yaml").resolve()
+            Path("bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml").resolve()
         ),
         "replica1": str(
-            Path("examples/qwen3-32b-multi-gpu/a8-replica.yaml").resolve()
+            Path("bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml").resolve()
         ),
         "gateway": str(
-            Path("examples/qwen3-32b-multi-gpu/a8-gateway.yaml").resolve()
+            Path("bench/deploy/qwen3-32b-multi-gpu/a8-gateway.yaml").resolve()
         ),
     }
     services: dict[str, object] = {}
@@ -2290,9 +2323,9 @@ def _docker_stack_provenance(
         normalized_sources = {
             "/app/kairyu": "repo:kairyu",
             "/etc/kairyu/config.yaml": (
-                "repo:examples/qwen3-32b-multi-gpu/a8-gateway.yaml"
+                "repo:bench/deploy/qwen3-32b-multi-gpu/a8-gateway.yaml"
                 if service == "gateway"
-                else "repo:examples/qwen3-32b-multi-gpu/a8-replica.yaml"
+                else "repo:bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml"
             ),
             "/models": "volume:kairyu-qwen3-32b_qwen3-32b",
             "/evidence": "artifact:run-dir",
@@ -2320,7 +2353,7 @@ def _docker_stack_provenance(
         }
     return {
         "project": "kairyu-qwen3-32b-a8",
-        "compose_file": "repo:examples/qwen3-32b-multi-gpu/a8-compose.yaml",
+        "compose_file": "repo:bench/deploy/qwen3-32b-multi-gpu/a8-compose.yaml",
         "services": services,
     }
 

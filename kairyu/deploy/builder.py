@@ -93,6 +93,11 @@ def _effective_tokenizer_source(entry) -> Path | None:
         source = entry.options.get("tokenizer")
         if source is None:
             source = entry.options.get("model")
+    elif (
+        entry.backend == "openai"
+        and entry.options.get("allow_templated_chat_passthrough") is True
+    ):
+        source = entry.options.get("chat_tokenizer")
     else:
         return None
     if not isinstance(source, (str, os.PathLike)) or str(source) == "toy":
@@ -112,6 +117,13 @@ def _entry_chat_metadata(
     return load_tokenizer_chat_metadata(
         source,
         include_templates=include_templates,
+    )
+
+
+def _entry_preserves_templated_prompt(entry) -> bool:
+    return entry.backend in _TEMPLATED_PROMPT_BACKENDS or (
+        entry.backend == "openai"
+        and entry.options.get("allow_templated_chat_passthrough") is True
     )
 
 
@@ -170,6 +182,10 @@ def _resolve_chat_policy(
             # unused checkpoint chat metadata and accidentally let it override
             # the operator's explicit compatibility choice.
             continue
+        if model_name in orchestration_names and explicit is None:
+            # AUTO models consume the server's deterministic role-preserving
+            # L2 JSON envelope, not tokenizer control tokens or legacy chat.
+            continue
         try:
             metadata = tuple(
                 item
@@ -224,7 +240,7 @@ def _resolve_chat_policy(
                 {
                     entry.backend
                     for entry in entries
-                    if entry.backend not in _TEMPLATED_PROMPT_BACKENDS
+                    if not _entry_preserves_templated_prompt(entry)
                 }
             )
             if incompatible:
@@ -328,7 +344,7 @@ def _resolve_chat_policy(
             {
                 entry.backend
                 for entry in entries
-                if entry.backend not in _TEMPLATED_PROMPT_BACKENDS
+                if not _entry_preserves_templated_prompt(entry)
             }
         )
         if incompatible:
@@ -853,6 +869,10 @@ def build_app_from_spec(
         resolved_admin_keys=admin_keys,
         price_sheet=spec.pricing,
         legacy_chat_models=chat_policy.legacy_models,
+        orchestration_chat_models={
+            *spec.orchestrators,
+            *({"kairyu-auto"} if spec.orchestrator is not None else set()),
+        },
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)

@@ -58,6 +58,7 @@ class ToolCallProtocol(StrEnum):
     GENERIC = "generic"
     LLAMA = "llama"
     QWEN = "qwen"
+    DEEPSEEK_V4 = "deepseek_v4"
 
 
 def _tool_call_protocol(source: str | Mapping[str, str]) -> ToolCallProtocol:
@@ -75,12 +76,15 @@ def _tool_call_protocol(source: str | Mapping[str, str]) -> ToolCallProtocol:
         "<function=" in template and "<parameter=" in template and "</function>" in template
         for template in sources
     )
-    if has_llama and has_qwen:
+    has_deepseek_v4 = any("｜DSML｜tool_calls" in template for template in sources)
+    if sum((has_llama, has_qwen, has_deepseek_v4)) > 1:
         return ToolCallProtocol.GENERIC
     if has_llama:
         return ToolCallProtocol.LLAMA
     if has_qwen:
         return ToolCallProtocol.QWEN
+    if has_deepseek_v4:
+        return ToolCallProtocol.DEEPSEEK_V4
     return ToolCallProtocol.GENERIC
 
 

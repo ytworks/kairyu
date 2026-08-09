@@ -10,7 +10,8 @@ import pytest
 
 _PATH = (
     Path(__file__).parents[2]
-    / "examples"
+    / "bench"
+    / "deploy"
     / "qwen3-32b-multi-gpu"
     / "benchmark_report.py"
 )

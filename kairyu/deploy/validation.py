@@ -622,7 +622,11 @@ def _validate_model(
                 quant_config = load_checkpoint_quantization(
                     model_dir, quant_source
                 ).weights
-            if not model_config.requires_full_recompute:
+            official_frontier_decoder = (
+                model_config.requires_full_recompute
+                or model_config.uses_stateful_frontier_cache
+            )
+            if not official_frontier_decoder:
                 validate_model_quantization(
                     quant_config,
                     is_mla=model_config.is_mla,

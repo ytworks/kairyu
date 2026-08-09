@@ -7,7 +7,7 @@ import pytest
 from kairyu.deploy.spec import load_deployment_spec
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE_DIR = REPO_ROOT / "examples" / "ide-client"
+EXAMPLE_DIR = REPO_ROOT / "deploy" / "ide-client"
 
 
 @pytest.mark.parametrize(

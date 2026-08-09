@@ -497,6 +497,8 @@ def _validated_request_payload(
         payload["parallel_tool_calls"] = parallel_tool_calls
     if capabilities.priority:
         payload["priority"] = request.priority
+    if request.reasoning_effort is not None:
+        payload["reasoning_effort"] = request.reasoning_effort
     return payload
 
 
@@ -512,6 +514,18 @@ class OpenAICompatBackend:
         upstream: str = "generic",
         capabilities: Mapping[str, object] | OpenAIRequestCapabilities | None = None,
         image_input_policy: Mapping[str, object] | ImageInputPolicy | None = None,
+        allow_templated_chat_passthrough: bool = False,
+        chat_tokenizer: str | None = None,
+        model_revision: str | None = None,
+        max_model_len: int | None = None,
+        quantization_format: str | None = None,
+        cache_descriptor: Mapping[str, object] | None = None,
+        tensor_parallel_size: int = 1,
+        expert_parallel_size: int = 1,
+        attention_data_parallel_size: int = 1,
+        mtp_enabled: bool = False,
+        dspark_enabled: bool = False,
+        container_image_digest: str | None = None,
         client: httpx.AsyncClient | None = None,
         client_factory: Callable[[], httpx.AsyncClient] | None = None,
     ) -> None:
@@ -523,6 +537,20 @@ class OpenAICompatBackend:
             raise ValueError("client_factory and transport are mutually exclusive")
         self._base_url = base_url.rstrip("/")
         self._model = model
+        if type(allow_templated_chat_passthrough) is not bool:
+            raise TypeError("allow_templated_chat_passthrough must be a boolean")
+        self._allow_templated_chat_passthrough = allow_templated_chat_passthrough
+        self.chat_tokenizer = chat_tokenizer
+        self.model_revision = model_revision
+        self.max_model_len = max_model_len
+        self.quantization_format = quantization_format
+        self.cache_descriptor = dict(cache_descriptor) if cache_descriptor is not None else None
+        self.tensor_parallel_size = tensor_parallel_size
+        self.expert_parallel_size = expert_parallel_size
+        self.attention_data_parallel_size = attention_data_parallel_size
+        self.mtp_enabled = mtp_enabled
+        self.dspark_enabled = dspark_enabled
+        self.container_image_digest = container_image_digest
         self._api_key_env = api_key_env
         self._timeout_s = timeout_s
         self._transport = transport
@@ -606,6 +634,7 @@ class OpenAICompatBackend:
     def request_validation_key(self) -> tuple[
         OpenAIRequestCapabilities,
         ImageInputPolicy | None,
+        bool,
     ] | None:
         """Identity for replicas with exactly equivalent request validation.
 
@@ -619,18 +648,27 @@ class OpenAICompatBackend:
 
         if type(self) is not OpenAICompatBackend:
             return None
-        return self._capabilities, self._image_input_policy
+        return (
+            self._capabilities,
+            self._image_input_policy,
+            self._allow_templated_chat_passthrough,
+        )
 
     @property
     def admission_upper_bound_key(self) -> tuple[
         OpenAIRequestCapabilities,
         ImageInputPolicy | None,
+        bool,
     ] | None:
         """Identity for replicas with exactly equivalent admission ceilings."""
 
         if type(self) is not OpenAICompatBackend:
             return None
-        return self._capabilities, self._image_input_policy
+        return (
+            self._capabilities,
+            self._image_input_policy,
+            self._allow_templated_chat_passthrough,
+        )
 
     def _validate_request_structure(self, request: GenerationRequest) -> None:
         """Validate prompt structure without request-sized JSON serialization."""
@@ -641,7 +679,10 @@ class OpenAICompatBackend:
                 self._capabilities.upstream,
                 f"does not support prompt kind: {kind}",
             )
-        if isinstance(request.prompt, TemplatedPrompt):
+        if (
+            isinstance(request.prompt, TemplatedPrompt)
+            and not self._allow_templated_chat_passthrough
+        ):
             raise _client_error(
                 self._capabilities.upstream,
                 "cannot preserve a tokenizer-owned pre-rendered chat prompt through "
@@ -1188,7 +1229,11 @@ class OpenAICompatBackend:
             "messages": messages,
             **validated,
         }
-        if request.tools:
+        # A passthrough vLLM replica uses an identity chat template. Kairyu has
+        # already rendered tools and reasoning controls into the model-owned
+        # template, so duplicating the structured tool fields would create two
+        # competing prompt owners.
+        if request.tools and not isinstance(prompt, TemplatedPrompt):
             payload["tools"] = list(request.tools)
             if request.tool_choice is not None:
                 payload["tool_choice"] = request.tool_choice
@@ -1301,6 +1346,14 @@ class OpenAICompatBackend:
                 CompletionOutput(
                     index=choice.get("index", i),
                     text=_message_text(choice["message"]),
+                    reasoning_content=(
+                        choice["message"].get("reasoning_content")
+                        if isinstance(choice.get("message"), Mapping)
+                        and isinstance(
+                            choice["message"].get("reasoning_content"), str
+                        )
+                        else None
+                    ),
                     token_ids=token_ids,
                     cumulative_logprob=(
                         None
@@ -1344,7 +1397,13 @@ class OpenAICompatBackend:
         finished: bool,
         usage: GenerationUsage | None = None,
         stage_metrics: tuple[GenerationStageMetric, ...] = (),
+        reasoning_parts: dict[int, list[str]] | None = None,
+        reasoning_lengths: dict[int, int] | None = None,
+        reasoning_deltas: dict[int, str] | None = None,
     ) -> GenerationResult:
+        reasoning_parts = reasoning_parts or {}
+        reasoning_lengths = reasoning_lengths or {}
+        reasoning_deltas = reasoning_deltas or {}
         completions = tuple(
             CompletionOutput(
                 index=index,
@@ -1361,8 +1420,18 @@ class OpenAICompatBackend:
                 logprob_content=(tuple(logprobs[index]) if index in logprobs else None),
                 text_delta=text_deltas.get(index, ""),
                 text_offset=text_lengths.get(index, 0) - len(text_deltas.get(index, "")),
+                reasoning_content=(
+                    "".join(reasoning_parts[index]) if index in reasoning_parts else None
+                ),
+                reasoning_delta=reasoning_deltas.get(index, ""),
+                reasoning_offset=(
+                    reasoning_lengths.get(index, 0)
+                    - len(reasoning_deltas.get(index, ""))
+                ),
             )
-            for index in sorted(text_parts.keys() | finish.keys() | logprobs.keys())
+            for index in sorted(
+                text_parts.keys() | reasoning_parts.keys() | finish.keys() | logprobs.keys()
+            )
         )
         return GenerationResult(
             request_id=request.request_id,
@@ -1391,6 +1460,8 @@ class OpenAICompatBackend:
                 _raise_for_status(self._base_url, response.status_code, body)
             text_parts: dict[int, list[str]] = {}
             text_lengths: dict[int, int] = {}
+            reasoning_parts: dict[int, list[str]] = {}
+            reasoning_lengths: dict[int, int] = {}
             finish: dict[int, str] = {}
             deltas_seen: dict[int, int] = {}
             logprobs: dict[int, list[TokenLogprob]] = {}
@@ -1424,6 +1495,8 @@ class OpenAICompatBackend:
                                 finished=False,
                                 usage=usage,
                                 stage_metrics=stage_metrics,
+                                reasoning_parts=reasoning_parts,
+                                reasoning_lengths=reasoning_lengths,
                             )
                         raise RuntimeError(
                             "Kairyu upstream reported an error after its stage trace"
@@ -1457,11 +1530,23 @@ class OpenAICompatBackend:
                     usage = _usage_from(chunk["usage"])
                 changed = False
                 text_deltas: dict[int, str] = {}
+                reasoning_deltas: dict[int, str] = {}
                 for choice in chunk.get("choices", []):
                     index = choice.get("index", 0)
                     text_parts.setdefault(index, [])
                     text_lengths.setdefault(index, 0)
                     content = (choice.get("delta") or {}).get("content")
+                    reasoning = (choice.get("delta") or {}).get("reasoning_content")
+                    if isinstance(reasoning, str) and reasoning:
+                        reasoning_parts.setdefault(index, []).append(reasoning)
+                        reasoning_lengths[index] = reasoning_lengths.get(index, 0) + len(
+                            reasoning
+                        )
+                        reasoning_deltas[index] = (
+                            reasoning_deltas.get(index, "") + reasoning
+                        )
+                        deltas_seen[index] = deltas_seen.get(index, 0) + 1
+                        changed = True
                     if content:
                         text_parts[index].append(content)
                         text_lengths[index] += len(content)
@@ -1486,6 +1571,9 @@ class OpenAICompatBackend:
                         deltas_seen,
                         logprobs,
                         finished=False,
+                        reasoning_parts=reasoning_parts,
+                        reasoning_lengths=reasoning_lengths,
+                        reasoning_deltas=reasoning_deltas,
                     )
             if trace_seen and not done_seen:
                 raise RuntimeError("Kairyu upstream stage trace omitted SSE [DONE]")
@@ -1503,6 +1591,8 @@ class OpenAICompatBackend:
             finished=True,
             usage=usage,
             stage_metrics=stage_metrics,
+            reasoning_parts=reasoning_parts,
+            reasoning_lengths=reasoning_lengths,
         )
 
     async def _shutdown_impl(self) -> None:

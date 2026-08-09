@@ -162,20 +162,20 @@ kairyu bench run --base-url http://localhost:8000/v1 \
     --model m1 --model kairyu-auto --model kairyu-auto-max
 
 # or config-driven (targets + judge in one file, CLI flags still override):
-kairyu bench run --config examples/bench_accuracy.yaml
+kairyu bench run --config bench/configs/accuracy.yaml
 
 # deterministic core regression suite (60 requests with the smoke preset):
 kairyu bench run --suite core --smoke \
     --base-url http://localhost:8000/v1 --model m1
-# or: kairyu bench run --config examples/bench_core.yaml --smoke
+# or: kairyu bench run --config bench/configs/core.yaml --smoke
 
 # five fixed JSON-Schema cases, paired constrained/control (10 calls):
-kairyu bench run --config examples/bench_structured.yaml
+kairyu bench run --config bench/configs/structured.yaml
 # or: kairyu bench run --suite structured \
 #         --base-url http://localhost:8000/v1 --model m1
 
 # full seven-arm quantization sweep (use the example's real manifest digests):
-kairyu bench run --config examples/bench_quantization.yaml \
+kairyu bench run --config bench/configs/quantization.yaml \
     --run-id qwen3-quant-accuracy
 kairyu bench quant-sweep --run qwen3-quant-accuracy \
     --tolerance gsm8k=1.0 --tolerance mmlu=1.0 \
@@ -537,7 +537,7 @@ identity and fresh-history validation.
 ```bash
 uv sync --extra bench
 kairyu bench download --suite structured --strict
-kairyu bench run --config examples/bench_structured.yaml \
+kairyu bench run --config bench/configs/structured.yaml \
     --run-id structured-conformance
 kairyu bench report --suite structured structured-conformance
 ```
@@ -607,7 +607,7 @@ INT8, AWQ, GPTQ, NVFP4, and dense BF16 with FP8-E4M3 KV. Dense BF16 is encoded
 as `weight_method: none` plus `compute_dtype: bfloat16`; BF16 is not a
 checkpoint quantization method. All weight-quantized arms use effective BF16
 KV, while the final arm isolates the KV dtype change. See
-[`examples/bench_quantization.yaml`](../examples/bench_quantization.yaml) for
+[`bench/configs/quantization.yaml`](../bench/configs/quantization.yaml) for
 the complete configuration.
 
 Each target also requires a distinct `served_config` SHA-256. Hash a canonical
@@ -634,7 +634,7 @@ duplicate, additional, or anonymously configured arm.
 
 ```bash
 kairyu bench download --suite quantization --strict
-kairyu bench run --config examples/bench_quantization.yaml \
+kairyu bench run --config bench/configs/quantization.yaml \
     --run-id qwen3-quant-accuracy
 kairyu bench quant-sweep --run qwen3-quant-accuracy \
     --tolerance gsm8k=1.0 --tolerance mmlu=1.0 \

@@ -447,6 +447,48 @@ async def test_backends_never_relabels_malformed_ep_metadata_as_tp():
     assert "tensor_parallel_size" not in entry
 
 
+def test_deepseek_v4_native_ep_metadata_accepts_ep8_composite_cache() -> None:
+    metadata = health_module._expert_parallel_metadata(
+        {
+            "parallelism": "expert_parallel",
+            "expert_parallel_size": 8,
+            "attention_placement": "request_owned_data_parallel",
+            "attention_output_placement": "replicated",
+            "attention_output_parallel_size": 1,
+            "attention_output_partial_dtype": None,
+            "execution_mode": "deepseek-v4-native-attention-dp",
+            "pipeline_depth": 1,
+            "decode_mode": "eager",
+            "kv_cache_dtype": "checkpoint-native-hca-csa",
+            "attention_data_parallel_size": 8,
+            "attention_tensor_parallel_size": 1,
+            "moe_dispatcher": "fixed-nccl-all-to-all-packed-fp4",
+            "sampling_ownership": "request_owner",
+            "kv_cache_ownership": "request_owner",
+            "cuda_graph_decode": False,
+            "cuda_graph_buckets": (),
+            "cuda_graph_captures": 0,
+            "cuda_graph_replays": 0,
+            "cuda_graph_eager_fallbacks": 0,
+            "attention_dp_prefill_scratch_pages": 2,
+            "attention_dp_decode_scratch_pages": 1,
+            "attention_dp_graph_scratch_pages": 0,
+            "attention_dp_scratch_pages": 3,
+            "moe_collective_transport": {
+                "selected_backend": "torch.distributed:nccl",
+                "fallback_backend": "torch.distributed:nccl",
+                "direct_nccl_active": False,
+                "direct_nccl_library": None,
+                "direct_nccl_version": None,
+                "selection_reason": "native fixed all-to-all",
+            },
+        }
+    )
+    assert metadata is not None
+    assert metadata["expert_parallel_size"] == 8
+    assert metadata["kv_cache_dtype"] == "checkpoint-native-hca-csa"
+
+
 async def test_backends_reports_live_attention_dp_cuda_graph_counters():
     transport = {
         "selected_backend": "direct_nccl_ctypes",

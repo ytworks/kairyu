@@ -2460,7 +2460,7 @@ def test_validation_key_is_exactly_the_immutable_capability_contract():
         upstream="generic",
     )
 
-    assert first.request_validation_key == (first.capabilities, None)
+    assert first.request_validation_key == (first.capabilities, None, False)
     assert first.request_validation_key == second.request_validation_key
     assert first.request_validation_key != different.request_validation_key
     assert isinstance(hash(first.request_validation_key), int)

@@ -1,0 +1,27 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  max_concurrency: 64
+
+pools:
+  qwen3.6-27b:
+    replicas:
+      - backend: openai
+        health_url: http://vllm:8000/health
+        options:
+          base_url: http://vllm:8000/v1
+          model: qwen3.6-27b
+          api_key_env: null
+          upstream: vllm
+          allow_templated_chat_passthrough: true
+          chat_tokenizer: /models/qwen3.6-27b
+          model_revision: 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9
+          max_model_len: 262144
+          quantization_format: bfloat16
+          cache_descriptor: {family: qwen3.6-hybrid-deltanet-paged-kv}
+          tensor_parallel_size: 1
+          mtp_enabled: false
+          container_image_digest: vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52
+    unhealthy_after: 1
+    probe_interval_s: 2.0

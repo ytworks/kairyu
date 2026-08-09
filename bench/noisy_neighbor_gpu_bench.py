@@ -903,13 +903,13 @@ def main() -> None:
         "--gateway-config",
         type=Path,
         default=Path(
-            "examples/qwen3-32b-multi-gpu/noisy-neighbor-gateway.yaml"
+            "bench/deploy/qwen3-32b-multi-gpu/noisy-neighbor-gateway.yaml"
         ),
     )
     parser.add_argument(
         "--replica-config",
         type=Path,
-        default=Path("examples/qwen3-32b-multi-gpu/kairyu.template.yaml"),
+        default=Path("bench/deploy/qwen3-32b-multi-gpu/kairyu.template.yaml"),
     )
     parser.add_argument("--model-revision")
     parser.add_argument("--replica-image-digest")

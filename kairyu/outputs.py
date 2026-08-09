@@ -78,6 +78,9 @@ class CompletionOutput:
     # that do not consume deltas.
     text_delta: str | None = None
     text_offset: int | None = None
+    reasoning_content: str | None = None
+    reasoning_delta: str | None = None
+    reasoning_offset: int | None = None
 
     def delta_after(self, offset: int) -> tuple[str, int]:
         """Return the next stream delta and its cumulative end offset.
@@ -106,6 +109,26 @@ class CompletionOutput:
                 f"expected {offset}, got {self.text_offset!r}"
             )
         return self.text_delta, delta_end
+
+    def reasoning_delta_after(self, offset: int) -> tuple[str, int]:
+        """Return a reasoning suffix with the same offset contract as text."""
+
+        if type(offset) is not int or offset < 0:
+            raise ValueError("completion reasoning offset must be non-negative")
+        if self.reasoning_delta is None and self.reasoning_offset is None:
+            value = self.reasoning_content or ""
+            return value[offset:], len(value)
+        if not isinstance(self.reasoning_delta, str) or type(self.reasoning_offset) is not int:
+            raise ValueError("completion reasoning delta metadata is incomplete")
+        delta_end = self.reasoning_offset + len(self.reasoning_delta)
+        if offset == delta_end:
+            return "", offset
+        if self.reasoning_offset != offset:
+            raise ValueError(
+                "completion reasoning delta offset mismatch: "
+                f"expected {offset}, got {self.reasoning_offset}"
+            )
+        return self.reasoning_delta, delta_end
 
 
 @dataclass(frozen=True)

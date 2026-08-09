@@ -1,0 +1,22 @@
+{
+  "environment": "deepseek-v4-flash-0731-8gpu",
+  "port": 8002,
+  "gpu_indices": [0, 1, 2, 3, 4, 5, 6, 7],
+  "selectable_gpu": false,
+  "minimum_compute_capability": 12.0,
+  "minimum_vram_mib": 90000,
+  "minimum_free_disk_gib": 520,
+  "kairyu_images": ["cpu", "gpu"],
+  "vllm_download_image_env": "VLLM_DEEPSEEK_IMAGE",
+  "images": {
+    "VLLM_DEEPSEEK_IMAGE": "vllm/vllm-openai@sha256:2e05966d05579729137714d16035f0cb3b9f0fc1586fbd009753868ee9afc68b"
+  },
+  "models": [
+    {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+      "slug": "deepseek-v4-flash-0731",
+      "max_context_tokens": 1048576
+    }
+  ]
+}

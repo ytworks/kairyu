@@ -217,6 +217,7 @@ class ChatCompletionRequest(BaseModel):
     response_format: dict | None = None
     extra_args: dict[str, object] | None = None
     user: str | None = None
+    reasoning_effort: Literal["low", "high", "max"] | None = None
     # vLLM-compatible scheduling priority. A configured gateway replaces this
     # untrusted client value with the authenticated tenant's class.
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
@@ -244,6 +245,7 @@ class ToolCall(BaseModel):
 class ResponseMessage(BaseModel):
     role: str = "assistant"
     content: str | list[ContentPart] | None = None
+    reasoning_content: str | None = None
     tool_calls: list[ToolCall] | None = None
 
 
@@ -352,6 +354,7 @@ class ChunkToolCall(BaseModel):
 class ChunkDelta(BaseModel):
     role: str | None = None
     content: str | list[ContentPart] | None = None
+    reasoning_content: str | None = None
     tool_calls: list[ChunkToolCall] | None = None
 
 

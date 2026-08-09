@@ -270,7 +270,7 @@ def _valid_container_provenance() -> dict[str, object]:
     return {
         "project": "kairyu-qwen3-32b-a9-tp8",
         "compose_file": (
-            "repo:examples/qwen3-32b-multi-gpu/a9-tp8-compose.yaml"
+            "repo:bench/deploy/qwen3-32b-multi-gpu/a9-tp8-compose.yaml"
         ),
         "services": services,
     }

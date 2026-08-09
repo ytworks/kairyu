@@ -1,0 +1,5 @@
+workers:
+  - {name: tier1, backend: openai, model: qwen3.6-27b, base_url: "http://kairyu-gateway:8000/v1", api_key_env: null, options: {upstream: kairyu}}
+  - {name: tier2, backend: openai, model: deepseek-v4-flash-0731, base_url: "http://kairyu-gateway:8000/v1", api_key_env: null, options: {upstream: kairyu}}
+router: {kind: calibrated, artifact: /etc/kairyu/router.json, sha256: 9b3cc02780fd5a1cdf1073557b66900e14dd59b6dd655b961f6f85bc3cb51ca5, target_mode: auto}
+budget: {max_steps: 4, max_refine_depth: 0}

@@ -34,7 +34,7 @@ GATEWAY_GPU_YAML = Path(__file__).parents[2] / "deploy/compose/gateway-gpu.yaml"
 GATEWAY_YAML = Path(__file__).parents[2] / "deploy/compose/gateway.yaml"
 ROUTING_YAML = Path(__file__).parents[2] / "deploy/compose/routing.yaml"
 QWEN_AUTO_GATEWAY_YAML = (
-    Path(__file__).parents[2] / "examples/qwen3-32b-multi-gpu/auto-gateway.yaml"
+    Path(__file__).parents[2] / "bench/deploy/qwen3-32b-multi-gpu/auto-gateway.yaml"
 )
 
 

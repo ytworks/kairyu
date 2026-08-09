@@ -19,6 +19,7 @@ _LLAMA_TEMPLATE = "{{ '<|python_tag|>' }}{{ messages[0].content }}"
 _QWEN_TEMPLATE = (
     "{{ '<function=name><parameter=value></parameter></function>' }}{{ messages[0].content }}"
 )
+_DEEPSEEK_TEMPLATE = "{{ '<｜DSML｜tool_calls></｜DSML｜tool_calls>' }}"
 
 
 def _tool(
@@ -59,6 +60,10 @@ def test_chat_template_attests_selected_protocol_not_model_name_or_unused_templa
     assert ChatTemplate(_GENERIC_TEMPLATE).tool_call_protocol is ToolCallProtocol.GENERIC
     assert ChatTemplate(_LLAMA_TEMPLATE).tool_call_protocol is ToolCallProtocol.LLAMA
     assert ChatTemplate(_QWEN_TEMPLATE).tool_call_protocol is ToolCallProtocol.QWEN
+    assert (
+        ChatTemplate(_DEEPSEEK_TEMPLATE).tool_call_protocol
+        is ToolCallProtocol.DEEPSEEK_V4
+    )
 
     mixed = ChatTemplate(
         {
@@ -105,6 +110,24 @@ def test_model_native_syntax_is_bound_to_attested_protocol():
     assert _parse_tool_calls(qwen, tools, ToolCallProtocol.GENERIC) == []
     assert _parse_tool_calls(qwen, tools, ToolCallProtocol.LLAMA) == []
     assert len(_parse_tool_calls(qwen, tools, ToolCallProtocol.QWEN)) == 1
+
+
+def test_deepseek_v4_dsml_preserves_strings_and_decodes_typed_json() -> None:
+    text = (
+        '<｜DSML｜tool_calls><｜DSML｜invoke name="run">'
+        '<｜DSML｜parameter name="path" string="true">資料</｜DSML｜parameter>'
+        '<｜DSML｜parameter name="count" string="false">2</｜DSML｜parameter>'
+        "</｜DSML｜invoke></｜DSML｜tool_calls>"
+    )
+    tools = _tool(
+        {"path": {"type": "string"}, "count": {"type": "integer"}},
+        required=["path", "count"],
+    )
+
+    calls = _parse_tool_calls(text, tools, ToolCallProtocol.DEEPSEEK_V4)
+
+    assert len(calls) == 1
+    assert json.loads(calls[0].function.arguments) == {"path": "資料", "count": 2}
 
 
 @pytest.mark.parametrize("protocol", list(ToolCallProtocol))

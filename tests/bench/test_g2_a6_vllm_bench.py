@@ -167,7 +167,7 @@ def _configuration_source(tp: int, arm: str) -> dict[str, object] | None:
         return None
     template = (
         a6._REPO_ROOT
-        / "examples/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
+        / "bench/deploy/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
     ).read_text(encoding="utf-8")
     rendered = template.replace("__TENSOR_PARALLEL_SIZE__", str(tp))
     return a6.kairyu_configuration_source(rendered, tp=tp)

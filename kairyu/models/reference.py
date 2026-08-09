@@ -57,6 +57,76 @@ class ReferenceDecoder(nn.Module):
             )
         return outputs.logits[0]
 
+    @torch.inference_mode()
+    def forward_cached(
+        self,
+        token_ids: torch.Tensor,
+        *,
+        past_key_values=None,
+        position: int = 0,
+    ) -> tuple[torch.Tensor, object]:
+        """Advance an official architecture cache by exactly ``token_ids``.
+
+        Kairyu owns the state lifetime and prefix/rollback policy.  The model
+        implementation owns the opaque HCA/CSA or DeltaNet tensors, preserving
+        the checkpoint's native cache mathematics without pretending they are
+        ordinary paged KV blocks.
+        """
+
+        if token_ids.ndim != 1 or token_ids.numel() < 1:
+            raise ValueError("frontier cached forward requires a non-empty token vector")
+        cache_position = torch.arange(
+            position,
+            position + token_ids.numel(),
+            dtype=torch.long,
+            device=token_ids.device,
+        )
+
+        def call_model():
+            kwargs = {
+                "input_ids": token_ids.unsqueeze(0),
+                "past_key_values": past_key_values,
+                "use_cache": True,
+                "return_dict": True,
+                "cache_position": cache_position,
+                "logits_to_keep": 1,
+            }
+            try:
+                return self.hf_model(**kwargs)
+            except TypeError as exc:
+                # Pinned production classes accept both optimization hints.
+                # Minimal parity fixtures may expose only the standard cache
+                # surface, so remove only explicitly rejected optional keys.
+                message = str(exc)
+                removed = False
+                for optional in ("cache_position", "logits_to_keep"):
+                    if optional in message and optional in kwargs:
+                        kwargs.pop(optional)
+                        removed = True
+                if not removed:
+                    raise
+                try:
+                    return self.hf_model(**kwargs)
+                except TypeError as retry_exc:
+                    retry_message = str(retry_exc)
+                    for optional in ("cache_position", "logits_to_keep"):
+                        if optional in retry_message and optional in kwargs:
+                            kwargs.pop(optional)
+                            return self.hf_model(**kwargs)
+                    raise
+
+        if self._autocast_dtype is not None and token_ids.device.type == "cuda":
+            with torch.autocast("cuda", dtype=self._autocast_dtype):
+                outputs = call_model()
+        else:
+            outputs = call_model()
+        cache = getattr(outputs, "past_key_values", None)
+        if cache is None:
+            raise RuntimeError(
+                f"{self.config.architecture} did not return its native cache"
+            )
+        return outputs.logits[0], cache
+
 
 def _transformers_classes(raw_config: dict, architecture: str):
     try:

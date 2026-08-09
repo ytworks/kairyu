@@ -27,10 +27,13 @@ FIXTURE_FILES = (
     "long-context-reasoning.jsonl",
     "mmlu.jsonl",
     "mrcr-v2.jsonl",
+    "ruler-niah-1024k.jsonl",
     "ruler-niah-128k.jsonl",
     "ruler-niah-16k.jsonl",
+    "ruler-niah-256k.jsonl",
     "ruler-niah-32k.jsonl",
     "ruler-niah-4k.jsonl",
+    "ruler-niah-512k.jsonl",
     "ruler-niah-64k.jsonl",
     "ruler-niah-8k.jsonl",
     "scicode.jsonl",
@@ -257,7 +260,7 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         (["bench", "list", "--suite", "core"], "suite core (3 slots)"),
         (
             ["bench", "list", "--suite", "long-context"],
-            "suite long-context (6 slots)",
+            "suite long-context (9 slots)",
         ),
         (["bench", "list", "--suite", "structured"], "suite structured (1 slots)"),
     ):
