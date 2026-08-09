@@ -11,6 +11,29 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-09 — [amendment] Frontier production selection uses architecture state
+- What: Qwen3.6/DeepSeek V4 gained composite cache descriptors, complete-prefix snapshots, transactional rollback, and a single-rank incremental runner; the example surface was rebuilt around three pinned offline environments and a report-owning benchmark CLI.
+- Why: full-sequence recomputation cannot exercise native context or serving performance, while generic paged KV cannot represent DeltaNet or HCA/CSA state. DeepSeek EP/Attention-DP and GPU gates remain explicitly open.
+- Refs: FN-D1–FN-D7; `docs/design/frontier-native-runtime.md`; `examples/`; `kairyu/engine/core/frontier_{cache,runner}.py`
+
+### 2026-08-09 — [progress] Accuracy reports add sourced frontier gaps and target timing
+- What: Accuracy comparison artifacts now carry a SHA-bound six-model public-score catalog and per-reference gaps; direct generation rows retain streamed TTFT/TPS evidence and every scoreboard renders target-only performance coverage.
+- Refs: `kairyu/bench/{reference,compare,streaming,aggregate,types}.py`; `docs/benchmarks.md`
+
+### 2026-08-09 — [progress] Portable CPU CI schedules valid jobs again
+- What: tokenizer cache setup moved from job-level runner context into a runtime environment step, restoring the full Python 3.11/3.12 CPU matrix.
+- Refs: PR #462; `.github/workflows/ci.yml`
+
+### 2026-08-09 — [design] Frontier text models use a single-device reference path
+- What: Qwen3.6 dense/MoE, DeepSeek V4, and Kimi K3 enter the model zoo through eager complete-sequence recomputation; public block-FP8/MXFP4 checkpoints use official loaders.
+- Why: hybrid recurrent/compressed attention state cannot truthfully reuse the existing paged-KV contract without architecture-specific cache evidence.
+- Refs: FZ-D1–FZ-D3; `docs/design/frontier-model-zoo.md`; `kairyu/engine/core/recompute_runner.py`
+
+### 2026-08-08 — [design] Evidence mechanics are package-owned; gate meaning stays local
+- What: canonical JSON/hash, strict indexed JSONL, artifact paths, raw-only replay, and exact retained-manifest verification moved to `kairyu.bench.evidence`; G4 M-A3 and G5 F4b use the full path, while F1a shares only its compatible file digest.
+- Why: new gates should not duplicate tamper-resistant framing and replay, but package code must not absorb repository-only schemas, thresholds, verdicts, or heterogeneous sidecar contracts.
+- Refs: issue #382; `docs/design/issue-382-evidence-library.md`; `kairyu/bench/evidence.py`
+
 ### 2026-08-08 — [amendment] W4A16 preserves FP16 scales; cache salt stays explicit
 - What: AWQ/GPTQ uses FP16 dot operands with FP32 accumulation for either model dtype; router/output/draft projections remain accuracy-default dense; native cache identity remains the exact token tuple without an in-process tenant salt.
 - Why: BF16 dequantization discarded checkpoint scale precision, while mapping `cache_salt` to affinity would falsely claim partitioning across RadixKV, tier, event, and routing identities.
