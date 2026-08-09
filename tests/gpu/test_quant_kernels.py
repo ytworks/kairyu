@@ -217,9 +217,10 @@ def test_w4a16_saturates_bf16_activations_to_finite_fp16_range(cuda, factory):
 
 
 @pytest.mark.parametrize("factory", [_awq_module, _gptq_module], ids=["awq", "gptq"])
-def test_w4a16_does_not_hide_fp16_infinite_activations(cuda, factory):
+@pytest.mark.parametrize("activation_dtype", [torch.float16, torch.bfloat16])
+def test_w4a16_does_not_hide_infinite_activations(cuda, factory, activation_dtype):
     module = factory(64, 32).to(cuda)
-    activation = torch.full((1, 64), torch.inf, device=cuda, dtype=torch.float16)
+    activation = torch.full((1, 64), torch.inf, device=cuda, dtype=activation_dtype)
 
     actual = module(activation)
 
