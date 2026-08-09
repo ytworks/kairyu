@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-09. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-10. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-10 — [progress] Frontier native metadata passes static validation
+- What: Native Qwen and DeepSeek examples now pass the same constructor-contract validation used at serve startup; Kairyu accepts and type-checks the frontier execution, revision, quantization, prefix-state, image, MTP, and DSpark metadata, and the DeepSeek EP example declares its required BF16 KV cache explicitly.
+- Refs: PR #465; `kairyu/engine/config_validation.py`; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/*kairyu.yaml`
 
 ### 2026-08-10 — [progress] Frontier gateway metadata passes static validation
 - What: OpenAI-compatible replicas now statically accept and type-check the full constructor metadata contract used by every Qwen, DeepSeek, and orchestration gateway; unsupported-option errors name the drifting fields.

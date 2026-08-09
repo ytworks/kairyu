@@ -149,3 +149,17 @@ def test_all_frontier_gateway_backend_options_pass_static_validation() -> None:
                 validated += 1
 
     assert validated >= 10
+
+
+def test_all_frontier_native_backend_options_pass_static_validation() -> None:
+    config_paths = sorted((ROOT / "examples").glob("**/*kairyu.yaml"))
+    assert config_paths
+    validated = 0
+
+    for path in config_paths:
+        config = yaml.safe_load(path.read_text())
+        for engine in (config.get("engines") or {}).values():
+            validate_backend_options(engine["backend"], engine["options"])
+            validated += 1
+
+    assert validated == 3

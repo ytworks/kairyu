@@ -86,6 +86,13 @@ _KAIRYU_OPTIONS = frozenset(
         "dram_kv_tier_profile",
         "generation_config",
         "nvfp4_accuracy_profile",
+        "execution_mode",
+        "prefix_state_capacity_bytes",
+        "model_revision",
+        "quantization_format",
+        "container_image_digest",
+        "mtp_enabled",
+        "dspark_enabled",
     }
 )
 _KAIRYU_PROC_OPTIONS = frozenset(
@@ -499,6 +506,28 @@ def _validate_native_common(
 
 def _validate_kairyu(options: Mapping[str, object]) -> None:
     _require_exact_options("kairyu", options, _KAIRYU_OPTIONS)
+    execution_mode = options.get("execution_mode", "auto")
+    if execution_mode not in {"auto", "native", "reference"}:
+        raise ValueError(
+            "kairyu backend execution_mode must be one of auto, native, or reference"
+        )
+    _require_int_at_least(
+        "kairyu",
+        "prefix_state_capacity_bytes",
+        options.get("prefix_state_capacity_bytes", 0),
+        0,
+    )
+    for field in (
+        "model_revision",
+        "quantization_format",
+        "container_image_digest",
+    ):
+        value = options.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"kairyu backend {field} must be a string or null")
+    for field in ("mtp_enabled", "dspark_enabled"):
+        if type(options.get(field, False)) is not bool:
+            raise ValueError(f"kairyu backend {field} must be a boolean")
     tensor_parallel_size = _require_int_at_least(
         "kairyu",
         "tensor_parallel_size",
