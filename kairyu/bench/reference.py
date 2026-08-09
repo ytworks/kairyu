@@ -1,9 +1,9 @@
-"""Published Fugu-release scores, for comparison against a local run.
+"""Published frontier benchmark scores, for comparison against a local run.
 
 ## Provenance
 
-Every number below was transcribed from the two figures on
-<https://sakana.ai/fugu-release/> on **2026-07-25**:
+The legacy Fugu table in ``PUBLISHED_SCORES`` was transcribed from the two
+figures on <https://sakana.ai/fugu-release/> on **2026-07-25**:
 
 - `/assets/fugu-release/benchmark-table.png` — the headline table (Fugu, Fugu
   Ultra, Opus 4.8, Gemini 3.1 Pro, GPT 5.5),
@@ -14,6 +14,10 @@ Every number below was transcribed from the two figures on
 The page publishes these values **as images**, so there is no machine-readable
 source to fetch: the table cannot be scraped, and these constants are the
 transcription. To refresh, re-read both images and update `RETRIEVED_ON`.
+
+The six-model additions in ``FRONTIER_SCORE_RECORDS`` come from the provider
+pages and technical report listed in ``REFERENCE_SOURCES``; each source records
+its own publication and retrieval dates.
 
 ## What the published numbers are, and are not
 
