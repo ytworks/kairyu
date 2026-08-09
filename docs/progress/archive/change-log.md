@@ -11,6 +11,29 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-10 — [progress] Qwen3.6 vLLM examples fit the hybrid cache budget
+- What: Qwen3.6 vLLM services in the single-GPU and combined orchestration examples now cap active sequences at 64, matching the native backend and fitting the measured 714-block Mamba cache ceiling at native context.
+- Refs: PR #465; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/compose.yaml`
+
+### 2026-08-10 — [progress] Frontier Compose identities accept model-version names
+- What: The shared lifecycle now normalizes environment and profile text into a Docker Compose-compatible project identity, with Qwen3.6 single-model and orchestration coverage.
+- Refs: PR #465; `examples/_shared/examplectl.py`; `tests/unit/test_frontier_examplectl.py`
+
+### 2026-08-10 — [amendment] Frontier examples use process-only configuration
+- What: Qwen 1-GPU, DeepSeek 8-GPU, and combined orchestration lifecycle configuration now comes only from inherited environment variables; user and runtime dotenv files were removed, Compose's implicit dotenv loading is disabled, and compose paths no longer depend on the caller's working directory.
+- Why: Repository-local dotenv files mixed credentials and operator state with examples, made non-interactive inheritance ambiguous, and allowed Docker Compose to silently substitute different inputs than the lifecycle preflight used.
+- Refs: `examples/_shared/examplectl.py`; `examples/{qwen3.6-27b-1gpu,deepseek-v4-flash-0731-8gpu,qwen3.6-deepseek-v4-8gpu}/`
+
+### 2026-08-10 — [amendment] Frontier examples use external model storage safely
+- What: Frontier lifecycle preflight and model volumes now honor an absolute external storage root, download images use their available `python3`, and inherited HF credentials are forwarded by name rather than embedded in process arguments.
+- Why: The Qwen3.6 1-GPU example checked the repository filesystem instead of its model volume, assumed an absent `python` executable in the pinned vLLM image, and could expose a token through failure diagnostics.
+- Refs: `examples/_shared/examplectl.py`; `examples/qwen3.6-27b-1gpu/`
+
+### 2026-08-10 — [amendment] DeepSeek V4 native EP runs packed checkpoint experts
+- What: DeepSeek V4 gained strict official-checkpoint validation, direct SM120 E2M1/UE8M0 expert kernels, bounded FP4 Lightning Indexer state, request-owned EP2/4/8 Attention-DP, fixed NCCL all-to-all, EP8 example selection, and a committed 1M gate; single-GPU FP4 and two-rank ragged EP smokes pass.
+- Why: the prior frontier example exposed a native target but still rejected distributed DeepSeek and could not execute its official FP4 expert ABI.
+- Refs: FN-D2–FN-D4, FN-D7; `kairyu/models/deepseek_v4*.py`; `kairyu/kernels/deepseek_v4_moe_gpu.py`; `scripts/gpu_gates/deepseek_v4_native_1m.sh`
+
 ### 2026-08-09 — [amendment] Frontier production selection uses architecture state
 - What: Qwen3.6/DeepSeek V4 gained composite cache descriptors, complete-prefix snapshots, transactional rollback, and a single-rank incremental runner; the example surface was rebuilt around three pinned offline environments and a report-owning benchmark CLI.
 - Why: full-sequence recomputation cannot exercise native context or serving performance, while generic paged KV cannot represent DeltaNet or HCA/CSA state. DeepSeek EP/Attention-DP and GPU gates remain explicitly open.
