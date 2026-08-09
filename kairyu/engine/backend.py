@@ -413,10 +413,14 @@ def _strict_tool_response_format(
         elif protocol == "llama":
             begin = f'<|python_tag|>{{"name": {json.dumps(name)}, "parameters": '
             end = "}"
-        else:
+        elif protocol == "qwen":
             begin = f"<tool_call>\n<function={name}>\n"
             end = "\n</function>\n</tool_call>"
             style = "qwen_xml"
+        else:
+            begin = f'<｜DSML｜invoke name="{name}">\n'
+            end = "</｜DSML｜invoke>\n"
+            style = "deepseek_xml"
         tags.append(
             {
                 "type": "tag",
@@ -431,22 +435,49 @@ def _strict_tool_response_format(
             }
         )
 
+    parallel = resolve_parallel_tool_calls(
+        request.parallel_tool_calls,
+        request.sampling_params.extra_args,
+    )
+    at_least_one = choice == "required" or isinstance(choice, Mapping)
+    if protocol == "deepseek_v4":
+        return {
+            "type": "structural_tag",
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<｜DSML｜tool_calls>"],
+                "tags": [
+                    {
+                        "type": "tag",
+                        "begin": "<｜DSML｜tool_calls>\n",
+                        "content": {
+                            "type": "tags_with_separator",
+                            "tags": tags,
+                            "separator": "",
+                            "at_least_one": True,
+                            "stop_after_first": parallel is False,
+                        },
+                        "end": "</｜DSML｜tool_calls>",
+                    }
+                ],
+                "at_least_one": at_least_one,
+                "stop_after_first": True,
+                "excludes": [],
+            },
+        }
+
     trigger = {
         "generic": "<tool_call>",
         "llama": "<|python_tag|>",
         "qwen": "<tool_call>\n<function=",
     }[protocol]
-    parallel = resolve_parallel_tool_calls(
-        request.parallel_tool_calls,
-        request.sampling_params.extra_args,
-    )
     return {
         "type": "structural_tag",
         "format": {
             "type": "triggered_tags",
             "triggers": [trigger],
             "tags": tags,
-            "at_least_one": choice == "required" or isinstance(choice, Mapping),
+            "at_least_one": at_least_one,
             "stop_after_first": protocol == "llama" or parallel is False,
             "excludes": [],
         },

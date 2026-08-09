@@ -7,6 +7,7 @@ import torch
 
 import kairyu.kernels.deepseek_v4_moe_gpu as moe_gpu
 import kairyu.models.deepseek_v4_cache as cache_module
+from kairyu.engine.core.deepseek_v4_runner import DeepseekV4DistributedRunner
 from kairyu.models.deepseek_v4_cache import (
     CompressedAttentionState,
     PackedFP4IndexerCache,
@@ -15,6 +16,28 @@ from kairyu.models.deepseek_v4_cache import (
     make_deepseek_v4_cache,
 )
 from kairyu.quant.nvfp4 import E2M1_LUT
+
+
+def test_attention_dp_empty_rank_still_participates_and_pads(monkeypatch) -> None:
+    runner = object.__new__(DeepseekV4DistributedRunner)
+    began: list[bool] = []
+    counts: list[int] = []
+    padding: list[bool] = []
+    runner._model = SimpleNamespace(
+        _kairyu_begin_attention_dp_phase=lambda: began.append(True)
+    )
+    monkeypatch.setattr(
+        runner,
+        "_phase_forward_count",
+        lambda local: counts.append(local) or 2,
+    )
+    monkeypatch.setattr(runner, "_padding_forward", lambda: padding.append(True))
+
+    runner._execute_phase((), {}, {}, prefill=True)
+
+    assert counts == [0]
+    assert began == [True]
+    assert padding == [True, True]
 
 
 def _dequant(packed: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:

@@ -486,6 +486,59 @@ engines:
     )
 
 
+def test_validation_accepts_deepseek_v4_official_block_fp8_metadata(tmp_path):
+    from transformers import DeepseekV4Config
+
+    model = tmp_path / "model"
+    model.mkdir()
+    config = DeepseekV4Config(
+        vocab_size=32,
+        hidden_size=16,
+        moe_intermediate_size=8,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        q_lora_rank=8,
+        num_experts_per_tok=2,
+        n_routed_experts=4,
+        n_shared_experts=1,
+        max_position_embeddings=32,
+        sliding_window=4,
+        hc_mult=2,
+        o_groups=2,
+        o_lora_rank=8,
+        index_n_heads=2,
+        index_head_dim=4,
+        index_topk=4,
+        num_nextn_predict_layers=0,
+    ).to_dict()
+    config["architectures"] = ["DeepseekV4ForCausalLM"]
+    config["quantization_config"] = {
+        "quant_method": "fp8",
+        "weight_block_size": [128, 128],
+    }
+    (model / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        f"""
+engines:
+  local:
+    backend: kairyu
+    options:
+      model_path: {model}
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert not any(
+        finding.code == "schema.incompatible_model"
+        for finding in report.findings
+    ), report.render_text()
+
+
 def test_validation_rejects_invalid_local_model_artifacts(tmp_path):
     from safetensors.torch import save_file
 

@@ -9,7 +9,7 @@ from kairyu.entrypoints.server.chat_service import _parse_tool_calls
 
 pytest.importorskip("xgrammar")
 
-_VOCAB = [chr(codepoint) for codepoint in range(32, 127)] + ["\n", "<eos>"]
+_VOCAB = [chr(codepoint) for codepoint in range(32, 127)] + ["\n", "｜", "<eos>"]
 
 
 def _tool(name: str, *, strict: bool) -> dict[str, object]:
@@ -87,6 +87,35 @@ def test_native_strict_tool_builds_parser_matched_structural_tag(
     )
 
 
+def test_deepseek_v4_strict_tool_builds_nested_dsml_structural_tag():
+    request = GenerationRequest(
+        "strict-deepseek",
+        "prompt",
+        SamplingParams(),
+        tools=(_tool("strict_tool", strict=True),),
+        tool_choice="required",
+        tool_call_protocol="deepseek_v4",
+    )
+
+    response_format = native_sampling_params(request).extra_args[
+        "response_format"
+    ]
+    grammar_format = response_format["format"]
+    outer = grammar_format["tags"][0]
+    invoke = outer["content"]["tags"][0]
+
+    assert grammar_format["triggers"] == ["<｜DSML｜tool_calls>"]
+    assert outer["begin"] == "<｜DSML｜tool_calls>\n"
+    assert outer["end"] == "</｜DSML｜tool_calls>"
+    assert invoke["begin"] == '<｜DSML｜invoke name="strict_tool">\n'
+    assert invoke["content"]["style"] == "deepseek_xml"
+    XGrammarEnforcer(
+        _VOCAB,
+        structural_tag=response_format,
+        stop_token_id=len(_VOCAB) - 1,
+    )
+
+
 @pytest.mark.parametrize("protocol", ["generic", "llama", "qwen"])
 def test_non_strict_tool_arguments_remain_unconstrained_in_mixed_request(
     protocol,
@@ -136,6 +165,13 @@ def test_non_strict_tool_arguments_remain_unconstrained_in_mixed_request(
             "<tool_call>\n<function=strict_tool>\n<parameter=value>\n1\n"
             "</parameter>\n</function>\n</tool_call>",
             ToolCallProtocol.QWEN,
+        ),
+        (
+            "deepseek_v4",
+            '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="strict_tool">\n'
+            '<｜DSML｜parameter name="value" string="false">1'
+            '</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>',
+            ToolCallProtocol.DEEPSEEK_V4,
         ),
     ],
 )

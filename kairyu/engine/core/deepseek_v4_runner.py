@@ -90,10 +90,10 @@ class DeepseekV4DistributedRunner(NativeFrontierModelRunner):
         *,
         prefill: bool,
     ) -> None:
-        if not chunks:
+        agreed = self._phase_forward_count(len(chunks))
+        if agreed == 0:
             return
         self._model._kairyu_begin_attention_dp_phase()
-        agreed = self._phase_forward_count(len(chunks))
         if agreed < len(chunks):
             raise RuntimeError("DeepSeek V4 Attention-DP forward-count agreement regressed")
         for chunk in chunks:
