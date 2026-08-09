@@ -18,8 +18,8 @@ preserving the affected command and evidence paths.
 | Measurement and decision artifacts | `bench/results/` | Repository-only and never shipped in a wheel; routine output is ignored, while explicitly reviewed formal evidence may be retained by Git |
 | Tests | `tests/` | Repository-only and never shipped in a wheel |
 
-The default Fugu result location remains `bench/results/fugu/` for command
-compatibility; Core defaults to `bench/results/core/`, and the fixed seven-arm
+The default Accuracy result location is `bench/results/accuracy/`; Core defaults
+to `bench/results/core/`, and the fixed seven-arm
 task-accuracy suite defaults to `bench/results/quantization/`. The dedicated
 structured-output suite defaults to `bench/results/structured/`. For an
 installed CLI used outside this repository, these are paths relative to the

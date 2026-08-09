@@ -833,7 +833,7 @@ tokens_per_minute=200_000)}))`。
 ## 8. ベンチマーク
 
 `kairyu bench` は、デプロイ済みゲートウェイに対して回答品質スイートを実行します。
-既定は Fugu リリースの 11 ベンチマークで、`--suite core` は決定論的な
+既定は Sakana の Fugu リリース表に基づく 11 ベンチマークの Accuracy スイートで、`--suite core` は決定論的な
 GSM8K/MMLU/IFEval 回帰スイート、`--suite structured` は固定 5 ケースの
 JSON Schema 適合性コーパスを選択します。単一モデルとオーケストレーション
 ティアはスコアボードの列として並びます:

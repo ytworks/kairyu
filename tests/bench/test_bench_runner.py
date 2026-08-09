@@ -910,10 +910,10 @@ async def test_clean_real_data_run_is_indexed_once_and_rerun_is_preflighted(
     assert index_path.read_bytes() == first_bytes
 
 
-async def test_full_fugu_history_stamps_safe_and_withheld_cross_run_cells(
+async def test_full_accuracy_history_stamps_safe_and_withheld_cross_run_cells(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters import FUGU_ROW_ORDER, suite_adapters
+    from kairyu.bench.adapters import ACCURACY_ROW_ORDER, suite_adapters
     from kairyu.bench.adapters.base import cache_pins, evaluation_protocol_identity
 
     run_calls: dict[str, int] = {}
@@ -955,14 +955,14 @@ async def test_full_fugu_history_stamps_safe_and_withheld_cross_run_cells(
     config = make_config(
         tmp_path,
         models=("m",),
-        suite="fugu",
+        suite="accuracy",
         offline_fixtures=False,
         download=False,
         smoke=False,
         limit=None,
     )
     cache = BenchCache(Path(config.cache_dir))
-    for adapter in suite_adapters("fugu"):
+    for adapter in suite_adapters("accuracy"):
         if adapter.info.hf_dataset is not None:
             cache.write_rows(adapter.info.name, [], cache_pins(adapter.info))
 
@@ -972,9 +972,9 @@ async def test_full_fugu_history_stamps_safe_and_withheld_cross_run_cells(
     scoreboard = json.loads((store.run_dir / "scoreboard.json").read_text(encoding="utf-8"))
     unresolved = {"swe-bench-pro", "terminal-bench", "tau-bench-banking"}
     unpinned_execution = {"livecodebench", "livecodebench-pro", "scicode"}
-    allowed = set(FUGU_ROW_ORDER) - unresolved - unpinned_execution
-    assert scoreboard["benchmarks"] == list(FUGU_ROW_ORDER)
-    assert set(run_calls) == set(FUGU_ROW_ORDER)
+    allowed = set(ACCURACY_ROW_ORDER) - unresolved - unpinned_execution
+    assert scoreboard["benchmarks"] == list(ACCURACY_ROW_ORDER)
+    assert set(run_calls) == set(ACCURACY_ROW_ORDER)
     for benchmark in allowed:
         cell = scoreboard["cells"][benchmark]["m"]
         assert (cell["cross_run_policy"], cell["cross_run_reason"]) == ("allowed", None)

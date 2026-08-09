@@ -3,12 +3,12 @@
 Status: **Implemented and merged** (2026-08-05); MMLU scoring amended by
 issue #368 as described below.
 
-Related contracts: M7 benchmark adapter/cache/result contracts and the Fugu
+Related contracts: M7 benchmark adapter/cache/result contracts and the Accuracy
 suite's existing reproducibility, degradation, resume, and reporting rules.
 
 ## 1. Goal and non-goals
 
-The existing `fugu` suite deliberately follows Sakana's 11-row release table.
+The existing `accuracy` suite deliberately follows Sakana's 11-row Fugu release table.
 Most of those rows are expensive frontier, judge, vision, generated-code, or
 agentic evaluations. Issue #367 adds a separate `core` suite for frequent,
 deterministic quality regression checks:
@@ -17,8 +17,8 @@ deterministic quality regression checks:
 2. MMLU ordered continuation-likelihood choice ranking;
 3. IFEval rule-based instruction following.
 
-`fugu` remains the default and keeps its row order, result path, published-score
-comparison, and all 11 adapters. `core` is not inserted into the Fugu table and
+`accuracy` remains the default and keeps its row order, result path, published-score
+comparison, and all 11 adapters. `core` is not inserted into the Accuracy table and
 is never compared with Fugu's published values. It reuses the same target,
 download/cache, request, retry, resume, pair evidence, scoreboard, fixture, and
 Wilson-confidence-interval contracts.
@@ -46,8 +46,8 @@ kairyu bench list --suite core
 
 When no result path is explicitly configured, a suite writes below
 `bench/results/<suite>`. Core runs write `run.json`, pair JSON, and
-`scoreboard.{json,md}` but no `comparison.{json,md}`. Fugu runs retain their
-existing comparison files. A comparison builder rejects a non-Fugu scoreboard
+`scoreboard.{json,md}` but no `comparison.{json,md}`. Accuracy runs retain their
+existing comparison files. A comparison builder rejects a non-Accuracy scoreboard
 instead of silently emitting a table full of missing reference values.
 
 All three headline item outcomes are Bernoulli values, so a complete pair may

@@ -194,8 +194,8 @@ async def test_harness_failure_reports_stderr(tmp_path, monkeypatch):
 
 
 async def test_full_suite_smoke_has_all_eleven_rows(tmp_path, http_factory):
-    """The headline guarantee: every Fugu slot appears; agentic rows skip cleanly."""
-    from kairyu.bench.adapters import FUGU_ROW_ORDER
+    """Every Accuracy slot appears and unavailable agentic rows skip cleanly."""
+    from kairyu.bench.adapters import ACCURACY_ROW_ORDER
 
     config = make_config(tmp_path, models=("m", "kairyu-auto"))
     runner = SuiteRunner(
@@ -207,7 +207,7 @@ async def test_full_suite_smoke_has_all_eleven_rows(tmp_path, http_factory):
     scoreboard = json.loads(
         (tmp_path / "results" / "test-run" / "scoreboard.json").read_text(encoding="utf-8")
     )
-    assert scoreboard["benchmarks"] == list(FUGU_ROW_ORDER)
+    assert scoreboard["benchmarks"] == list(ACCURACY_ROW_ORDER)
     store = ResultStore(tmp_path / "results", "test-run")
     for name in ("swe-bench-pro", "terminal-bench"):
         pair = store.load_pair(name, "m")

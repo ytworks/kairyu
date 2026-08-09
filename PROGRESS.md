@@ -75,7 +75,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: Fugu/Core/Quantization/Structured/Long Context suites, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
+- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 

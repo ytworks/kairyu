@@ -230,9 +230,9 @@ bench/results/*
 bench/data/
 # Cross-commit quality history is the only tracked suite-owned result. Per-run
 # directories under each suite remain ignored.
-!bench/results/fugu/
-bench/results/fugu/*
-!bench/results/fugu/scoreboards.jsonl
+!bench/results/accuracy/
+bench/results/accuracy/*
+!bench/results/accuracy/scoreboards.jsonl
 !bench/results/core/
 bench/results/core/*
 !bench/results/core/scoreboards.jsonl

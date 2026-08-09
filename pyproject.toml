@@ -89,7 +89,7 @@ bench = [
 ]
 # Official agentic harnesses (SWE-Bench Pro, Terminal-Bench 2.1); need docker.
 # Official tau-three v1.x retains the tau2 package/CLI name and is not on PyPI;
-# the Qwen Fugu wrapper installs its pinned [knowledge] source — see the guide.
+# the Qwen Accuracy wrapper installs its pinned [knowledge] source — see the guide.
 bench-agentic = [
     "mini-swe-agent>=2",
     "swebench>=4",

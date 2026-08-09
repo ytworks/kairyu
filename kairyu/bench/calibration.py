@@ -731,7 +731,7 @@ def _calibration_inputs_from_args(
         )
     return _load_bound_run(
         run,
-        results_dir=getattr(args, "results_dir", "bench/results/fugu"),
+        results_dir=getattr(args, "results_dir", "bench/results/accuracy"),
     )
 
 

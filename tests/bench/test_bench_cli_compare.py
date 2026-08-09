@@ -127,12 +127,15 @@ def test_compare_runs_rejects_a_results_root_from_another_suite(tmp_path, monkey
             "base",
             "candidate",
             "--suite",
-            "fugu",
+            "accuracy",
             "--results-dir",
             str(tmp_path),
         ]
     )
 
     assert handle(args) == 1
-    assert "belong to suite 'core', not selected suite 'fugu'" in capsys.readouterr().out
+    assert (
+        "belong to suite 'core', not selected suite 'accuracy'"
+        in capsys.readouterr().out
+    )
     assert list(tmp_path.iterdir()) == []

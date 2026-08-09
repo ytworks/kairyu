@@ -624,9 +624,9 @@ def test_huge_integer_wilson_fields_are_not_labelled_or_rendered():
 def test_run_identity_and_structure_mismatches_fail_closed(mutation, message):
     baseline, candidate = _pair()
     if mutation == "suite":
-        candidate["suite"] = "fugu"
-        candidate["scoreboard"]["suite"] = "fugu"
-        candidate["run"]["config"]["suite"] = "fugu"
+        candidate["suite"] = "accuracy"
+        candidate["scoreboard"]["suite"] = "accuracy"
+        candidate["run"]["config"]["suite"] = "accuracy"
     elif mutation == "fingerprint":
         candidate["fingerprint"] = "e" * 64
         candidate["run"]["fingerprint"] = "e" * 64

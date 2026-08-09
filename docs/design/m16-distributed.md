@@ -346,7 +346,7 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
   a two-rank gloo gate
   holds a worker receive beyond the model timeout before delivering the next
   step. Hardware validation also uses the exact
-  Qwen3-32B TP=8 / Fugu LiveCodeBench 20-item / concurrency-8 workload. The
+  Qwen3-32B TP=8 / Accuracy LiveCodeBench 20-item / concurrency-8 workload. The
   latter ran 654.53 s without a watchdog, kept `/readyz` at 200, and shut down
   with all eight GPUs returning to 0 MiB / 0% without a reset.
 - Full suite green; dist tests excluded from cov accounting by design.

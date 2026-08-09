@@ -80,7 +80,7 @@ def _board(
     target_configs=None,
     judge=None,
     judge_identity_incomplete=False,
-    suite="fugu",
+    suite="accuracy",
 ):
     return build_scoreboard(
         run_id="run-1",
@@ -147,10 +147,10 @@ def test_only_and_exclude_names_are_validated_within_the_selected_suite():
     with pytest.raises(ValueError, match="gpqa-diamond"):
         suite_adapters("core", only=("gpqa-diamond",))
     with pytest.raises(ValueError, match="gsm8k"):
-        suite_adapters("fugu", exclude=("gsm8k",))
+        suite_adapters("accuracy", exclude=("gsm8k",))
     with pytest.raises(
         ValueError,
-        match="available: fugu, core, quantization, structured, long-context",
+        match="available: accuracy, core, quantization, structured, long-context",
     ):
         suite_adapters("unknown")
 
@@ -390,7 +390,7 @@ def _write_report_fixture(
             {
                 "run_id": "report-run",
                 "config": {
-                    "suite": "fugu",
+                    "suite": "accuracy",
                     "targets": [target_config],
                     "judge": judge_config,
                 },
@@ -612,10 +612,10 @@ def test_report_preserves_valid_secondary_self_match_amid_bad_panel_members(
     assert any("independence unknown" in note for note in notes)
 
 
-def test_rows_follow_fugu_order_and_only_present_benchmarks():
+def test_rows_follow_accuracy_order_and_only_present_benchmarks():
     pairs = [
         _pair("gpqa-diamond", "m"),
-        _pair("mrcr-v2", "m"),  # later Fugu row than gpqa
+        _pair("mrcr-v2", "m"),  # later Accuracy row than gpqa
     ]
     board = _board(pairs, ["m"])
     assert board["benchmarks"] == ["gpqa-diamond", "mrcr-v2"]

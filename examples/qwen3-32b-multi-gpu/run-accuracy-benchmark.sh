@@ -1,6 +1,6 @@
 #!/bin/sh
 # One command: start Qwen3-32B on every visible GPU, wait for readiness, run the
-# Fugu quality suite, and print the accuracy report against the published Fugu
+# Accuracy suite, and print the accuracy report against the published Fugu
 # scores.
 set -eu
 
@@ -35,5 +35,5 @@ else
   printf '[startup] ready after %ss\n' "$elapsed_s"
 fi
 
-printf '[fugu] starting quality suite\n'
-exec ./fugu-benchmark.sh
+printf '[accuracy] starting quality suite\n'
+exec ./accuracy-benchmark.sh

@@ -103,7 +103,7 @@ def _run(
         else ExecutionConfig()
     )
     config = BenchConfig(
-        suite="core" if benchmark in {"gsm8k", "mmlu"} else "fugu",
+        suite="core" if benchmark in {"gsm8k", "mmlu"} else "accuracy",
         targets=(target,),
         only=(benchmark,),
         run_id=run_id,

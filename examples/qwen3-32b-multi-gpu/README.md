@@ -128,7 +128,7 @@ discovery, paired direct/AUTO TTFT, per-tier scores, actual internal call and
 token totals from the structured trace, and allocated GPU-seconds. This is a
 fixed subset gate, not a claim about full-suite LiveCodeBench accuracy.
 
-## Answer quality: the Fugu suite
+## Answer quality: the Accuracy suite
 
 The commands above measure throughput. To measure *answers* — all eleven
 benchmarks from Sakana's Fugu release table, then an accuracy report against
@@ -136,7 +136,7 @@ their published scores — start the service and run the suite with one command:
 
 ```console
 export HF_TOKEN=hf_...
-./examples/qwen3-32b-multi-gpu/run-fugu-benchmark.sh
+./examples/qwen3-32b-multi-gpu/run-accuracy-benchmark.sh
 ```
 
 It starts Qwen3-32B on every visible GPU (reusing an already-running service),
@@ -148,9 +148,9 @@ checkpoint-owned HF chat template directly from the local tokenizer directory
 extracts nor materializes a temporary template file, and no stale template copy
 is committed. Progress is reported per slot and per item while it runs.
 
-Two artifacts land under `results/fugu/<run_id>/`:
+Two artifacts land under `results/accuracy/<run_id>/`:
 
-- `scoreboard.md` — the Fugu-layout table of what was measured,
+- `scoreboard.md` — the Accuracy-suite table of what was measured,
 - `comparison.md` — each cell next to the published Fugu / Fugu Ultra /
   Opus 4.8 / Gemini 3.1 Pro / GPT 5.5 values, with the delta and every reason a
   delta may not mean parity.
@@ -161,7 +161,7 @@ operator setting is `HF_TOKEN`:
 
 ```console
 export HF_TOKEN=hf_...
-./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh
+./examples/qwen3-32b-multi-gpu/accuracy-benchmark.sh
 ```
 
 If `HF_TOKEN` is already exported in the machine environment, run only the
@@ -181,10 +181,10 @@ thousands of judged items (HLE alone is 2,500) and takes hours. The cap is
 announced on every run and recorded in the scoreboard's item counts.
 
 ```console
-BENCH_LIMIT=0 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh          # full suite
-BENCH_ONLY=gpqa-diamond,mrcr-v2 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh
-ATTEMPTS=4 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh
-OFFLINE_FIXTURES=1 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh     # plumbing only
+BENCH_LIMIT=0 ./examples/qwen3-32b-multi-gpu/accuracy-benchmark.sh          # full suite
+BENCH_ONLY=gpqa-diamond,mrcr-v2 ./examples/qwen3-32b-multi-gpu/accuracy-benchmark.sh
+ATTEMPTS=4 ./examples/qwen3-32b-multi-gpu/accuracy-benchmark.sh
+OFFLINE_FIXTURES=1 ./examples/qwen3-32b-multi-gpu/accuracy-benchmark.sh     # plumbing only
 ```
 
 | Variable | Default | Meaning |
@@ -196,7 +196,7 @@ OFFLINE_FIXTURES=1 ./examples/qwen3-32b-multi-gpu/fugu-benchmark.sh     # plumbi
 | `JUDGE_EXTRA_BODY` | Qwen thinking disabled | JSON merged into judge / τ user-simulator requests |
 | `MODEL` / `JUDGE_MODEL` | `qwen3-32b` | Served model ids |
 | `BENCH_CONCURRENCY` | `8` | In-flight requests |
-| `RESULTS_DIR` / `RUN_ID` | `results/fugu`, timestamp | Where evidence lands; reuse a `RUN_ID` to resume |
+| `RESULTS_DIR` / `RUN_ID` | `results/accuracy`, timestamp | Where evidence lands; reuse a `RUN_ID` to resume |
 | `OFFLINE_FIXTURES` | — | Synthetic stand-in data: checks the plumbing, scores are meaningless |
 | `VISION` | — | Declare the target vision-capable (see below) |
 | `PORT` | `8001` | Host port; reaches the Compose mapping, so a custom value really is where the service listens |

@@ -2,7 +2,7 @@
 
 One command runs an installed answer-quality suite against a deployed Kairyu
 gateway — single models and orchestrations side by side — then writes a dated,
-footnoted scoreboard. The default `fugu` suite runs every benchmark from
+footnoted scoreboard. The default `accuracy` suite runs every benchmark from
 Sakana's Fugu release table
 ([sakana.ai/fugu-release](https://sakana.ai/fugu-release/)) against a deployed
 gateway. The `core` suite provides judge-free, Docker-free GSM8K, MMLU, and
@@ -162,7 +162,7 @@ kairyu bench run --base-url http://localhost:8000/v1 \
     --model m1 --model kairyu-auto --model kairyu-auto-max
 
 # or config-driven (targets + judge in one file, CLI flags still override):
-kairyu bench run --config examples/bench_fugu.yaml
+kairyu bench run --config examples/bench_accuracy.yaml
 
 # deterministic core regression suite (60 requests with the smoke preset):
 kairyu bench run --suite core --smoke \
@@ -187,13 +187,13 @@ kairyu bench run --suite long-context \
     --max-context-tokens 131072
 ```
 
-Results land in `bench/results/fugu/<run_id>/`:
+Results land in `bench/results/accuracy/<run_id>/`:
 
 ```
 run.json                                      # fingerprint + identity + config + environment
 <benchmark>--<sha16>/<target>--<sha16>.json   # one PairResult per scoreboard cell
 scoreboard.json                               # machine-readable table
-scoreboard.md                                 # Fugu-layout table (also printed to stdout)
+scoreboard.md                                 # Accuracy-suite table (also printed to stdout)
 comparison.json                               # measured vs published, machine-readable
 comparison.md                                 # accuracy report vs the Fugu release table
 config-comparison.json                        # optional config A/B gate artifact
@@ -362,7 +362,7 @@ kairyu bench compare --suite core \
 Or use different run IDs when the deployments cannot be measured in one run:
 
 ```bash
-kairyu bench compare --suite fugu \
+kairyu bench compare --suite accuracy \
     --baseline qwen3-bf16 --candidate qwen3-fp8 \
     --tolerance gpqa-diamond=2.0 --tolerance scicode=1.0
 ```
@@ -529,7 +529,7 @@ the package revision
 `sha256:a40b41e1f91f6f33803a55ab4967c75d610dc82d2c14fc11d03c19ace45b05be`,
 and loading fails if that digest changes. This content SHA-256 is deliberately a
 different provenance mechanism from the immutable HF Git commit pins used by
-downloaded Fugu/Core datasets: a Git revision identifies a repository snapshot,
+downloaded Accuracy/Core datasets: a Git revision identifies a repository snapshot,
 whereas this digest identifies the exact JSONL bytes shipped in the wheel. Both
 the corpus and the `jsonschema` evaluator distribution are included in the run
 identity and fresh-history validation.
@@ -659,7 +659,7 @@ all gates passed, exit 1 is a valid retained quality failure, and exit 2 means
 the input or evidence was invalid. The complete design is in
 [`docs/design/issue-372-quantization-sweep.md`](design/issue-372-quantization-sweep.md).
 
-## The 11 Fugu slots
+## The 11 Accuracy slots
 
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
@@ -771,7 +771,7 @@ the statement of what each helper was for.
 
 ## Live progress
 
-A full Fugu run is thousands of judged items across eleven slots and can take
+A full Accuracy run is thousands of judged items across eleven slots and can take
 hours; a full Core run is 15,902 target calls. The runner therefore reports
 what it is doing for either suite:
 
@@ -806,7 +806,7 @@ scoreboard, and the accuracy report when the suite has one) to **stdout**, so
 
 ## Accuracy report vs the published Fugu scores
 
-Every Fugu run also writes `comparison.md` / `comparison.json` (and prints the
+Every Accuracy run also writes `comparison.md` / `comparison.json` (and prints the
 report), placing each measured cell next to the values published on
 [sakana.ai/fugu-release](https://sakana.ai/fugu-release/) — Fugu, Fugu Ultra,
 Opus 4.8, Gemini 3.1 Pro, GPT 5.5, plus the Fable 5 / Mythos Preview columns
@@ -1049,7 +1049,7 @@ so each maps what its harness exposes and annotates what it cannot forward.
 `temperature` and `sampling_mode: recommended` are chat-only: all three
 external-harness rows fail closed as skipped when either is selected, because
 their pinned wrappers expose no verified equivalent. Run those rows separately
-with the default target policy. A full Fugu chat sensitivity run can use
+with the default target policy. A full Accuracy chat sensitivity run can use
 `--exclude swe-bench-pro,terminal-bench,tau-bench-banking`; SWE-Bench Pro also
 requires `attempts: 1`, while Harbor and τ interpret a larger attempt budget as
 their own harness trial count rather than as the grouped seed protocol below.
@@ -1165,8 +1165,8 @@ Before promoting a headline run, bind calibration directly to its immutable
 
 ```bash
 kairyu bench calibrate-judge \
-  --run 20260804-headline --results-dir bench/results/fugu \
-  --output bench/results/fugu/20260804-headline/judge-calibration.json
+  --run 20260804-headline --results-dir bench/results/accuracy \
+  --output bench/results/accuracy/20260804-headline/judge-calibration.json
 ```
 
 The command recomputes the run fingerprint from its recorded identity, verifies
@@ -1287,7 +1287,7 @@ therefore skips unless `attempts: 1`.
 
 ## Scale and cost
 
-The full Fugu suite is expensive by design (HLE alone is ~2500 judged items per
+The full Accuracy suite is expensive by design (HLE alone is ~2500 judged items per
 target). Core avoids judges, Docker, and vision, but its complete MMLU population
 still makes 14,042 requests. Published request counts assume `attempts: 1`;
 increasing it multiplies generated-chat requests while teacher-forced MMLU keeps

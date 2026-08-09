@@ -272,7 +272,7 @@ def test_pins_do_not_mutate_the_class_attribute():
 def test_pinned_slots_exist_in_a_suite(name):
     suite_slots = {
         adapter.info.name
-        for suite in ("fugu", "core", "quantization")
+        for suite in ("accuracy", "core", "quantization")
         for adapter in suite_adapters(suite)
     }
     assert name in suite_slots
@@ -289,7 +289,7 @@ def test_pin_change_moves_the_run_fingerprint(tmp_path, monkeypatch):
     cache = BenchCache(tmp_path / "cache")
 
     def fingerprint() -> str:
-        adapters = suite_adapters("fugu", only=("mrcr-v2",))
+        adapters = suite_adapters("accuracy", only=("mrcr-v2",))
         identities = [
             _adapter_identity(adapter, cache, offline_fixtures=False)
             for adapter in adapters

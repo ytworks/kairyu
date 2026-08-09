@@ -832,7 +832,7 @@ def run_banner(scoreboard: dict) -> list[str]:
 
 def render_markdown(scoreboard: dict) -> str:
     targets = scoreboard["targets"]
-    definition = suite_info(scoreboard.get("suite", "fugu"))
+    definition = suite_info(scoreboard.get("suite", "accuracy"))
     adapters = all_adapters()
     has_sampling = any(
         _stored_sampling_sensitivity(
