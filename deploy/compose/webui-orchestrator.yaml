@@ -25,9 +25,9 @@ roles:
     role_type: synthesizer
     prompt: >-
       [synthesizer] Produce the final answer.
-      Task: {query}
       Draft: {worker}
       Notes: {verifier}
+      Task: {query}
     depends_on: [worker, verifier]
 
 budget:

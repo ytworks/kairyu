@@ -813,6 +813,16 @@ def validate_orchestration_chat_input(
         sort_keys=True,
         separators=(",", ":"),
     )
+    current_user = next(
+        (
+            message.display_content
+            for message in reversed(prepared.messages)
+            if message.role == "user"
+        ),
+        "",
+    )
+    if current_user:
+        prompt += "\nCurrent user request:\n" + current_user
     return ValidatedChatInput(
         request=request,
         prompt=prompt,

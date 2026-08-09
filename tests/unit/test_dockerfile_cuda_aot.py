@@ -35,7 +35,11 @@ def test_docker_build_checks_the_scoped_aot_override_was_applied() -> None:
 
 
 def test_runtime_payload_is_revision_independent_and_nonroot_cache_safe() -> None:
-    payload = "FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04 AS runtime-payload"
+    payload = (
+        "FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04@sha256:"
+        "c3fde347d52d578c84fd644bc177bc7ec333feaf11550d990da4084d7612e4c7 "
+        "AS runtime-payload"
+    )
     final = "FROM runtime-payload AS base"
 
     assert payload in _DOCKERFILE

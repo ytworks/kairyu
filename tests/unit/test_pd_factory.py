@@ -1442,6 +1442,13 @@ def test_pd_role_options_do_not_shift_legacy_backend_positionals():
         "generation_config",
         "draft_model_path",
         "nvfp4_accuracy_profile",
+        "execution_mode",
+        "prefix_state_capacity_bytes",
+        "model_revision",
+        "quantization_format",
+        "container_image_digest",
+        "mtp_enabled",
+        "dspark_enabled",
     )
     assert parameters["max_num_partial_prefills"].default == 2
     assert parameters["expert_parallel_attention_dp"].default is False

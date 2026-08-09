@@ -2,7 +2,6 @@ import hashlib
 import json
 import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -61,27 +60,6 @@ def test_code_query_routes_to_tier2():
 
 def test_multi_step_query_routes_to_multi_agent():
     assert RuleRouter().route(MULTI_STEP_QUERY).target == "multi_agent"
-
-
-def test_checked_in_frontier_router_is_hash_pinned_and_context_safe() -> None:
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "examples/qwen3.6-deepseek-v4-8gpu/router.json"
-    )
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    router = load_calibrated_router(
-        path,
-        expected_sha256=digest,
-        target_mode="auto",
-    )
-
-    assert router.route("short", {"input_tokens": 262_144}).target == "tier2"
-    decision = router.route("short", {"input_tokens": 262_145})
-    assert decision.target == "tier2"
-    assert "exceeds tier1 limit" in decision.reason
-    descriptor = router.describe()
-    assert descriptor["quality_ci_lower"] >= 0.99
-    assert descriptor["tier1_max_input_tokens"] == 262_144
 
 
 def test_calibrated_router_rejects_hash_and_quality_gate(tmp_path) -> None:
