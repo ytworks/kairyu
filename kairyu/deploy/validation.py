@@ -605,19 +605,40 @@ def _validate_model(
     if config is not None:
         try:
             model_config = parse_model_config(config)
-            quant_config = load_checkpoint_quantization(model_dir, config).weights
-            validate_model_quantization(
-                quant_config,
-                is_mla=model_config.is_mla,
-                architecture=model_config.architecture,
+            from kairyu.models.loader import (
+                declared_quantization_config,
+                reference_quant_loader_kind,
             )
-            (
-                expected_checkpoint_shapes,
-                expected_checkpoint_shard_dims,
-            ) = _expected_checkpoint_contract(
-                model_config,
-                quant_config,
+            declared_quant = declared_quantization_config(config)
+            quant_source = (
+                {**config, "quantization_config": declared_quant}
+                if declared_quant is not None
+                else config
             )
+            reference_loader = reference_quant_loader_kind(
+                config, model_config.architecture
+            )
+            if reference_loader is None:
+                quant_config = load_checkpoint_quantization(
+                    model_dir, quant_source
+                ).weights
+            if not model_config.requires_full_recompute:
+                validate_model_quantization(
+                    quant_config,
+                    is_mla=model_config.is_mla,
+                    architecture=model_config.architecture,
+                )
+                (
+                    expected_checkpoint_shapes,
+                    expected_checkpoint_shard_dims,
+                ) = _expected_checkpoint_contract(
+                    model_config,
+                    quant_config,
+                )
+            elif reference_loader is None and quant_config.method is not QuantMethod.NONE:
+                raise ValueError(
+                    "reference execution requires an unquantized checkpoint"
+                )
         except Exception:
             findings.append(
                 _finding(
@@ -725,6 +746,13 @@ def _validate_model(
         and not isinstance(tensor_parallel_size, bool)
     ):
         try:
+            if (
+                model_config.requires_full_recompute
+                and tensor_parallel_size != 1
+            ):
+                raise ValueError(
+                    "hybrid reference execution is single-device only"
+                )
             validate_tensor_parallel_config(
                 model_config,
                 tensor_parallel_size,

@@ -18,9 +18,36 @@ _SUPPORTED_ARCHITECTURES = (
     "Qwen3ForCausalLM",
     "Qwen3MoeForCausalLM",
     "DeepseekV3ForCausalLM",
+    "DeepseekV4ForCausalLM",
+    "Qwen3_5ForCausalLM",
+    "Qwen3_5ForConditionalGeneration",
+    "Qwen3_5MoeForCausalLM",
+    "Qwen3_5MoeForConditionalGeneration",
+    "KimiLinearForCausalLM",
+    "KimiK3ForConditionalGeneration",
 )
 
-_MOE_ARCHITECTURES = ("Qwen3MoeForCausalLM", "DeepseekV3ForCausalLM")
+_MOE_ARCHITECTURES = (
+    "Qwen3MoeForCausalLM",
+    "DeepseekV3ForCausalLM",
+    "DeepseekV4ForCausalLM",
+    "Qwen3_5MoeForCausalLM",
+    "Qwen3_5MoeForConditionalGeneration",
+    "KimiLinearForCausalLM",
+    "KimiK3ForConditionalGeneration",
+)
+
+_REFERENCE_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV4ForCausalLM",
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+        "KimiLinearForCausalLM",
+        "KimiK3ForConditionalGeneration",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -116,7 +143,19 @@ class ModelConfig:
     @property
     def qk_norm(self) -> bool:
         # A8: Qwen3-MoE attention is source-identical to Qwen3
-        return self.architecture in ("Qwen3ForCausalLM", "Qwen3MoeForCausalLM")
+        return self.architecture in (
+            "Qwen3ForCausalLM",
+            "Qwen3MoeForCausalLM",
+            "Qwen3_5ForCausalLM",
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5MoeForCausalLM",
+            "Qwen3_5MoeForConditionalGeneration",
+        )
+
+    @property
+    def requires_full_recompute(self) -> bool:
+        """Whether this architecture uses the correctness-first sequence runner."""
+        return self.architecture in _REFERENCE_ARCHITECTURES
 
     @property
     def is_mla(self) -> bool:
@@ -181,7 +220,11 @@ def validate_tensor_parallel_config(config: ModelConfig, tp: int) -> None:
         )
 
 
-def _rope_fields(config: dict) -> tuple[float, RopeScaling | None]:
+def _rope_fields(
+    config: dict,
+    *,
+    allow_unsupported: bool = False,
+) -> tuple[float, RopeScaling | None]:
     """Both generations: rope_parameters (nested theta) or rope_scaling + theta."""
     parameters = config.get("rope_parameters") or config.get("rope_scaling") or {}
     theta = config.get("rope_theta", parameters.get("rope_theta", 10000.0))
@@ -210,7 +253,7 @@ def _rope_fields(config: dict) -> tuple[float, RopeScaling | None]:
                 config.get("max_position_embeddings", 4096),
             ),
         )
-    elif kind not in (None, "default"):
+    elif kind not in (None, "default") and not allow_unsupported:
         # unsupported kinds (linear/dynamic/longrope) must fail fast, not be
         # silently dropped to None — that would load fine and then generate
         # confidently wrong tokens vs hf.generate (M3), a silent parity break
@@ -239,10 +282,18 @@ def _moe_fields(config: dict, architecture: str) -> MoeConfig | None:
     # A trimmed/distilled config that omits these keys must fall back to the
     # SAME defaults as the reference HF config for the architecture (M2), or the
     # block routes unnormalized/unscaled where hf.generate normalizes and scales.
-    is_deepseek = architecture == "DeepseekV3ForCausalLM"
+    is_deepseek = architecture in (
+        "DeepseekV3ForCausalLM",
+        "DeepseekV4ForCausalLM",
+    )
+    experts_per_token = config.get("num_experts_per_tok")
+    if experts_per_token is None:
+        experts_per_token = config.get("num_experts_per_token")
+    if experts_per_token is None:
+        raise ValueError("MoE config missing num_experts_per_tok")
     return MoeConfig(
         num_experts=int(num_experts),
-        num_experts_per_tok=int(config["num_experts_per_tok"]),
+        num_experts_per_tok=int(experts_per_token),
         moe_intermediate_size=int(config["moe_intermediate_size"]),
         norm_topk_prob=bool(config.get("norm_topk_prob", is_deepseek)),
         decoder_sparse_step=int(config.get("decoder_sparse_step", 1)),
@@ -252,7 +303,9 @@ def _moe_fields(config: dict, architecture: str) -> MoeConfig | None:
         routed_scaling_factor=float(
             config.get("routed_scaling_factor", 2.5 if is_deepseek else 1.0)
         ),
-        n_shared_experts=int(config.get("n_shared_experts") or 0),
+        n_shared_experts=int(
+            config.get("n_shared_experts") or config.get("num_shared_experts") or 0
+        ),
         first_k_dense_replace=int(config.get("first_k_dense_replace", 3 if is_deepseek else 0)),
     )
 
@@ -296,7 +349,21 @@ def parse_model_config(config: dict) -> ModelConfig:
         raise ValueError(
             f"unsupported architecture {architecture!r}; supported: {supported}"
         )
-    if config.get("sliding_window") and config.get("use_sliding_window", True):
+    outer_config = config
+    if architecture in (
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+        "KimiK3ForConditionalGeneration",
+    ):
+        text_config = config.get("text_config")
+        if not isinstance(text_config, dict):
+            raise ValueError(f"{architecture} requires a text_config object")
+        config = text_config
+    if (
+        architecture not in _REFERENCE_ARCHITECTURES
+        and config.get("sliding_window")
+        and config.get("use_sliding_window", True)
+    ):
         raise ValueError("sliding-window attention is not supported (m12 §3)")
     hidden_size = _required_int(config, "hidden_size", minimum=1)
     heads = _required_int(config, "num_attention_heads", minimum=1)
@@ -304,12 +371,20 @@ def parse_model_config(config: dict) -> ModelConfig:
     num_key_value_heads = config.get("num_key_value_heads", heads)
     if type(num_key_value_heads) is not int or num_key_value_heads < 1:
         raise ValueError("num_key_value_heads must be an integer >= 1")
-    intermediate_size = _required_int(config, "intermediate_size", minimum=1)
+    intermediate_field = (
+        "intermediate_size"
+        if "intermediate_size" in config
+        else "moe_intermediate_size"
+    )
+    intermediate_size = _required_int(config, intermediate_field, minimum=1)
     vocab_size = _required_int(config, "vocab_size", minimum=1)
     max_position_embeddings = config.get("max_position_embeddings", 4096)
     if type(max_position_embeddings) is not int or max_position_embeddings < 1:
         raise ValueError("max_position_embeddings must be an integer >= 1")
-    rope_theta, rope_scaling = _rope_fields(config)
+    rope_theta, rope_scaling = _rope_fields(
+        config,
+        allow_unsupported=architecture in _REFERENCE_ARCHITECTURES,
+    )
     mla = _mla_fields(config, architecture)
     # A7: DeepSeek saved configs carry head_dim == qk_rope_head_dim; hub
     # originals omit it — for MLA the GQA head_dim is never used, so pin it
@@ -331,8 +406,16 @@ def parse_model_config(config: dict) -> ModelConfig:
         rms_norm_eps=config.get("rms_norm_eps", 1e-6),
         rope_theta=rope_theta,
         rope_scaling=rope_scaling,
-        tie_word_embeddings=config.get("tie_word_embeddings", False),
-        dtype=config.get("dtype") or config.get("torch_dtype") or "float32",
+        tie_word_embeddings=outer_config.get(
+            "tie_word_embeddings", config.get("tie_word_embeddings", False)
+        ),
+        dtype=(
+            outer_config.get("dtype")
+            or outer_config.get("torch_dtype")
+            or config.get("dtype")
+            or config.get("torch_dtype")
+            or "float32"
+        ),
         max_position_embeddings=max_position_embeddings,
         moe=_moe_fields(config, architecture),
         mla=mla,

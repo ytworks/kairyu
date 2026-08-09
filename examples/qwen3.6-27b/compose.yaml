@@ -3,9 +3,8 @@ name: kairyu-qwen3-6-27b
 services:
   vllm:
     # Same pinned stock-vLLM image as deploy/compose/docker-compose.webui-vlm.yaml.
-    # Qwen3.6-27B is Qwen3_5ForConditionalGeneration (hybrid Gated DeltaNet), an
-    # architecture outside Kairyu's native engine zoo, so the checkpoint runs on
-    # stock vLLM and Kairyu fronts it as a pool — the Qwen3-VL-32B pattern.
+    # Kairyu's text reference path is single-device; this TP8 production
+    # topology stays on stock vLLM and Kairyu fronts it as a pool.
     image: >-
       vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404@sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8
     ipc: host

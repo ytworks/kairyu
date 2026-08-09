@@ -1694,6 +1694,7 @@ engine = [
     { name = "safetensors" },
     { name = "tokenizers" },
     { name = "torch" },
+    { name = "transformers" },
     { name = "xgrammar" },
 ]
 flashattention4 = [
@@ -1784,6 +1785,7 @@ requires-dist = [
     { name = "tokenizers", marker = "extra == 'engine'", specifier = ">=0.21.1" },
     { name = "tokenizers", marker = "extra == 'hf'", specifier = ">=0.21.1" },
     { name = "torch", marker = "extra == 'engine'", specifier = ">=2.6" },
+    { name = "transformers", marker = "extra == 'engine'", specifier = ">=5.12,<5.13" },
     { name = "tqdm", marker = "extra == 'bench'", specifier = ">=4.66" },
     { name = "triton", marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=3.0" },
     { name = "uvicorn", specifier = ">=0.30" },

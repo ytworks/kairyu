@@ -66,6 +66,43 @@ def build_model(
     )
 
 
+def declared_quantization_config(raw_config: dict) -> dict | None:
+    """Return the effective outer or nested checkpoint quantization config."""
+    text_config = raw_config.get("text_config")
+    nested_quant = (
+        text_config.get("quantization_config")
+        if isinstance(text_config, dict)
+        else None
+    )
+    declared_quant = raw_config.get("quantization_config") or nested_quant
+    return declared_quant if isinstance(declared_quant, dict) else None
+
+
+def reference_quant_loader_kind(
+    raw_config: dict,
+    architecture: str,
+) -> str | None:
+    """Return the official loader for one published reference checkpoint."""
+
+    declared_quant = declared_quantization_config(raw_config)
+    if declared_quant is None:
+        return None
+    method = str(declared_quant.get("quant_method", "")).lower()
+    if (
+        architecture == "DeepseekV4ForCausalLM"
+        and method == "fp8"
+        and declared_quant.get("weight_block_size") is not None
+    ):
+        return "deepseek-v4-block-fp8"
+    if (
+        architecture in ("KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+        and method == "compressed-tensors"
+        and str(declared_quant.get("format", "")).lower() == "mxfp4-pack-quantized"
+    ):
+        return "kimi-k3-mxfp4"
+    return None
+
+
 def load_model(
     path: str | Path,
     dtype: torch.dtype = torch.float32,
@@ -76,7 +113,7 @@ def load_model(
     linear_selection_policy=None,
     nvfp4_accuracy_profile=None,
     generation_config: GenerationConfigMode = "auto",
-) -> tuple[DenseDecoder, ModelConfig, GenerationDefaults]:
+) -> tuple[torch.nn.Module, ModelConfig, GenerationDefaults]:
     from kairyu.quant.linear import linear_factory
 
     directory = Path(path)
@@ -89,8 +126,60 @@ def load_model(
         raw_config,
         generation_config,
     )
-    quant = load_checkpoint_quantization(directory, raw_config).weights
     config = parse_model_config(raw_config)
+    declared_quant = declared_quantization_config(raw_config)
+    if config.requires_full_recompute:
+        if linear_selection_policy is not None:
+            raise ValueError(
+                "hybrid reference execution does not support linear_selection_policy"
+            )
+        if nvfp4_accuracy_profile is not None:
+            raise ValueError(
+                "hybrid reference execution does not support nvfp4_accuracy_profile"
+            )
+    reference_quant_loader = reference_quant_loader_kind(
+        raw_config, config.architecture
+    )
+    if reference_quant_loader == "deepseek-v4-block-fp8":
+        from kairyu.models.reference import load_deepseek_public_decoder
+
+        model = load_deepseek_public_decoder(
+            directory,
+            raw_config,
+            config,
+            dtype=dtype,
+        )
+        return model, config, generation
+    if reference_quant_loader == "kimi-k3-mxfp4":
+        from kairyu.models.reference import load_kimi_public_decoder
+
+        model = load_kimi_public_decoder(
+            directory,
+            config,
+            dtype=dtype,
+        )
+        return model, config, generation
+    quant_config = (
+        {**raw_config, "quantization_config": declared_quant}
+        if declared_quant is not None
+        else raw_config
+    )
+    quant = load_checkpoint_quantization(directory, quant_config).weights
+    if config.requires_full_recompute:
+        if quant.method is not QuantMethod.NONE:
+            raise ValueError(
+                f"{config.architecture} reference execution currently requires "
+                "an unquantized checkpoint"
+            )
+        from kairyu.models.reference import load_reference_decoder
+
+        model = load_reference_decoder(
+            directory,
+            raw_config,
+            config,
+            dtype=dtype,
+        )
+        return model, config, generation
     validate_model_quantization(
         quant,
         is_mla=config.is_mla,

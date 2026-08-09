@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-08. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-09. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -71,6 +71,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - `kairyu serve --tp N` on real hardware: Qwen3-32B TP8, Llama-3.1-8B, Llama-3.3-70B FP8, Qwen3-VL-32B (via vLLM replica)
 - Attention backends: `auto`/torch/FlashInfer/FA3/FA4 with `/backends` reporting; capable CUDA models pre-capture decode graphs before readiness
 - Quantized serving: FP8/INT8/AWQ/GPTQ/NVFP4 without full dequantization; opt-in FP8 EAGLE/MTP draft loading
+- Single-device eager text reference path for Qwen3.6 dense/MoE, DeepSeek V4, and Kimi K3; Qwen3.8 remains excluded until public
 - Device-side sampling, penalties, spec verification, page-table caching; TP step headers sleep on Gloo while fixed-layout delta payloads use the bounded NCCL model group and rare controls remain Gloo objects; structured masks stay on CUDA with only selected IDs returned to the host matcher; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
@@ -86,6 +87,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
 - Production stage-sharded pipeline parallelism is a separate roadmap dependency (current PP report is not it)
 - Learned-draft real-checkpoint acceptance/performance evidence remains open; FP8-E4M3 KV remains disabled after its calibrated re-bake failed exact-output and decode-envelope checks
+- Frontier hybrid models still need architecture-native recurrent/KV caching, graph/spec support, distributed execution, and full-checkpoint performance evidence
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Human sign-off pending on M2–M4 design reviews
@@ -94,6 +96,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-09 — [progress] Portable CPU CI schedules valid jobs again
+- What: tokenizer cache setup moved from job-level runner context into a runtime environment step, restoring the full Python 3.11/3.12 CPU matrix.
+- Refs: PR #462; `.github/workflows/ci.yml`
+
+### 2026-08-09 — [design] Frontier text models use a single-device reference path
+- What: Qwen3.6 dense/MoE, DeepSeek V4, and Kimi K3 enter the model zoo through eager complete-sequence recomputation; public block-FP8/MXFP4 checkpoints use official loaders.
+- Why: hybrid recurrent/compressed attention state cannot truthfully reuse the existing paged-KV contract without architecture-specific cache evidence.
+- Refs: FZ-D1–FZ-D3; `docs/design/frontier-model-zoo.md`; `kairyu/engine/core/recompute_runner.py`
 
 ### 2026-08-08 — [design] Evidence mechanics are package-owned; gate meaning stays local
 - What: canonical JSON/hash, strict indexed JSONL, artifact paths, raw-only replay, and exact retained-manifest verification moved to `kairyu.bench.evidence`; G4 M-A3 and G5 F4b use the full path, while F1a shares only its compatible file digest.
