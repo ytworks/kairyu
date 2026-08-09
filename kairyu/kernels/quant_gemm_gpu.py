@@ -295,8 +295,9 @@ if triton is not None:
             # when the resident model activations are BF16, and keep the dot
             # accumulator in FP32.
             weight = ((quant - zero).to(tl.float32) * scales).to(tl.float16)
-            x = x.to(tl.float32)
-            x = tl.where(x > 65504.0, 65504.0, tl.where(x < -65504.0, -65504.0, x))
+            if x.dtype == tl.bfloat16:
+                x = x.to(tl.float32)
+                x = tl.where(x > 65504.0, 65504.0, tl.where(x < -65504.0, -65504.0, x))
             accumulator += tl.dot(x.to(tl.float16), weight, out_dtype=tl.float32)
         if HAS_BIAS:
             bias = tl.load(bias_ptr + offs_n, mask=offs_n < n_size, other=0.0)
@@ -380,8 +381,9 @@ if triton is not None:
             # when the resident model activations are BF16, and keep the dot
             # accumulator in FP32.
             weight = ((quant - zero).to(tl.float32) * scales).to(tl.float16)
-            x = x.to(tl.float32)
-            x = tl.where(x > 65504.0, 65504.0, tl.where(x < -65504.0, -65504.0, x))
+            if x.dtype == tl.bfloat16:
+                x = x.to(tl.float32)
+                x = tl.where(x > 65504.0, 65504.0, tl.where(x < -65504.0, -65504.0, x))
             accumulator += tl.dot(x.to(tl.float16), weight, out_dtype=tl.float32)
         if HAS_BIAS:
             bias = tl.load(bias_ptr + offs_n, mask=offs_n < n_size, other=0.0)

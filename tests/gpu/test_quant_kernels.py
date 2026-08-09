@@ -196,6 +196,9 @@ def test_w4a16_saturates_bf16_activations_to_finite_fp16_range(cuda, factory):
     torch.manual_seed(367)
     module = factory(64, 32)
     module.bias.data.zero_()
+    # Power-of-two weights keep every FP32 partial sum exact independent of
+    # the reduction order used by Triton and cuBLAS.
+    module.scales.fill_(0.5)
     activation = torch.full((3, 64), 70_000.0, dtype=torch.bfloat16)
     activation[1].neg_()
     weight = module.dequantize().to(device=cuda, dtype=torch.float16)
@@ -211,6 +214,16 @@ def test_w4a16_saturates_bf16_activations_to_finite_fp16_range(cuda, factory):
 
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("factory", [_awq_module, _gptq_module], ids=["awq", "gptq"])
+def test_w4a16_does_not_hide_fp16_infinite_activations(cuda, factory):
+    module = factory(64, 32).to(cuda)
+    activation = torch.full((1, 64), torch.inf, device=cuda, dtype=torch.float16)
+
+    actual = module(activation)
+
+    assert not torch.isfinite(actual).all()
 
 
 def test_nvfp4_qkv_pack_matches_separate_and_replays_cuda_graph(cuda):
