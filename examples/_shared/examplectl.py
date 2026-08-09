@@ -25,29 +25,6 @@ def _run(command: list[str], *, env: dict[str, str] | None = None, capture: bool
     )
 
 
-def _load_env(path: Path) -> dict[str, str]:
-    values = dict(os.environ)
-    if not path.exists():
-        return values
-    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            raise SystemExit(f"{path}:{number}: expected KEY=VALUE")
-        key, value = line.split("=", 1)
-        values.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-    return values
-
-
-def _save_runtime_env(path: Path, env: dict[str, str]) -> None:
-    keys = ("KAIRYU_CPU_IMAGE", "KAIRYU_GPU_IMAGE", "MODEL_VOLUME")
-    path.write_text(
-        "".join(f"{key}={env[key]}\n" for key in keys if env.get(key)),
-        encoding="utf-8",
-    )
-
-
 def _model_storage_directory(spec: dict, env: dict[str, str], root: Path) -> Path:
     configured = env.get("MODEL_STORAGE_ROOT", "").strip()
     if not configured:
@@ -319,11 +296,17 @@ def _compose(spec_dir: Path, spec: dict, env: dict[str, str], backend: str, args
         f"kairyu-{spec['environment']}-{profile}"
     )
     compose_env["COMPOSE_PROFILES"] = profile
+    compose_env["COMPOSE_DISABLE_ENV_FILE"] = "1"
     compose_env["BACKEND"] = backend
-    command = ["docker", "compose"]
-    if (spec_dir / ".env").exists():
-        command.extend(["--env-file", str(spec_dir / ".env")])
-    command.extend(args)
+    command = [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(spec_dir),
+        "--file",
+        str(spec_dir / "compose.yaml"),
+        *args,
+    ]
     return _run(command, env=compose_env)
 
 
@@ -367,30 +350,23 @@ def main() -> None:
     spec_dir = args.environment_dir.resolve()
     root = spec_dir.parents[1]
     spec = json.loads((spec_dir / "example.json").read_text(encoding="utf-8"))
-    env = _load_env(spec_dir / ".env")
-    runtime_env = _load_env(spec_dir / ".runtime.env")
-    for key in ("KAIRYU_CPU_IMAGE", "KAIRYU_GPU_IMAGE", "MODEL_VOLUME"):
-        if key in runtime_env:
-            env[key] = runtime_env[key]
+    env = dict(os.environ)
     env.update({key: str(value) for key, value in spec["images"].items()})
     env["PORT"] = env.get("PORT", str(spec["port"]))
     env.setdefault("MODEL_VOLUME", f"kairyu-models-{spec['environment']}")
     if args.action == "down":
-        if "KAIRYU_CPU_IMAGE" not in env:
-            raise SystemExit("environment has not been built; no stack to stop")
-        env.setdefault("KAIRYU_GPU_IMAGE", env["KAIRYU_CPU_IMAGE"])
+        env.setdefault("KAIRYU_CPU_IMAGE", "kairyu-runtime-state:local")
+        env.setdefault("KAIRYU_GPU_IMAGE", "kairyu-runtime-state:local")
         _compose(spec_dir, spec, env, args.backend, ["down", "--remove-orphans"])
         return
     if args.action == "status":
-        if "KAIRYU_CPU_IMAGE" not in env:
-            raise SystemExit("environment has not been built")
-        env.setdefault("KAIRYU_GPU_IMAGE", env["KAIRYU_CPU_IMAGE"])
+        env.setdefault("KAIRYU_CPU_IMAGE", "kairyu-runtime-state:local")
+        env.setdefault("KAIRYU_GPU_IMAGE", "kairyu-runtime-state:local")
         _compose(spec_dir, spec, env, args.backend, ["ps"])
         return
     if args.action == "logs":
-        if "KAIRYU_CPU_IMAGE" not in env:
-            raise SystemExit("environment has not been built")
-        env.setdefault("KAIRYU_GPU_IMAGE", env["KAIRYU_CPU_IMAGE"])
+        env.setdefault("KAIRYU_CPU_IMAGE", "kairyu-runtime-state:local")
+        env.setdefault("KAIRYU_GPU_IMAGE", "kairyu-runtime-state:local")
         _compose(spec_dir, spec, env, args.backend, ["logs", "--follow"])
         return
     env = _preflight(spec, env, root)
@@ -398,7 +374,6 @@ def main() -> None:
     _build_kairyu_images(root, spec, env, flavors=flavors)
     env.setdefault("KAIRYU_GPU_IMAGE", env["KAIRYU_CPU_IMAGE"])
     _materialize_models(spec, env, args.backend, root)
-    _save_runtime_env(spec_dir / ".runtime.env", env)
     _compose(spec_dir, spec, env, args.backend, ["up", "--detach", "--pull", "missing"])
     _wait_ready(spec, args.backend, env)
 

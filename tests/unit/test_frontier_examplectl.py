@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,3 +75,40 @@ def test_download_command_allows_public_anonymous_download() -> None:
     )
 
     assert "HF_TOKEN" not in command
+
+
+def test_compose_ignores_dotenv_files(monkeypatch, tmp_path: Path) -> None:
+    examplectl = _load_examplectl()
+    (tmp_path / ".env").write_text("HF_TOKEN=must-not-be-read\n", encoding="utf-8")
+    observed = {}
+
+    def fake_run(command, *, env=None, capture=False):
+        observed["command"] = command
+        observed["env"] = env
+        observed["capture"] = capture
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(examplectl, "_run", fake_run)
+    examplectl._compose(
+        tmp_path,
+        {"environment": "qwen3.6-27b-1gpu"},
+        {
+            "KAIRYU_CPU_IMAGE": "cpu@sha256:fixed",
+            "KAIRYU_GPU_IMAGE": "gpu@sha256:fixed",
+            "MODEL_VOLUME": "models",
+        },
+        "vllm",
+        ["ps"],
+    )
+
+    assert observed["command"] == [
+        "docker",
+        "compose",
+        "--project-directory",
+        str(tmp_path),
+        "--file",
+        str(tmp_path / "compose.yaml"),
+        "ps",
+    ]
+    assert "HF_TOKEN" not in observed["env"]
+    assert observed["env"]["COMPOSE_DISABLE_ENV_FILE"] == "1"

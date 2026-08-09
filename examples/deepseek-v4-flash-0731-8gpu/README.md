@@ -3,11 +3,15 @@
 The default topology is two independent EP4 + Attention-DP replicas on GPUs 0–3 and 4–7. The pinned mixed FP4/FP8 checkpoint is never requantized and the native 1,048,576-token context is never reduced. DSpark is off until its parity, accuracy and 5% goodput gates pass.
 
 ```sh
-cp .env.example .env
 ./run.sh vllm
 ./run.sh kairyu
 ./bench.sh compare all
 ```
+
+Configuration is inherited only from the invoking process environment; dotenv
+files are not read. Export `HF_TOKEN` when Hugging Face authentication is
+required and optionally set an absolute `MODEL_STORAGE_ROOT` for bind-backed
+model volumes.
 
 An EP8 topology lock is intentionally absent. It may be generated only after
 the EP4/EP8 quality, 1M-context, stability, and 2% SLO-goodput gates complete.

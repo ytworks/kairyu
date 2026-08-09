@@ -1,6 +1,6 @@
 # Qwen3.6-27B / 1 GPU
 
-One selected SM120 GPU serves the pinned BF16 checkpoint at its native 262,144-token context. The lifecycle inherits `HF_TOKEN` from the invoking environment (required only when Hugging Face requires authentication). For large local storage, set `MODEL_STORAGE_ROOT` to an absolute parent directory; the example creates a bind-backed volume below it and checks free space there. Then run:
+One selected SM120 GPU serves the pinned BF16 checkpoint at its native 262,144-token context. Configuration comes only from the invoking process environment; the lifecycle does not read dotenv files. It inherits `HF_TOKEN` when Hugging Face requires authentication. For large local storage, export an absolute parent directory such as `MODEL_STORAGE_ROOT=/mnt/nvme/kairyu/model-volumes`; the example creates a bind-backed volume below it and checks free space there. Then run:
 
 ```sh
 ./run.sh vllm
