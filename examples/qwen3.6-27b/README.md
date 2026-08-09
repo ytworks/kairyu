@@ -2,8 +2,9 @@
 
 Serves `Qwen/Qwen3.6-27B` through a Kairyu gateway with one command. The
 checkpoint is `Qwen3_5ForConditionalGeneration` (hybrid Gated DeltaNet /
-Gated Attention), an architecture outside Kairyu's native engine zoo, so the
-model runs on stock vLLM with `tensor_parallel_size=8` and Kairyu fronts it as
+Gated Attention). Kairyu has a single-device text reference path, but this
+8-GPU topology needs TP and optimized caching, so stock vLLM serves the model
+and Kairyu fronts it as
 the `qwen3.6-27b` pool — the same topology as the Qwen3-VL-32B image-chat
 deployment (`deploy/compose/docker-compose.webui-vlm.yaml`).
 

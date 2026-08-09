@@ -605,19 +605,22 @@ def _validate_model(
     if config is not None:
         try:
             model_config = parse_model_config(config)
-            quant_config = load_checkpoint_quantization(model_dir, config).weights
-            validate_model_quantization(
-                quant_config,
-                is_mla=model_config.is_mla,
-                architecture=model_config.architecture,
-            )
-            (
-                expected_checkpoint_shapes,
-                expected_checkpoint_shard_dims,
-            ) = _expected_checkpoint_contract(
-                model_config,
-                quant_config,
-            )
+            if not model_config.requires_full_recompute:
+                quant_config = load_checkpoint_quantization(
+                    model_dir, config
+                ).weights
+                validate_model_quantization(
+                    quant_config,
+                    is_mla=model_config.is_mla,
+                    architecture=model_config.architecture,
+                )
+                (
+                    expected_checkpoint_shapes,
+                    expected_checkpoint_shard_dims,
+                ) = _expected_checkpoint_contract(
+                    model_config,
+                    quant_config,
+                )
         except Exception:
             findings.append(
                 _finding(
@@ -725,6 +728,13 @@ def _validate_model(
         and not isinstance(tensor_parallel_size, bool)
     ):
         try:
+            if (
+                model_config.requires_full_recompute
+                and tensor_parallel_size != 1
+            ):
+                raise ValueError(
+                    "hybrid reference execution is single-device only"
+                )
             validate_tensor_parallel_config(
                 model_config,
                 tensor_parallel_size,

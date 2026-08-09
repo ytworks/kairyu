@@ -36,6 +36,7 @@ engine = [
     "xgrammar>=0.2.3",
     "tokenizers>=0.21.1",
     "safetensors>=0.5",
+    "transformers>=5.12,<5.13",
 ]
 # CPU production embeddings without pulling the multi-GB PyTorch runtime.
 # Model snapshots are resolved at an explicitly configured revision and ONNX

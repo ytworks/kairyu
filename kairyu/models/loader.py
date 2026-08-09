@@ -76,7 +76,7 @@ def load_model(
     linear_selection_policy=None,
     nvfp4_accuracy_profile=None,
     generation_config: GenerationConfigMode = "auto",
-) -> tuple[DenseDecoder, ModelConfig, GenerationDefaults]:
+) -> tuple[torch.nn.Module, ModelConfig, GenerationDefaults]:
     from kairyu.quant.linear import linear_factory
 
     directory = Path(path)
@@ -89,8 +89,56 @@ def load_model(
         raw_config,
         generation_config,
     )
-    quant = load_checkpoint_quantization(directory, raw_config).weights
     config = parse_model_config(raw_config)
+    text_config = raw_config.get("text_config")
+    nested_quant = (
+        text_config.get("quantization_config")
+        if isinstance(text_config, dict)
+        else None
+    )
+    declared_quant = raw_config.get("quantization_config") or nested_quant
+    if config.architecture == "DeepseekV4ForCausalLM" and declared_quant:
+        from kairyu.models.reference import load_deepseek_public_decoder
+
+        model = load_deepseek_public_decoder(
+            directory,
+            raw_config,
+            config,
+            dtype=dtype,
+        )
+        return model, config, generation
+    if (
+        config.architecture
+        in ("KimiLinearForCausalLM", "KimiK3ForConditionalGeneration")
+        and declared_quant
+    ):
+        from kairyu.models.reference import load_kimi_public_decoder
+
+        model = load_kimi_public_decoder(
+            directory,
+            config,
+            dtype=dtype,
+        )
+        return model, config, generation
+    quant_config = raw_config
+    if nested_quant and not raw_config.get("quantization_config"):
+        quant_config = {**raw_config, "quantization_config": nested_quant}
+    quant = load_checkpoint_quantization(directory, quant_config).weights
+    if config.requires_full_recompute:
+        if quant.method is not QuantMethod.NONE:
+            raise ValueError(
+                f"{config.architecture} reference execution currently requires "
+                "an unquantized checkpoint"
+            )
+        from kairyu.models.reference import load_reference_decoder
+
+        model = load_reference_decoder(
+            directory,
+            raw_config,
+            config,
+            dtype=dtype,
+        )
+        return model, config, generation
     validate_model_quantization(
         quant,
         is_mla=config.is_mla,

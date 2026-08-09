@@ -129,7 +129,8 @@ def _resolve_decode_mode(
         raw_config = json.loads(config_path.read_text())
         from kairyu.models.config import parse_model_config
 
-        if parse_model_config(raw_config).is_mla:
+        model_config = parse_model_config(raw_config)
+        if model_config.is_mla or model_config.requires_full_recompute:
             return "eager"
     from kairyu.engine.core.hw_profile import probe
 
@@ -160,7 +161,11 @@ def _default_cuda_graph_max_pages(
         config_path = Path(model_path) / "config.json"
         if config_path.is_file():
             raw = json.loads(config_path.read_text())
-            configured = raw.get("max_position_embeddings")
+            text_config = raw.get("text_config")
+            position_source = (
+                text_config if isinstance(text_config, dict) else raw
+            )
+            configured = position_source.get("max_position_embeddings")
             if type(configured) is int and configured > 0:
                 context_tokens = configured
     if context_tokens is None:
@@ -179,7 +184,9 @@ def _resolve_model_max_model_len(
     if not config_path.is_file():
         return max_model_len
     raw = json.loads(config_path.read_text())
-    position_limit = raw.get("max_position_embeddings", 4096)
+    text_config = raw.get("text_config")
+    position_source = text_config if isinstance(text_config, dict) else raw
+    position_limit = position_source.get("max_position_embeddings", 4096)
     if type(position_limit) is not int or position_limit < 1:
         raise ValueError("max_position_embeddings must be an integer >= 1")
     if max_model_len is None:
@@ -564,6 +571,40 @@ def build_engine_loop(
             model_path,
             max_model_len,
         )
+        config_path = Path(model_path) / "config.json"
+        if config_path.is_file():
+            from kairyu.models.config import parse_model_config
+
+            reference_config = parse_model_config(
+                json.loads(config_path.read_text())
+            )
+            if reference_config.requires_full_recompute:
+                if (
+                    tensor_parallel_size != 1
+                    or expert_parallel
+                    or pd_separation
+                ):
+                    raise ValueError(
+                        "hybrid reference execution is single-device only"
+                    )
+                if speculative is not None:
+                    raise ValueError(
+                        "hybrid reference execution does not support "
+                        "speculative decoding"
+                    )
+                if decode_mode == "cuda_graph":
+                    raise ValueError(
+                        "hybrid reference execution does not support CUDA graphs"
+                    )
+                if dram_kv_tier_capacity_pages:
+                    raise ValueError(
+                        "hybrid reference execution does not use a DRAM KV tier"
+                    )
+                if accuracy_profile.active:
+                    raise ValueError(
+                        "hybrid reference execution does not support "
+                        "nvfp4_accuracy_profile"
+                    )
     decode_mode = _resolve_decode_mode(
         decode_mode,
         model_path=model_path,
@@ -861,6 +902,22 @@ def build_engine_loop(
             model_config,
         )
         model = model.to(compute_device)
+        reference_recompute = bool(
+            getattr(model_config, "requires_full_recompute", False)
+        )
+        if reference_recompute:
+            if graph_decode:
+                raise ValueError(
+                    "hybrid reference execution does not support CUDA graphs"
+                )
+            if speculative is not None:
+                raise ValueError(
+                    "hybrid reference execution does not support speculative decoding"
+                )
+            if dram_kv_tier_capacity_pages:
+                raise ValueError(
+                    "hybrid reference execution does not use a DRAM KV tier"
+                )
         if accuracy_profile.active:
             from kairyu.engine.core.nvfp4_accuracy import materialize_fp8_weights
 
@@ -895,7 +952,15 @@ def build_engine_loop(
         priority_age_s=priority_age_s,
     )
     dram_kv_binding = None
-    if model_path is not None:
+    learned_draft_source = None
+    if model_path is not None and reference_recompute:
+        from kairyu.engine.core.recompute_runner import RecomputeModelRunner
+
+        runner = RecomputeModelRunner(
+            model,
+            sampler=Sampler(vocab_provider=lambda: grammar_vocab),
+        )
+    if model_path is not None and not reference_recompute:
         pool = PagedKVPool.for_cache(
             cache,
             model_config,

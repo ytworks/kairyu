@@ -20,8 +20,8 @@ name: kairyu-qwen3-6-deepseek-auto
 services:
   vllm-deepseek:
     # Same pinned stock-vLLM image as deploy/compose/docker-compose.webui-vlm.yaml.
-    # DeepseekV4ForCausalLM is outside Kairyu's native zoo (which stops at
-    # DeepSeek-V3); DSpark drafting requires vLLM >= 0.25.0.
+    # Kairyu's DeepSeek V4 reference path is single-device; this TP4+EP tier
+    # and DSpark drafting stay on stock vLLM >= 0.25.0.
     image: >-
       vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404@sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8
     ipc: host
@@ -72,8 +72,8 @@ services:
       start_period: 120s
 
   vllm-qwen:
-    # Qwen3_5ForConditionalGeneration (hybrid Gated DeltaNet) is outside
-    # Kairyu's native zoo, so this tier also runs on stock vLLM.
+    # Kairyu's Qwen3.6 reference path is single-device, so this DP4 tier
+    # also runs on stock vLLM.
     image: >-
       vllm/vllm-openai:v0.26.0-x86_64-cu129-ubuntu2404@sha256:4d08193d2fd05aadb1b5678f93ae609efb2635df67da45f3efe781c368b34dc8
     ipc: host

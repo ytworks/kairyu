@@ -2,10 +2,10 @@
 
 One command starts a heterogeneous two-tier Kairyu deployment: Qwen3.6-27B as
 the latency tier, DeepSeek-V4-Flash-0731 as the quality tier, and the routed
-`kairyu-auto` / `kairyu-auto-max` models in front of both. Neither checkpoint
-is in Kairyu's native engine zoo (`Qwen3_5ForConditionalGeneration` /
-`DeepseekV4ForCausalLM`), so both run on stock vLLM and Kairyu fronts them as
-pools — the Qwen3-VL-32B pattern.
+`kairyu-auto` / `kairyu-auto-max` models in front of both. Kairyu has a
+single-device text reference path for both architectures, but this deployment
+needs optimized multi-GPU execution, so stock vLLM serves both pools and
+Kairyu fronts them — the Qwen3-VL-32B pattern.
 
 ## GPU allocation
 

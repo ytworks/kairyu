@@ -2,9 +2,9 @@
 
 Serves `deepseek-ai/DeepSeek-V4-Flash-0731` (284B-parameter MoE, 256 routed
 experts, 6 active per token) through a Kairyu gateway with one command. The
-checkpoint is `DeepseekV4ForCausalLM`, an architecture outside Kairyu's native
-engine zoo (which stops at DeepSeek-V3), so the model runs on stock vLLM with
-`tensor_parallel_size=8` plus expert parallelism, and Kairyu fronts it as the
+checkpoint is `DeepseekV4ForCausalLM`. Kairyu has a single-device text
+reference path, but this production topology needs TP/EP and optimized caching,
+so stock vLLM serves it and Kairyu fronts it as the
 `deepseek-v4-flash-0731` pool — the same topology as the Qwen3-VL-32B
 image-chat deployment (`deploy/compose/docker-compose.webui-vlm.yaml`).
 
