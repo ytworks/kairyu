@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-10 — [progress] Gateways attest unanimous replica deployment metadata
+- What: Replica pools now publish revision, native context, quantization, cache, parallelism, feature, and image metadata when every configured replica agrees, even when an external engine such as vLLM has no Kairyu `/backends` endpoint; disagreement remains fail-closed and unreported.
+- Refs: PR #465; `kairyu/orchestration/replica.py`; `kairyu/entrypoints/server/health.py`; `tests/server/test_backends.py`
+
 ### 2026-08-10 — [progress] Frontier native metadata passes static validation
 - What: Native Qwen and DeepSeek examples now pass the same constructor-contract validation used at serve startup; Kairyu accepts and type-checks the frontier execution, revision, quantization, prefix-state, image, MTP, and DSpark metadata, and the DeepSeek EP example declares its required BF16 KV cache explicitly.
 - Refs: PR #465; `kairyu/engine/config_validation.py`; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/*kairyu.yaml`

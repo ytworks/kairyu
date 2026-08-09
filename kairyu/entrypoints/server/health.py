@@ -519,6 +519,11 @@ def add_health_routes(
         engine_list = []
         for name, engine in engines.items():
             label = _ENGINE_LABELS.get(type(engine).__name__, type(engine).__name__)
+            declared_metadata = (
+                engine.declared_metadata_snapshot()
+                if isinstance(engine, ReplicaPool)
+                else {}
+            )
             actual = getattr(engine, "attention_backend_decision", None)
             engine_decision = (
                 actual if isinstance(actual, AttentionBackendDecision) else configured_decision
@@ -565,7 +570,7 @@ def add_health_routes(
                 declared_ep_size = getattr(
                     engine,
                     "expert_parallel_size",
-                    None,
+                    declared_metadata.get("expert_parallel_size"),
                 )
                 if type(declared_ep_size) is int and declared_ep_size > 1:
                     # Never relabel a known EP engine as TP1 when its detailed
@@ -581,7 +586,7 @@ def add_health_routes(
                     tensor_parallel_size = getattr(
                         engine,
                         "tensor_parallel_size",
-                        None,
+                        declared_metadata.get("tensor_parallel_size"),
                     )
                     if (
                         type(tensor_parallel_size) is int
@@ -613,7 +618,7 @@ def add_health_routes(
                 "dspark_enabled",
                 "container_image_digest",
             ):
-                value = getattr(engine, field, None)
+                value = getattr(engine, field, declared_metadata.get(field))
                 if value is not None:
                     entry[field] = value
             if "container_image_digest" not in entry:
