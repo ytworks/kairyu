@@ -11,6 +11,29 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-10 — [amendment] External benchmark concurrency returns to eight
+- What: Main, judge, serving, and all frontier example clients now use eight simultaneous in-flight requests; combined orchestration also applies the same external limit in addition to its internal replica and proposal fan-out.
+- Why: The owner selected maximum aggregate per-GPU continuous-batching throughput over single-request isolation after a concurrency-1 LiveCodeBench run exposed unacceptable long-tail wall time.
+- Refs: supersedes the two concurrency-1 entries below; PR #465; `kairyu/bench/`; `bench/{serving_bench.py,tiered_auto_bench.py,configs/}`; `examples/`
+
+### 2026-08-10 — [progress] Every generic external benchmark client is serial by default
+- What: Judge calls, the standalone serving runner, and checked-in accuracy, core, structured, and quantization configs now join the main runner and frontier examples at concurrency 1; load-balanced and intentional stress runs can still opt into higher values explicitly.
+- Why: A separate judge semaphore and older sample configs could silently restore parallel load even when the primary benchmark client was serialized.
+- Refs: PR #465; `kairyu/bench/types.py`; `bench/{serving_bench.py,configs/}`
+
+### 2026-08-10 — [progress] Frontier benchmarks default to one external request
+- What: The generic runner and all Qwen, DeepSeek, and combined example commands now default to and explicitly record external concurrency 1; combined orchestration retains its independent four-replica Qwen pool and internal proposal fan-out.
+- Why: Without an explicitly load-balanced target, concurrent client requests distort single-engine accuracy, TTFT, and TPS comparisons and impose unintended GPU load.
+- Refs: PR #465; `kairyu/bench/{types.py,adapters/base.py}`; `examples/{_shared,qwen3.6-27b-1gpu,deepseek-v4-flash-0731-8gpu,qwen3.6-deepseek-v4-8gpu}/`; `bench/tiered_auto_bench.py`
+
+### 2026-08-10 — [progress] Frontier quality runs survive long reasoning phases
+- What: Benchmark CLI now accepts a positive generation read timeout, and Qwen, DeepSeek, and combined frontier examples pin a one-day allowance so reasoning-only streams cannot be retried or failed by the generic 600-second limit before final code appears.
+- Refs: PR #465; `kairyu/bench/{cli,config}.py`; `examples/{_shared,qwen3.6-27b-1gpu,deepseek-v4-flash-0731-8gpu,qwen3.6-deepseek-v4-8gpu}/`
+
+### 2026-08-10 — [progress] Benchmark CLI preserves explicit output budgets
+- What: `kairyu bench run` now accepts a positive `--max-output-tokens` override and applies it to every CLI-declared target, so frontier example budgets reach adapters instead of failing at argument parsing or reverting to 8,192 tokens.
+- Refs: PR #465; `kairyu/bench/{cli,config,types}.py`; `tests/bench/test_bench_config.py`
+
 ### 2026-08-10 — [progress] CUDA runtime copies uv from its pinned image path
 - What: The production CUDA Dockerfile now copies `uv` from `/usr/local/bin/uv`, the path present in the pinned Python-bearing uv image, instead of the absent distroless-image `/uv` path; a full SM120 AOT CUDA image build completed successfully.
 - Refs: PR #465; `Dockerfile.cuda`; `tests/unit/test_dockerfile_cuda_aot.py`
