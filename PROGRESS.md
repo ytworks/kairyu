@@ -98,6 +98,14 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-11 — [progress] Open WebUI tool metadata no longer blocks text requests
+- What: The DeepSeek prompt template now ignores `tools` metadata emitted by OpenAI-compatible UIs and renders the ordinary text conversation; model-side function-tool execution remains outside this example. The failing Open WebUI prompt was reproduced against Kairyu.
+- Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja`; `tests/unit/test_frontier_examplectl.py`
+
+### 2026-08-11 — [progress] SM120 example reaches end-to-end readiness
+- What: The pinned vLLM build now starts TP8/EP8 with DSpark-5 and the full 1M context on eight RTX PRO 6000 Blackwell GPUs; SM100-only MegaMoE and FP4 indexer-cache paths are explicitly disabled. Open WebUI reached Kairyu L3 and completed a real model response; the public UI bind remains separate from the loopback-only API.
+- Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/{compose.yaml,control.py,README.md}`; runtime validation on 2026-08-11
+
 ### 2026-08-11 — [amendment] Example surface becomes one L3-to-vLLM deployment
 - What: The three frontier environments and shared controllers are replaced by one exact 8 x RTX PRO 6000 Blackwell DeepSeek-V4-Flash-0731 stack; Open WebUI targets Kairyu L3, which owns checkpoint prompt rendering and delegates inference to an eight-GPU vLLM L1. One-command lifecycle and independent/all serving and full 1,055-row LiveCodeBench runners are added; measurement remains in progress.
 - Why: The owner requested one reproducible, same-host optimized deployment and complete measured evidence instead of a matrix of unvalidated example variants.

@@ -45,6 +45,12 @@ def test_example_is_exact_eight_gpu_kairyu_to_vllm_to_webui() -> None:
     assert set(compose["services"]) == {"vllm", "kairyu", "chat-ui"}
     webui = compose["services"]["chat-ui"]
     assert webui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
+    assert webui["ports"] == [
+        "${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080"
+    ]
+    assert compose["services"]["kairyu"]["ports"] == [
+        "127.0.0.1:${API_PORT:-8002}:8000"
+    ]
     assert webui["depends_on"] == {"kairyu": {"condition": "service_healthy"}}
     assert compose["services"]["kairyu"]["depends_on"] == {
         "vllm": {"condition": "service_healthy"}
@@ -64,17 +70,18 @@ def test_vllm_command_pins_the_optimized_sm120_contract() -> None:
         "--kv-cache-dtype": "fp8",
         "--block-size": "256",
         "--tensor-parallel-size": "8",
-        "--moe-backend": "deep_gemm_mega_moe",
         "--max-num-seqs": "64",
         "--max-num-batched-tokens": "16384",
     }
     for option, value in expected_pairs.items():
         assert command[command.index(option) + 1] == value
     assert "--enable-expert-parallel" in command
+    assert "--moe-backend" not in command
+    assert compose["services"]["vllm"]["environment"]["VLLM_USE_DEEP_GEMM"] == "0"
     assert "--enable-prefix-caching" in command
     assert "--enforce-eager" not in command
     assert json.loads(command[command.index("--attention-config") + 1]) == {
-        "use_fp4_indexer_cache": True
+        "use_fp4_indexer_cache": False
     }
     assert json.loads(command[command.index("--speculative-config") + 1])[
         "num_speculative_tokens"
@@ -136,12 +143,21 @@ def test_deepseek_template_matches_checkpoint_text_encoding() -> None:
     )
 
 
-def test_deepseek_template_fails_closed_on_tools() -> None:
+def test_deepseek_template_ignores_client_tool_metadata() -> None:
     template = ChatTemplate.load(str(EXAMPLE / "deepseek-v4-0731.jinja"))
-    with pytest.raises(ValueError, match="text chat only"):
-        template.render(
-            [{"role": "user", "content": "hi"}],
-            tools=[{"type": "function", "function": {"name": "f"}}],
+    expected = (
+        "<｜begin▁of▁sentence｜><｜User｜>PAC1の適応は？"
+        "<｜Assistant｜><think>"
+    )
+    for tools in (
+        [],
+        [{"type": "function", "function": {"name": "search"}}],
+    ):
+        assert (
+            template.render(
+                [{"role": "user", "content": "PAC1の適応は？"}], tools=tools
+            )
+            == expected
         )
 
 

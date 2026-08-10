@@ -1,7 +1,5 @@
 {# Byte-compatible text-chat subset of checkpoint encoding/encoding_dsv4.py. #}
-{%- if tools is not none -%}
-  {{- raise_exception('this example supports text chat only; omit tools') -}}
-{%- endif -%}
+{# Tool metadata is ignored: this checkpoint template renders text chat only. #}
 {%- set mode = thinking_mode | default('thinking') -%}
 {%- set effort = reasoning_effort | default('low') -%}
 {%- if mode not in ['chat', 'thinking'] -%}

@@ -9,6 +9,8 @@ services:
       HF_HUB_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       VLLM_NO_USAGE_STATS: "1"
+      # MegaMoE currently rejects SM120 as SM100-only in the pinned build.
+      VLLM_USE_DEEP_GEMM: "0"
     volumes:
       - models:/models:ro
       - ./identity-chat.jinja:/etc/kairyu/identity-chat.jinja:ro
@@ -26,10 +28,8 @@ services:
       - --tensor-parallel-size
       - "8"
       - --enable-expert-parallel
-      - --moe-backend
-      - deep_gemm_mega_moe
       - --attention-config
-      - '{"use_fp4_indexer_cache":true}'
+      - '{"use_fp4_indexer_cache":false}'
       - --speculative-config
       - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"greedy"}'
       - --compilation-config
@@ -94,6 +94,10 @@ services:
       DEFAULT_MODELS: deepseek-v4-flash-0731
       ENABLE_SIGNUP: "true"
       WEBUI_AUTH: "true"
+      WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
       ENABLE_OLLAMA_API: "false"
       RAG_EMBEDDING_ENGINE: ""
     volumes:
@@ -101,7 +105,7 @@ services:
     depends_on:
       kairyu: {condition: service_healthy}
     ports:
-      - 127.0.0.1:${CHAT_UI_PORT:-3000}:8080
+      - ${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080
     restart: unless-stopped
 
 volumes:

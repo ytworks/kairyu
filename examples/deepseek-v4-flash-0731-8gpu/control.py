@@ -56,6 +56,9 @@ def _compose_env() -> dict[str, str]:
             "CHAT_UI_PORT": os.environ.get(
                 "CHAT_UI_PORT", str(SPEC["webui"]["port"])
             ),
+            "CHAT_UI_BIND_ADDRESS": os.environ.get(
+                "CHAT_UI_BIND_ADDRESS", "127.0.0.1"
+            ),
         }
     )
     return env
@@ -265,7 +268,10 @@ def up() -> None:
         raise SystemExit("Kairyu did not become ready")
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
-    print(f"Chat UI:    http://127.0.0.1:{env['CHAT_UI_PORT']}")
+    ui_host = os.environ.get("PUBLIC_HOST", env["CHAT_UI_BIND_ADDRESS"])
+    if ui_host == "0.0.0.0":
+        ui_host = "127.0.0.1"
+    print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']}")
 
 
 def main() -> None:
