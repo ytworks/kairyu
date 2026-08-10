@@ -694,6 +694,46 @@ async def test_generate_forwards_and_preserves_native_tool_calls():
     await backend.shutdown()
 
 
+async def test_vllm_templated_prompt_uses_completions_without_second_chat_template():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "direct answer",
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+    )
+
+    output = (
+        await backend.generate(_request(TemplatedPrompt("<Assistant></think>")))
+    ).completions[0]
+
+    assert output.text == "direct answer"
+    assert output.reasoning_content is None
+    assert captured["path"] == "/v1/completions"
+    assert captured["body"]["prompt"] == "<Assistant></think>"
+    assert "messages" not in captured["body"]
+    await backend.shutdown()
+
+
 async def test_generate_forwards_representable_sampling_payload():
     captured: dict = {}
     backend = OpenAICompatBackend(
@@ -1990,6 +2030,36 @@ async def test_stream_parses_sse_into_cumulative_partials(monkeypatch):
     assert [completion.text_offset for completion in completions] == [0, 3, 5]
     assert [result.finished for result in results] == [False, False, True]
     assert results[-1].completions[0].finish_reason == "stop"
+    await backend.shutdown()
+
+
+async def test_vllm_templated_prompt_streams_completion_text():
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=_sse_chunks_transport(
+            {
+                "choices": [{"index": 0, "text": "direct "}]
+            },
+            {
+                "choices": [{"index": 0, "text": "answer"}]
+            },
+            {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]},
+        ),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+    )
+
+    results = [
+        result
+        async for result in backend.stream(
+            _request(TemplatedPrompt("<Assistant></think>"))
+        )
+    ]
+
+    assert results[-1].text == "direct answer"
+    assert results[-1].completions[0].reasoning_content is None
     await backend.shutdown()
 
 

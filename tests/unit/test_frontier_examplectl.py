@@ -45,6 +45,9 @@ def test_example_is_exact_eight_gpu_kairyu_to_vllm_to_webui() -> None:
     assert set(compose["services"]) == {"vllm", "kairyu", "chat-ui"}
     webui = compose["services"]["chat-ui"]
     assert webui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
+    assert json.loads(webui["environment"]["DEFAULT_MODEL_PARAMS"]) == {
+        "max_tokens": 32768
+    }
     assert webui["ports"] == [
         "${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080"
     ]
@@ -138,8 +141,8 @@ def test_deepseek_template_matches_checkpoint_text_encoding() -> None:
         ]
     )
     assert multi == (
-        "<｜begin▁of▁sentence｜><｜User｜>A<｜Assistant｜><think>"
-        "B<｜end▁of▁sentence｜><｜User｜>C<｜Assistant｜><think>"
+        "<｜begin▁of▁sentence｜><｜User｜>A<｜Assistant｜></think>"
+        "B<｜end▁of▁sentence｜><｜User｜>C<｜Assistant｜></think>"
     )
 
 
@@ -147,7 +150,7 @@ def test_deepseek_template_ignores_client_tool_metadata() -> None:
     template = ChatTemplate.load(str(EXAMPLE / "deepseek-v4-0731.jinja"))
     expected = (
         "<｜begin▁of▁sentence｜><｜User｜>PAC1の適応は？"
-        "<｜Assistant｜><think>"
+        "<｜Assistant｜></think>"
     )
     for tools in (
         [],

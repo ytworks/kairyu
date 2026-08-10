@@ -92,7 +92,8 @@ services:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
       DEFAULT_MODELS: deepseek-v4-flash-0731
-      ENABLE_SIGNUP: "true"
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":32768}'
+      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}
       WEBUI_AUTH: "true"
       WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
       WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}

@@ -14,7 +14,10 @@ official DeepSeek-V4 text prompt and sends it through vLLM's identity template.
 `tools` metadata emitted by OpenAI-compatible chat clients is ignored by this
 text-only checkpoint template, so Open WebUI's built-in tool declarations do
 not block ordinary questions. Model-side function-tool execution is not
-provided by this example.
+provided by this example. Ordinary UI requests default to direct chat mode;
+an explicit `reasoning_effort` selects thinking mode for accuracy runs. Open
+WebUI defaults model output to 32,768 tokens so normal answers are not cut into
+manual **Continue Response** steps.
 The official MegaMoE recommendation is not used: the pinned implementation
 rejects SM120 as SM100-only, so this example explicitly disables DeepGEMM and
 uses vLLM's supported SM120 MoE path.
@@ -100,7 +103,8 @@ Kairyu API on loopback:
 ```sh
 CHAT_UI_BIND_ADDRESS=0.0.0.0 PUBLIC_HOST=<public-ip> \
 WEBUI_URL=http://<public-ip>:3000 \
-WEBUI_ADMIN_EMAIL=<email> WEBUI_ADMIN_PASSWORD=<strong-secret> ./run.sh up
+ENABLE_SIGNUP=false WEBUI_ADMIN_EMAIL=<email> \
+WEBUI_ADMIN_PASSWORD=<strong-secret> ./run.sh up
 ```
 
 On a fresh data volume, Open WebUI creates that administrator and automatically

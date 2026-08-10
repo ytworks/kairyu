@@ -1,6 +1,8 @@
 {# Byte-compatible text-chat subset of checkpoint encoding/encoding_dsv4.py. #}
 {# Tool metadata is ignored: this checkpoint template renders text chat only. #}
-{%- set mode = thinking_mode | default('thinking') -%}
+{# Kairyu injects thinking_mode=thinking when reasoning_effort is explicit. #}
+{# Ordinary Open WebUI requests omit it and should return answer text directly. #}
+{%- set mode = thinking_mode | default('chat') -%}
 {%- set effort = reasoning_effort | default('low') -%}
 {%- if mode not in ['chat', 'thinking'] -%}
   {{- raise_exception('thinking_mode must be chat or thinking') -}}
