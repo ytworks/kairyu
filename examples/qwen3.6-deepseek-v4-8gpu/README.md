@@ -14,8 +14,8 @@ Configuration is inherited only from the invoking process environment; dotenv
 files are not read. Export `HF_TOKEN` when Hugging Face authentication is
 required and optionally set an absolute `MODEL_STORAGE_ROOT` for bind-backed
 model volumes. Quality runs that include Qwen preserve its documented 81,920
-output-token thinking budget. The external benchmark client uses concurrency 1.
-The four Qwen TP1 replicas and `kairyu-auto-max` proposal fan-out remain internal
-parallelism and are not multiplied by concurrent client requests.
+output-token thinking budget. The external benchmark client uses concurrency 8
+to maximize aggregate GPU throughput. The four Qwen TP1 replicas and
+`kairyu-auto-max` proposal fan-out remain additional internal parallelism.
 
 Inputs above 1,048,576 tokens fail with HTTP 400; no tier truncates them. AUTO chat uses a deterministic role-preserving L2 JSON envelope, not tokenizer control tokens or the legacy renderer.

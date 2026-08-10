@@ -146,7 +146,7 @@ class RunContext:
     # agentic adapters continue mapping this to their harness trial flag.
     attempts: int = 1
     run_id: str = ""  # provenance for artifacts the external harnesses name themselves
-    concurrency: int = 1
+    concurrency: int = 8
     retries: int = 2
     request_timeout_s: float = 600.0
     offline_fixtures: bool = False

@@ -118,10 +118,10 @@ def _models(spec: dict, benchmark_id: str) -> list[str]:
 
 def _benchmark_concurrency(spec: dict) -> int:
     concurrency = spec.get("benchmark_concurrency")
-    if type(concurrency) is not int or concurrency != 1:
+    if type(concurrency) is not int or concurrency != 8:
         raise ValueError(
-            "frontier examples require benchmark_concurrency=1; internal "
-            "orchestration fan-out is configured independently"
+            "frontier examples require benchmark_concurrency=8 to maximize "
+            "per-GPU continuous-batching throughput"
         )
     return concurrency
 
@@ -242,7 +242,7 @@ def _serving_commands(
     return commands
 
 
-def _orchestration_command(root: Path, port: int, output: Path) -> list[str]:
+def _orchestration_command(root: Path, spec: dict, port: int, output: Path) -> list[str]:
     return [
         str(root / ".venv/bin/python"),
         str(root / "bench/tiered_auto_bench.py"),
@@ -256,6 +256,8 @@ def _orchestration_command(root: Path, port: int, output: Path) -> list[str]:
         "kairyu-auto-max",
         "--gpu-count",
         "8",
+        "--concurrency",
+        str(_benchmark_concurrency(spec)),
         "--result",
         str(output / "tiered-auto.json"),
     ]
@@ -301,7 +303,7 @@ def _run_one(
         elif benchmark_id == "serving":
             commands = _serving_commands(root, spec, port, output)
         elif benchmark_id == "orchestration":
-            commands = [_orchestration_command(root, port, output)]
+            commands = [_orchestration_command(root, spec, port, output)]
         else:
             raise RuntimeError(f"unsupported benchmark id: {benchmark_id}")
         with (output / "raw.log").open("w", encoding="utf-8") as log:

@@ -91,6 +91,6 @@ targets:
       kv_cache_dtype: fp8_e4m3
 
 seed: 0
-concurrency: 1
+concurrency: 8
 # results_dir: bench/results/quantization
 # cache_dir: ~/.cache/kairyu/benchmarks

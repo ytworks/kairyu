@@ -166,16 +166,28 @@ def test_qwen_quality_command_preserves_documented_thinking_budget(tmp_path: Pat
     timeout = command.index("--request-timeout-s")
     assert command[timeout + 1] == "86400"
     concurrency = command.index("--concurrency")
-    assert command[concurrency + 1] == "1"
+    assert command[concurrency + 1] == "8"
 
 
-def test_all_frontier_examples_declare_single_external_benchmark_request() -> None:
+def test_all_frontier_examples_declare_throughput_benchmark_concurrency() -> None:
     specs = sorted((ROOT / "examples").glob("*/example.json"))
     assert specs
 
     for path in specs:
         spec = yaml.safe_load(path.read_text())
-        assert spec["benchmark_concurrency"] == 1, path
+        assert spec["benchmark_concurrency"] == 8, path
+
+
+def test_orchestration_command_forwards_throughput_concurrency(tmp_path: Path) -> None:
+    benchctl = _load_benchctl()
+    spec = yaml.safe_load(
+        (ROOT / "examples/qwen3.6-deepseek-v4-8gpu/example.json").read_text()
+    )
+
+    command = benchctl._orchestration_command(ROOT, spec, 8003, tmp_path)
+
+    concurrency = command.index("--concurrency")
+    assert command[concurrency + 1] == "8"
 
 
 def test_all_frontier_gateway_backend_options_pass_static_validation() -> None:
