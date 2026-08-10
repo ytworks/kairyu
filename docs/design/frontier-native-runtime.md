@@ -1,7 +1,8 @@
 # Frontier model native runtime and example boundary
 
 Status: **DeepSeek native EP/Attention-DP and SM120 packed-FP4 execution are
-implemented; full-checkpoint 262K/1M production gates remain open** (2026-08-10)
+implemented; full-checkpoint native production gates remain open; the example
+surface is superseded by FN-D8** (2026-08-11)
 
 This document amends FZ-D1 in `frontier-model-zoo.md`. It records what the
 frontier example rebuild may claim before full-checkpoint GPU evidence exists.
@@ -105,3 +106,18 @@ CPU/static gates. Full benchmark completion is intentionally a later GPU gate.
 - `PROGRESS.md` must not claim production frontier support until the real
   Qwen 262K and DeepSeek EP4/EP8 1M GPU runs, 30-minute soak, OOM/worker-failure
   recovery, and vLLM comparison all close.
+
+## FN-D8 — The user-facing example is one measured vLLM deployment
+
+This decision supersedes FN-D4's default-example topology and FN-D6's three
+environment surface; it does not remove or weaken the native-engine gates.
+`examples/` now contains exactly one deployment for the available 8 x RTX PRO
+6000 Blackwell Server Edition host: Open WebUI calls Kairyu L3, and Kairyu calls
+one vLLM L1 using all eight GPUs. The checkpoint's exact prompt encoder remains
+owned by Kairyu and is preserved through an identity template at vLLM.
+
+The committed default is selected only after same-host topology and feature
+measurements. Its serving report must record TTFT and output throughput, while
+the accuracy report must finish all 1,055 pinned LiveCodeBench release-v6 rows
+with isolated code execution. Public heterogeneous figures are comparison
+context, not a substitute for those local measurements.

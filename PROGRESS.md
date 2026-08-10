@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-10. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-11. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
-- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with process-only configuration, pinned revisions/images, bind-backed external model storage, credential-safe offline model attestations, unified lifecycle/benchmark CLIs, throughput-oriented concurrency 16, a deterministic Qwen LiveCodeBench 30-item performance diagnostic, and per-attempt reports
+- The example surface is now one 8 x RTX PRO 6000 Blackwell deployment: Open WebUI calls Kairyu L3, which preserves the checkpoint prompt and calls a pinned vLLM L1; one-command lifecycle and serving/full-LiveCodeBench runners are implemented, with real GPU tuning and complete 1,055-row evidence in progress
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-11 — [amendment] Example surface becomes one L3-to-vLLM deployment
+- What: The three frontier environments and shared controllers are replaced by one exact 8 x RTX PRO 6000 Blackwell DeepSeek-V4-Flash-0731 stack; Open WebUI targets Kairyu L3, which owns checkpoint prompt rendering and delegates inference to an eight-GPU vLLM L1. One-command lifecycle and independent/all serving and full 1,055-row LiveCodeBench runners are added; measurement remains in progress.
+- Why: The owner requested one reproducible, same-host optimized deployment and complete measured evidence instead of a matrix of unvalidated example variants.
+- Refs: FN-D8; `examples/deepseek-v4-flash-0731-8gpu/`; `tests/unit/test_frontier_examplectl.py`
 
 ### 2026-08-10 — [progress] Qwen example gains a fixed 30-item performance diagnostic
 - What: The full-dataset example default remains unchanged; a separate entrypoint fixes LiveCodeBench selection to `limit=30`, `seed=0`, and concurrency 16, while the shared controller records those CLI overrides in both backend runs.

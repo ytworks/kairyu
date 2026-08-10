@@ -306,8 +306,8 @@ environment).
 
 ```bash
 uv run pytest                                        # full suite, coverage gate 80%
-./examples/qwen3.6-27b-1gpu/bench.sh list             # inspect the frontier benchmark surface
-./examples/qwen3.6-27b-1gpu/run.sh kairyu             # pinned OpenAI-compatible 1-GPU stack
+./examples/deepseek-v4-flash-0731-8gpu/bench.sh list  # inspect the benchmark surface
+./examples/deepseek-v4-flash-0731-8gpu/run.sh         # Kairyu L3 + vLLM L1 + Chat UI
 ```
 
 Then pick your path: [single model](#5-single-model-setup--usage) or
