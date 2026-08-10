@@ -155,6 +155,20 @@ def test_deepseek_vllm_avoids_broken_inductor_path() -> None:
 
     assert "--enforce-eager" in command
     assert "--compilation-config" not in command
+    assert compose["x-vllm"]["environment"]["VLLM_USE_DEEP_GEMM"] == "0"
+
+
+def test_deepseek_vllm_image_matches_gateway_attestation() -> None:
+    directory = ROOT / "examples/deepseek-v4-flash-0731-8gpu"
+    spec = yaml.safe_load((directory / "example.json").read_text())
+    gateway = yaml.safe_load((directory / "vllm-gateway.yaml").read_text())
+
+    image = spec["images"]["VLLM_DEEPSEEK_IMAGE"]
+    replica = gateway["pools"]["deepseek-v4-flash-0731"]["replicas"][0]
+    assert image == replica["options"]["container_image_digest"]
+    assert image.endswith(
+        "sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52"
+    )
 
 
 def test_qwen_quality_command_preserves_documented_thinking_budget(tmp_path: Path) -> None:

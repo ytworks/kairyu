@@ -9,6 +9,7 @@ x-vllm: &vllm
     HF_HUB_OFFLINE: "1"
     HF_HUB_DISABLE_TELEMETRY: "1"
     VLLM_NO_USAGE_STATS: "1"
+    VLLM_USE_DEEP_GEMM: "0"
   volumes:
     - models:/models:ro
     - ../_shared/identity-chat.jinja:/etc/kairyu/identity-chat.jinja:ro
