@@ -69,6 +69,6 @@ judge:
 # seed: 0                    # item selection, not the target request seed
 # attempts: 4                # grouped chat sweep; unset target seed gives 0..3
 # exclude: [swe-bench-pro, terminal-bench, tau-bench-banking]  # for chat-only policy
-# concurrency: 8
+concurrency: 1
 # results_dir: bench/results/accuracy
 # cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE

@@ -270,7 +270,9 @@ class JudgeEndpointConfig(SamplingOptions):
     base_url: str | None = None
     model: str | None = None
     api_key_env: str = "KAIRYU_JUDGE_API_KEY"
-    concurrency: int = Field(default=4, ge=1)
+    # A judge is another external client. Higher concurrency is safe only when
+    # its endpoint is explicitly provisioned as a load-balanced pool.
+    concurrency: int = Field(default=1, ge=1)
     max_retries: int = Field(default=3, ge=0)
 
     @field_validator("base_url")

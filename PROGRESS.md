@@ -98,6 +98,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-10 — [progress] Every generic external benchmark client is serial by default
+- What: Judge calls, the standalone serving runner, and checked-in accuracy, core, structured, and quantization configs now join the main runner and frontier examples at concurrency 1; load-balanced and intentional stress runs can still opt into higher values explicitly.
+- Why: A separate judge semaphore and older sample configs could silently restore parallel load even when the primary benchmark client was serialized.
+- Refs: PR #465; `kairyu/bench/types.py`; `bench/{serving_bench.py,configs/}`
+
 ### 2026-08-10 — [progress] Frontier benchmarks default to one external request
 - What: The generic runner and all Qwen, DeepSeek, and combined example commands now default to and explicitly record external concurrency 1; combined orchestration retains its independent four-replica Qwen pool and internal proposal fan-out.
 - Why: Without an explicitly load-balanced target, concurrent client requests distort single-engine accuracy, TTFT, and TPS comparisons and impose unintended GPU load.

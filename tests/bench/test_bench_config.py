@@ -1,6 +1,7 @@
 """BenchConfig assembly from CLI args and bench.yaml."""
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -77,6 +78,18 @@ def test_models_shorthand_builds_targets():
     assert config.results_dir == "bench/results/accuracy"
     assert config.limit is None  # full run is the default
     assert config.concurrency == 1  # external load requires explicit opt-in
+    assert config.judge.concurrency == 1
+
+
+@pytest.mark.parametrize(
+    "name", ["accuracy", "core", "structured", "quantization"]
+)
+def test_checked_in_configs_use_single_external_request(name: str) -> None:
+    path = Path(__file__).parents[2] / "bench" / "configs" / f"{name}.yaml"
+    config = build_config(_parse(["run", "--config", str(path)]))
+
+    assert config.concurrency == 1
+    assert config.judge.concurrency == 1
 
 
 def test_long_context_cli_applies_declared_target_limit():
@@ -376,12 +389,14 @@ def test_recorded_non_quant_target_shape_remains_backward_compatible():
     assert "quantization" not in recorded_target
     assert "sampling_mode" not in recorded_target
     assert "temperature" not in recorded_target
-    # Pin the safe single-request default. The semantic concurrency change must
-    # produce a distinct identity instead of resuming an old concurrency=8 run.
+    # Pin the safe single-request defaults. The semantic concurrency changes
+    # must produce a distinct identity instead of resuming an old parallel run.
     assert _run_fingerprint(_run_identity(ordinary, [])) == (
-        "32bef7862ec565c55d07aee95f46134967dcc0f23ebc19250509aad5125f7b90"
+        "e198c578de00b1b97bbcd3a296ba4e7d0b5049dfb14d6096aabdbe1aa3a39c5b"
     )
-    legacy_parallel = ordinary.model_copy(update={"concurrency": 8})
+    legacy_parallel = ordinary.model_copy(
+        update={"concurrency": 8, "judge": JudgeConfig(concurrency=4)}
+    )
     assert _run_fingerprint(_run_identity(legacy_parallel, [])) == (
         "a250c2db0bdebbcb5f77ee0802b31c9d9ee1ec14c54998a15ebd7a8f1ef9f2ff"
     )
