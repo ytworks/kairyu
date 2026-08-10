@@ -1,6 +1,7 @@
 {
   "environment": "qwen3.6-27b-1gpu",
   "port": 8001,
+  "benchmark_concurrency": 1,
   "gpu_indices": [0],
   "selectable_gpu": true,
   "minimum_compute_capability": 12.0,

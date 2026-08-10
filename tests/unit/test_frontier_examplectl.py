@@ -165,6 +165,17 @@ def test_qwen_quality_command_preserves_documented_thinking_budget(tmp_path: Pat
     assert command[option + 1] == "81920"
     timeout = command.index("--request-timeout-s")
     assert command[timeout + 1] == "86400"
+    concurrency = command.index("--concurrency")
+    assert command[concurrency + 1] == "1"
+
+
+def test_all_frontier_examples_declare_single_external_benchmark_request() -> None:
+    specs = sorted((ROOT / "examples").glob("*/example.json"))
+    assert specs
+
+    for path in specs:
+        spec = yaml.safe_load(path.read_text())
+        assert spec["benchmark_concurrency"] == 1, path
 
 
 def test_all_frontier_gateway_backend_options_pass_static_validation() -> None:

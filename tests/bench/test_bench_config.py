@@ -76,6 +76,7 @@ def test_models_shorthand_builds_targets():
     assert config.suite == "accuracy"
     assert config.results_dir == "bench/results/accuracy"
     assert config.limit is None  # full run is the default
+    assert config.concurrency == 1  # external load requires explicit opt-in
 
 
 def test_long_context_cli_applies_declared_target_limit():
@@ -375,10 +376,13 @@ def test_recorded_non_quant_target_shape_remains_backward_compatible():
     assert "quantization" not in recorded_target
     assert "sampling_mode" not in recorded_target
     assert "temperature" not in recorded_target
-    # Pin the pre-#371 canonical default experiment, not merely the absence of
-    # the two new keys. A default-only extension must not invalidate existing
-    # run identities or resumable evidence.
+    # Pin the safe single-request default. The semantic concurrency change must
+    # produce a distinct identity instead of resuming an old concurrency=8 run.
     assert _run_fingerprint(_run_identity(ordinary, [])) == (
+        "32bef7862ec565c55d07aee95f46134967dcc0f23ebc19250509aad5125f7b90"
+    )
+    legacy_parallel = ordinary.model_copy(update={"concurrency": 8})
+    assert _run_fingerprint(_run_identity(legacy_parallel, [])) == (
         "a250c2db0bdebbcb5f77ee0802b31c9d9ee1ec14c54998a15ebd7a8f1ef9f2ff"
     )
     assert _recordable_config(declared)["targets"][0]["quantization"] == {

@@ -13,7 +13,6 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
-CONCURRENCY = (1, 2, 4, 8, 16, 32, 64)
 SHAREGPT_SHA256 = "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4"
 
 
@@ -117,6 +116,16 @@ def _models(spec: dict, benchmark_id: str) -> list[str]:
     return direct
 
 
+def _benchmark_concurrency(spec: dict) -> int:
+    concurrency = spec.get("benchmark_concurrency")
+    if type(concurrency) is not int or concurrency != 1:
+        raise ValueError(
+            "frontier examples require benchmark_concurrency=1; internal "
+            "orchestration fan-out is configured independently"
+        )
+    return concurrency
+
+
 def _quality_command(
     root: Path,
     spec: dict,
@@ -146,6 +155,8 @@ def _quality_command(
         "--run-id",
         benchmark_id.replace(":", "-"),
         "--no-progress",
+        "--concurrency",
+        str(_benchmark_concurrency(spec)),
     ]
     for model in models or _models(spec, benchmark_id):
         command.extend(["--model", model])
@@ -224,6 +235,8 @@ def _serving_commands(
                 str(dataset_path),
                 "--output",
                 str(output / f"serving-{model}.json"),
+                "--concurrency",
+                str(_benchmark_concurrency(spec)),
             ]
         )
     return commands

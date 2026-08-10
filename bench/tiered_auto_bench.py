@@ -316,6 +316,7 @@ async def run_latency(args: argparse.Namespace, client: httpx.AsyncClient) -> di
     }
     return {
         "config": {
+            "external_concurrency": 1,
             "pairs": args.latency_pairs,
             "warmup": args.latency_warmup,
             "max_tokens": args.latency_max_tokens,
@@ -402,6 +403,7 @@ async def run(args: argparse.Namespace) -> dict:
             "scoring": "pass@1; all public and private tests pass in local sandbox",
         },
         "config": {
+            "external_concurrency": 1,
             "attempts_per_item": 1,
             "temperature_requested": 0,
             "max_tokens_requested": args.quality_max_tokens,

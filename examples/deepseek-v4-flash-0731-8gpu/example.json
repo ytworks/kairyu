@@ -1,6 +1,7 @@
 {
   "environment": "deepseek-v4-flash-0731-8gpu",
   "port": 8002,
+  "benchmark_concurrency": 1,
   "gpu_indices": [0, 1, 2, 3, 4, 5, 6, 7],
   "selectable_gpu": false,
   "minimum_compute_capability": 12.0,
