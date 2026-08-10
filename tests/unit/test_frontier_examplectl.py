@@ -187,6 +187,7 @@ def test_full_livecodebench_command_has_no_subset_escape_hatch(
 
     monkeypatch.setattr(benchmark, "_run", fake_run)
     monkeypatch.setattr(benchmark, "_execution_image", lambda: "sha256:" + "a" * 64)
+    monkeypatch.setattr(benchmark, "_validate_livecodebench", lambda _path: 0)
     assert benchmark.livecodebench(tmp_path) == 0
     assert observed[observed.index("--only") + 1] == "livecodebench"
     assert observed[observed.index("--concurrency") + 1] == "16"
@@ -196,3 +197,39 @@ def test_full_livecodebench_command_has_no_subset_escape_hatch(
     assert "--limit" not in observed
     assert "--smoke" not in observed
     assert observed[observed.index("--exec-runner") + 1] == "docker"
+
+
+def test_livecodebench_result_validation_requires_all_1055_rows(
+    tmp_path: Path,
+) -> None:
+    benchmark = _load(EXAMPLE / "benchmark.py", "deepseek_example_benchmark_validation")
+    output = tmp_path / "livecodebench-full"
+    output.mkdir()
+
+    def write_cell(**overrides) -> None:
+        cell = {
+            "status": "completed",
+            "n": 1055,
+            "n_scored": 1055,
+            "performance": {
+                "requests": 1055,
+                "errors": 0,
+                "unmeasured_requests": 0,
+            },
+        }
+        cell.update(overrides)
+        (output / "scoreboard.json").write_text(
+            json.dumps(
+                {
+                    "cells": {
+                        "livecodebench": {"deepseek-v4-flash-0731": cell}
+                    }
+                }
+            )
+        )
+
+    write_cell()
+    assert benchmark._validate_livecodebench(tmp_path) == 0
+
+    write_cell(status="failed", n_scored=520)
+    assert benchmark._validate_livecodebench(tmp_path) == 1

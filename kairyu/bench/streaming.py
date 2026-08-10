@@ -8,8 +8,12 @@ from dataclasses import dataclass
 
 from kairyu.bench.types import JSON_SAFE_INTEGER_MAX, GenerationTimingEvidence
 
-_MAX_STREAM_BYTES = 1_048_576
-_MAX_TEXT_CHARS = 262_144
+# A 32K-token completion can carry several MiB of SSE framing because every
+# token is wrapped in its own JSON event.  Keep a hard bound, but size it for
+# the maximum output used by the frontier accuracy suites rather than for a
+# short chat response.
+_MAX_STREAM_BYTES = 16_777_216
+_MAX_TEXT_CHARS = 1_048_576
 
 
 class StreamingProtocolError(ValueError):
@@ -97,7 +101,9 @@ class ChatSSEAccumulator:
             payload = payload[1:]
         self._bytes += len(payload.encode("utf-8"))
         if self._bytes > _MAX_STREAM_BYTES:
-            raise StreamingProtocolError("SSE data exceeds 1048576 bytes")
+            raise StreamingProtocolError(
+                f"SSE data exceeds {_MAX_STREAM_BYTES} bytes"
+            )
         if payload == "[DONE]":
             self._done = True
             return

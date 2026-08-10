@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-11 — [progress] Frontier benchmark streams support 32K-token evidence
+- What: The strict benchmark SSE reader retains its fail-closed bound but raises it from 1 MiB to 16 MiB so 32K-token DeepSeek streams are not rejected solely by per-token JSON framing. The example runner now also rejects a nominally successful CLI run unless all 1,055 LiveCodeBench rows have measured, error-free evidence.
+- Refs: PR #468; `kairyu/bench/streaming.py`; `examples/deepseek-v4-flash-0731-8gpu/benchmark.py`; full-run diagnosis on 2026-08-11
+
 ### 2026-08-11 — [progress] Kairyu-owned vLLM prompts bypass a second chat template
 - What: Pre-rendered `TemplatedPrompt` requests sent to a vLLM-compatible backend now use `/completions` for both buffered and streaming generation. This preserves the checkpoint's single prompt boundary, prevents DeepSeek chat mode from being wrapped into thinking mode again, and returns final answer text to Open WebUI.
 - Refs: PR #468; `kairyu/engine/openai_backend.py`; `tests/unit/test_openai_backend.py`; real DeepSeek-V4 direct and streaming probes on 2026-08-11

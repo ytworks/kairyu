@@ -113,6 +113,31 @@ def test_stream_requires_done_and_finish_reason():
         stream.finish()
 
 
+def test_stream_accepts_32k_completion_sized_sse_framing():
+    stream = ChatSSEAccumulator(request_attempts=1)
+    # The payload is deliberately larger than the old 1 MiB cap while the
+    # semantic completion is tiny. Real 32K-token streams reach this size from
+    # thousands of repeated JSON envelopes rather than one padding field.
+    stream.feed_line(
+        _line(
+            {
+                "padding": "x" * 1_100_000,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ),
+        0.1,
+    )
+    stream.feed_line("data: [DONE]", 0.2)
+
+    assert stream.finish().content == "ok"
+
+
 def test_scoreboard_reports_target_timing_without_frontier_performance():
     timing = GenerationTimingEvidence(
         ttft_s=0.1,

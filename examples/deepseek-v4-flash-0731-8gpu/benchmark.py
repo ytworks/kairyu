@@ -190,7 +190,45 @@ def livecodebench(run_dir: Path) -> int:
         "--no-progress",
     ]
     # Deliberately no --limit or --smoke: the adapter requires all 1,055 rows.
-    return _run(command, log=run_dir / "livecodebench.log", check=False)
+    code = _run(command, log=run_dir / "livecodebench.log", check=False)
+    if code:
+        return code
+    return _validate_livecodebench(run_dir)
+
+
+def _validate_livecodebench(run_dir: Path) -> int:
+    """Fail closed unless the full, error-free 1,055-row pair was scored."""
+
+    scoreboard_path = run_dir / "livecodebench-full" / "scoreboard.json"
+    try:
+        scoreboard = json.loads(scoreboard_path.read_text(encoding="utf-8"))
+        cell = scoreboard["cells"]["livecodebench"][SPEC["model"]["served_name"]]
+        performance = cell["performance"]
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        print(f"invalid LiveCodeBench scoreboard: {error}", file=sys.stderr)
+        return 1
+
+    expected = int(SPEC["benchmarks"]["livecodebench"]["problems"])
+    complete = (
+        cell.get("status") == "completed"
+        and cell.get("n") == expected
+        and cell.get("n_scored") == expected
+        and performance.get("requests") == expected
+        and performance.get("errors") == 0
+        and performance.get("unmeasured_requests") == 0
+    )
+    if not complete:
+        print(
+            "LiveCodeBench did not produce complete evidence: "
+            f"status={cell.get('status')!r}, n={cell.get('n')!r}, "
+            f"n_scored={cell.get('n_scored')!r}, "
+            f"requests={performance.get('requests')!r}, "
+            f"errors={performance.get('errors')!r}, "
+            f"unmeasured={performance.get('unmeasured_requests')!r}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 def _served_config_sha256() -> str:
