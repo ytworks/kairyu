@@ -16,5 +16,6 @@ engines:
       # the admitted 1,048,576-token context or any cached history.
       max_num_batched_tokens: 4096
       max_num_seqs: 64
+      kv_cache_dtype: bfloat16
       prefix_state_capacity_bytes: 34359738368
       dspark_enabled: false

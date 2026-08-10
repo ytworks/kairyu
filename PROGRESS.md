@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-09. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-10. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
-- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with pinned revisions/images, offline model attestations, unified lifecycle/benchmark CLIs, and per-attempt reports
+- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with process-only configuration, pinned revisions/images, bind-backed external model storage, credential-safe offline model attestations, unified lifecycle/benchmark CLIs, throughput-oriented concurrency 16, a deterministic Qwen LiveCodeBench 30-item performance diagnostic, and per-attempt reports
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -98,30 +98,34 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
-### 2026-08-10 — [amendment] DeepSeek V4 native EP runs packed checkpoint experts
-- What: DeepSeek V4 gained strict official-checkpoint validation, direct SM120 E2M1/UE8M0 expert kernels, bounded FP4 Lightning Indexer state, request-owned EP2/4/8 Attention-DP, fixed NCCL all-to-all, EP8 example selection, and a committed 1M gate; single-GPU FP4 and two-rank ragged EP smokes pass.
-- Why: the prior frontier example exposed a native target but still rejected distributed DeepSeek and could not execute its official FP4 expert ABI.
-- Refs: FN-D2–FN-D4, FN-D7; `kairyu/models/deepseek_v4*.py`; `kairyu/kernels/deepseek_v4_moe_gpu.py`; `scripts/gpu_gates/deepseek_v4_native_1m.sh`
+### 2026-08-10 — [progress] Qwen example gains a fixed 30-item performance diagnostic
+- What: The full-dataset example default remains unchanged; a separate entrypoint fixes LiveCodeBench selection to `limit=30`, `seed=0`, and concurrency 16, while the shared controller records those CLI overrides in both backend runs.
+- Refs: PR #465; `examples/_shared/benchctl.py`; `examples/qwen3.6-27b-1gpu/bench-livecodebench-30.sh`
 
-### 2026-08-09 — [amendment] Frontier production selection uses architecture state
-- What: Qwen3.6/DeepSeek V4 gained composite cache descriptors, complete-prefix snapshots, transactional rollback, and a single-rank incremental runner; the example surface was rebuilt around three pinned offline environments and a report-owning benchmark CLI.
-- Why: full-sequence recomputation cannot exercise native context or serving performance, while generic paged KV cannot represent DeltaNet or HCA/CSA state. DeepSeek EP/Attention-DP and GPU gates remain explicitly open.
-- Refs: FN-D1–FN-D7; `docs/design/frontier-native-runtime.md`; `examples/`; `kairyu/engine/core/frontier_{cache,runner}.py`
+### 2026-08-10 — [amendment] External benchmark concurrency increases to sixteen
+- What: Main, judge, serving, and all frontier example clients now use sixteen simultaneous in-flight requests; combined orchestration applies the same external limit in addition to its internal replica and proposal fan-out.
+- Why: The owner selected the higher request wave after observed KV-cache headroom showed that eight did not saturate the single-GPU engine.
+- Refs: supersedes the concurrency-eight and concurrency-one entries below; PR #465; `kairyu/bench/`; `bench/{serving_bench.py,tiered_auto_bench.py,configs/}`; `examples/`
 
-### 2026-08-09 — [progress] Accuracy reports add sourced frontier gaps and target timing
-- What: Accuracy comparison artifacts now carry a SHA-bound six-model public-score catalog and per-reference gaps; direct generation rows retain streamed TTFT/TPS evidence and every scoreboard renders target-only performance coverage.
-- Refs: `kairyu/bench/{reference,compare,streaming,aggregate,types}.py`; `docs/benchmarks.md`
+### 2026-08-10 — [amendment] External benchmark concurrency returns to eight
+- What: Main, judge, serving, and all frontier example clients now use eight simultaneous in-flight requests; combined orchestration also applies the same external limit in addition to its internal replica and proposal fan-out.
+- Why: The owner selected maximum aggregate per-GPU continuous-batching throughput over single-request isolation after a concurrency-1 LiveCodeBench run exposed unacceptable long-tail wall time.
+- Refs: supersedes the two concurrency-1 entries below; PR #465; `kairyu/bench/`; `bench/{serving_bench.py,tiered_auto_bench.py,configs/}`; `examples/`
 
-### 2026-08-09 — [progress] Portable CPU CI schedules valid jobs again
-- What: tokenizer cache setup moved from job-level runner context into a runtime environment step, restoring the full Python 3.11/3.12 CPU matrix.
-- Refs: PR #462; `.github/workflows/ci.yml`
+### 2026-08-10 — [progress] Every generic external benchmark client is serial by default
+- What: Judge calls, the standalone serving runner, and checked-in accuracy, core, structured, and quantization configs now join the main runner and frontier examples at concurrency 1; load-balanced and intentional stress runs can still opt into higher values explicitly.
+- Why: A separate judge semaphore and older sample configs could silently restore parallel load even when the primary benchmark client was serialized.
+- Refs: PR #465; `kairyu/bench/types.py`; `bench/{serving_bench.py,configs/}`
 
-### 2026-08-09 — [design] Frontier text models use a single-device reference path
-- What: Qwen3.6 dense/MoE, DeepSeek V4, and Kimi K3 enter the model zoo through eager complete-sequence recomputation; public block-FP8/MXFP4 checkpoints use official loaders.
-- Why: hybrid recurrent/compressed attention state cannot truthfully reuse the existing paged-KV contract without architecture-specific cache evidence.
-- Refs: FZ-D1–FZ-D3; `docs/design/frontier-model-zoo.md`; `kairyu/engine/core/recompute_runner.py`
+### 2026-08-10 — [progress] Frontier benchmarks default to one external request
+- What: The generic runner and all Qwen, DeepSeek, and combined example commands now default to and explicitly record external concurrency 1; combined orchestration retains its independent four-replica Qwen pool and internal proposal fan-out.
+- Why: Without an explicitly load-balanced target, concurrent client requests distort single-engine accuracy, TTFT, and TPS comparisons and impose unintended GPU load.
+- Refs: PR #465; `kairyu/bench/{types.py,adapters/base.py}`; `examples/{_shared,qwen3.6-27b-1gpu,deepseek-v4-flash-0731-8gpu,qwen3.6-deepseek-v4-8gpu}/`; `bench/tiered_auto_bench.py`
 
-### 2026-08-08 — [design] Evidence mechanics are package-owned; gate meaning stays local
-- What: canonical JSON/hash, strict indexed JSONL, artifact paths, raw-only replay, and exact retained-manifest verification moved to `kairyu.bench.evidence`; G4 M-A3 and G5 F4b use the full path, while F1a shares only its compatible file digest.
-- Why: new gates should not duplicate tamper-resistant framing and replay, but package code must not absorb repository-only schemas, thresholds, verdicts, or heterogeneous sidecar contracts.
-- Refs: issue #382; `docs/design/issue-382-evidence-library.md`; `kairyu/bench/evidence.py`
+### 2026-08-10 — [progress] Frontier quality runs survive long reasoning phases
+- What: Benchmark CLI now accepts a positive generation read timeout, and Qwen, DeepSeek, and combined frontier examples pin a one-day allowance so reasoning-only streams cannot be retried or failed by the generic 600-second limit before final code appears.
+- Refs: PR #465; `kairyu/bench/{cli,config}.py`; `examples/{_shared,qwen3.6-27b-1gpu,deepseek-v4-flash-0731-8gpu,qwen3.6-deepseek-v4-8gpu}/`
+
+### 2026-08-10 — [progress] Benchmark CLI preserves explicit output budgets
+- What: `kairyu bench run` now accepts a positive `--max-output-tokens` override and applies it to every CLI-declared target, so frontier example budgets reach adapters instead of failing at argument parsing or reverting to 8,192 tokens.
+- Refs: PR #465; `kairyu/bench/{cli,config,types}.py`; `tests/bench/test_bench_config.py`

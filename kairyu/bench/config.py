@@ -46,6 +46,7 @@ def _cli_sampling(args) -> dict:
         # only ever narrows the default; `--no-vision` absent means "unspecified"
         "supports_vision": False if getattr(args, "no_vision", False) else None,
         "max_context_tokens": getattr(args, "max_context_tokens", None),
+        "max_output_tokens": getattr(args, "max_output_tokens", None),
     }
     return {key: value for key, value in options.items() if value is not None}
 
@@ -206,6 +207,7 @@ def build_config(args) -> BenchConfig:
         "seed": args.seed,
         "attempts": getattr(args, "attempts", None),
         "concurrency": args.concurrency,
+        "request_timeout_s": getattr(args, "request_timeout_s", None),
         "results_dir": args.results_dir,
         "run_id": args.run_id,
         "cache_dir": args.cache_dir,

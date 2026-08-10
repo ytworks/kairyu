@@ -13,7 +13,6 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
-CONCURRENCY = (1, 2, 4, 8, 16, 32, 64)
 SHAREGPT_SHA256 = "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4"
 
 
@@ -117,6 +116,16 @@ def _models(spec: dict, benchmark_id: str) -> list[str]:
     return direct
 
 
+def _benchmark_concurrency(spec: dict) -> int:
+    concurrency = spec.get("benchmark_concurrency")
+    if type(concurrency) is not int or concurrency != 16:
+        raise ValueError(
+            "frontier examples require benchmark_concurrency=16 to maximize "
+            "per-GPU continuous-batching throughput"
+        )
+    return concurrency
+
+
 def _quality_command(
     root: Path,
     spec: dict,
@@ -126,6 +135,8 @@ def _quality_command(
     *,
     models: list[str] | None = None,
     max_context_tokens: int | None = None,
+    limit: int | None = None,
+    seed: int | None = None,
 ) -> list[str]:
     suite, _, row = benchmark_id.partition(":")
     command = [
@@ -146,6 +157,8 @@ def _quality_command(
         "--run-id",
         benchmark_id.replace(":", "-"),
         "--no-progress",
+        "--concurrency",
+        str(_benchmark_concurrency(spec)),
     ]
     for model in models or _models(spec, benchmark_id):
         command.extend(["--model", model])
@@ -168,10 +181,26 @@ def _quality_command(
         )
     if row:
         command.extend(["--only", row])
+    if limit is not None:
+        command.extend(["--limit", str(limit)])
+    if seed is not None:
+        command.extend(["--seed", str(seed)])
     max_context = max_context_tokens or min(
         model["max_context_tokens"] for model in spec["models"]
     )
     command.extend(["--max-context-tokens", str(max_context)])
+    output_budgets = [model.get("max_output_tokens", 8192) for model in spec["models"]]
+    if any(type(budget) is not int or budget < 1 for budget in output_budgets):
+        raise ValueError("model max_output_tokens must be a positive integer")
+    max_output = max(output_budgets)
+    command.extend(["--max-output-tokens", str(max_output)])
+    request_timeouts = [model.get("request_timeout_s", 600) for model in spec["models"]]
+    if any(
+        type(timeout) not in (int, float) or isinstance(timeout, bool) or timeout <= 0
+        for timeout in request_timeouts
+    ):
+        raise ValueError("model request_timeout_s must be a positive number")
+    command.extend(["--request-timeout-s", str(max(request_timeouts))])
     return command
 
 
@@ -212,12 +241,14 @@ def _serving_commands(
                 str(dataset_path),
                 "--output",
                 str(output / f"serving-{model}.json"),
+                "--concurrency",
+                str(_benchmark_concurrency(spec)),
             ]
         )
     return commands
 
 
-def _orchestration_command(root: Path, port: int, output: Path) -> list[str]:
+def _orchestration_command(root: Path, spec: dict, port: int, output: Path) -> list[str]:
     return [
         str(root / ".venv/bin/python"),
         str(root / "bench/tiered_auto_bench.py"),
@@ -231,6 +262,8 @@ def _orchestration_command(root: Path, port: int, output: Path) -> list[str]:
         "kairyu-auto-max",
         "--gpu-count",
         "8",
+        "--concurrency",
+        str(_benchmark_concurrency(spec)),
         "--result",
         str(output / "tiered-auto.json"),
     ]
@@ -242,6 +275,9 @@ def _run_one(
     backend: str,
     benchmark_id: str,
     run_root: Path,
+    *,
+    limit: int | None = None,
+    seed: int | None = None,
 ) -> bool:
     root = _root(spec_dir)
     output = run_root / benchmark_id.replace(":", "_")
@@ -268,15 +304,27 @@ def _run_one(
                             else "deepseek-v4-flash-0731"
                         ],
                         max_context_tokens=model["max_context_tokens"],
+                        limit=limit,
+                        seed=seed,
                     )
                     for model in spec["models"]
                 ]
             else:
-                commands = [_quality_command(root, spec, benchmark_id, port, output)]
+                commands = [
+                    _quality_command(
+                        root,
+                        spec,
+                        benchmark_id,
+                        port,
+                        output,
+                        limit=limit,
+                        seed=seed,
+                    )
+                ]
         elif benchmark_id == "serving":
             commands = _serving_commands(root, spec, port, output)
         elif benchmark_id == "orchestration":
-            commands = [_orchestration_command(root, port, output)]
+            commands = [_orchestration_command(root, spec, port, output)]
         else:
             raise RuntimeError(f"unsupported benchmark id: {benchmark_id}")
         with (output / "raw.log").open("w", encoding="utf-8") as log:
@@ -311,7 +359,15 @@ def _stop(spec_dir: Path, backend: str) -> None:
     subprocess.run([str(spec_dir / "run.sh"), backend, "down"], check=False)
 
 
-def _backend_run(spec_dir: Path, spec: dict, backend: str, requested: str) -> tuple[Path, bool]:
+def _backend_run(
+    spec_dir: Path,
+    spec: dict,
+    backend: str,
+    requested: str,
+    *,
+    limit: int | None = None,
+    seed: int | None = None,
+) -> tuple[Path, bool]:
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     run_root = (
         _root(spec_dir)
@@ -363,7 +419,15 @@ def _backend_run(spec_dir: Path, spec: dict, backend: str, requested: str) -> tu
         else (requested,)
     )
     results = {
-        benchmark_id: _run_one(spec_dir, spec, backend, benchmark_id, run_root)
+        benchmark_id: _run_one(
+            spec_dir,
+            spec,
+            backend,
+            benchmark_id,
+            run_root,
+            limit=limit,
+            seed=seed,
+        )
         for benchmark_id in selected
     }
     integrated = {
@@ -383,12 +447,26 @@ def _backend_run(spec_dir: Path, spec: dict, backend: str, requested: str) -> tu
     return run_root, all(results.values())
 
 
-def _compare(spec_dir: Path, spec: dict, requested: str) -> bool:
+def _compare(
+    spec_dir: Path,
+    spec: dict,
+    requested: str,
+    *,
+    limit: int | None = None,
+    seed: int | None = None,
+) -> bool:
     roots: dict[str, Path] = {}
     passed = True
     for backend in ("vllm", "kairyu"):
         try:
-            roots[backend], ok = _backend_run(spec_dir, spec, backend, requested)
+            roots[backend], ok = _backend_run(
+                spec_dir,
+                spec,
+                backend,
+                requested,
+                limit=limit,
+                seed=seed,
+            )
             passed = passed and ok
         finally:
             _stop(spec_dir, backend)
@@ -420,6 +498,8 @@ def main() -> None:
     parser.add_argument("environment_dir", type=Path)
     parser.add_argument("backend", nargs="?")
     parser.add_argument("benchmark_id", nargs="?")
+    parser.add_argument("--limit", type=int)
+    parser.add_argument("--seed", type=int)
     args = parser.parse_args()
     spec_dir = args.environment_dir.resolve()
     spec = json.loads((spec_dir / "example.json").read_text(encoding="utf-8"))
@@ -434,10 +514,25 @@ def main() -> None:
         )
     if args.benchmark_id != "all" and args.benchmark_id not in valid_ids:
         raise SystemExit(f"unknown benchmark id: {args.benchmark_id}")
+    if args.limit is not None and args.limit < 1:
+        raise SystemExit("--limit must be a positive integer")
     if args.backend == "compare":
-        passed = _compare(spec_dir, spec, args.benchmark_id)
+        passed = _compare(
+            spec_dir,
+            spec,
+            args.benchmark_id,
+            limit=args.limit,
+            seed=args.seed,
+        )
     else:
-        _, passed = _backend_run(spec_dir, spec, args.backend, args.benchmark_id)
+        _, passed = _backend_run(
+            spec_dir,
+            spec,
+            args.backend,
+            args.benchmark_id,
+            limit=args.limit,
+            seed=args.seed,
+        )
     raise SystemExit(0 if passed else 1)
 
 

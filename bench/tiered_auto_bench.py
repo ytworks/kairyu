@@ -207,6 +207,7 @@ async def measure_quality(
     gpu_count: int,
     input_usd_per_mtok: float,
     output_usd_per_mtok: float,
+    request_semaphore: asyncio.Semaphore,
 ) -> QualityMeasurement:
     target = BenchTarget(
         base_url=base_url,
@@ -214,18 +215,19 @@ async def measure_quality(
         max_output_tokens=max_tokens,
     )
     request = _request_for(adapter, item, target, context)
-    started = time.perf_counter()
-    response = await client.post(
-        f"{normalize_base_url(base_url)}/chat/completions",
-        headers={"X-Kairyu-Trace": "1"},
-        json={
-            "model": model,
-            "messages": list(request.messages),
-            "temperature": 0,
-            "max_tokens": max_tokens,
-            "stream": False,
-        },
-    )
+    async with request_semaphore:
+        started = time.perf_counter()
+        response = await client.post(
+            f"{normalize_base_url(base_url)}/chat/completions",
+            headers={"X-Kairyu-Trace": "1"},
+            json={
+                "model": model,
+                "messages": list(request.messages),
+                "temperature": 0,
+                "max_tokens": max_tokens,
+                "stream": False,
+            },
+        )
     latency_s = time.perf_counter() - started
     response.raise_for_status()
     payload = response.json()
@@ -288,13 +290,10 @@ async def run_latency(args: argparse.Namespace, client: httpx.AsyncClient) -> di
                 order=warmup,
                 max_tokens=min(args.latency_max_tokens, 8),
             )
-    for index, prompt in enumerate(prompts):
-        order = (
-            (args.direct_model, args.auto_model)
-            if index % 2 == 0
-            else (args.auto_model, args.direct_model)
-        )
-        for position, model in enumerate(order):
+    semaphore = asyncio.Semaphore(args.concurrency)
+
+    async def run_one(index: int, prompt: str, position: int, model: str):
+        async with semaphore:
             measured = await measure_request(
                 client,
                 model=model,
@@ -302,11 +301,25 @@ async def run_latency(args: argparse.Namespace, client: httpx.AsyncClient) -> di
                 order=position,
                 max_tokens=args.latency_max_tokens,
             )
-            by_model[model].append(measured)
-            print(
-                f"[latency {index + 1}/{args.latency_pairs}] {model} TTFT={measured.ttft_ms:.2f}ms",
-                flush=True,
-            )
+        print(
+            f"[latency {index + 1}/{args.latency_pairs}] {model} TTFT={measured.ttft_ms:.2f}ms",
+            flush=True,
+        )
+        return model, measured
+
+    jobs = []
+    for index, prompt in enumerate(prompts):
+        order = (
+            (args.direct_model, args.auto_model)
+            if index % 2 == 0
+            else (args.auto_model, args.direct_model)
+        )
+        jobs.extend(
+            run_one(index, prompt, position, model)
+            for position, model in enumerate(order)
+        )
+    for model, measured in await asyncio.gather(*jobs):
+        by_model[model].append(measured)
 
     direct = summarize_requests(by_model[args.direct_model])
     auto = summarize_requests(by_model[args.auto_model])
@@ -316,6 +329,7 @@ async def run_latency(args: argparse.Namespace, client: httpx.AsyncClient) -> di
     }
     return {
         "config": {
+            "external_concurrency": args.concurrency,
             "pairs": args.latency_pairs,
             "warmup": args.latency_warmup,
             "max_tokens": args.latency_max_tokens,
@@ -338,7 +352,7 @@ async def run(args: argparse.Namespace) -> dict:
         http_factory=httpx.AsyncClient,
         request_timeout_s=args.timeout,
         retries=0,
-        concurrency=1,
+        concurrency=args.concurrency,
     )
     adapter = LiveCodeBenchAdapter()
     timeout = httpx.Timeout(args.timeout)
@@ -356,7 +370,8 @@ async def run(args: argparse.Namespace) -> dict:
             raise RuntimeError(f"gateway is missing required models: {missing}")
 
         latency = await run_latency(args, client)
-        measurements: list[QualityMeasurement] = []
+        quality_semaphore = asyncio.Semaphore(args.concurrency)
+        quality_jobs = []
         for index, item in enumerate(items):
             order = (
                 (args.auto_model, args.auto_max_model)
@@ -364,26 +379,30 @@ async def run(args: argparse.Namespace) -> dict:
                 else (args.auto_max_model, args.auto_model)
             )
             for position, model in enumerate(order):
-                measured = await measure_quality(
-                    client,
-                    adapter=adapter,
-                    context=context,
-                    item=item,
-                    model=model,
-                    order=position,
-                    base_url=args.base_url,
-                    max_tokens=args.quality_max_tokens,
-                    gpu_count=args.gpu_count,
-                    input_usd_per_mtok=args.input_usd_per_mtok,
-                    output_usd_per_mtok=args.output_usd_per_mtok,
+                quality_jobs.append(
+                    measure_quality(
+                        client,
+                        adapter=adapter,
+                        context=context,
+                        item=item,
+                        model=model,
+                        order=position,
+                        base_url=args.base_url,
+                        max_tokens=args.quality_max_tokens,
+                        gpu_count=args.gpu_count,
+                        input_usd_per_mtok=args.input_usd_per_mtok,
+                        output_usd_per_mtok=args.output_usd_per_mtok,
+                        request_semaphore=quality_semaphore,
+                    )
                 )
-                measurements.append(measured)
-                print(
-                    f"[quality {index + 1}/{len(items)}] {model} item={item.id} "
-                    f"score={measured.score:.0f} latency={measured.latency_s:.2f}s "
-                    f"calls={measured.internal_calls}",
-                    flush=True,
-                )
+        measurements = list(await asyncio.gather(*quality_jobs))
+        for measured in measurements:
+            print(
+                f"[quality] {measured.model} item={measured.item_id} "
+                f"score={measured.score:.0f} latency={measured.latency_s:.2f}s "
+                f"calls={measured.internal_calls}",
+                flush=True,
+            )
 
     by_model = {
         model: [item for item in measurements if item.model == model]
@@ -402,6 +421,7 @@ async def run(args: argparse.Namespace) -> dict:
             "scoring": "pass@1; all public and private tests pass in local sandbox",
         },
         "config": {
+            "external_concurrency": args.concurrency,
             "attempts_per_item": 1,
             "temperature_requested": 0,
             "max_tokens_requested": args.quality_max_tokens,
@@ -461,6 +481,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latency-max-tokens", type=int, default=64)
     parser.add_argument("--max-ttft-ratio", type=float, default=1.5)
     parser.add_argument("--quality-max-tokens", type=int, default=8192)
+    parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--gpu-count", type=int, default=8)
     parser.add_argument("--input-usd-per-mtok", type=float, default=0.0)
     parser.add_argument("--output-usd-per-mtok", type=float, default=0.0)
@@ -483,6 +504,7 @@ def parse_args() -> argparse.Namespace:
         "latency_max_tokens",
         "quality_max_tokens",
         "gpu_count",
+        "concurrency",
     ):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be >= 1")

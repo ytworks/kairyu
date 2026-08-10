@@ -48,3 +48,8 @@ def test_runtime_payload_is_revision_independent_and_nonroot_cache_safe() -> Non
     assert _DOCKERFILE.index("ARG KAIRYU_VCS_REF") > _DOCKERFILE.index(final)
     assert _DOCKERFILE.count("ARG KAIRYU_VCS_REF") == 1
     assert "FLASHINFER_WORKSPACE_BASE=/tmp/flashinfer" in _DOCKERFILE
+
+
+def test_runtime_payload_copies_uv_from_the_pinned_python_image_path() -> None:
+    assert "/usr/local/bin/uv /usr/local/bin/uv" in _DOCKERFILE
+    assert "  /uv /usr/local/bin/uv" not in _DOCKERFILE

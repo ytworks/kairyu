@@ -18,7 +18,6 @@ from kairyu.bench.reporting import atomic_write_json, atomic_write_text, nearest
 from kairyu.entrypoints.chat_template import ChatTemplate
 
 SHAREGPT_SHA256 = "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4"
-CONCURRENCY = (1, 2, 4, 8, 16, 32, 64)
 LENGTHS = (1_024, 8_192, 65_536)
 
 
@@ -194,7 +193,7 @@ async def run(args) -> int:
                 # full-prefix-reuse arm. The non-reuse arm has 64 distinct
                 # source hashes; no boundary-changing string surgery is used.
                 prompts = [prompts[0]] * len(prompts)
-            for concurrency in CONCURRENCY:
+            for concurrency in args.concurrency:
                 cell = await _cell(args.base_url, args.model, prompts, concurrency)
                 cell.update(
                     {
@@ -209,6 +208,7 @@ async def run(args) -> int:
         "repo": args.repo,
         "revision": args.revision,
         "native_max": args.native_max,
+        "external_concurrency": list(args.concurrency),
         "sharegpt_sha256": SHAREGPT_SHA256,
         "tokenizer_dir": str(tokenizer_dir),
         "cells": cells,
@@ -235,7 +235,18 @@ def main() -> None:
     parser.add_argument("--native-max", required=True, type=int)
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--output", required=True)
-    raise SystemExit(asyncio.run(run(parser.parse_args())))
+    parser.add_argument(
+        "--concurrency",
+        action="append",
+        type=int,
+        default=None,
+        help="External client concurrency (repeatable; throughput default: 16)",
+    )
+    args = parser.parse_args()
+    args.concurrency = tuple(args.concurrency or (16,))
+    if any(value < 1 for value in args.concurrency):
+        parser.error("--concurrency must be >= 1")
+    raise SystemExit(asyncio.run(run(args)))
 
 
 if __name__ == "__main__":

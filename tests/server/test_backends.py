@@ -714,6 +714,40 @@ async def test_backends_gateway_pool_without_backends_endpoint_degrades():
     assert "via_replica" not in pool
 
 
+async def test_backends_gateway_reports_unanimous_declared_replica_metadata():
+    replica = OpenAICompatBackend(
+        base_url="http://upstream/v1",
+        model="qwen3.6-27b",
+        api_key_env=None,
+        transport=httpx.MockTransport(lambda request: httpx.Response(404)),
+        upstream="vllm",
+        model_revision="fixed-revision",
+        max_model_len=262144,
+        quantization_format="bfloat16",
+        cache_descriptor={"family": "qwen3.6-hybrid-deltanet-paged-kv"},
+        tensor_parallel_size=1,
+        mtp_enabled=False,
+        container_image_digest="vllm@sha256:fixed",
+    )
+    gateway_app = create_app(engines={"qwen3.6-27b": ReplicaPool([replica])})
+
+    async with _client(gateway_app) as client:
+        response = await client.get("/backends")
+
+    assert response.status_code == 200
+    entry = response.json()["engines"][0]
+    assert entry["model_revision"] == "fixed-revision"
+    assert entry["max_model_len"] == 262144
+    assert entry["quantization_format"] == "bfloat16"
+    assert entry["cache_descriptor"] == {
+        "family": "qwen3.6-hybrid-deltanet-paged-kv"
+    }
+    assert entry["tensor_parallel_size"] == 1
+    assert entry["mtp_enabled"] is False
+    assert entry["container_image_digest"] == "vllm@sha256:fixed"
+    assert "via_replica" not in entry
+
+
 async def test_backends_does_not_adopt_mixed_or_malformed_replica_defaults():
     valid = {
         "generation_config": "auto",

@@ -11,6 +11,72 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-10 — [progress] CUDA runtime copies uv from its pinned image path
+- What: The production CUDA Dockerfile now copies `uv` from `/usr/local/bin/uv`, the path present in the pinned Python-bearing uv image, instead of the absent distroless-image `/uv` path; a full SM120 AOT CUDA image build completed successfully.
+- Refs: PR #465; `Dockerfile.cuda`; `tests/unit/test_dockerfile_cuda_aot.py`
+
+### 2026-08-10 — [progress] Qwen quality runs retain the checkpoint thinking budget
+- What: Single-GPU and combined Qwen3.6 examples now pin an 81,920-token quality-output budget from the checkpoint documentation, and the shared benchmark controller forwards and validates it instead of silently truncating every LiveCodeBench response at the generic 8,192-token default.
+- Refs: PR #465; `examples/_shared/benchctl.py`; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/example.json`
+
+### 2026-08-10 — [progress] Gateways attest unanimous replica deployment metadata
+- What: Replica pools now publish revision, native context, quantization, cache, parallelism, feature, and image metadata when every configured replica agrees, even when an external engine such as vLLM has no Kairyu `/backends` endpoint; disagreement remains fail-closed and unreported.
+- Refs: PR #465; `kairyu/orchestration/replica.py`; `kairyu/entrypoints/server/health.py`; `tests/server/test_backends.py`
+
+### 2026-08-10 — [progress] Frontier native metadata passes static validation
+- What: Native Qwen and DeepSeek examples now pass the same constructor-contract validation used at serve startup; Kairyu accepts and type-checks the frontier execution, revision, quantization, prefix-state, image, MTP, and DSpark metadata, and the DeepSeek EP example declares its required BF16 KV cache explicitly.
+- Refs: PR #465; `kairyu/engine/config_validation.py`; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/*kairyu.yaml`
+
+### 2026-08-10 — [progress] Frontier gateway metadata passes static validation
+- What: OpenAI-compatible replicas now statically accept and type-check the full constructor metadata contract used by every Qwen, DeepSeek, and orchestration gateway; unsupported-option errors name the drifting fields.
+- Refs: PR #465; `kairyu/engine/config_validation.py`; `examples/*/*gateway.yaml`
+
+### 2026-08-10 — [progress] Qwen3.6 vLLM examples fit the hybrid cache budget
+- What: Qwen3.6 vLLM services in the single-GPU and combined orchestration examples now cap active sequences at 64, matching the native backend and fitting the measured 714-block Mamba cache ceiling at native context.
+- Refs: PR #465; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/compose.yaml`
+
+### 2026-08-10 — [progress] Frontier Compose identities accept model-version names
+- What: The shared lifecycle now normalizes environment and profile text into a Docker Compose-compatible project identity, with Qwen3.6 single-model and orchestration coverage.
+- Refs: PR #465; `examples/_shared/examplectl.py`; `tests/unit/test_frontier_examplectl.py`
+
+### 2026-08-10 — [amendment] Frontier examples use process-only configuration
+- What: Qwen 1-GPU, DeepSeek 8-GPU, and combined orchestration lifecycle configuration now comes only from inherited environment variables; user and runtime dotenv files were removed, Compose's implicit dotenv loading is disabled, and compose paths no longer depend on the caller's working directory.
+- Why: Repository-local dotenv files mixed credentials and operator state with examples, made non-interactive inheritance ambiguous, and allowed Docker Compose to silently substitute different inputs than the lifecycle preflight used.
+- Refs: `examples/_shared/examplectl.py`; `examples/{qwen3.6-27b-1gpu,deepseek-v4-flash-0731-8gpu,qwen3.6-deepseek-v4-8gpu}/`
+
+### 2026-08-10 — [amendment] Frontier examples use external model storage safely
+- What: Frontier lifecycle preflight and model volumes now honor an absolute external storage root, download images use their available `python3`, and inherited HF credentials are forwarded by name rather than embedded in process arguments.
+- Why: The Qwen3.6 1-GPU example checked the repository filesystem instead of its model volume, assumed an absent `python` executable in the pinned vLLM image, and could expose a token through failure diagnostics.
+- Refs: `examples/_shared/examplectl.py`; `examples/qwen3.6-27b-1gpu/`
+
+### 2026-08-10 — [amendment] DeepSeek V4 native EP runs packed checkpoint experts
+- What: DeepSeek V4 gained strict official-checkpoint validation, direct SM120 E2M1/UE8M0 expert kernels, bounded FP4 Lightning Indexer state, request-owned EP2/4/8 Attention-DP, fixed NCCL all-to-all, EP8 example selection, and a committed 1M gate; single-GPU FP4 and two-rank ragged EP smokes pass.
+- Why: the prior frontier example exposed a native target but still rejected distributed DeepSeek and could not execute its official FP4 expert ABI.
+- Refs: FN-D2–FN-D4, FN-D7; `kairyu/models/deepseek_v4*.py`; `kairyu/kernels/deepseek_v4_moe_gpu.py`; `scripts/gpu_gates/deepseek_v4_native_1m.sh`
+
+### 2026-08-09 — [amendment] Frontier production selection uses architecture state
+- What: Qwen3.6/DeepSeek V4 gained composite cache descriptors, complete-prefix snapshots, transactional rollback, and a single-rank incremental runner; the example surface was rebuilt around three pinned offline environments and a report-owning benchmark CLI.
+- Why: full-sequence recomputation cannot exercise native context or serving performance, while generic paged KV cannot represent DeltaNet or HCA/CSA state. DeepSeek EP/Attention-DP and GPU gates remain explicitly open.
+- Refs: FN-D1–FN-D7; `docs/design/frontier-native-runtime.md`; `examples/`; `kairyu/engine/core/frontier_{cache,runner}.py`
+
+### 2026-08-09 — [progress] Accuracy reports add sourced frontier gaps and target timing
+- What: Accuracy comparison artifacts now carry a SHA-bound six-model public-score catalog and per-reference gaps; direct generation rows retain streamed TTFT/TPS evidence and every scoreboard renders target-only performance coverage.
+- Refs: `kairyu/bench/{reference,compare,streaming,aggregate,types}.py`; `docs/benchmarks.md`
+
+### 2026-08-09 — [progress] Portable CPU CI schedules valid jobs again
+- What: tokenizer cache setup moved from job-level runner context into a runtime environment step, restoring the full Python 3.11/3.12 CPU matrix.
+- Refs: PR #462; `.github/workflows/ci.yml`
+
+### 2026-08-09 — [design] Frontier text models use a single-device reference path
+- What: Qwen3.6 dense/MoE, DeepSeek V4, and Kimi K3 enter the model zoo through eager complete-sequence recomputation; public block-FP8/MXFP4 checkpoints use official loaders.
+- Why: hybrid recurrent/compressed attention state cannot truthfully reuse the existing paged-KV contract without architecture-specific cache evidence.
+- Refs: FZ-D1–FZ-D3; `docs/design/frontier-model-zoo.md`; `kairyu/engine/core/recompute_runner.py`
+
+### 2026-08-08 — [design] Evidence mechanics are package-owned; gate meaning stays local
+- What: canonical JSON/hash, strict indexed JSONL, artifact paths, raw-only replay, and exact retained-manifest verification moved to `kairyu.bench.evidence`; G4 M-A3 and G5 F4b use the full path, while F1a shares only its compatible file digest.
+- Why: new gates should not duplicate tamper-resistant framing and replay, but package code must not absorb repository-only schemas, thresholds, verdicts, or heterogeneous sidecar contracts.
+- Refs: issue #382; `docs/design/issue-382-evidence-library.md`; `kairyu/bench/evidence.py`
+
 ### 2026-08-08 — [amendment] W4A16 preserves FP16 scales; cache salt stays explicit
 - What: AWQ/GPTQ uses FP16 dot operands with FP32 accumulation for either model dtype; router/output/draft projections remain accuracy-default dense; native cache identity remains the exact token tuple without an in-process tenant salt.
 - Why: BF16 dequantization discarded checkpoint scale precision, while mapping `cache_salt` to affinity would falsely claim partitioning across RadixKV, tier, event, and routing identities.

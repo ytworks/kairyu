@@ -22,7 +22,7 @@ targets:
 # ten endpoint calls: five corpus cases x two arms.
 seed: 0
 attempts: 1
-concurrency: 4
+concurrency: 16
 results_dir: bench/results/structured
 
 # cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE

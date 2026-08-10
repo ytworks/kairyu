@@ -63,6 +63,19 @@ from kairyu.orchestration.router import JsonlRouterLog
 
 _DEFAULT_UNHEALTHY_AFTER = 3
 _DEFAULT_QUEUE_DEPTH_THRESHOLD = 8
+_DECLARED_METADATA_FIELDS = (
+    "model_revision",
+    "max_model_len",
+    "quantization_format",
+    "cache_descriptor",
+    "execution_mode",
+    "tensor_parallel_size",
+    "expert_parallel_size",
+    "attention_data_parallel_size",
+    "mtp_enabled",
+    "dspark_enabled",
+    "container_image_digest",
+)
 logger = logging.getLogger(__name__)
 
 
@@ -254,6 +267,31 @@ class ReplicaPool:
         if not values or values[0] is None:
             return None
         return values[0] if all(value == values[0] for value in values[1:]) else None
+
+    def declared_metadata_snapshot(self) -> dict[str, object]:
+        """Return constructor metadata only when every current replica agrees.
+
+        External engines such as vLLM do not expose Kairyu's ``/backends``
+        endpoint. Their OpenAI-compatible adapters still carry the pinned
+        deployment metadata, so a gateway can publish that unanimous contract
+        without pretending it was probed from the upstream runtime.
+        """
+
+        backends = tuple(entry.backend for entry in self._entries.values())
+        if not backends:
+            return {}
+        metadata: dict[str, object] = {}
+        for metadata_field in _DECLARED_METADATA_FIELDS:
+            values = tuple(
+                getattr(backend, metadata_field, None) for backend in backends
+            )
+            first = values[0]
+            if first is None or not all(value == first for value in values[1:]):
+                continue
+            metadata[metadata_field] = (
+                dict(first) if isinstance(first, Mapping) else first
+            )
+        return metadata
 
     # -- membership (m10a D1) -------------------------------------------------
 

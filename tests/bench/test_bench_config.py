@@ -1,6 +1,7 @@
 """BenchConfig assembly from CLI args and bench.yaml."""
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -76,6 +77,19 @@ def test_models_shorthand_builds_targets():
     assert config.suite == "accuracy"
     assert config.results_dir == "bench/results/accuracy"
     assert config.limit is None  # full run is the default
+    assert config.concurrency == 16
+    assert config.judge.concurrency == 16
+
+
+@pytest.mark.parametrize(
+    "name", ["accuracy", "core", "structured", "quantization"]
+)
+def test_checked_in_configs_use_throughput_concurrency(name: str) -> None:
+    path = Path(__file__).parents[2] / "bench" / "configs" / f"{name}.yaml"
+    config = build_config(_parse(["run", "--config", str(path)]))
+
+    assert config.concurrency == 16
+    assert config.judge.concurrency == 16
 
 
 def test_long_context_cli_applies_declared_target_limit():
@@ -111,6 +125,70 @@ def test_long_context_cli_applies_declared_target_limit():
         ]
     )
     with pytest.raises(ValueError, match="greater than or equal to 1"):
+        build_config(invalid)
+
+
+def test_max_output_tokens_cli_applies_target_generation_limit():
+    args = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--max-output-tokens",
+            "81920",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.targets[0].max_output_tokens == 81_920
+
+    invalid = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--max-output-tokens",
+            "0",
+        ]
+    )
+    with pytest.raises(ValueError, match="greater than or equal to 1"):
+        build_config(invalid)
+
+
+def test_request_timeout_cli_applies_generation_read_timeout():
+    args = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--request-timeout-s",
+            "86400",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.request_timeout_s == 86_400
+
+    invalid = _parse(
+        [
+            "run",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--request-timeout-s",
+            "0",
+        ]
+    )
+    with pytest.raises(ValueError, match="greater than 0"):
         build_config(invalid)
 
 
@@ -311,11 +389,16 @@ def test_recorded_non_quant_target_shape_remains_backward_compatible():
     assert "quantization" not in recorded_target
     assert "sampling_mode" not in recorded_target
     assert "temperature" not in recorded_target
-    # Pin the pre-#371 canonical default experiment, not merely the absence of
-    # the two new keys. A default-only extension must not invalidate existing
-    # run identities or resumable evidence.
+    # Pin the throughput defaults. The concurrency change must produce a
+    # distinct identity instead of resuming an older mixed 8/4 run.
     assert _run_fingerprint(_run_identity(ordinary, [])) == (
-        "a250c2db0bdebbcb5f77ee0802b31c9d9ee1ec14c54998a15ebd7a8f1ef9f2ff"
+        "ee73ae00fd8d08e5af8b2042314b6f20d77e32bc3cf6ff83f8576966fff0a9dc"
+    )
+    legacy_parallel = ordinary.model_copy(
+        update={"judge": JudgeConfig(concurrency=4)}
+    )
+    assert _run_fingerprint(_run_identity(legacy_parallel, [])) == (
+        "6d19893955c3339d590fa6695e8fa0de09275e677e5174fead995c0b9c7baaaf"
     )
     assert _recordable_config(declared)["targets"][0]["quantization"] == {
         "weight_method": "none",

@@ -32,7 +32,7 @@ targets:
 # fields and does not apply target sampling overrides or chat attempts.
 seed: 0
 # attempts: 4
-concurrency: 8
+concurrency: 16
 
 # results_dir: bench/results/core
 # cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE
