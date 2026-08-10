@@ -207,7 +207,7 @@ def test_shared_target_form_normalizes_url_and_uses_env_secret(monkeypatch):
     assert config["api_key_source"] == "environment"
     assert config["stage_trace"] is False
     assert config["profile"] is False
-    assert config["concurrency"] == 8
+    assert config["concurrency"] == 16
     assert "private-value" not in str(config)
 
 

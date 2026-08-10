@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
-- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with process-only configuration, pinned revisions/images, bind-backed external model storage, credential-safe offline model attestations, unified lifecycle/benchmark CLIs, throughput-oriented concurrency 8, and per-attempt reports
+- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with process-only configuration, pinned revisions/images, bind-backed external model storage, credential-safe offline model attestations, unified lifecycle/benchmark CLIs, throughput-oriented concurrency 16, and per-attempt reports
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-10 — [amendment] External benchmark concurrency increases to sixteen
+- What: Main, judge, serving, and all frontier example clients now use sixteen simultaneous in-flight requests; combined orchestration applies the same external limit in addition to its internal replica and proposal fan-out.
+- Why: The owner selected the higher request wave after observed KV-cache headroom showed that eight did not saturate the single-GPU engine.
+- Refs: supersedes the concurrency-eight and concurrency-one entries below; PR #465; `kairyu/bench/`; `bench/{serving_bench.py,tiered_auto_bench.py,configs/}`; `examples/`
 
 ### 2026-08-10 — [amendment] External benchmark concurrency returns to eight
 - What: Main, judge, serving, and all frontier example clients now use eight simultaneous in-flight requests; combined orchestration also applies the same external limit in addition to its internal replica and proposal fan-out.

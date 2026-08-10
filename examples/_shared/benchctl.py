@@ -118,9 +118,9 @@ def _models(spec: dict, benchmark_id: str) -> list[str]:
 
 def _benchmark_concurrency(spec: dict) -> int:
     concurrency = spec.get("benchmark_concurrency")
-    if type(concurrency) is not int or concurrency != 8:
+    if type(concurrency) is not int or concurrency != 16:
         raise ValueError(
-            "frontier examples require benchmark_concurrency=8 to maximize "
+            "frontier examples require benchmark_concurrency=16 to maximize "
             "per-GPU continuous-batching throughput"
         )
     return concurrency

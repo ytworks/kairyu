@@ -481,7 +481,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--latency-max-tokens", type=int, default=64)
     parser.add_argument("--max-ttft-ratio", type=float, default=1.5)
     parser.add_argument("--quality-max-tokens", type=int, default=8192)
-    parser.add_argument("--concurrency", type=int, default=8)
+    parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--gpu-count", type=int, default=8)
     parser.add_argument("--input-usd-per-mtok", type=float, default=0.0)
     parser.add_argument("--output-usd-per-mtok", type=float, default=0.0)

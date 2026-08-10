@@ -270,7 +270,7 @@ class JudgeEndpointConfig(SamplingOptions):
     base_url: str | None = None
     model: str | None = None
     api_key_env: str = "KAIRYU_JUDGE_API_KEY"
-    concurrency: int = Field(default=8, ge=1)
+    concurrency: int = Field(default=16, ge=1)
     max_retries: int = Field(default=3, ge=0)
 
     @field_validator("base_url")
@@ -429,9 +429,9 @@ class BenchConfig(BaseModel):
     # `--num-trials`. The default stays 1 because every attempt adds a model or
     # full docker/agent run.
     attempts: int = Field(default=1, ge=1)
-    # Eight in-flight requests lets one engine continuously batch work for
+    # Sixteen in-flight requests lets one engine continuously batch work for
     # per-GPU throughput; this is true request concurrency, not queue depth.
-    concurrency: int = Field(default=8, ge=1)  # in-flight requests per pair
+    concurrency: int = Field(default=16, ge=1)  # in-flight requests per pair
     request_timeout_s: float = Field(default=600.0, gt=0)
     retries: int = Field(default=2, ge=0)
     cache_dir: str | None = None

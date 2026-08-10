@@ -14,7 +14,7 @@ Configuration is inherited only from the invoking process environment; dotenv
 files are not read. Export `HF_TOKEN` when Hugging Face authentication is
 required and optionally set an absolute `MODEL_STORAGE_ROOT` for bind-backed
 model volumes. Quality runs that include Qwen preserve its documented 81,920
-output-token thinking budget. The external benchmark client uses concurrency 8
+output-token thinking budget. The external benchmark client uses concurrency 16
 to maximize aggregate GPU throughput. The four Qwen TP1 replicas and
 `kairyu-auto-max` proposal fan-out remain additional internal parallelism.
 

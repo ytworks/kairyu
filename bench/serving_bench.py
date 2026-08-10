@@ -1024,7 +1024,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=None)
     parser.add_argument("--dataset", default=None, help="ShareGPT-format JSON path")
     parser.add_argument("--num-requests", type=int, default=128)
-    parser.add_argument("--concurrency", type=int, default=8)
+    parser.add_argument("--concurrency", type=int, default=16)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument(
         "--temperature",

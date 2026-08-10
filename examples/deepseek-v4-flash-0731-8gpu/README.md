@@ -11,7 +11,7 @@ The default topology is two independent EP4 + Attention-DP replicas on GPUs 0–
 Configuration is inherited only from the invoking process environment; dotenv
 files are not read. Export `HF_TOKEN` when Hugging Face authentication is
 required and optionally set an absolute `MODEL_STORAGE_ROOT` for bind-backed
-model volumes. The external benchmark client uses concurrency 8 so the logical
+model volumes. The external benchmark client uses concurrency 16 so the logical
 engine can continuously batch work; replica and Attention-DP execution remain
 additional internal parallelism.
 

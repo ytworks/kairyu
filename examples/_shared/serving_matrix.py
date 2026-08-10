@@ -240,10 +240,10 @@ def main() -> None:
         action="append",
         type=int,
         default=None,
-        help="External client concurrency (repeatable; throughput default: 8)",
+        help="External client concurrency (repeatable; throughput default: 16)",
     )
     args = parser.parse_args()
-    args.concurrency = tuple(args.concurrency or (8,))
+    args.concurrency = tuple(args.concurrency or (16,))
     if any(value < 1 for value in args.concurrency):
         parser.error("--concurrency must be >= 1")
     raise SystemExit(asyncio.run(run(args)))

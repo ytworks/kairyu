@@ -77,8 +77,8 @@ def test_models_shorthand_builds_targets():
     assert config.suite == "accuracy"
     assert config.results_dir == "bench/results/accuracy"
     assert config.limit is None  # full run is the default
-    assert config.concurrency == 8
-    assert config.judge.concurrency == 8
+    assert config.concurrency == 16
+    assert config.judge.concurrency == 16
 
 
 @pytest.mark.parametrize(
@@ -88,8 +88,8 @@ def test_checked_in_configs_use_throughput_concurrency(name: str) -> None:
     path = Path(__file__).parents[2] / "bench" / "configs" / f"{name}.yaml"
     config = build_config(_parse(["run", "--config", str(path)]))
 
-    assert config.concurrency == 8
-    assert config.judge.concurrency == 8
+    assert config.concurrency == 16
+    assert config.judge.concurrency == 16
 
 
 def test_long_context_cli_applies_declared_target_limit():
@@ -389,16 +389,16 @@ def test_recorded_non_quant_target_shape_remains_backward_compatible():
     assert "quantization" not in recorded_target
     assert "sampling_mode" not in recorded_target
     assert "temperature" not in recorded_target
-    # Pin the throughput defaults. The judge concurrency change must produce a
+    # Pin the throughput defaults. The concurrency change must produce a
     # distinct identity instead of resuming an older mixed 8/4 run.
     assert _run_fingerprint(_run_identity(ordinary, [])) == (
-        "89703086db3963278c62de85b7d6174041bd870e15da7915c8ffc8f8fc82c082"
+        "ee73ae00fd8d08e5af8b2042314b6f20d77e32bc3cf6ff83f8576966fff0a9dc"
     )
     legacy_parallel = ordinary.model_copy(
         update={"judge": JudgeConfig(concurrency=4)}
     )
     assert _run_fingerprint(_run_identity(legacy_parallel, [])) == (
-        "a250c2db0bdebbcb5f77ee0802b31c9d9ee1ec14c54998a15ebd7a8f1ef9f2ff"
+        "6d19893955c3339d590fa6695e8fa0de09275e677e5174fead995c0b9c7baaaf"
     )
     assert _recordable_config(declared)["targets"][0]["quantization"] == {
         "weight_method": "none",
