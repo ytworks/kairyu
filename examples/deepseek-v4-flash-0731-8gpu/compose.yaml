@@ -26,8 +26,7 @@ x-vllm: &vllm
     - --enable-expert-parallel
     - --data-parallel-size
     - "4"
-    - --compilation-config
-    - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+    - --enforce-eager
     - --attention_config.use_fp4_indexer_cache=True
     - --tokenizer-mode
     - deepseek_v4

@@ -147,6 +147,16 @@ def test_qwen_vllm_services_cap_sequences_for_hybrid_cache() -> None:
         assert command[option + 1] == "64"
 
 
+def test_deepseek_vllm_avoids_broken_inductor_path() -> None:
+    compose = yaml.safe_load(
+        (ROOT / "examples/deepseek-v4-flash-0731-8gpu/compose.yaml").read_text()
+    )
+    command = compose["x-vllm"]["command"]
+
+    assert "--enforce-eager" in command
+    assert "--compilation-config" not in command
+
+
 def test_qwen_quality_command_preserves_documented_thinking_budget(tmp_path: Path) -> None:
     benchctl = _load_benchctl()
     spec = yaml.safe_load(
