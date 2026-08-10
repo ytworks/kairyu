@@ -169,6 +169,36 @@ def test_qwen_quality_command_preserves_documented_thinking_budget(tmp_path: Pat
     assert command[concurrency + 1] == "16"
 
 
+def test_qwen_livecodebench_30_contract_is_explicit_and_deterministic(
+    tmp_path: Path,
+) -> None:
+    benchctl = _load_benchctl()
+    spec = yaml.safe_load(
+        (ROOT / "examples/qwen3.6-27b-1gpu/example.json").read_text()
+    )
+
+    command = benchctl._quality_command(
+        ROOT,
+        spec,
+        "accuracy:livecodebench",
+        8001,
+        tmp_path,
+        limit=30,
+        seed=0,
+    )
+
+    limit = command.index("--limit")
+    seed = command.index("--seed")
+    assert command[limit + 1] == "30"
+    assert command[seed + 1] == "0"
+    assert command[command.index("--concurrency") + 1] == "16"
+
+    entrypoint = (
+        ROOT / "examples/qwen3.6-27b-1gpu/bench-livecodebench-30.sh"
+    ).read_text()
+    assert "accuracy:livecodebench --limit 30 --seed 0" in entrypoint
+
+
 def test_all_frontier_examples_declare_throughput_benchmark_concurrency() -> None:
     specs = sorted((ROOT / "examples").glob("*/example.json"))
     assert specs
