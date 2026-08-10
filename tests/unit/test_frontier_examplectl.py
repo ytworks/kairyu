@@ -155,7 +155,10 @@ def test_deepseek_vllm_avoids_broken_inductor_path() -> None:
 
     assert "--enforce-eager" in command
     assert "--compilation-config" not in command
+    indexer_cache = command.index("--attention_config.use_fp4_indexer_cache=False")
+    assert indexer_cache >= 0
     assert compose["x-vllm"]["environment"]["VLLM_USE_DEEP_GEMM"] == "0"
+    assert compose["x-vllm"]["environment"]["VLLM_ENGINE_READY_TIMEOUT_S"] == "1800"
 
 
 def test_deepseek_vllm_image_matches_gateway_attestation() -> None:
@@ -167,7 +170,7 @@ def test_deepseek_vllm_image_matches_gateway_attestation() -> None:
     replica = gateway["pools"]["deepseek-v4-flash-0731"]["replicas"][0]
     assert image == replica["options"]["container_image_digest"]
     assert image.endswith(
-        "sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52"
+        "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1"
     )
 
 

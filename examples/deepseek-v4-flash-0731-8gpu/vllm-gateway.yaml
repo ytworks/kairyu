@@ -1,4 +1,6 @@
 server: {host: 0.0.0.0, port: 8000, api_keys_env: null, max_concurrency: 128}
+chat_templates:
+  deepseek-v4-flash-0731: "{{ messages[0]['content'] }}"
 pools:
   deepseek-v4-flash-0731:
     replicas:
@@ -18,7 +20,7 @@ pools:
           expert_parallel_size: 4
           attention_data_parallel_size: 4
           dspark_enabled: false
-          container_image_digest: vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52
+          container_image_digest: local/vllm-openai@sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
       - backend: openai
         health_url: http://vllm-b:8000/health
         options:

@@ -10,7 +10,7 @@
   "kairyu_images": ["cpu", "gpu"],
   "vllm_download_image_env": "VLLM_DEEPSEEK_IMAGE",
   "images": {
-    "VLLM_DEEPSEEK_IMAGE": "vllm/vllm-openai@sha256:ffb2d59b1c059a5bd8d781320c9f5189de8293693b7d95da54befddaa54abf52"
+    "VLLM_DEEPSEEK_IMAGE": "local/vllm-openai@sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1"
   },
   "models": [
     {

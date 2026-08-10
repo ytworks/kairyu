@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
-- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with process-only configuration, pinned revisions/images, bind-backed external model storage, credential-safe offline model attestations, unified lifecycle/benchmark CLIs, throughput-oriented concurrency 16, a deterministic Qwen LiveCodeBench 30-item performance diagnostic, and per-attempt reports; the DeepSeek vLLM reference arm pins v0.26.0, disables DeepGEMM, and uses eager execution around upstream Inductor and SM120 MHC blockers
+- Frontier example surface rebuilt around Qwen 1-GPU, DeepSeek 8-GPU, and combined 8-GPU environments with process-only configuration, pinned revisions/images, bind-backed external model storage, credential-safe offline model attestations, unified lifecycle/benchmark CLIs, throughput-oriented concurrency 16, a deterministic Qwen LiveCodeBench 30-item performance diagnostic, and per-attempt reports; the DeepSeek vLLM arm currently needs a local source build of `jasl/vllm@aa0d513` plus eager execution, disabled DeepGEMM, and disabled FP4 indexer caching on SM120, and has no completed 64-item verdict
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-11 — [progress] DeepSeek vLLM reaches SM120 inference without a full verdict
+- What: Kairyu L3 served a local CUDA 13 source build of `jasl/vllm@aa0d513` after the pinned v0.26 image failed SM120 scaled-MM; startup also disables unsupported FP4 indexer caching and allows the long engine-ready phase. The requested 64-item LiveCodeBench run was stopped before a pair result was persisted, so it has no accuracy, TTFT, or TPS verdict.
+- Refs: PR #467; `examples/deepseek-v4-flash-0731-8gpu/{compose.yaml,example.json,vllm-gateway.yaml}`
 
 ### 2026-08-10 — [progress] DeepSeek vLLM arm selects the SM120 fallback path
 - What: The reference arm now pins the v0.26.0 CUDA 13.0 image and disables DeepGEMM so RTX PRO 6000 uses the guarded TileLang MHC fallback; gateway deployment attestation pins the same digest.
