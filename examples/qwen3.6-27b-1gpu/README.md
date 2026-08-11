@@ -30,7 +30,10 @@ OpenAI API: http://127.0.0.1:8001/v1
 Chat UI:    http://127.0.0.1:3000
 ```
 
-Model files and Open WebUI state never use Docker's default volume area. Set
+Model files and Open WebUI state share one isolated directory below
+`/mnt/nvme/kairyu/model-volumes/qwen3.6-27b-1gpu/` and never use Docker's
+default volume area. The same directory holds vLLM's compilation cache, so
+configuration comparisons and later starts can reuse compiled graphs. Set
 `NVME_STORAGE_ROOT` only to another absolute path below `/mnt/nvme` if the
 default must change. The first model download is approximately 31 GB. Later
 starts use its content attestation; `VERIFY_MODEL=1 ./run.sh` rehashes it.
@@ -86,6 +89,7 @@ different quantizations, contexts, prompts, or software revisions:
 ## Reproducibility pins
 
 - Model revision: `e89b16ebf1988b3d6befa7de50abc2d76f26eb09`
+- Model tree SHA-256: `f108556571d80514a792b458de366221c9b910fe69cbd5d2525c207580cd51aa`
 - vLLM SM120 source: `aa0d51302747ea80f282e26949708b3253409fe2`
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 

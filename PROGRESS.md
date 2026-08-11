@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
-- The example surface includes the measured 8 x RTX PRO 6000 DeepSeek deployment and a contract-tested one-GPU Qwen3.6 FP8 candidate; both route Open WebUI through Kairyu L3 to pinned vLLM L1, and the Qwen runtime/20-row measurement gate is in progress on NVMe-backed storage
+- The example surface includes the measured 8 x RTX PRO 6000 DeepSeek deployment and a runtime-validated one-GPU Qwen3.6 FP8 candidate; both route Open WebUI through Kairyu L3 to pinned vLLM L1, and Qwen's serving/20-row measurement gate is in progress with all persistent data and compilation caches on NVMe
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 

@@ -27,4 +27,4 @@ engines:
       container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
 
 chat_templates:
-  qwen3.6-27b: /models/qwen3.6-27b-fp8/chat_template.jinja
+  qwen3.6-27b: /etc/kairyu/qwen3.6-chat-template.jinja

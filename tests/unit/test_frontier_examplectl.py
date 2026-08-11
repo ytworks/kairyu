@@ -44,6 +44,9 @@ def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
         "minimum_vram_mib": 90000,
     }
     assert spec["storage"]["root"].startswith("/mnt/nvme/")
+    assert spec["model"]["tree_sha256"] == (
+        "f108556571d80514a792b458de366221c9b910fe69cbd5d2525c207580cd51aa"
+    )
     assert set(compose["services"]) == {"vllm", "kairyu", "chat-ui"}
     webui = compose["services"]["chat-ui"]
     assert webui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
@@ -59,6 +62,7 @@ def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
     for service in ("vllm", "kairyu"):
         model_mount = compose["services"][service]["volumes"][0]
         assert model_mount["source"] == "${MODEL_STORAGE_PATH}"
+    assert compose["services"]["vllm"]["volumes"][1]["source"] == "${VLLM_CACHE_PATH}"
     assert webui["volumes"][0]["source"] == "${WEBUI_STORAGE_PATH}"
 
 
@@ -93,7 +97,7 @@ def test_qwen_vllm_command_pins_the_sm120_latency_throughput_contract() -> None:
         json.loads(command[command.index("--compilation-config") + 1])["cudagraph_mode"]
         == "FULL_AND_PIECEWISE"
     )
-    assert service["environment"]["VLLM_USE_FASTOKENS"] == "1"
+    assert "VLLM_USE_FASTOKENS" not in service["environment"]
 
 
 def test_qwen_kairyu_l3_owns_chat_and_declares_vllm_l1() -> None:
@@ -107,7 +111,21 @@ def test_qwen_kairyu_l3_owns_chat_and_declares_vllm_l1() -> None:
     assert entry.options["allow_templated_chat_passthrough"] is True
     assert entry.options["tensor_parallel_size"] == 1
     assert entry.options["mtp_enabled"] is True
-    assert spec.chat_templates == {"qwen3.6-27b": "/models/qwen3.6-27b-fp8/chat_template.jinja"}
+    assert spec.chat_templates == {
+        "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja"
+    }
+
+
+def test_qwen_template_defaults_chat_to_direct_and_benchmark_to_thinking() -> None:
+    template = ChatTemplate.load(str(QWEN_EXAMPLE / "chat_template.jinja"))
+    messages = [{"role": "user", "content": "Return OK."}]
+    direct = template.render(messages)
+    thinking = template.render(
+        messages,
+        template_kwargs={"reasoning_effort": "max", "thinking_mode": "thinking"},
+    )
+    assert direct.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+    assert thinking.endswith("<|im_start|>assistant\n<think>\n")
 
 
 def test_qwen_control_selects_one_gpu_and_forces_nvme_storage() -> None:

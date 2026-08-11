@@ -37,7 +37,7 @@ def _run(
     )
 
 
-def _storage_paths() -> tuple[Path, Path]:
+def _storage_paths() -> tuple[Path, Path, Path]:
     configured = Path(os.environ.get("NVME_STORAGE_ROOT", SPEC["storage"]["root"]))
     if not configured.is_absolute():
         raise SystemExit("NVME_STORAGE_ROOT must be an absolute path below /mnt/nvme")
@@ -45,15 +45,20 @@ def _storage_paths() -> tuple[Path, Path]:
     nvme = Path("/mnt/nvme")
     if root != nvme and nvme not in root.parents:
         raise SystemExit("NVME_STORAGE_ROOT must be /mnt/nvme or one of its descendants")
-    model = root / "model-volumes" / SPEC["environment"]
-    webui = root / "webui-data" / SPEC["environment"]
-    for path in (model, webui):
-        path.mkdir(parents=True, exist_ok=True)
+    environment_root = root / "model-volumes" / SPEC["environment"]
+    model = environment_root / "models"
+    webui = environment_root / "webui-data"
+    vllm_cache = environment_root / "vllm-cache"
+    for path in (model, webui, vllm_cache):
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise SystemExit(f"cannot prepare NVMe storage {path}: {error}") from error
     free_gib = shutil.disk_usage(root).free // (1024**3)
     minimum = int(SPEC["storage"]["minimum_free_gib"])
     if free_gib < minimum:
         raise SystemExit(f"NVMe storage has {free_gib} GiB free; {minimum} GiB is required")
-    return model, webui
+    return model, webui, vllm_cache
 
 
 def _compose_env() -> dict[str, str]:
@@ -62,13 +67,14 @@ def _compose_env() -> dict[str, str]:
         for key, value in os.environ.items()
         if key not in {"COMPOSE_FILE", "COMPOSE_PROFILES", "COMPOSE_PROJECT_NAME"}
     }
-    model_path, webui_path = _storage_paths()
+    model_path, webui_path, vllm_cache_path = _storage_paths()
     env.update(
         {
             "COMPOSE_DISABLE_ENV_FILE": "1",
             "COMPOSE_PROJECT_NAME": SPEC["environment"].replace(".", "-"),
             "MODEL_STORAGE_PATH": str(model_path),
             "WEBUI_STORAGE_PATH": str(webui_path),
+            "VLLM_CACHE_PATH": str(vllm_cache_path),
             "VLLM_IMAGE": os.environ.get("VLLM_IMAGE", SPEC["vllm"]["image"]),
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),

@@ -11,7 +11,6 @@ services:
       HF_HUB_DISABLE_TELEMETRY: "1"
       VLLM_NO_USAGE_STATS: "1"
       VLLM_USE_DEEP_GEMM: "0"
-      VLLM_USE_FASTOKENS: "1"
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       SAFETENSORS_FAST_GPU: "1"
     volumes:
@@ -19,6 +18,9 @@ services:
         source: ${MODEL_STORAGE_PATH}
         target: /models
         read_only: true
+      - type: bind
+        source: ${VLLM_CACHE_PATH}
+        target: /root/.cache/vllm
     command:
       - /models/qwen3.6-27b-fp8
       - --served-model-name
@@ -88,6 +90,7 @@ services:
         target: /models
         read_only: true
       - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
+      - ./chat_template.jinja:/etc/kairyu/qwen3.6-chat-template.jinja:ro
     depends_on:
       vllm: {condition: service_healthy}
     ports:
