@@ -15,7 +15,27 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
-RESULTS_ROOT = ROOT / "bench/results/examples" / SPEC["environment"]
+
+
+def _nvme_root() -> Path:
+    configured = Path(os.environ.get("NVME_STORAGE_ROOT", SPEC["storage"]["root"]))
+    if not configured.is_absolute():
+        raise SystemExit("NVME_STORAGE_ROOT must be an absolute path below /mnt/nvme")
+    root = configured.resolve()
+    nvme = Path("/mnt/nvme")
+    if root != nvme and nvme not in root.parents:
+        raise SystemExit("NVME_STORAGE_ROOT must be /mnt/nvme or one of its descendants")
+    return root
+
+
+STORAGE_ROOT = _nvme_root()
+RESULTS_ROOT = Path(
+    os.environ.get(
+        "BENCH_RESULTS_ROOT",
+        STORAGE_ROOT / "bench-results/examples" / SPEC["environment"],
+    )
+)
+TERMINAL_BENCH_DATASET = STORAGE_ROOT / "bench-data/terminal-bench-2-1"
 BENCHMARKS = (
     "serving-qwen",
     "serving-deepseek",
@@ -26,14 +46,21 @@ BENCHMARKS = (
     "serving-auto-max-moa3",
     "serving-auto-max-moa4",
     "orchestration",
+    "terminalbench-pilot",
     "terminalbench",
 )
 
 
-def _run(command: list[str], *, log: Path | None = None, check: bool = True) -> int:
+def _run(
+    command: list[str],
+    *,
+    log: Path | None = None,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+) -> int:
     print("+ " + " ".join(command), flush=True)
     if log is None:
-        return subprocess.run(command, cwd=ROOT, check=check).returncode
+        return subprocess.run(command, cwd=ROOT, check=check, env=env).returncode
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w", encoding="utf-8") as stream:
         process = subprocess.run(
@@ -43,6 +70,7 @@ def _run(command: list[str], *, log: Path | None = None, check: bool = True) -> 
             text=True,
             stdout=stream,
             stderr=subprocess.STDOUT,
+            env=env,
         )
     if check and process.returncode:
         raise subprocess.CalledProcessError(process.returncode, command)
@@ -56,6 +84,44 @@ def _run_id() -> str:
 def _ensure_environment(no_start: bool) -> None:
     if not no_start:
         _run([sys.executable, str(HERE / "control.py"), "up"])
+
+
+def _terminalbench_dataset(run_dir: Path) -> Path:
+    expected = int(SPEC["benchmarks"]["terminalbench"]["dataset_tasks"])
+
+    def task_count() -> int:
+        if not TERMINAL_BENCH_DATASET.is_dir():
+            return 0
+        return sum(
+            (path / "task.toml").is_file()
+            for path in TERMINAL_BENCH_DATASET.iterdir()
+            if path.is_dir()
+        )
+
+    if task_count() != expected:
+        TERMINAL_BENCH_DATASET.parent.mkdir(parents=True, exist_ok=True)
+        code = _run(
+            [
+                "harbor",
+                "dataset",
+                "download",
+                SPEC["benchmarks"]["terminalbench"]["dataset"],
+                "--output-dir",
+                str(TERMINAL_BENCH_DATASET.parent),
+                "--export",
+                "--overwrite",
+            ],
+            log=run_dir / "terminalbench-dataset-download.log",
+            check=False,
+        )
+        if code:
+            raise RuntimeError(f"Harbor dataset download failed with exit code {code}")
+    observed = task_count()
+    if observed != expected:
+        raise RuntimeError(
+            f"Terminal-Bench dataset has {observed} tasks; expected exactly {expected}"
+        )
+    return TERMINAL_BENCH_DATASET
 
 
 def _serving_dataset(
@@ -359,8 +425,16 @@ def orchestration(run_dir: Path) -> int:
     )
 
 
-def terminalbench(run_dir: Path) -> int:
+def _terminalbench_run(
+    run_dir: Path,
+    *,
+    models: tuple[str, ...],
+    run_id: str,
+    served_label: str,
+    tasks: tuple[str, ...] = (),
+) -> int:
     config = SPEC["benchmarks"]["terminalbench"]
+    dataset = _terminalbench_dataset(run_dir)
     command = [
         str(ROOT / ".venv/bin/python"),
         "-m",
@@ -369,15 +443,14 @@ def terminalbench(run_dir: Path) -> int:
         "run",
         "--base-url",
         f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1",
-        "--model",
-        SPEC["orchestration"]["auto_model"],
+        *[part for model in models for part in ("--model", model)],
         "--served-config-label",
-        "rtx-pro-6000-blackwell-8x-vllm-qwen-tp1x4-deepseek-tp4-ep4-moa2",
+        served_label,
         "--served-config-sha256",
         _served_config_sha256(),
         "--no-vision",
         "--max-context-tokens",
-        str(SPEC["models"]["tier2"]["max_context_tokens"]),
+        str(SPEC["models"]["tier1"]["max_context_tokens"]),
         "--max-output-tokens",
         str(config["max_output_tokens"]),
         "--request-timeout-s",
@@ -393,40 +466,93 @@ def terminalbench(run_dir: Path) -> int:
         "--results-dir",
         str(run_dir),
         "--run-id",
-        "terminalbench-2.1",
+        run_id,
+        *(["--limit", str(len(tasks))] if tasks else []),
         "--no-progress",
     ]
-    # No --limit: Harbor receives the complete Terminal-Bench 2.1 package.
-    # Unsupported sampling knobs are deliberately omitted at this boundary.
-    code = _run(command, log=run_dir / "terminalbench.log", check=False)
+    env = dict(os.environ)
+    env["KAIRYU_TERMINAL_BENCH_PATH"] = str(dataset)
+    if tasks:
+        env["KAIRYU_TERMINAL_BENCH_TASKS"] = ",".join(tasks)
+    else:
+        env.pop("KAIRYU_TERMINAL_BENCH_TASKS", None)
+    code = _run(
+        command,
+        log=run_dir / "terminalbench.log",
+        check=False,
+        env=env,
+    )
     if code:
         return code
-    return _validate_terminalbench(run_dir)
+    return _validate_terminalbench(
+        run_dir,
+        run_id=run_id,
+        models=models,
+        expected_tasks=(len(tasks) if tasks else int(config["dataset_tasks"])),
+    )
 
 
-def _validate_terminalbench(run_dir: Path) -> int:
-    scoreboard_path = run_dir / "terminalbench-2.1" / "scoreboard.json"
+def terminalbench_pilot(run_dir: Path) -> int:
+    config = SPEC["benchmarks"]["terminalbench"]
+    return _terminalbench_run(
+        run_dir,
+        models=tuple(config["pilot_models"]),
+        run_id="terminalbench-2.1-pilot",
+        served_label=(
+            "rtx-pro-6000-blackwell-8x-vllm-qwen-tp1x4-"
+            "deepseek-tp4-ep4-quality-pilot"
+        ),
+        tasks=tuple(config["pilot_tasks"]),
+    )
+
+
+def terminalbench(run_dir: Path) -> int:
+    # No task filter or limit: Harbor receives all 89 locally pinned tasks.
+    # Unsupported sampling knobs are deliberately omitted at this boundary.
+    return _terminalbench_run(
+        run_dir,
+        models=(SPEC["orchestration"]["auto_max_model"],),
+        run_id="terminalbench-2.1",
+        served_label=(
+            "rtx-pro-6000-blackwell-8x-vllm-qwen-tp1x4-"
+            "deepseek-tp4-ep4-auto-max-selected"
+        ),
+    )
+
+
+def _validate_terminalbench(
+    run_dir: Path,
+    *,
+    run_id: str,
+    models: tuple[str, ...],
+    expected_tasks: int,
+) -> int:
+    scoreboard_path = run_dir / run_id / "scoreboard.json"
     try:
         scoreboard = json.loads(scoreboard_path.read_text(encoding="utf-8"))
-        cell = scoreboard["cells"]["terminal-bench"][SPEC["orchestration"]["auto_model"]]
     except (KeyError, OSError, TypeError, ValueError) as error:
         print(f"invalid Terminal-Bench scoreboard: {error}", file=sys.stderr)
         return 1
-    complete = (
-        cell.get("status") == "completed"
-        and isinstance(cell.get("score"), (int, float))
-        and isinstance(cell.get("n"), int)
-        and cell["n"] > 0
-        and cell.get("n_scored") == cell["n"]
-    )
-    if not complete:
-        print(
-            "Terminal-Bench did not produce complete evidence: "
-            f"status={cell.get('status')!r}, n={cell.get('n')!r}, "
-            f"n_scored={cell.get('n_scored')!r}, score={cell.get('score')!r}",
-            file=sys.stderr,
+    for model in models:
+        try:
+            cell = scoreboard["cells"]["terminal-bench"][model]
+        except (KeyError, TypeError) as error:
+            print(f"Terminal-Bench has no cell for {model}: {error}", file=sys.stderr)
+            return 1
+        complete = (
+            cell.get("status") == "completed"
+            and isinstance(cell.get("score"), (int, float))
+            and cell.get("n") == expected_tasks
+            and cell.get("n_scored") == expected_tasks
         )
-        return 1
+        if not complete:
+            print(
+                f"Terminal-Bench did not produce complete evidence for {model}: "
+                f"status={cell.get('status')!r}, n={cell.get('n')!r}, "
+                f"n_scored={cell.get('n_scored')!r}, score={cell.get('score')!r}",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 
@@ -466,6 +592,7 @@ def main() -> None:
         print("serving-auto-max  forced MoA-3 + Tier2 synthesis matrix")
         print("serving-auto-max-moa1..4  fixed-fanout quality-candidate matrices")
         print("orchestration     fixed L2 direct/auto/auto-max latency and quality")
+        print("terminalbench-pilot  same four tasks on direct Qwen/DeepSeek and MoA1..4")
         print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
         print("all               every benchmark above, continuing after failures")
         return

@@ -205,28 +205,80 @@ def test_tiered_control_rejects_persistent_storage_outside_nvme(
         control._nvme_root()
 
 
+def test_tiered_benchmark_rejects_storage_outside_nvme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NVME_STORAGE_ROOT", "/tmp/not-nvme")
+    with pytest.raises(SystemExit, match="/mnt/nvme"):
+        _load(EXAMPLE / "benchmark.py", "tiered_example_benchmark_nvme")
+
+
 def test_tiered_terminalbench_command_is_full_dataset_without_sampling_claims(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_benchmark")
     observed: list[str] = []
+    observed_env: dict[str, str] = {}
+    dataset = tmp_path / "terminal-bench-2-1"
+    dataset.mkdir()
 
-    def fake_run(command, *, log=None, check=True):
+    def fake_run(command, *, log=None, check=True, env=None):
         observed.extend(command)
+        observed_env.update(env or {})
         return 0
 
     monkeypatch.setattr(benchmark, "_run", fake_run)
-    monkeypatch.setattr(benchmark, "_validate_terminalbench", lambda _path: 0)
+    monkeypatch.setattr(benchmark, "_terminalbench_dataset", lambda _path: dataset)
+    monkeypatch.setattr(
+        benchmark, "_validate_terminalbench", lambda _path, **_kwargs: 0
+    )
     assert benchmark.terminalbench(tmp_path) == 0
     assert observed[observed.index("--only") + 1] == "terminal-bench"
-    assert observed[observed.index("--model") + 1] == "kairyu-auto"
+    assert observed[observed.index("--model") + 1] == "kairyu-auto-max"
     assert observed[observed.index("--attempts") + 1] == "1"
     assert observed[observed.index("--concurrency") + 1] == "4"
+    assert observed_env["KAIRYU_TERMINAL_BENCH_PATH"] == str(dataset)
+    assert "KAIRYU_TERMINAL_BENCH_TASKS" not in observed_env
     assert "--limit" not in observed
     assert "--temperature" not in observed
     assert "--recommended-sampling" not in observed
     assert "--top-p" not in observed
     assert "--sampling-seed" not in observed
+
+
+def test_tiered_terminalbench_pilot_pins_same_tasks_for_all_candidates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_tb_pilot")
+    observed: list[str] = []
+    observed_env: dict[str, str] = {}
+    dataset = tmp_path / "terminal-bench-2-1"
+    dataset.mkdir()
+
+    def fake_run(command, *, log=None, check=True, env=None):
+        observed.extend(command)
+        observed_env.update(env or {})
+        return 0
+
+    monkeypatch.setattr(benchmark, "_run", fake_run)
+    monkeypatch.setattr(benchmark, "_terminalbench_dataset", lambda _path: dataset)
+    monkeypatch.setattr(
+        benchmark, "_validate_terminalbench", lambda _path, **_kwargs: 0
+    )
+
+    assert benchmark.terminalbench_pilot(tmp_path) == 0
+    models = [
+        observed[index + 1]
+        for index, value in enumerate(observed)
+        if value == "--model"
+    ]
+    config = benchmark.SPEC["benchmarks"]["terminalbench"]
+    assert models == config["pilot_models"]
+    assert observed[observed.index("--limit") + 1] == str(len(config["pilot_tasks"]))
+    assert observed_env["KAIRYU_TERMINAL_BENCH_PATH"] == str(dataset)
+    assert observed_env["KAIRYU_TERMINAL_BENCH_TASKS"] == ",".join(
+        config["pilot_tasks"]
+    )
 
 
 def test_tiered_all_dispatches_every_benchmark(
@@ -252,6 +304,37 @@ def test_tiered_all_dispatches_every_benchmark(
     assert observed == list(benchmark.BENCHMARKS)
     manifest = json.loads((tmp_path / "all-start" / "run.json").read_text())
     assert list(manifest["exit_codes"]) == list(benchmark.BENCHMARKS)
+
+
+def test_tiered_terminalbench_validator_rejects_partial_or_wrong_denominator(
+    tmp_path: Path,
+) -> None:
+    benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_tb_validator")
+    run = tmp_path / "pilot"
+    run.mkdir()
+    scoreboard = {
+        "cells": {
+            "terminal-bench": {
+                "deepseek-v4-flash-0731": {
+                    "status": "partial",
+                    "score": 0.5,
+                    "n": 4,
+                    "n_scored": 3,
+                }
+            }
+        }
+    }
+    (run / "scoreboard.json").write_text(json.dumps(scoreboard))
+
+    assert (
+        benchmark._validate_terminalbench(
+            tmp_path,
+            run_id="pilot",
+            models=("deepseek-v4-flash-0731",),
+            expected_tasks=4,
+        )
+        == 1
+    )
 
 
 def test_tiered_moa_candidate_serving_requires_exact_trace_count(

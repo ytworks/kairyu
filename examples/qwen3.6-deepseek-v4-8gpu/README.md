@@ -71,6 +71,7 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./bench.sh serving-auto-max-moa3
 ./bench.sh serving-auto-max-moa4
 ./bench.sh orchestration
+./bench.sh terminalbench-pilot
 ./bench.sh terminalbench
 ./bench.sh all
 ```
@@ -85,15 +86,21 @@ token totals in their trace evidence.
 
 `orchestration` runs Kairyu's fixed direct/auto/auto-max L2 latency and
 LiveCodeBench-quality diagnostic, including internal calls, internal tokens,
-route identity, and allocated GPU-seconds. `terminalbench` runs the complete
-Harbor Hub `terminal-bench/terminal-bench-2-1` package with terminus-2 and the
-published 500-turn budget. It deliberately passes no task limit and no sampling
-knob that Harbor cannot forward. The checked-in one-trial result is therefore a
-complete task-set measurement, not an official five-trial leaderboard entry.
+route identity, and allocated GPU-seconds. `terminalbench-pilot` runs the same
+four named Terminal-Bench 2.1 tasks on direct Qwen, direct DeepSeek, and
+auto-max MoA 1/2/3/4. `terminalbench` runs the selected `kairyu-auto-max` over
+all 89 tasks with terminus-2 and the published 500-turn budget. It deliberately
+passes no unsupported sampling knob. The one-trial full result is a complete
+task-set measurement, not an official five-trial leaderboard entry.
+
+The Harbor dataset is exported once to
+`/mnt/nvme/kairyu/bench-data/terminal-bench-2-1`; Harbor job temporaries use
+`/mnt/nvme/kairyu/bench-tmp/qwen3.6-deepseek-v4-8gpu`. This avoids Harbor's
+home-directory cache for example-owned runs.
 
 `all` continues through every benchmark after an individual failure and always
 finalizes `run.json`. Artifacts go to
-`bench/results/examples/qwen3.6-deepseek-v4-8gpu/<UTC-run-id>/`.
+`/mnt/nvme/kairyu/bench-results/examples/qwen3.6-deepseek-v4-8gpu/<UTC-run-id>/`.
 
 ## Reproducibility pins
 
