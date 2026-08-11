@@ -25,10 +25,10 @@ router:
   # Code fences and truly heavy signals still reach Tier2; only extreme
   # multi-step/long requests pay for MoA-2.
   thresholds:
-    multi_step_markers: 8
+    multi_step_markers: 64
     multi_agent_min_chars: 262144
-    reasoning_keywords: 6
-    math_symbols: 64
+    reasoning_keywords: 64
+    math_symbols: 512
     tier2_min_chars: 131072
 
 moa_samples: 2

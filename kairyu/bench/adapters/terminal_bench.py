@@ -27,7 +27,10 @@ from kairyu.bench.adapters.base import (
 )
 from kairyu.bench.types import BenchTarget, DownloadReport, ItemResult, PairResult
 
-_HARNESS_TIMEOUT_S = 8 * 3600
+# A complete Terminal-Bench 2.1 package at concurrency one can legitimately
+# exceed a workday. Keep a finite fail-closed bound without truncating the
+# requested full task set in the parent process.
+_HARNESS_TIMEOUT_S = 72 * 3600
 # Terminal-Bench 2.1 is published on Harbor Hub under this organization/package
 # identifier. `terminal-bench@2.1` addresses the legacy registry instead and is
 # not a published dataset there.

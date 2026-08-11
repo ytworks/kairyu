@@ -120,10 +120,10 @@ def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
     assert standard.router.kind == "rules"
     assert standard.router.thresholds is not None
     assert standard.router.thresholds.model_dump() == {
-        "multi_step_markers": 8,
+        "multi_step_markers": 64,
         "multi_agent_min_chars": 262144,
-        "reasoning_keywords": 6,
-        "math_symbols": 64,
+        "reasoning_keywords": 64,
+        "math_symbols": 512,
         "tier2_min_chars": 131072,
     }
     assert standard.moa_samples == 2
