@@ -91,7 +91,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     } == deepseek["environment"]
     assert json.loads(_option(deepseek["command"], "--speculative-config")) == {
         "method": "dspark",
-        "num_speculative_tokens": 3,
+        "num_speculative_tokens": 5,
         "draft_sample_method": "greedy",
     }
 
