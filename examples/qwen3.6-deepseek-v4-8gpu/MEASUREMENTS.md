@@ -98,10 +98,13 @@ slower for the single DeepSeek synthesis request on the principal auto-max
 path. The 32K budget improves c8/c16 throughput but loses c1 E2E/generation
 speed and c32 throughput/TPOT, so 16K is the better latency-first balance.
 
-Before the cache fix, a DSpark-5/32K cold engine initialization took 560.68 s.
-The no-spec/16K initial build in the corrected layout took 519.00 s, including
-404.55 s of mHC warm-up. The generated caches now exist outside the containers
-at `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/compile-cache/`:
-73 MiB for DeepSeek and approximately 239-240 MiB for each Qwen replica at the
-time of measurement. The next DSpark restart is used to verify reuse rather
-than treating an ephemeral compile as warm startup.
+Before the cache fix, a DSpark-5/32K cold engine initialization took 560.68 s,
+including 375.98 s of mHC warm-up. The no-spec/16K initial build in the
+corrected layout took 519.00 s, including 404.55 s of mHC warm-up. After
+restoring the selected DSpark-5/16K configuration, the first restart against
+that persistent cache reduced mHC warm-up to 11.98 s and total engine
+initialization to 73.05 s. The generated caches exist outside the containers at
+`/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/compile-cache/`:
+94 MiB for DeepSeek and approximately 239-240 MiB for each Qwen replica after
+the reuse check. The selected DeepSeek process also reported 45.74 GiB of KV
+cache, or 2,947,608 tokens (2.81x the configured 1M-token context), with FP8 KV.
