@@ -708,7 +708,7 @@ def main() -> None:
         print("serving-auto-max-moa1..4  fixed-fanout quality-candidate matrices")
         print("orchestration     fixed L2 direct/auto/auto-max latency and quality")
         print(
-            "terminalbench-pilot  same four tasks on direct DeepSeek and MoA3-chat"
+            "terminalbench-pilot  same four tasks on direct DeepSeek and thinking-MoA3"
         )
         print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
         print("all               every benchmark above, continuing after failures")

@@ -58,10 +58,19 @@ with `BadGatewayError`. Counting the failed task as zero leaves MoA-2 at 1/4,
 so it is not eligible for the full benchmark. Run ID:
 `terminalbench-selection-moa2-vs-deepseek-20260812`.
 
-The next candidate is therefore **MoA-3 with ordinary DeepSeek synthesis**.
-It is slower than MoA-2 but already completed the full c1/c8/c16/c32 L3 matrix
-with 32/32 valid responses at every concurrency. It must equal or exceed the
-same clean direct-DeepSeek 2/4 pilot before promotion to `kairyu-auto-max`.
+Ordinary-synthesis MoA-3 also failed the gate. It scored 0/3 completed tasks;
+the fourth task was stopped because even a success could leave it at only 1/4,
+below direct DeepSeek's 2/4. Run ID:
+`terminalbench-selection-moa3-vs-deepseek-20260812`.
+
+The next quality candidate is therefore **MoA-3 with private DeepSeek thinking
+synthesis**. Its prior c8 L3 run produced 31/32 public answers because one
+private generation exhausted the 1024-token internal allowance before its
+configured `</think>` boundary. The generic private-work allowance is raised
+to 2048 for this candidate. Natural EOS means normal requests retain their
+measured work, while the long-thinking tail gets room to produce a valid public
+answer. This candidate must first re-pass the L3 reliability/performance matrix
+and then equal or exceed the same clean direct-DeepSeek 2/4 pilot.
 
 ## Tier1 topology selection
 

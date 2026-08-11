@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [progress] Ordinary synthesis fails to preserve the quality floor
+- What: Ordinary-DeepSeek MoA-3 scored 0/3 completed pilot tasks, making the fourth task irrelevant to its maximum possible 1/4 score versus direct DeepSeek's clean 2/4. The quality candidate returns to private-thinking MoA-3 with a generic 2048-token internal allowance to eliminate the previously measured 1024-token boundary-exhaustion tail before re-running L3 performance and quality gates.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,auto-max.yaml}`; run ID `terminalbench-selection-moa3-vs-deepseek-20260812`; PR #471
+
 ### 2026-08-12 — [progress] MoA-2 fails the quality-selection gate
 - What: The performance-winning ordinary-chat MoA-2 candidate scored 1/3 completed Terminal-Bench 2.1 pilot tasks and failed the fourth request with `BadGatewayError`, below direct DeepSeek's clean 2/4 baseline. MoA-2 is rejected; the already performance-qualified MoA-3 ordinary-chat candidate advances to the same fixed four-task gate.
 - Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,auto-max-chat.yaml}`; run ID `terminalbench-selection-moa2-vs-deepseek-20260812`; PR #471

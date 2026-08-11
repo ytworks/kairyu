@@ -72,7 +72,7 @@
     ],
     "moa_samples": 2,
     "auto_max_moa_samples": 3,
-    "internal_max_output_tokens": 1024,
+    "internal_max_output_tokens": 2048,
     "auto_max_chat_moa_samples": 3,
     "auto_max_chat_internal_max_output_tokens": 1024
   },
@@ -106,7 +106,7 @@
       ],
       "pilot_models": [
         "deepseek-v4-flash-0731",
-        "kairyu-auto-max-chat"
+        "kairyu-auto-max"
       ]
     }
   }

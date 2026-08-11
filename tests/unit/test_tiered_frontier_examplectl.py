@@ -181,6 +181,8 @@ def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 3
+    assert maximum.internal_max_tokens == 2048
+    assert config["orchestration"]["internal_max_output_tokens"] == 2048
     assert maximum.budget.max_steps == 4
     assert chat.router == maximum.router
     assert chat.moa_samples == 3
