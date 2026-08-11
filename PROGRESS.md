@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [progress] Tiered quality candidate reduces fan-out, not proposal depth
+- What: The 512-token private-cap A/B retained 32/32 valid L3 responses but did not improve c1/c8 median TTFT beyond run noise, so the quality candidate restores the 1024-token allowance and changes ordinary-chat synthesis from MoA-3 to MoA-2 for the next performance/quality gate.
+- Refs: run IDs `l3-auto-max-chat-moa3-public-v1-20260812`, `l3-auto-max-chat-moa3-private512-public-v1-20260812`; `examples/qwen3.6-deepseek-v4-8gpu/`; PR #471
+
 ### 2026-08-12 — [amendment] L2 bounds private work independently of public output
 - What: Orchestrator YAML and decorator specs now expose a validated, backend-neutral `internal_max_tokens` policy that caps private planning/proposal/verification generations without reducing the caller's final-answer budget. The tiered MoA-3 chat-synthesis candidate pins 512 after its reliable but 1024-token L3 matrix showed excessive c16/c32 latency.
 - Why: Private proposal length is an operator latency/quality tradeoff and must remain portable policy rather than a model- or example-specific core-code branch.

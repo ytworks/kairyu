@@ -420,7 +420,8 @@ def serving_auto_max(run_dir: Path) -> int:
 
 
 def serving_auto_max_chat(run_dir: Path) -> int:
-    return _serving_auto_max_candidate("kairyu-auto-max-chat", run_dir, samples=3)
+    samples = int(SPEC["orchestration"]["auto_max_chat_moa_samples"])
+    return _serving_auto_max_candidate("kairyu-auto-max-chat", run_dir, samples=samples)
 
 
 def _serving_auto_max_candidate(model: str, run_dir: Path, *, samples: int) -> int:
@@ -654,7 +655,7 @@ def main() -> None:
         print("orchestration     fixed L2 direct/auto/auto-max latency and quality")
         print(
             "terminalbench-pilot  same four tasks on direct Qwen/DeepSeek, "
-            "MoA3-chat, and MoA1..4-thinking"
+            "MoA2-chat, and MoA1..4-thinking"
         )
         print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
         print("all               every benchmark above, continuing after failures")

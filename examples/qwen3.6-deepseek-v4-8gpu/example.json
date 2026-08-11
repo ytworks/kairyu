@@ -73,7 +73,8 @@
     "moa_samples": 2,
     "auto_max_moa_samples": 3,
     "internal_max_output_tokens": 1024,
-    "auto_max_chat_internal_max_output_tokens": 512
+    "auto_max_chat_moa_samples": 2,
+    "auto_max_chat_internal_max_output_tokens": 1024
   },
   "webui": {
     "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
