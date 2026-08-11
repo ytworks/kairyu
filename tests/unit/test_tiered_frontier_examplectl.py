@@ -141,6 +141,15 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     }
 
 
+def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcript() -> None:
+    template = (EXAMPLE / "deepseek-thinking.jinja").read_text()
+
+    assert "Reason privately and carefully" in template
+    assert "converge promptly" in template
+    assert "entire deliberation process" not in template
+    assert "Do not stop reasoning" not in template
+
+
 def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
     standard = load_spec(EXAMPLE / "auto.yaml")
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
