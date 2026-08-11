@@ -77,6 +77,7 @@ _NATIVE_STAGE_NAMES = (
 )
 _MAX_STAGE_DURATION_NS = (1 << 63) - 1
 _MAX_STAGE_OCCURRENCES = (1 << 31) - 1
+_MAX_TRACE_TOKEN_COUNT = (1 << 63) - 1
 _MAX_TRACE_EVENTS = 256
 _TRACE_DURATION_NAMES = (
     "duration_ms",
@@ -92,7 +93,7 @@ _CLIENT_PROFILE_RANGE = "kairyu.bench.serving.client-measurement"
 
 @dataclass(frozen=True)
 class TraceStageMetrics:
-    """Privacy-minimized timing for one orchestration trace event."""
+    """Privacy-minimized timing and scalar usage for one trace event."""
 
     stage: str
     node: str
@@ -107,6 +108,10 @@ class TraceStageMetrics:
     first_token_ms: float | None = None
     post_first_ms: float | None = None
     total_ms: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_tokens: int | None = None
+    proposals: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -123,6 +128,10 @@ class TraceStageMetrics:
             "first_token_ms": self.first_token_ms,
             "post_first_ms": self.post_first_ms,
             "total_ms": self.total_ms,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cached_tokens": self.cached_tokens,
+            "proposals": self.proposals,
         }
 
 
@@ -189,6 +198,24 @@ def _trace_identifier(
 
 def _duration_ms(start: _datetime.datetime, end: _datetime.datetime) -> float:
     return (end - start).total_seconds() * 1e3
+
+
+def _trace_usage(event: dict) -> tuple[int | None, int | None, int | None]:
+    usage = event.get("usage")
+    if usage is None:
+        return None, None, None
+    if not isinstance(usage, dict):
+        raise ValueError("event.usage must be an object or null")
+    values = tuple(
+        usage.get(name)
+        for name in ("prompt_tokens", "completion_tokens", "cached_tokens")
+    )
+    if any(
+        type(value) is not int or not 0 <= value <= _MAX_TRACE_TOKEN_COUNT
+        for value in values
+    ):
+        raise ValueError("event.usage token counts must be bounded non-negative integers")
+    return values
 
 
 def _parse_trace(
@@ -322,6 +349,14 @@ def _parse_trace(
         if ordered[0] < trace_started or ordered[-1] > trace_completed:
             raise ValueError("event timestamps are outside the trace envelope")
 
+        input_tokens, output_tokens, cached_tokens = _trace_usage(event)
+        proposals = None
+        if node == "moa" and role == "moa" and kind == "synthesis" and status == "success":
+            detail = event.get("detail")
+            proposals = detail.get("proposals") if isinstance(detail, dict) else None
+            if type(proposals) is not int or not 1 <= proposals <= 16:
+                raise ValueError("successful MoA trace must report 1..16 proposals")
+
         stage = "/".join((node, role or "-", kind))
         stages.append(
             TraceStageMetrics(
@@ -342,6 +377,10 @@ def _parse_trace(
                     _duration_ms(first, completed) if first is not None else None
                 ),
                 total_ms=_duration_ms(queued or started, completed),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+                proposals=proposals,
             )
         )
     return _TRACE_VERSION, tuple(stages)
@@ -723,6 +762,8 @@ def summarize_results(
                 "events": 0,
                 "request_indexes": set(),
                 "occurrences_total": None,
+                "usage_totals": None,
+                "proposal_counts": set(),
                 **{name: [] for name in _TRACE_DURATION_NAMES},
             }
     for request_index, metric in enumerate(results):
@@ -739,6 +780,8 @@ def summarize_results(
                     "events": 0,
                     "request_indexes": set(),
                     "occurrences_total": None,
+                    "usage_totals": None,
+                    "proposal_counts": set(),
                     **{name: [] for name in _TRACE_DURATION_NAMES},
                 },
             )
@@ -750,6 +793,23 @@ def summarize_results(
                 aggregate["occurrences_total"] = (
                     int(aggregate["occurrences_total"] or 0) + stage.occurrences
                 )
+            if stage.input_tokens is not None:
+                usage_totals = aggregate["usage_totals"]
+                if usage_totals is None:
+                    usage_totals = {
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cached_tokens": 0,
+                    }
+                    aggregate["usage_totals"] = usage_totals
+                assert isinstance(usage_totals, dict)
+                usage_totals["input_tokens"] += stage.input_tokens
+                usage_totals["output_tokens"] += stage.output_tokens or 0
+                usage_totals["cached_tokens"] += stage.cached_tokens or 0
+            if stage.proposals is not None:
+                proposal_counts = aggregate["proposal_counts"]
+                assert isinstance(proposal_counts, set)
+                proposal_counts.add(stage.proposals)
             for name in _TRACE_DURATION_NAMES:
                 value = getattr(stage, name)
                 if value is not None:
@@ -774,6 +834,8 @@ def summarize_results(
                 requests_observed / requested_traces if requested_traces else None
             ),
             "occurrences_total": aggregate["occurrences_total"],
+            "usage_totals": aggregate["usage_totals"],
+            "proposal_counts": sorted(aggregate["proposal_counts"]),
         }
         for name in _TRACE_DURATION_NAMES:
             values = sorted(aggregate[name])

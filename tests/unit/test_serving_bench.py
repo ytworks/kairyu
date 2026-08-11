@@ -371,6 +371,69 @@ def _trace(*, request_id="chatcmpl-traced"):
     }
 
 
+def test_trace_retains_only_bounded_moa_count_and_usage_scalars():
+    trace = _trace()
+    trace["events"][1].update(
+        {
+            "node": "moa",
+            "role": "moa",
+            "kind": "synthesis",
+            "attempt": 0,
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 45,
+                "cached_tokens": 20,
+            },
+            "detail": {"proposals": 3, "secret": "must-not-be-retained"},
+        }
+    )
+
+    _, stages = serving_bench._parse_trace(trace, response_id="chatcmpl-traced")
+    moa = stages[1]
+    assert moa.proposals == 3
+    assert (moa.input_tokens, moa.output_tokens, moa.cached_tokens) == (120, 45, 20)
+    assert "secret" not in str(moa.as_dict())
+
+    metric = serving_bench.RequestMetrics(
+        ttft_s=0.1,
+        total_s=0.2,
+        output_chunks=2,
+        completion_tokens=3,
+        trace_status="valid",
+        trace_version="2.0",
+        trace_stages=stages,
+    )
+    summary, _ = serving_bench.summarize_results(
+        [metric],
+        wall_ns=1_000_000_000,
+        dataset_label="moa-trace",
+        ttft_slo_s=1.0,
+    )
+    moa_summary = summary["stage_latency_ms"]["moa/moa/synthesis"]
+    assert moa_summary["proposal_counts"] == [3]
+    assert moa_summary["usage_totals"] == {
+        "input_tokens": 120,
+        "output_tokens": 45,
+        "cached_tokens": 20,
+    }
+
+
+@pytest.mark.parametrize("proposals", [None, 0, 17, "3"])
+def test_successful_moa_trace_rejects_missing_or_unsafe_proposal_count(proposals):
+    trace = _trace()
+    trace["events"][1].update(
+        {
+            "node": "moa",
+            "role": "moa",
+            "kind": "synthesis",
+            "detail": {"proposals": proposals},
+        }
+    )
+
+    with pytest.raises(ValueError, match="1..16 proposals"):
+        serving_bench._parse_trace(trace, response_id="chatcmpl-traced")
+
+
 async def test_run_one_extracts_only_sanitized_terminal_trace_and_not_as_output():
     from fastapi import FastAPI
     from fastapi.responses import StreamingResponse
@@ -705,6 +768,10 @@ def test_direct_stage_trace_uses_scalar_duration_and_discards_raw_detail():
         "first_token_ms",
         "post_first_ms",
         "total_ms",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "proposals",
     }
     assert "aggregation" not in stage.as_dict()
     assert "scope" not in stage.as_dict()
