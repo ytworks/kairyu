@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,8 @@ _HARNESS_TIMEOUT_S = 72 * 3600
 # identifier. `terminal-bench@2.1` addresses the legacy registry instead and is
 # not a published dataset there.
 _DATASET = "terminal-bench/terminal-bench-2-1"
+_LOCAL_DATASET_ENV = "KAIRYU_TERMINAL_BENCH_PATH"
+_INCLUDE_TASKS_ENV = "KAIRYU_TERMINAL_BENCH_TASKS"
 _AGENT = "terminus-2"
 # Fugu's condition. Harbor's terminus-2 default turn budget is lower, which
 # truncates long traces well before the published limit.
@@ -201,14 +204,18 @@ class TerminalBenchAdapter:
             return reason
         if shutil.which("harbor") is None:
             return "harbor not installed (pip install 'kairyu[bench-agentic]')"
+        local_dataset = os.environ.get(_LOCAL_DATASET_ENV)
+        if local_dataset:
+            path = Path(local_dataset)
+            if not path.is_absolute() or not path.is_dir():
+                return f"{_LOCAL_DATASET_ENV} must name an existing absolute directory"
         return None
 
     def _command(self, target: BenchTarget, ctx: RunContext, output_dir: Path) -> list[str]:
         command = [
             "harbor",
             "run",
-            "-d",
-            _DATASET,
+            *(self._dataset_arguments()),
             "-a",
             _AGENT,
             "-m",
@@ -234,7 +241,21 @@ class TerminalBenchAdapter:
         ]
         if ctx.limit is not None:
             command += ["--n-tasks", str(ctx.limit)]
+        include_tasks = tuple(
+            task.strip()
+            for task in os.environ.get(_INCLUDE_TASKS_ENV, "").split(",")
+            if task.strip()
+        )
+        for task in include_tasks:
+            command += ["--include-task-name", task]
         return command
+
+    @staticmethod
+    def _dataset_arguments() -> list[str]:
+        local_dataset = os.environ.get(_LOCAL_DATASET_ENV)
+        if local_dataset:
+            return ["--path", str(Path(local_dataset).resolve())]
+        return ["-d", _DATASET]
 
     async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:
         started_at = utc_now()

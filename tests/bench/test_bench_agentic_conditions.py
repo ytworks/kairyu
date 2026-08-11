@@ -134,6 +134,40 @@ def test_terminal_bench_limit_is_a_task_cap(tmp_path):
     assert _flag_value(command, "--n-tasks") == "3"
 
 
+def test_terminal_bench_can_use_pinned_local_dataset_and_task_filter(
+    tmp_path, monkeypatch
+):
+    dataset = tmp_path / "terminal-bench-2-1"
+    dataset.mkdir()
+    monkeypatch.setenv("KAIRYU_TERMINAL_BENCH_PATH", str(dataset))
+    monkeypatch.setenv("KAIRYU_TERMINAL_BENCH_TASKS", "write-compressor, fix-git")
+    monkeypatch.setattr("kairyu.bench.adapters.terminal_bench.shutil.which", lambda _: "harbor")
+
+    adapter = TerminalBenchAdapter()
+    command = adapter._command(_target(), _ctx(tmp_path), tmp_path / "jobs")
+
+    assert "-d" not in command
+    assert _flag_value(command, "--path") == str(dataset)
+    assert [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "--include-task-name"
+    ] == ["write-compressor", "fix-git"]
+    assert adapter._preconditions(_target(), _ctx(tmp_path)) is None
+
+
+def test_terminal_bench_rejects_missing_local_dataset(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "KAIRYU_TERMINAL_BENCH_PATH", str(tmp_path / "missing-terminal-bench")
+    )
+    monkeypatch.setattr("kairyu.bench.adapters.terminal_bench.shutil.which", lambda _: "harbor")
+
+    reason = TerminalBenchAdapter()._preconditions(_target(), _ctx(tmp_path))
+
+    assert reason is not None
+    assert "existing absolute directory" in reason
+
+
 @pytest.mark.parametrize(
     "target",
     [
