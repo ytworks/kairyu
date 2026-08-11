@@ -257,10 +257,12 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
-      DEFAULT_MODELS: kairyu-auto
+      DEFAULT_MODELS: kairyu-auto-max
       DEFAULT_MODEL_PARAMS: '{"max_tokens":32768}'
-      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}
-      WEBUI_AUTH: "true"
+      ENABLE_PERSISTENT_CONFIG: "false"
+      ENABLE_SIGNUP: "false"
+      ENABLE_LOGIN_FORM: "false"
+      WEBUI_AUTH: "false"
       WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
       WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
       WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
@@ -274,7 +276,7 @@ services:
     depends_on:
       kairyu: {condition: service_healthy}
     ports:
-      - ${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080
+      - ${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3000}:8080
     restart: unless-stopped
 
 volumes:

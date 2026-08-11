@@ -35,10 +35,11 @@ prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8003/v1
-Chat UI:    http://127.0.0.1:3000
+Chat UI:    http://<outward-facing-host>:3000 (no authentication)
 ```
 
-Open WebUI calls only Kairyu L3 and defaults to `kairyu-auto`. Direct
+Open WebUI listens on all host interfaces, requires no login, calls only
+Kairyu L3, and defaults to the quality-first `kairyu-auto-max`. Direct
 `qwen3.6-27b`, direct `deepseek-v4-flash-0731`, and `kairyu-auto-max` also
 appear in the model inventory. During the selection gate,
 `kairyu-auto-max-moa1` through `kairyu-auto-max-moa4` expose matched fixed
@@ -111,9 +112,12 @@ finalizes `run.json`. Artifacts go to
 - vLLM SM120 source: `aa0d51302747ea80f282e26949708b3253409fe2`
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 
-Override API/UI ports with `API_PORT` and `CHAT_UI_PORT`. To expose the UI,
-set `CHAT_UI_BIND_ADDRESS=0.0.0.0` and `PUBLIC_HOST`, but leave the unauthenticated
-Kairyu API on loopback and put TLS/firewall controls in front of port 3000.
+Override API/UI ports with `API_PORT` and `CHAT_UI_PORT`. The launcher discovers
+the outward-facing IPv4 address used in the printed URL; set `PUBLIC_HOST` when
+the browser must use a DNS name, public NAT address, or reverse proxy. Kairyu's
+L3 API remains on loopback. The UI is intentionally unauthenticated, so restrict
+port 3000 at the firewall or place appropriate TLS/access controls in front of
+it when exposure beyond a trusted network is not intended.
 
 See [MEASUREMENTS.md](MEASUREMENTS.md) for selected-runtime evidence and the
 completed Terminal-Bench result.

@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shutil
+import socket
 import subprocess
 import urllib.error
 import urllib.request
@@ -97,7 +98,7 @@ def _compose_env() -> dict[str, str]:
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
             "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
-            "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "127.0.0.1"),
+            "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "0.0.0.0"),
             # Render-safe defaults for down/status/logs. `up` replaces these
             # with NUMA-local CPU sets discovered from the exact GPU inventory.
             "DEEPSEEK_CPUSET": os.environ.get("DEEPSEEK_CPUSET", "0"),
@@ -372,8 +373,34 @@ def _validate_ready(api_url: str) -> None:
             raise SystemExit(f"Kairyu L2 does not report MoA-{samples} for {model}")
 
 
+def _public_ui_host() -> str:
+    configured = os.environ.get("PUBLIC_HOST", "").strip()
+    if configured:
+        if "://" in configured or "/" in configured:
+            raise SystemExit("PUBLIC_HOST must be a hostname or IPv4 address, not a URL")
+        return configured
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
+            # UDP connect selects the outward-facing interface without sending data.
+            route.connect(("192.0.2.1", 9))
+            detected = str(route.getsockname()[0])
+    except OSError as error:
+        raise SystemExit(
+            "cannot discover an externally reachable Chat UI host; set PUBLIC_HOST"
+        ) from error
+    if detected == "0.0.0.0" or detected.startswith("127."):
+        raise SystemExit(
+            "cannot discover an externally reachable Chat UI host; set PUBLIC_HOST"
+        )
+    return detected
+
+
 def up() -> None:
     env = _compose_env()
+    ui_host = _public_ui_host()
+    env["WEBUI_URL"] = os.environ.get(
+        "WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}"
+    )
     _preflight(env)
     _ensure_vllm_image(env)
     _ensure_models(env)
@@ -398,10 +425,7 @@ def up() -> None:
     _validate_ready(api_url)
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
-    ui_host = os.environ.get("PUBLIC_HOST", env["CHAT_UI_BIND_ADDRESS"])
-    if ui_host == "0.0.0.0":
-        ui_host = "127.0.0.1"
-    print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']}")
+    print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
     print(
         "Models:     kairyu-auto, kairyu-auto-max, "
         "kairyu-auto-max-moa1..4, qwen3.6-27b, deepseek-v4-flash-0731"

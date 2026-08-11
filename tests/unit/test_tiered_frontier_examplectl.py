@@ -174,7 +174,14 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
     compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
     ui = compose["services"]["chat-ui"]
     assert ui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
-    assert ui["environment"]["DEFAULT_MODELS"] == "kairyu-auto"
+    assert ui["environment"] | {
+        "DEFAULT_MODELS": "kairyu-auto-max",
+        "ENABLE_PERSISTENT_CONFIG": "false",
+        "ENABLE_SIGNUP": "false",
+        "ENABLE_LOGIN_FORM": "false",
+        "WEBUI_AUTH": "false",
+    } == ui["environment"]
+    assert ui["ports"] == ["${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3000}:8080"]
     assert ui["depends_on"] == {"kairyu": {"condition": "service_healthy"}}
     assert compose["services"]["kairyu"]["depends_on"] == {
         "qwen-0": {"condition": "service_healthy"},
@@ -194,6 +201,16 @@ def test_tiered_control_requires_exact_eight_gpu_inventory() -> None:
     )
     rows = control._gpu_inventory(text)
     assert sorted(rows) == list(range(8))
+
+
+def test_tiered_control_uses_explicit_public_ui_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _load(EXAMPLE / "control.py", "tiered_example_public_host")
+    monkeypatch.setenv("PUBLIC_HOST", "gpu.example.test")
+
+    assert control._public_ui_host() == "gpu.example.test"
+    assert control._compose_env()["CHAT_UI_BIND_ADDRESS"] == "0.0.0.0"
 
 
 def test_tiered_control_rejects_persistent_storage_outside_nvme(
