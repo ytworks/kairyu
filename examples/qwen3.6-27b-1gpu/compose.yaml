@@ -1,0 +1,126 @@
+name: kairyu-qwen36-27b-1gpu
+
+services:
+  vllm:
+    image: ${VLLM_IMAGE:-local/vllm-openai:sm120-aa0d513027}
+    ipc: host
+    cpuset: ${GPU_CPUSET}
+    environment:
+      HF_HOME: /models/.cache
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      VLLM_USE_DEEP_GEMM: "0"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      SAFETENSORS_FAST_GPU: "1"
+    volumes:
+      - type: bind
+        source: ${MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - type: bind
+        source: ${VLLM_CACHE_PATH}
+        target: /root/.cache/vllm
+    command:
+      - /models/qwen3.6-27b-fp8
+      - --served-model-name
+      - qwen3.6-27b
+      - --max-model-len
+      - "262144"
+      - --language-model-only
+      - --dtype
+      - bfloat16
+      - --kv-cache-dtype
+      - fp8
+      - --mamba-cache-dtype
+      - float16
+      - --mamba-ssm-cache-dtype
+      - float16
+      - --mamba-cache-mode
+      - align
+      - --enable-prefix-caching
+      - --enable-chunked-prefill
+      - --max-num-batched-tokens
+      - "16384"
+      - --max-num-seqs
+      - "32"
+      - --gpu-memory-utilization
+      - "0.95"
+      - --attention-backend
+      - FLASHINFER
+      - --enable-flashinfer-autotune
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+      - --generation-config
+      - vllm
+      - --reasoning-parser
+      - qwen3
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --disable-uvicorn-access-log
+    healthcheck:
+      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)']
+      interval: 5s
+      timeout: 3s
+      retries: 720
+      start_period: 30s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_ID:-0}"]
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  kairyu:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${KAIRYU_IMAGE:-local/kairyu:qwen36-vllm-example}
+    command: [/etc/kairyu/kairyu.yaml]
+    environment:
+      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
+    volumes:
+      - type: bind
+        source: ${MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
+      - ./chat_template.jinja:/etc/kairyu/qwen3.6-chat-template.jinja:ro
+    depends_on:
+      vllm: {condition: service_healthy}
+    ports:
+      - 127.0.0.1:${API_PORT:-8001}:8000
+    healthcheck:
+      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=2)']
+      interval: 5s
+      timeout: 3s
+      retries: 120
+    restart: unless-stopped
+
+  chat-ui:
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01}
+    environment:
+      OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      OPENAI_API_KEY: sk-local-kairyu
+      DEFAULT_MODELS: qwen3.6-27b
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"temperature":1.0,"top_p":0.95}'
+      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}
+      WEBUI_AUTH: "true"
+      WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
+      ENABLE_OLLAMA_API: "false"
+      RAG_EMBEDDING_ENGINE: ""
+    volumes:
+      - type: bind
+        source: ${WEBUI_STORAGE_PATH}
+        target: /app/backend/data
+    depends_on:
+      kairyu: {condition: service_healthy}
+    ports:
+      - ${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080
+    restart: unless-stopped
