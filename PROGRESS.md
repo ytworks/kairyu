@@ -74,7 +74,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Incremental architecture-state paths for Qwen3.6 and DeepSeek V4 plus an explicit recompute diagnostic mode; DeepSeek EP2/4/8 Attention-DP and direct packed-FP4 execution are implemented, with SM120 single-kernel and two-rank NCCL smokes green
 - Device-side sampling, penalties, spec verification, page-table caching; TP step headers sleep on Gloo while fixed-layout delta payloads use the bounded NCCL model group and rare controls remain Gloo objects; structured masks stay on CUDA with only selected IDs returned to the host matcher; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
-- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
+- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; prefix-aware replica placement now obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
 - The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8, plus a contract-tested tiered Qwen TP1x4 + DeepSeek TP4/EP4 L2 stack entering runtime validation; all route Open WebUI through Kairyu L3 to pinned vLLM L1. Qwen's no-MTP/16K-batch configuration completed its final serving and LiveCodeBench-20 gates after MTP and 32K-batch candidates failed performance or stability checks, with all persistent data and compilation caches on NVMe
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-11 — [progress] Prefix affinity obeys replica overload policy
+- What: ReplicaPool now applies its configured queue-depth valve after both prefix-aware and session-affine placement, retaining idle KV locality while overflowing concurrent warm-prefix work to least-outstanding replicas; focused orchestration and backend regressions pass.
+- Refs: `kairyu/orchestration/replica.py`; `tests/unit/test_kv_routing.py`; PR #471
 
 ### 2026-08-11 — [progress] Tiered eight-GPU vLLM example enters runtime validation
 - What: Added a one-command Open WebUI -> Kairyu L3/L2 -> vLLM L1 contract for four Qwen3.6 FP8 TP1 replicas plus one DeepSeek-V4 TP4/EP4 tier, with rule routing, MoA-2/MoA-3, `/mnt/nvme`-only persistence, independent/all serving and orchestration runners, and a full-dataset Terminal-Bench 2.1 entrypoint. Static and contract tests pass; runtime tuning and complete evidence remain in progress.

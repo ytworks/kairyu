@@ -449,7 +449,12 @@ class TestPrefixRouting:
     def test_warm_candidate_wins_zero_score_tie_with_cold_baseline(self):
         index = PrefixIndex(chunk_chars=4)
         replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
-        pool = ReplicaPool(replicas, prefix_index=index, prefix_beta=0.25)
+        pool = ReplicaPool(
+            replicas,
+            prefix_index=index,
+            prefix_beta=0.25,
+            queue_depth_threshold=1_000,
+        )
         baseline = ReplicaPool(replicas)
         prompt = "shared-prefix"
         index.observe("a", prompt)
@@ -549,6 +554,28 @@ class TestPrefixRouting:
 
         assert pool._select(request) == baseline._select(request)
         assert pool._select(request)[1] == "queue_depth_fallback"
+
+    def test_busy_warm_prefix_obeys_queue_depth_fallback(self):
+        index = PrefixIndex(chunk_chars=4)
+        replicas = {"a": MockBackend(), "b": MockBackend(), "c": MockBackend()}
+        pool = ReplicaPool(
+            replicas,
+            prefix_index=index,
+            queue_depth_threshold=0,
+        )
+        request = _request(
+            "shared-prefix-user",
+            session_id="sticky-session",
+            prefix_fingerprint="0" * 16,
+        )
+        index.observe("a", request.prompt)
+        pool._entries["a"].outstanding = 1
+
+        selected, reason, observed_session = pool._select(request)
+
+        assert selected == "b"
+        assert reason == "queue_depth_fallback"
+        assert observed_session == "sticky-session"
 
     def test_prefix_selection_keeps_queue_depth_penalty_semantics(self):
         class ScoredIndex:
