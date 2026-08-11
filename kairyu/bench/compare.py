@@ -354,9 +354,10 @@ def _caveats(comparison: dict, source_markers: dict[str, str]) -> list[str]:
             published_variant = ", ".join(
                 f"{model} {score:.1f}" for model, score in variant["scores"].items()
             )
+            marker = source_markers["fugu-release"]
             caveats.append(
                 f"**{name}**: the release also publishes a {variant['label']} "
-                f"({published_variant}) [S1]; the row above uses the headline table."
+                f"({published_variant}) [{marker}]; the row above uses the headline table."
             )
         frontier_variants = [
             record for record in row.get("published_records", []) if record.get("variant")

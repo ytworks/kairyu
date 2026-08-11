@@ -106,25 +106,78 @@ def test_frontier_catalog_matches_selected_matrix_values_and_absences():
         benchmark: {record["model"]: record["score"] for record in records}
         for benchmark, records in FRONTIER_SCORE_RECORDS.items()
     }
-    assert selected["swe-bench-pro"] == {
-        "Fugu": 59.0,
-        "Fugu Ultra": 73.7,
-        "Fable 5": 80.3,
-        "GPT-5.6 Sol": 64.6,
-        "Qwen3.8 MAX": 67.7,
-        "GLM-5.2": 62.1,
+    assert selected == {
+        "swe-bench-pro": {
+            "Fugu": 59.0,
+            "Fugu Ultra": 73.7,
+            "Fable 5": 80.3,
+            "GPT-5.6 Sol": 64.6,
+            "Qwen3.8 MAX": 67.7,
+            "GLM-5.2": 62.1,
+        },
+        "terminal-bench": {
+            "Fugu": 80.2,
+            "Fugu Ultra": 82.1,
+            "Fable 5": 88.0,
+            "GPT-5.6 Sol": 88.8,
+            "DeepSeek-V4-Flash-0731": 82.7,
+            "Qwen3.8 MAX": 86.6,
+            "GLM-5.2": 81.0,
+            "Kimi K3": 88.3,
+        },
+        "livecodebench": {"Fugu": 92.9, "Fugu Ultra": 93.2},
+        "livecodebench-pro": {"Fugu": 87.8, "Fugu Ultra": 90.8},
+        "hle": {
+            "Fugu": 47.2,
+            "Fugu Ultra": 50.0,
+            "Fable 5": 59.0,
+            "GPT-5.6 Sol": 49.5,
+            "Qwen3.8 MAX": 43.6,
+            "GLM-5.2": 40.5,
+            "Kimi K3": 43.5,
+        },
+        "charxiv-reasoning": {
+            "Fugu": 85.1,
+            "Fugu Ultra": 86.6,
+            "Qwen3.8 MAX": 93.5,
+            "Kimi K3": 84.8,
+        },
+        "gpqa-diamond": {
+            "Fugu": 95.5,
+            "Fugu Ultra": 95.5,
+            "Fable 5": 91.3,
+            "GPT-5.6 Sol": 94.6,
+            "Qwen3.8 MAX": 92.6,
+            "GLM-5.2": 91.2,
+            "Kimi K3": 93.5,
+        },
+        "scicode": {
+            "Fugu": 60.1,
+            "Fugu Ultra": 58.7,
+            "Fable 5": 60.2,
+            "GLM-5.2": 50.0,
+            "Kimi K3": 58.7,
+        },
+        "tau-bench-banking": {
+            "Fugu": 21.7,
+            "Fugu Ultra": 20.6,
+            "Qwen3.8 MAX": 51.3,
+            "GLM-5.2": 27.0,
+            "Kimi K3": 33.4,
+        },
+        "long-context-reasoning": {
+            "Fugu": 74.7,
+            "Fugu Ultra": 73.3,
+            "GLM-5.2": 71.0,
+            "Kimi K3": 74.7,
+        },
+        "mrcr-v2": {
+            "Fugu": 86.6,
+            "Fugu Ultra": 93.6,
+            "GPT-5.6 Sol": 91.5,
+            "Qwen3.8 MAX": 92.9,
+        },
     }
-    assert selected["terminal-bench"] == {
-        "Fugu": 80.2,
-        "Fugu Ultra": 82.1,
-        "Fable 5": 88.0,
-        "GPT-5.6 Sol": 88.8,
-        "DeepSeek-V4-Flash-0731": 82.7,
-        "Qwen3.8 MAX": 86.6,
-        "GLM-5.2": 81.0,
-        "Kimi K3": 88.3,
-    }
-    assert selected["livecodebench"] == {"Fugu": 92.9, "Fugu Ultra": 93.2}
     deepseek_rows = {
         benchmark
         for benchmark, scores in selected.items()
