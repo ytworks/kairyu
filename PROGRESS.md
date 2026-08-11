@@ -76,7 +76,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
+- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
 - The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8; both route Open WebUI through Kairyu L3 to pinned vLLM L1. Qwen's no-MTP/16K-batch configuration completed its final serving and LiveCodeBench-20 gates after MTP and 32K-batch candidates failed performance or stability checks, with all persistent data and compilation caches on NVMe
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
@@ -106,6 +106,15 @@ in `.claude/rules/progress-log.md`).
 - What: A second example adds one-command Open WebUI -> Kairyu L3 -> pinned vLLM L1 serving for the official Qwen3.6-27B FP8 checkpoint on one selected RTX PRO 6000; model/UI persistence is fail-closed below `/mnt/nvme`, and independent/all serving plus deterministic 20-row LiveCodeBench runners are contract-tested. Runtime tuning and measured evidence remain in progress.
 - Refs: `examples/qwen3.6-27b-1gpu/`; `tests/unit/test_frontier_examplectl.py`
 
+### 2026-08-11 — [progress] Accuracy comparisons cite every reference score
+- What: Accuracy reports now compare local runs with the final eight-model benchmark matrix, preserve missing values, and attach source markers, dates, source class, conditions, and notes to selected and alternate scores in Markdown and JSON.
+- Refs: `kairyu/bench/{reference.py,compare.py}`; `tests/bench/test_bench_compare.py`; `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`
+
+### 2026-08-11 — [design] Accuracy reports bind reference scores to sources
+- What: The Accuracy comparison will use the supplied eight-model matrix and render a source marker, linked source metadata, measurement condition, and notes for every selected or alternate published score; missing values remain missing and old DeepSeek snapshots do not fill the 0731 column.
+- Why: A numeric comparison without cell-level provenance obscures provider, third-party, harness, and version differences and cannot be audited from the generated report.
+- Refs: `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`; `kairyu/bench/{reference.py,compare.py}`
+
 ### 2026-08-11 — [progress] Full DeepSeek-V4 LiveCodeBench evidence completes
 - What: The clean-cache TP8+EP8 DSpark-5 example completed and scored all 1,055 LiveCodeBench release_v6 problems: 759 passed (71.9431%), all target timings measured, and zero request errors, retries, or unmeasured rows. The warm serving matrix reached 168.01 output tok/s at c1 with 220.10 ms median TTFT and 972.93 output tok/s at c32.
 - Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/MEASUREMENTS.md`; run IDs `livecodebench-full-tp8-ep8-dspark5-clean-sse16m-20260811` and `tp8-ep8-dspark5-warm-20260811`
@@ -117,25 +126,3 @@ in `.claude/rules/progress-log.md`).
 ### 2026-08-11 — [progress] Kairyu-owned vLLM prompts bypass a second chat template
 - What: Pre-rendered `TemplatedPrompt` requests sent to a vLLM-compatible backend now use `/completions` for both buffered and streaming generation. This preserves the checkpoint's single prompt boundary, prevents DeepSeek chat mode from being wrapped into thinking mode again, and returns final answer text to Open WebUI.
 - Refs: PR #468; `kairyu/engine/openai_backend.py`; `tests/unit/test_openai_backend.py`; real DeepSeek-V4 direct and streaming probes on 2026-08-11
-
-### 2026-08-11 — [progress] Open WebUI tool metadata no longer blocks text requests
-- What: The DeepSeek prompt template now ignores `tools` metadata emitted by OpenAI-compatible UIs and renders the ordinary text conversation; model-side function-tool execution remains outside this example. The failing Open WebUI prompt was reproduced against Kairyu.
-- Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja`; `tests/unit/test_frontier_examplectl.py`
-
-### 2026-08-11 — [progress] SM120 example reaches end-to-end readiness
-- What: The pinned vLLM build now starts TP8/EP8 with DSpark-5 and the full 1M context on eight RTX PRO 6000 Blackwell GPUs; SM100-only MegaMoE and FP4 indexer-cache paths are explicitly disabled. Open WebUI reached Kairyu L3 and completed a real model response; the public UI bind remains separate from the loopback-only API.
-- Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/{compose.yaml,control.py,README.md}`; runtime validation on 2026-08-11
-
-### 2026-08-11 — [amendment] Example surface becomes one L3-to-vLLM deployment
-- What: The three frontier environments and shared controllers are replaced by one exact 8 x RTX PRO 6000 Blackwell DeepSeek-V4-Flash-0731 stack; Open WebUI targets Kairyu L3, which owns checkpoint prompt rendering and delegates inference to an eight-GPU vLLM L1. One-command lifecycle and independent/all serving and full 1,055-row LiveCodeBench runners are added; measurement remains in progress.
-- Why: The owner requested one reproducible, same-host optimized deployment and complete measured evidence instead of a matrix of unvalidated example variants.
-- Refs: FN-D8; `examples/deepseek-v4-flash-0731-8gpu/`; `tests/unit/test_frontier_examplectl.py`
-
-### 2026-08-10 — [progress] Qwen example gains a fixed 30-item performance diagnostic
-- What: The full-dataset example default remains unchanged; a separate entrypoint fixes LiveCodeBench selection to `limit=30`, `seed=0`, and concurrency 16, while the shared controller records those CLI overrides in both backend runs.
-- Refs: PR #465; `examples/_shared/benchctl.py`; `examples/qwen3.6-27b-1gpu/bench-livecodebench-30.sh`
-
-### 2026-08-10 — [amendment] External benchmark concurrency increases to sixteen
-- What: Main, judge, serving, and all frontier example clients now use sixteen simultaneous in-flight requests; combined orchestration applies the same external limit in addition to its internal replica and proposal fan-out.
-- Why: The owner selected the higher request wave after observed KV-cache headroom showed that eight did not saturate the single-GPU engine.
-- Refs: supersedes the concurrency-eight and concurrency-one entries below; PR #465; `kairyu/bench/`; `bench/{serving_bench.py,tiered_auto_bench.py,configs/}`; `examples/`

@@ -88,19 +88,125 @@ def test_baselines_are_declared_provider_reported():
     assert "Fugu Ultra" not in PROVIDER_REPORTED
 
 
+def test_frontier_catalog_uses_the_supplied_eight_model_order():
+    assert COMPARISON_MODELS == (
+        "Fugu",
+        "Fugu Ultra",
+        "Fable 5",
+        "GPT-5.6 Sol",
+        "DeepSeek-V4-Flash-0731",
+        "Qwen3.8 MAX",
+        "GLM-5.2",
+        "Kimi K3",
+    )
+
+
+def test_frontier_catalog_matches_selected_matrix_values_and_absences():
+    selected = {
+        benchmark: {record["model"]: record["score"] for record in records}
+        for benchmark, records in FRONTIER_SCORE_RECORDS.items()
+    }
+    assert selected == {
+        "swe-bench-pro": {
+            "Fugu": 59.0,
+            "Fugu Ultra": 73.7,
+            "Fable 5": 80.3,
+            "GPT-5.6 Sol": 64.6,
+            "Qwen3.8 MAX": 67.7,
+            "GLM-5.2": 62.1,
+        },
+        "terminal-bench": {
+            "Fugu": 80.2,
+            "Fugu Ultra": 82.1,
+            "Fable 5": 88.0,
+            "GPT-5.6 Sol": 88.8,
+            "DeepSeek-V4-Flash-0731": 82.7,
+            "Qwen3.8 MAX": 86.6,
+            "GLM-5.2": 81.0,
+            "Kimi K3": 88.3,
+        },
+        "livecodebench": {"Fugu": 92.9, "Fugu Ultra": 93.2},
+        "livecodebench-pro": {"Fugu": 87.8, "Fugu Ultra": 90.8},
+        "hle": {
+            "Fugu": 47.2,
+            "Fugu Ultra": 50.0,
+            "Fable 5": 59.0,
+            "GPT-5.6 Sol": 49.5,
+            "Qwen3.8 MAX": 43.6,
+            "GLM-5.2": 40.5,
+            "Kimi K3": 43.5,
+        },
+        "charxiv-reasoning": {
+            "Fugu": 85.1,
+            "Fugu Ultra": 86.6,
+            "Qwen3.8 MAX": 93.5,
+            "Kimi K3": 84.8,
+        },
+        "gpqa-diamond": {
+            "Fugu": 95.5,
+            "Fugu Ultra": 95.5,
+            "Fable 5": 91.3,
+            "GPT-5.6 Sol": 94.6,
+            "Qwen3.8 MAX": 92.6,
+            "GLM-5.2": 91.2,
+            "Kimi K3": 93.5,
+        },
+        "scicode": {
+            "Fugu": 60.1,
+            "Fugu Ultra": 58.7,
+            "Fable 5": 60.2,
+            "GLM-5.2": 50.0,
+            "Kimi K3": 58.7,
+        },
+        "tau-bench-banking": {
+            "Fugu": 21.7,
+            "Fugu Ultra": 20.6,
+            "Qwen3.8 MAX": 51.3,
+            "GLM-5.2": 27.0,
+            "Kimi K3": 33.4,
+        },
+        "long-context-reasoning": {
+            "Fugu": 74.7,
+            "Fugu Ultra": 73.3,
+            "GLM-5.2": 71.0,
+            "Kimi K3": 74.7,
+        },
+        "mrcr-v2": {
+            "Fugu": 86.6,
+            "Fugu Ultra": 93.6,
+            "GPT-5.6 Sol": 91.5,
+            "Qwen3.8 MAX": 92.9,
+        },
+    }
+    deepseek_rows = {
+        benchmark
+        for benchmark, scores in selected.items()
+        if "DeepSeek-V4-Flash-0731" in scores
+    }
+    assert deepseek_rows == {"terminal-bench"}
+
+
 def test_frontier_catalog_records_are_source_bound_and_unambiguous():
     assert len(catalog_sha256()) == 64
+    for source in REFERENCE_SOURCES.values():
+        assert str(source["url"]).startswith("https://")
+        assert source["publisher"]
+        assert source["published_on"]
+        assert source["retrieved_on"]
+        assert source["tier"]
     for benchmark, records in FRONTIER_SCORE_RECORDS.items():
         models = [record["model"] for record in records]
         assert len(models) == len(set(models)), benchmark
         for record in records:
             assert record["model"] in COMPARISON_MODELS
             assert record["source"] in REFERENCE_SOURCES
+            assert record["source_class"] in {"provider", "third_party"}
             assert 0 <= record["score"] <= 100
             assert record["condition"]
     for records in FRONTIER_SCORE_VARIANTS.values():
         for record in records:
             assert record["source"] in REFERENCE_SOURCES
+            assert record["source_class"] in {"provider", "third_party"}
             assert record["condition"]
 
 
@@ -224,12 +330,48 @@ def test_frontier_catalog_keeps_missing_values_and_all_model_gap_columns():
     row = comparison["rows"][0]
 
     assert row["published_models"] == list(COMPARISON_MODELS)
-    assert row["published"] == {"Fugu": 87.8}
+    assert row["published"] == {"Fugu": 87.8, "Fugu Ultra": 90.8}
     assert row["deltas_by_reference"]["qwen3-32b"]["Fugu"] == -7.8
+    assert row["deltas_by_reference"]["qwen3-32b"]["Fugu Ultra"] == -10.8
     assert row["deltas_by_reference"]["qwen3-32b"]["GPT-5.6 Sol"] is None
     markdown = render_comparison_markdown(comparison)
     assert "## Measured score gaps by reference model" in markdown
     assert "catalog `" in markdown
+
+
+def test_report_marks_each_selected_score_with_its_source():
+    comparison = build_comparison(
+        _scoreboard(**{"terminal-bench": {"status": "completed", "score": 0.8}})
+    )
+    markdown = render_comparison_markdown(comparison)
+    main_row = next(
+        line for line in markdown.splitlines() if line.startswith("| terminal-bench |")
+    )
+    assert "80.2 [S1]" in main_row
+    assert "82.7 [S4]" in main_row
+    assert "## Published reference details" in markdown
+    assert "Terminal-Bench 2.1; max effort; temperature=1; top_p=.95" in markdown
+
+
+def test_report_source_catalog_links_markers_and_dates():
+    markdown = render_comparison_markdown(
+        build_comparison(_scoreboard(**{"scicode": {"status": "completed", "score": 0.5}}))
+    )
+    assert "[S1]: https://sakana.ai/fugu-release/" in markdown
+    assert "Published 2026-07-23; retrieved 2026-08-11" in markdown
+    assert "third_party" in markdown
+    assert "AA snapshot reproduced by provider" in markdown
+
+
+def test_json_records_keep_source_traceability():
+    comparison = build_comparison(
+        _scoreboard(**{"hle": {"status": "completed", "score": 0.4}})
+    )
+    records = comparison["rows"][0]["published_records"]
+    qwen = next(record for record in records if record["model"] == "Qwen3.8 MAX")
+    assert qwen["source"] in comparison["reference"]["sources"]
+    assert qwen["source_class"] == "provider"
+    assert qwen["condition"]
 
 
 # -- runner integration --------------------------------------------------------

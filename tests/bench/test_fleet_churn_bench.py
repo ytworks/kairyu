@@ -408,7 +408,15 @@ def _passing_evidence():
         response_id = f"server-{sequence}"
         send_ns = traffic_origin_ns + sequence * interval_ns
         selected_at_ns = send_ns + 1_000_000
-        latest_membership = max(
+        membership_at_start = max(
+            (
+                record
+                for record in memberships
+                if record["observed_ns"] <= send_ns
+            ),
+            key=lambda record: record["observed_ns"],
+        )
+        membership_at_selection = max(
             (
                 record
                 for record in memberships
@@ -416,8 +424,15 @@ def _passing_evidence():
             ),
             key=lambda record: record["observed_ns"],
         )
-        replica_id = latest_membership["eligible_ids"][0]
-        replica_generation = latest_membership["generation_by_id"][replica_id]
+        prepared_eligible_ids = sorted(
+            replica_id
+            for replica_id in membership_at_start["eligible_ids"]
+            if replica_id in membership_at_selection["eligible_ids"]
+            and membership_at_start["generation_by_id"].get(replica_id)
+            == membership_at_selection["generation_by_id"].get(replica_id)
+        )
+        replica_id = prepared_eligible_ids[0]
+        replica_generation = membership_at_selection["generation_by_id"][replica_id]
         ordinal = replica_id.split("-", 1)[1]
         requests.append(
             {
@@ -448,8 +463,8 @@ def _passing_evidence():
                 "placement_latency_ns": 1_000_000,
                 "placement_started_ns": send_ns,
                 "selected_at_ns": selected_at_ns,
-                "pool_size": len(latest_membership["replica_ids"]),
-                "eligible_size": len(latest_membership["eligible_ids"]),
+                "pool_size": len(membership_at_selection["replica_ids"]),
+                "eligible_size": len(prepared_eligible_ids),
             }
         )
 
@@ -1842,6 +1857,60 @@ def test_gate_requires_full_gateway_recovery_in_each_epoch_window() -> None:
     assert not result["passed"]
     assert not result["checks"]["gateway_membership_recovers_each_epoch"]
     assert result["membership"]["epoch_recoveries"][0]["event_id"] is None
+
+
+def test_gate_accepts_prepared_eligibility_lease_across_membership_growth() -> None:
+    """A request cannot adopt replicas that recover after its preparation starts."""
+
+    evidence = _passing_evidence()
+    request = evidence["requests"][15]
+    placement = next(
+        row
+        for row in evidence["placements"]
+        if row.get("request_id") == request["request_id_echo"]
+    )
+    recovered_ns = evidence["churn"][0]["recovered_ns"]
+    assert placement["placement_started_ns"] < recovered_ns < placement["selected_at_ns"]
+
+    assert request["pod_uid"] == "old-0"
+    assert placement["replica_id"] == "old-0"
+    assert placement["eligible_size"] == 2
+
+    result = evaluate_gate(**evidence)
+
+    failed_checks = [name for name, passed in result["checks"].items() if not passed]
+    assert result["passed"], {
+        "failed_checks": failed_checks,
+        "membership_failures": result["placement"]["membership_join_failures"],
+    }
+    assert result["checks"]["placement_membership_temporal_join_complete"]
+
+
+def test_gate_accepts_eligibility_lease_prepared_after_membership_growth() -> None:
+    evidence = _passing_evidence()
+    request = evidence["requests"][15]
+    placement = next(
+        row
+        for row in evidence["placements"]
+        if row.get("request_id") == request["request_id_echo"]
+    )
+    recovered_ns = evidence["churn"][0]["recovered_ns"]
+    assert placement["placement_started_ns"] < recovered_ns < placement["selected_at_ns"]
+
+    request.update(
+        pod_name="f1a-replica-1",
+        pod_uid="new-1",
+    )
+    placement.update(
+        replica_id="new-1",
+        replica_generation="generation-new-1",
+        eligible_size=4,
+    )
+
+    result = evaluate_gate(**evidence)
+
+    assert result["passed"]
+    assert result["checks"]["placement_membership_temporal_join_complete"]
 
 
 def test_gate_rejects_placement_on_not_yet_created_uid() -> None:

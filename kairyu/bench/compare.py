@@ -1,9 +1,9 @@
 """Accuracy report: a finished run next to committed frontier reference scores.
 
 The scoreboard says what kairyu measured. This says how that sits against the
-numbers Sakana published — with the deltas, and with every reason the delta may
-not mean what it looks like: a skipped or partial cell, a substituted dataset,
-an uncompiled checker, a single attempt where the published figure used four.
+committed frontier reference catalog — with score-level source links, deltas,
+and every reason a delta may not mean what it looks like: a skipped or partial
+cell, a substituted dataset, an uncompiled checker, or different attempt counts.
 
 Rules the renderer keeps:
 
@@ -166,8 +166,63 @@ def _delta_text(delta: float | None, values: dict) -> str:
     return f"{sign}{delta:.1f}"
 
 
+def _source_markers(reference: dict) -> dict[str, str]:
+    """Give every committed source a stable marker in catalog order."""
+
+    return {
+        source_id: f"S{position}"
+        for position, source_id in enumerate(reference["sources"], start=1)
+    }
+
+
+def _selected_record(row: dict, model: str) -> dict | None:
+    return next(
+        (
+            record
+            for record in row.get("published_records", [])
+            if record["model"] == model and not record.get("variant")
+        ),
+        None,
+    )
+
+
+def _published_reference_details(
+    comparison: dict,
+    source_markers: dict[str, str],
+) -> list[str]:
+    lines = [
+        "",
+        "## Published reference details",
+        "",
+        "Every selected score and retained alternate condition is bound to its "
+        "committed source record.",
+        "",
+        "| Benchmark | Model | Score | Kind | Source | Class | Condition | Notes |",
+        "|---|---|---:|---|---|---|---|---|",
+    ]
+    for row in comparison["rows"]:
+        for record in row.get("published_records", []):
+            cells = [
+                row["display_name"],
+                record["model"],
+                f"{float(record['score']):.1f}",
+                "alternate" if record.get("variant") else "selected",
+                f"[{source_markers[str(record['source'])]}]",
+                record["source_class"],
+                record["condition"],
+                record.get("notes") or "—",
+            ]
+            lines.append(
+                "| "
+                + " | ".join(_markdown_table_text(cell) for cell in cells)
+                + " |"
+            )
+    return lines
+
+
 def render_comparison_markdown(comparison: dict) -> str:
     reference = comparison["reference"]
+    source_markers = _source_markers(reference)
     targets = comparison["targets"]
     lines = [
         f"# Accuracy vs published frontier scores — run {comparison['run_id']}",
@@ -196,7 +251,12 @@ def render_comparison_markdown(comparison: dict) -> str:
         cells += [_measured_text(row["measured"][target]) for target in targets]
         for model in published_columns:
             value = row["published"].get(model)
-            cells.append("—" if value is None else f"{value:.1f}")
+            record = _selected_record(row, model)
+            if value is None or record is None:
+                cells.append("—")
+            else:
+                marker = source_markers[str(record["source"])]
+                cells.append(f"{value:.1f} [{marker}]")
         cells += [_delta_text(row["deltas"][target], row["measured"][target]) for target in targets]
         lines.append("| " + " | ".join(cells) + " |")
 
@@ -224,6 +284,7 @@ def render_comparison_markdown(comparison: dict) -> str:
                     cells.append(_delta_text(delta, values))
             lines.append("| " + " | ".join(cells) + " |")
 
+    lines += _published_reference_details(comparison, source_markers)
     lines += ["", "## Reading this table", ""]
     for note in reference["footnotes"]:
         lines.append(f"- {note}")
@@ -234,13 +295,18 @@ def render_comparison_markdown(comparison: dict) -> str:
         "made under this harness."
     )
     lines += ["", "## Published-source catalog", ""]
-    for source in reference["sources"].values():
+    for source_id, source in reference["sources"].items():
+        marker = source_markers[source_id]
         lines.append(
-            f"- [{source['title']}]({source['url']}) — {source['publisher']}; "
-            f"{source['tier']}; retrieved {source['retrieved_on']}."
+            f"- **[{marker}] {source['title']}** — {source['publisher']}; "
+            f"{source['tier']}; Published {source['published_on']}; "
+            f"retrieved {source['retrieved_on']}."
         )
+    lines.append("")
+    for source_id, source in reference["sources"].items():
+        lines.append(f"[{source_markers[source_id]}]: {source['url']}")
 
-    caveats = _caveats(comparison)
+    caveats = _caveats(comparison, source_markers)
     if caveats:
         lines += ["", "## Why a delta may not mean parity", ""]
         lines += [f"- {text}" for text in caveats]
@@ -273,7 +339,7 @@ def _banner(comparison: dict) -> list[str]:
     )
 
 
-def _caveats(comparison: dict) -> list[str]:
+def _caveats(comparison: dict, source_markers: dict[str, str]) -> list[str]:
     """Per-row reasons a delta is not a like-for-like comparison."""
     caveats: list[str] = []
     for row in comparison["rows"]:
@@ -288,9 +354,10 @@ def _caveats(comparison: dict) -> list[str]:
             published_variant = ", ".join(
                 f"{model} {score:.1f}" for model, score in variant["scores"].items()
             )
+            marker = source_markers["fugu-release"]
             caveats.append(
                 f"**{name}**: the release also publishes a {variant['label']} "
-                f"({published_variant}); the row above uses the headline table."
+                f"({published_variant}) [{marker}]; the row above uses the headline table."
             )
         frontier_variants = [
             record for record in row.get("published_records", []) if record.get("variant")
@@ -298,7 +365,8 @@ def _caveats(comparison: dict) -> list[str]:
         if frontier_variants:
             values = ", ".join(
                 f"{record['model']} {float(record['score']):.1f} "
-                f"({record['condition']})"
+                f"({record['condition']}) "
+                f"[{source_markers[str(record['source'])]}]"
                 for record in frontier_variants
             )
             caveats.append(

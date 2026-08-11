@@ -3605,40 +3605,102 @@ def evaluate_gate(
         ):
             placement_latency_raw_consistent = False
             reasons.append("placement_latency_out_of_range")
-        latest_membership = None
+        membership_at_start = None
+        membership_at_selection = None
+        membership_start_index = None
+        membership_selection_index = None
+        if membership_timeline_ready and type(placement_started_ns) is int:
+            membership_index = bisect.bisect_right(
+                membership_observed_ns,
+                placement_started_ns,
+            ) - 1
+            if membership_index >= 0:
+                membership_start_index = membership_index
+                membership_at_start = memberships[membership_index]
         if membership_timeline_ready and type(selected_at_ns) is int:
             membership_index = bisect.bisect_right(
                 membership_observed_ns,
                 selected_at_ns,
             ) - 1
             if membership_index >= 0:
-                latest_membership = memberships[membership_index]
-        if latest_membership is None:
+                membership_selection_index = membership_index
+                membership_at_selection = memberships[membership_index]
+        if membership_at_start is None:
+            reasons.append("no_membership_at_placement_start")
+        if membership_at_selection is None:
             reasons.append("no_membership_at_selection")
-        else:
+        if membership_at_start is not None and membership_at_selection is not None:
             replica_id = request.get("replica_id")
-            replica_ids = membership_ids(
-                latest_membership,
+            replica_ids_at_selection = membership_ids(
+                membership_at_selection,
                 "replica_ids",
             )
-            eligible_ids = membership_ids(
-                latest_membership,
+            eligible_ids_at_selection = membership_ids(
+                membership_at_selection,
                 "eligible_ids",
             )
+            generations_at_selection = membership_at_selection.get(
+                "generation_by_id"
+            )
+            possible_prepared_eligible_ids: list[set[str]] = []
+            surviving_eligible_ids: set[str] | None = None
+            if (
+                isinstance(membership_start_index, int)
+                and isinstance(membership_selection_index, int)
+                and isinstance(generations_at_selection, dict)
+            ):
+                # Preflight may start anywhere between ingress and selection.
+                # A prepared lease can only shrink across later membership
+                # states, so enumerate the observable suffix intersections.
+                candidate_memberships = memberships[
+                    membership_start_index : membership_selection_index + 1
+                ]
+                for candidate_membership in reversed(candidate_memberships):
+                    candidate_generations = candidate_membership.get(
+                        "generation_by_id"
+                    )
+                    stable_eligible_ids = {
+                        candidate_id
+                        for candidate_id in membership_ids(
+                            candidate_membership,
+                            "eligible_ids",
+                        )
+                        & eligible_ids_at_selection
+                        if isinstance(candidate_generations, dict)
+                        and isinstance(candidate_generations.get(candidate_id), str)
+                        and candidate_generations.get(candidate_id)
+                        == generations_at_selection.get(candidate_id)
+                    }
+                    surviving_eligible_ids = (
+                        stable_eligible_ids
+                        if surviving_eligible_ids is None
+                        else surviving_eligible_ids & stable_eligible_ids
+                    )
+                    possible_prepared_eligible_ids.append(
+                        surviving_eligible_ids.copy()
+                    )
             placement = placement_by_request.get(
                 request.get("request_id_echo"),
                 [{}],
             )[0]
-            if placement.get("pool_size") != len(replica_ids):
+            if placement.get("pool_size") != len(replica_ids_at_selection):
                 reasons.append("pool_size_mismatch")
-            if placement.get("eligible_size") != len(eligible_ids):
+            eligible_size = placement.get("eligible_size")
+            matching_prepared_eligible_ids = [
+                candidate_ids
+                for candidate_ids in possible_prepared_eligible_ids
+                if len(candidate_ids) == eligible_size
+            ]
+            if not matching_prepared_eligible_ids:
                 reasons.append("eligible_size_mismatch")
-            if replica_id not in eligible_ids:
+            if not any(
+                replica_id in candidate_ids
+                for candidate_ids in matching_prepared_eligible_ids
+            ):
                 reasons.append("replica_not_eligible")
-            generation_by_id = latest_membership.get("generation_by_id")
             expected_generation = (
-                generation_by_id.get(replica_id)
-                if isinstance(generation_by_id, dict)
+                generations_at_selection.get(replica_id)
+                if isinstance(generations_at_selection, dict)
                 else None
             )
             if (

@@ -15,9 +15,10 @@ The page publishes these values **as images**, so there is no machine-readable
 source to fetch: the table cannot be scraped, and these constants are the
 transcription. To refresh, re-read both images and update `RETRIEVED_ON`.
 
-The six-model additions in ``FRONTIER_SCORE_RECORDS`` come from the provider
-pages and technical report listed in ``REFERENCE_SOURCES``; each source records
-its own publication and retrieval dates.
+The eight-model comparison in ``FRONTIER_SCORE_RECORDS`` was refreshed from the
+provider pages, model cards, technical report, and third-party leaderboards in
+``REFERENCE_SOURCES`` on **2026-08-11**. Each selected value keeps its source,
+source class, condition, and notes; alternate conditions are retained separately.
 
 ## What the published numbers are, and are not
 
@@ -59,6 +60,7 @@ PROVIDER_REPORTED = frozenset(
         "GPT-5.6 Sol",
         "DeepSeek-V4-Flash-0731",
         "Qwen3.8 MAX",
+        "GLM-5.2",
         "Kimi K3",
     )
 )
@@ -67,12 +69,14 @@ PROVIDER_REPORTED = frozenset(
 #: in the report even when no like-for-like public value exists for a row; that
 #: absence is rendered as ``—`` and is never filled from an older model.
 COMPARISON_MODELS = (
+    "Fugu",
+    "Fugu Ultra",
     "Fable 5",
     "GPT-5.6 Sol",
     "DeepSeek-V4-Flash-0731",
     "Qwen3.8 MAX",
+    "GLM-5.2",
     "Kimi K3",
-    "Fugu",
 )
 
 # Source records are committed rather than fetched at report time.  This keeps
@@ -85,23 +89,31 @@ REFERENCE_SOURCES: dict[str, dict[str, object]] = {
         "url": SOURCE_URL,
         "publisher": "Sakana AI",
         "published_on": "2026-07-23",
-        "retrieved_on": RETRIEVED_ON,
+        "retrieved_on": "2026-08-11",
+        "tier": "primary",
+    },
+    "anthropic-fable-5": {
+        "title": "Claude Fable 5 and Claude Mythos 5",
+        "url": "https://www.anthropic.com/news/claude-fable-5-mythos-5",
+        "publisher": "Anthropic",
+        "published_on": "2026-06-09",
+        "retrieved_on": "2026-08-11",
         "tier": "primary",
     },
     "openai-gpt-5-6": {
         "title": "Introducing GPT-5.6",
         "url": "https://openai.com/index/gpt-5-6/",
         "publisher": "OpenAI",
-        "published_on": "2026-07-28",
-        "retrieved_on": "2026-08-09",
+        "published_on": "2026-07-09",
+        "retrieved_on": "2026-08-11",
         "tier": "primary",
     },
-    "deepseek-updates": {
-        "title": "DeepSeek API updates — DeepSeek-V4-Flash-0731",
-        "url": "https://api-docs.deepseek.com/updates/",
+    "deepseek-v4-flash-0731": {
+        "title": "DeepSeek-V4-Flash-0731 model card",
+        "url": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731",
         "publisher": "DeepSeek",
         "published_on": "2026-07-31",
-        "retrieved_on": "2026-08-09",
+        "retrieved_on": "2026-08-11",
         "tier": "primary",
     },
     "qwen-3-8-launch": {
@@ -109,16 +121,72 @@ REFERENCE_SOURCES: dict[str, dict[str, object]] = {
         "url": "https://qwen.ai/blog?id=qwen3.8",
         "publisher": "Qwen",
         "published_on": "2026-08-03",
-        "retrieved_on": "2026-08-09",
+        "retrieved_on": "2026-08-11",
         "tier": "primary-image-transcription",
     },
-    "kimi-k3-report": {
-        "title": "Kimi K3: Technical Report",
-        "url": "https://arxiv.org/abs/2607.24653",
+    "glm-5-2-card": {
+        "title": "GLM-5.2 model card",
+        "url": "https://huggingface.co/zai-org/GLM-5.2",
+        "publisher": "Z.ai",
+        "published_on": "2026-06-16",
+        "retrieved_on": "2026-08-11",
+        "tier": "primary",
+    },
+    "kimi-k3-card": {
+        "title": "Kimi K3 model card",
+        "url": "https://huggingface.co/moonshotai/Kimi-K3",
         "publisher": "Moonshot AI",
         "published_on": "2026-07-29",
-        "retrieved_on": "2026-08-09",
+        "retrieved_on": "2026-08-11",
         "tier": "primary",
+    },
+    "vals-fable-5": {
+        "title": "Claude Fable 5 independent evaluation",
+        "url": "https://www.vals.ai/models/anthropic_claude-fable-5",
+        "publisher": "Vals AI",
+        "published_on": "rolling leaderboard",
+        "retrieved_on": "2026-08-11",
+        "tier": "third-party",
+    },
+    "artificial-analysis-hle": {
+        "title": "Humanity's Last Exam leaderboard",
+        "url": "https://artificialanalysis.ai/evaluations/humanitys-last-exam",
+        "publisher": "Artificial Analysis",
+        "published_on": "rolling leaderboard",
+        "retrieved_on": "2026-08-11",
+        "tier": "third-party",
+    },
+    "artificial-analysis-scicode": {
+        "title": "SciCode leaderboard",
+        "url": "https://artificialanalysis.ai/evaluations/scicode",
+        "publisher": "Artificial Analysis",
+        "published_on": "rolling leaderboard",
+        "retrieved_on": "2026-08-11",
+        "tier": "third-party",
+    },
+    "artificial-analysis-tau3": {
+        "title": "Tau3 Banking leaderboard",
+        "url": "https://artificialanalysis.ai/evaluations/tau3-banking",
+        "publisher": "Artificial Analysis",
+        "published_on": "rolling leaderboard",
+        "retrieved_on": "2026-08-11",
+        "tier": "third-party",
+    },
+    "artificial-analysis-lcr": {
+        "title": "Artificial Analysis Long Context Reasoning leaderboard",
+        "url": "https://artificialanalysis.ai/evaluations/artificial-analysis-long-context-reasoning",
+        "publisher": "Artificial Analysis",
+        "published_on": "rolling leaderboard",
+        "retrieved_on": "2026-08-11",
+        "tier": "third-party",
+    },
+    "artificial-analysis-glm-5-2": {
+        "title": "GLM-5.2 intelligence analysis",
+        "url": "https://artificialanalysis.ai/models/glm-5-2",
+        "publisher": "Artificial Analysis",
+        "published_on": "2026-06-16",
+        "retrieved_on": "2026-08-11",
+        "tier": "third-party",
     },
 }
 
@@ -129,6 +197,7 @@ def _record(
     source: str,
     *,
     condition: str,
+    source_class: str,
     metric: str = "score_percent",
     comparable: bool = True,
     notes: str | None = None,
@@ -139,6 +208,7 @@ def _record(
         "metric": metric,
         "condition": condition,
         "source": source,
+        "source_class": source_class,
         "comparable": comparable,
         "notes": notes,
     }
@@ -257,54 +327,259 @@ PUBLISHED_VARIANTS: dict[str, dict[str, object]] = {
     },
 }
 
-# Compact rows expand into artifact-friendly records below. Equal benchmark names
-# do not imply equal tools, attempts, or populations, so conditions stay explicit.
-_FRONTIER_ROWS: dict[str, tuple[tuple[str, float, str, str], ...]] = {
+# Equal benchmark names do not imply equal tools, attempts, or populations, so
+# the selected matrix keeps conditions explicit and variants stay separate.
+_FRONTIER_ROWS: dict[str, tuple[dict[str, object], ...]] = {
     "swe-bench-pro": (
-        ("Fable 5", 80.0, "openai-gpt-5-6", "provider baseline in GPT-5.6 table"),
-        ("GPT-5.6 Sol", 64.6, "openai-gpt-5-6", "launch-table condition"),
-        ("Qwen3.8 MAX", 67.7, "qwen-3-8-launch", "launch-table condition"),
+        _record(
+            "Fable 5",
+            80.3,
+            "anthropic-fable-5",
+            condition="provider launch evaluation; maximum reasoning",
+            source_class="provider",
+            notes="the published value has been disputed publicly",
+        ),
+        _record(
+            "GPT-5.6 Sol",
+            64.6,
+            "openai-gpt-5-6",
+            condition="provider launch evaluation; maximum reasoning",
+            source_class="provider",
+        ),
+        _record(
+            "Qwen3.8 MAX",
+            67.7,
+            "qwen-3-8-launch",
+            condition="vendor-run launch-table evaluation",
+            source_class="provider",
+        ),
+        _record(
+            "GLM-5.2",
+            62.1,
+            "glm-5-2-card",
+            condition="OpenHands; tailored prompt; temperature=1; top_p=1",
+            source_class="provider",
+        ),
     ),
     "terminal-bench": (
-        ("Fable 5", 83.1, "openai-gpt-5-6", "Terminal-Bench 2.1 provider baseline"),
-        ("GPT-5.6 Sol", 88.8, "openai-gpt-5-6", "Terminal-Bench 2.1"),
-        (
+        _record(
+            "Fable 5",
+            88.0,
+            "kimi-k3-card",
+            condition="Terminal-Bench 2.1 provider baseline in the Kimi K3 table",
+            source_class="provider",
+        ),
+        _record(
+            "GPT-5.6 Sol",
+            88.8,
+            "openai-gpt-5-6",
+            condition="Terminal-Bench 2.1; maximum reasoning",
+            source_class="provider",
+        ),
+        _record(
             "DeepSeek-V4-Flash-0731",
             82.7,
-            "deepseek-updates",
-            "Terminal-Bench 2.1; max effort; temperature=1; top_p=.95",
+            "deepseek-v4-flash-0731",
+            condition="Terminal-Bench 2.1; max effort; temperature=1; top_p=.95",
+            source_class="provider",
         ),
-        ("Qwen3.8 MAX", 86.6, "qwen-3-8-launch", "Terminal-Bench 2.1"),
-        ("Kimi K3", 88.3, "kimi-k3-report", "Terminal-Bench 2.1; max; top_p=1"),
-    ),
-    "livecodebench": (
-        ("Fable 5", 89.8, "fugu-release", "provider baseline in Fugu figure"),
+        _record(
+            "Qwen3.8 MAX",
+            86.6,
+            "qwen-3-8-launch",
+            condition="Terminal-Bench 2.1; provider launch evaluation",
+            source_class="provider",
+        ),
+        _record(
+            "GLM-5.2",
+            81.0,
+            "glm-5-2-card",
+            condition="Terminal-Bench 2.1; Terminus-2 harness",
+            source_class="provider",
+            notes="the same model card reports 82.7 with the best reported harness",
+        ),
+        _record(
+            "Kimi K3",
+            88.3,
+            "kimi-k3-card",
+            condition="Terminal-Bench 2.1; Kimi Code harness; max; top_p=1",
+            source_class="provider",
+        ),
     ),
     "hle": (
-        ("Fable 5", 53.3, "kimi-k3-report", "HLE-Full; no tools"),
-        ("GPT-5.6 Sol", 44.5, "kimi-k3-report", "HLE-Full; no tools"),
-        ("Qwen3.8 MAX", 43.6, "qwen-3-8-launch", "launch-table condition"),
-        ("Kimi K3", 43.5, "kimi-k3-report", "HLE-Full; no tools; max; temperature=1"),
+        _record(
+            "Fable 5",
+            59.0,
+            "anthropic-fable-5",
+            condition="HLE-Full; no tools; provider launch evaluation",
+            source_class="provider",
+        ),
+        _record(
+            "GPT-5.6 Sol",
+            49.5,
+            "artificial-analysis-hle",
+            condition="Artificial Analysis HLE evaluation; no tools",
+            source_class="third_party",
+            notes="no provider-published value was found for this condition",
+        ),
+        _record(
+            "Qwen3.8 MAX",
+            43.6,
+            "qwen-3-8-launch",
+            condition="HLE; no tools; provider launch evaluation",
+            source_class="provider",
+        ),
+        _record(
+            "GLM-5.2",
+            40.5,
+            "glm-5-2-card",
+            condition="HLE; no tools; provider launch evaluation",
+            source_class="provider",
+        ),
+        _record(
+            "Kimi K3",
+            43.5,
+            "kimi-k3-card",
+            condition="HLE-Full; no tools; max; temperature=1; top_p=.95",
+            source_class="provider",
+        ),
     ),
     "charxiv-reasoning": (
-        ("Fable 5", 88.9, "kimi-k3-report", "CharXiv RQ; no tools"),
-        ("GPT-5.6 Sol", 84.6, "kimi-k3-report", "CharXiv RQ; no tools"),
-        ("Kimi K3", 84.8, "kimi-k3-report", "CharXiv RQ; no tools; max"),
+        _record(
+            "Qwen3.8 MAX",
+            93.5,
+            "qwen-3-8-launch",
+            condition="CharXiv Reasoning; provider launch evaluation",
+            source_class="provider",
+            notes="the launch table is ambiguous; 88.4 may be the matching condition",
+        ),
+        _record(
+            "Kimi K3",
+            84.8,
+            "kimi-k3-card",
+            condition="CharXiv RQ; no tools; max; three-run average",
+            source_class="provider",
+        ),
     ),
     "gpqa-diamond": (
-        ("Fable 5", 92.6, "openai-gpt-5-6", "provider baseline in GPT-5.6 table"),
-        ("GPT-5.6 Sol", 94.6, "openai-gpt-5-6", "launch-table condition"),
-        ("Kimi K3", 93.5, "kimi-k3-report", "max; temperature=1; top_p=.95"),
+        _record(
+            "Fable 5",
+            91.3,
+            "anthropic-fable-5",
+            condition="GPQA Diamond; provider launch evaluation",
+            source_class="provider",
+            notes="fallback handling materially changes reported results",
+        ),
+        _record(
+            "GPT-5.6 Sol",
+            94.6,
+            "openai-gpt-5-6",
+            condition="GPQA Diamond; maximum reasoning",
+            source_class="provider",
+        ),
+        _record(
+            "Qwen3.8 MAX",
+            92.6,
+            "qwen-3-8-launch",
+            condition="GPQA Diamond; provider launch evaluation",
+            source_class="provider",
+        ),
+        _record(
+            "GLM-5.2",
+            91.2,
+            "glm-5-2-card",
+            condition="GPQA Diamond; provider launch evaluation",
+            source_class="provider",
+            notes="Artificial Analysis independently reported 89.0",
+        ),
+        _record(
+            "Kimi K3",
+            93.5,
+            "kimi-k3-card",
+            condition="GPQA Diamond; max; temperature=1; top_p=.95",
+            source_class="provider",
+        ),
     ),
     "scicode": (
-        ("Fable 5", 60.2, "kimi-k3-report", "SciCode"),
-        ("GPT-5.6 Sol", 56.1, "kimi-k3-report", "SciCode"),
-        ("Kimi K3", 58.7, "kimi-k3-report", "SciCode; max; temperature=1; top_p=.95"),
+        _record(
+            "Fable 5",
+            60.2,
+            "artificial-analysis-scicode",
+            condition="Artificial Analysis SciCode evaluation",
+            source_class="third_party",
+        ),
+        _record(
+            "GLM-5.2",
+            50.0,
+            "artificial-analysis-glm-5-2",
+            condition="Artificial Analysis Intelligence Index v4.1",
+            source_class="third_party",
+        ),
+        _record(
+            "Kimi K3",
+            58.7,
+            "kimi-k3-card",
+            condition="Artificial Analysis snapshot as of 2026-07-23",
+            source_class="provider",
+            notes="AA snapshot reproduced by provider",
+        ),
     ),
     "tau-bench-banking": (
-        ("Fable 5", 26.8, "kimi-k3-report", "tau3-bench Banking"),
-        ("GPT-5.6 Sol", 33.0, "kimi-k3-report", "tau3-bench Banking"),
-        ("Kimi K3", 33.4, "kimi-k3-report", "tau3-bench Banking; max; top_p=1"),
+        _record(
+            "Qwen3.8 MAX",
+            51.3,
+            "artificial-analysis-tau3",
+            condition="Artificial Analysis Tau3 Banking evaluation",
+            source_class="third_party",
+        ),
+        _record(
+            "GLM-5.2",
+            27.0,
+            "artificial-analysis-glm-5-2",
+            condition="Artificial Analysis Intelligence Index v4.1",
+            source_class="third_party",
+        ),
+        _record(
+            "Kimi K3",
+            33.4,
+            "kimi-k3-card",
+            condition="Artificial Analysis snapshot as of 2026-07-23",
+            source_class="provider",
+            notes="AA snapshot reproduced by provider; current AA value is 46.0",
+        ),
+    ),
+    "long-context-reasoning": (
+        _record(
+            "GLM-5.2",
+            71.0,
+            "artificial-analysis-glm-5-2",
+            condition="Artificial Analysis Long Context Reasoning",
+            source_class="third_party",
+        ),
+        _record(
+            "Kimi K3",
+            74.7,
+            "kimi-k3-card",
+            condition="Artificial Analysis snapshot as of 2026-07-23",
+            source_class="provider",
+            notes="AA snapshot reproduced by provider; current AA value is 82.7",
+        ),
+    ),
+    "mrcr-v2": (
+        _record(
+            "GPT-5.6 Sol",
+            91.5,
+            "openai-gpt-5-6",
+            condition="MRCR v2; 256K-512K; eight needles",
+            source_class="provider",
+        ),
+        _record(
+            "Qwen3.8 MAX",
+            92.9,
+            "qwen-3-8-launch",
+            condition="MRCR v2; 256K; eight needles",
+            source_class="provider",
+        ),
     ),
 }
 
@@ -315,40 +590,164 @@ FRONTIER_SCORE_RECORDS: dict[str, tuple[dict[str, object], ...]] = {
             scores["Fugu"],
             "fugu-release",
             condition="Sakana release-table condition; no common provider harness",
+            source_class="provider",
             notes="mini-swe-agent scaffolding" if benchmark == "swe-bench-pro" else None,
         ),
-        *(
-            _record(model, score, source, condition=condition)
-            for model, score, source, condition in _FRONTIER_ROWS.get(benchmark, ())
+        _record(
+            "Fugu Ultra",
+            scores["Fugu Ultra"],
+            "fugu-release",
+            condition="Sakana release-table condition; no common provider harness",
+            source_class="provider",
+            notes="mini-swe-agent scaffolding" if benchmark == "swe-bench-pro" else None,
         ),
+        *_FRONTIER_ROWS.get(benchmark, ()),
     )
     for benchmark, scores in PUBLISHED_SCORES.items()
 }
 
-_VARIANT_ROWS: dict[str, tuple[tuple[str, float, str, str], ...]] = {
+_VARIANT_ROWS: dict[str, tuple[dict[str, object], ...]] = {
+    "terminal-bench": (
+        _record(
+            "Fable 5",
+            84.6,
+            "vals-fable-5",
+            condition="Vals AI Terminal-Bench 2.1 evaluation",
+            source_class="third_party",
+            comparable=False,
+        ),
+        _record(
+            "GPT-5.6 Sol",
+            91.9,
+            "openai-gpt-5-6",
+            condition="Terminal-Bench 2.1; ultra; four parallel agents",
+            source_class="provider",
+            comparable=False,
+        ),
+        _record(
+            "GLM-5.2",
+            82.7,
+            "glm-5-2-card",
+            condition="Terminal-Bench 2.1; best reported harness",
+            source_class="provider",
+            comparable=False,
+        ),
+    ),
+    "livecodebench": (
+        _record(
+            "Fable 5",
+            89.8,
+            "fugu-release",
+            condition="aggregated value without a verified Fable publication",
+            source_class="provider",
+            comparable=False,
+            notes="excluded from the selected matrix as unverified",
+        ),
+    ),
     "hle": (
-        ("Fable 5", 63.0, "kimi-k3-report", "HLE-Full; with tools"),
-        ("GPT-5.6 Sol", 58.0, "kimi-k3-report", "HLE-Full; with tools"),
-        ("Kimi K3", 56.0, "kimi-k3-report", "HLE-Full; with tools"),
+        _record(
+            "Fable 5",
+            64.5,
+            "anthropic-fable-5",
+            condition="HLE-Full; with tools",
+            source_class="provider",
+            comparable=False,
+        ),
+        _record(
+            "Fable 5",
+            55.5,
+            "artificial-analysis-hle",
+            condition="Artificial Analysis HLE evaluation",
+            source_class="third_party",
+            comparable=False,
+        ),
+        _record(
+            "Qwen3.8 MAX",
+            56.2,
+            "qwen-3-8-launch",
+            condition="HLE; with tools",
+            source_class="provider",
+            comparable=False,
+        ),
+        _record(
+            "GLM-5.2",
+            54.7,
+            "glm-5-2-card",
+            condition="HLE; with tools",
+            source_class="provider",
+            comparable=False,
+        ),
+        _record(
+            "Kimi K3",
+            56.0,
+            "kimi-k3-card",
+            condition="HLE-Full; with tools; max; temperature=1",
+            source_class="provider",
+            comparable=False,
+        ),
     ),
     "charxiv-reasoning": (
-        ("Fable 5", 93.5, "kimi-k3-report", "CharXiv RQ; with tools"),
-        ("GPT-5.6 Sol", 89.1, "kimi-k3-report", "CharXiv RQ; with tools"),
-        ("Kimi K3", 91.3, "kimi-k3-report", "CharXiv RQ; with tools"),
+        _record(
+            "Qwen3.8 MAX",
+            88.4,
+            "qwen-3-8-launch",
+            condition="alternate interpretation of the launch-table CharXiv value",
+            source_class="provider",
+            comparable=False,
+        ),
+        _record(
+            "Kimi K3",
+            91.3,
+            "kimi-k3-card",
+            condition="CharXiv RQ; with Python tools; three-run average",
+            source_class="provider",
+            comparable=False,
+        ),
     ),
     "gpqa-diamond": (
-        ("GPT-5.6 Sol", 94.1, "kimi-k3-report", "value reproduced in Kimi K3 Table 2"),
+        _record(
+            "Fable 5",
+            93.2,
+            "vals-fable-5",
+            condition="Vals AI score including fallback responses",
+            source_class="third_party",
+            comparable=False,
+            notes="Vals reports a 41.92% refusal rate",
+        ),
+    ),
+    "tau-bench-banking": (
+        _record(
+            "Kimi K3",
+            46.0,
+            "artificial-analysis-tau3",
+            condition="current Artificial Analysis Tau3 Banking evaluation",
+            source_class="third_party",
+            comparable=False,
+        ),
+    ),
+    "long-context-reasoning": (
+        _record(
+            "Kimi K3",
+            82.7,
+            "artificial-analysis-lcr",
+            condition="current Artificial Analysis Long Context Reasoning evaluation",
+            source_class="third_party",
+            comparable=False,
+        ),
     ),
     "mrcr-v2": (
-        ("GPT-5.6 Sol", 91.5, "openai-gpt-5-6", "MRCR v2 256K–512K bucket"),
-        ("GPT-5.6 Sol", 73.8, "openai-gpt-5-6", "MRCR v2 512K–1M bucket"),
+        _record(
+            "GPT-5.6 Sol",
+            73.8,
+            "openai-gpt-5-6",
+            condition="MRCR v2; 512K-1M; eight needles",
+            source_class="provider",
+            comparable=False,
+        ),
     ),
 }
 FRONTIER_SCORE_VARIANTS = {
-    benchmark: tuple(
-        _record(model, score, source, condition=condition, comparable=False)
-        for model, score, source, condition in rows
-    )
+    benchmark: tuple(rows)
     for benchmark, rows in _VARIANT_ROWS.items()
 }
 
@@ -375,7 +774,7 @@ def published_models(benchmark: str) -> tuple[str, ...]:
 
 
 def comparison_published(benchmark: str) -> dict[str, float]:
-    """Return only the six requested frontier columns for one row."""
+    """Return only the eight requested frontier columns for one row."""
 
     records = FRONTIER_SCORE_RECORDS.get(benchmark, ())
     return {
