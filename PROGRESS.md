@@ -76,7 +76,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
+- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
 - The example surface is one measured 8 x RTX PRO 6000 Blackwell deployment: Open WebUI calls Kairyu L3, which preserves the checkpoint prompt and calls a pinned vLLM L1; one-command lifecycle and benchmark runners are implemented, and the complete 1,055-row LiveCodeBench run scored 71.9431% with zero request/measurement failures
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-11 — [progress] Accuracy comparisons cite every reference score
+- What: Accuracy reports now compare local runs with the final eight-model benchmark matrix, preserve missing values, and attach source markers, dates, source class, conditions, and notes to selected and alternate scores in Markdown and JSON.
+- Refs: `kairyu/bench/{reference.py,compare.py}`; `tests/bench/test_bench_compare.py`; `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`
 
 ### 2026-08-11 — [design] Accuracy reports bind reference scores to sources
 - What: The Accuracy comparison will use the supplied eight-model matrix and render a source marker, linked source metadata, measurement condition, and notes for every selected or alternate published score; missing values remain missing and old DeepSeek snapshots do not fill the 0731 column.
