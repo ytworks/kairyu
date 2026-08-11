@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
-- The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8; both route Open WebUI through Kairyu L3 to pinned vLLM L1. Qwen's no-MTP/16K-batch configuration completed its final serving and LiveCodeBench-20 gates after MTP and 32K-batch candidates failed performance or stability checks, with all persistent data and compilation caches on NVMe
+- The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8, plus a contract-tested tiered Qwen TP1x4 + DeepSeek TP4/EP4 L2 stack entering runtime validation; all route Open WebUI through Kairyu L3 to pinned vLLM L1. Qwen's no-MTP/16K-batch configuration completed its final serving and LiveCodeBench-20 gates after MTP and 32K-batch candidates failed performance or stability checks, with all persistent data and compilation caches on NVMe
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-11 — [progress] Tiered eight-GPU vLLM example enters runtime validation
+- What: Added a one-command Open WebUI -> Kairyu L3/L2 -> vLLM L1 contract for four Qwen3.6 FP8 TP1 replicas plus one DeepSeek-V4 TP4/EP4 tier, with rule routing, MoA-2/MoA-3, `/mnt/nvme`-only persistence, independent/all serving and orchestration runners, and a full-dataset Terminal-Bench 2.1 entrypoint. Static and contract tests pass; runtime tuning and complete evidence remain in progress.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/`; `tests/unit/test_tiered_frontier_examplectl.py`
 
 ### 2026-08-11 — [progress] One-GPU Qwen3.6 example completes measured gate
 - What: The one-command Qwen3.6-27B FP8 stack on one RTX PRO 6000 completed its final unique-prefix 8K/256 matrix (41.43 output tok/s with 190.82 ms median TTFT at c1; 842.35 output tok/s with 1.247 s median TTFT at c32) and deterministic LiveCodeBench subset (11/20, 55.0%, 20/20 scored, zero request errors/retries/unmeasured rows). No-MTP won TTFT at every tested concurrency and aggregate throughput at c16/c32; MTP-5 crashed at c16 and the 32K prefill budget exhausted VRAM at c32.

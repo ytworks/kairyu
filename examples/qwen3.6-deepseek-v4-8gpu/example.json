@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "environment": "qwen3.6-deepseek-v4-8gpu",
+  "hardware": {
+    "gpu_count": 8,
+    "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "minimum_compute_capability": 12.0,
+    "minimum_vram_mib": 90000
+  },
+  "storage": {
+    "root": "/mnt/nvme/kairyu",
+    "minimum_free_gib": 220,
+    "deepseek_model_volume": "kairyu-models-deepseek-v4-flash-0731-8gpu"
+  },
+  "allocation": {
+    "tier1": {
+      "model": "qwen3.6-27b",
+      "gpu_ids": [0, 1, 2, 3],
+      "replicas": 4,
+      "tensor_parallel_size": 1
+    },
+    "tier2": {
+      "model": "deepseek-v4-flash-0731",
+      "gpu_ids": [4, 5, 6, 7],
+      "replicas": 1,
+      "tensor_parallel_size": 4,
+      "expert_parallel_size": 4
+    }
+  },
+  "models": {
+    "tier1": {
+      "repo": "Qwen/Qwen3.6-27B-FP8",
+      "revision": "e89b16ebf1988b3d6befa7de50abc2d76f26eb09",
+      "tree_sha256": "f108556571d80514a792b458de366221c9b910fe69cbd5d2525c207580cd51aa",
+      "slug": "qwen3.6-27b-fp8",
+      "served_name": "qwen3.6-27b",
+      "max_context_tokens": 262144,
+      "quantization": "fp8"
+    },
+    "tier2": {
+      "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+      "tree_sha256": "90bd164d6f778d798eeaecd3517d83b87d49d300756a9217ada14a2b15203754",
+      "slug": "deepseek-v4-flash-0731",
+      "served_name": "deepseek-v4-flash-0731",
+      "max_context_tokens": 1048576,
+      "quantization": "mixed-fp4-fp8"
+    }
+  },
+  "vllm": {
+    "image": "local/vllm-openai:sm120-aa0d513027",
+    "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
+    "source_repository": "https://github.com/jasl/vllm.git",
+    "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
+    "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834",
+    "qwen_mtp_speculative_tokens": 0,
+    "deepseek_dspark_speculative_tokens": 5
+  },
+  "orchestration": {
+    "auto_model": "kairyu-auto",
+    "auto_max_model": "kairyu-auto-max",
+    "moa_samples": 2,
+    "auto_max_moa_samples": 3,
+    "internal_max_output_tokens": 1024
+  },
+  "webui": {
+    "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+    "port": 3000
+  },
+  "api_port": 8003,
+  "benchmarks": {
+    "serving": {
+      "prompt_tokens_approx": 8192,
+      "output_tokens": 256,
+      "concurrency": [1, 8, 16, 32],
+      "requests_per_concurrency": 32
+    },
+    "terminalbench": {
+      "dataset": "terminal-bench/terminal-bench-2-1",
+      "agent": "terminus-2",
+      "max_turns": 500,
+      "attempts": 1,
+      "max_output_tokens": 32768,
+      "concurrency": 1
+    }
+  }
+}

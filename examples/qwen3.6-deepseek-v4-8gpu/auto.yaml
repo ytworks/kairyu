@@ -1,0 +1,30 @@
+# L2 throughput tier: short prompts use one of four Qwen TP1 replicas, harder
+# prompts use DeepSeek TP4+EP4, and very large/multi-step prompts use two Qwen
+# proposals followed by one DeepSeek synthesis.
+workers:
+  - name: tier1
+    backend: openai
+    model: qwen3.6-27b
+    base_url: http://kairyu:8000/v1
+    api_key_env: null
+    options:
+      upstream: kairyu
+      timeout_s: 86400
+  - name: tier2
+    backend: openai
+    model: deepseek-v4-flash-0731-thinking
+    base_url: http://kairyu:8000/v1
+    api_key_env: null
+    options:
+      upstream: kairyu
+      timeout_s: 86400
+
+router:
+  kind: rules
+
+moa_samples: 2
+
+budget:
+  # Two parallel proposals plus one synthesis; no recursive refinement.
+  max_steps: 3
+  max_refine_depth: 0
