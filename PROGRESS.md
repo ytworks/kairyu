@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, six-model sourced Accuracy comparison, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
-- The example surface includes the measured 8-GPU RTX PRO 6000 DeepSeek deployment and a one-GPU Qwen3.6 FP8 example; both route Open WebUI through Kairyu L3 to pinned vLLM L1. Qwen's no-MTP/16K-batch candidate won the c32 screen after MTP and 32K-batch candidates failed performance or stability checks; its final serving/LiveCodeBench-20 reruns are in progress, with all persistent data and compilation caches on NVMe
+- The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8; both route Open WebUI through Kairyu L3 to pinned vLLM L1. Qwen's no-MTP/16K-batch configuration completed its final serving and LiveCodeBench-20 gates after MTP and 32K-batch candidates failed performance or stability checks, with all persistent data and compilation caches on NVMe
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-11 — [progress] One-GPU Qwen3.6 example completes measured gate
+- What: The one-command Qwen3.6-27B FP8 stack on one RTX PRO 6000 completed its final unique-prefix 8K/256 matrix (41.43 output tok/s with 190.82 ms median TTFT at c1; 842.35 output tok/s with 1.247 s median TTFT at c32) and deterministic LiveCodeBench subset (11/20, 55.0%, 20/20 scored, zero request errors/retries/unmeasured rows). No-MTP won TTFT at every tested concurrency and aggregate throughput at c16/c32; MTP-5 crashed at c16 and the 32K prefill budget exhausted VRAM at c32.
+- Refs: PR #469; `examples/qwen3.6-27b-1gpu/MEASUREMENTS.md`; run IDs `final-no-mtp-20260811` and `qwen36-fp8-no-mtp-lcb20-20260811`
 
 ### 2026-08-11 — [progress] One-GPU Qwen3.6 vLLM example enters runtime validation
 - What: A second example adds one-command Open WebUI -> Kairyu L3 -> pinned vLLM L1 serving for the official Qwen3.6-27B FP8 checkpoint on one selected RTX PRO 6000; model/UI persistence is fail-closed below `/mnt/nvme`, and independent/all serving plus deterministic 20-row LiveCodeBench runners are contract-tested. Runtime tuning and measured evidence remain in progress.

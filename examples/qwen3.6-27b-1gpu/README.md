@@ -15,10 +15,11 @@ without it. Kairyu owns the checkpoint's official chat template and forwards
 the rendered prompt to vLLM's completions endpoint, so Open WebUI always talks
 to Kairyu L3 rather than directly to L1.
 
-The no-MTP selection reached **846.89 output tok/s with 1.211 s median TTFT at
-c32** in its fixed-candidate screen, versus 561.08 tok/s and 7.036 s for MTP-3.
-The clean final matrix and LiveCodeBench rerun are being recorded in
-[MEASUREMENTS.md](MEASUREMENTS.md).
+The selected no-MTP configuration measured **41.43 output tok/s with 190.82 ms
+median TTFT at c1** and **842.35 output tok/s with 1.247 s median TTFT at c32**
+for the fixed 8K-input/256-output workload. The completed LiveCodeBench subset
+scored **11/20 (55.0%)**. See [MEASUREMENTS.md](MEASUREMENTS.md) for the full
+matrix, MTP tradeoff, limitations, and reproducibility identity.
 
 ## Start
 

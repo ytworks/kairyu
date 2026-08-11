@@ -2,90 +2,96 @@
 
 ## Result
 
-The final candidate is FP8 weights and KV cache, FP16 Gated-DeltaNet state,
-FlashInfer attention, a 16,384-token chunked-prefill budget, 32 maximum
-sequences, and no speculative decoding. Its c32 screen reached 846.89 output
-tok/s with 1,210.58 ms median TTFT, versus 561.08 tok/s and 7,035.82 ms for
-MTP-3. The clean final matrix and LiveCodeBench rerun are in progress; the
-tables below retain the completed MTP-3 baseline until that replacement is
-finished.
+The selected configuration uses FP8 weights and KV cache, FP16
+Gated-DeltaNet state, FlashInfer attention, a 16,384-token chunked-prefill
+budget, 32 maximum sequences, full/piecewise CUDA Graphs, and no speculative
+decoding. It completed the full serving matrix and the fixed 20-problem
+accuracy run through Kairyu L3.
 
-### Fixed 8K/256 serving matrix — MTP-3 baseline
+### Fixed 8K/256 serving matrix
 
-Run `tuning-mtp3-20260811` issued 32 unique-prefix requests per row through
-Kairyu L3. Inputs are approximately 8K tokens and every valid response contains
-exactly 256 output tokens (`ignore_eos=true`). Times include the HTTP and L3
-path.
+Run `final-no-mtp-20260811` issued 32 unique-prefix requests per row. Inputs
+are approximately 8K tokens and every valid response contains exactly 256
+output tokens (`ignore_eos=true`). Times include the HTTP and Kairyu L3 path.
 
 | Concurrency | TTFT p50 | TTFT p99 | Mean TPOT | Output throughput | Wall time |
 |---:|---:|---:|---:|---:|---:|
-| 1 | 1,307.31 ms | 1,921.11 ms | 12.486 ms/token | 56.76 tok/s | 144.337 s |
-| 8 | 848.00 ms | 3,881.68 ms | 17.436 ms/token | 333.47 tok/s | 24.566 s |
-| 16 | 1,777.45 ms | 4,346.52 ms | 24.762 ms/token | 452.22 tok/s | 18.115 s |
-| 32 | 7,035.82 ms | 8,087.26 ms | 28.262 ms/token | 561.08 tok/s | 14.600 s |
+| 1 | 190.82 ms | 209.67 ms | 23.490 ms/token | 41.43 tok/s | 197.720 s |
+| 8 | 492.25 ms | 561.55 ms | 25.388 ms/token | 294.25 tok/s | 27.840 s |
+| 16 | 674.05 ms | 835.17 ms | 28.121 ms/token | 521.60 tok/s | 15.705 s |
+| 32 | 1,246.77 ms | 1,387.43 ms | 33.737 ms/token | **842.35 tok/s** | 9.725 s |
 
 All four rows produced 32/32 responses and 8,192/8,192 output tokens. The
-runner now rejects partial streams, missing token counts, zero-token results,
-and multiple result artifacts even when an underlying client exits zero.
+runner rejects partial streams, missing token counts, zero-token results, and
+multiple result artifacts even when an underlying client exits zero.
 
 ### Tuning decision
 
-The same prompts and seed compared native MTP depths three and five. The
-five-token candidate reached 57.73 tok/s at c1 versus 56.76 tok/s for MTP-3,
-but its TTFT was slightly worse (1,319.65 versus 1,307.31 ms). At c8 it fell to
-302.66 tok/s versus 333.47 tok/s and mean TPOT rose to 20.123 versus 17.436
-ms/token. During c16, its EngineCore terminated with a CUDA illegal-memory
-access; the asynchronous stack surfaced while FlashInfer attention metadata
-was being built. The following c32 requests produced no tokens. MTP-5 is
-therefore neither faster across the matrix nor stable enough for this image and
-hardware. MTP-3 is the measured winner among the speculative candidates.
+The final no-MTP configuration and the complete MTP-3 baseline used the same
+prompts, seed, model, and 16,384-token prefill budget:
 
-A second c32 screen raised `max_num_batched_tokens` from 16,384 to 32,768 while
-keeping MTP-3 and every request parameter fixed. The engine exhausted the
-94.97 GiB device during the first prefill (`torch.OutOfMemoryError`, another
-632 MiB requested with only 503.56 MiB free), so all 32 streams produced zero
-tokens. The complete 16,384-token run is retained as the largest locally
-validated budget for this full-native-context configuration.
+| Concurrency | no-MTP TTFT p50 | MTP-3 TTFT p50 | no-MTP output | MTP-3 output |
+|---:|---:|---:|---:|---:|
+| 1 | **190.82 ms** | 1,307.31 ms | 41.43 tok/s | **56.76 tok/s** |
+| 8 | **492.25 ms** | 848.00 ms | 294.25 tok/s | **333.47 tok/s** |
+| 16 | **674.05 ms** | 1,777.45 ms | **521.60 tok/s** | 452.22 tok/s |
+| 32 | **1,246.77 ms** | 7,035.82 ms | **842.35 tok/s** | 561.08 tok/s |
 
-Finally, disabling MTP at the stable 16,384-token budget improved the fixed c32
-screen to 846.89 output tok/s and 1,210.58 ms median TTFT. That is 50.94% more
-aggregate output throughput and 82.79% lower median TTFT than MTP-3 on the same
-32 prompts. Mean TPOT was higher (33.710 versus 28.262 ms/token), so the final
-selection optimizes the requested aggregate throughput and TTFT rather than
-single-request inter-token latency under saturation.
+No-MTP wins TTFT at every tested concurrency and aggregate throughput at the
+service-saturation c16/c32 rows. It gives up 27.0% c1 and 11.8% c8 output
+throughput, while gaining 15.3% at c16 and 50.1% at c32. Because the requested
+target is TTFT plus general serving throughput, the committed configuration
+optimizes the low-latency/high-concurrency envelope rather than single-stream
+decode speed.
 
-vLLM automatically changes the requested `FULL_AND_PIECEWISE` CUDA Graph mode
-to `PIECEWISE` because this FlashInfer/speculative-decode combination does not
-support full graphs. The effective serving mode is therefore piecewise graphs.
+Two larger candidates failed the stability gate:
 
-## LiveCodeBench-20 — MTP-3 baseline
+- MTP-5 reached 57.73 tok/s at c1, but fell to 302.66 tok/s at c8 and its
+  EngineCore died with a CUDA illegal-memory access during c16. MTP-3 was the
+  only speculative candidate to finish c32.
+- Raising `max_num_batched_tokens` from 16,384 to 32,768 with MTP-3 exhausted
+  the 94.97 GiB device during the first c32 prefill (`torch.OutOfMemoryError`,
+  another 632 MiB requested with only 503.56 MiB free). All 32 streams produced
+  zero tokens. The 16,384-token budget is the largest locally validated value.
 
-Run `qwen36-fp8-mtp3-lcb20-20260811` completed the deterministic first 20
+The MTP candidates were automatically reduced from requested
+`FULL_AND_PIECEWISE` graphs to `PIECEWISE`, because this FlashInfer/speculative
+combination does not support full graphs. The selected no-MTP configuration
+retains the requested full/piecewise graph modes.
+
+## LiveCodeBench-20
+
+Run `qwen36-fp8-no-mtp-lcb20-20260811` completed the deterministic first 20
 `release_v6` items selected with seed 0. It used pass@1, temperature 1.0,
 top-p 0.95, `reasoning_effort=max`, a 32,768-token output ceiling, concurrency
 16, and the content-addressed networkless Docker executor.
 
 | Metric | Result |
 |---|---:|
-| Correct / scored | 14 / 20 |
-| Simplified pass@1 | **70.0%** |
-| Wilson 95% confidence interval | 48.10%–85.45% |
+| Correct / scored | 11 / 20 |
+| Simplified pass@1 | **55.0%** |
+| Wilson 95% confidence interval | 34.21%–74.18% |
 | Request / scoring errors | 0 / 0 |
 | Retries / unmeasured requests | 0 / 0 |
-| TTFT p50 / p95 | 4,926.02 / 4,929.01 ms |
-| Per-request generation TPS p50 | 61.85 tok/s |
-| Completion tokens | 479,332 |
-| End-to-end run window | 767 s |
-| Aggregate output throughput | 624.94 tok/s |
-| Request latency p50 / p95 | 445.267 / 538.186 s |
-| Median output length | 26,468 tokens |
-| Requests reaching 32,768-token limit | 7 / 20 |
+| TTFT p50 / p95 | 3,674.40 / 3,689.14 ms |
+| Per-request generation TPS p50 | 33.46 tok/s |
+| Completion tokens | 521,702 |
+| End-to-end run window | 1,428 s |
+| Aggregate output throughput | 365.34 tok/s |
+| Request latency p50 / p95 | 922.669 / 987.604 s |
+| Median output length | 30,710 tokens |
+| Requests reaching 32,768-token limit | 9 / 20 |
 
-The 70% figure is a quick 20-question signal, not a full benchmark score. The
+The 55% figure is a quick 20-question signal, not a full benchmark score. The
 scoreboard marks it non-comparable with the complete 1,055-problem release_v6
-run. Seven limit hits also show that this model's maximum-thinking mode is very
-verbose; the latency and throughput values intentionally retain that workload
-rather than shortening it after the fact.
+run. Nine limit hits show that maximum-thinking mode is very verbose; the
+latency and throughput values intentionally retain that workload.
+
+For tuning context, the MTP-3 run scored 14/20 (70%) with a 48.10%–85.45%
+Wilson interval. Its sampling path differs despite the same seed, and both
+20-item confidence intervals are wide and overlapping. The committed no-MTP
+configuration's 11/20 result is the authoritative simplified score for this
+example.
 
 ## Reproducibility identity
 
@@ -99,9 +105,11 @@ rather than shortening it after the fact.
   `f108556571d80514a792b458de366221c9b910fe69cbd5d2525c207580cd51aa`
 - vLLM: source `jasl/vllm@aa0d51302747ea80f282e26949708b3253409fe2`;
   image `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`
-- Kairyu benchmark commit: `dd65716c7e90703d1631bf79df230a10c46b59c1`
+- Kairyu benchmark commit: `83241cc1a6ccfa06b8da8bb68672a9c64015ecca`
+- Clean source-tree SHA-256:
+  `98ac53c04aa1411e2ed26a7b2106de05c3179acde00b31eba2b6e7f02067da13`
 - Served configuration SHA-256:
-  `7167e456b76ef62dcd0be11f88c1309ff77998614bc2f3a74363ee2964fc4443`
+  `14e7f6b4421945279b4eda7b203541d15004e600f354786c056f7e44d75cb85c`
 - LiveCodeBench dataset revision:
   `0fe84c3912ea0c4d4a78037083943e8f0c4dd505`
 - Execution image:
