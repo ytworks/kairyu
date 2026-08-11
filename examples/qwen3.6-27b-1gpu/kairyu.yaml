@@ -1,0 +1,30 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  max_concurrency: 64
+  admission_wait_timeout_s: 86400
+
+engines:
+  qwen3.6-27b:
+    backend: openai
+    health_url: http://vllm:8000/health
+    options:
+      base_url: http://vllm:8000/v1
+      model: qwen3.6-27b
+      api_key_env: null
+      timeout_s: 86400
+      upstream: vllm
+      allow_templated_chat_passthrough: true
+      chat_tokenizer: /models/qwen3.6-27b-fp8
+      model_revision: e89b16ebf1988b3d6befa7de50abc2d76f26eb09
+      max_model_len: 262144
+      quantization_format: fp8
+      cache_descriptor:
+        family: qwen3.6-hybrid-deltanet-paged-kv
+      tensor_parallel_size: 1
+      mtp_enabled: true
+      container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
+
+chat_templates:
+  qwen3.6-27b: /models/qwen3.6-27b-fp8/chat_template.jinja
