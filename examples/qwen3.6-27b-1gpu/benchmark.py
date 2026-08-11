@@ -122,8 +122,51 @@ def serving(run_dir: Path) -> int:
             log=run_dir / f"serving-c{concurrency}.log",
             check=False,
         )
+        if code == 0:
+            code = _validate_serving_row(row_dir, requests, int(config["output_tokens"]))
         failures += code != 0
+        if code:
+            break
     return 1 if failures else 0
+
+
+def _validate_serving_row(row_dir: Path, requests: int, output_tokens: int) -> int:
+    """Reject partial streams and nominally successful zero-token runs."""
+
+    artifacts = list(row_dir.glob("*-serving.json"))
+    if len(artifacts) != 1:
+        print(
+            f"serving row produced {len(artifacts)} result files; expected exactly one",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        result = json.loads(artifacts[0].read_text(encoding="utf-8"))
+        summary = result["summary"]
+        samples = result["samples"]
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        print(f"invalid serving result: {error}", file=sys.stderr)
+        return 1
+    expected_total = requests * output_tokens
+    complete = (
+        summary.get("requests") == requests
+        and summary.get("completion_tokens_total") == expected_total
+        and isinstance(summary.get("output_tokens_per_s"), (int, float))
+        and summary["output_tokens_per_s"] > 0
+        and len(samples) == requests
+        and all(sample.get("completion_tokens") == output_tokens for sample in samples)
+    )
+    if not complete:
+        print(
+            "serving row did not produce complete evidence: "
+            f"requests={summary.get('requests')!r}, "
+            f"completion_tokens_total={summary.get('completion_tokens_total')!r}, "
+            f"output_tokens_per_s={summary.get('output_tokens_per_s')!r}, "
+            f"samples={len(samples)!r}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 def _execution_image() -> str:
@@ -174,7 +217,7 @@ def livecodebench(run_dir: Path) -> int:
         "--model",
         SPEC["model"]["served_name"],
         "--served-config-label",
-        "rtx-pro-6000-blackwell-1x-vllm-fp8-mtp3",
+        f"rtx-pro-6000-blackwell-1x-vllm-fp8-mtp{SPEC['vllm']['mtp_speculative_tokens']}",
         "--served-config-sha256",
         _served_config_sha256(),
         "--no-vision",

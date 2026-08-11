@@ -381,3 +381,25 @@ def test_qwen_serving_prompts_do_not_share_the_first_prefix(tmp_path: Path) -> N
         "Case 2",
         "Case 3",
     ]
+
+
+def test_qwen_serving_validation_rejects_partial_streams(tmp_path: Path) -> None:
+    benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_example_serving_validation")
+    row_dir = tmp_path / "serving-c2"
+    row_dir.mkdir()
+    result = {
+        "summary": {
+            "requests": 2,
+            "completion_tokens_total": 8,
+            "output_tokens_per_s": 1.0,
+        },
+        "samples": [{"completion_tokens": 4}, {"completion_tokens": 4}],
+    }
+    output = row_dir / "result-serving.json"
+    output.write_text(json.dumps(result))
+    assert benchmark._validate_serving_row(row_dir, requests=2, output_tokens=4) == 0
+
+    result["summary"]["completion_tokens_total"] = None
+    result["samples"][1]["completion_tokens"] = 0
+    output.write_text(json.dumps(result))
+    assert benchmark._validate_serving_row(row_dir, requests=2, output_tokens=4) == 1
