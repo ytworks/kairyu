@@ -19,6 +19,10 @@ has a non-empty public answer and a valid trace with the exact proposal count.
 | MoA-3, ordinary DeepSeek synthesis | 8 | 32,257.80 / 37,529.51 | 39,267.84 / 43,239.06 | 35.025 | 0.20 | 44.26 | 276.16 | 32/32 / 32/32 |
 | MoA-3, ordinary DeepSeek synthesis | 16 | 53,530.21 / 68,127.32 | 69,949.14 / 85,593.48 | 87.895 | 0.23 | 73.68 | 336.97 | 32/32 / 32/32 |
 | MoA-3, ordinary DeepSeek synthesis | 32 | 100,263.47 / 126,709.95 | 130,182.47 / 133,476.95 | 172.232 | 0.24 | 48.98 | 324.82 | 32/32 / 32/32 |
+| **MoA-3, private-thinking DeepSeek, 2048 internal cap** | **1** | **15,559.95 / 19,801.79** | **16,899.93 / 20,997.39** | **4.384** | **0.06** | **17.05** | **96.61** | **32/32 / 32/32** |
+| **MoA-3, private-thinking DeepSeek, 2048 internal cap** | **8** | **38,325.65 / 48,881.13** | **41,234.34 / 50,111.05** | **13.707** | **0.19** | **47.81** | **302.65** | **32/32 / 32/32** |
+| **MoA-3, private-thinking DeepSeek, 2048 internal cap** | **16** | **68,184.60 / 85,067.02** | **72,678.04 / 85,897.75** | **15.862** | **0.21** | **50.62** | **357.03** | **32/32 / 32/32** |
+| **MoA-3, private-thinking DeepSeek, 2048 internal cap** | **32** | **129,700.49 / 150,492.27** | **138,592.39 / 153,445.40** | **29.284** | **0.21** | **54.32** | **351.29** | **32/32 / 32/32** |
 | **MoA-2, ordinary DeepSeek synthesis** | **1** | **14,968.53 / 18,565.29** | **16,285.04 / 19,684.75** | **4.897** | **0.06** | **14.88** | **65.73** | **32/32 / 32/32** |
 | **MoA-2, ordinary DeepSeek synthesis** | **8** | **26,741.72 / 33,050.82** | **34,450.35 / 37,173.33** | **36.660** | **0.23** | **54.50** | **235.91** | **32/32 / 32/32** |
 | **MoA-2, ordinary DeepSeek synthesis** | **16** | **42,287.00 / 55,686.19** | **58,878.42 / 64,166.79** | **83.318** | **0.26** | **65.04** | **279.93** | **32/32 / 32/32** |
@@ -28,6 +32,7 @@ Run IDs:
 
 - `l3-auto-max-chat-moa3-public-v1-20260812`
 - `l3-auto-max-chat-moa2-public-v1-20260812`
+- `l3-auto-max-thinking2048-public-v1-20260812`
 
 MoA-2 retains MoA-3's c1 envelope while reducing cumulative internal output
 by 21.5%. At c8 it improves median TTFT by 17.1%, median E2E by 12.3%, and
@@ -69,8 +74,17 @@ private generation exhausted the 1024-token internal allowance before its
 configured `</think>` boundary. The generic private-work allowance is raised
 to 2048 for this candidate. Natural EOS means normal requests retain their
 measured work, while the long-thinking tail gets room to produce a valid public
-answer. This candidate must first re-pass the L3 reliability/performance matrix
-and then equal or exceed the same clean direct-DeepSeek 2/4 pilot.
+answer.
+
+The 2048 candidate passed the full L3 matrix: all 128 requests returned
+non-empty public answers with 128/128 valid traces, exactly three proposals,
+and zero request errors. At c1 its median TTFT/E2E are only 1.2%/0.8% above the
+old 1024 candidate. At c8 it trades 18.8% higher median TTFT than ordinary MoA-3
+for a 5.0% E2E increase and 8.0% higher public TPS, while eliminating the old
+hidden-thinking empty-answer failure. At c16 the TTFT increase is 27.4%, but
+median E2E increases only 3.9%. It is therefore the performance-qualified
+quality candidate and must now equal or exceed the clean direct-DeepSeek 2/4
+pilot before the all-89 run.
 
 ## Tier1 topology selection
 
