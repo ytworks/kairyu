@@ -56,3 +56,52 @@ profiling in the custom all-reduce kernel; with the option, both NCCL candidates
 started and completed the matrix. TP4's first cache build reported 201.41 s for
 engine initialization, including 109.54 s compilation. These candidate-only
 transport settings are not present in the selected TP1 deployment.
+
+## Tier2 speculation and batch-budget selection
+
+The Tier2 comparison keeps DeepSeek TP4+EP4, FP8 KV, max sequences 32, prefix
+caching, and full/piecewise CUDA Graphs fixed. It changes only the named
+candidate variable. The dataset and L3 measurement protocol are the same as
+the Tier1 matrix. Direct-model requests enter through Kairyu L3; they do not
+call the DeepSeek vLLM endpoint directly.
+
+| Tier2 candidate | Concurrency | semantic TTFT p50/p99 (ms) | E2E p50/p99 (ms) | TPOT mean (ms/token) | per-request generation TPS p50 | aggregate output TPS | success |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| DSpark-5, 16K batch | 1 | 779.22 / 791.75 | 1,926.21 / 2,240.48 | 4.617 | 223.00 | 130.79 | 32/32 |
+| DSpark-5, 16K batch | 8 | 833.16 / 6,641.27 | 9,700.31 / 15,773.82 | 32.336 | 29.39 | 187.17 | 32/32 |
+| DSpark-5, 16K batch | 16 | 2,710.53 / 11,899.12 | 17,749.63 / 29,026.48 | 49.887 | 19.82 | 221.88 | 32/32 |
+| DSpark-5, 16K batch | 32 | 12,399.45 / 23,535.78 | 30,373.40 / 33,890.59 | 66.807 | 14.65 | 241.62 | 32/32 |
+| DSpark-5, 32K batch | 1 | 771.59 / 786.90 | 2,007.40 / 2,251.42 | 4.789 | 207.32 | 128.39 | 32/32 |
+| DSpark-5, 32K batch | 8 | 809.94 / 6,040.70 | 9,718.16 / 15,700.83 | 29.201 | 31.96 | 211.44 | 32/32 |
+| DSpark-5, 32K batch | 16 | 3,306.91 / 11,602.01 | 16,664.29 / 28,367.76 | 46.221 | 23.27 | 234.90 | 32/32 |
+| DSpark-5, 32K batch | 32 | 12,219.31 / 23,008.60 | 31,538.33 / 35,025.73 | 70.727 | 13.40 | 233.78 | 32/32 |
+| No speculation, 16K batch | 1 | 774.25 / 1,186.28 | 3,406.64 / 3,817.17 | 10.326 | 97.21 | 74.88 | 32/32 |
+| No speculation, 16K batch | 8 | 3,965.50 / 6,191.15 | 9,524.89 / 10,508.00 | 21.526 | 44.22 | 213.53 | 32/32 |
+| No speculation, 16K batch | 16 | 6,549.86 / 11,780.05 | 16,120.20 / 21,357.75 | 38.401 | 26.73 | 252.94 | 32/32 |
+| No speculation, 16K batch | 32 | 12,414.10 / 23,381.04 | 29,184.28 / 29,296.87 | 63.230 | 15.27 | 279.41 | 32/32 |
+
+Run IDs:
+
+- `l3-deepseek-tp4ep4-dspark5-b16k-unique-20260811`
+- `l3-deepseek-tp4ep4-dspark5-b32k-unique-20260811`
+- `l3-deepseek-tp4ep4-nospec-b16k-nvmecache-unique-20260811`
+
+DSpark-3 is not a supported candidate in the pinned vLLM revision. Startup
+fails closed because DeepSeek's DSpark block size is five and values below five
+can produce incorrect output. It was rejected before serving any request.
+
+The current winner is **DSpark-5 with a 16K batch-token budget**. Against no
+speculation it gives nearly identical c1 median TTFT but 43.5% lower median E2E
+latency and 74.7% higher aggregate output TPS. No-spec improves aggregate TPS
+under c8-c32 saturation, but it delays the first token at c8/c16 and is much
+slower for the single DeepSeek synthesis request on the principal auto-max
+path. The 32K budget improves c8/c16 throughput but loses c1 E2E/generation
+speed and c32 throughput/TPOT, so 16K is the better latency-first balance.
+
+Before the cache fix, a DSpark-5/32K cold engine initialization took 560.68 s.
+The no-spec/16K initial build in the corrected layout took 519.00 s, including
+404.55 s of mHC warm-up. The generated caches now exist outside the containers
+at `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/compile-cache/`:
+73 MiB for DeepSeek and approximately 239-240 MiB for each Qwen replica at the
+time of measurement. The next DSpark restart is used to verify reuse rather
+than treating an ephemeral compile as warm startup.
