@@ -158,6 +158,7 @@ def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcri
 
 
 def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
+    config = json.loads((EXAMPLE / "example.json").read_text())
     standard = load_spec(EXAMPLE / "auto.yaml")
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
     chat = load_spec(EXAMPLE / "auto-max-chat.yaml")
@@ -184,6 +185,7 @@ def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
     assert chat.router == maximum.router
     assert chat.moa_samples == 3
     assert chat.internal_max_tokens == 512
+    assert config["orchestration"]["auto_max_chat_internal_max_output_tokens"] == 512
     assert chat.budget == maximum.budget
     assert chat.workers[0] == maximum.workers[0]
     assert chat.workers[1].model == "deepseek-v4-flash-0731"
