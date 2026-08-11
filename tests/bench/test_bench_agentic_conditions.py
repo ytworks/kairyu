@@ -122,6 +122,13 @@ def test_terminal_bench_passes_concurrency(tmp_path):
     assert _flag_value(command, "--n-concurrent") == "4"
 
 
+def test_terminal_bench_expands_only_the_agent_execution_timeout(tmp_path):
+    command = TerminalBenchAdapter()._command(_target(), _ctx(tmp_path), tmp_path)
+    assert _flag_value(command, "--agent-timeout-multiplier") == "8.0"
+    assert "--timeout-multiplier" not in command
+    assert "--verifier-timeout-multiplier" not in command
+
+
 def test_terminal_bench_limit_is_a_task_cap(tmp_path):
     command = TerminalBenchAdapter()._command(_target(), _ctx(tmp_path, limit=3), tmp_path)
     assert _flag_value(command, "--n-tasks") == "3"

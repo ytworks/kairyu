@@ -39,6 +39,12 @@ _AGENT = "terminus-2"
 # Fugu's condition. Harbor's terminus-2 default turn budget is lower, which
 # truncates long traces well before the published limit.
 _MAX_TURNS = 500
+# Terminal-Bench 2.1 task metadata commonly gives the agent 900 seconds. That
+# is too short for a 500-turn local-model trajectory with 32K responses, and a
+# timeout is a failed task rather than a meaningful accuracy verdict. Harbor's
+# agent-only multiplier preserves verifier/build timeouts while allowing two
+# hours for the agent phase of each task.
+_AGENT_TIMEOUT_MULTIPLIER = 8.0
 
 
 # Harbor's JobResult holds `trial_results`, and each TrialResult carries its
@@ -152,6 +158,9 @@ class TerminalBenchAdapter:
         annotations=(
             f"agent scaffold: {_AGENT} via the Harbor harness, "
             f"max_turns={_MAX_TURNS} (Fugu's condition)",
+            "Harbor agent execution timeout multiplier=8.0; a 900-second task "
+            "budget becomes 7200 seconds while verifier and build timeouts stay "
+            "at their task-defined values",
             "one attempt per task by default (--attempts); the official "
             "leaderboard requires at least five; Harbor -k is a harness trial "
             "count, not grouped chat seed-sweep sensitivity",
@@ -220,6 +229,8 @@ class TerminalBenchAdapter:
             str(ctx.attempts),
             "--n-concurrent",
             str(ctx.concurrency),
+            "--agent-timeout-multiplier",
+            str(_AGENT_TIMEOUT_MULTIPLIER),
         ]
         if ctx.limit is not None:
             command += ["--n-tasks", str(ctx.limit)]
@@ -280,6 +291,7 @@ class TerminalBenchAdapter:
                 "harness": "harbor",
                 "agent": _AGENT,
                 "max_turns": _MAX_TURNS,
+                "agent_timeout_multiplier": _AGENT_TIMEOUT_MULTIPLIER,
                 "attempts": ctx.attempts,
                 "denominator": (
                     "every trial, errored ones as zero (Harbor's own Mean maps a "
