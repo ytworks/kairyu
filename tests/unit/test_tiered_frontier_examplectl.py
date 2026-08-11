@@ -94,6 +94,10 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "num_speculative_tokens": 5,
         "draft_sample_method": "greedy",
     }
+    assert json.loads(_option(deepseek["command"], "--compilation-config")) == {
+        "cudagraph_mode": "NONE",
+        "custom_ops": ["all"],
+    }
 
 
 def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
