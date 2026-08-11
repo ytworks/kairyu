@@ -23,18 +23,12 @@ pools:
           quantization_format: fp8
           cache_descriptor:
             family: qwen3.6-hybrid-deltanet-paged-kv
-          tensor_parallel_size: 1
+          tensor_parallel_size: 2
           mtp_enabled: false
           container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
       - backend: openai
         health_url: http://qwen-1:8000/health
         options: {<<: *qwen, base_url: http://qwen-1:8000/v1}
-      - backend: openai
-        health_url: http://qwen-2:8000/health
-        options: {<<: *qwen, base_url: http://qwen-2:8000/v1}
-      - backend: openai
-        health_url: http://qwen-3:8000/health
-        options: {<<: *qwen, base_url: http://qwen-3:8000/v1}
     unhealthy_after: 1
     queue_depth_threshold: 8
     prefix_index: true

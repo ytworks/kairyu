@@ -253,7 +253,13 @@ def _serving(
 
 
 def serving_qwen(run_dir: Path) -> int:
-    return _serving("qwen3.6-27b", run_dir, tensor_parallel=1, replicas=4)
+    tier1 = SPEC["allocation"]["tier1"]
+    return _serving(
+        "qwen3.6-27b",
+        run_dir,
+        tensor_parallel=int(tier1["tensor_parallel_size"]),
+        replicas=int(tier1["replicas"]),
+    )
 
 
 def serving_deepseek(run_dir: Path) -> int:
@@ -261,11 +267,12 @@ def serving_deepseek(run_dir: Path) -> int:
 
 
 def serving_auto(run_dir: Path) -> int:
+    tier1 = SPEC["allocation"]["tier1"]
     return _serving(
         "kairyu-auto",
         run_dir,
-        tensor_parallel=4,
-        replicas=4,
+        tensor_parallel=int(tier1["tensor_parallel_size"]),
+        replicas=int(tier1["replicas"]),
         expected_route="tier1",
     )
 

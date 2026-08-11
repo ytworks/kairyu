@@ -16,8 +16,8 @@
     "tier1": {
       "model": "qwen3.6-27b",
       "gpu_ids": [0, 1, 2, 3],
-      "replicas": 4,
-      "tensor_parallel_size": 1
+      "replicas": 2,
+      "tensor_parallel_size": 2
     },
     "tier2": {
       "model": "deepseek-v4-flash-0731",

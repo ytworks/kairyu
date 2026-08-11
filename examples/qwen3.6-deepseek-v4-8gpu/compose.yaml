@@ -22,6 +22,8 @@ x-qwen: &qwen
     - qwen3.6-27b
     - --max-model-len
     - "262144"
+    - --tensor-parallel-size
+    - "2"
     - --language-model-only
     - --dtype
     - bfloat16
@@ -79,7 +81,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["0"]
+              device_ids: ["0", "1"]
               capabilities: [gpu]
 
   qwen-1:
@@ -98,45 +100,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
-              capabilities: [gpu]
-
-  qwen-2:
-    <<: *qwen
-    cpuset: ${QWEN_2_CPUSET}
-    volumes:
-      - type: bind
-        source: ${QWEN_MODEL_STORAGE_PATH}
-        target: /models
-        read_only: true
-      - type: bind
-        source: ${QWEN_CACHE_2_PATH}
-        target: /root/.cache/vllm
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["2"]
-              capabilities: [gpu]
-
-  qwen-3:
-    <<: *qwen
-    cpuset: ${QWEN_3_CPUSET}
-    volumes:
-      - type: bind
-        source: ${QWEN_MODEL_STORAGE_PATH}
-        target: /models
-        read_only: true
-      - type: bind
-        source: ${QWEN_CACHE_3_PATH}
-        target: /root/.cache/vllm
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["3"]
+              device_ids: ["2", "3"]
               capabilities: [gpu]
 
   deepseek:
@@ -226,8 +190,6 @@ services:
     depends_on:
       qwen-0: {condition: service_healthy}
       qwen-1: {condition: service_healthy}
-      qwen-2: {condition: service_healthy}
-      qwen-3: {condition: service_healthy}
       deepseek: {condition: service_healthy}
     ports:
       - 127.0.0.1:${API_PORT:-8003}:8000
