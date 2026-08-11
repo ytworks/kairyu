@@ -56,10 +56,13 @@ def _storage_paths() -> dict[str, Path]:
         "qwen_models": qwen_models,
         "deepseek_models": root / "model-volumes/deepseek-v4-flash-0731-8gpu",
         "webui": environment / "webui-data",
-        "deepseek_cache": environment / "vllm-cache/deepseek",
+        "deepseek_cache": environment / "compile-cache/deepseek",
     }
     paths.update(
-        {f"qwen_cache_{index}": environment / f"vllm-cache/qwen-{index}" for index in range(4)}
+        {
+            f"qwen_cache_{index}": environment / f"compile-cache/qwen-{index}"
+            for index in range(4)
+        }
     )
     for path in paths.values():
         try:

@@ -67,12 +67,28 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         assert devices["device_ids"] == [str(index)]
         assert "--tensor-parallel-size" not in service["command"]
         assert _option(service["command"], "--max-num-seqs") == "32"
+        assert service["volumes"][-1]["target"] == "/root/.cache"
+        assert service["environment"] | {
+            "XDG_CACHE_HOME": "/root/.cache",
+            "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/torchinductor",
+            "TRITON_CACHE_DIR": "/root/.cache/triton",
+            "TILELANG_CACHE_DIR": "/root/.cache/tilelang",
+            "TILELANG_TMP_DIR": "/root/.cache/tilelang/tmp",
+        } == service["environment"]
     deepseek = compose["services"]["deepseek"]
     devices = deepseek["deploy"]["resources"]["reservations"]["devices"][0]
     assert devices["device_ids"] == ["4", "5", "6", "7"]
     assert _option(deepseek["command"], "--tensor-parallel-size") == "4"
     assert "--enable-expert-parallel" in deepseek["command"]
     assert _option(deepseek["command"], "--max-num-batched-tokens") == "32768"
+    assert deepseek["volumes"][1]["target"] == "/root/.cache"
+    assert deepseek["environment"] | {
+        "XDG_CACHE_HOME": "/root/.cache",
+        "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/torchinductor",
+        "TRITON_CACHE_DIR": "/root/.cache/triton",
+        "TILELANG_CACHE_DIR": "/root/.cache/tilelang",
+        "TILELANG_TMP_DIR": "/root/.cache/tilelang/tmp",
+    } == deepseek["environment"]
     assert json.loads(_option(deepseek["command"], "--speculative-config")) == {
         "method": "dspark",
         "num_speculative_tokens": 5,

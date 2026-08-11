@@ -11,6 +11,11 @@ x-qwen: &qwen
     VLLM_USE_DEEP_GEMM: "0"
     PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
     SAFETENSORS_FAST_GPU: "1"
+    XDG_CACHE_HOME: /root/.cache
+    TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+    TRITON_CACHE_DIR: /root/.cache/triton
+    TILELANG_CACHE_DIR: /root/.cache/tilelang
+    TILELANG_TMP_DIR: /root/.cache/tilelang/tmp
   volumes: &qwen-volumes
     - type: bind
       source: ${QWEN_MODEL_STORAGE_PATH}
@@ -73,7 +78,7 @@ services:
         read_only: true
       - type: bind
         source: ${QWEN_CACHE_0_PATH}
-        target: /root/.cache/vllm
+        target: /root/.cache
     deploy:
       resources:
         reservations:
@@ -92,7 +97,7 @@ services:
         read_only: true
       - type: bind
         source: ${QWEN_CACHE_1_PATH}
-        target: /root/.cache/vllm
+        target: /root/.cache
     deploy:
       resources:
         reservations:
@@ -111,7 +116,7 @@ services:
         read_only: true
       - type: bind
         source: ${QWEN_CACHE_2_PATH}
-        target: /root/.cache/vllm
+        target: /root/.cache
     deploy:
       resources:
         reservations:
@@ -130,7 +135,7 @@ services:
         read_only: true
       - type: bind
         source: ${QWEN_CACHE_3_PATH}
-        target: /root/.cache/vllm
+        target: /root/.cache
     deploy:
       resources:
         reservations:
@@ -152,11 +157,16 @@ services:
       VLLM_USE_DEEP_GEMM: "0"
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       SAFETENSORS_FAST_GPU: "1"
+      XDG_CACHE_HOME: /root/.cache
+      TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
+      TRITON_CACHE_DIR: /root/.cache/triton
+      TILELANG_CACHE_DIR: /root/.cache/tilelang
+      TILELANG_TMP_DIR: /root/.cache/tilelang/tmp
     volumes:
       - deepseek-models:/models:ro
       - type: bind
         source: ${DEEPSEEK_CACHE_PATH}
-        target: /root/.cache/vllm
+        target: /root/.cache
       - ../deepseek-v4-flash-0731-8gpu/identity-chat.jinja:/etc/kairyu/identity-chat.jinja:ro
     command:
       - /models/deepseek-v4-flash-0731
