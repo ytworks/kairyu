@@ -753,6 +753,15 @@ class OpenAICompatBackend:
                 "cannot preserve a tokenizer-owned pre-rendered chat prompt through "
                 "an upstream /chat/completions template boundary",
             )
+        if (
+            isinstance(request.prompt, TemplatedPrompt)
+            and self._completion_reasoning_end_tag is not None
+            and request.sampling_params.logprobs is not None
+        ):
+            raise _client_error(
+                self._capabilities.upstream,
+                "cannot return logprobs after filtering private completion reasoning",
+            )
         if isinstance(request.prompt, MultimodalPrompt):
             if type(request.prompt.base) is not str and not isinstance(
                 request.prompt.base,

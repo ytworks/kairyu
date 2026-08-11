@@ -24,7 +24,10 @@ the quality tier. Its reasoning is private L2 state: Kairyu fail-closed splits
 the configured `</think>` boundary for both buffered and streamed vLLM
 completions, and multi-stage responses expose only the final answer. The
 role-tagged conversation JSON is context data, not a request to wrap normal UI
-answers in a JSON `role`/`content` envelope.
+answers in a JSON `role`/`content` envelope. Raw completion `logprobs` are
+rejected before dispatch on this private-reasoning alias because they cannot be
+truthfully aligned after the hidden prefix is removed; ordinary direct models
+retain their normal logprobs support.
 
 ## Start
 

@@ -768,6 +768,39 @@ async def test_vllm_templated_completion_separates_configured_private_reasoning(
     await backend.shutdown()
 
 
+async def test_vllm_private_completion_reasoning_rejects_logprobs_before_dispatch():
+    transport_calls: list[httpx.Request] = []
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: (
+                transport_calls.append(request)
+                or httpx.Response(200, json={"choices": []})
+            )
+        ),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+        completion_reasoning_end_tag="</think>",
+    )
+
+    with pytest.raises(
+        UpstreamClientError,
+        match="logprobs after filtering private completion reasoning",
+    ) as exc_info:
+        await backend.generate(
+            _request(
+                TemplatedPrompt("<Assistant><think>"),
+                SamplingParams(max_tokens=64, logprobs=1),
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert transport_calls == []
+    assert backend._client is None
+
+
 async def test_vllm_templated_completion_missing_reasoning_terminator_fails_closed():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(

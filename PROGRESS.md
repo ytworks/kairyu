@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [progress] Private reasoning rejects unsafe token metadata
+- What: A pre-rendered vLLM completion with a configured private-reasoning boundary now rejects logprobs before dispatch, preventing raw hidden-token metadata from bypassing the text filter; ordinary direct backends retain logprobs support.
+- Refs: `kairyu/engine/openai_backend.py`; `tests/unit/test_openai_backend.py`; PR #471
+
 ### 2026-08-12 — [progress] L3 benchmarks separate public output from private work
 - What: The serving harness can count final assistant content with a pinned tokenizer after the timed interval, reporting public TPS/TPOT beside cumulative orchestration tokens and E2E p50/p99. The tiered example uses natural-EOS reasoning requests plus a loopback-only DeepSeek tokenizer oracle; ChatUI still reaches only Kairyu L3.
 - Refs: `bench/serving_bench.py`; `examples/qwen3.6-deepseek-v4-8gpu/`; PR #471
