@@ -112,7 +112,7 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     qwen = deployment.pools["qwen3.6-27b"]
     assert len(qwen.replicas) == 4
     assert qwen.prefix_index is True
-    assert qwen.queue_depth_threshold == 8
+    assert qwen.queue_depth_threshold == 0
     for replica in qwen.replicas:
         validate_backend_options(replica.backend, replica.options)
         assert replica.options["tensor_parallel_size"] == 1

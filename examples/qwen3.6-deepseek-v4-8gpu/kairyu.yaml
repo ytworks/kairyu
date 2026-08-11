@@ -36,7 +36,10 @@ pools:
         health_url: http://qwen-3:8000/health
         options: {<<: *qwen, base_url: http://qwen-3:8000/v1}
     unhealthy_after: 1
-    queue_depth_threshold: 8
+    # Overflow as soon as the affine replica has one in-flight request. Agent
+    # turns and MoA proposals deliberately share a cache session; a larger
+    # threshold funnels concurrent work onto one GPU and leaves 3 replicas idle.
+    queue_depth_threshold: 0
     prefix_index: true
     probe_interval_s: 2.0
 
