@@ -88,19 +88,72 @@ def test_baselines_are_declared_provider_reported():
     assert "Fugu Ultra" not in PROVIDER_REPORTED
 
 
+def test_frontier_catalog_uses_the_supplied_eight_model_order():
+    assert COMPARISON_MODELS == (
+        "Fugu",
+        "Fugu Ultra",
+        "Fable 5",
+        "GPT-5.6 Sol",
+        "DeepSeek-V4-Flash-0731",
+        "Qwen3.8 MAX",
+        "GLM-5.2",
+        "Kimi K3",
+    )
+
+
+def test_frontier_catalog_matches_selected_matrix_values_and_absences():
+    selected = {
+        benchmark: {record["model"]: record["score"] for record in records}
+        for benchmark, records in FRONTIER_SCORE_RECORDS.items()
+    }
+    assert selected["swe-bench-pro"] == {
+        "Fugu": 59.0,
+        "Fugu Ultra": 73.7,
+        "Fable 5": 80.3,
+        "GPT-5.6 Sol": 64.6,
+        "Qwen3.8 MAX": 67.7,
+        "GLM-5.2": 62.1,
+    }
+    assert selected["terminal-bench"] == {
+        "Fugu": 80.2,
+        "Fugu Ultra": 82.1,
+        "Fable 5": 88.0,
+        "GPT-5.6 Sol": 88.8,
+        "DeepSeek-V4-Flash-0731": 82.7,
+        "Qwen3.8 MAX": 86.6,
+        "GLM-5.2": 81.0,
+        "Kimi K3": 88.3,
+    }
+    assert selected["livecodebench"] == {"Fugu": 92.9, "Fugu Ultra": 93.2}
+    deepseek_rows = {
+        benchmark
+        for benchmark, scores in selected.items()
+        if "DeepSeek-V4-Flash-0731" in scores
+    }
+    assert deepseek_rows == {"terminal-bench"}
+
+
 def test_frontier_catalog_records_are_source_bound_and_unambiguous():
     assert len(catalog_sha256()) == 64
+    for source in REFERENCE_SOURCES.values():
+        assert str(source["url"]).startswith("https://")
+        assert source["publisher"]
+        assert source["published_on"]
+        assert source["retrieved_on"]
+        assert source["tier"]
     for benchmark, records in FRONTIER_SCORE_RECORDS.items():
         models = [record["model"] for record in records]
         assert len(models) == len(set(models)), benchmark
         for record in records:
             assert record["model"] in COMPARISON_MODELS
             assert record["source"] in REFERENCE_SOURCES
+            assert record["source_class"] in {"provider", "third_party"}
             assert 0 <= record["score"] <= 100
             assert record["condition"]
     for records in FRONTIER_SCORE_VARIANTS.values():
         for record in records:
             assert record["source"] in REFERENCE_SOURCES
+            assert record["source_class"] in {"provider", "third_party"}
             assert record["condition"]
 
 
@@ -224,8 +277,9 @@ def test_frontier_catalog_keeps_missing_values_and_all_model_gap_columns():
     row = comparison["rows"][0]
 
     assert row["published_models"] == list(COMPARISON_MODELS)
-    assert row["published"] == {"Fugu": 87.8}
+    assert row["published"] == {"Fugu": 87.8, "Fugu Ultra": 90.8}
     assert row["deltas_by_reference"]["qwen3-32b"]["Fugu"] == -7.8
+    assert row["deltas_by_reference"]["qwen3-32b"]["Fugu Ultra"] == -10.8
     assert row["deltas_by_reference"]["qwen3-32b"]["GPT-5.6 Sol"] is None
     markdown = render_comparison_markdown(comparison)
     assert "## Measured score gaps by reference model" in markdown
