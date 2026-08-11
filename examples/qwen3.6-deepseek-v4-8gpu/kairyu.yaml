@@ -61,7 +61,7 @@ pools:
           tensor_parallel_size: 4
           expert_parallel_size: 4
           attention_data_parallel_size: 1
-          dspark_enabled: true
+          dspark_enabled: false
           container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
     unhealthy_after: 1
     queue_depth_threshold: 8

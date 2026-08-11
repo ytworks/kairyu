@@ -89,11 +89,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "TILELANG_CACHE_DIR": "/root/.cache/tilelang",
         "TILELANG_TMP_DIR": "/root/.cache/tilelang/tmp",
     } == deepseek["environment"]
-    assert json.loads(_option(deepseek["command"], "--speculative-config")) == {
-        "method": "dspark",
-        "num_speculative_tokens": 5,
-        "draft_sample_method": "greedy",
-    }
+    assert "--speculative-config" not in deepseek["command"]
 
 
 def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
@@ -118,7 +114,7 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     validate_backend_options(deepseek.replicas[0].backend, deepseek.replicas[0].options)
     assert deepseek.replicas[0].options["tensor_parallel_size"] == 4
     assert deepseek.replicas[0].options["expert_parallel_size"] == 4
-    assert deepseek.replicas[0].options["dspark_enabled"] is True
+    assert deepseek.replicas[0].options["dspark_enabled"] is False
     assert set(deployment.orchestrators) == {"kairyu-auto", "kairyu-auto-max"}
     assert deployment.chat_templates == {
         "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja",
