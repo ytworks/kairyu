@@ -63,6 +63,7 @@
   "orchestration": {
     "auto_model": "kairyu-auto",
     "auto_max_model": "kairyu-auto-max",
+    "auto_max_chat_model": "kairyu-auto-max-chat",
     "auto_max_candidate_models": [
       "kairyu-auto-max-moa1",
       "kairyu-auto-max-moa2",
@@ -104,6 +105,7 @@
       "pilot_models": [
         "qwen3.6-27b",
         "deepseek-v4-flash-0731",
+        "kairyu-auto-max-chat",
         "kairyu-auto-max-moa1",
         "kairyu-auto-max-moa2",
         "kairyu-auto-max-moa3",

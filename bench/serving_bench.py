@@ -500,6 +500,10 @@ async def run_one(
                     trace_protocol_invalid = True
                 json_event_count += 1
             chunk = json.loads(data)
+            if "error" in chunk:
+                error = chunk["error"] if isinstance(chunk["error"], dict) else {}
+                label = error.get("code") or error.get("type") or "unknown"
+                raise RuntimeError(f"target stream failed ({label})")
             if request_trace:
                 chunk_id = chunk.get("id")
                 if isinstance(chunk_id, str) and chunk_id:

@@ -108,11 +108,14 @@ class _CompletionReasoningParser:
     end_tag: str
     pending: str = ""
     finished_reasoning: bool = False
+    public_content_seen: bool = False
 
     def feed(self, delta: str) -> tuple[str, str]:
         """Return ``(private_reasoning, public_content)`` for one wire delta."""
 
         if self.finished_reasoning:
+            if delta.strip():
+                self.public_content_seen = True
             return "", delta
         self.pending += delta
         marker_at = self.pending.find(self.end_tag)
@@ -121,6 +124,8 @@ class _CompletionReasoningParser:
             content = self.pending[marker_at + len(self.end_tag) :]
             self.pending = ""
             self.finished_reasoning = True
+            if content.strip():
+                self.public_content_seen = True
             return reasoning, content
         keep = len(self.end_tag) - 1
         if len(self.pending) <= keep:
@@ -135,6 +140,11 @@ class _CompletionReasoningParser:
                 "OpenAI-compatible completion ended before its configured "
                 "private-reasoning terminator"
             )
+        if not self.public_content_seen:
+            raise RuntimeError(
+                "OpenAI-compatible completion ended without public content "
+                "after its private-reasoning terminator"
+            )
 
 
 def _split_completion_reasoning(text: str, end_tag: str) -> tuple[str, str]:
@@ -144,7 +154,14 @@ def _split_completion_reasoning(text: str, end_tag: str) -> tuple[str, str]:
             "OpenAI-compatible completion omitted its configured "
             "private-reasoning terminator"
         )
-    return text[:marker_at], text[marker_at + len(end_tag) :]
+    reasoning = text[:marker_at]
+    content = text[marker_at + len(end_tag) :]
+    if not content.strip():
+        raise RuntimeError(
+            "OpenAI-compatible completion ended without public content after "
+            "its private-reasoning terminator"
+        )
+    return reasoning, content
 
 
 _SHARED_PREPARED_PAYLOADS: dict[

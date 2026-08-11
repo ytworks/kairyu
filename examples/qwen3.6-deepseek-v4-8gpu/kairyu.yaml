@@ -92,6 +92,8 @@ orchestrators:
     spec: /etc/kairyu/auto.yaml
   kairyu-auto-max:
     spec: /etc/kairyu/auto-max.yaml
+  kairyu-auto-max-chat:
+    spec: /etc/kairyu/auto-max-chat.yaml
   kairyu-auto-max-moa1:
     spec: /etc/kairyu/auto-max-moa1.yaml
   kairyu-auto-max-moa2:

@@ -1,0 +1,32 @@
+# L2 quality/performance candidate: three parallel Qwen proposals followed by
+# ordinary DeepSeek synthesis. This isolates the value and cost of a hidden
+# DeepSeek thinking prefix while keeping MoA fan-out, routing, and budgets fixed.
+workers:
+  - name: tier1
+    backend: openai
+    model: qwen3.6-27b
+    base_url: http://kairyu:8000/v1
+    api_key_env: null
+    options:
+      upstream: kairyu
+      timeout_s: 86400
+  - name: tier2
+    backend: openai
+    model: deepseek-v4-flash-0731
+    base_url: http://kairyu:8000/v1
+    api_key_env: null
+    options:
+      upstream: kairyu
+      timeout_s: 86400
+
+router:
+  kind: calibrated
+  artifact: /etc/kairyu/router.json
+  sha256: 9b3cc02780fd5a1cdf1073557b66900e14dd59b6dd655b961f6f85bc3cb51ca5
+  target_mode: auto-max
+
+moa_samples: 3
+
+budget:
+  max_steps: 4
+  max_refine_depth: 0

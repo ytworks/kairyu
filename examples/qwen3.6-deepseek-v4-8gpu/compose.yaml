@@ -233,6 +233,7 @@ services:
       - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
       - ./auto.yaml:/etc/kairyu/auto.yaml:ro
       - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
+      - ./auto-max-chat.yaml:/etc/kairyu/auto-max-chat.yaml:ro
       - ./auto-max-moa1.yaml:/etc/kairyu/auto-max-moa1.yaml:ro
       - ./auto-max-moa2.yaml:/etc/kairyu/auto-max-moa2.yaml:ro
       - ./auto-max-moa3.yaml:/etc/kairyu/auto-max-moa3.yaml:ro

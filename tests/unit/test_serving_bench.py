@@ -127,6 +127,31 @@ async def test_run_one_falls_back_when_target_rejects_stream_options():
         assert calls[1][field] == value
 
 
+async def test_run_one_rejects_sanitized_sse_error_instead_of_counting_success():
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def chat(_request: dict):
+        async def events():
+            yield (
+                'data: {"error":{"message":"upstream backend error",'
+                '"type":"upstream_error","code":"backend_error"}}\n\n'
+            )
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://t/v1",
+    ) as client:
+        with pytest.raises(RuntimeError, match=r"target stream failed \(backend_error\)"):
+            await serving_bench.run_one(client, "m", "fail", max_tokens=4)
+
+
 def test_summary_retains_raw_request_timings_and_token_throughput():
     results = [
         serving_bench.RequestMetrics(

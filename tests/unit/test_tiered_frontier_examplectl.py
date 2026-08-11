@@ -134,6 +134,7 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert set(deployment.orchestrators) == {
         "kairyu-auto",
         "kairyu-auto-max",
+        "kairyu-auto-max-chat",
         "kairyu-auto-max-moa1",
         "kairyu-auto-max-moa2",
         "kairyu-auto-max-moa3",
@@ -151,6 +152,7 @@ def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcri
 
     assert "Reason privately and carefully" in template
     assert "converge promptly" in template
+    assert "non-empty final answer immediately follows </think>" in template
     assert "entire deliberation process" not in template
     assert "Do not stop reasoning" not in template
 
@@ -158,6 +160,7 @@ def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcri
 def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
     standard = load_spec(EXAMPLE / "auto.yaml")
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
+    chat = load_spec(EXAMPLE / "auto-max-chat.yaml")
 
     assert [worker.name for worker in standard.workers] == ["tier1", "tier2"]
     assert standard.workers[0].model == "qwen3.6-27b"
@@ -178,6 +181,12 @@ def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 3
     assert maximum.budget.max_steps == 4
+    assert chat.router == maximum.router
+    assert chat.moa_samples == 3
+    assert chat.budget == maximum.budget
+    assert chat.workers[0] == maximum.workers[0]
+    assert chat.workers[1].model == "deepseek-v4-flash-0731"
+    assert maximum.workers[1].model == "deepseek-v4-flash-0731-thinking"
     for samples in range(1, 5):
         candidate = load_spec(EXAMPLE / f"auto-max-moa{samples}.yaml")
         assert candidate.router.target_mode == "auto-max"

@@ -42,6 +42,7 @@ BENCHMARKS = (
     "serving-deepseek",
     "serving-auto",
     "serving-auto-max",
+    "serving-auto-max-chat",
     "serving-auto-max-moa1",
     "serving-auto-max-moa2",
     "serving-auto-max-moa3",
@@ -418,6 +419,10 @@ def serving_auto_max(run_dir: Path) -> int:
     return _serving_auto_max_candidate("kairyu-auto-max", run_dir, samples=3)
 
 
+def serving_auto_max_chat(run_dir: Path) -> int:
+    return _serving_auto_max_candidate("kairyu-auto-max-chat", run_dir, samples=3)
+
+
 def _serving_auto_max_candidate(model: str, run_dir: Path, *, samples: int) -> int:
     return _serving(
         model,
@@ -617,6 +622,7 @@ def _served_config_sha256() -> str:
         "kairyu.yaml",
         "auto.yaml",
         "auto-max.yaml",
+        "auto-max-chat.yaml",
         "auto-max-moa1.yaml",
         "auto-max-moa2.yaml",
         "auto-max-moa3.yaml",
@@ -643,9 +649,13 @@ def main() -> None:
         print("serving-deepseek  Tier2 TP4+EP4 TTFT/throughput matrix")
         print("serving-auto      routed Tier1/Tier2/MoA-2 matrix")
         print("serving-auto-max  forced MoA-3 + Tier2 synthesis matrix")
+        print("serving-auto-max-chat  MoA-3 + non-thinking Tier2 synthesis matrix")
         print("serving-auto-max-moa1..4  fixed-fanout quality-candidate matrices")
         print("orchestration     fixed L2 direct/auto/auto-max latency and quality")
-        print("terminalbench-pilot  same four tasks on direct Qwen/DeepSeek and MoA1..4")
+        print(
+            "terminalbench-pilot  same four tasks on direct Qwen/DeepSeek, "
+            "MoA3-chat, and MoA1..4-thinking"
+        )
         print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
         print("all               every benchmark above, continuing after failures")
         return

@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [progress] Empty reasoning finals fail closed
+- What: Completion reasoning filters now require non-empty public content after the private terminator, and the serving harness rejects sanitized SSE errors. The tiered example adds a matched MoA-3 ordinary-chat synthesis candidate after thinking MoA returned one empty public answer in the c8 L3 matrix.
+- Refs: `kairyu/engine/openai_backend.py`; `bench/serving_bench.py`; `examples/qwen3.6-deepseek-v4-8gpu/`; run ID `l3-auto-max-moa3-public-v2-20260812`; PR #471
+
 ### 2026-08-12 — [progress] Private reasoning rejects unsafe token metadata
 - What: A pre-rendered vLLM completion with a configured private-reasoning boundary now rejects logprobs before dispatch, preventing raw hidden-token metadata from bypassing the text filter; ordinary direct backends retain logprobs support.
 - Refs: `kairyu/engine/openai_backend.py`; `tests/unit/test_openai_backend.py`; PR #471

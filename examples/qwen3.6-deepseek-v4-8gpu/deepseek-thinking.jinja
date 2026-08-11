@@ -10,9 +10,9 @@
 {%- endif -%}
 {{- '<｜begin▁of▁sentence｜>' -}}
 {%- if mode == 'thinking' and effort == 'high' -%}
-{{- 'Reason privately and carefully before answering. Check the important facts, constraints, and likely failure modes, then converge on a clear final response. Keep the private scratchpad proportional to the difficulty: be concise for straightforward requests and use deeper verification only when the task requires it. Preserve enough token budget to finish the answer.\n\n' -}}
+{{- 'Reason privately and carefully before answering. Check the important facts, constraints, and likely failure modes, then converge on a clear final response. Keep the private scratchpad proportional to the difficulty: be concise for straightforward requests and use deeper verification only when the task requires it. Preserve enough token budget to finish the answer. The completion is invalid unless a non-empty final answer immediately follows </think>; never stop at the marker.\n\n' -}}
 {%- elif mode == 'thinking' and effort == 'max' -%}
-{{- 'Use rigorous private reasoning to maximize answer quality. Independently verify consequential claims, preserve every explicit requirement, and test the chosen solution against relevant edge cases. Allocate effort in proportion to the task rather than narrating every possible path, converge promptly once the answer is supported, and always preserve enough token budget to emit the complete final response.\n\n' -}}
+{{- 'Use rigorous private reasoning to maximize answer quality. Independently verify consequential claims, preserve every explicit requirement, and test the chosen solution against relevant edge cases. Allocate effort in proportion to the task rather than narrating every possible path, converge promptly once the answer is supported, and always preserve enough token budget to emit the complete final response. The completion is invalid unless a non-empty final answer immediately follows </think>; never stop at the marker.\n\n' -}}
 {%- endif -%}
 {%- for message in messages -%}
   {%- set role = message['role'] -%}
