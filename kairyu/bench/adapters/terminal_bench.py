@@ -93,6 +93,14 @@ def _trial_name(entry: dict, index: int) -> str:
     return str(task_id or entry.get("id") or index)
 
 
+def _failed_schema_item(index: int, error: str) -> ItemResult:
+    return ItemResult(
+        item_id=f"harbor-schema-{index}",
+        status="failed",
+        error=error,
+    )
+
+
 def parse_harbor_results(data) -> list[ItemResult]:
     """Harbor `result.json` -> per-trial items.
 
@@ -105,10 +113,22 @@ def parse_harbor_results(data) -> list[ItemResult]:
         entries = data.get("trial_results")
         if entries is None:
             entries = data.get("results", [])
+        expected_total = data.get("n_total_trials")
     else:
         entries = data
+        expected_total = None
+    if not isinstance(entries, list):
+        return [_failed_schema_item(0, "Harbor trial results are not a list")]
     items: list[ItemResult] = []
     for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            items.append(
+                _failed_schema_item(
+                    index,
+                    f"Harbor trial result is {type(entry).__name__}, not an object",
+                )
+            )
+            continue
         name = _trial_name(entry, index)
         if entry.get("exception_info"):
             exception = entry["exception_info"] or {}
@@ -148,6 +168,14 @@ def parse_harbor_results(data) -> list[ItemResult]:
             items.append(ItemResult(item_id=name, status="completed", score=float(entry["reward"])))
         else:
             items.append(ItemResult(item_id=name, status="failed", error="no verdict in trial"))
+    if isinstance(expected_total, int) and expected_total >= 0:
+        for missing_index in range(len(entries), expected_total):
+            items.append(
+                _failed_schema_item(
+                    missing_index,
+                    "Harbor job omitted a declared trial result",
+                )
+            )
     return items
 
 
@@ -327,22 +355,66 @@ class TerminalBenchAdapter:
 
     @staticmethod
     def _find_results(output_dir: Path):
-        """Harbor writes a job-level `result.json` holding `trial_results`."""
+        """Find complete Harbor verdicts across supported on-disk layouts.
+
+        Harbor <=0.16 embedded ``trial_results`` in the job result. Harbor
+        0.17 intentionally excludes that heavy field from the final job-level
+        file and leaves one authoritative ``result.json`` under each trial
+        directory. Legacy wrappers may instead write ``{"results": [...]}``.
+        Only accept typed lists of trial objects; agent artifacts also use a
+        top-level ``results`` key and must never be mistaken for verdicts.
+        """
         candidates = sorted(
             output_dir.rglob("*.json"),
             # prefer the job-level file over any per-trial artifact
             key=lambda path: (path.name != "result.json", len(path.parts), str(path)),
         )
+        expected_total: int | None = None
+        per_trial: list[tuple[Path, dict]] = []
         for path in candidates:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
-            if isinstance(data, dict) and ("trial_results" in data or "results" in data):
-                return data
+            if isinstance(data, dict):
+                declared_total = data.get("n_total_trials")
+                if isinstance(declared_total, int) and declared_total >= 0:
+                    expected_total = (
+                        declared_total
+                        if expected_total is None
+                        else max(expected_total, declared_total)
+                    )
+                embedded = data.get("trial_results")
+                if (
+                    isinstance(embedded, list)
+                    and (embedded or isinstance(declared_total, int))
+                    and all(isinstance(entry, dict) for entry in embedded)
+                ):
+                    return data
+                legacy = data.get("results")
+                if isinstance(legacy, list) and legacy and all(
+                    isinstance(entry, dict) for entry in legacy
+                ):
+                    return data
+                if (
+                    path.name == "result.json"
+                    and data.get("trial_name")
+                    and (data.get("task_name") or data.get("task_id"))
+                    and ("verifier_result" in data or "exception_info" in data)
+                ):
+                    per_trial.append((path, data))
+                    continue
             if isinstance(data, list) and data and isinstance(data[0], dict):
                 if {"resolved", "reward", "verifier_result"} & set(data[0]):
                     return data
+        if per_trial or expected_total is not None:
+            per_trial.sort(key=lambda pair: str(pair[0]))
+            return {
+                "trial_results": [data for _path, data in per_trial],
+                "n_total_trials": (
+                    expected_total if expected_total is not None else len(per_trial)
+                ),
+            }
         return None
 
     def _failed(self, target: BenchTarget, started_at: str, reason: str) -> PairResult:

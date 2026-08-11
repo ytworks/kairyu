@@ -193,9 +193,8 @@ async def test_agentic_harnesses_reject_chat_only_sampling_policy(
 
 # -- Harbor result schema ------------------------------------------------------
 
-# Shape of Harbor 0.17's job-level result.json: JobResult.trial_results, each
-# TrialResult carrying its verdict under verifier_result.rewards (a task-defined
-# dict) or an exception_info.
+# Embedded JobResult shape retained by older Harbor versions. Harbor 0.17's
+# final job-level file excludes trial_results and is covered separately below.
 HARBOR_JOB_RESULT = {
     "id": "3f1b0e6a-0000-4000-8000-000000000000",
     "started_at": "2026-07-25T00:00:00",
@@ -258,6 +257,32 @@ def test_ambiguous_reward_dict_is_failed_not_guessed():
     assert "ambiguous reward keys" in items[0].error
 
 
+def test_parse_harbor_results_rejects_string_entries_without_crashing():
+    from kairyu.bench.adapters.terminal_bench import parse_harbor_results
+
+    items = parse_harbor_results({"results": ["not-a-trial"]})
+
+    assert len(items) == 1
+    assert items[0].status == "failed"
+    assert "not an object" in items[0].error
+
+
+def test_parse_harbor_results_counts_declared_but_missing_trials():
+    from kairyu.bench.adapters.terminal_bench import parse_harbor_results
+
+    items = parse_harbor_results(
+        {
+            "n_total_trials": 2,
+            "trial_results": [HARBOR_JOB_RESULT["trial_results"][0]],
+        }
+    )
+
+    assert len(items) == 2
+    assert items[0].score == 1.0
+    assert items[1].status == "failed"
+    assert "omitted" in items[1].error
+
+
 async def test_terminal_bench_reads_the_real_harbor_output(tmp_path, monkeypatch):
     """A successful `harbor run` must not report 'no harbor results file found'."""
     import json as _json
@@ -292,6 +317,53 @@ async def test_terminal_bench_reads_the_real_harbor_output(tmp_path, monkeypatch
     # zero in the denominator -- not an exclusion that would inflate the score
     assert pair.score == pytest.approx((1.0 + 0.0 + 0.5 + 0.0) / 4)
     assert "errored ones as zero" in pair.methodology["denominator"]
+
+
+async def test_terminal_bench_reads_harbor_017_per_trial_results(tmp_path, monkeypatch):
+    """Harbor 0.17 omits trial_results from the final job-level result."""
+    import json as _json
+
+    import kairyu.bench.adapters.terminal_bench as tb
+
+    monkeypatch.setattr(tb.shutil, "which", lambda name: "/usr/bin/harbor")
+
+    def fake_run(command, capture_output, timeout, env, check):
+        jobs_dir = Path(command[command.index("--jobs-dir") + 1])
+        job = jobs_dir / "2026-08-11__00-00-00"
+        job.mkdir(parents=True)
+        (job / "result.json").write_text(
+            _json.dumps(
+                {
+                    "id": "job",
+                    "n_total_trials": 4,
+                    "stats": {"n_completed_trials": 4},
+                }
+            ),
+            encoding="utf-8",
+        )
+        for entry in HARBOR_JOB_RESULT["trial_results"]:
+            trial = job / entry["trial_name"]
+            trial.mkdir()
+            (trial / "result.json").write_text(_json.dumps(entry), encoding="utf-8")
+        # This resembles an agent artifact that triggered the production crash.
+        (job / "agent-artifact.json").write_text(
+            _json.dumps({"results": ["stdout", "stderr"]}), encoding="utf-8"
+        )
+
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(tb.subprocess, "run", fake_run)
+    pair = await TerminalBenchAdapter().run(_target(), _ctx(tmp_path))
+
+    assert pair.status == "partial"
+    assert pair.metrics["n_total"] == 4
+    assert pair.metrics["n_failed"] == 1
+    assert pair.score == pytest.approx((1.0 + 0.0 + 0.5 + 0.0) / 4)
 
 
 def test_harbor_mean_counts_every_trial():
