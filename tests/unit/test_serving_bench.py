@@ -59,6 +59,7 @@ async def test_run_one_reads_usage_chunk_for_token_tpot():
             seed=7,
             min_tokens=6,
             ignore_eos=True,
+            capture_response=True,
         )
     assert calls[0]["stream_options"] == {"include_usage": True}
     assert trace_headers == [None]
@@ -67,6 +68,7 @@ async def test_run_one_reads_usage_chunk_for_token_tpot():
     assert calls[0]["min_tokens"] == 6
     assert calls[0]["ignore_eos"] is True
     assert metrics.completion_tokens == 6  # from the include_usage final chunk
+    assert metrics.response_text == "4"
     assert metrics.token_granular is True
     assert metrics.trace_status == "not_requested"
     assert metrics.tpot_s >= 0.0
@@ -189,6 +191,45 @@ def test_summary_retains_raw_request_timings_and_token_throughput():
     ]
 
 
+def test_summary_separates_public_tokens_from_orchestration_usage():
+    results = [
+        serving_bench.RequestMetrics(
+            ttft_s=0.1,
+            total_s=0.5,
+            output_chunks=3,
+            completion_tokens=40,
+            public_completion_tokens=5,
+        ),
+        serving_bench.RequestMetrics(
+            ttft_s=0.2,
+            total_s=0.6,
+            output_chunks=3,
+            completion_tokens=60,
+            public_completion_tokens=7,
+        ),
+    ]
+
+    summary, samples = serving_bench.summarize_results(
+        results,
+        wall_ns=1_000_000_000,
+        dataset_label="orchestration",
+        ttft_slo_s=1.0,
+    )
+
+    assert summary["completion_tokens_total"] == 100
+    assert summary["output_tokens_per_s"] == 100.0
+    assert summary["public_completion_tokens_total"] == 12
+    assert summary["public_output_tokens_per_s"] == 12.0
+    assert summary["tpot_method"] == "public-token"
+    assert summary["generation_tokens_per_s_p50"] == 12.5
+    assert summary["public_generation_tokens_per_s_mean"] == 12.5
+    assert summary["reported_output_tokens_per_e2e_s_mean"] == 90.0
+    assert summary["e2e_p50_ms"] == 500.0
+    assert summary["e2e_p99_ms"] == 600.0
+    assert [sample["public_completion_tokens"] for sample in samples] == [5, 7]
+    assert "response_text" not in str(samples)
+
+
 def test_shared_target_form_normalizes_url_and_uses_env_secret(monkeypatch):
     monkeypatch.setenv("SERVING_API_KEY", "private-value")
     args = serving_bench.build_parser().parse_args(
@@ -216,6 +257,29 @@ def test_stage_trace_is_an_explicit_recorded_opt_in():
 
     assert args.stage_trace is True
     assert serving_bench.build_run_config(args)["stage_trace"] is True
+
+
+def test_public_tokenizer_requires_a_pinned_model_and_records_both():
+    parser = serving_bench.build_parser()
+    incomplete = parser.parse_args(
+        ["--public-tokenizer-url", "http://tokenizer.test/tokenize"]
+    )
+    with pytest.raises(ValueError, match="provided together"):
+        serving_bench.serving_artifact_paths(incomplete)
+
+    args = parser.parse_args(
+        [
+            "--public-tokenizer-url",
+            "http://tokenizer.test/tokenize",
+            "--public-tokenizer-model",
+            "pinned-model",
+            "--results-dir",
+            "",
+        ]
+    )
+    config = serving_bench.build_run_config(args)
+    assert config["public_tokenizer_url"] == "http://tokenizer.test/tokenize"
+    assert config["public_tokenizer_model"] == "pinned-model"
 
 
 def test_client_profile_is_an_independent_recorded_opt_in():

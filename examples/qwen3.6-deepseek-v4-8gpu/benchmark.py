@@ -131,6 +131,7 @@ def _serving_dataset(
     approximate_tokens: int,
     *,
     namespace: str,
+    response_instruction: str = "",
 ) -> None:
     vocabulary = (
         "code",
@@ -159,6 +160,8 @@ def _serving_dataset(
         # Put the run/row identity before the repeated body so another
         # concurrency row cannot become a full-prefix-cache microbenchmark.
         prompt = f"Run {namespace}, case {request}: " + " ".join(words)
+        if response_instruction:
+            prompt += "\n\n" + response_instruction
         rows.append({"conversations": [{"from": "human", "value": prompt}]})
     path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
 
@@ -172,6 +175,7 @@ def _validate_serving_row(
     expected_role: str = "direct",
     expected_kind: str = "generation",
     expected_moa_samples: int | None = None,
+    public_tokens: bool = False,
 ) -> int:
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -184,15 +188,30 @@ def _validate_serving_row(
     except (KeyError, OSError, TypeError, ValueError) as error:
         print(f"invalid serving result: {error}", file=sys.stderr)
         return 1
-    expected_total = requests * output_tokens
-    complete = (
-        summary.get("requests") == requests
-        and summary.get("completion_tokens_total") == expected_total
-        and isinstance(summary.get("output_tokens_per_s"), (int, float))
-        and summary["output_tokens_per_s"] > 0
-        and len(samples) == requests
-        and all(sample.get("completion_tokens") == output_tokens for sample in samples)
-    )
+    if public_tokens:
+        complete = (
+            summary.get("requests") == requests
+            and isinstance(summary.get("public_completion_tokens_total"), int)
+            and summary["public_completion_tokens_total"] > 0
+            and isinstance(summary.get("public_output_tokens_per_s"), (int, float))
+            and summary["public_output_tokens_per_s"] > 0
+            and len(samples) == requests
+            and all(
+                isinstance(sample.get("public_completion_tokens"), int)
+                and sample["public_completion_tokens"] > 0
+                for sample in samples
+            )
+        )
+    else:
+        expected_total = requests * output_tokens
+        complete = (
+            summary.get("requests") == requests
+            and summary.get("completion_tokens_total") == expected_total
+            and isinstance(summary.get("output_tokens_per_s"), (int, float))
+            and summary["output_tokens_per_s"] > 0
+            and len(samples) == requests
+            and all(sample.get("completion_tokens") == output_tokens for sample in samples)
+        )
     if complete and expected_route is not None:
         complete = all(
             sample.get("trace", {}).get("status") == "valid"
@@ -226,6 +245,7 @@ def _serving(
     expected_kind: str = "generation",
     expected_moa_samples: int | None = None,
     warmup_requests: int | None = None,
+    natural_completion: bool = False,
 ) -> int:
     config = SPEC["benchmarks"]["serving"]
     requests = int(config["requests_per_concurrency"])
@@ -234,11 +254,38 @@ def _serving(
     prompt_tokens = int(config["prompt_tokens_approx"])
     warmup_requests = warmup_requests or max(1, replicas)
     warmup_dataset = run_dir / "warmup-8k.json"
+    response_instruction = (
+        "Synthesize a useful final answer of approximately 256 output tokens. "
+        "Return only that answer; do not expose candidates or private reasoning."
+        if natural_completion
+        else ""
+    )
     _serving_dataset(
         warmup_dataset,
         warmup_requests,
         prompt_tokens,
         namespace=f"{run_dir.parent.name}-{run_dir.name}-warmup",
+        response_instruction=response_instruction,
+    )
+    request_max_tokens = (
+        int(config["auto_max_combined_max_tokens"])
+        if natural_completion
+        else output_tokens
+    )
+    fixed_output_args = (
+        []
+        if natural_completion
+        else ["--min-tokens", "32", "--ignore-eos"]
+    )
+    public_tokenizer_args = (
+        [
+            "--public-tokenizer-url",
+            f"http://127.0.0.1:{os.environ.get('DEEPSEEK_L1_PORT', 8005)}/tokenize",
+            "--public-tokenizer-model",
+            "deepseek-v4-flash-0731",
+        ]
+        if natural_completion
+        else []
     )
     warmup_code = _run(
         [
@@ -255,12 +302,10 @@ def _serving(
             "--concurrency",
             str(warmup_requests),
             "--max-tokens",
-            "32",
-            "--min-tokens",
-            "32",
-            "--ignore-eos",
+            str(request_max_tokens if natural_completion else 32),
+            *fixed_output_args,
             "--temperature",
-            "1.0",
+            "0.0" if natural_completion else "1.0",
             "--seed",
             "0",
             "--timeout",
@@ -271,6 +316,7 @@ def _serving(
             str(tensor_parallel),
             "--dp-replicas",
             str(replicas),
+            *public_tokenizer_args,
             *(["--stage-trace"] if expected_route is not None else []),
         ],
         log=run_dir / "warmup.log",
@@ -285,6 +331,7 @@ def _serving(
             requests,
             prompt_tokens,
             namespace=f"{run_dir.parent.name}-{run_dir.name}-c{concurrency}",
+            response_instruction=response_instruction,
         )
         row_dir = run_dir / f"serving-c{concurrency}"
         code = _run(
@@ -302,12 +349,14 @@ def _serving(
                 "--concurrency",
                 str(concurrency),
                 "--max-tokens",
-                str(output_tokens),
-                "--min-tokens",
-                str(output_tokens),
-                "--ignore-eos",
+                str(request_max_tokens),
+                *(
+                    []
+                    if natural_completion
+                    else ["--min-tokens", str(output_tokens), "--ignore-eos"]
+                ),
                 "--temperature",
-                "1.0",
+                "0.0" if natural_completion else "1.0",
                 "--seed",
                 "0",
                 "--timeout",
@@ -318,6 +367,7 @@ def _serving(
                 str(tensor_parallel),
                 "--dp-replicas",
                 str(replicas),
+                *public_tokenizer_args,
                 *(["--stage-trace"] if expected_route is not None else []),
             ],
             log=run_dir / f"serving-c{concurrency}.log",
@@ -332,6 +382,7 @@ def _serving(
                 expected_role=expected_role,
                 expected_kind=expected_kind,
                 expected_moa_samples=expected_moa_samples,
+                public_tokens=natural_completion,
             )
         if code:
             return code
@@ -378,6 +429,7 @@ def _serving_auto_max_candidate(model: str, run_dir: Path, *, samples: int) -> i
         expected_kind="synthesis",
         expected_moa_samples=samples,
         warmup_requests=4,
+        natural_completion=True,
     )
 
 

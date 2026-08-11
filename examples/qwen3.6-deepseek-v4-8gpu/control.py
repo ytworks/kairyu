@@ -97,6 +97,9 @@ def _compose_env() -> dict[str, str]:
             "VLLM_IMAGE": os.environ.get("VLLM_IMAGE", SPEC["vllm"]["image"]),
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
+            "DEEPSEEK_L1_PORT": os.environ.get(
+                "DEEPSEEK_L1_PORT", str(SPEC["deepseek_l1_loopback_port"])
+            ),
             "CHAT_UI_PORT": os.environ.get("CHAT_UI_PORT", str(SPEC["webui"]["port"])),
             "CHAT_UI_BIND_ADDRESS": os.environ.get("CHAT_UI_BIND_ADDRESS", "0.0.0.0"),
             # Render-safe defaults for down/status/logs. `up` replaces these
@@ -346,11 +349,25 @@ def _json_url(url: str) -> dict:
         return json.loads(response.read())
 
 
-def _validate_ready(api_url: str) -> None:
+def _post_json_url(url: str, payload: dict) -> dict:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read())
+
+
+def _validate_ready(api_url: str, tokenizer_url: str) -> None:
     try:
         ready = _json_url(f"{api_url}/readyz")
         models = {row["id"] for row in _json_url(f"{api_url}/v1/models")["data"]}
         routing = _json_url(f"{api_url}/routing")["models"]
+        token_count = _post_json_url(
+            tokenizer_url,
+            {"model": "deepseek-v4-flash-0731", "prompt": "kairyu"},
+        )["count"]
     except (KeyError, OSError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Kairyu readiness evidence is incomplete: {error}") from error
     required = {
@@ -362,6 +379,8 @@ def _validate_ready(api_url: str) -> None:
     }
     if ready.get("status") != "ready" or not required <= models:
         raise SystemExit(f"Kairyu model inventory is incomplete: {sorted(models)}")
+    if type(token_count) is not int or token_count < 1:
+        raise SystemExit("DeepSeek public-output tokenizer oracle is not ready")
     if routing["kairyu-auto"].get("moa_samples") != 2:
         raise SystemExit("Kairyu L2 does not report the selected two-proposal MoA")
     if routing["kairyu-auto-max"].get("moa_samples") != 3:
@@ -422,7 +441,8 @@ def up() -> None:
         env=env,
     )
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
-    _validate_ready(api_url)
+    tokenizer_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}/tokenize"
+    _validate_ready(api_url, tokenizer_url)
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")

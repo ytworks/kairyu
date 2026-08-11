@@ -76,7 +76,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
+- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
 - The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8, plus a contract-tested tiered Qwen TP1x4 + DeepSeek TP4/EP4 L2 stack entering runtime validation; its externally bound no-auth Open WebUI defaults to quality-first `kairyu-auto-max` and calls only loopback-exposed Kairyu L3, which owns pinned vLLM L1. Qwen's no-MTP/16K-batch configuration completed its final serving and LiveCodeBench-20 gates after MTP and 32K-batch candidates failed performance or stability checks, with all persistent data and compilation caches on NVMe
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-12 — [progress] L3 benchmarks separate public output from private work
+- What: The serving harness can count final assistant content with a pinned tokenizer after the timed interval, reporting public TPS/TPOT beside cumulative orchestration tokens and E2E p50/p99. The tiered example uses natural-EOS reasoning requests plus a loopback-only DeepSeek tokenizer oracle; ChatUI still reaches only Kairyu L3.
+- Refs: `bench/serving_bench.py`; `examples/qwen3.6-deepseek-v4-8gpu/`; PR #471
 
 ### 2026-08-12 — [progress] L2 exposes the answer, not private synthesis work
 - What: OpenAI-compatible vLLM completion replicas can now opt into a bounded fail-closed private-reasoning terminator for buffered and streamed output; multi-stage orchestration strips reasoning metadata at its public boundary, and role-tagged conversation JSON explicitly remains context rather than a response envelope. The tiered DeepSeek thinking alias enables this generic contract.

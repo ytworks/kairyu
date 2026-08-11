@@ -203,6 +203,10 @@ services:
       - "16384"
       - --disable-uvicorn-access-log
     healthcheck: *health
+    # Loopback-only L1 access lets the benchmark count the final L3 answer with
+    # DeepSeek's exact tokenizer. ChatUI still has only the Kairyu L3 endpoint.
+    ports:
+      - 127.0.0.1:${DEEPSEEK_L1_PORT:-8005}:8000
     deploy:
       resources:
         reservations:

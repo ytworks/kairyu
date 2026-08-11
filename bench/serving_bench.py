@@ -26,7 +26,7 @@ import re
 import statistics
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import httpx
@@ -141,26 +141,37 @@ class RequestMetrics:
     total_s: float
     output_chunks: int
     completion_tokens: int | None = None  # from the include_usage final chunk
+    # AUTO usage is cumulative across private stages.  An optional tokenizer
+    # oracle counts only the assistant content that crossed the L3 boundary.
+    public_completion_tokens: int | None = None
+    response_text: str = ""
     trace_status: str = "not_requested"
     trace_version: str | None = None
     trace_stages: tuple[TraceStageMetrics, ...] = ()
 
     @property
     def tpot_s(self) -> float:
-        """Token-granularity when the target reported usage (m9 D5); falls
-        back to chunk granularity — the method is labeled in the output."""
-        units = (
-            self.completion_tokens - 1
-            if self.completion_tokens is not None
-            else self.output_chunks - 1
+        """Prefer exact public-token granularity, then reported API usage.
+
+        Targets without either counter fall back to chunk granularity; the
+        selected method is always labeled in the artifact.
+        """
+        tokens = (
+            self.public_completion_tokens
+            if self.public_completion_tokens is not None
+            else self.completion_tokens
         )
+        units = tokens - 1 if tokens is not None else self.output_chunks - 1
         if units is None or units <= 0:
             return 0.0
         return (self.total_s - self.ttft_s) / units
 
     @property
     def token_granular(self) -> bool:
-        return self.completion_tokens is not None
+        return (
+            self.public_completion_tokens is not None
+            or self.completion_tokens is not None
+        )
 
 
 def _parse_utc_timestamp(value: object, label: str) -> _datetime.datetime:
@@ -421,6 +432,7 @@ async def run_one(
     min_tokens: int | None = None,
     ignore_eos: bool = False,
     request_trace: bool = False,
+    capture_response: bool = False,
 ) -> RequestMetrics:
     body = {
         "model": model,
@@ -448,6 +460,7 @@ async def run_one(
     json_event_count = 0
     done_count = 0
     trace_protocol_invalid = False
+    response_parts: list[str] = []
     # Clients use the shared canonical API root (ending in /v1). Keep the
     # request relative so URL joining cannot produce /v1/v1.
     async with client.stream(
@@ -469,6 +482,7 @@ async def run_one(
                 min_tokens=min_tokens,
                 ignore_eos=ignore_eos,
                 request_trace=request_trace,
+                capture_response=capture_response,
             )
         response.raise_for_status()
         async for line in response.aiter_lines():
@@ -506,10 +520,18 @@ async def run_one(
                             json_event_count,
                         )
                     )
-            if any(
-                (choice.get("delta") or {}).get("content")
+            content_parts = [
+                content
                 for choice in chunk.get("choices", [])
-            ):
+                if isinstance(
+                    content := (choice.get("delta") or {}).get("content"),
+                    str,
+                )
+                and content
+            ]
+            if content_parts:
+                if capture_response:
+                    response_parts.extend(content_parts)
                 chunks += 1
                 if ttft is None:
                     ttft = time.perf_counter() - start
@@ -555,6 +577,7 @@ async def run_one(
         total_s=total,
         output_chunks=chunks,
         completion_tokens=completion_tokens,
+        response_text="".join(response_parts),
         trace_status=trace_status,
         trace_version=trace_version,
         trace_stages=trace_stages,
@@ -640,6 +663,8 @@ def build_run_config(args: argparse.Namespace) -> dict:
         "seed": args.seed,
         "min_tokens": args.min_tokens,
         "ignore_eos": args.ignore_eos,
+        "public_tokenizer_url": getattr(args, "public_tokenizer_url", None),
+        "public_tokenizer_model": getattr(args, "public_tokenizer_model", None),
         "stage_trace": getattr(args, "stage_trace", False),
         "profile": getattr(args, "profile", False),
         "ttft_slo_s": args.ttft_slo_s,
@@ -712,6 +737,44 @@ def _validate_run_args(args: argparse.Namespace) -> None:
         or min_tokens > args.max_tokens
     ):
         raise ValueError("--min-tokens must be between zero and --max-tokens")
+    tokenizer_url = getattr(args, "public_tokenizer_url", None)
+    tokenizer_model = getattr(args, "public_tokenizer_model", None)
+    if bool(tokenizer_url) != bool(tokenizer_model):
+        raise ValueError(
+            "--public-tokenizer-url and --public-tokenizer-model must be provided together"
+        )
+
+
+async def _count_public_completion_tokens(
+    results: list[RequestMetrics],
+    *,
+    tokenizer_url: str,
+    tokenizer_model: str,
+    concurrency: int,
+    timeout: float,
+) -> list[RequestMetrics]:
+    """Count only public L3 content outside the timed serving interval."""
+
+    semaphore = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+
+        async def count(metric: RequestMetrics) -> RequestMetrics:
+            async with semaphore:
+                response = await client.post(
+                    tokenizer_url,
+                    json={"model": tokenizer_model, "prompt": metric.response_text},
+                )
+            response.raise_for_status()
+            value = response.json().get("count")
+            if type(value) is not int or value < 0:
+                raise RuntimeError("public tokenizer returned an invalid token count")
+            return replace(
+                metric,
+                public_completion_tokens=value,
+                response_text="",
+            )
+
+        return list(await asyncio.gather(*(count(metric) for metric in results)))
 
 
 def summarize_results(
@@ -726,14 +789,58 @@ def summarize_results(
         raise ValueError(f"wall_ns must be positive, got {wall_ns}")
     wall_s = wall_ns / 1e9
     ttfts = sorted(metric.ttft_s for metric in results)
+    totals = sorted(metric.total_s for metric in results)
     tpots = [metric.tpot_s for metric in results if metric.tpot_s > 0]
-    token_granular = all(metric.token_granular for metric in results)
-    tpot_method = "token" if token_granular else "chunk"
+    reported_token_granular = all(
+        metric.completion_tokens is not None for metric in results
+    )
+    public_token_granular = all(
+        metric.public_completion_tokens is not None for metric in results
+    )
+    tpot_method = (
+        "public-token"
+        if public_token_granular
+        else "token"
+        if reported_token_granular
+        else "chunk"
+    )
     within_slo = sum(metric.ttft_s <= ttft_slo_s for metric in results)
     completion_tokens_total = (
         sum(metric.completion_tokens or 0 for metric in results)
-        if token_granular
+        if reported_token_granular
         else None
+    )
+    public_completion_tokens_total = (
+        sum(metric.public_completion_tokens or 0 for metric in results)
+        if public_token_granular
+        else None
+    )
+
+    def generation_rates(field: str, *, post_first: bool) -> list[float]:
+        rates = []
+        for metric in results:
+            tokens = getattr(metric, field)
+            duration = (
+                metric.total_s - metric.ttft_s if post_first else metric.total_s
+            )
+            units = tokens - 1 if post_first and tokens is not None else tokens
+            if units is not None and duration > 0 and units > 0:
+                rates.append(units / duration)
+        return rates
+
+    public_generation_rates = generation_rates(
+        "public_completion_tokens", post_first=True
+    )
+    reported_generation_rates = generation_rates(
+        "completion_tokens", post_first=True
+    )
+    effective_generation_rates = (
+        public_generation_rates
+        if public_token_granular
+        else reported_generation_rates
+    )
+    reported_e2e_rates = generation_rates(
+        "completion_tokens", post_first=False
     )
     trace_counts = {
         status: sum(metric.trace_status == status for metric in results)
@@ -858,6 +965,11 @@ def summarize_results(
             "tpot_ms": metric.tpot_s * 1e3,
             "output_chunks": metric.output_chunks,
             "completion_tokens": metric.completion_tokens,
+            **(
+                {"public_completion_tokens": metric.public_completion_tokens}
+                if metric.public_completion_tokens is not None
+                else {}
+            ),
             "trace": {
                 "status": metric.trace_status,
                 "version": metric.trace_version,
@@ -874,16 +986,50 @@ def summarize_results(
         "wall_s": wall_s,
         "ttft_p50_ms": round(nearest_rank_percentile(ttfts, 0.50) * 1e3, 2),
         "ttft_p99_ms": round(nearest_rank_percentile(ttfts, 0.99) * 1e3, 2),
+        "e2e_p50_ms": round(nearest_rank_percentile(totals, 0.50) * 1e3, 2),
+        "e2e_p99_ms": round(nearest_rank_percentile(totals, 0.99) * 1e3, 2),
         "tpot_mean_ms": round(statistics.mean(tpots) * 1e3, 3) if tpots else None,
         "tpot_method": tpot_method,
         "throughput_rps": round(len(results) / wall_s, 2),
         "goodput_rps": round(within_slo / wall_s, 2),
         "completion_tokens_total": completion_tokens_total,
+        "public_completion_tokens_total": public_completion_tokens_total,
         "output_tokens_per_s": (
             round(completion_tokens_total / wall_s, 2)
             if completion_tokens_total is not None
             else None
         ),
+        "public_output_tokens_per_s": (
+            round(public_completion_tokens_total / wall_s, 2)
+            if public_completion_tokens_total is not None
+            else None
+        ),
+        "generation_tokens_per_s_mean": (
+            round(statistics.mean(effective_generation_rates), 3)
+            if effective_generation_rates
+            else None
+        ),
+        "generation_tokens_per_s_p50": (
+            round(statistics.median(effective_generation_rates), 3)
+            if effective_generation_rates
+            else None
+        ),
+        "public_generation_tokens_per_s_mean": (
+            round(statistics.mean(public_generation_rates), 3)
+            if public_generation_rates
+            else None
+        ),
+        "public_generation_tokens_per_s_p50": (
+            round(statistics.median(public_generation_rates), 3)
+            if public_generation_rates
+            else None
+        ),
+        "reported_output_tokens_per_e2e_s_mean": (
+            round(statistics.mean(reported_e2e_rates), 3)
+            if reported_e2e_rates
+            else None
+        ),
+        "success_rate": 1.0,
         "trace_coverage": {
             "total_requests": len(results),
             "requested": requested_traces,
@@ -943,6 +1089,7 @@ async def run_benchmark(args: argparse.Namespace) -> None:
                     min_tokens=args.min_tokens,
                     ignore_eos=args.ignore_eos,
                     request_trace=getattr(args, "stage_trace", False),
+                    capture_response=args.public_tokenizer_url is not None,
                 )
 
         with profile_scope(
@@ -961,6 +1108,15 @@ async def run_benchmark(args: argparse.Namespace) -> None:
                 results = await asyncio.gather(*(bounded(p) for p in prompts))
                 wall_ns = time.perf_counter_ns() - wall_start_ns
 
+    if args.public_tokenizer_url is not None:
+        results = await _count_public_completion_tokens(
+            results,
+            tokenizer_url=args.public_tokenizer_url,
+            tokenizer_model=args.public_tokenizer_model,
+            concurrency=args.concurrency,
+            timeout=args.timeout,
+        )
+
     summary, samples = summarize_results(
         results,
         wall_ns=wall_ns,
@@ -977,6 +1133,9 @@ async def run_benchmark(args: argparse.Namespace) -> None:
     )
     print(
         f"TTFT p50={summary['ttft_p50_ms']}ms p99={summary['ttft_p99_ms']}ms"
+    )
+    print(
+        f"E2E p50={summary['e2e_p50_ms']}ms p99={summary['e2e_p99_ms']}ms"
     )
     if summary["tpot_mean_ms"] is not None:
         print(
@@ -1018,6 +1177,7 @@ async def run_benchmark(args: argparse.Namespace) -> None:
     print(
         f"throughput={summary['throughput_rps']} req/s; "
         f"output={summary['output_tokens_per_s']} token/s; "
+        f"public_output={summary['public_output_tokens_per_s']} token/s; "
         f"goodput(TTFT<={args.ttft_slo_s}s)={summary['goodput_rps']} req/s"
     )
     if result_path is not None:
@@ -1117,6 +1277,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage-trace",
         action="store_true",
         help="request and report Kairyu structured stage timing (opt-in)",
+    )
+    parser.add_argument(
+        "--public-tokenizer-url",
+        default=None,
+        help=(
+            "Optional exact tokenizer endpoint for public assistant content; "
+            "tokenization runs after and outside the timed serving interval"
+        ),
+    )
+    parser.add_argument(
+        "--public-tokenizer-model",
+        default=None,
+        help="Model name sent to --public-tokenizer-url (required with that option)",
     )
     parser.add_argument(
         "--profile",

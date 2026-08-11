@@ -81,13 +81,20 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./bench.sh all
 ```
 
-The `serving-*` commands independently record median/p99 TTFT, TPOT,
-requests/s, and output tokens/s for fixed approximately 8K-token inputs and
-exactly 256 generated tokens at concurrency 1, 8, 16, and 32. Prompts have
-unique first blocks so prefix reuse cannot inflate the matrix. Auto requests
-require a valid L3 trace for every sample; fixed-fanout candidates additionally
-require the exact MoA proposal count and retain bounded internal input/output
-token totals in their trace evidence.
+The `serving-*` commands independently record median/p99 semantic TTFT and E2E,
+TPOT, requests/s, and output tokens/s for fixed approximately 8K-token inputs
+at concurrency 1, 8, 16, and 32. Direct Qwen/DeepSeek and fast `auto` use an
+exact 256-token completion. Thinking `auto-max` instead uses natural EOS with
+an approximately 256-token public-answer instruction and enough combined
+reasoning/output budget to reach the private `</think>` boundary. Its artifact
+separates cumulative orchestration tokens from exact public-answer tokens,
+counted after (and outside) the timed interval by the pinned DeepSeek tokenizer
+through loopback-only port 8005. Prompts have unique first blocks so prefix
+reuse cannot inflate the matrix. Auto requests require a valid L3 trace for
+every sample; fixed-fanout candidates additionally require the exact MoA
+proposal count and retain bounded internal input/output token totals in their
+trace evidence. ChatUI has no route to the loopback L1 port and continues to
+call only Kairyu L3.
 
 `orchestration` runs Kairyu's fixed direct/auto/auto-max L2 latency and
 LiveCodeBench-quality diagnostic, including internal calls, internal tokens,
@@ -116,7 +123,8 @@ finalizes `run.json`. Artifacts go to
 - vLLM SM120 source: `aa0d51302747ea80f282e26949708b3253409fe2`
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 
-Override API/UI ports with `API_PORT` and `CHAT_UI_PORT`. The launcher discovers
+Override API/UI/tokenizer-oracle ports with `API_PORT`, `CHAT_UI_PORT`, and
+`DEEPSEEK_L1_PORT`. The launcher discovers
 the outward-facing IPv4 address used in the printed URL; set `PUBLIC_HOST` when
 the browser must use a DNS name, public NAT address, or reverse proxy. Kairyu's
 L3 API remains on loopback. The UI is intentionally unauthenticated, so restrict

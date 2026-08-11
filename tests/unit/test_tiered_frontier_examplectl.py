@@ -37,6 +37,8 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "minimum_compute_capability": 12.0,
         "minimum_vram_mib": 90000,
     }
+    assert spec["deepseek_l1_loopback_port"] == 8005
+    assert spec["benchmarks"]["serving"]["auto_max_combined_max_tokens"] == 4096
     assert spec["allocation"] == {
         "tier1": {
             "model": "qwen3.6-27b",
@@ -79,6 +81,9 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     devices = deepseek["deploy"]["resources"]["reservations"]["devices"][0]
     assert devices["device_ids"] == ["4", "5", "6", "7"]
     assert _option(deepseek["command"], "--tensor-parallel-size") == "4"
+    assert deepseek["ports"] == [
+        "127.0.0.1:${DEEPSEEK_L1_PORT:-8005}:8000"
+    ]
     assert "--enable-expert-parallel" in deepseek["command"]
     assert _option(deepseek["command"], "--max-num-batched-tokens") == "16384"
     assert deepseek["volumes"][1]["target"] == "/root/.cache"
@@ -223,6 +228,7 @@ def test_tiered_control_uses_explicit_public_ui_host(
 
     assert control._public_ui_host() == "gpu.example.test"
     assert control._compose_env()["CHAT_UI_BIND_ADDRESS"] == "0.0.0.0"
+    assert control._compose_env()["DEEPSEEK_L1_PORT"] == "8005"
 
 
 def test_tiered_control_rejects_persistent_storage_outside_nvme(
@@ -393,4 +399,5 @@ def test_tiered_moa_candidate_serving_requires_exact_trace_count(
             "expected_kind": "synthesis",
             "expected_moa_samples": samples,
             "warmup_requests": 4,
+            "natural_completion": True,
         } == kwargs
