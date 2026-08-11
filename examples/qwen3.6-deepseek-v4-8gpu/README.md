@@ -51,12 +51,14 @@ Kairyu L3, and defaults to the quality-first `kairyu-auto-max`. Direct
 appear in the model inventory. During the selection gate,
 `kairyu-auto-max-chat` retains the diagnostic ordinary-DeepSeek MoA-3 policy.
 Both its MoA-2 and MoA-3 variants scored below direct DeepSeek in the fixed
-Terminal-Bench pilot. The quality candidate is now `kairyu-auto-max`: three
+Terminal-Bench pilot. The selected quality policy is `kairyu-auto-max`: three
 Qwen proposals followed by private-thinking DeepSeek synthesis. Its generic
 private-work allowance is 2048 tokens so a long reasoning tail can reach the
 configured `</think>` boundary and return a non-empty public answer. Natural
 EOS keeps shorter requests unchanged, and the caller's final-answer budget
-remains independent.
+remains independent. This policy scored 3/4 in the clean selection pilot versus
+2/4 for direct DeepSeek and completed its L3 c1/c8/c16/c32 matrix without an
+empty public answer.
 `kairyu-auto-max-moa1` through `kairyu-auto-max-moa4` expose matched fixed
 fan-out candidates; `kairyu-auto-max` remains the selected alias.
 

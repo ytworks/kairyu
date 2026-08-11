@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [progress] Thinking MoA-3 clears the quality floor
+- What: On the same fixed four Terminal-Bench 2.1 tasks, the 2048-token private-thinking MoA-3 policy scored 3/4 versus direct DeepSeek's 2/4. Both completed 4/4 items with zero failed/unjudged/skipped trials and null item errors on a clean source tree; `kairyu-auto-max` is selected for the full 89-task run.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/MEASUREMENTS.md`; run ID `terminalbench-selection-thinking2048-vs-deepseek-20260812`; PR #471
+
 ### 2026-08-12 — [progress] Thinking MoA-3 restores L3 reliability within its performance envelope
 - What: The generic 2048-token internal allowance completed the quality-first MoA-3 c1/c8/c16/c32 matrix with 128/128 non-empty public answers, valid traces, exact fan-out, and zero errors. Versus the failed 1024 run it preserves c1 TTFT/E2E within 1.2%/0.8%; versus ordinary MoA-3 at c8 it costs 18.8% TTFT but only 5.0% E2E while increasing public TPS 8.0%. It advances to the fixed quality pilot.
 - Refs: `examples/qwen3.6-deepseek-v4-8gpu/MEASUREMENTS.md`; run ID `l3-auto-max-thinking2048-public-v1-20260812`; PR #471

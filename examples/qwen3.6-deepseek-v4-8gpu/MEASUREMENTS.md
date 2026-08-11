@@ -86,6 +86,24 @@ median E2E increases only 3.9%. It is therefore the performance-qualified
 quality candidate and must now equal or exceed the clean direct-DeepSeek 2/4
 pilot before the all-89 run.
 
+## Terminal-Bench 2.1 quality selection
+
+The fixed four-task pilot selected the 2048-token private-thinking MoA-3
+policy. It scored **3/4 (75%)**, while direct DeepSeek scored **2/4 (50%)** on
+the same `write-compressor`, `fix-git`, `build-cython-ext`, and
+`db-wal-recovery` tasks. MoA passed the first three and failed only database WAL
+recovery; direct DeepSeek passed compressor and git. Both targets completed all
+four items with zero failed, unjudged, or skipped trials and `error: null` on
+every item. The benchmark harness source was clean at commit
+`e822f02997be7c1a6cb3f7025b9dbb11cf649092`.
+
+Run ID: `terminalbench-selection-thinking2048-vs-deepseek-20260812`.
+
+This is a selection subset, not a published-score comparison. The selected
+`kairyu-auto-max` must now complete all 89 Terminal-Bench 2.1 tasks before its
+score can be compared with the 82.7 DeepSeek-V4-Flash-0731 reference or the
+74/89 (83.15%) local target.
+
 ## Tier1 topology selection
 
 The comparison uses the same Qwen3.6-27B FP8 checkpoint and vLLM settings on
