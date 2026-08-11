@@ -186,6 +186,7 @@ def test_tiered_terminalbench_command_is_full_dataset_without_sampling_claims(
     assert observed[observed.index("--only") + 1] == "terminal-bench"
     assert observed[observed.index("--model") + 1] == "kairyu-auto"
     assert observed[observed.index("--attempts") + 1] == "1"
+    assert observed[observed.index("--concurrency") + 1] == "4"
     assert "--limit" not in observed
     assert "--temperature" not in observed
     assert "--recommended-sampling" not in observed

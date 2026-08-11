@@ -115,6 +115,13 @@ def test_terminal_bench_passes_attempts(tmp_path, attempts):
     assert _flag_value(command, "-k") == str(attempts)
 
 
+def test_terminal_bench_passes_concurrency(tmp_path):
+    command = TerminalBenchAdapter()._command(
+        _target(), _ctx(tmp_path, concurrency=4), tmp_path
+    )
+    assert _flag_value(command, "--n-concurrent") == "4"
+
+
 def test_terminal_bench_limit_is_a_task_cap(tmp_path):
     command = TerminalBenchAdapter()._command(_target(), _ctx(tmp_path, limit=3), tmp_path)
     assert _flag_value(command, "--n-tasks") == "3"

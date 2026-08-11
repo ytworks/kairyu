@@ -81,7 +81,7 @@
       "max_turns": 500,
       "attempts": 1,
       "max_output_tokens": 32768,
-      "concurrency": 1
+      "concurrency": 4
     }
   }
 }

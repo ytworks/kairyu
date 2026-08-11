@@ -218,6 +218,8 @@ class TerminalBenchAdapter:
             ),
             "-k",
             str(ctx.attempts),
+            "--n-concurrent",
+            str(ctx.concurrency),
         ]
         if ctx.limit is not None:
             command += ["--n-tasks", str(ctx.limit)]
