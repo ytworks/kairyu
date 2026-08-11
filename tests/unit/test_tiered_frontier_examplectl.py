@@ -27,7 +27,7 @@ def _option(command: list[str], name: str) -> str:
     return command[command.index(name) + 1]
 
 
-def test_tiered_example_allocates_two_qwen_tp2_replicas_and_one_deepseek_tp4() -> None:
+def test_tiered_example_allocates_one_qwen_tp4_replica_and_one_deepseek_tp4() -> None:
     spec = json.loads((EXAMPLE / "example.json").read_text())
     compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
 
@@ -41,8 +41,8 @@ def test_tiered_example_allocates_two_qwen_tp2_replicas_and_one_deepseek_tp4() -
         "tier1": {
             "model": "qwen3.6-27b",
             "gpu_ids": [0, 1, 2, 3],
-            "replicas": 2,
-            "tensor_parallel_size": 2,
+            "replicas": 1,
+            "tensor_parallel_size": 4,
         },
         "tier2": {
             "model": "deepseek-v4-flash-0731",
@@ -54,18 +54,16 @@ def test_tiered_example_allocates_two_qwen_tp2_replicas_and_one_deepseek_tp4() -
     }
     assert set(compose["services"]) == {
         "qwen-0",
-        "qwen-1",
         "deepseek",
         "kairyu",
         "chat-ui",
     }
-    for index in range(2):
-        service = compose["services"][f"qwen-{index}"]
-        devices = service["deploy"]["resources"]["reservations"]["devices"][0]
-        assert devices["device_ids"] == [str(index * 2), str(index * 2 + 1)]
-        assert _option(service["command"], "--tensor-parallel-size") == "2"
-        assert "--disable-custom-all-reduce" in service["command"]
-        assert _option(service["command"], "--max-num-seqs") == "32"
+    service = compose["services"]["qwen-0"]
+    devices = service["deploy"]["resources"]["reservations"]["devices"][0]
+    assert devices["device_ids"] == ["0", "1", "2", "3"]
+    assert _option(service["command"], "--tensor-parallel-size") == "4"
+    assert "--disable-custom-all-reduce" in service["command"]
+    assert _option(service["command"], "--max-num-seqs") == "32"
     deepseek = compose["services"]["deepseek"]
     devices = deepseek["deploy"]["resources"]["reservations"]["devices"][0]
     assert devices["device_ids"] == ["4", "5", "6", "7"]
@@ -88,12 +86,12 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         "deepseek-v4-flash-0731-thinking",
     }
     qwen = deployment.pools["qwen3.6-27b"]
-    assert len(qwen.replicas) == 2
+    assert len(qwen.replicas) == 1
     assert qwen.prefix_index is True
     assert qwen.queue_depth_threshold == 8
     for replica in qwen.replicas:
         validate_backend_options(replica.backend, replica.options)
-        assert replica.options["tensor_parallel_size"] == 2
+        assert replica.options["tensor_parallel_size"] == 4
         assert replica.options["upstream"] == "vllm"
     deepseek = deployment.pools["deepseek-v4-flash-0731"]
     assert len(deepseek.replicas) == 1
@@ -142,7 +140,6 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
     assert ui["depends_on"] == {"kairyu": {"condition": "service_healthy"}}
     assert compose["services"]["kairyu"]["depends_on"] == {
         "qwen-0": {"condition": "service_healthy"},
-        "qwen-1": {"condition": "service_healthy"},
         "deepseek": {"condition": "service_healthy"},
     }
 
