@@ -23,7 +23,7 @@ engines:
       cache_descriptor:
         family: qwen3.6-hybrid-deltanet-paged-kv
       tensor_parallel_size: 1
-      mtp_enabled: true
+      mtp_enabled: false
       container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
 
 chat_templates:

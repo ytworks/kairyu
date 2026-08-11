@@ -89,10 +89,10 @@ def test_qwen_vllm_command_pins_the_sm120_latency_throughput_contract() -> None:
     assert "--enable-chunked-prefill" in command
     assert "--enable-flashinfer-autotune" in command
     assert "--enforce-eager" not in command
-    assert json.loads(command[command.index("--speculative-config") + 1]) == {
-        "method": "mtp",
-        "num_speculative_tokens": 3,
-    }
+    assert "--speculative-config" not in command
+    assert json.loads((QWEN_EXAMPLE / "example.json").read_text())["vllm"][
+        "mtp_speculative_tokens"
+    ] == 0
     assert (
         json.loads(command[command.index("--compilation-config") + 1])["cudagraph_mode"]
         == "FULL_AND_PIECEWISE"
@@ -110,7 +110,7 @@ def test_qwen_kairyu_l3_owns_chat_and_declares_vllm_l1() -> None:
     assert entry.options["upstream"] == "vllm"
     assert entry.options["allow_templated_chat_passthrough"] is True
     assert entry.options["tensor_parallel_size"] == 1
-    assert entry.options["mtp_enabled"] is True
+    assert entry.options["mtp_enabled"] is False
     assert spec.chat_templates == {
         "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja"
     }
@@ -330,6 +330,7 @@ def test_qwen_livecodebench_command_is_the_fixed_twenty_item_run(
     monkeypatch.setattr(benchmark, "_validate_livecodebench", lambda _path: 0)
     assert benchmark.livecodebench(tmp_path) == 0
     assert observed[observed.index("--only") + 1] == "livecodebench"
+    assert observed[observed.index("--served-config-label") + 1].endswith("-no-mtp")
     assert observed[observed.index("--limit") + 1] == "20"
     assert observed[observed.index("--concurrency") + 1] == "16"
     assert observed[observed.index("--reasoning-effort") + 1] == "max"
@@ -403,3 +404,28 @@ def test_qwen_serving_validation_rejects_partial_streams(tmp_path: Path) -> None
     result["samples"][1]["completion_tokens"] = 0
     output.write_text(json.dumps(result))
     assert benchmark._validate_serving_row(row_dir, requests=2, output_tokens=4) == 1
+
+
+def test_qwen_all_dispatches_both_benchmarks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_example_all")
+    observed: list[str] = []
+    monkeypatch.setattr(benchmark, "RESULTS_ROOT", tmp_path)
+    monkeypatch.setattr(benchmark, "_ensure_environment", lambda _no_start: None)
+    monkeypatch.setattr(benchmark, "serving", lambda _path: observed.append("serving") or 0)
+    monkeypatch.setattr(
+        benchmark,
+        "livecodebench",
+        lambda _path: observed.append("livecodebench") or 0,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["benchmark.py", "all", "--no-start", "--run-id", "all-start"],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        benchmark.main()
+    assert exit_info.value.code == 0
+    assert observed == ["serving", "livecodebench"]
+    manifest = json.loads((tmp_path / "all-start" / "run.json").read_text())
+    assert manifest["exit_codes"] == {"serving": 0, "livecodebench": 0}

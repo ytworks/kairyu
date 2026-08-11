@@ -25,5 +25,7 @@ both:
 ./examples/deepseek-v4-flash-0731-8gpu/bench.sh serving
 ./examples/deepseek-v4-flash-0731-8gpu/bench.sh livecodebench
 ./examples/deepseek-v4-flash-0731-8gpu/bench.sh all
+./examples/qwen3.6-27b-1gpu/bench.sh serving
 ./examples/qwen3.6-27b-1gpu/bench.sh livecodebench  # exactly 20 items
+./examples/qwen3.6-27b-1gpu/bench.sh all
 ```

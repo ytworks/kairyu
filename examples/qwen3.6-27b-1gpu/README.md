@@ -9,10 +9,16 @@ Open WebUI -> Kairyu L3 (:8001) -> vLLM L1 (one selected TP1 GPU)
 The serving checkpoint is the official `Qwen/Qwen3.6-27B-FP8` revision. The
 configuration keeps the native 262,144-token context but loads only the text
 backbone: FP8 weights and KV cache, FP16 Gated-DeltaNet state, prefix caching,
-chunked prefill, FlashInfer autotuning, full/piecewise CUDA Graphs, and native
-MTP speculative decoding. Kairyu owns the checkpoint's official chat template
-and forwards the rendered prompt to vLLM's completions endpoint, so Open WebUI
-always talks to Kairyu L3 rather than directly to L1.
+chunked prefill, FlashInfer autotuning, and full/piecewise CUDA Graphs. Native
+MTP is deliberately disabled because the local c32 screen was materially faster
+without it. Kairyu owns the checkpoint's official chat template and forwards
+the rendered prompt to vLLM's completions endpoint, so Open WebUI always talks
+to Kairyu L3 rather than directly to L1.
+
+The no-MTP selection reached **846.89 output tok/s with 1.211 s median TTFT at
+c32** in its fixed-candidate screen, versus 561.08 tok/s and 7.036 s for MTP-3.
+The clean final matrix and LiveCodeBench rerun are being recorded in
+[MEASUREMENTS.md](MEASUREMENTS.md).
 
 ## Start
 
@@ -83,8 +89,9 @@ different quantizations, contexts, prompts, or software revisions:
   for the Workstation Edition. The
   [vLLM tuning guide](https://docs.vllm.ai/en/latest/configuration/optimization/)
   recommends chunked prefill and more than 8,192 batched tokens for throughput
-  on smaller models and large GPUs; the committed 16,384-token balance is
-  selected by the local TTFT/throughput comparison.
+  on smaller models and large GPUs. The committed 16,384-token budget is the
+  largest local candidate to complete c32 (32,768 exhausted VRAM); the local
+  comparison disabled MTP after it reduced c32 aggregate throughput.
 
 ## Reproducibility pins
 

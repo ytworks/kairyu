@@ -27,7 +27,7 @@
     "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
     "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834",
     "tensor_parallel_size": 1,
-    "mtp_speculative_tokens": 3
+    "mtp_speculative_tokens": 0
   },
   "webui": {
     "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",

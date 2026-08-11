@@ -217,7 +217,7 @@ def livecodebench(run_dir: Path) -> int:
         "--model",
         SPEC["model"]["served_name"],
         "--served-config-label",
-        f"rtx-pro-6000-blackwell-1x-vllm-fp8-mtp{SPEC['vllm']['mtp_speculative_tokens']}",
+        _served_config_label(),
         "--served-config-sha256",
         _served_config_sha256(),
         "--no-vision",
@@ -261,6 +261,12 @@ def livecodebench(run_dir: Path) -> int:
     if code:
         return code
     return _validate_livecodebench(run_dir)
+
+
+def _served_config_label() -> str:
+    prefix = "rtx-pro-6000-blackwell-1x-vllm-fp8"
+    mtp_tokens = int(SPEC["vllm"]["mtp_speculative_tokens"])
+    return f"{prefix}-mtp{mtp_tokens}" if mtp_tokens else f"{prefix}-no-mtp"
 
 
 def _validate_livecodebench(run_dir: Path) -> int:
