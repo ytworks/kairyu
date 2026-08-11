@@ -1,3 +1,7 @@
 #!/bin/sh
 set -eu
-exec "$(dirname "$0")/../../.venv/bin/python" "$(dirname "$0")/benchmark.py" "$@"
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+venv_bin="$here/../../.venv/bin"
+PATH="$venv_bin:$PATH"
+export PATH
+exec "$venv_bin/python" "$here/benchmark.py" "$@"

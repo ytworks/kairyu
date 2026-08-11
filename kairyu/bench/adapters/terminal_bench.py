@@ -152,10 +152,13 @@ class TerminalBenchAdapter:
             "one attempt per task by default (--attempts); the official "
             "leaderboard requires at least five; Harbor -k is a harness trial "
             "count, not grouped chat seed-sweep sensitivity",
+            "target max_output_tokens is forwarded through terminus-2's documented "
+            "llm_call_kwargs; without it an OpenAI-compatible endpoint may apply a "
+            "16-token default and truncate every JSON command batch",
             "target reasoning_effort, top_p, seed, and vendor extra_body are NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
-            "documents no sampling passthrough; explicit temperature and "
-            "recommended sampling are rejected",
+            "does not expose those fields as portable harness controls; explicit "
+            "temperature and recommended sampling are rejected",
             "score is Harbor's Mean over EVERY trial, errored trials as zero",
         ),
         evaluation_distributions=("harbor",),
@@ -204,6 +207,12 @@ class TerminalBenchAdapter:
             str(output_dir),
             "--ak",
             f"max_turns={_MAX_TURNS}",
+            "--ak",
+            "llm_call_kwargs="
+            + json.dumps(
+                {"max_tokens": target.max_output_tokens},
+                separators=(",", ":"),
+            ),
             "-k",
             str(ctx.attempts),
         ]

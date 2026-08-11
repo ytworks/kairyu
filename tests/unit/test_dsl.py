@@ -100,6 +100,56 @@ async def test_build_orchestrator_runs_end_to_end():
     assert result.text
 
 
+def test_rule_router_thresholds_are_configurable_and_validated():
+    spec = load_spec(
+        """
+workers:
+  - {name: tier1, backend: mock}
+  - {name: tier2, backend: mock}
+router:
+  kind: rules
+  thresholds:
+    multi_step_markers: 8
+    multi_agent_min_chars: 32768
+    reasoning_keywords: 6
+    math_symbols: 64
+    tier2_min_chars: 12288
+"""
+    )
+    descriptor = build_orchestrator(spec).describe_routing()
+    assert descriptor["router"]["thresholds"] == {
+        "multi_step_markers": 8,
+        "multi_agent_min_chars": 32768,
+        "reasoning_keywords": 6,
+        "math_symbols": 64,
+        "tier2_min_chars": 12288,
+    }
+
+    with pytest.raises(ValidationError, match="multi_agent_min_chars"):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+router:
+  kind: rules
+  thresholds: {multi_agent_min_chars: 0}
+"""
+        )
+
+
+def test_calibrated_router_rejects_inline_thresholds():
+    with pytest.raises(ValidationError, match="pinned artifact"):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+router:
+  kind: calibrated
+  artifact: router.json
+  sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  thresholds: {tier2_min_chars: 4096}
+"""
+        )
+
+
 @pytest.mark.parametrize("value", [-1, 17])
 def test_moa_samples_rejects_unsafe_values(value):
     with pytest.raises(ValidationError, match="moa_samples"):

@@ -94,6 +94,19 @@ def test_terminal_bench_sets_fugu_turn_budget(tmp_path):
     assert _flag_value(command, "--ak") == "max_turns=500"
 
 
+def test_terminal_bench_forwards_output_limit_via_terminus_llm_kwargs(tmp_path):
+    command = TerminalBenchAdapter()._command(
+        _target(max_output_tokens=32768), _ctx(tmp_path), tmp_path
+    )
+    agent_kwargs = [
+        command[index + 1] for index, value in enumerate(command) if value == "--ak"
+    ]
+    assert agent_kwargs == [
+        "max_turns=500",
+        'llm_call_kwargs={"max_tokens":32768}',
+    ]
+
+
 @pytest.mark.parametrize("attempts", [1, 5])
 def test_terminal_bench_passes_attempts(tmp_path, attempts):
     command = TerminalBenchAdapter()._command(

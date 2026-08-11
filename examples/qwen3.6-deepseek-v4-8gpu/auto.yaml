@@ -12,7 +12,7 @@ workers:
       timeout_s: 86400
   - name: tier2
     backend: openai
-    model: deepseek-v4-flash-0731-thinking
+    model: deepseek-v4-flash-0731
     base_url: http://kairyu:8000/v1
     api_key_env: null
     options:
@@ -21,6 +21,15 @@ workers:
 
 router:
   kind: rules
+  # Keep ordinary interactive/agent turns on the four-replica throughput tier.
+  # Code fences and truly heavy signals still reach Tier2; only extreme
+  # multi-step/long requests pay for MoA-2.
+  thresholds:
+    multi_step_markers: 8
+    multi_agent_min_chars: 262144
+    reasoning_keywords: 6
+    math_symbols: 64
+    tier2_min_chars: 131072
 
 moa_samples: 2
 

@@ -116,8 +116,16 @@ def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
 
     assert [worker.name for worker in standard.workers] == ["tier1", "tier2"]
     assert standard.workers[0].model == "qwen3.6-27b"
-    assert standard.workers[1].model == "deepseek-v4-flash-0731-thinking"
+    assert standard.workers[1].model == "deepseek-v4-flash-0731"
     assert standard.router.kind == "rules"
+    assert standard.router.thresholds is not None
+    assert standard.router.thresholds.model_dump() == {
+        "multi_step_markers": 8,
+        "multi_agent_min_chars": 262144,
+        "reasoning_keywords": 6,
+        "math_symbols": 64,
+        "tier2_min_chars": 131072,
+    }
     assert standard.moa_samples == 2
     assert standard.budget.max_steps == 3
     assert standard.budget.max_refine_depth == 0

@@ -12,7 +12,7 @@ from kairyu.engine.registry import create_backend
 from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.conductor import RoleSpec, chars_cost_model, zero_cost
 from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
-from kairyu.orchestration.router import RuleRouter, load_calibrated_router
+from kairyu.orchestration.router import RouteThresholds, RuleRouter, load_calibrated_router
 
 
 def load_spec(source: str | Path) -> OrchestratorSpec:
@@ -81,7 +81,11 @@ def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
     rate = spec.budget.cost_per_1k_chars_usd
     cost_model = chars_cost_model(rate) if rate is not None else zero_cost
     router = (
-        RuleRouter()
+        RuleRouter(
+            RouteThresholds(**spec.router.thresholds.model_dump())
+            if spec.router.thresholds is not None
+            else RouteThresholds()
+        )
         if spec.router.kind == "rules"
         else load_calibrated_router(
             spec.router.artifact or "",
