@@ -98,6 +98,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-11 — [design] Accuracy reports bind reference scores to sources
+- What: The Accuracy comparison will use the supplied eight-model matrix and render a source marker, linked source metadata, measurement condition, and notes for every selected or alternate published score; missing values remain missing and old DeepSeek snapshots do not fill the 0731 column.
+- Why: A numeric comparison without cell-level provenance obscures provider, third-party, harness, and version differences and cannot be audited from the generated report.
+- Refs: `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`; `kairyu/bench/{reference.py,compare.py}`
+
 ### 2026-08-11 — [progress] Full DeepSeek-V4 LiveCodeBench evidence completes
 - What: The clean-cache TP8+EP8 DSpark-5 example completed and scored all 1,055 LiveCodeBench release_v6 problems: 759 passed (71.9431%), all target timings measured, and zero request errors, retries, or unmeasured rows. The warm serving matrix reached 168.01 output tok/s at c1 with 220.10 ms median TTFT and 972.93 output tok/s at c32.
 - Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/MEASUREMENTS.md`; run IDs `livecodebench-full-tp8-ep8-dspark5-clean-sse16m-20260811` and `tp8-ep8-dspark5-warm-20260811`
