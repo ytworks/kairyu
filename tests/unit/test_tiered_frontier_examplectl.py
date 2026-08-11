@@ -386,6 +386,70 @@ def test_tiered_terminalbench_validator_rejects_partial_or_wrong_denominator(
     )
 
 
+def test_tiered_terminalbench_validator_requires_clean_error_free_raw_items(
+    tmp_path: Path,
+) -> None:
+    benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_tb_raw_validator")
+    run = tmp_path / "pilot"
+    result_dir = run / "terminal-bench--suite"
+    result_dir.mkdir(parents=True)
+    model = "deepseek-v4-flash-0731"
+    scoreboard = {
+        "cells": {
+            "terminal-bench": {
+                model: {
+                    "status": "completed",
+                    "score": 0.75,
+                    "n": 4,
+                    "n_scored": 4,
+                }
+            }
+        }
+    }
+    (run / "scoreboard.json").write_text(json.dumps(scoreboard))
+    raw = {
+        "target": model,
+        "status": "completed",
+        "source_identity": {"source_tree_clean": True},
+        "metrics": {
+            "n_total": 4,
+            "n_scored": 4,
+            "n_unjudged": 0,
+            "n_skipped": 0,
+            "n_failed": 0,
+        },
+        "items": [
+            {"status": "completed", "score": score, "error": None}
+            for score in (1.0, 1.0, 1.0, 0.0)
+        ],
+    }
+    raw_path = result_dir / "deepseek.json"
+    raw_path.write_text(json.dumps(raw))
+
+    assert (
+        benchmark._validate_terminalbench(
+            tmp_path,
+            run_id="pilot",
+            models=(model,),
+            expected_tasks=4,
+        )
+        == 0
+    )
+
+    raw["items"][3]["error"] = "runtime exception"
+    raw["metrics"]["n_failed"] = 1
+    raw_path.write_text(json.dumps(raw))
+    assert (
+        benchmark._validate_terminalbench(
+            tmp_path,
+            run_id="pilot",
+            models=(model,),
+            expected_tasks=4,
+        )
+        == 1
+    )
+
+
 def test_tiered_moa_candidate_serving_requires_exact_trace_count(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

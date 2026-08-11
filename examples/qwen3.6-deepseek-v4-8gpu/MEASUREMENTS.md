@@ -5,6 +5,56 @@ measured at the public Kairyu L3 OpenAI-compatible endpoint, never at a vLLM L1
 endpoint. Terminal-Bench 2.1 evidence and the final served-configuration hash
 will be added only after the L1/L2 selection gates close.
 
+## L3 auto-max performance selection
+
+These rows measure complete Qwen proposal fan-out, DeepSeek synthesis, L2, and
+L3 streaming on unique approximately 8K-token prompts. `public TPS` counts only
+the assistant answer visible to the user; `internal TPS` is the cumulative
+proposal-plus-synthesis output reported by orchestration. Every selected row
+has a non-empty public answer and a valid trace with the exact proposal count.
+
+| L2 candidate | Concurrency | semantic TTFT p50/p99 (ms) | E2E p50/p99 (ms) | TPOT mean (ms/public token) | req/s | public TPS | internal TPS | success / valid trace |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| MoA-3, ordinary DeepSeek synthesis | 1 | 14,762.34 / 19,008.44 | 15,965.11 / 19,695.69 | 4.828 | 0.06 | 14.56 | 85.86 | 32/32 / 32/32 |
+| MoA-3, ordinary DeepSeek synthesis | 8 | 32,257.80 / 37,529.51 | 39,267.84 / 43,239.06 | 35.025 | 0.20 | 44.26 | 276.16 | 32/32 / 32/32 |
+| MoA-3, ordinary DeepSeek synthesis | 16 | 53,530.21 / 68,127.32 | 69,949.14 / 85,593.48 | 87.895 | 0.23 | 73.68 | 336.97 | 32/32 / 32/32 |
+| MoA-3, ordinary DeepSeek synthesis | 32 | 100,263.47 / 126,709.95 | 130,182.47 / 133,476.95 | 172.232 | 0.24 | 48.98 | 324.82 | 32/32 / 32/32 |
+| **MoA-2, ordinary DeepSeek synthesis** | **1** | **14,968.53 / 18,565.29** | **16,285.04 / 19,684.75** | **4.897** | **0.06** | **14.88** | **65.73** | **32/32 / 32/32** |
+| **MoA-2, ordinary DeepSeek synthesis** | **8** | **26,741.72 / 33,050.82** | **34,450.35 / 37,173.33** | **36.660** | **0.23** | **54.50** | **235.91** | **32/32 / 32/32** |
+| **MoA-2, ordinary DeepSeek synthesis** | **16** | **42,287.00 / 55,686.19** | **58,878.42 / 64,166.79** | **83.318** | **0.26** | **65.04** | **279.93** | **32/32 / 32/32** |
+| **MoA-2, ordinary DeepSeek synthesis** | **32** | **79,506.41 / 104,720.95** | **108,613.41 / 114,351.48** | **169.822** | **0.28** | **56.15** | **285.42** | **32/32 / 32/32** |
+
+Run IDs:
+
+- `l3-auto-max-chat-moa3-public-v1-20260812`
+- `l3-auto-max-chat-moa2-public-v1-20260812`
+
+MoA-2 retains MoA-3's c1 envelope while reducing cumulative internal output
+by 21.5%. At c8 it improves median TTFT by 17.1%, median E2E by 12.3%, and
+public aggregate TPS by 23.1%. At c16 it improves TTFT/E2E by 21.0%/15.8%; at
+c32 by 20.7%/16.6%, while request throughput rises from 0.24 to 0.28 req/s.
+The lower c16 aggregate public TPS reflects shorter answers (247 versus 327
+tokens/request), not slower delivery: per-request visible generation rises
+from 10.25 to 11.37 tok/s.
+
+A separate 1024-versus-512 private-proposal cap A/B was stopped after c1/c8.
+The 512 cap produced 32/32 valid responses but changed c1 TTFT from 14,762.34
+to 14,821.93 ms and c8 from 32,257.80 to 32,645.11 ms, while internal output
+did not decrease. Qwen proposals usually ended naturally below 512 tokens, so
+the performance candidate restores the quality-preserving 1024-token default.
+Run ID: `l3-auto-max-chat-moa3-private512-public-v1-20260812`.
+
+The hidden-thinking MoA-3 candidate was rejected before c16: c1 completed
+32/32 with TTFT 15,375.10 ms, but c8 returned one response containing private
+reasoning usage and no public answer (31/32 usable). L2 now converts that case
+to an explicit failure instead of a successful empty response, but a quality
+path must be reliable before scoring. Run ID:
+`l3-auto-max-moa3-public-v2-20260812`.
+
+The performance winner is therefore **MoA-2 with ordinary DeepSeek synthesis**,
+pending the fixed four-task Terminal-Bench 2.1 quality comparison against
+direct DeepSeek.
+
 ## Tier1 topology selection
 
 The comparison uses the same Qwen3.6-27B FP8 checkpoint and vLLM settings on

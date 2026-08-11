@@ -110,8 +110,8 @@ same performance and quality gates select the final `kairyu-auto-max` policy.
 `orchestration` runs Kairyu's fixed direct/auto/auto-max L2 latency and
 LiveCodeBench-quality diagnostic, including internal calls, internal tokens,
 route identity, and allocated GPU-seconds. `terminalbench-pilot` runs the same
-four named Terminal-Bench 2.1 tasks on direct Qwen, direct DeepSeek, MoA-2 with
-chat synthesis, and thinking MoA 1/2/3/4. `terminalbench` runs the selected `kairyu-auto-max` over
+four named Terminal-Bench 2.1 tasks on direct DeepSeek and the performance-winning
+MoA-2 chat-synthesis candidate. `terminalbench` runs the selected `kairyu-auto-max` over
 all 89 tasks with terminus-2 and the published 500-turn budget. It deliberately
 passes no unsupported sampling knob. The one-trial full result is a complete
 task-set measurement, not an official five-trial leaderboard entry.

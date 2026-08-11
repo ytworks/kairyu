@@ -105,13 +105,8 @@
         "db-wal-recovery"
       ],
       "pilot_models": [
-        "qwen3.6-27b",
         "deepseek-v4-flash-0731",
-        "kairyu-auto-max-chat",
-        "kairyu-auto-max-moa1",
-        "kairyu-auto-max-moa2",
-        "kairyu-auto-max-moa3",
-        "kairyu-auto-max-moa4"
+        "kairyu-auto-max-chat"
       ]
     }
   }

@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [progress] MoA-2 chat synthesis wins the L3 performance gate
+- What: The ordinary-DeepSeek MoA-2 candidate completed c1/c8/c16/c32 with 32/32 non-empty answers and valid traces at every row; versus MoA-3 it preserves c1 and cuts median TTFT by 17.1%/21.0%/20.7% at c8/c16/c32. The quality pilot now compares only this winner with direct DeepSeek, and validates raw zero-failed/unjudged/skipped/error evidence on a clean source tree.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,benchmark.py}`; run ID `l3-auto-max-chat-moa2-public-v1-20260812`; PR #471
+
 ### 2026-08-12 — [progress] Tiered quality candidate reduces fan-out, not proposal depth
 - What: The 512-token private-cap A/B retained 32/32 valid L3 responses but did not improve c1/c8 median TTFT beyond run noise, so the quality candidate restores the 1024-token allowance and changes ordinary-chat synthesis from MoA-3 to MoA-2 for the next performance/quality gate.
 - Refs: run IDs `l3-auto-max-chat-moa3-public-v1-20260812`, `l3-auto-max-chat-moa3-private512-public-v1-20260812`; `examples/qwen3.6-deepseek-v4-8gpu/`; PR #471

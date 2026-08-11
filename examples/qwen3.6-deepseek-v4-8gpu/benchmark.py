@@ -592,6 +592,19 @@ def _validate_terminalbench(
     except (KeyError, OSError, TypeError, ValueError) as error:
         print(f"invalid Terminal-Bench scoreboard: {error}", file=sys.stderr)
         return 1
+    result_paths = tuple((run_dir / run_id).glob("terminal-bench--*/*.json"))
+    raw_results: dict[str, dict] = {}
+    try:
+        for path in result_paths:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            target = payload.get("target")
+            if isinstance(target, str):
+                if target in raw_results:
+                    raise ValueError(f"duplicate raw result for {target}")
+                raw_results[target] = payload
+    except (OSError, TypeError, ValueError) as error:
+        print(f"invalid Terminal-Bench raw result: {error}", file=sys.stderr)
+        return 1
     for model in models:
         try:
             cell = scoreboard["cells"]["terminal-bench"][model]
@@ -609,6 +622,47 @@ def _validate_terminalbench(
                 f"Terminal-Bench did not produce complete evidence for {model}: "
                 f"status={cell.get('status')!r}, n={cell.get('n')!r}, "
                 f"n_scored={cell.get('n_scored')!r}, score={cell.get('score')!r}",
+                file=sys.stderr,
+            )
+            return 1
+        result = raw_results.get(model)
+        if result is None:
+            print(f"Terminal-Bench has no raw result for {model}", file=sys.stderr)
+            return 1
+        metrics = result.get("metrics")
+        items = result.get("items")
+        source_identity = result.get("source_identity")
+        raw_complete = (
+            result.get("status") == "completed"
+            and isinstance(metrics, dict)
+            and metrics.get("n_total") == expected_tasks
+            and metrics.get("n_scored") == expected_tasks
+            and metrics.get("n_unjudged") == 0
+            and metrics.get("n_skipped") == 0
+            and metrics.get("n_failed") == 0
+            and isinstance(source_identity, dict)
+            and source_identity.get("source_tree_clean") is True
+            and isinstance(items, list)
+            and len(items) == expected_tasks
+            and all(
+                isinstance(item, dict)
+                and item.get("status") == "completed"
+                and isinstance(item.get("score"), (int, float))
+                and item.get("error") is None
+                for item in items
+            )
+        )
+        if not raw_complete:
+            clean_source = (
+                source_identity.get("source_tree_clean")
+                if isinstance(source_identity, dict)
+                else None
+            )
+            print(
+                f"Terminal-Bench raw evidence is incomplete for {model}: "
+                f"status={result.get('status')!r}, metrics={metrics!r}, "
+                f"items={len(items) if isinstance(items, list) else None!r}, "
+                f"clean={clean_source!r}",
                 file=sys.stderr,
             )
             return 1
@@ -654,8 +708,7 @@ def main() -> None:
         print("serving-auto-max-moa1..4  fixed-fanout quality-candidate matrices")
         print("orchestration     fixed L2 direct/auto/auto-max latency and quality")
         print(
-            "terminalbench-pilot  same four tasks on direct Qwen/DeepSeek, "
-            "MoA2-chat, and MoA1..4-thinking"
+            "terminalbench-pilot  same four tasks on direct DeepSeek and MoA2-chat"
         )
         print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
         print("all               every benchmark above, continuing after failures")
