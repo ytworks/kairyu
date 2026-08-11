@@ -11,6 +11,26 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-11 — [progress] MoA preserves the original response contract
+- What: Proposal roles now independently draft against an explicit original-request boundary, while synthesis treats candidates as untrusted advice and must preserve machine-readable output contracts without leaking ensemble meta-analysis; focused MoA/orchestrator/backend regressions pass.
+- Refs: `kairyu/orchestration/moa.py`; `tests/unit/test_moa.py`; PR #471
+
+### 2026-08-11 — [progress] Prefix affinity obeys replica overload policy
+- What: ReplicaPool now applies its configured queue-depth valve after both prefix-aware and session-affine placement, retaining idle KV locality while overflowing concurrent warm-prefix work to least-outstanding replicas; focused orchestration and backend regressions pass.
+- Refs: `kairyu/orchestration/replica.py`; `tests/unit/test_kv_routing.py`; PR #471
+
+### 2026-08-11 — [progress] Tiered eight-GPU vLLM example enters runtime validation
+- What: Added a one-command Open WebUI -> Kairyu L3/L2 -> vLLM L1 contract for four Qwen3.6 FP8 TP1 replicas plus one DeepSeek-V4 TP4/EP4 tier, with rule routing, MoA-2/MoA-3, `/mnt/nvme`-only persistence, independent/all serving and orchestration runners, and a full-dataset Terminal-Bench 2.1 entrypoint. Static and contract tests pass; runtime tuning and complete evidence remain in progress.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/`; `tests/unit/test_tiered_frontier_examplectl.py`
+
+### 2026-08-11 — [progress] One-GPU Qwen3.6 example completes measured gate
+- What: The one-command Qwen3.6-27B FP8 stack on one RTX PRO 6000 completed its final unique-prefix 8K/256 matrix (41.43 output tok/s with 190.82 ms median TTFT at c1; 842.35 output tok/s with 1.247 s median TTFT at c32) and deterministic LiveCodeBench subset (11/20, 55.0%, 20/20 scored, zero request errors/retries/unmeasured rows). No-MTP won TTFT at every tested concurrency and aggregate throughput at c16/c32; MTP-5 crashed at c16 and the 32K prefill budget exhausted VRAM at c32.
+- Refs: PR #469; `examples/qwen3.6-27b-1gpu/MEASUREMENTS.md`; run IDs `final-no-mtp-20260811` and `qwen36-fp8-no-mtp-lcb20-20260811`
+
+### 2026-08-11 — [progress] One-GPU Qwen3.6 vLLM example enters runtime validation
+- What: A second example adds one-command Open WebUI -> Kairyu L3 -> pinned vLLM L1 serving for the official Qwen3.6-27B FP8 checkpoint on one selected RTX PRO 6000; model/UI persistence is fail-closed below `/mnt/nvme`, and independent/all serving plus deterministic 20-row LiveCodeBench runners are contract-tested. Runtime tuning and measured evidence remain in progress.
+- Refs: `examples/qwen3.6-27b-1gpu/`; `tests/unit/test_frontier_examplectl.py`
+
 ### 2026-08-11 — [progress] Accuracy comparisons cite every reference score
 - What: Accuracy reports now compare local runs with the final eight-model benchmark matrix, preserve missing values, and attach source markers, dates, source class, conditions, and notes to selected and alternate scores in Markdown and JSON.
 - Refs: `kairyu/bench/{reference.py,compare.py}`; `tests/bench/test_bench_compare.py`; `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`
