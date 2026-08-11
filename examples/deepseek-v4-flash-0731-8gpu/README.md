@@ -10,7 +10,8 @@ The default is tuned for the exact hardware and checkpoint: mixed FP4/FP8
 weights, FP8 KV cache, native 1,048,576-token context, prefix caching,
 full/piecewise CUDA Graphs, and five-token DSpark speculation.
 Five draft tokens match the checkpoint's DSpark block size. Kairyu owns the
-official DeepSeek-V4 text prompt and sends it through vLLM's identity template.
+official DeepSeek-V4 text prompt and sends the pre-rendered prompt to vLLM's
+`/completions` endpoint, avoiding a second chat-template pass.
 `tools` metadata emitted by OpenAI-compatible chat clients is ignored by this
 text-only checkpoint template, so Open WebUI's built-in tool declarations do
 not block ordinary questions. Model-side function-tool execution is not
@@ -63,6 +64,12 @@ an individual failure.
 
 Artifacts go to
 `bench/results/examples/deepseek-v4-flash-0731-8gpu/<UTC-run-id>/`.
+
+The locked local results are in [MEASUREMENTS.md](MEASUREMENTS.md). The warm
+serving run reached 168.01 output tokens/s with 220.10 ms median TTFT at
+concurrency 1 and 972.93 output tokens/s at concurrency 32. The complete
+1,055-problem LiveCodeBench run scored 759/1,055 (71.9431% pass@1), with 1,055
+measured requests and no transport, retry, or measurement failures.
 
 ## Public performance context
 
