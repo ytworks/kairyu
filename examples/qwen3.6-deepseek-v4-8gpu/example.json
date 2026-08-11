@@ -54,7 +54,11 @@
     "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
     "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834",
     "qwen_mtp_speculative_tokens": 0,
-    "deepseek_dspark_speculative_tokens": 5
+    "deepseek_dspark_speculative_tokens": 5,
+    "deepseek_max_num_batched_tokens": 16384,
+    "deepseek_max_num_seqs": 32,
+    "deepseek_kv_cache_dtype": "fp8",
+    "deepseek_cudagraph_mode": "FULL_AND_PIECEWISE"
   },
   "orchestration": {
     "auto_model": "kairyu-auto",

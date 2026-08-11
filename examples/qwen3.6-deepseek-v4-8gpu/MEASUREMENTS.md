@@ -57,7 +57,7 @@ started and completed the matrix. TP4's first cache build reported 201.41 s for
 engine initialization, including 109.54 s compilation. These candidate-only
 transport settings are not present in the selected TP1 deployment.
 
-## Tier2 speculation and batch-budget selection
+## Tier2 speculation, batch-budget, and CUDA Graph selection
 
 The Tier2 comparison keeps DeepSeek TP4+EP4, FP8 KV, max sequences 32, prefix
 caching, and full/piecewise CUDA Graphs fixed. It changes only the named
@@ -79,12 +79,17 @@ call the DeepSeek vLLM endpoint directly.
 | No speculation, 16K batch | 8 | 3,965.50 / 6,191.15 | 9,524.89 / 10,508.00 | 21.526 | 44.22 | 213.53 | 32/32 |
 | No speculation, 16K batch | 16 | 6,549.86 / 11,780.05 | 16,120.20 / 21,357.75 | 38.401 | 26.73 | 252.94 | 32/32 |
 | No speculation, 16K batch | 32 | 12,414.10 / 23,381.04 | 29,184.28 / 29,296.87 | 63.230 | 15.27 | 279.41 | 32/32 |
+| DSpark-5, 16K, Graph NONE | 1 | 906.50 / 910.99 | 15,710.47 / 18,312.96 | 59.105 | 17.13 | 16.06 | 32/32 |
+| DSpark-5, 16K, Graph NONE | 8 | 1,099.37 / 6,302.06 | 26,115.42 / 35,678.58 | 96.659 | 10.65 | 71.66 | 32/32 |
+| DSpark-5, 16K, Graph NONE | 16 | 1,834.91 / 12,025.04 | 31,821.59 / 47,515.43 | 110.630 | 9.19 | 108.23 | 32/32 |
+| DSpark-5, 16K, Graph NONE | 32 | 12,495.09 / 23,732.88 | 40,037.46 / 56,320.56 | 112.944 | 8.59 | 145.41 | 32/32 |
 
 Run IDs:
 
 - `l3-deepseek-tp4ep4-dspark5-b16k-unique-20260811`
 - `l3-deepseek-tp4ep4-dspark5-b32k-unique-20260811`
 - `l3-deepseek-tp4ep4-nospec-b16k-nvmecache-unique-20260811`
+- `l3-deepseek-tp4ep4-dspark5-b16k-cudagraph-none-unique-20260811`
 
 DSpark-3 is not a supported candidate in the pinned vLLM revision. Startup
 fails closed because DeepSeek's DSpark block size is five and values below five
@@ -97,6 +102,16 @@ under c8-c32 saturation, but it delays the first token at c8/c16 and is much
 slower for the single DeepSeek synthesis request on the principal auto-max
 path. The 32K budget improves c8/c16 throughput but loses c1 E2E/generation
 speed and c32 throughput/TPOT, so 16K is the better latency-first balance.
+
+`FULL_AND_PIECEWISE` is also retained. Disabling CUDA Graph shortened a
+persistent-cache engine initialization from 73.05 s to 29.55 s, but that
+startup-only saving is not worth the serving regression. At c1, Graph NONE
+increased median E2E latency from 1.93 s to 15.71 s and reduced aggregate
+output throughput from 130.79 to 16.06 tok/s. It remained slower in E2E and
+throughput at c8, c16, and c32; even its lower c16 median TTFT was paired with
+79.3% higher median E2E latency. The selected Tier2 configuration is therefore
+TP4+EP4, DSpark-5, 16K batch tokens, max 32 sequences, FP8 KV, prefix caching,
+and full/piecewise CUDA Graphs.
 
 Before the cache fix, a DSpark-5/32K cold engine initialization took 560.68 s,
 including 375.98 s of mHC warm-up. The no-spec/16K initial build in the

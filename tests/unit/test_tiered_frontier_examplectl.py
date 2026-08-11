@@ -95,7 +95,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "draft_sample_method": "greedy",
     }
     assert json.loads(_option(deepseek["command"], "--compilation-config")) == {
-        "cudagraph_mode": "NONE",
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
         "custom_ops": ["all"],
     }
 
