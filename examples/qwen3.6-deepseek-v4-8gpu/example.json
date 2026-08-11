@@ -54,7 +54,7 @@
     "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
     "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834",
     "qwen_mtp_speculative_tokens": 0,
-    "deepseek_dspark_speculative_tokens": 5
+    "deepseek_dspark_speculative_tokens": 3
   },
   "orchestration": {
     "auto_model": "kairyu-auto",

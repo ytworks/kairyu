@@ -80,7 +80,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     assert devices["device_ids"] == ["4", "5", "6", "7"]
     assert _option(deepseek["command"], "--tensor-parallel-size") == "4"
     assert "--enable-expert-parallel" in deepseek["command"]
-    assert _option(deepseek["command"], "--max-num-batched-tokens") == "32768"
+    assert _option(deepseek["command"], "--max-num-batched-tokens") == "16384"
     assert deepseek["volumes"][1]["target"] == "/root/.cache"
     assert deepseek["environment"] | {
         "XDG_CACHE_HOME": "/root/.cache",
@@ -91,7 +91,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     } == deepseek["environment"]
     assert json.loads(_option(deepseek["command"], "--speculative-config")) == {
         "method": "dspark",
-        "num_speculative_tokens": 5,
+        "num_speculative_tokens": 3,
         "draft_sample_method": "greedy",
     }
 
