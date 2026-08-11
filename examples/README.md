@@ -1,21 +1,23 @@
-# Frontier model examples
+# Kairyu + vLLM / DeepSeek-V4-Flash-0731
 
-This directory intentionally contains only three production-shaped environments and their shared controllers.
+`examples/` contains exactly one complete environment:
 
-| Environment | GPU layout | Native context |
-|---|---|---:|
-| `qwen3.6-27b-1gpu` | selected TP1 GPU (default 0) | 262,144 |
-| `deepseek-v4-flash-0731-8gpu` | two EP4 + Attention-DP replicas | 1,048,576 |
-| `qwen3.6-deepseek-v4-8gpu` | DeepSeek EP4 on 0–3, Qwen TP1 ×4 on 4–7 | 262,144 / 1,048,576 |
+- [`deepseek-v4-flash-0731-8gpu`](deepseek-v4-flash-0731-8gpu/README.md)
+- 8 x NVIDIA RTX PRO 6000 Blackwell Server Edition (96 GiB)
+- L3: Kairyu; L1: vLLM; UI: Open WebUI
+- exact `deepseek-ai/DeepSeek-V4-Flash-0731` revision and native 1,048,576-token context
 
-Every directory exposes the same interface:
+Start everything and print the local Chat UI URL:
 
-```text
-./run.sh <vllm|kairyu> [up|down|status|logs]
-./bench.sh <vllm|kairyu|compare> <benchmark-id|all>
-./bench.sh list
+```sh
+./examples/deepseek-v4-flash-0731-8gpu/run.sh
 ```
 
-`run.sh` checks SM120, full VRAM, disk and NUMA-local pairs and fails instead of reducing context. The first start downloads an exact checkpoint revision, hashes all files, builds content-addressed Kairyu images and then serves the same read-only model volume offline. vLLM base images are repository digests; MTP and DSpark remain disabled until their parity, accuracy and 5% goodput gates pass.
+Run measured serving performance, the complete 1,055-problem LiveCodeBench, or
+both:
 
-Benchmark artifacts are written under `bench/results/examples/<environment>/<backend>/<run-id>/`. Each benchmark finalizes JSON and Markdown immediately, `all` continues after failures, and `compare` runs the two backends sequentially to avoid GPU overlap. Credentials are never included in evidence.
+```sh
+./examples/deepseek-v4-flash-0731-8gpu/bench.sh serving
+./examples/deepseek-v4-flash-0731-8gpu/bench.sh livecodebench
+./examples/deepseek-v4-flash-0731-8gpu/bench.sh all
+```

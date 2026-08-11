@@ -1,249 +1,235 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import yaml
 
+from kairyu.deploy.spec import load_deployment_spec
 from kairyu.engine.config_validation import validate_backend_options
+from kairyu.entrypoints.chat_template import ChatTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
+EXAMPLE = ROOT / "examples/deepseek-v4-flash-0731-8gpu"
 
 
-def _load_examplectl():
-    module_spec = importlib.util.spec_from_file_location(
-        "frontier_examplectl",
-        ROOT / "examples/_shared/examplectl.py",
-    )
+def _load(path: Path, name: str):
+    module_spec = importlib.util.spec_from_file_location(name, path)
     assert module_spec is not None and module_spec.loader is not None
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
     return module
 
 
-def _load_benchctl():
-    module_spec = importlib.util.spec_from_file_location(
-        "frontier_benchctl",
-        ROOT / "examples/_shared/benchctl.py",
+def test_examples_surface_contains_exactly_one_environment() -> None:
+    environments = sorted(
+        path.name
+        for path in (ROOT / "examples").iterdir()
+        if path.is_dir() and not path.name.startswith("__")
     )
-    assert module_spec is not None and module_spec.loader is not None
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
-    return module
+    assert environments == ["deepseek-v4-flash-0731-8gpu"]
 
 
-def test_model_storage_root_is_absolute_and_environment_scoped(tmp_path: Path) -> None:
-    examplectl = _load_examplectl()
-    spec = {"environment": "qwen3.6-27b-1gpu"}
-    storage_root = tmp_path / "models"
+def test_example_is_exact_eight_gpu_kairyu_to_vllm_to_webui() -> None:
+    spec = json.loads((EXAMPLE / "example.json").read_text())
+    compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
 
-    directory = examplectl._model_storage_directory(
-        spec,
-        {"MODEL_STORAGE_ROOT": str(storage_root)},
-        tmp_path / "repository",
+    assert spec["hardware"] == {
+        "gpu_count": 8,
+        "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "minimum_compute_capability": 12.0,
+        "minimum_vram_mib": 90000,
+    }
+    assert set(compose["services"]) == {"vllm", "kairyu", "chat-ui"}
+    webui = compose["services"]["chat-ui"]
+    assert webui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
+    assert json.loads(webui["environment"]["DEFAULT_MODEL_PARAMS"]) == {
+        "max_tokens": 32768
+    }
+    assert webui["ports"] == [
+        "${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080"
+    ]
+    assert compose["services"]["kairyu"]["ports"] == [
+        "127.0.0.1:${API_PORT:-8002}:8000"
+    ]
+    assert webui["depends_on"] == {"kairyu": {"condition": "service_healthy"}}
+    assert compose["services"]["kairyu"]["depends_on"] == {
+        "vllm": {"condition": "service_healthy"}
+    }
+    devices = compose["services"]["vllm"]["deploy"]["resources"]["reservations"][
+        "devices"
+    ][0]
+    assert devices["device_ids"] == [str(index) for index in range(8)]
+
+
+def test_vllm_command_pins_the_optimized_sm120_contract() -> None:
+    compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
+    command = compose["services"]["vllm"]["command"]
+
+    expected_pairs = {
+        "--max-model-len": "1048576",
+        "--kv-cache-dtype": "fp8",
+        "--block-size": "256",
+        "--tensor-parallel-size": "8",
+        "--max-num-seqs": "64",
+        "--max-num-batched-tokens": "16384",
+    }
+    for option, value in expected_pairs.items():
+        assert command[command.index(option) + 1] == value
+    assert "--enable-expert-parallel" in command
+    assert "--moe-backend" not in command
+    assert compose["services"]["vllm"]["environment"]["VLLM_USE_DEEP_GEMM"] == "0"
+    assert "--enable-prefix-caching" in command
+    assert "--enforce-eager" not in command
+    assert json.loads(command[command.index("--attention-config") + 1]) == {
+        "use_fp4_indexer_cache": False
+    }
+    assert json.loads(command[command.index("--speculative-config") + 1])[
+        "num_speculative_tokens"
+    ] == 5
+    assert json.loads(command[command.index("--compilation-config") + 1])[
+        "cudagraph_mode"
+    ] == "FULL_AND_PIECEWISE"
+
+
+def test_kairyu_l3_declares_the_attested_vllm_l1() -> None:
+    raw = (EXAMPLE / "kairyu.yaml").read_text()
+    spec = load_deployment_spec(raw)
+    assert set(spec.engines) == {"deepseek-v4-flash-0731"}
+    entry = spec.engines["deepseek-v4-flash-0731"]
+    assert entry.backend == "openai"
+    validate_backend_options(entry.backend, entry.options)
+    assert entry.options["upstream"] == "vllm"
+    assert entry.options["allow_templated_chat_passthrough"] is True
+    assert entry.options["tensor_parallel_size"] == 8
+    assert entry.options["expert_parallel_size"] == 8
+    assert entry.options["dspark_enabled"] is True
+    assert spec.chat_templates == {
+        "deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja"
+    }
+
+
+def test_deepseek_template_matches_checkpoint_text_encoding() -> None:
+    template = ChatTemplate.load(str(EXAMPLE / "deepseek-v4-0731.jinja"))
+    maximum = (
+        "Reasoning Effort: Beyond maximum — exhaustive, relentless, and uncompromising.\n"
+        "You MUST reason with the utmost depth and rigor, leaving absolutely nothing to "
+        "chance: exhaustively decompose the problem into its most fundamental components, "
+        "trace every causal chain to its root, and resolve the underlying cause rather "
+        "than any surface symptom.\n"
+        "Do not stop reasoning until you have independently verified the solution from "
+        "multiple angles and are certain that no assumption remains unchecked and no "
+        "error remains undiscovered.\n\n"
+    )
+    rendered = template.render(
+        [{"role": "user", "content": "Write Python."}],
+        template_kwargs={"reasoning_effort": "max", "thinking_mode": "thinking"},
+    )
+    assert rendered == (
+        "<｜begin▁of▁sentence｜>"
+        + maximum
+        + "<｜User｜>Write Python.<｜Assistant｜><think>"
     )
 
-    assert directory == (storage_root / spec["environment"]).resolve()
-    assert directory.is_dir()
-    with pytest.raises(SystemExit, match="must be an absolute path"):
-        examplectl._model_storage_directory(
-            spec,
-            {"MODEL_STORAGE_ROOT": "relative/models"},
-            tmp_path / "repository",
+    multi = template.render(
+        [
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "C"},
+        ]
+    )
+    assert multi == (
+        "<｜begin▁of▁sentence｜><｜User｜>A<｜Assistant｜></think>"
+        "B<｜end▁of▁sentence｜><｜User｜>C<｜Assistant｜></think>"
+    )
+
+
+def test_deepseek_template_ignores_client_tool_metadata() -> None:
+    template = ChatTemplate.load(str(EXAMPLE / "deepseek-v4-0731.jinja"))
+    expected = (
+        "<｜begin▁of▁sentence｜><｜User｜>PAC1の適応は？"
+        "<｜Assistant｜></think>"
+    )
+    for tools in (
+        [],
+        [{"type": "function", "function": {"name": "search"}}],
+    ):
+        assert (
+            template.render(
+                [{"role": "user", "content": "PAC1の適応は？"}], tools=tools
+            )
+            == expected
         )
 
 
-def test_download_command_uses_python3_and_forwards_token_without_argv_value() -> None:
-    examplectl = _load_examplectl()
-    secret = "hf_private-do-not-render"
-    command = examplectl._download_command(
-        "model-volume",
-        "vllm@sha256:fixed",
-        {
-            "repo": "Qwen/Qwen3.6-27B",
-            "revision": "fixed-revision",
-            "slug": "qwen3.6-27b",
-        },
-        {"HF_TOKEN": secret},
+def test_control_preflight_requires_exact_gpu_inventory() -> None:
+    control = _load(EXAMPLE / "control.py", "deepseek_example_control")
+    text = "\n".join(
+        f"{index}, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97887, 12.0"
+        for index in range(8)
     )
-
-    assert command[command.index("--entrypoint") + 1] == "python3"
-    assert ["--env", "HF_TOKEN"] == command[
-        command.index("HF_TOKEN") - 1 : command.index("HF_TOKEN") + 1
-    ]
-    assert all(secret not in argument for argument in command)
-    program = command[command.index("-c") + 1]
-    assert "os.environ.get('HF_TOKEN') or None" in program
-    assert "HF_TOKEN is required" not in program
+    rows = control._gpu_inventory(text)
+    assert len(rows) == 8
+    assert rows[-1]["index"] == 7
 
 
-def test_download_command_allows_public_anonymous_download() -> None:
-    examplectl = _load_examplectl()
-    command = examplectl._download_command(
-        "model-volume",
-        "vllm@sha256:fixed",
-        {"repo": "public/model", "revision": "fixed", "slug": "model"},
-        {},
-    )
+def test_full_livecodebench_command_has_no_subset_escape_hatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    benchmark = _load(EXAMPLE / "benchmark.py", "deepseek_example_benchmark")
+    observed: list[str] = []
 
-    assert "HF_TOKEN" not in command
+    def fake_run(command, *, log=None, check=True):
+        observed.extend(command)
+        return 0
 
-
-def test_compose_ignores_dotenv_files(monkeypatch, tmp_path: Path) -> None:
-    examplectl = _load_examplectl()
-    (tmp_path / ".env").write_text("HF_TOKEN=must-not-be-read\n", encoding="utf-8")
-    observed = {}
-
-    def fake_run(command, *, env=None, capture=False):
-        observed["command"] = command
-        observed["env"] = env
-        observed["capture"] = capture
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(examplectl, "_run", fake_run)
-    examplectl._compose(
-        tmp_path,
-        {"environment": "qwen3.6-27b-1gpu"},
-        {
-            "KAIRYU_CPU_IMAGE": "cpu@sha256:fixed",
-            "KAIRYU_GPU_IMAGE": "gpu@sha256:fixed",
-            "MODEL_VOLUME": "models",
-        },
-        "vllm",
-        ["ps"],
-    )
-
-    assert observed["command"] == [
-        "docker",
-        "compose",
-        "--project-directory",
-        str(tmp_path),
-        "--file",
-        str(tmp_path / "compose.yaml"),
-        "ps",
-    ]
-    assert "HF_TOKEN" not in observed["env"]
-    assert observed["env"]["COMPOSE_DISABLE_ENV_FILE"] == "1"
-    assert observed["env"]["COMPOSE_PROJECT_NAME"] == (
-        "kairyu-qwen3-6-27b-1gpu-vllm"
-    )
+    monkeypatch.setattr(benchmark, "_run", fake_run)
+    monkeypatch.setattr(benchmark, "_execution_image", lambda: "sha256:" + "a" * 64)
+    monkeypatch.setattr(benchmark, "_validate_livecodebench", lambda _path: 0)
+    assert benchmark.livecodebench(tmp_path) == 0
+    assert observed[observed.index("--only") + 1] == "livecodebench"
+    assert observed[observed.index("--concurrency") + 1] == "16"
+    assert observed[observed.index("--reasoning-effort") + 1] == "max"
+    assert observed[observed.index("--temperature") + 1] == "1.0"
+    assert observed[observed.index("--top-p") + 1] == "0.95"
+    assert "--limit" not in observed
+    assert "--smoke" not in observed
+    assert observed[observed.index("--exec-runner") + 1] == "docker"
 
 
-def test_qwen_vllm_services_cap_sequences_for_hybrid_cache() -> None:
-    single = yaml.safe_load(
-        (ROOT / "examples/qwen3.6-27b-1gpu/compose.yaml").read_text()
-    )
-    orchestration = yaml.safe_load(
-        (ROOT / "examples/qwen3.6-deepseek-v4-8gpu/compose.yaml").read_text()
-    )
-
-    for command in (
-        single["services"]["vllm"]["command"],
-        orchestration["x-qwen-vllm"]["command"],
-    ):
-        option = command.index("--max-num-seqs")
-        assert command[option + 1] == "64"
-
-
-def test_qwen_quality_command_preserves_documented_thinking_budget(tmp_path: Path) -> None:
-    benchctl = _load_benchctl()
-    spec = yaml.safe_load(
-        (ROOT / "examples/qwen3.6-27b-1gpu/example.json").read_text()
-    )
-
-    command = benchctl._quality_command(
-        ROOT,
-        spec,
-        "accuracy:livecodebench",
-        8001,
-        tmp_path,
-    )
-
-    option = command.index("--max-output-tokens")
-    assert command[option + 1] == "81920"
-    timeout = command.index("--request-timeout-s")
-    assert command[timeout + 1] == "86400"
-    concurrency = command.index("--concurrency")
-    assert command[concurrency + 1] == "16"
-
-
-def test_qwen_livecodebench_30_contract_is_explicit_and_deterministic(
+def test_livecodebench_result_validation_requires_all_1055_rows(
     tmp_path: Path,
 ) -> None:
-    benchctl = _load_benchctl()
-    spec = yaml.safe_load(
-        (ROOT / "examples/qwen3.6-27b-1gpu/example.json").read_text()
-    )
+    benchmark = _load(EXAMPLE / "benchmark.py", "deepseek_example_benchmark_validation")
+    output = tmp_path / "livecodebench-full"
+    output.mkdir()
 
-    command = benchctl._quality_command(
-        ROOT,
-        spec,
-        "accuracy:livecodebench",
-        8001,
-        tmp_path,
-        limit=30,
-        seed=0,
-    )
+    def write_cell(**overrides) -> None:
+        cell = {
+            "status": "completed",
+            "n": 1055,
+            "n_scored": 1055,
+            "performance": {
+                "requests": 1055,
+                "errors": 0,
+                "unmeasured_requests": 0,
+            },
+        }
+        cell.update(overrides)
+        (output / "scoreboard.json").write_text(
+            json.dumps(
+                {
+                    "cells": {
+                        "livecodebench": {"deepseek-v4-flash-0731": cell}
+                    }
+                }
+            )
+        )
 
-    limit = command.index("--limit")
-    seed = command.index("--seed")
-    assert command[limit + 1] == "30"
-    assert command[seed + 1] == "0"
-    assert command[command.index("--concurrency") + 1] == "16"
+    write_cell()
+    assert benchmark._validate_livecodebench(tmp_path) == 0
 
-    entrypoint = (
-        ROOT / "examples/qwen3.6-27b-1gpu/bench-livecodebench-30.sh"
-    ).read_text()
-    assert "accuracy:livecodebench --limit 30 --seed 0" in entrypoint
-
-
-def test_all_frontier_examples_declare_throughput_benchmark_concurrency() -> None:
-    specs = sorted((ROOT / "examples").glob("*/example.json"))
-    assert specs
-
-    for path in specs:
-        spec = yaml.safe_load(path.read_text())
-        assert spec["benchmark_concurrency"] == 16, path
-
-
-def test_orchestration_command_forwards_throughput_concurrency(tmp_path: Path) -> None:
-    benchctl = _load_benchctl()
-    spec = yaml.safe_load(
-        (ROOT / "examples/qwen3.6-deepseek-v4-8gpu/example.json").read_text()
-    )
-
-    command = benchctl._orchestration_command(ROOT, spec, 8003, tmp_path)
-
-    concurrency = command.index("--concurrency")
-    assert command[concurrency + 1] == "16"
-
-
-def test_all_frontier_gateway_backend_options_pass_static_validation() -> None:
-    gateway_paths = sorted((ROOT / "examples").glob("*/*gateway.yaml"))
-    assert gateway_paths
-    validated = 0
-
-    for path in gateway_paths:
-        config = yaml.safe_load(path.read_text())
-        for pool in (config.get("pools") or {}).values():
-            for replica in pool["replicas"]:
-                validate_backend_options(replica["backend"], replica["options"])
-                validated += 1
-
-    assert validated >= 10
-
-
-def test_all_frontier_native_backend_options_pass_static_validation() -> None:
-    config_paths = sorted((ROOT / "examples").glob("**/*kairyu.yaml"))
-    assert config_paths
-    validated = 0
-
-    for path in config_paths:
-        config = yaml.safe_load(path.read_text())
-        for engine in (config.get("engines") or {}).values():
-            validate_backend_options(engine["backend"], engine["options"])
-            validated += 1
-
-    assert validated == 3
+    write_cell(status="failed", n_scored=520)
+    assert benchmark._validate_livecodebench(tmp_path) == 1

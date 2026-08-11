@@ -1,24 +1,54 @@
 {
+  "schema_version": 1,
   "environment": "deepseek-v4-flash-0731-8gpu",
-  "port": 8002,
-  "benchmark_concurrency": 16,
-  "gpu_indices": [0, 1, 2, 3, 4, 5, 6, 7],
-  "selectable_gpu": false,
-  "minimum_compute_capability": 12.0,
-  "minimum_vram_mib": 90000,
-  "minimum_free_disk_gib": 520,
-  "kairyu_images": ["cpu", "gpu"],
-  "vllm_download_image_env": "VLLM_DEEPSEEK_IMAGE",
-  "images": {
-    "VLLM_DEEPSEEK_IMAGE": "vllm/vllm-openai@sha256:2e05966d05579729137714d16035f0cb3b9f0fc1586fbd009753868ee9afc68b"
+  "hardware": {
+    "gpu_count": 8,
+    "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "minimum_compute_capability": 12.0,
+    "minimum_vram_mib": 90000
   },
-  "models": [
-    {
-      "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
-      "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
-      "slug": "deepseek-v4-flash-0731",
-      "max_context_tokens": 1048576,
-      "request_timeout_s": 86400
+  "model": {
+    "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+    "tree_sha256": "90bd164d6f778d798eeaecd3517d83b87d49d300756a9217ada14a2b15203754",
+    "slug": "deepseek-v4-flash-0731",
+    "served_name": "deepseek-v4-flash-0731",
+    "max_context_tokens": 1048576,
+    "quantization": "mixed-fp4-fp8"
+  },
+  "vllm": {
+    "image": "local/vllm-openai:ds4-sm120-aa0d513027",
+    "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
+    "source_repository": "https://github.com/jasl/vllm.git",
+    "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
+    "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834",
+    "tensor_parallel_size": 8,
+    "expert_parallel_size": 8,
+    "dspark_speculative_tokens": 5
+  },
+  "webui": {
+    "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+    "port": 3000
+  },
+  "api_port": 8002,
+  "model_volume": "kairyu-models-deepseek-v4-flash-0731-8gpu",
+  "benchmarks": {
+    "serving": {
+      "prompt_tokens_approx": 8192,
+      "output_tokens": 256,
+      "concurrency": [1, 8, 16, 32],
+      "requests_per_concurrency": 32
+    },
+    "livecodebench": {
+      "release": "release_v6",
+      "problems": 1055,
+      "reasoning_effort": "max",
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "max_output_tokens": 32768,
+      "concurrency": 16,
+      "seed": 0,
+      "attempts": 1
     }
-  ]
+  }
 }

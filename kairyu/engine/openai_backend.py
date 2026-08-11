@@ -1195,6 +1195,7 @@ class OpenAICompatBackend:
         image_urls: tuple[str, ...] | None,
     ) -> dict:
         prompt = request.prompt
+        use_completions = self._uses_vllm_completions(request)
         if isinstance(prompt, MultimodalPrompt):
             if image_urls is None:
                 raise RuntimeError(
@@ -1223,6 +1224,23 @@ class OpenAICompatBackend:
         else:
             text = prompt_text(prompt)
             assert text is not None
+            if use_completions:
+                completion_args = dict(validated)
+                # These chat-only fields are already represented in Kairyu's
+                # rendered DeepSeek prompt and are invalid on /completions.
+                completion_args.pop("parallel_tool_calls", None)
+                completion_args.pop("reasoning_effort", None)
+                if completion_args.get("logprobs") is True:
+                    completion_args["logprobs"] = completion_args.pop(
+                        "top_logprobs", 0
+                    )
+                else:
+                    completion_args.pop("top_logprobs", None)
+                return {
+                    "model": self._model,
+                    "prompt": text,
+                    **completion_args,
+                }
             messages = [{"role": "user", "content": text}]
         payload: dict = {
             "model": self._model,
@@ -1238,6 +1256,14 @@ class OpenAICompatBackend:
             if request.tool_choice is not None:
                 payload["tool_choice"] = request.tool_choice
         return payload
+
+    def _uses_vllm_completions(self, request: GenerationRequest) -> bool:
+        """Send Kairyu-rendered text without a second vLLM chat template."""
+
+        return (
+            self._capabilities.upstream == "vllm"
+            and isinstance(request.prompt, TemplatedPrompt)
+        )
 
     def _encode_payload(
         self,
@@ -1320,8 +1346,10 @@ class OpenAICompatBackend:
             request,
             stream=False,
         )
+        use_completions = self._uses_vllm_completions(request)
+        endpoint = "completions" if use_completions else "chat/completions"
         response = await self._get_client().post(
-            f"{self._base_url}/chat/completions",
+            f"{self._base_url}/{endpoint}",
             content=payload,
             headers=self._json_headers(request),
             timeout=self._timeout_s,
@@ -1342,18 +1370,24 @@ class OpenAICompatBackend:
             logprob_content = (
                 None if raw_content is None else tuple(_token_logprob(item) for item in raw_content)
             )
+            text = (
+                choice.get("text", "")
+                if use_completions
+                else _message_text(choice["message"])
+            )
+            reasoning_content = None
+            if not use_completions:
+                reasoning_content = (
+                    choice["message"].get("reasoning_content")
+                    if isinstance(choice.get("message"), Mapping)
+                    and isinstance(choice["message"].get("reasoning_content"), str)
+                    else None
+                )
             completions_list.append(
                 CompletionOutput(
                     index=choice.get("index", i),
-                    text=_message_text(choice["message"]),
-                    reasoning_content=(
-                        choice["message"].get("reasoning_content")
-                        if isinstance(choice.get("message"), Mapping)
-                        and isinstance(
-                            choice["message"].get("reasoning_content"), str
-                        )
-                        else None
-                    ),
+                    text=text,
+                    reasoning_content=reasoning_content,
                     token_ids=token_ids,
                     cumulative_logprob=(
                         None
@@ -1448,9 +1482,11 @@ class OpenAICompatBackend:
             request,
             stream=True,
         )
+        use_completions = self._uses_vllm_completions(request)
+        endpoint = "completions" if use_completions else "chat/completions"
         async with self._get_client().stream(
             "POST",
-            f"{self._base_url}/chat/completions",
+            f"{self._base_url}/{endpoint}",
             content=payload,
             headers=self._json_headers(request),
             timeout=self._timeout_s,
@@ -1535,8 +1571,16 @@ class OpenAICompatBackend:
                     index = choice.get("index", 0)
                     text_parts.setdefault(index, [])
                     text_lengths.setdefault(index, 0)
-                    content = (choice.get("delta") or {}).get("content")
-                    reasoning = (choice.get("delta") or {}).get("reasoning_content")
+                    content = (
+                        choice.get("text")
+                        if use_completions
+                        else (choice.get("delta") or {}).get("content")
+                    )
+                    reasoning = (
+                        None
+                        if use_completions
+                        else (choice.get("delta") or {}).get("reasoning_content")
+                    )
                     if isinstance(reasoning, str) and reasoning:
                         reasoning_parts.setdefault(index, []).append(reasoning)
                         reasoning_lengths[index] = reasoning_lengths.get(index, 0) + len(

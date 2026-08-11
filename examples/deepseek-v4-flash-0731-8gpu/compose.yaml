@@ -1,145 +1,59 @@
-name: kairyu-deepseek-v4-8gpu
-
-x-vllm: &vllm
-  profiles: [vllm]
-  image: ${VLLM_DEEPSEEK_IMAGE}
-  ipc: host
-  environment:
-    HF_HOME: /models/.cache
-    HF_HUB_OFFLINE: "1"
-    HF_HUB_DISABLE_TELEMETRY: "1"
-    VLLM_NO_USAGE_STATS: "1"
-  volumes:
-    - models:/models:ro
-    - ../_shared/identity-chat.jinja:/etc/kairyu/identity-chat.jinja:ro
-  command:
-    - /models/deepseek-v4-flash-0731
-    - --served-model-name
-    - deepseek-v4-flash-0731
-    - --max-model-len
-    - "1048576"
-    - --trust-remote-code
-    - --kv-cache-dtype
-    - fp8
-    - --block-size
-    - "256"
-    - --enable-expert-parallel
-    - --data-parallel-size
-    - "4"
-    - --compilation-config
-    - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
-    - --attention_config.use_fp4_indexer_cache=True
-    - --tokenizer-mode
-    - deepseek_v4
-    - --tool-call-parser
-    - deepseek_v4
-    - --enable-auto-tool-choice
-    - --reasoning-parser
-    - deepseek_v4
-    - --chat-template
-    - /etc/kairyu/identity-chat.jinja
-    - --enable-prefix-caching
-  healthcheck:
-    test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)']
-    interval: 5s
-    timeout: 3s
-    retries: 1440
-
-x-native: &native
-  profiles: [kairyu]
-  image: ${KAIRYU_GPU_IMAGE}
-  ipc: host
-  command: [/etc/kairyu/config.yaml]
-  environment:
-    HF_HUB_OFFLINE: "1"
-    HF_HUB_DISABLE_TELEMETRY: "1"
-    KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_GPU_IMAGE}
-  volumes:
-    - models:/models:ro
-    - ./kairyu-replica.yaml:/etc/kairyu/config.yaml:ro
+name: kairyu-deepseek-v4-flash-0731-8gpu
 
 services:
-  vllm-a:
-    <<: *vllm
-    cpuset: ${GPU_PAIR_0_1_CPUSET},${GPU_PAIR_2_3_CPUSET}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0", "1", "2", "3"]
-              capabilities: [gpu]
-  vllm-b:
-    <<: *vllm
-    cpuset: ${GPU_PAIR_4_5_CPUSET},${GPU_PAIR_6_7_CPUSET}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["4", "5", "6", "7"]
-              capabilities: [gpu]
-
-  vllm-gateway:
-    profiles: [vllm]
-    image: ${KAIRYU_CPU_IMAGE}
-    command: [/etc/kairyu/config.yaml]
+  vllm:
+    image: ${VLLM_IMAGE:-local/vllm-openai:ds4-sm120-aa0d513027}
+    ipc: host
     environment:
-      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_CPU_IMAGE}
-    volumes:
-      - models:/models:ro
-      - ./vllm-gateway.yaml:/etc/kairyu/config.yaml:ro
-    depends_on:
-      vllm-a: {condition: service_healthy}
-      vllm-b: {condition: service_healthy}
-    ports: ["127.0.0.1:${PORT:-8002}:8000"]
-
-  kairyu-a:
-    <<: *native
-    cpuset: ${GPU_PAIR_0_1_CPUSET},${GPU_PAIR_2_3_CPUSET}
-    environment:
+      HF_HOME: /models/.cache
       HF_HUB_OFFLINE: "1"
-      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_GPU_IMAGE}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0", "1", "2", "3"]
-              capabilities: [gpu]
-  kairyu-b:
-    <<: *native
-    cpuset: ${GPU_PAIR_4_5_CPUSET},${GPU_PAIR_6_7_CPUSET}
-    environment:
-      HF_HUB_OFFLINE: "1"
-      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_GPU_IMAGE}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["4", "5", "6", "7"]
-              capabilities: [gpu]
-
-  kairyu-gateway:
-    profiles: [kairyu]
-    image: ${KAIRYU_CPU_IMAGE}
-    command: [/etc/kairyu/config.yaml]
-    environment:
-      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_CPU_IMAGE}
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      # MegaMoE currently rejects SM120 as SM100-only in the pinned build.
+      VLLM_USE_DEEP_GEMM: "0"
     volumes:
       - models:/models:ro
-      - ./kairyu-gateway.yaml:/etc/kairyu/config.yaml:ro
-    depends_on: [kairyu-a, kairyu-b]
-    ports: ["127.0.0.1:${PORT:-8002}:8000"]
-
-  kairyu-ep8:
-    <<: *native
-    profiles: [kairyu-ep8]
-    cpuset: ${GPU_PAIR_0_1_CPUSET},${GPU_PAIR_2_3_CPUSET},${GPU_PAIR_4_5_CPUSET},${GPU_PAIR_6_7_CPUSET}
-    volumes:
-      - models:/models:ro
-      - ./kairyu-ep8.yaml:/etc/kairyu/config.yaml:ro
+      - ./identity-chat.jinja:/etc/kairyu/identity-chat.jinja:ro
+    command:
+      - /models/deepseek-v4-flash-0731
+      - --served-model-name
+      - deepseek-v4-flash-0731
+      - --max-model-len
+      - "1048576"
+      - --trust-remote-code
+      - --kv-cache-dtype
+      - fp8
+      - --block-size
+      - "256"
+      - --tensor-parallel-size
+      - "8"
+      - --enable-expert-parallel
+      - --attention-config
+      - '{"use_fp4_indexer_cache":false}'
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"greedy"}'
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+      - --tokenizer-mode
+      - deepseek_v4
+      - --reasoning-parser
+      - deepseek_v4
+      - --chat-template
+      - /etc/kairyu/identity-chat.jinja
+      - --enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.95"
+      - --max-num-seqs
+      - "64"
+      - --max-num-batched-tokens
+      - "16384"
+      - --disable-uvicorn-access-log
+    healthcheck:
+      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)']
+      interval: 5s
+      timeout: 3s
+      retries: 1440
+      start_period: 30s
     deploy:
       resources:
         reservations:
@@ -147,20 +61,56 @@ services:
             - driver: nvidia
               device_ids: ["0", "1", "2", "3", "4", "5", "6", "7"]
               capabilities: [gpu]
+    restart: unless-stopped
 
-  kairyu-ep8-gateway:
-    profiles: [kairyu-ep8]
-    image: ${KAIRYU_CPU_IMAGE}
-    command: [/etc/kairyu/config.yaml]
+  kairyu:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: ${KAIRYU_IMAGE:-local/kairyu:deepseek-v4-example}
+    command: [/etc/kairyu/kairyu.yaml]
     environment:
-      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_CPU_IMAGE}
+      KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
     volumes:
       - models:/models:ro
-      - ./kairyu-ep8-gateway.yaml:/etc/kairyu/config.yaml:ro
-    depends_on: [kairyu-ep8]
-    ports: ["127.0.0.1:${PORT:-8002}:8000"]
+      - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
+      - ./deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
+    depends_on:
+      vllm: {condition: service_healthy}
+    ports:
+      - 127.0.0.1:${API_PORT:-8002}:8000
+    healthcheck:
+      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=2)']
+      interval: 5s
+      timeout: 3s
+      retries: 120
+    restart: unless-stopped
+
+  chat-ui:
+    image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01}
+    environment:
+      OPENAI_API_BASE_URL: http://kairyu:8000/v1
+      OPENAI_API_KEY: sk-local-kairyu
+      DEFAULT_MODELS: deepseek-v4-flash-0731
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":32768}'
+      ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}
+      WEBUI_AUTH: "true"
+      WEBUI_URL: ${WEBUI_URL:-http://localhost:3000}
+      WEBUI_ADMIN_EMAIL: ${WEBUI_ADMIN_EMAIL:-}
+      WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
+      WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
+      ENABLE_OLLAMA_API: "false"
+      RAG_EMBEDDING_ENGINE: ""
+    volumes:
+      - webui-data:/app/backend/data
+    depends_on:
+      kairyu: {condition: service_healthy}
+    ports:
+      - ${CHAT_UI_BIND_ADDRESS:-127.0.0.1}:${CHAT_UI_PORT:-3000}:8080
+    restart: unless-stopped
 
 volumes:
   models:
     external: true
-    name: ${MODEL_VOLUME}
+    name: ${MODEL_VOLUME:-kairyu-models-deepseek-v4-flash-0731-8gpu}
+  webui-data:

@@ -286,8 +286,8 @@ vLLM は Linux GPU ホストで `vllm` バックエンドを使う場合のみ�
 
 ```bash
 uv run pytest                                        # フルスイート, カバレッジゲート 80%
-./examples/qwen3.6-27b-1gpu/bench.sh list             # frontier ベンチマーク一覧
-./examples/qwen3.6-27b-1gpu/run.sh kairyu             # 固定済み OpenAI 互換 1 GPU 環境
+./examples/deepseek-v4-flash-0731-8gpu/bench.sh list  # ベンチマーク一覧
+./examples/deepseek-v4-flash-0731-8gpu/run.sh         # Kairyu L3 + vLLM L1 + Chat UI
 ```
 
 そのまま [単一モデル版](#5-単一モデル版--セットアップと使い方) か
