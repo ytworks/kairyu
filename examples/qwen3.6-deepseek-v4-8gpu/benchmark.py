@@ -29,13 +29,14 @@ def _nvme_root() -> Path:
 
 
 STORAGE_ROOT = _nvme_root()
+ENVIRONMENT_STORAGE = STORAGE_ROOT / "model-volumes" / SPEC["environment"]
 RESULTS_ROOT = Path(
     os.environ.get(
         "BENCH_RESULTS_ROOT",
-        STORAGE_ROOT / "bench-results/examples" / SPEC["environment"],
+        ENVIRONMENT_STORAGE / "bench-results",
     )
 )
-TERMINAL_BENCH_DATASET = STORAGE_ROOT / "bench-data/terminal-bench-2-1"
+TERMINAL_BENCH_DATASET = ENVIRONMENT_STORAGE / "bench-data/terminal-bench-2-1"
 BENCHMARKS = (
     "serving-qwen",
     "serving-deepseek",

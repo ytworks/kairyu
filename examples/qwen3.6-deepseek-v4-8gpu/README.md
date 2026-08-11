@@ -94,13 +94,13 @@ passes no unsupported sampling knob. The one-trial full result is a complete
 task-set measurement, not an official five-trial leaderboard entry.
 
 The Harbor dataset is exported once to
-`/mnt/nvme/kairyu/bench-data/terminal-bench-2-1`; Harbor job temporaries use
-`/mnt/nvme/kairyu/bench-tmp/qwen3.6-deepseek-v4-8gpu`. This avoids Harbor's
-home-directory cache for example-owned runs.
+`/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-data/terminal-bench-2-1`;
+Harbor job temporaries use the adjacent `bench-tmp/` directory. This avoids
+Harbor's home-directory cache for example-owned runs.
 
 `all` continues through every benchmark after an individual failure and always
 finalizes `run.json`. Artifacts go to
-`/mnt/nvme/kairyu/bench-results/examples/qwen3.6-deepseek-v4-8gpu/<UTC-run-id>/`.
+`/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/<UTC-run-id>/`.
 
 ## Reproducibility pins
 
