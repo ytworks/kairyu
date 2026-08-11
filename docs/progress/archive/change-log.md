@@ -11,6 +11,27 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-11 — [progress] Accuracy comparisons cite every reference score
+- What: Accuracy reports now compare local runs with the final eight-model benchmark matrix, preserve missing values, and attach source markers, dates, source class, conditions, and notes to selected and alternate scores in Markdown and JSON.
+- Refs: `kairyu/bench/{reference.py,compare.py}`; `tests/bench/test_bench_compare.py`; `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`
+
+### 2026-08-11 — [design] Accuracy reports bind reference scores to sources
+- What: The Accuracy comparison will use the supplied eight-model matrix and render a source marker, linked source metadata, measurement condition, and notes for every selected or alternate published score; missing values remain missing and old DeepSeek snapshots do not fill the 0731 column.
+- Why: A numeric comparison without cell-level provenance obscures provider, third-party, harness, and version differences and cannot be audited from the generated report.
+- Refs: `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`; `kairyu/bench/{reference.py,compare.py}`
+
+### 2026-08-11 — [progress] Full DeepSeek-V4 LiveCodeBench evidence completes
+- What: The clean-cache TP8+EP8 DSpark-5 example completed and scored all 1,055 LiveCodeBench release_v6 problems: 759 passed (71.9431%), all target timings measured, and zero request errors, retries, or unmeasured rows. The warm serving matrix reached 168.01 output tok/s at c1 with 220.10 ms median TTFT and 972.93 output tok/s at c32.
+- Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/MEASUREMENTS.md`; run IDs `livecodebench-full-tp8-ep8-dspark5-clean-sse16m-20260811` and `tp8-ep8-dspark5-warm-20260811`
+
+### 2026-08-11 — [progress] Frontier benchmark streams support 32K-token evidence
+- What: The strict benchmark SSE reader retains its fail-closed bound but raises it from 1 MiB to 16 MiB so 32K-token DeepSeek streams are not rejected solely by per-token JSON framing. The example runner now also rejects a nominally successful CLI run unless all 1,055 LiveCodeBench rows have measured, error-free evidence.
+- Refs: PR #468; `kairyu/bench/streaming.py`; `examples/deepseek-v4-flash-0731-8gpu/benchmark.py`; full-run diagnosis on 2026-08-11
+
+### 2026-08-11 — [progress] Kairyu-owned vLLM prompts bypass a second chat template
+- What: Pre-rendered `TemplatedPrompt` requests sent to a vLLM-compatible backend now use `/completions` for both buffered and streaming generation. This preserves the checkpoint's single prompt boundary, prevents DeepSeek chat mode from being wrapped into thinking mode again, and returns final answer text to Open WebUI.
+- Refs: PR #468; `kairyu/engine/openai_backend.py`; `tests/unit/test_openai_backend.py`; real DeepSeek-V4 direct and streaming probes on 2026-08-11
+
 ### 2026-08-11 — [progress] Open WebUI tool metadata no longer blocks text requests
 - What: The DeepSeek prompt template now ignores `tools` metadata emitted by OpenAI-compatible UIs and renders the ordinary text conversation; model-side function-tool execution remains outside this example. The failing Open WebUI prompt was reproduced against Kairyu.
 - Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja`; `tests/unit/test_frontier_examplectl.py`
