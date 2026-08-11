@@ -72,6 +72,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     assert devices["device_ids"] == ["4", "5", "6", "7"]
     assert _option(deepseek["command"], "--tensor-parallel-size") == "4"
     assert "--enable-expert-parallel" in deepseek["command"]
+    assert _option(deepseek["command"], "--max-num-batched-tokens") == "32768"
     assert json.loads(_option(deepseek["command"], "--speculative-config")) == {
         "method": "dspark",
         "num_speculative_tokens": 5,

@@ -190,7 +190,7 @@ services:
       - --max-num-seqs
       - "32"
       - --max-num-batched-tokens
-      - "16384"
+      - "32768"
       - --disable-uvicorn-access-log
     healthcheck: *health
     deploy:
