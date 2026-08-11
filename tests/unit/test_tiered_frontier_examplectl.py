@@ -64,6 +64,7 @@ def test_tiered_example_allocates_two_qwen_tp2_replicas_and_one_deepseek_tp4() -
         devices = service["deploy"]["resources"]["reservations"]["devices"][0]
         assert devices["device_ids"] == [str(index * 2), str(index * 2 + 1)]
         assert _option(service["command"], "--tensor-parallel-size") == "2"
+        assert "--disable-custom-all-reduce" in service["command"]
         assert _option(service["command"], "--max-num-seqs") == "32"
     deepseek = compose["services"]["deepseek"]
     devices = deepseek["deploy"]["resources"]["reservations"]["devices"][0]

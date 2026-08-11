@@ -24,6 +24,9 @@ x-qwen: &qwen
     - "262144"
     - --tensor-parallel-size
     - "2"
+    # RTX PRO 6000 PCIe pairs have no NVLink/custom-all-reduce path. NCCL is
+    # the portable vLLM transport for the TP2/TP4 comparison candidates.
+    - --disable-custom-all-reduce
     - --language-model-only
     - --dtype
     - bfloat16
