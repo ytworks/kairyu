@@ -386,8 +386,14 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         raise SystemExit("Kairyu L2 does not report the selected two-proposal MoA")
     if routing["kairyu-auto-max"].get("moa_samples") != 3:
         raise SystemExit("Kairyu L2 does not report the selected three-proposal MoA")
-    if routing[SPEC["orchestration"]["auto_max_chat_model"]].get("moa_samples") != 3:
-        raise SystemExit("Kairyu L2 does not report the MoA-3 chat synthesis candidate")
+    expected_chat_samples = SPEC["orchestration"]["auto_max_chat_moa_samples"]
+    if (
+        routing[SPEC["orchestration"]["auto_max_chat_model"]].get("moa_samples")
+        != expected_chat_samples
+    ):
+        raise SystemExit(
+            "Kairyu L2 does not report the configured chat synthesis candidate"
+        )
     for samples, model in enumerate(
         SPEC["orchestration"]["auto_max_candidate_models"], start=1
     ):
