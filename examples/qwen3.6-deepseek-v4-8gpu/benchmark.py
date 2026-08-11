@@ -21,6 +21,10 @@ BENCHMARKS = (
     "serving-deepseek",
     "serving-auto",
     "serving-auto-max",
+    "serving-auto-max-moa1",
+    "serving-auto-max-moa2",
+    "serving-auto-max-moa3",
+    "serving-auto-max-moa4",
     "orchestration",
     "terminalbench",
 )
@@ -98,6 +102,9 @@ def _validate_serving_row(
     output_tokens: int,
     *,
     expected_route: str | None = None,
+    expected_role: str = "direct",
+    expected_kind: str = "generation",
+    expected_moa_samples: int | None = None,
 ) -> int:
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -124,8 +131,13 @@ def _validate_serving_row(
             sample.get("trace", {}).get("status") == "valid"
             and any(
                 stage.get("node") == expected_route
-                and stage.get("role") == "direct"
+                and stage.get("role") == expected_role
+                and stage.get("kind") == expected_kind
                 and stage.get("status") == "success"
+                and (
+                    expected_moa_samples is None
+                    or stage.get("proposals") == expected_moa_samples
+                )
                 for stage in sample.get("trace", {}).get("stages", [])
             )
             for sample in samples
@@ -143,13 +155,17 @@ def _serving(
     tensor_parallel: int,
     replicas: int,
     expected_route: str | None = None,
+    expected_role: str = "direct",
+    expected_kind: str = "generation",
+    expected_moa_samples: int | None = None,
+    warmup_requests: int | None = None,
 ) -> int:
     config = SPEC["benchmarks"]["serving"]
     requests = int(config["requests_per_concurrency"])
     output_tokens = int(config["output_tokens"])
     run_dir.mkdir(parents=True, exist_ok=True)
     prompt_tokens = int(config["prompt_tokens_approx"])
-    warmup_requests = max(1, replicas)
+    warmup_requests = warmup_requests or max(1, replicas)
     warmup_dataset = run_dir / "warmup-8k.json"
     _serving_dataset(
         warmup_dataset,
@@ -246,6 +262,9 @@ def _serving(
                 requests,
                 output_tokens,
                 expected_route=expected_route,
+                expected_role=expected_role,
+                expected_kind=expected_kind,
+                expected_moa_samples=expected_moa_samples,
             )
         if code:
             return code
@@ -278,7 +297,37 @@ def serving_auto(run_dir: Path) -> int:
 
 
 def serving_auto_max(run_dir: Path) -> int:
-    return _serving("kairyu-auto-max", run_dir, tensor_parallel=4, replicas=4)
+    return _serving_auto_max_candidate("kairyu-auto-max", run_dir, samples=3)
+
+
+def _serving_auto_max_candidate(model: str, run_dir: Path, *, samples: int) -> int:
+    return _serving(
+        model,
+        run_dir,
+        tensor_parallel=4,
+        replicas=1,
+        expected_route="moa",
+        expected_role="moa",
+        expected_kind="synthesis",
+        expected_moa_samples=samples,
+        warmup_requests=4,
+    )
+
+
+def serving_auto_max_moa1(run_dir: Path) -> int:
+    return _serving_auto_max_candidate("kairyu-auto-max-moa1", run_dir, samples=1)
+
+
+def serving_auto_max_moa2(run_dir: Path) -> int:
+    return _serving_auto_max_candidate("kairyu-auto-max-moa2", run_dir, samples=2)
+
+
+def serving_auto_max_moa3(run_dir: Path) -> int:
+    return _serving_auto_max_candidate("kairyu-auto-max-moa3", run_dir, samples=3)
+
+
+def serving_auto_max_moa4(run_dir: Path) -> int:
+    return _serving_auto_max_candidate("kairyu-auto-max-moa4", run_dir, samples=4)
 
 
 def orchestration(run_dir: Path) -> int:
@@ -389,6 +438,10 @@ def _served_config_sha256() -> str:
         "kairyu.yaml",
         "auto.yaml",
         "auto-max.yaml",
+        "auto-max-moa1.yaml",
+        "auto-max-moa2.yaml",
+        "auto-max-moa3.yaml",
+        "auto-max-moa4.yaml",
         "router.json",
         "deepseek-thinking.jinja",
     ):
@@ -411,6 +464,7 @@ def main() -> None:
         print("serving-deepseek  Tier2 TP4+EP4 TTFT/throughput matrix")
         print("serving-auto      routed Tier1/Tier2/MoA-2 matrix")
         print("serving-auto-max  forced MoA-3 + Tier2 synthesis matrix")
+        print("serving-auto-max-moa1..4  fixed-fanout quality-candidate matrices")
         print("orchestration     fixed L2 direct/auto/auto-max latency and quality")
         print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
         print("all               every benchmark above, continuing after failures")

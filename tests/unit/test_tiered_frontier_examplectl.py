@@ -123,7 +123,14 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert deepseek.replicas[0].options["tensor_parallel_size"] == 4
     assert deepseek.replicas[0].options["expert_parallel_size"] == 4
     assert deepseek.replicas[0].options["dspark_enabled"] is True
-    assert set(deployment.orchestrators) == {"kairyu-auto", "kairyu-auto-max"}
+    assert set(deployment.orchestrators) == {
+        "kairyu-auto",
+        "kairyu-auto-max",
+        "kairyu-auto-max-moa1",
+        "kairyu-auto-max-moa2",
+        "kairyu-auto-max-moa3",
+        "kairyu-auto-max-moa4",
+    }
     assert deployment.chat_templates == {
         "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja",
         "deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja",
@@ -154,6 +161,13 @@ def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 3
     assert maximum.budget.max_steps == 4
+    for samples in range(1, 5):
+        candidate = load_spec(EXAMPLE / f"auto-max-moa{samples}.yaml")
+        assert candidate.router.target_mode == "auto-max"
+        assert candidate.workers == maximum.workers
+        assert candidate.moa_samples == samples
+        assert candidate.budget.max_steps == samples + 1
+        assert candidate.budget.max_refine_depth == 0
 
 
 def test_tiered_chat_ui_calls_kairyu_l3() -> None:
@@ -238,3 +252,33 @@ def test_tiered_all_dispatches_every_benchmark(
     assert observed == list(benchmark.BENCHMARKS)
     manifest = json.loads((tmp_path / "all-start" / "run.json").read_text())
     assert list(manifest["exit_codes"]) == list(benchmark.BENCHMARKS)
+
+
+def test_tiered_moa_candidate_serving_requires_exact_trace_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_moa_serving")
+    observed: list[tuple[str, dict]] = []
+
+    def fake_serving(model, _run_dir, **kwargs):
+        observed.append((model, kwargs))
+        return 0
+
+    monkeypatch.setattr(benchmark, "_serving", fake_serving)
+    for samples in range(1, 5):
+        function = getattr(benchmark, f"serving_auto_max_moa{samples}")
+        assert function(tmp_path / str(samples)) == 0
+
+    assert [model for model, _ in observed] == [
+        f"kairyu-auto-max-moa{samples}" for samples in range(1, 5)
+    ]
+    for samples, (_, kwargs) in enumerate(observed, start=1):
+        assert kwargs | {
+            "tensor_parallel": 4,
+            "replicas": 1,
+            "expected_route": "moa",
+            "expected_role": "moa",
+            "expected_kind": "synthesis",
+            "expected_moa_samples": samples,
+            "warmup_requests": 4,
+        } == kwargs

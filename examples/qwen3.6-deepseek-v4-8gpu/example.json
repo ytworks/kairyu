@@ -63,6 +63,12 @@
   "orchestration": {
     "auto_model": "kairyu-auto",
     "auto_max_model": "kairyu-auto-max",
+    "auto_max_candidate_models": [
+      "kairyu-auto-max-moa1",
+      "kairyu-auto-max-moa2",
+      "kairyu-auto-max-moa3",
+      "kairyu-auto-max-moa4"
+    ],
     "moa_samples": 2,
     "auto_max_moa_samples": 3,
     "internal_max_output_tokens": 1024

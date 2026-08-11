@@ -357,6 +357,7 @@ def _validate_ready(api_url: str) -> None:
         "deepseek-v4-flash-0731",
         "kairyu-auto",
         "kairyu-auto-max",
+        *SPEC["orchestration"]["auto_max_candidate_models"],
     }
     if ready.get("status") != "ready" or not required <= models:
         raise SystemExit(f"Kairyu model inventory is incomplete: {sorted(models)}")
@@ -364,6 +365,11 @@ def _validate_ready(api_url: str) -> None:
         raise SystemExit("Kairyu L2 does not report the selected two-proposal MoA")
     if routing["kairyu-auto-max"].get("moa_samples") != 3:
         raise SystemExit("Kairyu L2 does not report the selected three-proposal MoA")
+    for samples, model in enumerate(
+        SPEC["orchestration"]["auto_max_candidate_models"], start=1
+    ):
+        if routing[model].get("moa_samples") != samples:
+            raise SystemExit(f"Kairyu L2 does not report MoA-{samples} for {model}")
 
 
 def up() -> None:
@@ -396,7 +402,10 @@ def up() -> None:
     if ui_host == "0.0.0.0":
         ui_host = "127.0.0.1"
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']}")
-    print("Models:     kairyu-auto, kairyu-auto-max, qwen3.6-27b, deepseek-v4-flash-0731")
+    print(
+        "Models:     kairyu-auto, kairyu-auto-max, "
+        "kairyu-auto-max-moa1..4, qwen3.6-27b, deepseek-v4-flash-0731"
+    )
 
 
 def main() -> None:

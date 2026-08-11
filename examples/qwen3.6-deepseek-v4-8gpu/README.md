@@ -40,7 +40,9 @@ Chat UI:    http://127.0.0.1:3000
 
 Open WebUI calls only Kairyu L3 and defaults to `kairyu-auto`. Direct
 `qwen3.6-27b`, direct `deepseek-v4-flash-0731`, and `kairyu-auto-max` also
-appear in the model inventory.
+appear in the model inventory. During the selection gate,
+`kairyu-auto-max-moa1` through `kairyu-auto-max-moa4` expose matched fixed
+fan-out candidates; `kairyu-auto-max` remains the selected alias.
 
 All persistent state is bind-backed below `/mnt/nvme`:
 
@@ -64,15 +66,22 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./bench.sh serving-deepseek
 ./bench.sh serving-auto
 ./bench.sh serving-auto-max
+./bench.sh serving-auto-max-moa1
+./bench.sh serving-auto-max-moa2
+./bench.sh serving-auto-max-moa3
+./bench.sh serving-auto-max-moa4
 ./bench.sh orchestration
 ./bench.sh terminalbench
 ./bench.sh all
 ```
 
-The four `serving-*` commands independently record median/p99 TTFT, TPOT,
+The `serving-*` commands independently record median/p99 TTFT, TPOT,
 requests/s, and output tokens/s for fixed approximately 8K-token inputs and
 exactly 256 generated tokens at concurrency 1, 8, 16, and 32. Prompts have
-unique first blocks so prefix reuse cannot inflate the matrix.
+unique first blocks so prefix reuse cannot inflate the matrix. Auto requests
+require a valid L3 trace for every sample; fixed-fanout candidates additionally
+require the exact MoA proposal count and retain bounded internal input/output
+token totals in their trace evidence.
 
 `orchestration` runs Kairyu's fixed direct/auto/auto-max L2 latency and
 LiveCodeBench-quality diagnostic, including internal calls, internal tokens,

@@ -84,6 +84,14 @@ orchestrators:
     spec: /etc/kairyu/auto.yaml
   kairyu-auto-max:
     spec: /etc/kairyu/auto-max.yaml
+  kairyu-auto-max-moa1:
+    spec: /etc/kairyu/auto-max-moa1.yaml
+  kairyu-auto-max-moa2:
+    spec: /etc/kairyu/auto-max-moa2.yaml
+  kairyu-auto-max-moa3:
+    spec: /etc/kairyu/auto-max-moa3.yaml
+  kairyu-auto-max-moa4:
+    spec: /etc/kairyu/auto-max-moa4.yaml
 
 chat_templates:
   qwen3.6-27b: /etc/kairyu/qwen3.6-chat-template.jinja
