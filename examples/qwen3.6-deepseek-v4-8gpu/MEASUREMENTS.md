@@ -51,9 +51,17 @@ to an explicit failure instead of a successful empty response, but a quality
 path must be reliable before scoring. Run ID:
 `l3-auto-max-moa3-public-v2-20260812`.
 
-The performance winner is therefore **MoA-2 with ordinary DeepSeek synthesis**,
-pending the fixed four-task Terminal-Bench 2.1 quality comparison against
-direct DeepSeek.
+MoA-2 was the performance winner, but it failed the fixed four-task
+Terminal-Bench 2.1 quality gate: direct DeepSeek completed all four tasks and
+scored 2/4, while MoA-2 scored 1/3 completed tasks and its fourth task failed
+with `BadGatewayError`. Counting the failed task as zero leaves MoA-2 at 1/4,
+so it is not eligible for the full benchmark. Run ID:
+`terminalbench-selection-moa2-vs-deepseek-20260812`.
+
+The next candidate is therefore **MoA-3 with ordinary DeepSeek synthesis**.
+It is slower than MoA-2 but already completed the full c1/c8/c16/c32 L3 matrix
+with 32/32 valid responses at every concurrency. It must equal or exceed the
+same clean direct-DeepSeek 2/4 pilot before promotion to `kairyu-auto-max`.
 
 ## Tier1 topology selection
 

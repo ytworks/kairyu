@@ -49,11 +49,13 @@ Open WebUI listens on all host interfaces, requires no login, calls only
 Kairyu L3, and defaults to the quality-first `kairyu-auto-max`. Direct
 `qwen3.6-27b`, direct `deepseek-v4-flash-0731`, and `kairyu-auto-max` also
 appear in the model inventory. During the selection gate,
-`kairyu-auto-max-chat` uses two independent Qwen proposals followed by ordinary
+`kairyu-auto-max-chat` uses three independent Qwen proposals followed by ordinary
 DeepSeek synthesis. A short L3 A/B rejected a 512-token private cap because it
-did not improve c1/c8 latency beyond run noise, so this quality candidate keeps
-the default 1024-token private allowance and reduces fan-out instead. The
-caller's final-answer budget remains unchanged.
+did not improve c1/c8 latency beyond run noise. The faster MoA-2 candidate was
+then rejected after scoring 1/3 completed tasks and failing the fourth request
+in the fixed Terminal-Bench pilot, below direct DeepSeek's clean 2/4. The MoA-3
+candidate therefore keeps the quality-preserving 1024-token private allowance.
+The caller's final-answer budget remains unchanged.
 `kairyu-auto-max-moa1` through `kairyu-auto-max-moa4` expose matched fixed
 fan-out candidates; `kairyu-auto-max` remains the selected alias.
 
@@ -105,13 +107,13 @@ proposal count and retain bounded internal input/output token totals in their
 trace evidence. ChatUI has no route to the loopback L1 port and continues to
 call only Kairyu L3.
 
-The thinking MoA-3 and chat-synthesis MoA-2 paths are separate candidates until the
+The thinking MoA-3 and ordinary chat-synthesis MoA-3 paths are separate candidates until the
 same performance and quality gates select the final `kairyu-auto-max` policy.
 `orchestration` runs Kairyu's fixed direct/auto/auto-max L2 latency and
 LiveCodeBench-quality diagnostic, including internal calls, internal tokens,
 route identity, and allocated GPU-seconds. `terminalbench-pilot` runs the same
-four named Terminal-Bench 2.1 tasks on direct DeepSeek and the performance-winning
-MoA-2 chat-synthesis candidate. `terminalbench` runs the selected `kairyu-auto-max` over
+four named Terminal-Bench 2.1 tasks on direct DeepSeek and the next-fastest
+MoA-3 chat-synthesis candidate. `terminalbench` runs the selected `kairyu-auto-max` over
 all 89 tasks with terminus-2 and the published 500-turn budget. It deliberately
 passes no unsupported sampling knob. The one-trial full result is a complete
 task-set measurement, not an official five-trial leaderboard entry.

@@ -73,7 +73,7 @@
     "moa_samples": 2,
     "auto_max_moa_samples": 3,
     "internal_max_output_tokens": 1024,
-    "auto_max_chat_moa_samples": 2,
+    "auto_max_chat_moa_samples": 3,
     "auto_max_chat_internal_max_output_tokens": 1024
   },
   "webui": {

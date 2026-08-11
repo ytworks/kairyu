@@ -1,6 +1,6 @@
-# L2 quality/performance candidate: two parallel Qwen proposals followed by
-# ordinary DeepSeek synthesis. This isolates the value and cost of a hidden
-# DeepSeek thinking prefix while retaining independent candidate review.
+# L2 quality/performance candidate: three parallel Qwen proposals followed by
+# ordinary DeepSeek synthesis. MoA-2 won the performance gate but failed the
+# fixed quality pilot, so this is the next-fastest fully measured candidate.
 workers:
   - name: tier1
     backend: openai
@@ -25,9 +25,9 @@ router:
   sha256: 9b3cc02780fd5a1cdf1073557b66900e14dd59b6dd655b961f6f85bc3cb51ca5
   target_mode: auto-max
 
-moa_samples: 2
+moa_samples: 3
 internal_max_tokens: 1024
 
 budget:
-  max_steps: 3
+  max_steps: 4
   max_refine_depth: 0
