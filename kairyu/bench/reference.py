@@ -774,7 +774,7 @@ def published_models(benchmark: str) -> tuple[str, ...]:
 
 
 def comparison_published(benchmark: str) -> dict[str, float]:
-    """Return only the six requested frontier columns for one row."""
+    """Return only the eight requested frontier columns for one row."""
 
     records = FRONTIER_SCORE_RECORDS.get(benchmark, ())
     return {

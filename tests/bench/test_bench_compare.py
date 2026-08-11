@@ -286,6 +286,41 @@ def test_frontier_catalog_keeps_missing_values_and_all_model_gap_columns():
     assert "catalog `" in markdown
 
 
+def test_report_marks_each_selected_score_with_its_source():
+    comparison = build_comparison(
+        _scoreboard(**{"terminal-bench": {"status": "completed", "score": 0.8}})
+    )
+    markdown = render_comparison_markdown(comparison)
+    main_row = next(
+        line for line in markdown.splitlines() if line.startswith("| terminal-bench |")
+    )
+    assert "80.2 [S1]" in main_row
+    assert "82.7 [S4]" in main_row
+    assert "## Published reference details" in markdown
+    assert "Terminal-Bench 2.1; max effort; temperature=1; top_p=.95" in markdown
+
+
+def test_report_source_catalog_links_markers_and_dates():
+    markdown = render_comparison_markdown(
+        build_comparison(_scoreboard(**{"scicode": {"status": "completed", "score": 0.5}}))
+    )
+    assert "[S1]: https://sakana.ai/fugu-release/" in markdown
+    assert "Published 2026-07-23; retrieved 2026-08-11" in markdown
+    assert "third_party" in markdown
+    assert "AA snapshot reproduced by provider" in markdown
+
+
+def test_json_records_keep_source_traceability():
+    comparison = build_comparison(
+        _scoreboard(**{"hle": {"status": "completed", "score": 0.4}})
+    )
+    records = comparison["rows"][0]["published_records"]
+    qwen = next(record for record in records if record["model"] == "Qwen3.8 MAX")
+    assert qwen["source"] in comparison["reference"]["sources"]
+    assert qwen["source_class"] == "provider"
+    assert qwen["condition"]
+
+
 # -- runner integration --------------------------------------------------------
 
 
