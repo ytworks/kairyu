@@ -22,11 +22,6 @@ x-qwen: &qwen
     - qwen3.6-27b
     - --max-model-len
     - "262144"
-    - --tensor-parallel-size
-    - "4"
-    # RTX PRO 6000 PCIe pairs have no NVLink/custom-all-reduce path. NCCL is
-    # the portable vLLM transport for the TP2/TP4 comparison candidates.
-    - --disable-custom-all-reduce
     - --language-model-only
     - --dtype
     - bfloat16
@@ -84,7 +79,64 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["0", "1", "2", "3"]
+              device_ids: ["0"]
+              capabilities: [gpu]
+
+  qwen-1:
+    <<: *qwen
+    cpuset: ${QWEN_1_CPUSET}
+    volumes:
+      - type: bind
+        source: ${QWEN_MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - type: bind
+        source: ${QWEN_CACHE_1_PATH}
+        target: /root/.cache/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+
+  qwen-2:
+    <<: *qwen
+    cpuset: ${QWEN_2_CPUSET}
+    volumes:
+      - type: bind
+        source: ${QWEN_MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - type: bind
+        source: ${QWEN_CACHE_2_PATH}
+        target: /root/.cache/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["2"]
+              capabilities: [gpu]
+
+  qwen-3:
+    <<: *qwen
+    cpuset: ${QWEN_3_CPUSET}
+    volumes:
+      - type: bind
+        source: ${QWEN_MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - type: bind
+        source: ${QWEN_CACHE_3_PATH}
+        target: /root/.cache/vllm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["3"]
               capabilities: [gpu]
 
   deepseek:
@@ -173,6 +225,9 @@ services:
       - ../deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
     depends_on:
       qwen-0: {condition: service_healthy}
+      qwen-1: {condition: service_healthy}
+      qwen-2: {condition: service_healthy}
+      qwen-3: {condition: service_healthy}
       deepseek: {condition: service_healthy}
     ports:
       - 127.0.0.1:${API_PORT:-8003}:8000

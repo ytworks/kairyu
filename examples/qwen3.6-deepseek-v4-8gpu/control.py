@@ -184,7 +184,8 @@ def _preflight(env: dict[str, str]) -> None:
         if row["compute_capability"] < expected["minimum_compute_capability"]:
             raise SystemExit(f"GPU {index} has insufficient compute capability")
     cpusets = {index: _numa_cpuset(str(row["pci_bus_id"])) for index, row in rows.items()}
-    env["QWEN_0_CPUSET"] = ",".join(dict.fromkeys(cpusets[index] for index in range(4)))
+    for index in range(4):
+        env[f"QWEN_{index}_CPUSET"] = cpusets[index]
     env["DEEPSEEK_CPUSET"] = ",".join(dict.fromkeys(cpusets[index] for index in range(4, 8)))
     print(
         f"hardware: 8 x {expected['product']} ({rows[0]['memory_mib']} MiB each); "
