@@ -91,6 +91,10 @@ class OrchestratorSpec(BaseModel):
     budget: BudgetSpec = BudgetSpec()
     router: RouterSpec = RouterSpec()
     shared_prefix: str = ""
+    # Private planning/proposal/verification output is bounded independently
+    # from the caller's public final-answer allowance.  Keeping this in the
+    # orchestration policy makes latency/cost tuning portable across backends.
+    internal_max_tokens: int = Field(default=1024, ge=1, le=32768)
     # Zero keeps the standard Conductor route. A positive value turns the
     # multi-agent route into that many parallel MoA proposals plus synthesis.
     moa_samples: int = Field(default=0, ge=0, le=16)

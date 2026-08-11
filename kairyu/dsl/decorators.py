@@ -10,9 +10,15 @@ from kairyu.dsl.spec import BudgetSpec, OrchestratorSpec, RoleNodeSpec, WorkerSp
 class AgentPool:
     """Collects workers, roles and a budget; ``to_spec()`` freezes them."""
 
-    def __init__(self, shared_prefix: str = "", moa_samples: int = 0) -> None:
+    def __init__(
+        self,
+        shared_prefix: str = "",
+        moa_samples: int = 0,
+        internal_max_tokens: int = 1024,
+    ) -> None:
         self._shared_prefix = shared_prefix
         self._moa_samples = moa_samples
+        self._internal_max_tokens = internal_max_tokens
         self._workers: list[WorkerSpec] = []
         self._roles: list[RoleNodeSpec] = []
         self._budget = BudgetSpec()
@@ -79,5 +85,6 @@ class AgentPool:
             roles=tuple(self._roles),
             budget=self._budget,
             shared_prefix=self._shared_prefix,
+            internal_max_tokens=self._internal_max_tokens,
             moa_samples=self._moa_samples,
         )

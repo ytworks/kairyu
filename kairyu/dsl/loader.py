@@ -13,6 +13,7 @@ from kairyu.orchestration.budget import Budget
 from kairyu.orchestration.conductor import RoleSpec, chars_cost_model, zero_cost
 from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
 from kairyu.orchestration.router import RouteThresholds, RuleRouter, load_calibrated_router
+from kairyu.sampling_params import SamplingParams
 
 
 def load_spec(source: str | Path) -> OrchestratorSpec:
@@ -99,6 +100,7 @@ def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
         roles=roles,
         budget=budget,
         shared_prefix=spec.shared_prefix,
+        sampling_params=SamplingParams(max_tokens=spec.internal_max_tokens),
         cost_model=cost_model,
         moa_samples=spec.moa_samples,
         engine_descriptors=engine_descriptors,

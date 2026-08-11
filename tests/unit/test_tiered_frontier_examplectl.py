@@ -183,6 +183,7 @@ def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
     assert maximum.budget.max_steps == 4
     assert chat.router == maximum.router
     assert chat.moa_samples == 3
+    assert chat.internal_max_tokens == 512
     assert chat.budget == maximum.budget
     assert chat.workers[0] == maximum.workers[0]
     assert chat.workers[1].model == "deepseek-v4-flash-0731"

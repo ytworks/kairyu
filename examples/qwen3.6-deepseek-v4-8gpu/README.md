@@ -50,7 +50,10 @@ Kairyu L3, and defaults to the quality-first `kairyu-auto-max`. Direct
 `qwen3.6-27b`, direct `deepseek-v4-flash-0731`, and `kairyu-auto-max` also
 appear in the model inventory. During the selection gate,
 `kairyu-auto-max-chat` holds MoA-3 constant while using ordinary DeepSeek
-synthesis to measure the latency/robustness value of its hidden thinking stage.
+synthesis to measure the latency/robustness value of its hidden thinking stage;
+it caps each private Qwen proposal at 512 tokens through the generic L2
+`internal_max_tokens` policy while leaving the caller's final-answer budget
+unchanged.
 `kairyu-auto-max-moa1` through `kairyu-auto-max-moa4` expose matched fixed
 fan-out candidates; `kairyu-auto-max` remains the selected alias.
 

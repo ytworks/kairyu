@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-11. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-12. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -97,6 +97,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-12 — [amendment] L2 bounds private work independently of public output
+- What: Orchestrator YAML and decorator specs now expose a validated, backend-neutral `internal_max_tokens` policy that caps private planning/proposal/verification generations without reducing the caller's final-answer budget. The tiered MoA-3 chat-synthesis candidate pins 512 after its reliable but 1024-token L3 matrix showed excessive c16/c32 latency.
+- Why: Private proposal length is an operator latency/quality tradeoff and must remain portable policy rather than a model- or example-specific core-code branch.
+- Refs: M11 D2; `kairyu/dsl/`; `examples/qwen3.6-deepseek-v4-8gpu/auto-max-chat.yaml`; run ID `l3-auto-max-chat-moa3-public-v1-20260812`; PR #471
 
 ### 2026-08-12 — [progress] Empty reasoning finals fail closed
 - What: Completion reasoning filters now require non-empty public content after the private terminator, and the serving harness rejects sanitized SSE errors. The tiered example adds a matched MoA-3 ordinary-chat synthesis candidate after thinking MoA returned one empty public answer in the c8 L3 matrix.

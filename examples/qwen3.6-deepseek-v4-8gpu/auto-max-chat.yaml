@@ -26,6 +26,7 @@ router:
   target_mode: auto-max
 
 moa_samples: 3
+internal_max_tokens: 512
 
 budget:
   max_steps: 4

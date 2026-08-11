@@ -1,6 +1,6 @@
 # M11 Design: Fugu-Class Product Surface + Tenancy — Implemented
 
-Status: **Implemented** (2026-07-03; D4/D5/D7 amended 2026-07-31;
+Status: **Implemented** (2026-07-03; D2 amended 2026-08-12; D4/D5/D7 amended 2026-07-31;
 D1/D2/D4/D6 amended 2026-07-28; D3 amended 2026-07-27). Reviewed
 (1-reviewer panel with file/line evidence + OpenAI SDK verification,
 2026-07-03; §5 binding).
@@ -90,6 +90,12 @@ Qwen3-32B TP8 A/B rejected uncapped propagation after one Conductor stage ran
 76.44 s and a MoA proposal exceeded the upstream 60 s timeout, failing the
 fixed quality gate with 502. The bounded policy leaves the final 8192-token
 allowance unchanged and completes the same gate.
+
+**Private-work budget amendment (2026-08-12).** Declarative YAML and the
+decorator DSL expose the same validated `internal_max_tokens` policy, defaulting
+to 1024 for compatibility. Operators may shorten private stages independently
+of the public final-answer allowance; the cap remains generic orchestration
+policy and is not inferred from a model name or deployment topology.
 
 Typed final events retain cumulative `CompletionOutput` choices, so unary and
 SSE preserve every choice index, finish/stop reason, cumulative logprob, and
