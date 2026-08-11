@@ -101,6 +101,52 @@ class _PayloadPreparationFlight:
     waiters: int = 0
 
 
+@dataclass
+class _CompletionReasoningParser:
+    """Split a completion stream that starts inside private reasoning."""
+
+    end_tag: str
+    pending: str = ""
+    finished_reasoning: bool = False
+
+    def feed(self, delta: str) -> tuple[str, str]:
+        """Return ``(private_reasoning, public_content)`` for one wire delta."""
+
+        if self.finished_reasoning:
+            return "", delta
+        self.pending += delta
+        marker_at = self.pending.find(self.end_tag)
+        if marker_at >= 0:
+            reasoning = self.pending[:marker_at]
+            content = self.pending[marker_at + len(self.end_tag) :]
+            self.pending = ""
+            self.finished_reasoning = True
+            return reasoning, content
+        keep = len(self.end_tag) - 1
+        if len(self.pending) <= keep:
+            return "", ""
+        reasoning = self.pending[:-keep] if keep else self.pending
+        self.pending = self.pending[-keep:] if keep else ""
+        return reasoning, ""
+
+    def require_finished(self) -> None:
+        if not self.finished_reasoning:
+            raise RuntimeError(
+                "OpenAI-compatible completion ended before its configured "
+                "private-reasoning terminator"
+            )
+
+
+def _split_completion_reasoning(text: str, end_tag: str) -> tuple[str, str]:
+    marker_at = text.find(end_tag)
+    if marker_at < 0:
+        raise RuntimeError(
+            "OpenAI-compatible completion omitted its configured "
+            "private-reasoning terminator"
+        )
+    return text[:marker_at], text[marker_at + len(end_tag) :]
+
+
 _SHARED_PREPARED_PAYLOADS: dict[
     int,
     tuple[
@@ -515,6 +561,7 @@ class OpenAICompatBackend:
         capabilities: Mapping[str, object] | OpenAIRequestCapabilities | None = None,
         image_input_policy: Mapping[str, object] | ImageInputPolicy | None = None,
         allow_templated_chat_passthrough: bool = False,
+        completion_reasoning_end_tag: str | None = None,
         chat_tokenizer: str | None = None,
         model_revision: str | None = None,
         max_model_len: int | None = None,
@@ -540,6 +587,16 @@ class OpenAICompatBackend:
         if type(allow_templated_chat_passthrough) is not bool:
             raise TypeError("allow_templated_chat_passthrough must be a boolean")
         self._allow_templated_chat_passthrough = allow_templated_chat_passthrough
+        if completion_reasoning_end_tag is not None and (
+            not isinstance(completion_reasoning_end_tag, str)
+            or not completion_reasoning_end_tag
+            or len(completion_reasoning_end_tag) > 128
+        ):
+            raise ValueError(
+                "completion_reasoning_end_tag must be a non-empty string of at "
+                "most 128 characters or null"
+            )
+        self._completion_reasoning_end_tag = completion_reasoning_end_tag
         self.chat_tokenizer = chat_tokenizer
         self.model_revision = model_revision
         self.max_model_len = max_model_len
@@ -560,6 +617,14 @@ class OpenAICompatBackend:
             raise ValueError("request_stream_usage must be a boolean")
         self._request_stream_usage = request_stream_usage
         self._capabilities = resolve_openai_capabilities(upstream, capabilities)
+        if completion_reasoning_end_tag is not None and (
+            self._capabilities.upstream != "vllm"
+            or not allow_templated_chat_passthrough
+        ):
+            raise ValueError(
+                "completion_reasoning_end_tag requires upstream='vllm' and "
+                "allow_templated_chat_passthrough=true"
+            )
         unsupported_prompt_kinds = self._capabilities.prompt_kinds - {
             "text",
             "multimodal",
@@ -1376,7 +1441,12 @@ class OpenAICompatBackend:
                 else _message_text(choice["message"])
             )
             reasoning_content = None
-            if not use_completions:
+            if use_completions and self._completion_reasoning_end_tag is not None:
+                reasoning_content, text = _split_completion_reasoning(
+                    text,
+                    self._completion_reasoning_end_tag,
+                )
+            elif not use_completions:
                 reasoning_content = (
                     choice["message"].get("reasoning_content")
                     if isinstance(choice.get("message"), Mapping)
@@ -1506,6 +1576,7 @@ class OpenAICompatBackend:
             trace_seen = False
             trace_response_id: str | None = None
             done_seen = False
+            completion_reasoning: dict[int, _CompletionReasoningParser] = {}
             async for data_str in iter_sse_data(response):
                 data_str = data_str.strip()
                 if data_str == _SSE_DONE:
@@ -1581,6 +1652,16 @@ class OpenAICompatBackend:
                         if use_completions
                         else (choice.get("delta") or {}).get("reasoning_content")
                     )
+                    if use_completions and self._completion_reasoning_end_tag is not None:
+                        parser = completion_reasoning.setdefault(
+                            index,
+                            _CompletionReasoningParser(
+                                self._completion_reasoning_end_tag
+                            ),
+                        )
+                        reasoning, content = parser.feed(
+                            content if isinstance(content, str) else ""
+                        )
                     if isinstance(reasoning, str) and reasoning:
                         reasoning_parts.setdefault(index, []).append(reasoning)
                         reasoning_lengths[index] = reasoning_lengths.get(index, 0) + len(
@@ -1621,6 +1702,8 @@ class OpenAICompatBackend:
                     )
             if trace_seen and not done_seen:
                 raise RuntimeError("Kairyu upstream stage trace omitted SSE [DONE]")
+        for parser in completion_reasoning.values():
+            parser.require_finished()
         if not text_parts and not finish:
             raise RuntimeError(f"backend {self._base_url} streamed no choices")
         self._require_exact_multimodal_usage(request, usage)

@@ -1289,6 +1289,66 @@ async def test_moa_final_synthesis_streams_and_reports_trace():
     assert moa["detail"]["streamed"] is True
 
 
+@pytest.mark.parametrize("stream", [False, True])
+async def test_multistage_response_withholds_synthesizer_private_reasoning(stream):
+    class ReasoningBackend(MockBackend):
+        @staticmethod
+        def _with_reasoning(result):
+            return replace(
+                result,
+                completions=tuple(
+                    replace(
+                        completion,
+                        reasoning_content="private chain",
+                        reasoning_delta="private chain",
+                        reasoning_offset=0,
+                    )
+                    for completion in result.completions
+                ),
+            )
+
+        async def generate(self, request):
+            return self._with_reasoning(await super().generate(request))
+
+        async def stream(self, request):
+            async for result in super().stream(request):
+                yield self._with_reasoning(result)
+
+    proposal = MockBackend()
+    synthesis = ReasoningBackend(
+        responses={"Synthesize": "public final answer"}
+    )
+    orchestrator = _orchestrator(
+        engines={"tier1": proposal, "tier2": synthesis},
+        moa_samples=2,
+    )
+
+    if stream:
+        events = [
+            event
+            async for event in await orchestrator.run_chat(COMPLEX, stream=True)
+        ]
+        public_completions = [
+            completion
+            for event in events
+            for completion in (
+                event.completions
+                if event.kind == "delta"
+                else (event.result.completions if event.result is not None else ())
+            )
+        ]
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await orchestrator.run(COMPLEX)
+        public_completions = list(result.completions)
+
+    assert result.text == "public final answer"
+    assert public_completions
+    assert all(completion.reasoning_content is None for completion in public_completions)
+    assert all(completion.reasoning_delta is None for completion in public_completions)
+
+
 async def test_moa_stream_cancellation_closes_stream_and_releases_reservation(
     monkeypatch,
 ):

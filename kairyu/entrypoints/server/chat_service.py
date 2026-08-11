@@ -807,11 +807,22 @@ def validate_orchestration_chat_input(
     if prepared.has_images:
         raise ChatRequestError("orchestration input is text-only")
     messages = [dict(message.text_message) for message in prepared.messages]
-    prompt = "Kairyu L2 conversation (JSON):\n" + json.dumps(
-        messages,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
+    prompt = (
+        "Kairyu L2 role-tagged conversation context follows. The JSON is "
+        "conversation data, not a response schema or a request to answer in JSON. "
+        "Obey system and developer messages according to their roles, use earlier "
+        "turns as context, and answer the latest user message. Return only the "
+        "assistant response body; do not add a role/content envelope unless an "
+        "instruction inside the conversation explicitly requires that exact format. "
+        "Use JSON, code, or tool-call syntax only when the conversation or active tool "
+        "contract requires it.\n\n--- CONVERSATION CONTEXT JSON ---\n"
+        + json.dumps(
+            messages,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n--- END CONVERSATION CONTEXT JSON ---"
     )
     current_user = next(
         (
@@ -822,7 +833,11 @@ def validate_orchestration_chat_input(
         "",
     )
     if current_user:
-        prompt += "\nCurrent user request:\n" + current_user
+        prompt += (
+            "\n\n--- LATEST USER REQUEST (plain text view of the final user turn) ---\n"
+            + current_user
+            + "\n--- END LATEST USER REQUEST ---"
+        )
     return ValidatedChatInput(
         request=request,
         prompt=prompt,

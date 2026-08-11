@@ -20,7 +20,11 @@ through two parallel Qwen proposals plus DeepSeek synthesis. `kairyu-auto-max`
 always uses three Qwen proposals plus DeepSeek synthesis. The ordinary direct
 DeepSeek model remains in chat mode; the internal Tier2 alias defaults to max
 thinking so agentic requests that cannot forward a reasoning knob still use
-the quality tier.
+the quality tier. Its reasoning is private L2 state: Kairyu fail-closed splits
+the configured `</think>` boundary for both buffered and streamed vLLM
+completions, and multi-stage responses expose only the final answer. The
+role-tagged conversation JSON is context data, not a request to wrap normal UI
+answers in a JSON `role`/`content` envelope.
 
 ## Start
 

@@ -74,7 +74,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Incremental architecture-state paths for Qwen3.6 and DeepSeek V4 plus an explicit recompute diagnostic mode; DeepSeek EP2/4/8 Attention-DP and direct packed-FP4 execution are implemented, with SM120 single-kernel and two-rank NCCL smokes green
 - Device-side sampling, penalties, spec verification, page-table caching; TP step headers sleep on Gloo while fixed-layout delta payloads use the bounded NCCL model group and rare controls remain Gloo objects; structured masks stay on CUDA with only selected IDs returned to the host matcher; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
-- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; MoA keeps the original response contract distinct from untrusted candidate drafts; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
+- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
 - The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8, plus a contract-tested tiered Qwen TP1x4 + DeepSeek TP4/EP4 L2 stack entering runtime validation; its externally bound no-auth Open WebUI defaults to quality-first `kairyu-auto-max` and calls only loopback-exposed Kairyu L3, which owns pinned vLLM L1. Qwen's no-MTP/16K-batch configuration completed its final serving and LiveCodeBench-20 gates after MTP and 32K-batch candidates failed performance or stability checks, with all persistent data and compilation caches on NVMe
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-12 — [progress] L2 exposes the answer, not private synthesis work
+- What: OpenAI-compatible vLLM completion replicas can now opt into a bounded fail-closed private-reasoning terminator for buffered and streamed output; multi-stage orchestration strips reasoning metadata at its public boundary, and role-tagged conversation JSON explicitly remains context rather than a response envelope. The tiered DeepSeek thinking alias enables this generic contract.
+- Refs: `kairyu/engine/openai_backend.py`; `kairyu/orchestration/orchestrator.py`; `kairyu/entrypoints/server/chat_service.py`; `examples/qwen3.6-deepseek-v4-8gpu/`; PR #471
 
 ### 2026-08-11 — [progress] Tiered Chat UI defaults to the quality-first L3 path
 - What: The eight-GPU tiered launcher now exposes an explicitly unauthenticated Open WebUI on all host interfaces, prints its outward-facing URL, and disables persistent UI configuration so every start selects `kairyu-auto-max`; Kairyu L3 remains loopback-only and the UI has no L1/L2 bypass.

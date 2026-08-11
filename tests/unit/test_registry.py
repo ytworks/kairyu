@@ -397,6 +397,26 @@ def test_openai_multimodal_capability_and_image_policy_must_be_paired():
         )
 
 
+def test_openai_completion_reasoning_boundary_is_explicit_vllm_passthrough_only():
+    valid = {
+        "base_url": "http://vllm:8000/v1",
+        "model": "m",
+        "upstream": "vllm",
+        "allow_templated_chat_passthrough": True,
+        "completion_reasoning_end_tag": "</think>",
+    }
+    validate_backend_options("openai", valid)
+
+    for invalid in (
+        {**valid, "completion_reasoning_end_tag": ""},
+        {**valid, "completion_reasoning_end_tag": 7},
+        {**valid, "upstream": "generic"},
+        {**valid, "allow_templated_chat_passthrough": False},
+    ):
+        with pytest.raises(ValueError, match="completion_reasoning_end_tag"):
+            validate_backend_options("openai", invalid)
+
+
 @pytest.mark.parametrize(
     "policy",
     [
