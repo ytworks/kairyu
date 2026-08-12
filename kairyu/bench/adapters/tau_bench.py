@@ -52,7 +52,42 @@ _DOMAIN = "banking_knowledge"
 # Fugu enables every knowledge-retrieval tool. `alltools` is also the harness
 # default, but pinning it makes the condition part of the record.
 _RETRIEVAL_CONFIG = "alltools"
+_RETRIEVAL_CONFIG_ENV = "KAIRYU_TAU_RETRIEVAL_CONFIG"
+_RETRIEVAL_CONFIGS = frozenset(
+    {
+        "alltools",
+        "alltools-qwen",
+        "bm25",
+        "bm25_grep",
+        "bm25_reranker",
+        "bm25_reranker_grep",
+        "full_kb",
+        "golden_retrieval",
+        "grep_only",
+        "no_knowledge",
+        "openai_embeddings",
+        "openai_embeddings_grep",
+        "openai_embeddings_reranker",
+        "openai_embeddings_reranker_grep",
+        "qwen_embeddings",
+        "qwen_embeddings_grep",
+        "qwen_embeddings_reranker",
+        "qwen_embeddings_reranker_grep",
+        "terminal_use",
+        "terminal_use_write",
+    }
+)
 _RESULTS_NAME = "results.json"
+
+
+def retrieval_config() -> str:
+    """Selected official harness retrieval variant, fail-closed."""
+    value = os.environ.get(_RETRIEVAL_CONFIG_ENV, _RETRIEVAL_CONFIG).strip()
+    if value not in _RETRIEVAL_CONFIGS:
+        raise ValueError(
+            f"{_RETRIEVAL_CONFIG_ENV} must be one of: " + ", ".join(sorted(_RETRIEVAL_CONFIGS))
+        )
+    return value
 
 
 def detect_harness() -> str | None:
@@ -225,11 +260,14 @@ class TauBenchBankingAdapter:
                 "tau harness not installed (install official tau2-bench v1.x "
                 "with the knowledge extra)"
             )
-        missing_runtime = missing_alltools_runtime()
-        if missing_runtime:
-            return "tau alltools sandbox runtime unavailable; missing: " + ", ".join(
-                missing_runtime
-            )
+        try:
+            retrieval = retrieval_config()
+        except ValueError as error:
+            return str(error)
+        if retrieval in {"alltools", "alltools-qwen", "terminal_use", "terminal_use_write"}:
+            missing_runtime = missing_alltools_runtime()
+            if missing_runtime:
+                return "tau sandbox runtime unavailable; missing: " + ", ".join(missing_runtime)
         if ctx.judge is None:
             return (
                 "requires a user-simulator LLM: configure the judge endpoint "
@@ -272,13 +310,15 @@ class TauBenchBankingAdapter:
             "--domain",
             _DOMAIN,
             "--retrieval-config",
-            _RETRIEVAL_CONFIG,
+            retrieval_config(),
             "--agent-llm",
             f"openai/{target.model}",
             "--user-llm",
             f"openai/{ctx.judge.config.model}",
             "--num-trials",
             str(ctx.attempts),
+            "--max-concurrency",
+            str(ctx.concurrency),
             # a NAME under the harness data dir, not a path the caller picks
             "--save-to",
             save_to,
@@ -312,6 +352,7 @@ class TauBenchBankingAdapter:
             )
         flavor = detect_harness()
         version = harness_version(flavor)
+        retrieval = retrieval_config()
         annotations = self.info.annotations
         incomparable: tuple[str, ...] = ()
         if not is_tau3_release(flavor):
@@ -325,6 +366,12 @@ class TauBenchBankingAdapter:
                 "the tau2 banking harness stood in for tau3; scores are not "
                 "directly comparable to Fugu's τ³ number",
             )
+        if retrieval != _RETRIEVAL_CONFIG:
+            reason = (
+                f"retrieval config {retrieval!r} replaced Fugu's {_RETRIEVAL_CONFIG!r} condition"
+            )
+            annotations = annotations + (reason + "; score is NOT comparable",)
+            incomparable = (*incomparable, reason)
 
         env = dict(os.environ)
         base = normalize_base_url(target.base_url)
@@ -388,7 +435,7 @@ class TauBenchBankingAdapter:
                 "harness_version": version,
                 "harness_release": "tau3" if is_tau3_release(flavor) else "tau2",
                 "domain": _DOMAIN,
-                "retrieval_config": _RETRIEVAL_CONFIG,
+                "retrieval_config": retrieval,
                 "num_trials": ctx.attempts,
                 "user_simulator": ctx.judge.config.model,
                 "user_simulator_sampling": self._llm_args(ctx.judge.config),

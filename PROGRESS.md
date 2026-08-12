@@ -98,6 +98,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [amendment] τ³ exposes official retrieval variants
+- What: The τ³ Banking adapter keeps Fugu's `alltools` default but accepts an explicit official harness retrieval variant, records non-default variants as incomparable, only requires the shell sandbox for variants that use it, and forwards benchmark concurrency to the harness.
+- Why: The tiered example exposes chat completions but not the `text-embedding-3-large` endpoint required by `alltools`; the official offline `bm25_grep` condition can exercise all ten tasks without silently pretending score parity.
+- Refs: `kairyu/bench/adapters/tau_bench.py`; `tests/bench/test_bench_agentic_conditions.py`
+
 ### 2026-08-12 — [progress] Qwen examples accept bounded image input
 - What: Both one-GPU and tiered Qwen examples load the checkpoint's native multimodal processor, build the vision gateway dependency, preserve one validated image for upstream chat processing, and keep image synthesis out of the text-only DeepSeek orchestration path.
 - Refs: `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/{compose.yaml,kairyu.yaml,README.md}`; `tests/unit/test_{frontier,tiered_frontier}_examplectl.py`

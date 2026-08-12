@@ -443,6 +443,26 @@ def test_tau_uses_the_real_domain_and_retrieval_config(tmp_path):
     assert _flag_value(command, "--retrieval-config") == "alltools"
 
 
+def test_tau_allows_a_disclosed_official_retrieval_variant(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAIRYU_TAU_RETRIEVAL_CONFIG", "bm25_grep")
+    ctx = _ctx(tmp_path, judge=_judge())
+    adapter = TauBenchBankingAdapter()
+    command = adapter._command("tau2", _target(), ctx, "run-name")
+
+    assert _flag_value(command, "--retrieval-config") == "bm25_grep"
+    assert adapter._preconditions(_target(), ctx) is None
+
+
+def test_tau_rejects_unknown_retrieval_variant(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAIRYU_TAU_RETRIEVAL_CONFIG", "invented")
+    reason = TauBenchBankingAdapter()._preconditions(
+        _target(), _ctx(tmp_path, judge=_judge())
+    )
+
+    assert reason is not None
+    assert "KAIRYU_TAU_RETRIEVAL_CONFIG must be one of" in reason
+
+
 def test_tau_addresses_results_by_name_not_path(tmp_path):
     ctx = _ctx(tmp_path, judge=_judge())
     command = TauBenchBankingAdapter()._command("tau2", _target(), ctx, "run-name")
@@ -456,6 +476,7 @@ def test_tau_passes_num_trials(tmp_path, attempts):
     ctx = _ctx(tmp_path, judge=_judge(), attempts=attempts)
     command = TauBenchBankingAdapter()._command("tau2", _target(), ctx, "n")
     assert _flag_value(command, "--num-trials") == str(attempts)
+    assert _flag_value(command, "--max-concurrency") == str(ctx.concurrency)
 
 
 def test_tau_forwards_user_simulator_reasoning_effort(tmp_path):
