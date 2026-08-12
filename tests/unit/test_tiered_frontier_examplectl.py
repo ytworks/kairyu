@@ -332,7 +332,7 @@ def test_tiered_swebench_pro_command_is_full_dataset(
     assert _option(observed, "--only") == "swe-bench-pro"
     assert _option(observed, "--model") == "kairyu-auto-max"
     assert _option(observed, "--attempts") == "1"
-    assert _option(observed, "--concurrency") == "16"
+    assert _option(observed, "--concurrency") == "8"
     assert _option(observed, "--max-output-tokens") == "32768"
     assert _option(observed, "--cache-dir") == str(benchmark.AGENTIC_CACHE)
     assert "--limit" not in observed

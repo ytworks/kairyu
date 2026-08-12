@@ -120,9 +120,11 @@ route identity, and allocated GPU-seconds. `terminalbench-pilot` runs the same
 four named Terminal-Bench 2.1 tasks on direct DeepSeek and the quality-first
 thinking-MoA3 candidate. `swebench-pro` runs the selected `kairyu-auto-max` over
 all 731 pinned public tasks with mini-swe-agent's bundled text-action scaffold,
-a 1,000-step budget, 16 workers, and the pinned official ScaleAI evaluator. Its
+a 1,000-step budget, 8 workers, and the pinned official ScaleAI evaluator. Its
 dataset, evaluator, predictions, trajectories, Docker logs, and zero-inclusive
 official verdicts remain below the NVMe benchmark cache and result directory.
+Task images pulled by the run are evicted after use so the full suite does not
+grow Docker storage in proportion to all 731 tasks; preloaded images are kept.
 `terminalbench` runs the selected `kairyu-auto-max` over
 all 89 tasks with terminus-2 and the published 500-turn budget. It deliberately
 passes no unsupported sampling knob. The one-trial full run launched all 89
