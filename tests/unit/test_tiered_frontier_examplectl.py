@@ -98,6 +98,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         devices = service["deploy"]["resources"]["reservations"]["devices"][0]
         assert devices["device_ids"] == [str(index)]
         assert "--tensor-parallel-size" not in service["command"]
+        assert "--language-model-only" not in service["command"]
         assert _option(service["command"], "--max-num-seqs") == "32"
         assert service["volumes"][-1]["target"] == "/root/.cache"
         assert service["environment"] | {
@@ -154,6 +155,14 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         validate_backend_options(replica.backend, replica.options)
         assert replica.options["tensor_parallel_size"] == 1
         assert replica.options["upstream"] == "vllm"
+        assert replica.options["capabilities"] == {
+            "allow_prompt_kinds": ["text", "multimodal"]
+        }
+        assert replica.options["image_input_policy"]["max_images"] == 4
+        assert (
+            replica.options["image_input_policy"]["max_processed_prompt_tokens"]
+            == 32768
+        )
     deepseek = deployment.pools["deepseek-v4-flash-0731"]
     assert len(deepseek.replicas) == 1
     validate_backend_options(deepseek.replicas[0].backend, deepseek.replicas[0].options)
@@ -199,11 +208,13 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     assert config["orchestration"]["internal_max_output_tokens"] == 2048
     assert config["orchestration"]["product_policy"] == "verifier-gated-role-dag"
     assert config["orchestration"]["product_normal_calls"] == 7
-    assert config["orchestration"]["product_max_calls"] == 11
+    assert config["orchestration"]["product_vision_normal_calls"] == 8
+    assert config["orchestration"]["product_max_calls"] == 12
     assert config["orchestration"]["product_max_refinements"] == 2
-    assert maximum.budget.max_steps == 11
+    assert maximum.budget.max_steps == 12
     assert maximum.budget.max_refine_depth == 2
     assert [role.name for role in maximum.roles] == [
+        "vision_grounding",
         "planner",
         "proposal_a",
         "proposal_b",
@@ -214,8 +225,16 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     ]
     verifier = next(role for role in maximum.roles if role.name == "verifier")
     publisher = next(role for role in maximum.roles if role.name == "publisher")
+    vision = next(role for role in maximum.roles if role.name == "vision_grounding")
+    assert vision.worker == "tier1"
+    assert vision.role_type == "vision"
+    assert vision.depends_on == ()
     assert verifier.verifies == "draft_synthesis"
-    assert publisher.depends_on == ("draft_synthesis", "verifier")
+    assert publisher.depends_on == (
+        "vision_grounding",
+        "draft_synthesis",
+        "verifier",
+    )
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 

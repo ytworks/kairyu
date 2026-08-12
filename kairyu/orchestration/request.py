@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from kairyu.engine.prompt import MultimodalPrompt
 from kairyu.sampling_params import (
     PARALLEL_TOOL_CALLS_EXTRA_ARG,
     SamplingParams,
@@ -32,6 +33,7 @@ class OrchestrationRequest:
     parallel_tool_calls: bool | None = None
     tool_call_protocol: str = "generic"
     reasoning_effort: str | None = None
+    multimodal_prompt: MultimodalPrompt | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))

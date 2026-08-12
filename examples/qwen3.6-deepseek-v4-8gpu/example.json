@@ -65,7 +65,8 @@
     "internal_max_output_tokens": 2048,
     "product_policy": "verifier-gated-role-dag",
     "product_normal_calls": 7,
-    "product_max_calls": 11,
+    "product_vision_normal_calls": 8,
+    "product_max_calls": 12,
     "product_max_refinements": 2,
     "product_exposes_intermediate_outputs": true
   },

@@ -382,6 +382,7 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         raise SystemExit(f"Kairyu product routing inventory is not isolated: {sorted(routing)}")
     policy = routing[product_model]
     expected_roles = [
+        "vision_grounding",
         "planner",
         "proposal_a",
         "proposal_b",
@@ -391,11 +392,11 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         "publisher",
     ]
     if [role.get("name") for role in policy.get("roles", ())] != expected_roles:
-        raise SystemExit("Kairyu L2 does not report the required seven-role product DAG")
+        raise SystemExit("Kairyu L2 does not report the required eight-role product DAG")
     if policy.get("moa_samples") != 0:
         raise SystemExit("Kairyu product policy must use the explicit DAG, not MoA")
-    if policy.get("budget", {}).get("max_steps") != 11:
-        raise SystemExit("Kairyu product policy max_steps must be 11")
+    if policy.get("budget", {}).get("max_steps") != 12:
+        raise SystemExit("Kairyu product policy max_steps must be 12")
     if policy.get("budget", {}).get("max_refine_depth") != 2:
         raise SystemExit("Kairyu product policy max_refine_depth must be 2")
     if policy.get("expose_intermediate_outputs") is not True:

@@ -2240,6 +2240,9 @@ def create_app(
                 orchestration_request = OrchestrationRequest(
                     prompt=prompt,
                     sampling_params=sampling,
+                    multimodal_prompt=(
+                        validated_input.orchestration_multimodal_prompt
+                    ),
                     tools=tuple(request.tools or ()),
                     tool_choice=request.tool_choice,
                     parallel_tool_calls=request.parallel_tool_calls,

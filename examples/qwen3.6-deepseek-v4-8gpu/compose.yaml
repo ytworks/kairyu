@@ -27,7 +27,6 @@ x-qwen: &qwen
     - qwen3.6-27b
     - --max-model-len
     - "262144"
-    - --language-model-only
     - --dtype
     - bfloat16
     - --kv-cache-dtype

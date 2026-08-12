@@ -387,6 +387,38 @@ def test_multimodal_chat_bypasses_strict_local_text_template_policy():
     assert isinstance(validated.prompt, MultimodalPrompt)
 
 
+def test_multimodal_orchestration_retains_images_and_a_text_routing_view():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "auto",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "read this chart "},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,opaque",
+                                "detail": "high",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    validated = validate_orchestration_chat_input(request)
+
+    assert isinstance(validated.prompt, str)
+    assert "read this chart <image:0>" in validated.prompt
+    multimodal = validated.orchestration_multimodal_prompt
+    assert isinstance(multimodal, MultimodalPrompt)
+    assert multimodal.items[0].data == "data:image/png;base64,opaque"
+    assert multimodal.messages[0].content[1].detail == "high"
+
+
 def test_text_preparation_avoids_message_dump_and_visits_parts_once(monkeypatch):
     request = ChatCompletionRequest.model_validate(
         {

@@ -21,7 +21,16 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
 )
-from kairyu.engine.prompt import TemplatedPrompt, prompt_kind, prompt_text
+from kairyu.engine.prompt import (
+    MultimodalMessage,
+    MultimodalMessagePart,
+    MultimodalPrompt,
+    PromptInput,
+    TemplatedPrompt,
+    TextPrompt,
+    prompt_kind,
+    prompt_text,
+)
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
 from kairyu.orchestration.trace import (
@@ -313,6 +322,11 @@ class Conductor:
             for dep in role.depends_on:
                 if dep not in self._by_name:
                     raise ValueError(f"role {role.name!r} has unknown dependency {dep!r}")
+            if role.role_type == "vision" and role.depends_on:
+                raise ValueError(
+                    f"vision role {role.name!r} must be dependency-free so it can "
+                    "ground the original multimodal input"
+                )
             if role.role_type == "verifier":
                 if role.verifies is None or role.verifies not in self._by_name:
                     raise ValueError(f"verifier {role.name!r} must set verifies=<existing role>")
@@ -350,6 +364,66 @@ class Conductor:
         body = template.format_map(_SafeDict(query=query, **outputs))
         return f"{self._shared_prefix}{body}"
 
+    @staticmethod
+    def _multimodal_role_prompt(
+        source: MultimodalPrompt,
+        rendered_role_prompt: str,
+    ) -> MultimodalPrompt:
+        """Append one L2 role instruction without flattening the image layout."""
+
+        instruction = MultimodalMessagePart(
+            "text",
+            text=f"\n\n--- KAIRYU VISION ROLE ---\n{rendered_role_prompt}",
+        )
+        messages = list(source.messages)
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].role == "user":
+                message = messages[index]
+                messages[index] = replace(
+                    message,
+                    content=(*message.content, instruction),
+                )
+                break
+        else:
+            content = (
+                MultimodalMessagePart("text", text=rendered_role_prompt),
+                *(
+                    MultimodalMessagePart("item", item_index=index)
+                    for index in range(len(source.items))
+                ),
+            )
+            messages.append(MultimodalMessage("user", content))
+        return MultimodalPrompt(
+            base=TextPrompt(rendered_role_prompt),
+            items=source.items,
+            messages=tuple(messages),
+        )
+
+    def _role_prompt(
+        self,
+        spec: RoleSpec,
+        query: str,
+        outputs: Mapping[str, str],
+        multimodal_prompt: MultimodalPrompt | None,
+    ) -> PromptInput:
+        rendered = self._render(spec.prompt, query, outputs)
+        if spec.role_type != "vision":
+            return rendered
+        if multimodal_prompt is None:
+            raise ValueError("vision role requires multimodal orchestration input")
+        return self._multimodal_role_prompt(multimodal_prompt, rendered)
+
+    def _active_units(
+        self,
+        multimodal_prompt: MultimodalPrompt | None,
+    ) -> tuple[RoleSpec, ...]:
+        if multimodal_prompt is None:
+            return tuple(role for role in self._units if role.role_type != "vision")
+        vision = tuple(role for role in self._units if role.role_type == "vision")
+        if not vision:
+            raise ValueError("multimodal orchestration requires a vision role")
+        return self._units
+
     def _cache_hint(self, session: str) -> CacheHint:
         return CacheHint(
             session_id=session,
@@ -367,6 +441,7 @@ class Conductor:
         query: str,
         *,
         request_id_suffix: str,
+        multimodal_prompt: MultimodalPrompt | None = None,
     ) -> tuple[tuple[RoleSpec, GenerationRequest], ...]:
         """Build the exact dependency-free role intents used by the first wave.
 
@@ -380,11 +455,13 @@ class Conductor:
             raise ValueError(
                 "Conductor cannot derive role prompts from a tokenizer-owned "
                 "pre-rendered chat prompt"
-            )
+        )
         session = self.preflight_session(request_id_suffix)
         requests: list[tuple[RoleSpec, GenerationRequest]] = []
-        for spec in self._units:
-            if self._unit_deps[spec.name]:
+        active_units = self._active_units(multimodal_prompt)
+        active_names = {role.name for role in active_units}
+        for spec in active_units:
+            if self._unit_deps[spec.name] & active_names:
                 continue
             (
                 sampling_params,
@@ -401,7 +478,12 @@ class Conductor:
                     spec,
                     GenerationRequest(
                         request_id=f"preflight-role-{spec.name}-{request_id_suffix}",
-                        prompt=self._render(spec.prompt, query, {}),
+                        prompt=self._role_prompt(
+                            spec,
+                            query,
+                            {},
+                            multimodal_prompt,
+                        ),
                         sampling_params=sampling_params,
                         cache_hint=self._cache_hint(session),
                         tools=tools,
@@ -419,7 +501,7 @@ class Conductor:
         run: _RunState,
         session: str,
         spec: RoleSpec,
-        prompt: str,
+        prompt: PromptInput,
         attempt: int,
     ) -> GenerationRequest:
         """Consume an exact first-wave preflight request when one is bound."""
@@ -461,16 +543,11 @@ class Conductor:
     def _prepared_initial_prompt(
         run: _RunState,
         spec: RoleSpec,
-    ) -> str | None:
+    ) -> PromptInput | None:
         prepared = run.prepared_initial_requests.get(spec.name)
         if prepared is None:
             return None
-        text = prompt_text(prepared.prompt)
-        if text is None:
-            raise RuntimeError(
-                f"prepared initial role request {spec.name!r} is not text"
-            )
-        return text
+        return prepared.prompt
 
     @staticmethod
     def _refinement_prompt(
@@ -590,7 +667,7 @@ class Conductor:
         session: str,
         node: str,
         worker: str,
-        prompt: str,
+        prompt: PromptInput,
         attempt: int,
         *,
         spec: RoleSpec | None = None,
@@ -688,7 +765,14 @@ class Conductor:
             ),
         )
 
-    async def _run_unit(self, run: _RunState, session: str, query: str, spec: RoleSpec) -> None:
+    async def _run_unit(
+        self,
+        run: _RunState,
+        session: str,
+        query: str,
+        spec: RoleSpec,
+        multimodal_prompt: MultimodalPrompt | None = None,
+    ) -> None:
         if run.budget.is_exhausted:
             run.trace.append(
                 self._trace_event(
@@ -704,12 +788,21 @@ class Conductor:
             return
         base_prompt = self._prepared_initial_prompt(run, spec)
         if base_prompt is None:
-            base_prompt = await run_prompt_work(
-                self._render,
-                spec.prompt,
-                query,
-                dict(run.outputs),
-            )
+            if spec.role_type == "vision":
+                base_prompt = await run_prompt_work(
+                    self._role_prompt,
+                    spec,
+                    query,
+                    dict(run.outputs),
+                    multimodal_prompt,
+                )
+            else:
+                base_prompt = await run_prompt_work(
+                    self._render,
+                    spec.prompt,
+                    query,
+                    dict(run.outputs),
+                )
         verifier = self._verifier_for.get(spec.name)
         prompt = base_prompt
         depth = 0
@@ -824,14 +917,33 @@ class Conductor:
         run.completion_order.append(spec.name)
 
     async def _run_unit_safe(
-        self, run: _RunState, session: str, query: str, spec: RoleSpec
+        self,
+        run: _RunState,
+        session: str,
+        query: str,
+        spec: RoleSpec,
+        multimodal_prompt: MultimodalPrompt | None = None,
     ) -> None:
         # A transient backend failure on one unit must not destroy the whole
         # multi-agent run: record it and let the Conductor return the best
         # result produced so far (O4). Sibling units keep their completed work.
         try:
-            await self._run_unit(run, session, query, spec)
+            await self._run_unit(
+                run,
+                session,
+                query,
+                spec,
+                multimodal_prompt,
+            )
+            if (
+                spec.role_type == "vision"
+                and multimodal_prompt is not None
+                and spec.name not in run.outputs
+            ):
+                raise RuntimeError("required vision role produced no grounded output")
         except _ObservedGenerationError:
+            if spec.role_type == "vision" and multimodal_prompt is not None:
+                raise
             pass
         except Exception as error:
             run.trace.append(
@@ -845,6 +957,8 @@ class Conductor:
                     error=TraceError(type=type(error).__name__),
                 )
             )
+            if spec.role_type == "vision" and multimodal_prompt is not None:
+                raise
 
     def _final_text(self, run: _RunState) -> str:
         unit = self._final_output_unit(run)
@@ -882,12 +996,29 @@ class Conductor:
         query: str,
         *,
         exclude: frozenset[str] = frozenset(),
+        multimodal_prompt: MultimodalPrompt | None = None,
     ) -> None:
-        pending = {name: set(deps) for name, deps in self._unit_deps.items() if name not in exclude}
+        active_names = {
+            role.name for role in self._active_units(multimodal_prompt)
+        } - set(exclude)
+        pending = {
+            name: set(deps) & active_names
+            for name, deps in self._unit_deps.items()
+            if name in active_names
+        }
         while pending:
             ready = [name for name, deps in pending.items() if not deps]
             await asyncio.gather(
-                *(self._run_unit_safe(run, session, query, self._by_name[name]) for name in ready)
+                *(
+                    self._run_unit_safe(
+                        run,
+                        session,
+                        query,
+                        self._by_name[name],
+                        multimodal_prompt,
+                    )
+                    for name in ready
+                )
             )
             for name in ready:
                 del pending[name]
@@ -900,6 +1031,7 @@ class Conductor:
         session: str,
         query: str,
         spec: RoleSpec,
+        multimodal_prompt: MultimodalPrompt | None = None,
     ) -> AsyncIterator[ConductorEvent]:
         if run.budget.is_exhausted:
             run.trace.append(
@@ -917,12 +1049,21 @@ class Conductor:
 
         prompt = self._prepared_initial_prompt(run, spec)
         if prompt is None:
-            prompt = await run_prompt_work(
-                self._render,
-                spec.prompt,
-                query,
-                dict(run.outputs),
-            )
+            if spec.role_type == "vision":
+                prompt = await run_prompt_work(
+                    self._role_prompt,
+                    spec,
+                    query,
+                    dict(run.outputs),
+                    multimodal_prompt,
+                )
+            else:
+                prompt = await run_prompt_work(
+                    self._render,
+                    spec.prompt,
+                    query,
+                    dict(run.outputs),
+                )
         backend = self._workers[spec.worker]
         request = self._generation_request(run, session, spec, prompt, 0)
         queued_at = utc_now_iso()
@@ -1095,6 +1236,7 @@ class Conductor:
         *,
         session: str | None = None,
         prepared_initial_requests: Mapping[str, GenerationRequest] | None = None,
+        multimodal_prompt: MultimodalPrompt | None = None,
     ) -> ConductorResult:
         if isinstance(query, TemplatedPrompt):
             raise ValueError(
@@ -1108,7 +1250,12 @@ class Conductor:
             prepared_initial_requests=dict(prepared_initial_requests or {}),
         )
         session = session or uuid.uuid4().hex[:12]
-        await self._run_pending(run, session, query)
+        await self._run_pending(
+            run,
+            session,
+            query,
+            multimodal_prompt=multimodal_prompt,
+        )
         return ConductorResult(
             final_text=self._final_text(run),
             completions=run.final_completions,
@@ -1127,6 +1274,7 @@ class Conductor:
         *,
         session: str | None = None,
         prepared_initial_requests: Mapping[str, GenerationRequest] | None = None,
+        multimodal_prompt: MultimodalPrompt | None = None,
     ) -> AsyncIterator[ConductorEvent]:
         """Run pre-final DAG waves, then pull final backend deltas directly.
 
@@ -1154,6 +1302,7 @@ class Conductor:
             session,
             query,
             exclude=frozenset({final.name}),
+            multimodal_prompt=multimodal_prompt,
         )
         for output in run.intermediate_outputs:
             yield ConductorEvent(
@@ -1162,7 +1311,13 @@ class Conductor:
             )
         emitted_text = ""
         try:
-            async for event in self._stream_unit(run, session, query, final):
+            async for event in self._stream_unit(
+                run,
+                session,
+                query,
+                final,
+                multimodal_prompt,
+            ):
                 if event.kind == "delta":
                     emitted_text += event.text
                 yield event

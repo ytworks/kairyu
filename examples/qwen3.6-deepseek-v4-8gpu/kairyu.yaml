@@ -16,6 +16,17 @@ pools:
           api_key_env: null
           timeout_s: 86400
           upstream: vllm
+          capabilities:
+            allow_prompt_kinds: [text, multimodal]
+          image_input_policy:
+            max_images: 4
+            max_image_bytes: 8388608
+            max_total_image_bytes: 16777216
+            max_image_pixels: 16777216
+            max_total_image_pixels: 16777216
+            max_image_dimension: 8192
+            max_image_aspect_ratio: 200
+            max_processed_prompt_tokens: 32768
           allow_templated_chat_passthrough: true
           chat_tokenizer: /models/qwen/qwen3.6-27b-fp8
           model_revision: e89b16ebf1988b3d6befa7de50abc2d76f26eb09

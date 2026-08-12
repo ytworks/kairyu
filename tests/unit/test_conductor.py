@@ -12,7 +12,15 @@ from kairyu.engine.backend import (
     GenerationUsage,
 )
 from kairyu.engine.mock import MockBackend
-from kairyu.engine.prompt import TemplatedPrompt
+from kairyu.engine.prompt import (
+    MultimodalItem,
+    MultimodalMessage,
+    MultimodalMessagePart,
+    MultimodalPrompt,
+    PromptInput,
+    TemplatedPrompt,
+    TextPrompt,
+)
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, RoleSpec
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
@@ -25,7 +33,7 @@ class ScriptedBackend:
 
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
-        self.prompts_seen: list[str] = []
+        self.prompts_seen: list[PromptInput] = []
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         self.prompts_seen.append(request.prompt)
@@ -190,6 +198,160 @@ def _linear_roles() -> tuple[RoleSpec, ...]:
             depends_on=("planner",),
         ),
     )
+
+
+def _image_prompt() -> MultimodalPrompt:
+    return MultimodalPrompt(
+        base=TextPrompt("user: inspect <image:0>"),
+        items=(
+            MultimodalItem(
+                modality="image",
+                encoding="uri",
+                data="data:image/png;base64,opaque",
+            ),
+        ),
+        messages=(
+            MultimodalMessage(
+                "user",
+                (
+                    MultimodalMessagePart("text", text="inspect "),
+                    MultimodalMessagePart("item", item_index=0),
+                ),
+            ),
+        ),
+    )
+
+
+async def test_multimodal_input_runs_vision_role_then_text_verifier_and_publisher():
+    backend = ScriptedBackend(
+        ["red square", "draft from red square", "PASS grounded", "final red"]
+    )
+    roles = (
+        RoleSpec(
+            name="vision",
+            worker="w",
+            role_type="vision",
+            prompt="ground the image for {query}",
+        ),
+        RoleSpec(
+            name="draft",
+            worker="w",
+            prompt="draft using {vision}",
+            depends_on=("vision",),
+        ),
+        RoleSpec(
+            name="verify",
+            worker="w",
+            role_type="verifier",
+            verifies="draft",
+            prompt="verify {draft} against {vision}",
+            depends_on=("draft", "vision"),
+        ),
+        RoleSpec(
+            name="publisher",
+            worker="w",
+            role_type="publisher",
+            prompt="publish {draft}; {verify}; evidence {vision}",
+            depends_on=("vision", "draft", "verify"),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+
+    result = await conductor.run(
+        "chart question",
+        multimodal_prompt=_image_prompt(),
+    )
+
+    assert result.final_text == "final red"
+    assert [event.node for event in result.trace] == [
+        "vision",
+        "draft",
+        "verify",
+        "publisher",
+    ]
+    vision_prompt = backend.prompts_seen[0]
+    assert isinstance(vision_prompt, MultimodalPrompt)
+    assert vision_prompt.items == _image_prompt().items
+    assert vision_prompt.messages[-1].content[-1].text is not None
+    assert "KAIRYU VISION ROLE" in vision_prompt.messages[-1].content[-1].text
+    assert backend.prompts_seen[1] == "draft using red square"
+    assert backend.prompts_seen[2] == (
+        "verify draft from red square against red square"
+    )
+    assert backend.prompts_seen[3] == (
+        "publish draft from red square; PASS grounded; evidence red square"
+    )
+
+
+async def test_text_input_skips_conditional_vision_role():
+    backend = ScriptedBackend(["text draft"])
+    roles = (
+        RoleSpec(
+            name="vision",
+            worker="w",
+            role_type="vision",
+            prompt="ground image",
+        ),
+        RoleSpec(
+            name="draft",
+            worker="w",
+            prompt="answer {query} {vision}",
+            depends_on=("vision",),
+        ),
+    )
+
+    result = await Conductor(roles=roles, workers={"w": backend}).run("plain")
+
+    assert result.final_text == "text draft"
+    assert backend.prompts_seen == ["answer plain "]
+
+
+async def test_multimodal_input_fails_closed_when_vision_role_fails():
+    roles = (
+        RoleSpec(
+            name="vision",
+            worker="w",
+            role_type="vision",
+            prompt="ground image",
+        ),
+        RoleSpec(
+            name="draft",
+            worker="w",
+            prompt="answer from {vision}",
+            depends_on=("vision",),
+        ),
+    )
+
+    with pytest.raises(conductor_module._ObservedGenerationError):
+        await Conductor(
+            roles=roles,
+            workers={"w": ScriptedBackend([])},
+        ).run("image task", multimodal_prompt=_image_prompt())
+
+
+def test_multimodal_input_requires_a_dependency_free_vision_role():
+    with pytest.raises(ValueError, match="vision role.*dependency-free"):
+        Conductor(
+            roles=(
+                RoleSpec(name="root", worker="w", prompt="root"),
+                RoleSpec(
+                    name="vision",
+                    worker="w",
+                    role_type="vision",
+                    prompt="vision",
+                    depends_on=("root",),
+                ),
+            ),
+            workers={"w": MockBackend()},
+        )
+
+    conductor = Conductor(roles=_linear_roles(), workers={"w": MockBackend()})
+    with pytest.raises(ValueError, match="requires a vision role"):
+        conductor.initial_requests(
+            "image task",
+            request_id_suffix="test",
+            multimodal_prompt=_image_prompt(),
+        )
 
 
 def test_cache_hint_carries_only_an_exact_complete_shared_root() -> None:

@@ -128,6 +128,7 @@ class ValidatedChatInput:
     include_usage: bool
     tool_call_protocol: ToolCallProtocol = ToolCallProtocol.GENERIC
     parallel_tool_calls: bool | None = None
+    orchestration_multimodal_prompt: MultimodalPrompt | None = None
 
 
 @dataclass(frozen=True)
@@ -804,9 +805,17 @@ def validate_orchestration_chat_input(
         raise ChatRequestError("top_logprobs requires logprobs to be true")
     _validate_response_format(request.response_format)
     prepared = _prepare_chat_messages(request, validate_message_fields=True)
-    if prepared.has_images:
-        raise ChatRequestError("orchestration input is text-only")
-    messages = [dict(message.text_message) for message in prepared.messages]
+    multimodal_prompt = (
+        _render_multimodal_prompt(request, None, prepared)
+        if prepared.has_images
+        else None
+    )
+    messages: list[dict[str, object]] = []
+    for prepared_message in prepared.messages:
+        message = dict(prepared_message.text_message)
+        if prepared_message.has_images:
+            message["content"] = prepared_message.display_content
+        messages.append(message)
     prompt = (
         "Kairyu L2 role-tagged conversation context follows. The JSON is "
         "conversation data, not a response schema or a request to answer in JSON. "
@@ -846,6 +855,7 @@ def validate_orchestration_chat_input(
         parallel_tool_calls=_resolved_parallel_tool_calls(request),
         tools_in_prompt=False,
         include_usage=bool(request.stream_options and request.stream_options.include_usage),
+        orchestration_multimodal_prompt=multimodal_prompt,
     )
 
 

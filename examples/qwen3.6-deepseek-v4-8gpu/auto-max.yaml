@@ -14,12 +14,24 @@ router:
   target_mode: auto-max
 
 roles:
+  - name: vision_grounding
+    worker: tier1
+    role_type: vision
+    prompt: |
+      [vision_grounding] Inspect every supplied image and extract the visual
+      evidence needed to answer the user's request. Be precise about labels,
+      values, trends, geometry, and uncertainty. Return grounded observations
+      only; do not invent details that are not visible.
+      Task: {query}
+
   - name: planner
     worker: tier2
     role_type: planner
+    depends_on: [vision_grounding]
     prompt: |
       [planner] Produce a compact plan for the user's task.
       Task: {query}
+      Visual grounding (empty when no image was supplied): {vision_grounding}
 
   - name: proposal_a
     worker: tier1
@@ -51,10 +63,11 @@ roles:
   - name: draft_synthesis
     worker: tier2
     role_type: synthesizer
-    depends_on: [proposal_a, proposal_b, proposal_c]
+    depends_on: [vision_grounding, proposal_a, proposal_b, proposal_c]
     prompt: |
       [draft_synthesis] Synthesize the strongest accurate draft.
       Task: {query}
+      Visual grounding (empty when no image was supplied): {vision_grounding}
       Proposal A: {proposal_a}
       Proposal B: {proposal_b}
       Proposal C: {proposal_c}
@@ -63,21 +76,23 @@ roles:
     worker: tier2
     role_type: verifier
     verifies: draft_synthesis
-    depends_on: [draft_synthesis]
+    depends_on: [vision_grounding, draft_synthesis]
     prompt: |
       [verifier] Check the draft against the task. Start with PASS when it is
       ready to publish. Otherwise start with FAIL and give actionable defects.
       Task: {query}
+      Visual grounding (empty when no image was supplied): {vision_grounding}
       Draft: {draft_synthesis}
 
   - name: publisher
     worker: tier2
     role_type: publisher
-    depends_on: [draft_synthesis, verifier]
+    depends_on: [vision_grounding, draft_synthesis, verifier]
     prompt: |
       [publisher] Return only the final answer to the user. Incorporate the
       verified draft and notes; do not describe this orchestration process.
       Task: {query}
+      Visual grounding (empty when no image was supplied): {vision_grounding}
       Verified draft: {draft_synthesis}
       Verifier: {verifier}
 
@@ -86,5 +101,5 @@ internal_max_tokens: 2048
 expose_intermediate_outputs: true
 
 budget:
-  max_steps: 11
+  max_steps: 12
   max_refine_depth: 2

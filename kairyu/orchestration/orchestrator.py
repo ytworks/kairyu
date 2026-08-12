@@ -14,6 +14,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    backend_admission_upper_bound,
     prepare_backend_request,
     shutdown_all,
     validate_backend_request_before_prepare,
@@ -454,6 +455,14 @@ class Orchestrator:
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> None:
+        if (
+            call.multimodal_prompt is not None
+            and decision is not None
+            and decision.target != "multi_agent"
+        ):
+            raise ValueError(
+                "multimodal orchestration requires the multi_agent role DAG"
+            )
         if call.sampling_params.n <= 1:
             return
         final_role = self._conductor_final_role()
@@ -579,6 +588,7 @@ class Orchestrator:
             for spec, request in conductor.initial_requests(
                 call.prompt,
                 request_id_suffix=request_id_suffix,
+                multimodal_prompt=call.multimodal_prompt,
             )
         )
 
@@ -989,8 +999,30 @@ class Orchestrator:
         # fan-out duplicates that prefill just as it duplicates the supplied
         # prompt, tools, response schema, and decode ceiling.
         final_reingestion = candidates * internal_output * private_steps
+        multimodal_work = 0
+        if call.multimodal_prompt is not None:
+            vision_role_names = {
+                role.name for role in self._roles if role.role_type == "vision"
+            }
+            multimodal_work = sum(
+                backend_admission_upper_bound(
+                    self._engines[intent.engine_key],
+                    intent.request,
+                ).tokens
+                for intent in self._initial_role_intent_requests(
+                    call,
+                    None,
+                    request_id_suffix="admission",
+                )
+                if intent.role_name in vision_role_names
+            )
         return AdmissionUpperBound(
-            tokens=private_work + final_request_bound.tokens + final_reingestion,
+            tokens=(
+                private_work
+                + final_request_bound.tokens
+                + final_reingestion
+                + multimodal_work
+            ),
             refundable_on_exact_usage=False,
         )
 
@@ -1458,6 +1490,7 @@ class Orchestrator:
                 budget=self._budget,
                 session=conductor_session,
                 prepared_initial_requests=initial_requests,
+                multimodal_prompt=call.multimodal_prompt,
             )
             notes.extend(f"{event.node}: {event.kind} {event.detail}" for event in result.trace)
             trace_events.extend(result.trace)
@@ -2225,6 +2258,7 @@ class Orchestrator:
                     budget=self._budget,
                     session=conductor_session,
                     prepared_initial_requests=initial_requests,
+                    multimodal_prompt=call.multimodal_prompt,
                 )
             ):
                 if event is None:

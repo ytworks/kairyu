@@ -21,10 +21,12 @@ caching, chunked batching, and full/piecewise CUDA Graphs.
 Kairyu exposes exactly one public product model, `kairyu-auto-max`. Its request
 enters L3 once, then L2 borrows the deployment-owned L1 pools through
 `engine_ref`: DeepSeek planning, three parallel Qwen proposals, DeepSeek draft
-synthesis, verification, and DeepSeek publishing. A failed verifier can repeat
-synthesis and verification at most twice (`moa_samples: 0`,
-`max_refine_depth: 2`, `max_steps: 11`); L2 never calls the public L3 endpoint
-recursively.
+synthesis, verification, and DeepSeek publishing. Image requests first run one
+conditional Qwen vision-grounding role; its grounded text is an explicit input
+to planning, synthesis, verification, and publishing, while text-only requests
+skip that role. A failed verifier can repeat synthesis and verification at most
+twice (`moa_samples: 0`, `max_refine_depth: 2`, `max_steps: 12`); L2 never calls
+the public L3 endpoint recursively.
 
 In the same assistant response, completed L2/L1 stages are sent as
 model-attributed `reasoning_content` and rendered by pinned Open WebUI in a
@@ -57,7 +59,7 @@ Chat UI:    http://<outward-facing-host>:3000 (no authentication)
 Open WebUI listens on all host interfaces, requires no login, calls only
 Kairyu L3, and defaults to `kairyu-auto-max`, the only model returned by the
 product `/v1/models` endpoint. The L1 pools are not Chat UI choices. The
-launcher validates that exact public inventory and the explicit seven-role DAG
+launcher validates that exact public inventory and the explicit eight-role DAG
 before printing the URL.
 
 All persistent state is bind-backed below `/mnt/nvme`:
