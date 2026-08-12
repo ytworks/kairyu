@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent/all serving, L2 orchestration, and agentic benchmark runner."""
+"""Independent/all serving, L2 orchestration, and Terminal-Bench 2.1 runner."""
 
 from __future__ import annotations
 
@@ -37,10 +37,6 @@ RESULTS_ROOT = Path(
     )
 )
 TERMINAL_BENCH_DATASET = ENVIRONMENT_STORAGE / "bench-data/terminal-bench-2-1"
-AGENTIC_CACHE = ENVIRONMENT_STORAGE / "bench-data/kairyu-cache"
-SWE_BENCH_PRO_TASKS = 731
-SWE_BENCH_PRO_CONCURRENCY = 4
-SWE_BENCH_PRO_MAX_OUTPUT_TOKENS = 32768
 BENCHMARKS = (
     "serving-qwen",
     "serving-deepseek",
@@ -52,7 +48,6 @@ BENCHMARKS = (
     "serving-auto-max-moa3",
     "serving-auto-max-moa4",
     "orchestration",
-    "swebench-pro",
     "terminalbench-pilot",
     "terminalbench",
 )
@@ -584,122 +579,6 @@ def terminalbench(run_dir: Path) -> int:
     )
 
 
-def swebench_pro(run_dir: Path) -> int:
-    """Run all 731 public Pro instances through the selected orchestration."""
-
-    model = SPEC["orchestration"]["auto_max_model"]
-    run_id = "swebench-pro"
-    command = [
-        str(ROOT / ".venv/bin/python"),
-        "-m",
-        "kairyu.entrypoints.cli",
-        "bench",
-        "run",
-        "--base-url",
-        f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1",
-        "--model",
-        model,
-        "--served-config-label",
-        (
-            "rtx-pro-6000-blackwell-8x-vllm-qwen-tp1x4-"
-            "deepseek-tp4-ep4-auto-max-selected"
-        ),
-        "--served-config-sha256",
-        _served_config_sha256(),
-        "--no-vision",
-        "--max-context-tokens",
-        str(SPEC["models"]["tier1"]["max_context_tokens"]),
-        "--max-output-tokens",
-        str(SWE_BENCH_PRO_MAX_OUTPUT_TOKENS),
-        "--request-timeout-s",
-        "86400",
-        "--suite",
-        "accuracy",
-        "--only",
-        "swe-bench-pro",
-        "--attempts",
-        "1",
-        "--concurrency",
-        str(SWE_BENCH_PRO_CONCURRENCY),
-        "--cache-dir",
-        str(AGENTIC_CACHE),
-        "--results-dir",
-        str(run_dir),
-        "--run-id",
-        run_id,
-        "--no-progress",
-    ]
-    code = _run(
-        command,
-        log=run_dir / "swebench-pro.log",
-        check=False,
-    )
-    if code:
-        return code
-    return _validate_swebench_pro(
-        run_dir,
-        run_id=run_id,
-        model=model,
-        expected_tasks=SWE_BENCH_PRO_TASKS,
-    )
-
-
-def _validate_swebench_pro(
-    run_dir: Path,
-    *,
-    run_id: str,
-    model: str,
-    expected_tasks: int,
-) -> int:
-    run = run_dir / run_id
-    try:
-        scoreboard = json.loads((run / "scoreboard.json").read_text(encoding="utf-8"))
-        cell = scoreboard["cells"]["swe-bench-pro"][model]
-        result_paths = tuple(run.glob("swe-bench-pro--*/*.json"))
-        if len(result_paths) != 1:
-            raise ValueError(f"expected one raw result, found {len(result_paths)}")
-        result = json.loads(result_paths[0].read_text(encoding="utf-8"))
-        metrics = result["metrics"]
-        items = result["items"]
-        source_identity = result["source_identity"]
-    except (KeyError, OSError, TypeError, ValueError) as error:
-        print(f"invalid SWE-Bench Pro result: {error}", file=sys.stderr)
-        return 1
-    complete = (
-        cell.get("status") == "completed"
-        and isinstance(cell.get("score"), (int, float))
-        and cell.get("n") == expected_tasks
-        and cell.get("n_scored") == expected_tasks
-        and result.get("status") == "completed"
-        and result.get("target") == model
-        and metrics.get("n_total") == expected_tasks
-        and metrics.get("n_scored") == expected_tasks
-        and metrics.get("n_unjudged") == 0
-        and metrics.get("n_skipped") == 0
-        and metrics.get("n_failed") == 0
-        and source_identity.get("source_tree_clean") is True
-        and isinstance(items, list)
-        and len(items) == expected_tasks
-        and all(
-            isinstance(item, dict)
-            and item.get("status") == "completed"
-            and item.get("score") in {0.0, 1.0}
-            and item.get("error") is None
-            for item in items
-        )
-    )
-    if not complete:
-        print(
-            "SWE-Bench Pro did not produce complete 731-item evidence: "
-            f"cell={cell!r}, metrics={metrics!r}, items="
-            f"{len(items) if isinstance(items, list) else None!r}, "
-            f"clean={source_identity.get('source_tree_clean')!r}",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
-
-
 def _validate_terminalbench(
     run_dir: Path,
     *,
@@ -828,7 +707,6 @@ def main() -> None:
         print("serving-auto-max-chat  MoA-3 + non-thinking Tier2 synthesis matrix")
         print("serving-auto-max-moa1..4  fixed-fanout quality-candidate matrices")
         print("orchestration     fixed L2 direct/auto/auto-max latency and quality")
-        print("swebench-pro     complete SWE-Bench Pro, 731 tasks, mini-swe-agent")
         print(
             "terminalbench-pilot  same four tasks on direct DeepSeek and thinking-MoA3"
         )

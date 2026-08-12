@@ -9,12 +9,10 @@ Terminal-Bench raised its turn budget to the published limit.
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import httpx
 import pytest
 
-from kairyu.bench.adapters import swebench_pro as swe_mod
 from kairyu.bench.adapters.base import RunContext
 from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
 from kairyu.bench.adapters.tau_bench import (
@@ -61,197 +59,10 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
     configs = [command[i + 1] for i, part in enumerate(command) if part == "--config"]
     # the harness drops its default config as soon as -c is given, so the
     # default file must be restated alongside the override
-    assert configs == [
-        "swebench_backticks.yaml",
-        "agent.step_limit=1000",
-        "environment.cwd=/app",
-        'environment.run_args=["--rm","--entrypoint",""]',
-        "environment.pull_timeout=1800",
-        "model.cost_tracking=ignore_errors",
-        "model.model_kwargs.max_tokens=8192",
-    ]
+    assert configs == ["swebench.yaml", "agent.step_limit=1000"]
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"
     assert _flag_value(command, "--split") == "test"
     assert _flag_value(command, "--output") == "mini-output"
-    assert _flag_value(command, "--model-class") == (
-        "kairyu.bench.mini_swe_agent.OpenAICompatTextbasedModel"
-    )
-
-
-def test_swebench_resolves_entrypoint_beside_active_python(tmp_path, monkeypatch):
-    python = tmp_path / "bin" / "python"
-    monkeypatch.setattr(swe_mod.shutil, "which", lambda name: None)
-    monkeypatch.setattr(swe_mod.sys, "executable", str(python))
-
-    command = SweBenchProAdapter()._generate_command(
-        _target(), _ctx(tmp_path), tmp_path / "output"
-    )
-
-    assert command[0] == str(python.with_name("mini-extra"))
-
-
-def test_swebench_text_model_strips_litellm_message_extensions():
-    pytest.importorskip("minisweagent")
-    from minisweagent.environments import _ENVIRONMENT_MAPPING
-
-    from kairyu.bench.mini_swe_agent import (
-        _EPHEMERAL_DOCKER_ENVIRONMENT,
-        OpenAICompatTextbasedModel,
-    )
-
-    model = OpenAICompatTextbasedModel(
-        model_name="openai/local",
-        cost_tracking="ignore_errors",
-    )
-    prepared = model._prepare_messages_for_api(
-        [
-            {
-                "role": "assistant",
-                "content": "answer",
-                "tool_calls": None,
-                "provider_specific_fields": {"reasoning_content": "private"},
-                "extra": {"local": True},
-            }
-        ]
-    )
-
-    assert prepared == [
-        {"role": "assistant", "content": "answer", "tool_calls": None}
-    ]
-    assert _ENVIRONMENT_MAPPING["docker"] == _EPHEMERAL_DOCKER_ENVIRONMENT
-
-
-def test_swebench_official_eval_uses_ephemeral_runner(tmp_path):
-    command = SweBenchProAdapter()._evaluate_command(
-        tmp_path / "evaluator",
-        tmp_path / "dataset.jsonl",
-        tmp_path / "predictions.json",
-        tmp_path / "output",
-        4,
-    )
-
-    assert command[1:3] == ["-m", "kairyu.bench.swebench_pro_eval"]
-    assert any(part.startswith("--evaluator-script=") for part in command)
-    assert "--use_local_docker" in command
-
-
-def test_swebench_ephemeral_environment_removes_new_task_image(monkeypatch):
-    pytest.importorskip("minisweagent")
-    from kairyu.bench.mini_swe_agent import EphemeralDockerEnvironment
-
-    environment = object.__new__(EphemeralDockerEnvironment)
-    environment.config = SimpleNamespace(executable="docker", image="repo:task")
-    environment.container_id = "container-id"
-    environment._container_name = "container-name"
-    environment._cleanup_started = False
-    environment._remove_image = True
-    calls = []
-
-    def fake_run(*args, timeout):
-        calls.append((args, timeout))
-        return SimpleNamespace(returncode=0, stderr="")
-
-    monkeypatch.setattr(environment, "_run_docker", fake_run)
-    environment.cleanup()
-    environment.cleanup()
-
-    assert calls == [
-        (("stop", "--time", "1", "container-id"), 15),
-        (("image", "rm", "repo:task"), 180),
-    ]
-
-
-def test_swebench_ephemeral_environment_retries_image_remove(monkeypatch):
-    pytest.importorskip("minisweagent")
-    from kairyu.bench.mini_swe_agent import EphemeralDockerEnvironment
-
-    environment = object.__new__(EphemeralDockerEnvironment)
-    environment.config = SimpleNamespace(executable="docker", image="repo:task")
-    environment.container_id = "container-id"
-    environment._container_name = "container-name"
-    environment._cleanup_started = False
-    environment._remove_image = True
-    image_attempts = 0
-
-    def fake_run(*args, timeout):
-        nonlocal image_attempts
-        if args[:2] == ("image", "rm"):
-            image_attempts += 1
-            return SimpleNamespace(returncode=int(image_attempts == 1), stderr="busy")
-        return SimpleNamespace(returncode=0, stderr="")
-
-    monkeypatch.setattr(environment, "_run_docker", fake_run)
-    monkeypatch.setattr("kairyu.bench.mini_swe_agent.time.sleep", lambda _: None)
-    environment.cleanup()
-
-    assert image_attempts == 2
-
-
-def test_swebench_eval_runner_removes_new_task_image():
-    from kairyu.bench.swebench_pro_eval import _ephemeral_eval
-
-    removed = []
-
-    class Images:
-        @staticmethod
-        def get(image):
-            raise RuntimeError(f"missing: {image}")
-
-        @staticmethod
-        def remove(image):
-            removed.append(image)
-            if len(removed) == 1:
-                raise RuntimeError("container auto-removal in progress")
-
-    client = SimpleNamespace(images=Images(), close=lambda: None)
-    module = SimpleNamespace(
-        docker=SimpleNamespace(from_env=lambda: client),
-        get_dockerhub_image_uri=lambda instance_id, username, repo: (
-            f"{username}/sweap-images:{instance_id}"
-        ),
-    )
-    def original(*args, **kwargs):
-        return "official-result"
-
-    wrapped = _ephemeral_eval(module, original)
-
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr("kairyu.bench.swebench_pro_eval.time.sleep", lambda _: None)
-        result = wrapped(
-            "patch",
-            {"instance_id": "item-1", "repo": "repo"},
-            "output",
-            "jefzda",
-            "scripts",
-        )
-
-    assert result == "official-result"
-    assert removed == [
-        "jefzda/sweap-images:item-1",
-        "jefzda/sweap-images:item-1",
-    ]
-
-
-def test_swebench_normalizes_official_image_and_complete_problem():
-    rows = [
-        {
-            "instance_id": f"instance-{index}",
-            "problem_statement": "problem",
-            "requirements": "requirements",
-            "interface": "interface",
-            "dockerhub_tag": f"repo.instance-{index}",
-        }
-        for index in range(731)
-    ]
-
-    normalized = swe_mod._normalize_rows(rows)
-
-    assert len(normalized) == 731
-    assert normalized[0]["image_name"] == "jefzda/sweap-images:repo.instance-0"
-    assert normalized[0]["problem_statement"] == (
-        "problem\n\nRequirements:\nrequirements"
-        "\n\nNew interfaces introduced:\ninterface"
-    )
 
 
 def test_swebench_step_limit_is_disclosed():
@@ -708,12 +519,11 @@ def test_swebench_forwards_named_sampling_to_model_kwargs(tmp_path):
     assert "model.model_kwargs.seed=7" in configs
 
 
-def test_swebench_forwards_output_limit_to_model_kwargs(tmp_path):
+def test_swebench_omits_model_kwargs_when_unset(tmp_path):
     command = SweBenchProAdapter()._generate_command(
-        _target(max_output_tokens=32768), _ctx(tmp_path), Path("preds.json")
+        _target(), _ctx(tmp_path), Path("preds.json")
     )
-    configs = [command[i + 1] for i, part in enumerate(command) if part == "--config"]
-    assert "model.model_kwargs.max_tokens=32768" in configs
+    assert not any("model_kwargs" in part for part in command)
 
 
 def test_swebench_annotates_what_it_cannot_forward():
