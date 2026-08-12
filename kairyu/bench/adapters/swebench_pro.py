@@ -53,6 +53,9 @@ _STEP_LIMIT = 1000
 # mini-swe-agent merges -c specs recursively but DROPS its default config as
 # soon as -c is given, so the default file has to be restated by name.
 _BASE_CONFIG = "swebench.yaml"
+_AGENT_OUTCOMES = frozenset(
+    {"Submitted", "LimitsExceeded", "TimeExceeded", "RepeatedFormatError"}
+)
 
 
 def _model_kwargs(target: BenchTarget) -> dict[str, object]:
@@ -231,6 +234,31 @@ def _prediction_list(predictions: Path, destination: Path, expected_ids: set[str
     return destination
 
 
+def _validate_generation_trajectories(
+    output_dir: Path,
+    expected_ids: set[str],
+) -> None:
+    """Reject harness/runtime crashes that mini-swe-agent exits with status 0."""
+
+    failures: list[str] = []
+    for instance_id in sorted(expected_ids):
+        path = output_dir / instance_id / f"{instance_id}.traj.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            exit_status = payload["info"]["exit_status"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+            failures.append(f"{instance_id}: invalid trajectory ({type(error).__name__})")
+            continue
+        if exit_status not in _AGENT_OUTCOMES:
+            failures.append(f"{instance_id}: {exit_status!r}")
+    if failures:
+        preview = ", ".join(failures[:5])
+        suffix = "" if len(failures) <= 5 else f", and {len(failures) - 5} more"
+        raise ValueError(
+            f"generation had {len(failures)} harness/runtime failures: {preview}{suffix}"
+        )
+
+
 def parse_swebench_report(report: dict) -> tuple[list[ItemResult], int]:
     """Report -> per-instance items + official denominator (all submitted)."""
     resolved = report.get("resolved_ids") or []
@@ -259,9 +287,10 @@ class SweBenchProAdapter:
         annotations=(
             "scaffold: mini-swe-agent (matches Fugu's published methodology), "
             f"agent.step_limit={_STEP_LIMIT}",
-            "target reasoning_effort, top_p, and seed are forwarded as "
-            "model.model_kwargs.*; explicit temperature and recommended sampling "
-            "are rejected because this wrapper has no verified passthrough",
+            "target max_output_tokens, reasoning_effort, top_p, and seed are forwarded "
+            "as model.model_kwargs.*; local-model cost lookup errors are ignored; "
+            "explicit temperature and recommended sampling are rejected because this "
+            "wrapper has no verified passthrough",
             "vendor extra_body has no harness equivalent and is NOT forwarded",
             f"official ScaleAI evaluator {_EVALUATOR_REVISION[:12]} with local Docker",
             "--attempts must remain 1; this wrapper has no verified repeated-trial "
@@ -368,6 +397,8 @@ class SweBenchProAdapter:
             "environment.cwd=/app",
             "--config",
             'environment.run_args=["--rm","--entrypoint",""]',
+            "--config",
+            "model.cost_tracking=ignore_errors",
         ]
         # The harness forwards `model.model_kwargs.*` to its LLM client, so the
         # endpoint's named sampling policy can reach the agent's requests. Vendor
@@ -460,10 +491,12 @@ class SweBenchProAdapter:
                 "generate stage produced no mini-output/preds.json file",
             )
         try:
+            expected_ids = {str(row["instance_id"]) for row in selected_rows}
+            _validate_generation_trajectories(generation_dir, expected_ids)
             _prediction_list(
                 predictions,
                 evaluation_predictions,
-                {str(row["instance_id"]) for row in selected_rows},
+                expected_ids,
             )
         except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
             return self._failed(target, started_at, f"invalid predictions: {error}")

@@ -106,6 +106,14 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
         if "swe_bench_pro_eval.py" not in " ".join(command):
             output_dir = Path(command[command.index("--output") + 1])
             output_dir.mkdir()
+            for index in range(4):
+                instance_id = f"item-{index}"
+                trajectory_dir = output_dir / instance_id
+                trajectory_dir.mkdir()
+                (trajectory_dir / f"{instance_id}.traj.json").write_text(
+                    json.dumps({"info": {"exit_status": "Submitted"}}),
+                    encoding="utf-8",
+                )
             (output_dir / "preds.json").write_text(
                 json.dumps(
                     {
@@ -175,6 +183,32 @@ async def test_swebench_fails_closed_when_generation_writes_no_predictions(
     pair = await SweBenchProAdapter().run(make_target(), _swe_ctx(tmp_path, 1))
     assert pair.status == "failed"
     assert "mini-output/preds.json" in pair.reason
+
+
+async def test_swebench_fails_closed_on_zero_exit_harness_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
+    monkeypatch.setattr(swe_mod, "adapter_cache_ready", lambda adapter, cache: True)
+
+    def fake_run(command, capture_output, timeout, env, cwd, check):
+        output_dir = Path(command[command.index("--output") + 1])
+        instance_id = "item-0"
+        trajectory_dir = output_dir / instance_id
+        trajectory_dir.mkdir(parents=True)
+        (trajectory_dir / f"{instance_id}.traj.json").write_text(
+            json.dumps({"info": {"exit_status": "RuntimeError"}}),
+            encoding="utf-8",
+        )
+        (output_dir / "preds.json").write_text(
+            json.dumps({instance_id: {"model_patch": ""}}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(swe_mod, "subprocess", SimpleNamespace(run=fake_run))
+    pair = await SweBenchProAdapter().run(make_target(), _swe_ctx(tmp_path, 1))
+    assert pair.status == "failed"
+    assert "harness/runtime failures" in pair.reason
+    assert "RuntimeError" in pair.reason
 
 
 async def test_terminal_bench_flow(tmp_path, monkeypatch):
