@@ -58,6 +58,11 @@ _BASE_CONFIG = "swebench.yaml"
 def _model_kwargs(target: BenchTarget) -> dict[str, object]:
     """Named sampling fields the harness can forward to its LLM client."""
     fields = {
+        # mini-swe-agent otherwise omits max_tokens. OpenAI-compatible
+        # /completions endpoints commonly default that omission to 16 tokens,
+        # which can truncate both ordinary answers and private-reasoning
+        # prefixes before their public answer boundary.
+        "max_tokens": target.max_output_tokens,
         "reasoning_effort": target.reasoning_effort,
         "top_p": target.top_p,
         "seed": target.seed,
