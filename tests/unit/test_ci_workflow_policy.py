@@ -397,9 +397,11 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
 
 def test_kind_job_runs_helm_tests_as_an_applicable_non_skipping_suite() -> None:
     workflow, _ = _load_workflow("ci.yml")
-    steps = workflow["jobs"]["kind-smoke"]["steps"]
+    kind_job = workflow["jobs"]["kind-smoke"]
+    assert "needs" not in kind_job
+    steps = kind_job["steps"]
     step = _named_step(
-        workflow["jobs"]["kind-smoke"],
+        kind_job,
         "Run Helm integration tests",
     )
     script = (_ROOT / "scripts" / "helm_integration.sh").read_text(
