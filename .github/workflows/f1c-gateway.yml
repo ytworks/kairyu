@@ -38,11 +38,33 @@ jobs:
               github.sha
             }}
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
-      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
-        with:
-          install_only: true
-          version: v0.32.0
-          kubectl_version: v1.36.3
+      - name: Install kind and kubectl
+        shell: bash
+        env:
+          KIND_VERSION: v0.32.0
+          KUBECTL_VERSION: v1.36.3
+        run: |
+          tools_dir="${RUNNER_TEMP}/kairyu-tools"
+          mkdir -p "${tools_dir}"
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64" \
+            --output "${tools_dir}/kind"
+          curl --fail --location --retry 5 --retry-all-errors \
+            "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64.sha256sum" \
+            --output "${tools_dir}/kind.sha256"
+          echo "$(cat "${tools_dir}/kind.sha256")  ${tools_dir}/kind" | sha256sum --check
+
+          curl --fail --location --retry 5 --retry-all-errors \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+            --output "${tools_dir}/kubectl"
+          curl --fail --location --retry 5 --retry-all-errors \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" \
+            --output "${tools_dir}/kubectl.sha256"
+          echo "$(cat "${tools_dir}/kubectl.sha256")  ${tools_dir}/kubectl" | sha256sum --check
+
+          chmod +x "${tools_dir}/kind" "${tools_dir}/kubectl"
+          echo "${tools_dir}" >> "${GITHUB_PATH}"
       - name: Run the F1c Kubernetes integration test
         shell: bash
         run: bash scripts/kind_gateway_gate.sh
