@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Portable CPU tests (Python ${{ matrix.python-version }})
@@ -158,13 +162,14 @@ jobs:
   kind-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - uses: helm/kind-action@v1
-        with:
-          install_only: true
+      - name: Install kind and kubectl
+        env:
+          KIND_VERSION: v0.31.0
+          KUBECTL_VERSION: v1.35.0
+        run: bash scripts/install_kind_tools.sh
       - name: Helm schema and GPU template gate
         run: bash scripts/kind_smoke.sh --helm-check
       - name: Run Helm integration tests

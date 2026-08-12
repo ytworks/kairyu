@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 
 from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
@@ -55,13 +55,14 @@ _KEEPALIVE_INTERVAL_S = 15.0  # SSE keep-alive cadence for long multi-stage runs
 
 def _public_multistage_completions(
     completions: tuple[CompletionOutput, ...],
+    reasoning_content: str | None = None,
 ) -> tuple[CompletionOutput, ...]:
-    """Keep final text/tool metadata while withholding private stage reasoning."""
+    """Keep final text while replacing final-stage reasoning with policy output."""
 
     return tuple(
         replace(
             completion,
-            reasoning_content=None,
+            reasoning_content=reasoning_content,
             reasoning_delta=None,
             reasoning_offset=None,
         )
@@ -116,13 +117,14 @@ class OrchestratorResult:
     completion_tokens: int = 0
     cached_tokens: int = 0
     structured_trace: StructuredTrace | None = None
+    reasoning_content: str | None = None
 
 
 @dataclass(frozen=True)
 class OrchestratorEvent:
     """Streaming event (m11 D1): status keep-alive, token delta, or final."""
 
-    kind: str  # "status" | "delta" | "error" | "result"
+    kind: str  # "status" | "reasoning" | "delta" | "error" | "result"
     text: str = ""
     completions: tuple[CompletionOutput, ...] = ()
     result: OrchestratorResult | None = None
@@ -227,6 +229,8 @@ class Orchestrator:
         cost_model: CostModel = zero_cost,
         moa_samples: int = 0,
         engine_descriptors: Mapping[str, EngineDescriptor] | None = None,
+        owned_engines: Iterable[EngineBackend] | None = None,
+        expose_intermediate_outputs: bool = False,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
@@ -235,6 +239,11 @@ class Orchestrator:
                 "orchestration shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
             )
         self._engines = dict(engines)
+        self._owned_engines = tuple(
+            {id(engine): engine for engine in (
+                self._engines.values() if owned_engines is None else owned_engines
+            )}.values()
+        )
         self._owner_token = object()
         supplied_descriptors = dict(engine_descriptors or {})
         self._engine_descriptors = {
@@ -253,6 +262,7 @@ class Orchestrator:
         self._cost_model = cost_model
         # m11 A4: >0 routes multi_agent through MoA (the deep kairyu-auto-max tier)
         self._moa_samples = moa_samples
+        self._expose_intermediate_outputs = expose_intermediate_outputs
 
     def generation_defaults_snapshot(
         self,
@@ -274,7 +284,7 @@ class Orchestrator:
     async def startup(self) -> None:
         """Eagerly start owned process resources before serving auto models."""
 
-        for engine in {id(engine): engine for engine in self._engines.values()}.values():
+        for engine in self._owned_engines:
             startup = getattr(engine, "startup", None)
             if callable(startup):
                 await startup()
@@ -352,10 +362,11 @@ class Orchestrator:
             "budget": asdict(self._budget),
             "moa_samples": self._moa_samples,
             "internal_max_tokens": self._sampling_params.max_tokens,
+            "expose_intermediate_outputs": self._expose_intermediate_outputs,
         }
 
     async def shutdown(self) -> None:
-        await shutdown_all(self._engines.values(), "Orchestrator")
+        await shutdown_all(self._owned_engines, "Orchestrator")
 
     def _resolve_engine_name(self, tier: str, notes: list[str]) -> str:
         if tier in self._engines:
@@ -1018,6 +1029,7 @@ class Orchestrator:
             cost_model=self._cost_model,
             worker_trace=self._conductor_worker_trace(),
             usage_observer=usage_observer,
+            expose_intermediate_outputs=self._expose_intermediate_outputs,
         )
 
     def _conductor_worker_trace(self) -> dict[str, WorkerTraceIdentity]:
@@ -1180,6 +1192,7 @@ class Orchestrator:
             prompt_tokens: int = 0,
             completion_tokens: int = 0,
             cached_tokens: int = 0,
+            reasoning_content: str | None = None,
         ) -> OrchestratorResult:
             return OrchestratorResult(
                 text=text,
@@ -1189,6 +1202,7 @@ class Orchestrator:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_tokens=cached_tokens,
+                reasoning_content=reasoning_content,
                 structured_trace=StructuredTrace(
                     request_id=request_id,
                     started_at=trace_started_at,
@@ -1449,10 +1463,14 @@ class Orchestrator:
             trace_events.extend(result.trace)
             return result_with_trace(
                 text=result.final_text,
-                completions=_public_multistage_completions(result.completions),
+                completions=_public_multistage_completions(
+                    result.completions,
+                    result.reasoning_content,
+                ),
                 prompt_tokens=result.usage[0],
                 completion_tokens=result.usage[1],
                 cached_tokens=result.cached_tokens,
+                reasoning_content=result.reasoning_content,
             )
         try:
             engine_name = (
@@ -1596,6 +1614,7 @@ class Orchestrator:
             prompt_tokens: int = 0,
             completion_tokens: int = 0,
             cached_tokens: int = 0,
+            reasoning_content: str | None = None,
         ) -> OrchestratorResult:
             return OrchestratorResult(
                 text=text,
@@ -1605,6 +1624,7 @@ class Orchestrator:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 cached_tokens=cached_tokens,
+                reasoning_content=reasoning_content,
                 structured_trace=StructuredTrace(
                     request_id=request_id,
                     started_at=trace_started_at,
@@ -2209,6 +2229,9 @@ class Orchestrator:
             ):
                 if event is None:
                     yield OrchestratorEvent(kind="status", text="working")
+                elif event.kind == "reasoning":
+                    if event.text:
+                        yield OrchestratorEvent(kind="reasoning", text=event.text)
                 elif event.kind == "delta":
                     if not event.text:
                         continue
@@ -2232,11 +2255,13 @@ class Orchestrator:
                 result=result_with_trace(
                     text=conductor_result.final_text,
                     completions=_public_multistage_completions(
-                        conductor_result.completions
+                        conductor_result.completions,
+                        conductor_result.reasoning_content,
                     ),
                     prompt_tokens=conductor_result.usage[0],
                     completion_tokens=conductor_result.usage[1],
                     cached_tokens=conductor_result.cached_tokens,
+                    reasoning_content=conductor_result.reasoning_content,
                 ),
                 error_type=type(error.cause).__name__,
             )
@@ -2252,11 +2277,13 @@ class Orchestrator:
             result=result_with_trace(
                 text=conductor_result.final_text,
                 completions=_public_multistage_completions(
-                    conductor_result.completions
+                    conductor_result.completions,
+                    conductor_result.reasoning_content,
                 ),
                 prompt_tokens=conductor_result.usage[0],
                 completion_tokens=conductor_result.usage[1],
                 cached_tokens=conductor_result.cached_tokens,
+                reasoning_content=conductor_result.reasoning_content,
             ),
         )
 

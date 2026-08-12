@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-12. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-13. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: 12-slot Accuracy plus Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; SWE-bench Verified uses mini-SWE-agent's official 250-step `verified` flow plus the official harness with fail-closed denominators; Terminal-Bench keeps resumable raw Harbor jobs and bounds every agent phase to two effective hours
-- The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8, plus a measured tiered Qwen TP1x4 + DeepSeek TP4/EP4 stack; its no-auth external Open WebUI defaults to quality-first MoA-3 `kairyu-auto-max` and calls only loopback Kairyu L3. The selected policy cleared direct DeepSeek 3/4 vs 2/4 on the fixed pilot and its all-89 single-attempt Terminal-Bench run scored 60/89 with Harbor's zero-inclusive Mean; all persistent data and compilation caches are on NVMe
+- The tiered RTX PRO example now has one public model and one orchestration YAML: Open WebUI calls Kairyu L3 once, L2 borrows the Qwen/DeepSeek L1 pools directly, runs the bounded planner/proposal/synthesis/verifier/publisher DAG, and returns model-attributed intermediate work in the same answer's expandable reasoning item while keeping publisher content separate. Its composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes; prior MoA-3 measurements remain historical evidence only
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -98,6 +98,24 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-13 — [amendment] Kind CI tool setup is shared and verified
+- What: All four kind gates now use one pinned installer with bounded nested retries, HTTPS-only downloads, SHA-256 verification, and executable version checks; a policy test bans the flaky action path from every workflow.
+- Why: Per-workflow fixes left the same dependency-acquisition failure in other gates, incorrectly surfacing CI infrastructure failures as product-quality failures.
+- Refs: PR #476; `scripts/install_kind_tools.sh`; `.github/workflows/{ci,f1a-churn,f1b-rollout,f1c-gateway}.yml`; `tests/unit/test_ci_workflow_policy.py`
+
+### 2026-08-13 — [progress] Tiered PR infrastructure flakes are bounded
+- What: F1c now installs pinned kind/kubectl binaries with retried, checksum-verified downloads, and F1b retries one failed import of its already-frozen image archives. Product gate behavior is unchanged.
+- Refs: PR #476; `.github/workflows/f1c-gateway.yml`; `scripts/kind_rollout_gate.sh`
+
+### 2026-08-13 — [progress] Tiered example collapses to one layered product path
+- What: The example now keeps one `auto-max.yaml` policy and one public Chat UI model; L2 borrows deployment-owned L1 pools, runs the bounded seven-role DAG, and streams attributed intermediate output separately from publisher content in the same response. Obsolete auto/MoA candidate YAMLs and commands were removed.
+- Refs: PR #476; `examples/qwen3.6-deepseek-v4-8gpu/`; `scripts/webui_browser_smoke.mjs`
+
+### 2026-08-13 — [design] Tiered UI owns one layered orchestration path
+- What: The tiered example will expose one product model, borrow deployment L1 pools directly from L2, run a bounded verifier-gated DAG, and show policy-enabled model-attributed intermediate output separately from the final answer.
+- Why: The prior loopback L3 workers and single-pass MoA policy did not exercise the intended L3→L2→L1 boundary, while the product UI now requires inspectable intermediate work without mixing it into the committed answer.
+- Refs: EO-D1..EO-D5; `docs/design/example-layered-orchestration.md`; `docs/superpowers/plans/2026-08-13-example-layered-orchestration-correction.md`
+
 ### 2026-08-12 — [amendment] SWE-bench fixes selection before generation
 - What: SWE-bench now persists the official ordered selection before generation, evaluates that full set even when a prediction is omitted, accepts the official v4.1 completed/error report overlap with error precedence, and retains redacted stage logs plus raw upstream evidence; failed runs resume while explicit reruns use isolated artifacts.
 - Why: mini-SWE-agent can exit successfully after a worker omits its prediction, so deriving `--instance_ids` from `preds.json` could shrink the denominator and deleting work directories could discard the only audit and resume evidence.
@@ -106,25 +124,3 @@ in `.claude/rules/progress-log.md`).
 ### 2026-08-12 — [progress] SWE-bench Verified launches through Accuracy
 - What: Accuracy now runs the 500-task Verified test split through mini-SWE-agent's standard 250-step configuration and the official SWE-bench evaluator, preserves every selected task in the resolved-rate denominator, retains auditable commands and raw evidence, and extends the sourced comparison report with Fable 5's published result without claiming one-trial/five-trial parity.
 - Refs: issue #472; `kairyu/bench/adapters/swebench*.py`; `docs/benchmarks.md`; `tests/bench/test_bench_agentic*.py`; `tests/bench/test_bench_compare.py`
-
-### 2026-08-12 — [progress] Tiered PR CI regressions reproduced and closed
-- What: The Open WebUI initial/outage/recovery browser phases pass after keeping the deterministic AUTO SSE marker inside the mock's prompt-boundary echo window; the tiered control test now stubs storage path preparation instead of attempting `/mnt/nvme` writes on hosted runners. Production NVMe enforcement and L2/L3 behavior are unchanged.
-- Refs: `scripts/webui_browser_smoke.mjs`; `tests/unit/test_tiered_frontier_examplectl.py`; PR #471
-
-### 2026-08-12 — [design] SWE-bench Verified joins the Accuracy suite
-- What: The Accuracy suite will run SWE-bench Verified through mini-SWE-agent's standard 250-step `verified` flow and the official SWE-bench harness, preserve exact selected-instance denominators and failure classes, and extend the sourced frontier comparison without inventing missing exact-model scores.
-- Why: Issue #472 requires the benchmark to launch like existing suites and follow their score-comparison reporting, while upstream methodology differences and OpenAI's retirement warning must remain explicit and auditable.
-- Refs: issue #472; `docs/superpowers/specs/2026-08-12-swe-bench-verified-design.md`
-
-### 2026-08-12 — [progress] Tiered RTX PRO example closes full task-set scoring
-- What: The selected private-thinking MoA-3 policy launched all 89 Terminal-Bench 2.1 tasks and closed at 60/89 (67.42%) under official task verifiers and Harbor's zero-inclusive Mean: 86 verifier rewards (60 one, 26 zero), two rewardless infrastructure errors, and one rewardless operator-terminated CPU outlier. The score does not substitute diagnostic retries.
-- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,terminalbench-result.json}`; run ID `terminalbench-2.1-auto-max-thinking2048-full-v1-20260812`; PR #471
-
-### 2026-08-12 — [amendment] Agentic evidence survives interruption with bounded outliers
-- What: Terminal-Bench now retains its raw Harbor job directory for authoritative per-task evidence/resume, and sets agent `max_timeout_sec=900` before the existing 8x multiplier so every task has a 7200-second effective agent cap. Official Harbor reward/Mean semantics remain unchanged.
-- Why: A 3600-second task declaration previously expanded to eight hours and interrupt cleanup deleted the partial raw job, making one pathological task both operationally unbounded and non-resumable.
-- Refs: `kairyu/bench/adapters/terminal_bench.py`; `tests/bench/test_bench_agentic*.py`; PR #471
-
-### 2026-08-12 — [progress] Thinking MoA-3 clears the quality floor
-- What: On the same fixed four Terminal-Bench 2.1 tasks, the 2048-token private-thinking MoA-3 policy scored 3/4 versus direct DeepSeek's 2/4. Both completed 4/4 items with zero failed/unjudged/skipped trials and null item errors on a clean source tree; `kairyu-auto-max` is selected for the full 89-task run.
-- Refs: `examples/qwen3.6-deepseek-v4-8gpu/MEASUREMENTS.md`; run ID `terminalbench-selection-thinking2048-vs-deepseek-20260812`; PR #471

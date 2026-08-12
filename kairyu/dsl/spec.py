@@ -13,6 +13,7 @@ class WorkerSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
+    engine_ref: str | None = Field(default=None, min_length=1)
     backend: str = "mock"
     model: str | None = None
     base_url: str | None = None
@@ -21,6 +22,20 @@ class WorkerSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_openai_capabilities(self) -> WorkerSpec:
+        if self.engine_ref is not None:
+            factory_fields = {
+                "backend",
+                "model",
+                "base_url",
+                "api_key_env",
+                "options",
+            } & self.model_fields_set
+            if factory_fields:
+                raise ValueError(
+                    "engine_ref workers cannot also declare factory fields: "
+                    f"{sorted(factory_fields)}"
+                )
+            return self
         if self.backend == "openai":
             resolve_openai_capabilities(
                 self.options.get("upstream", "generic"),
@@ -98,6 +113,9 @@ class OrchestratorSpec(BaseModel):
     # Zero keeps the standard Conductor route. A positive value turns the
     # multi-agent route into that many parallel MoA proposals plus synthesis.
     moa_samples: int = Field(default=0, ge=0, le=16)
+    # Completed pre-final stage outputs may be surfaced separately from the
+    # answer. Hidden is the safe and backward-compatible default.
+    expose_intermediate_outputs: bool = False
 
     @model_validator(mode="after")
     def _roles_reference_known_workers(self) -> OrchestratorSpec:

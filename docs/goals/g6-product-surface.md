@@ -47,6 +47,15 @@ route decision, role DAG, verifier verdicts — Fugu is a black box). Sources in
 | P-B4 (tiered auto models) | `kairyu-auto` (latency-biased routing) and `kairyu-auto-max` (Conductor/MoA depth) both in `/v1/models`; auto ≤1.5× direct-call latency, auto-max quality-wins on a fixed eval set | bench |
 | P-B5 (tenancy v1) | Key→tenant map in `DeploymentSpec`; per-key token-bucket limits in-gateway; append-only usage ledger + `/admin/usage`; two keys get isolated 429s; ledger reconciles with Prometheus counters to <0.1% | `tests/server/` |
 
+**Tiered-example amendment (2026-08-13).** The quality-first Chat UI profile
+exposes exactly one orchestration model. L2 borrows its deployment-owned L1
+pools directly and runs an explicit verifier-gated DAG with at most two
+refinements. The profile opts in to model-attributed completed intermediate
+outputs via `reasoning_content`, which Open WebUI presents under a separate
+expandable reasoning control; the publisher answer remains separate
+`content`. Direct models and policy candidates are confined to a loopback-only
+benchmark profile. See `docs/design/example-layered-orchestration.md`.
+
 P-B2 is CPU-green as of 2026-07-27 (issue #196): direct, Conductor, and
 MoA unary/streaming paths expose cumulative internal usage; retry, fallback,
 partial-failure, cancellation, structured-trace, and privacy cases are fixed

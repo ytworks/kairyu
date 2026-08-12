@@ -38,16 +38,7 @@ RESULTS_ROOT = Path(
 )
 TERMINAL_BENCH_DATASET = ENVIRONMENT_STORAGE / "bench-data/terminal-bench-2-1"
 BENCHMARKS = (
-    "serving-qwen",
-    "serving-deepseek",
-    "serving-auto",
     "serving-auto-max",
-    "serving-auto-max-chat",
-    "serving-auto-max-moa1",
-    "serving-auto-max-moa2",
-    "serving-auto-max-moa3",
-    "serving-auto-max-moa4",
-    "orchestration",
     "terminalbench-pilot",
     "terminalbench",
 )
@@ -175,7 +166,6 @@ def _validate_serving_row(
     expected_route: str | None = None,
     expected_role: str = "direct",
     expected_kind: str = "generation",
-    expected_moa_samples: int | None = None,
     public_tokens: bool = False,
 ) -> int:
     artifacts = list(row_dir.glob("*-serving.json"))
@@ -221,10 +211,6 @@ def _validate_serving_row(
                 and stage.get("role") == expected_role
                 and stage.get("kind") == expected_kind
                 and stage.get("status") == "success"
-                and (
-                    expected_moa_samples is None
-                    or stage.get("proposals") == expected_moa_samples
-                )
                 for stage in sample.get("trace", {}).get("stages", [])
             )
             for sample in samples
@@ -244,7 +230,6 @@ def _serving(
     expected_route: str | None = None,
     expected_role: str = "direct",
     expected_kind: str = "generation",
-    expected_moa_samples: int | None = None,
     warmup_requests: int | None = None,
     natural_completion: bool = False,
 ) -> int:
@@ -382,7 +367,6 @@ def _serving(
                 expected_route=expected_route,
                 expected_role=expected_role,
                 expected_kind=expected_kind,
-                expected_moa_samples=expected_moa_samples,
                 public_tokens=natural_completion,
             )
         if code:
@@ -390,97 +374,17 @@ def _serving(
     return 0
 
 
-def serving_qwen(run_dir: Path) -> int:
-    tier1 = SPEC["allocation"]["tier1"]
-    return _serving(
-        "qwen3.6-27b",
-        run_dir,
-        tensor_parallel=int(tier1["tensor_parallel_size"]),
-        replicas=int(tier1["replicas"]),
-    )
-
-
-def serving_deepseek(run_dir: Path) -> int:
-    return _serving("deepseek-v4-flash-0731", run_dir, tensor_parallel=4, replicas=1)
-
-
-def serving_auto(run_dir: Path) -> int:
-    tier1 = SPEC["allocation"]["tier1"]
-    return _serving(
-        "kairyu-auto",
-        run_dir,
-        tensor_parallel=int(tier1["tensor_parallel_size"]),
-        replicas=int(tier1["replicas"]),
-        expected_route="tier1",
-    )
-
-
 def serving_auto_max(run_dir: Path) -> int:
-    return _serving_auto_max_candidate("kairyu-auto-max", run_dir, samples=3)
-
-
-def serving_auto_max_chat(run_dir: Path) -> int:
-    samples = int(SPEC["orchestration"]["auto_max_chat_moa_samples"])
-    return _serving_auto_max_candidate("kairyu-auto-max-chat", run_dir, samples=samples)
-
-
-def _serving_auto_max_candidate(model: str, run_dir: Path, *, samples: int) -> int:
     return _serving(
-        model,
+        SPEC["orchestration"]["auto_max_model"],
         run_dir,
         tensor_parallel=4,
         replicas=1,
-        expected_route="moa",
-        expected_role="moa",
-        expected_kind="synthesis",
-        expected_moa_samples=samples,
+        expected_route="publisher",
+        expected_role="publisher",
+        expected_kind="generation",
         warmup_requests=4,
         natural_completion=True,
-    )
-
-
-def serving_auto_max_moa1(run_dir: Path) -> int:
-    return _serving_auto_max_candidate("kairyu-auto-max-moa1", run_dir, samples=1)
-
-
-def serving_auto_max_moa2(run_dir: Path) -> int:
-    return _serving_auto_max_candidate("kairyu-auto-max-moa2", run_dir, samples=2)
-
-
-def serving_auto_max_moa3(run_dir: Path) -> int:
-    return _serving_auto_max_candidate("kairyu-auto-max-moa3", run_dir, samples=3)
-
-
-def serving_auto_max_moa4(run_dir: Path) -> int:
-    return _serving_auto_max_candidate("kairyu-auto-max-moa4", run_dir, samples=4)
-
-
-def orchestration(run_dir: Path) -> int:
-    return _run(
-        [
-            str(ROOT / ".venv/bin/python"),
-            str(ROOT / "bench/tiered_auto_bench.py"),
-            "--base-url",
-            f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1",
-            "--direct-model",
-            "qwen3.6-27b",
-            "--auto-model",
-            "kairyu-auto",
-            "--auto-max-model",
-            "kairyu-auto-max",
-            "--gpu-count",
-            "8",
-            "--concurrency",
-            "16",
-            "--timeout",
-            "86400",
-            "--hardware",
-            "8x RTX PRO 6000 Blackwell; Qwen FP8 TP1x4 + DeepSeek TP4/EP4",
-            "--result",
-            str(run_dir / "tiered-auto.json"),
-        ],
-        log=run_dir / "orchestration.log",
-        check=False,
     )
 
 
@@ -675,13 +579,7 @@ def _served_config_sha256() -> str:
         "example.json",
         "compose.yaml",
         "kairyu.yaml",
-        "auto.yaml",
         "auto-max.yaml",
-        "auto-max-chat.yaml",
-        "auto-max-moa1.yaml",
-        "auto-max-moa2.yaml",
-        "auto-max-moa3.yaml",
-        "auto-max-moa4.yaml",
         "router.json",
         "deepseek-thinking.jinja",
     ):
@@ -700,16 +598,8 @@ def main() -> None:
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
     if args.benchmark == "list":
-        print("serving-qwen      Tier1 TP1 x 4 replica TTFT/throughput matrix")
-        print("serving-deepseek  Tier2 TP4+EP4 TTFT/throughput matrix")
-        print("serving-auto      routed Tier1/Tier2/MoA-2 matrix")
-        print("serving-auto-max  forced MoA-3 + Tier2 synthesis matrix")
-        print("serving-auto-max-chat  MoA-3 + non-thinking Tier2 synthesis matrix")
-        print("serving-auto-max-moa1..4  fixed-fanout quality-candidate matrices")
-        print("orchestration     fixed L2 direct/auto/auto-max latency and quality")
-        print(
-            "terminalbench-pilot  same four tasks on direct DeepSeek and thinking-MoA3"
-        )
+        print("serving-auto-max  verifier-gated product DAG serving matrix")
+        print("terminalbench-pilot  four-task product-model pilot")
         print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
         print("all               every benchmark above, continuing after failures")
         return

@@ -97,6 +97,15 @@ to 1024 for compatibility. Operators may shorten private stages independently
 of the public final-answer allowance; the cap remains generic orchestration
 policy and is not inferred from a model name or deployment topology.
 
+**Tiered-example transparency amendment (2026-08-13, EO-D1..EO-D4).** The
+tiered Chat UI product borrows deployment-owned L1 pools directly and exposes
+only its orchestrator model. Its explicit verifier-gated DAG may opt in to
+model-attributed completed intermediate output through OpenAI
+`reasoning_content`; the final publisher remains ordinary `content`, and trace
+v2 remains metadata-only. Other deployments retain hidden intermediates by
+default. The binding example contract is
+`docs/design/example-layered-orchestration.md`.
+
 Typed final events retain cumulative `CompletionOutput` choices, so unary and
 SSE preserve every choice index, finish/stop reason, cumulative logprob, and
 token logprob exactly once. Tool-enabled streams buffer until every final

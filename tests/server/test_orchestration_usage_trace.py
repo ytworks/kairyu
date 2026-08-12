@@ -6,7 +6,7 @@ import pytest
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.orchestration.budget import Budget
-from kairyu.orchestration.orchestrator import Orchestrator
+from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
 from kairyu.outputs import CompletionOutput
 from tests.server._legacy_chat import create_legacy_app
 
@@ -63,13 +63,24 @@ class AccountingBackend:
         return None
 
 
-def _app(tmp_path, backend, *, moa_samples: int = 0):
+def _app(
+    tmp_path,
+    backend,
+    *,
+    moa_samples: int = 0,
+    expose_intermediate_outputs: bool = False,
+):
     return create_legacy_app(
         {"plain": backend},
         orchestrators={
             "auto": Orchestrator(
                 {"tier1": backend, "tier2": backend},
                 moa_samples=moa_samples,
+                expose_intermediate_outputs=expose_intermediate_outputs,
+                engine_descriptors={
+                    "tier1": EngineDescriptor("mock", "Qwen3.6-27B"),
+                    "tier2": EngineDescriptor("mock", "DeepSeek-V4"),
+                },
             )
         },
         settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
@@ -129,6 +140,59 @@ def test_auto_usage_reconciles_every_success_route(
     assert usage["orchestration_output_tokens"] == expected_calls * 2
     assert usage["prompt_tokens"] == expected_calls * 10
     assert usage["completion_tokens"] == expected_calls * 2
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+def test_visible_intermediates_use_reasoning_content_with_model_attribution(
+    tmp_path,
+    stream,
+):
+    backend = AccountingBackend()
+    app = _app(tmp_path, backend, expose_intermediate_outputs=True)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": COMPLEX}],
+                "stream": stream,
+            },
+        )
+
+    assert response.status_code == 200
+    if stream:
+        payloads = _sse_payloads(response.text)
+        reasoning = "".join(
+            choice["delta"].get("reasoning_content") or ""
+            for payload in payloads
+            for choice in payload.get("choices", ())
+        )
+        content = "".join(
+            choice["delta"].get("content") or ""
+            for payload in payloads
+            for choice in payload.get("choices", ())
+        )
+    else:
+        message = response.json()["choices"][0]["message"]
+        reasoning = message["reasoning_content"]
+        content = message["content"]
+
+    assert content == "final synthesized answer"
+    if not stream:
+        assert reasoning.startswith("### Final answer attribution")
+        assert "L2 role: `synthesizer`" in reasoning
+        assert "L1 worker: `tier2`" in reasoning
+        assert "Model: `DeepSeek-V4`" in reasoning
+    assert "useful intermediate answer" in reasoning
+    assert "PASS" in reasoning
+    assert "L2 role: `planner`" in reasoning
+    assert "L1 worker: `tier2`" in reasoning
+    assert "Model: `Qwen3.6-27B`" in reasoning
+    assert "Model: `DeepSeek-V4`" in reasoning
+    assert "final synthesized answer" not in reasoning
 
 
 def test_non_auto_usage_shape_is_unchanged_and_auto_fields_are_discoverable(

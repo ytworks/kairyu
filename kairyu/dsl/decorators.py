@@ -15,10 +15,12 @@ class AgentPool:
         shared_prefix: str = "",
         moa_samples: int = 0,
         internal_max_tokens: int = 1024,
+        expose_intermediate_outputs: bool = False,
     ) -> None:
         self._shared_prefix = shared_prefix
         self._moa_samples = moa_samples
         self._internal_max_tokens = internal_max_tokens
+        self._expose_intermediate_outputs = expose_intermediate_outputs
         self._workers: list[WorkerSpec] = []
         self._roles: list[RoleNodeSpec] = []
         self._budget = BudgetSpec()
@@ -26,20 +28,27 @@ class AgentPool:
     def worker(
         self,
         name: str,
-        backend: str = "mock",
+        backend: str | None = None,
+        engine_ref: str | None = None,
         model: str | None = None,
         base_url: str | None = None,
         api_key_env: str | None = None,
         options: dict | None = None,
     ) -> WorkerSpec:
-        spec = WorkerSpec(
-            name=name,
-            backend=backend,
-            model=model,
-            base_url=base_url,
-            api_key_env=api_key_env,
-            options=options or {},
-        )
+        values: dict[str, object] = {"name": name}
+        if backend is not None:
+            values["backend"] = backend
+        if engine_ref is not None:
+            values["engine_ref"] = engine_ref
+        if model is not None:
+            values["model"] = model
+        if base_url is not None:
+            values["base_url"] = base_url
+        if api_key_env is not None:
+            values["api_key_env"] = api_key_env
+        if options is not None:
+            values["options"] = options
+        spec = WorkerSpec.model_validate(values)
         self._workers.append(spec)
         return spec
 
@@ -87,4 +96,5 @@ class AgentPool:
             shared_prefix=self._shared_prefix,
             internal_max_tokens=self._internal_max_tokens,
             moa_samples=self._moa_samples,
+            expose_intermediate_outputs=self._expose_intermediate_outputs,
         )

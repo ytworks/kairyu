@@ -357,8 +357,14 @@ if ((${#kind_nodes[@]} != 1)); then
   exit 1
 fi
 CONTROL_PLANE=${kind_nodes[0]}
-"$KIND" load image-archive "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE" \
-  --name "$CLUSTER_NAME"
+if ! run_bounded 120s \
+  "$KIND" load image-archive "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE" \
+  --name "$CLUSTER_NAME"; then
+  echo "retrying kind image archive import" >&2
+  run_bounded 120s \
+    "$KIND" load image-archive "$GATEWAY_IMAGE_ARCHIVE" "$MOCK_IMAGE_ARCHIVE" \
+    --name "$CLUSTER_NAME"
+fi
 
 run_bounded 20s "$DOCKER" exec "$CONTROL_PLANE" \
   crictl inspecti --output json "$GATEWAY_IMAGE" \

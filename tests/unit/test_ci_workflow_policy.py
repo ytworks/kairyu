@@ -88,6 +88,131 @@ def test_f1b_rollout_freezes_each_image_before_kind_cluster_creation() -> None:
     assert '"$KIND" load docker-image' not in script
 
 
+def test_kind_ci_uses_one_verified_retried_tool_installer() -> None:
+    expected = {
+        ("ci.yml", "kind-smoke"): ("v0.31.0", "v1.35.0"),
+        ("f1a-churn.yml", "churn"): ("v0.32.0", "v1.36.3"),
+        ("f1b-rollout.yml", "rollout"): ("v0.32.0", "v1.36.3"),
+        ("f1c-gateway.yml", "gateway"): ("v0.32.0", "v1.36.3"),
+    }
+    for (workflow_name, job_name), versions in expected.items():
+        workflow, _ = _load_workflow(workflow_name)
+        step = _named_step(workflow["jobs"][job_name], "Install kind and kubectl")
+        assert step["run"] == "bash scripts/install_kind_tools.sh"
+        assert (
+            step["env"]["KIND_VERSION"],
+            step["env"]["KUBECTL_VERSION"],
+        ) == versions
+        pull_request = workflow["on"].get("pull_request")
+        if isinstance(pull_request, dict) and "paths" in pull_request:
+            assert "scripts/install_kind_tools.sh" in pull_request["paths"]
+
+    for workflow_path in _WORKFLOWS.glob("*.yml"):
+        assert "helm/kind-action" not in workflow_path.read_text(encoding="utf-8")
+
+    installer = (_ROOT / "scripts" / "install_kind_tools.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "--retry 4" in installer
+    assert "for attempt in 1 2 3" in installer
+    assert "sha256sum" in installer
+    assert '"${TOOLS_DIR}/kind" version' in installer
+    assert '"${TOOLS_DIR}/kubectl" version --client=true' in installer
+
+
+def test_kind_tool_installer_recovers_from_transient_downloads(
+    tmp_path: Path,
+) -> None:
+    fake_curl = tmp_path / "curl"
+    state = tmp_path / "curl-count"
+    github_path = tmp_path / "github-path"
+    kind_payload = tmp_path / "kind-payload"
+    kubectl_payload = tmp_path / "kubectl-payload"
+    _write_executable(
+        kind_payload,
+        "#!/usr/bin/env bash\necho 'kind v0.test go-test linux/amd64'\n",
+    )
+    _write_executable(
+        kubectl_payload,
+        "#!/usr/bin/env bash\necho 'Client Version: v1.test'\n",
+    )
+    _write_executable(
+        fake_curl,
+        """#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [[ -f "$FAKE_CURL_STATE" ]]; then
+  count=$(<"$FAKE_CURL_STATE")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$FAKE_CURL_STATE"
+if ((count <= 2)); then
+  exit 56
+fi
+url=
+output=
+while (($#)); do
+  case "$1" in
+    --output)
+      output=$2
+      shift 2
+      ;;
+    https://*)
+      url=$1
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+case "$url" in
+  */kind-linux-amd64.sha256sum)
+    printf '%s  kind-linux-amd64\n' "$(sha256sum "$FAKE_KIND" | awk '{print $1}')" >"$output"
+    ;;
+  */kind-linux-amd64)
+    cp "$FAKE_KIND" "$output"
+    ;;
+  */kubectl.sha256)
+    sha256sum "$FAKE_KUBECTL" | awk '{print $1}' >"$output"
+    ;;
+  */kubectl)
+    cp "$FAKE_KUBECTL" "$output"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+""",
+    )
+    env = os.environ | {
+        "CURL": str(fake_curl),
+        "FAKE_CURL_STATE": str(state),
+        "FAKE_KIND": str(kind_payload),
+        "FAKE_KUBECTL": str(kubectl_payload),
+        "GITHUB_PATH": str(github_path),
+        "KIND_VERSION": "v0.test",
+        "KUBECTL_VERSION": "v1.test",
+        "RUNNER_TEMP": str(tmp_path),
+    }
+    result = subprocess.run(
+        ["bash", str(_ROOT / "scripts" / "install_kind_tools.sh")],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "download attempt 1/3 failed" in result.stderr
+    assert "download attempt 2/3 failed" in result.stderr
+    assert state.read_text(encoding="utf-8").strip() == "6"
+    assert github_path.read_text(encoding="utf-8").strip() == str(
+        tmp_path / "kairyu-tools"
+    )
+
+
 def test_f1c_pull_requests_always_run_the_real_gateway_gate() -> None:
     workflow, text = _load_workflow("f1c-gateway.yml")
     pull_request = workflow["on"]["pull_request"]
@@ -272,9 +397,12 @@ def test_ci_runs_one_dedicated_cpu_microbenchmark_gate() -> None:
 
 def test_kind_job_runs_helm_tests_as_an_applicable_non_skipping_suite() -> None:
     workflow, _ = _load_workflow("ci.yml")
-    steps = workflow["jobs"]["kind-smoke"]["steps"]
+    assert workflow["concurrency"]["cancel-in-progress"] == "true"
+    kind_job = workflow["jobs"]["kind-smoke"]
+    assert "needs" not in kind_job
+    steps = kind_job["steps"]
     step = _named_step(
-        workflow["jobs"]["kind-smoke"],
+        kind_job,
         "Run Helm integration tests",
     )
     script = (_ROOT / "scripts" / "helm_integration.sh").read_text(

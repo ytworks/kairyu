@@ -192,6 +192,9 @@ services:
       - deepseek_v4
       - --reasoning-parser
       - deepseek_v4
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - deepseek_v4
       - --chat-template
       - /etc/kairyu/identity-chat.jinja
       - --enable-prefix-caching
@@ -231,13 +234,7 @@ services:
         read_only: true
       - deepseek-models:/models/deepseek:ro
       - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
-      - ./auto.yaml:/etc/kairyu/auto.yaml:ro
       - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
-      - ./auto-max-chat.yaml:/etc/kairyu/auto-max-chat.yaml:ro
-      - ./auto-max-moa1.yaml:/etc/kairyu/auto-max-moa1.yaml:ro
-      - ./auto-max-moa2.yaml:/etc/kairyu/auto-max-moa2.yaml:ro
-      - ./auto-max-moa3.yaml:/etc/kairyu/auto-max-moa3.yaml:ro
-      - ./auto-max-moa4.yaml:/etc/kairyu/auto-max-moa4.yaml:ro
       - ./router.json:/etc/kairyu/router.json:ro
       - ./deepseek-thinking.jinja:/etc/kairyu/deepseek-thinking.jinja:ro
       - ../qwen3.6-27b-1gpu/chat_template.jinja:/etc/kairyu/qwen3.6-chat-template.jinja:ro
@@ -263,8 +260,9 @@ services:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
       DEFAULT_MODELS: kairyu-auto-max
-      DEFAULT_MODEL_PARAMS: '{"max_tokens":32768}'
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"stream_response":false}'
       ENABLE_PERSISTENT_CONFIG: "false"
+      RESET_CONFIG_ON_START: "true"
       ENABLE_SIGNUP: "false"
       ENABLE_LOGIN_FORM: "false"
       WEBUI_AUTH: "false"
@@ -273,6 +271,7 @@ services:
       WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
       WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
       ENABLE_OLLAMA_API: "false"
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
       RAG_EMBEDDING_ENGINE: ""
     volumes:
       - type: bind

@@ -789,7 +789,7 @@ def build_app_from_spec(
             orchestrator_spec = orchestrator_spec.model_copy(
                 update={"workers": tuple(workers)}
             )
-        return build_orchestrator(orchestrator_spec)
+        return build_orchestrator(orchestrator_spec, engine_refs=engines)
 
     orchestrator: Orchestrator | None = None
     if spec.orchestrator is not None:
@@ -800,6 +800,44 @@ def build_app_from_spec(
     if orchestrator is not None:
         startup_resources.append(orchestrator)
     startup_resources.extend(orchestrators.values())
+
+    all_orchestrators = dict(orchestrators)
+    if orchestrator is not None:
+        all_orchestrators.setdefault("kairyu-auto", orchestrator)
+    public_models = spec.public_models
+    served_engines = (
+        engines
+        if public_models is None
+        else {name: engine for name, engine in engines.items() if name in public_models}
+    )
+    served_orchestrators = (
+        all_orchestrators
+        if public_models is None
+        else {
+            name: selected
+            for name, selected in all_orchestrators.items()
+            if name in public_models
+        }
+    )
+    served_embeddings = (
+        embedding_backends
+        if public_models is None
+        else {
+            name: backend
+            for name, backend in embedding_backends.items()
+            if name in public_models
+        }
+    )
+    served_chat_templates = {
+        name: template
+        for name, template in chat_templates.items()
+        if public_models is None or name in public_models
+    }
+    served_legacy_chat_models = frozenset(
+        name
+        for name in chat_policy.legacy_models
+        if public_models is None or name in public_models
+    )
 
     workers: list[BatchWorker] = []  # filled after create_app (worker needs app metrics)
     batch_stores: list[object] = []
@@ -857,22 +895,21 @@ def build_app_from_spec(
                 )
 
     app = create_app(
-        engines=engines,
-        orchestrator=orchestrator,
-        orchestrators=orchestrators,
+        engines=served_engines,
+        orchestrators=served_orchestrators,
         settings=server_settings,
         lifespan=lifespan,
-        chat_templates=chat_templates,
+        chat_templates=served_chat_templates,
         tenant_config=tenant_config,
-        embedding_backends=embedding_backends,
+        embedding_backends=served_embeddings,
         resolved_api_keys=api_keys,
         resolved_admin_keys=admin_keys,
         price_sheet=spec.pricing,
-        legacy_chat_models=chat_policy.legacy_models,
-        orchestration_chat_models={
-            *spec.orchestrators,
-            *({"kairyu-auto"} if spec.orchestrator is not None else set()),
-        },
+        legacy_chat_models=served_legacy_chat_models,
+        orchestration_chat_models=set(served_orchestrators),
+        runtime_engines=engines,
+        runtime_embedding_backends=embedding_backends,
+        runtime_orchestrators=all_orchestrators,
     )
     app.state.deployment_spec = spec
     app.state.probers = tuple(probers)

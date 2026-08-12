@@ -16,6 +16,7 @@ from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, RoleSpec
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
+from kairyu.orchestration.trace import WorkerTraceIdentity
 from kairyu.outputs import CompletionOutput
 
 
@@ -472,6 +473,117 @@ async def test_refinement_depth_is_bounded():
     result = await conductor.run("task", budget=Budget(max_refine_depth=2))
     assert result.outputs["worker"] == "d3"  # 1 initial + 2 refinements, then stop
     assert result.outputs["check"] == "FAIL 3"
+    verifier_events = [event for event in result.trace if event.role == "verifier"]
+    assert verifier_events[-1].metadata["refinement_exhausted"] is True
+
+
+async def test_visible_intermediates_are_attributed_and_separate_from_final():
+    backend = ScriptedBackend(
+        ["draft v1", "FAIL: revise", "draft v2", "PASS", "published answer"]
+    )
+    roles = (
+        RoleSpec(name="draft", worker="tier1", prompt="draft: {query}"),
+        RoleSpec(
+            name="check",
+            worker="tier2",
+            prompt="verify: {draft}",
+            role_type="verifier",
+            verifies="draft",
+            depends_on=("draft",),
+        ),
+        RoleSpec(
+            name="publisher",
+            worker="tier2",
+            prompt="publish: {draft} {check}",
+            role_type="publisher",
+            depends_on=("draft", "check"),
+        ),
+    )
+    conductor = Conductor(
+        roles=roles,
+        workers={"tier1": backend, "tier2": backend},
+        worker_trace={
+            "tier1": WorkerTraceIdentity(engine="qwen-pool", model="Qwen3.6-27B"),
+            "tier2": WorkerTraceIdentity(engine="deepseek-pool", model="DeepSeek-V4"),
+        },
+        expose_intermediate_outputs=True,
+    )
+
+    events = [
+        event
+        async for event in conductor.stream(
+            "task",
+            budget=Budget(max_steps=5, max_refine_depth=1),
+        )
+    ]
+
+    reasoning = "".join(event.text for event in events if event.kind == "reasoning")
+    final = events[-1].result
+    assert final is not None
+    assert final.final_text == "published answer"
+    assert final.reasoning_content is not None
+    assert reasoning.removesuffix("\n\n---\n\n") == final.reasoning_content
+    assert reasoning.index("draft v1") < reasoning.index("FAIL: revise")
+    assert reasoning.index("draft v2") < reasoning.index("PASS")
+    assert "L2 role: `worker`" in reasoning
+    assert "L1 worker: `tier1`" in reasoning
+    assert "Engine: `qwen-pool`" in reasoning
+    assert "Model: `Qwen3.6-27B`" in reasoning
+    assert "Model: `DeepSeek-V4`" in reasoning
+    assert "published answer" not in reasoning
+
+
+async def test_unary_reasoning_starts_with_actual_final_model_attribution():
+    backend = ScriptedBackend(["draft", "published answer"])
+    roles = (
+        RoleSpec(name="draft", worker="tier1", prompt="draft: {query}"),
+        RoleSpec(
+            name="publisher",
+            worker="tier2",
+            prompt="publish: {draft}",
+            role_type="publisher",
+            depends_on=("draft",),
+        ),
+    )
+    conductor = Conductor(
+        roles=roles,
+        workers={"tier1": backend, "tier2": backend},
+        worker_trace={
+            "tier1": WorkerTraceIdentity(engine="qwen-pool", model="Qwen3.6-27B"),
+            "tier2": WorkerTraceIdentity(engine="deepseek-pool", model="DeepSeek-V4"),
+        },
+        expose_intermediate_outputs=True,
+    )
+
+    result = await conductor.run("task")
+
+    assert result.reasoning_content is not None
+    assert result.reasoning_content.startswith("### Final answer attribution")
+    assert "L2 role: `publisher`" in result.reasoning_content
+    assert "L1 worker: `tier2`" in result.reasoning_content
+    assert "Engine: `deepseek-pool`" in result.reasoning_content
+    assert "Model: `DeepSeek-V4`" in result.reasoning_content
+    assert result.reasoning_content.index("Final answer attribution") < (
+        result.reasoning_content.index("### draft")
+    )
+
+
+async def test_intermediates_remain_hidden_by_default():
+    backend = ScriptedBackend(["draft", "published answer"])
+    roles = (
+        RoleSpec(name="draft", worker="w", prompt="draft: {query}"),
+        RoleSpec(
+            name="publisher",
+            worker="w",
+            prompt="publish: {draft}",
+            depends_on=("draft",),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+
+    result = await conductor.run("task")
+
+    assert result.reasoning_content is None
 
 
 async def test_budget_exhaustion_returns_best_so_far():

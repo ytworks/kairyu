@@ -39,6 +39,13 @@ choice index rather than by non-empty text. Role-only, finish-only, and empty-co
 remain valid empty completions (including within `n > 1`), while a stream that observes no
 choices at all remains an upstream failure.
 
+**Deployment-reference amendment (2026-08-13, EO-D1).** A deployment-loaded
+L2 worker may borrow an already-built L1 engine or pool by `engine_ref`. The
+deployment retains lifecycle ownership and L2 dispatches to the exact object;
+it must not construct an HTTP worker that loops through the deployment's own
+L3 surface. Standalone factory-backed DSL workers retain their existing owned
+lifecycle. See `example-layered-orchestration.md`.
+
 **Typed-prompt amendment (2026-07-30, issue #227):** the public backend seam now
 accepts a nominal `PromptInput`: legacy `str`, `TextPrompt`, `TokensPrompt`, or
 `MultimodalPrompt`. Legacy strings retain their exact behavior. A

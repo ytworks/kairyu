@@ -1,23 +1,11 @@
-# L2 quality tier: all requests use three independent Qwen proposals in
-# parallel and one DeepSeek synthesis. Four Tier1 replicas prevent proposal
-# fan-out from serializing at L1.
+# UI-visible quality policy. One L3 request enters this explicit L2 DAG, whose
+# workers borrow the deployment-owned L1 pools directly. Completed pre-final
+# work is carried separately as model-attributed reasoning_content.
 workers:
   - name: tier1
-    backend: openai
-    model: qwen3.6-27b
-    base_url: http://kairyu:8000/v1
-    api_key_env: null
-    options:
-      upstream: kairyu
-      timeout_s: 86400
+    engine_ref: qwen3.6-27b
   - name: tier2
-    backend: openai
-    model: deepseek-v4-flash-0731-thinking
-    base_url: http://kairyu:8000/v1
-    api_key_env: null
-    options:
-      upstream: kairyu
-      timeout_s: 86400
+    engine_ref: deepseek-v4-flash-0731-thinking
 
 router:
   kind: calibrated
@@ -25,9 +13,78 @@ router:
   sha256: 9b3cc02780fd5a1cdf1073557b66900e14dd59b6dd655b961f6f85bc3cb51ca5
   target_mode: auto-max
 
-moa_samples: 3
+roles:
+  - name: planner
+    worker: tier2
+    role_type: planner
+    prompt: |
+      [planner] Produce a compact plan for the user's task.
+      Task: {query}
+
+  - name: proposal_a
+    worker: tier1
+    role_type: proposal
+    depends_on: [planner]
+    prompt: |
+      [proposal_a] Solve the task independently using the plan.
+      Task: {query}
+      Plan: {planner}
+
+  - name: proposal_b
+    worker: tier1
+    role_type: proposal
+    depends_on: [planner]
+    prompt: |
+      [proposal_b] Produce an adversarial solution that emphasizes edge cases.
+      Task: {query}
+      Plan: {planner}
+
+  - name: proposal_c
+    worker: tier1
+    role_type: proposal
+    depends_on: [planner]
+    prompt: |
+      [proposal_c] Produce a verification-oriented independent solution.
+      Task: {query}
+      Plan: {planner}
+
+  - name: draft_synthesis
+    worker: tier2
+    role_type: synthesizer
+    depends_on: [proposal_a, proposal_b, proposal_c]
+    prompt: |
+      [draft_synthesis] Synthesize the strongest accurate draft.
+      Task: {query}
+      Proposal A: {proposal_a}
+      Proposal B: {proposal_b}
+      Proposal C: {proposal_c}
+
+  - name: verifier
+    worker: tier2
+    role_type: verifier
+    verifies: draft_synthesis
+    depends_on: [draft_synthesis]
+    prompt: |
+      [verifier] Check the draft against the task. Start with PASS when it is
+      ready to publish. Otherwise start with FAIL and give actionable defects.
+      Task: {query}
+      Draft: {draft_synthesis}
+
+  - name: publisher
+    worker: tier2
+    role_type: publisher
+    depends_on: [draft_synthesis, verifier]
+    prompt: |
+      [publisher] Return only the final answer to the user. Incorporate the
+      verified draft and notes; do not describe this orchestration process.
+      Task: {query}
+      Verified draft: {draft_synthesis}
+      Verifier: {verifier}
+
+moa_samples: 0
 internal_max_tokens: 2048
+expose_intermediate_outputs: true
 
 budget:
-  max_steps: 4
-  max_refine_depth: 0
+  max_steps: 11
+  max_refine_depth: 2

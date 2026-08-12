@@ -86,6 +86,36 @@ class ConductorResult:
     trace: tuple[TraceEvent, ...]
     usage: tuple[int, int] = (0, 0)  # (prompt, completion) summed over units (m11 A1)
     cached_tokens: int = 0
+    reasoning_content: str | None = None
+
+
+@dataclass(frozen=True)
+class IntermediateOutput:
+    """One explicitly publishable completed L2/L1 stage output."""
+
+    node: str
+    role: str
+    attempt: int
+    worker: str
+    engine: str
+    model: str | None
+    text: str
+    model_reasoning: str | None = None
+
+    def as_markdown(self) -> str:
+        model = self.model or "unspecified"
+        lines = [
+            f"### {self.node} — attempt {self.attempt + 1}",
+            "",
+            f"- L2 role: `{self.role}`",
+            f"- L1 worker: `{self.worker}`",
+            f"- Engine: `{self.engine}`",
+            f"- Model: `{model}`",
+        ]
+        if self.model_reasoning:
+            lines.extend(("", "#### Model reasoning", "", self.model_reasoning))
+        lines.extend(("", "#### Stage output", "", self.text))
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -98,7 +128,7 @@ class ConductorEvent:
     followed by the complete accounting result.
     """
 
-    kind: str  # "delta" | "result"
+    kind: str  # "reasoning" | "delta" | "result"
     text: str = ""
     completions: tuple[CompletionOutput, ...] = ()
     result: ConductorResult | None = None
@@ -136,6 +166,7 @@ class _RunState:
     prepared_initial_requests: dict[str, GenerationRequest] = field(
         default_factory=dict
     )
+    intermediate_outputs: list[IntermediateOutput] = field(default_factory=list)
 
 
 class _BudgetRefused(Exception):
@@ -176,6 +207,7 @@ class Conductor:
         usage_observer: Callable[[GenerationUsage], None] | None = None,
         final_parallel_tool_calls: bool | None = None,
         final_tool_call_protocol: str = "generic",
+        expose_intermediate_outputs: bool = False,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -198,6 +230,7 @@ class Conductor:
         self._final_tool_call_protocol = final_tool_call_protocol
         self._cost_model = cost_model
         self._usage_observer = usage_observer
+        self._expose_intermediate_outputs = expose_intermediate_outputs
         supplied_trace = dict(worker_trace or {})
         self._worker_trace = {
             worker: supplied_trace.get(
@@ -485,6 +518,72 @@ class Conductor:
             error=error,
         )
 
+    @staticmethod
+    def _model_reasoning(completions: tuple[CompletionOutput, ...]) -> str | None:
+        parts = tuple(
+            completion.reasoning_content
+            for completion in completions
+            if completion.reasoning_content
+        )
+        return "\n\n".join(parts) or None
+
+    def _record_intermediate(
+        self,
+        run: _RunState,
+        spec: RoleSpec,
+        attempt: int,
+        observed: _GenerationObservation,
+    ) -> None:
+        if (
+            not self._expose_intermediate_outputs
+            or spec.name == self._selected_final_unit().name
+        ):
+            return
+        identity = self._worker_trace[spec.worker]
+        run.intermediate_outputs.append(
+            IntermediateOutput(
+                node=spec.name,
+                role=spec.role_type,
+                attempt=attempt,
+                worker=spec.worker,
+                engine=identity.engine,
+                model=identity.model,
+                text=observed.text,
+                model_reasoning=self._model_reasoning(observed.completions),
+            )
+        )
+
+    def _attribution_summary(self, spec: RoleSpec) -> str:
+        identity = self._worker_trace[spec.worker]
+        model = identity.model or "unspecified"
+        return "\n".join(
+            (
+                "### Final answer attribution",
+                "",
+                f"- L2 role: `{spec.role_type}`",
+                f"- L1 worker: `{spec.worker}`",
+                f"- Engine: `{identity.engine}`",
+                f"- Model: `{model}`",
+            )
+        )
+
+    def _reasoning_content(
+        self,
+        run: _RunState,
+        *,
+        include_final_attribution: bool = True,
+    ) -> str | None:
+        if not self._expose_intermediate_outputs:
+            return None
+        sections = [output.as_markdown() for output in run.intermediate_outputs]
+        if not include_final_attribution:
+            return "\n\n---\n\n".join(sections) or None
+        final = self._final_output_unit(run)
+        if final is None:
+            return None
+        sections.insert(0, self._attribution_summary(final))
+        return "\n\n---\n\n".join(sections)
+
     async def _generate(
         self,
         run: _RunState,
@@ -643,6 +742,7 @@ class Conductor:
                 break
             text = observed.text
             run.outputs[spec.name] = text
+            self._record_intermediate(run, spec, depth, observed)
             if spec.name == self._selected_final_unit().name:
                 run.final_completions = observed.completions
             run.trace.append(
@@ -693,6 +793,8 @@ class Conductor:
             verdict = verifier_observed.text
             run.outputs[verifier.name] = verdict
             passed = _is_pass(verdict)
+            can_refine = run.budget.can_refine(depth)
+            self._record_intermediate(run, verifier, depth, verifier_observed)
             run.trace.append(
                 self._trace_event(
                     verifier,
@@ -704,10 +806,13 @@ class Conductor:
                     timing=verifier_observed.timing,
                     usage=verifier_observed.usage,
                     budget=verifier_observed.budget,
-                    metadata={"pass": passed},
+                    metadata={
+                        "pass": passed,
+                        "refinement_exhausted": not passed and not can_refine,
+                    },
                 )
             )
-            if passed or not run.budget.can_refine(depth):
+            if passed or not can_refine:
                 break
             depth += 1
             prompt = await run_prompt_work(
@@ -742,14 +847,18 @@ class Conductor:
             )
 
     def _final_text(self, run: _RunState) -> str:
+        unit = self._final_output_unit(run)
+        return run.outputs[unit.name] if unit is not None else ""
+
+    def _final_output_unit(self, run: _RunState) -> RoleSpec | None:
         terminal = self._terminal_units()
         synthesizers = [unit for unit in terminal if unit.role_type == "synthesizer"]
         for unit in synthesizers + terminal:
             if unit.name in run.outputs:
-                return run.outputs[unit.name]
+                return unit
         if run.completion_order:
-            return run.outputs[run.completion_order[-1]]
-        return ""
+            return self._by_name[run.completion_order[-1]]
+        return None
 
     def _terminal_units(self) -> list[RoleSpec]:
         dependents: set[str] = set()
@@ -1008,6 +1117,7 @@ class Conductor:
             trace=tuple(run.trace),
             usage=tuple(run.usage),
             cached_tokens=run.cached_tokens,
+            reasoning_content=self._reasoning_content(run),
         )
 
     async def stream(
@@ -1045,6 +1155,11 @@ class Conductor:
             query,
             exclude=frozenset({final.name}),
         )
+        for output in run.intermediate_outputs:
+            yield ConductorEvent(
+                kind="reasoning",
+                text=f"{output.as_markdown()}\n\n---\n\n",
+            )
         emitted_text = ""
         try:
             async for event in self._stream_unit(run, session, query, final):
@@ -1060,6 +1175,10 @@ class Conductor:
                 trace=tuple(run.trace),
                 usage=tuple(run.usage),
                 cached_tokens=run.cached_tokens,
+                reasoning_content=self._reasoning_content(
+                    run,
+                    include_final_attribution=False,
+                ),
             )
             raise ConductorStreamError(error, result) from error
         final_text = self._final_text(run)
@@ -1080,5 +1199,9 @@ class Conductor:
                 trace=tuple(run.trace),
                 usage=tuple(run.usage),
                 cached_tokens=run.cached_tokens,
+                reasoning_content=self._reasoning_content(
+                    run,
+                    include_final_attribution=False,
+                ),
             ),
         )

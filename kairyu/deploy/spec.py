@@ -390,6 +390,9 @@ class DeploymentSpec(BaseModel):
     # legacy single `orchestrator:` key stays and is served as "kairyu-auto".
     orchestrators: dict[str, OrchestratorSection] = Field(default_factory=dict)
     embeddings: dict[str, EmbeddingSection] = Field(default_factory=dict)
+    # Omission preserves the generic all-model server. An explicit allowlist
+    # separates public dispatch from deployment-owned internal resources.
+    public_models: frozenset[str] | None = None
     batch: BatchSection | None = None
     tenants: TenantSection | None = None
     pricing: PriceSheet | None = None
@@ -459,6 +462,20 @@ class DeploymentSpec(BaseModel):
                 f"embedding names {sorted(embedding_overlap)} collide with "
                 "engines:/pools:/orchestrators: names; served model names must be unique"
             )
+        if self.public_models is not None:
+            if not self.public_models:
+                raise ValueError("public_models must contain at least one model")
+            known_models = {
+                *self.engines,
+                *self.pools,
+                *orchestration_names,
+                *self.embeddings,
+            }
+            unknown_public = self.public_models - known_models
+            if unknown_public:
+                raise ValueError(
+                    f"public_models contains unknown models {sorted(unknown_public)}"
+                )
         if self.tenants is not None:
             resolve_credentials = (
                 info.context is None

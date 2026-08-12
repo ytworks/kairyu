@@ -121,3 +121,11 @@ measurements. Its serving report must record TTFT and output throughput, while
 the accuracy report must finish all 1,055 pinned LiveCodeBench release-v6 rows
 with isolated code execution. Public heterogeneous figures are comparison
 context, not a substitute for those local measurements.
+
+**Layered-product amendment (2026-08-13, EO-D2..EO-D5).** The measured vLLM
+services may remain transitional L1 workers while the tiered example proves
+its direct L2-to-L1 object boundary, bounded verifier loop, one-model public
+inventory, and separate model-attributed intermediate-output UI. That
+structural pass does not satisfy the native production gate: the default may
+be called native Kairyu L1 only after the full-checkpoint gates in FN-D7 pass.
+The binding example contract is `example-layered-orchestration.md`.

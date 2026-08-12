@@ -61,20 +61,13 @@
     "deepseek_cudagraph_mode": "FULL_AND_PIECEWISE"
   },
   "orchestration": {
-    "auto_model": "kairyu-auto",
     "auto_max_model": "kairyu-auto-max",
-    "auto_max_chat_model": "kairyu-auto-max-chat",
-    "auto_max_candidate_models": [
-      "kairyu-auto-max-moa1",
-      "kairyu-auto-max-moa2",
-      "kairyu-auto-max-moa3",
-      "kairyu-auto-max-moa4"
-    ],
-    "moa_samples": 2,
-    "auto_max_moa_samples": 3,
     "internal_max_output_tokens": 2048,
-    "auto_max_chat_moa_samples": 3,
-    "auto_max_chat_internal_max_output_tokens": 1024
+    "product_policy": "verifier-gated-role-dag",
+    "product_normal_calls": 7,
+    "product_max_calls": 11,
+    "product_max_refinements": 2,
+    "product_exposes_intermediate_outputs": true
   },
   "webui": {
     "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
@@ -107,10 +100,7 @@
         "build-cython-ext",
         "db-wal-recovery"
       ],
-      "pilot_models": [
-        "deepseek-v4-flash-0731",
-        "kairyu-auto-max"
-      ]
+      "pilot_models": ["kairyu-auto-max"]
     }
   }
 }

@@ -314,6 +314,57 @@ orchestrator: {spec: cycle.yaml}
     )
 
 
+def test_validation_resolves_orchestrator_engine_refs_without_constructing_backends(
+    tmp_path,
+):
+    orchestrator = tmp_path / "auto.yaml"
+    orchestrator.write_text(
+        "workers:\n  - {name: tier1, engine_ref: internal}\n",
+        encoding="utf-8",
+    )
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        """
+pools:
+  internal:
+    replicas:
+      - {backend: mock}
+orchestrator: {spec: auto.yaml}
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert report.valid
+
+
+def test_validation_rejects_unknown_orchestrator_engine_ref(tmp_path):
+    orchestrator = tmp_path / "auto.yaml"
+    orchestrator.write_text(
+        "workers:\n  - {name: tier1, engine_ref: missing}\n",
+        encoding="utf-8",
+    )
+    deployment = tmp_path / "deploy.yaml"
+    deployment.write_text(
+        """
+engines:
+  internal: {backend: mock}
+orchestrator: {spec: auto.yaml}
+""",
+        encoding="utf-8",
+    )
+
+    report = validate_deployment(deployment)
+
+    assert not report.valid
+    assert any(
+        finding.code == "schema.unknown_engine_ref"
+        and finding.field == "workers[0].engine_ref"
+        for finding in report.findings
+    )
+
+
 def test_validation_resolves_links_from_the_config_symlink_location(tmp_path):
     release = tmp_path / "release"
     entry = tmp_path / "entry"

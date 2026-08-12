@@ -153,6 +153,7 @@ class RoutingModelDescriptorPayload(BaseModel):
     budget: BudgetDescriptorPayload
     moa_samples: int
     internal_max_tokens: int | None
+    expose_intermediate_outputs: bool = False
 
 
 class RoutingResponse(BaseModel):

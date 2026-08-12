@@ -193,6 +193,38 @@ def test_defaults():
     assert spec.tenants is None
     assert spec.embeddings == {}
     assert spec.legacy_chat_models == frozenset()
+    assert spec.public_models is None
+
+
+def test_public_models_are_explicit_and_fail_closed():
+    spec = load_deployment_spec(
+        """
+engines:
+  internal: {backend: mock}
+orchestrators:
+  product: {spec: product.yaml}
+public_models: [product]
+"""
+    )
+    assert spec.public_models == frozenset({"product"})
+
+    with pytest.raises(ValidationError, match="at least one model"):
+        load_deployment_spec(
+            """
+engines:
+  internal: {backend: mock}
+public_models: []
+"""
+        )
+
+    with pytest.raises(ValidationError, match="unknown models.*ghost"):
+        load_deployment_spec(
+            """
+engines:
+  internal: {backend: mock}
+public_models: [ghost]
+"""
+        )
 
 
 def test_legacy_chat_models_are_explicit_per_served_model():

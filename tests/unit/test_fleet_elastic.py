@@ -1332,15 +1332,16 @@ async def test_helm_check_exits_after_four_helm_commands_without_cluster_side_ef
 
 
 async def test_ci_has_explicit_single_source_helm_schema_and_gpu_template_gate():
-    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    helm_install = workflow.index("- uses: helm/kind-action@v1")
-    named_gate = workflow.index("- name: Helm schema and GPU template gate")
-    gate_call = workflow.index("run: bash scripts/kind_smoke.sh --helm-check")
-    kind_smoke = workflow.index("- name: kind smoke (m10a D5)")
+    workflow_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    workflow = yaml.safe_load(workflow_text)
+    steps = workflow["jobs"]["kind-smoke"]["steps"]
+    run_commands = [step.get("run") for step in steps]
 
-    assert helm_install < named_gate < gate_call < kind_smoke
-    assert "helm lint" not in workflow
-    assert "helm template" not in workflow
+    assert run_commands.index(
+        "bash scripts/kind_smoke.sh --helm-check"
+    ) < run_commands.index("bash scripts/kind_smoke.sh")
+    assert "helm lint" not in workflow_text
+    assert "helm template" not in workflow_text
 
 
 @pytest.mark.helm
