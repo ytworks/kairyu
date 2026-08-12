@@ -1302,6 +1302,11 @@ Harness output and sampling, verified against the pinned harnesses:
   terminus-2; those omissions are annotated on the cell. Explicit target
   `temperature` and recommended-default omission are not claimed through any
   external harness: those rows skip as described above.
+- **SWE-Bench Pro Docker storage**: generation and official evaluation run
+  their official task containers. Images that were absent before the run are
+  removed when their task finishes, bounding local storage near the active-
+  worker set while preserving images that the operator had preloaded. Pulls
+  have a 30-minute per-task timeout for large official images.
 
 `--attempts N` also controls the grouped multi-seed chat runs described above.
 For the external harnesses it continues to set trials per task where exposed

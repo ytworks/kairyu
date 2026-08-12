@@ -39,7 +39,7 @@ from kairyu.bench.types import (
     PairResult,
 )
 
-_STAGE_TIMEOUT_S = 8 * 3600
+_STAGE_TIMEOUT_S = 24 * 3600
 _DATASET = "ScaleAI/SWE-bench_Pro"
 _DATASET_REVISION = "7ab5114912baf22bb098818e604c02fe7ad2c11f"
 _DATASET_ROWS = 731
@@ -54,6 +54,7 @@ _STEP_LIMIT = 1000
 # soon as -c is given, so the default file has to be restated by name.
 _BASE_CONFIG = "swebench_backticks.yaml"
 _MODEL_CLASS = "kairyu.bench.mini_swe_agent.OpenAICompatTextbasedModel"
+_PULL_TIMEOUT_S = 30 * 60
 _AGENT_OUTCOMES = frozenset(
     {"Submitted", "LimitsExceeded", "TimeExceeded", "RepeatedFormatError"}
 )
@@ -294,6 +295,8 @@ class SweBenchProAdapter:
             "wrapper has no verified passthrough",
             "vendor extra_body has no harness equivalent and is NOT forwarded",
             f"official ScaleAI evaluator {_EVALUATOR_REVISION[:12]} with local Docker",
+            "task images first pulled by this run are removed after each generation "
+            "and evaluation task to bound local Docker storage",
             "--attempts must remain 1; this wrapper has no verified repeated-trial "
             "or grouped chat seed-sweep path",
         ),
@@ -401,6 +404,8 @@ class SweBenchProAdapter:
             "--config",
             'environment.run_args=["--rm","--entrypoint",""]',
             "--config",
+            f"environment.pull_timeout={_PULL_TIMEOUT_S}",
+            "--config",
             "model.cost_tracking=ignore_errors",
         ]
         # The harness forwards `model.model_kwargs.*` to its LLM client, so the
@@ -422,7 +427,9 @@ class SweBenchProAdapter:
     ) -> list[str]:
         return [
             sys.executable,
-            str(evaluator / "swe_bench_pro_eval.py"),
+            "-m",
+            "kairyu.bench.swebench_pro_eval",
+            f"--evaluator-script={evaluator / 'swe_bench_pro_eval.py'}",
             f"--raw_sample_path={dataset}",
             f"--patch_path={predictions}",
             f"--output_dir={output_dir}",
