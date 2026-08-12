@@ -17,6 +17,9 @@ roles:
   - name: vision_grounding
     worker: tier1
     role_type: vision
+    extra_args:
+      chat_template_kwargs:
+        enable_thinking: false
     prompt: |
       [vision_grounding] Inspect every supplied image and extract the visual
       evidence needed to answer the user's request. Be precise about labels,

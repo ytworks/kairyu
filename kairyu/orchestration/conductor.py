@@ -76,6 +76,7 @@ class RoleSpec:
     role_type: str = "worker"
     depends_on: tuple[str, ...] = ()
     verifies: str | None = None
+    extra_args: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, TemplatedPrompt):
@@ -84,6 +85,7 @@ class RoleSpec:
                 "chat prompts; provide a plain derivation template"
             )
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
+        object.__setattr__(self, "extra_args", dict(self.extra_args))
 
 
 @dataclass(frozen=True)
@@ -275,7 +277,7 @@ class Conductor:
         str,
     ]:
         if spec.name == self._selected_final_unit().name:
-            return (
+            intent = (
                 self._final_sampling_params,
                 self._final_tools,
                 self._final_tool_choice,
@@ -283,7 +285,17 @@ class Conductor:
                 self._final_parallel_tool_calls,
                 self._final_tool_call_protocol,
             )
-        return self._sampling_params, (), None, False, None, "generic"
+        else:
+            intent = self._sampling_params, (), None, False, None, "generic"
+        if not spec.extra_args:
+            return intent
+        sampling, *rest = intent
+        return (
+            sampling.clone(
+                extra_args={**sampling.extra_args, **spec.extra_args},
+            ),
+            *rest,
+        )
 
     def _observe_usage(
         self,

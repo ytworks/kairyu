@@ -99,6 +99,7 @@ def build_orchestrator(
                 role_type=role.role_type,
                 depends_on=role.depends_on,
                 verifies=role.verifies,
+                extra_args=role.extra_args,
             )
             for role in spec.roles
         )

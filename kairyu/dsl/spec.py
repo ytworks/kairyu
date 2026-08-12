@@ -53,6 +53,7 @@ class RoleNodeSpec(BaseModel):
     role_type: str = "worker"
     depends_on: tuple[str, ...] = ()
     verifies: str | None = None
+    extra_args: dict[str, object] = Field(default_factory=dict)
 
 
 class BudgetSpec(BaseModel):

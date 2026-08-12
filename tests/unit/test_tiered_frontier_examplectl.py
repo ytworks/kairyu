@@ -161,7 +161,8 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         assert replica.options["tensor_parallel_size"] == 1
         assert replica.options["upstream"] == "vllm"
         assert replica.options["capabilities"] == {
-            "allow_prompt_kinds": ["text", "multimodal"]
+            "allow_prompt_kinds": ["text", "multimodal"],
+            "allow_extra_args": ["chat_template_kwargs"],
         }
         assert replica.options["image_input_policy"]["max_images"] == 4
         assert (
@@ -234,6 +235,9 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     assert vision.worker == "tier1"
     assert vision.role_type == "vision"
     assert vision.depends_on == ()
+    assert vision.extra_args == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
     assert verifier.verifies == "draft_synthesis"
     assert publisher.depends_on == (
         "vision_grounding",

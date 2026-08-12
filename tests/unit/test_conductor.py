@@ -232,6 +232,9 @@ async def test_multimodal_input_runs_vision_role_then_text_verifier_and_publishe
             worker="w",
             role_type="vision",
             prompt="ground the image for {query}",
+            extra_args={
+                "chat_template_kwargs": {"enable_thinking": False}
+            },
         ),
         RoleSpec(
             name="draft",
@@ -256,6 +259,16 @@ async def test_multimodal_input_runs_vision_role_then_text_verifier_and_publishe
         ),
     )
     conductor = Conductor(roles=roles, workers={"w": backend})
+    initial = conductor.initial_requests(
+        "chart question",
+        request_id_suffix="vision",
+        multimodal_prompt=_image_prompt(),
+    )
+
+    assert len(initial) == 1
+    assert initial[0][1].sampling_params.extra_args == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
 
     result = await conductor.run(
         "chart question",

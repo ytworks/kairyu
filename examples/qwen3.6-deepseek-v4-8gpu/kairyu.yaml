@@ -18,6 +18,7 @@ pools:
           upstream: vllm
           capabilities:
             allow_prompt_kinds: [text, multimodal]
+            allow_extra_args: [chat_template_kwargs]
           image_input_policy:
             max_images: 4
             max_image_bytes: 8388608
