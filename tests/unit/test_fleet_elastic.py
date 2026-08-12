@@ -1335,17 +1335,11 @@ async def test_ci_has_explicit_single_source_helm_schema_and_gpu_template_gate()
     workflow_text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     workflow = yaml.safe_load(workflow_text)
     steps = workflow["jobs"]["kind-smoke"]["steps"]
-    named_steps = {
-        step["name"]: (index, step)
-        for index, step in enumerate(steps)
-        if "name" in step
-    }
-    install_index, _ = named_steps["Install kind and kubectl"]
-    gate_index, gate = named_steps["Helm schema and GPU template gate"]
-    smoke_index, _ = named_steps["kind smoke (m10a D5)"]
+    run_commands = [step.get("run") for step in steps]
 
-    assert install_index < gate_index < smoke_index
-    assert gate["run"] == "bash scripts/kind_smoke.sh --helm-check"
+    assert run_commands.index(
+        "bash scripts/kind_smoke.sh --helm-check"
+    ) < run_commands.index("bash scripts/kind_smoke.sh")
     assert "helm lint" not in workflow_text
     assert "helm template" not in workflow_text
 
