@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [progress] Docker executor tolerates loaded-daemon creation
+- What: The untrusted-code runner keeps 10-second Docker control calls but allows 30 seconds for asynchronous container creation, retaining the late-create ownership handoff and delegated cleanup guarantee.
+- Refs: `kairyu/bench/execution.py`; `tests/bench/test_bench_exec_runners.py`
+
 ### 2026-08-12 — [progress] Benchmark cache reuses unchanged verification
 - What: One suite run now reuses a normalized cache's digest, parsed asset references, and manifest while its exact file identities stay unchanged; adapter-owned assets remain rehashed on every readiness check and any data/manifest mutation invalidates the reuse.
 - Refs: `kairyu/bench/cache.py`; `tests/bench/test_bench_download_resilience.py`

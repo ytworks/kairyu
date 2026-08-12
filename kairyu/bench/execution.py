@@ -33,6 +33,7 @@ from typing import Protocol, runtime_checkable
 _OUTPUT_CAP = 64_000
 _FILE_SIZE_LIMIT = 32_000_000
 _CONTROL_TIMEOUT_S = 10.0
+_CREATE_TIMEOUT_S = 30.0
 _CONTAINER_USER = "65534:65534"
 _CONTAINER_LABEL = "io.kairyu.bench-exec=true"
 _RESERVED_INPUT_NAMES = frozenset({"main.py", "stdin"})
@@ -440,7 +441,7 @@ class DockerExecutionRunner:
         _which: Callable[[str], str | None] = shutil.which,
         _name_factory: Callable[[], str] | None = None,
         _sleep: Callable[[float], None] = time.sleep,
-        _create_timeout_s: float = _CONTROL_TIMEOUT_S,
+        _create_timeout_s: float = _CREATE_TIMEOUT_S,
     ) -> None:
         self.image = _validate_image(image)
         if (

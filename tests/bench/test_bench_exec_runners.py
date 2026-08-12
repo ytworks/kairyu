@@ -316,7 +316,7 @@ def test_build_execution_runner_uses_exact_config_and_rejects_ambiguity():
         "input_mount": "read-only",
         "output_cap_bytes": 64_000,
         "numeric_library_threads": 1,
-        "create_timeout_s": execution._CONTROL_TIMEOUT_S,
+        "create_timeout_s": execution._CREATE_TIMEOUT_S,
     }
 
 
