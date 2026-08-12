@@ -883,7 +883,7 @@ async function assertTieredProductInventory() {
 async function assertTieredReasoningUi() {
 	const responseItem = await sendUiMessage(
 		productModel,
-		'Explain in one short sentence why independent review improves an answer.'
+		'KAIRYU_TIERED_UI_OK'
 	);
 	const reasoningToggle = responseItem.locator('button[aria-expanded]').filter({
 		hasText: /Thought|Thinking/

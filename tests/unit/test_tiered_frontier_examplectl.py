@@ -222,6 +222,10 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
     compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
     ui = compose["services"]["chat-ui"]
     assert ui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
+    assert json.loads(ui["environment"]["DEFAULT_MODEL_PARAMS"]) == {
+        "max_tokens": 32768,
+        "stream_response": False,
+    }
     assert ui["environment"] | {
         "DEFAULT_MODELS": "kairyu-auto-max",
         "ENABLE_PERSISTENT_CONFIG": "false",
