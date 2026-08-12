@@ -1275,6 +1275,31 @@ async def test_chat_tool_call_transcript_remains_supported():
     assert "<tool_call>" in backend.prompts_seen[0]
 
 
+async def test_litellm_message_metadata_is_ignored_without_reaching_prompt():
+    backend = MockBackend()
+    app = create_legacy_app(engines={"chat": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "chat",
+                "messages": [
+                    {"role": "user", "content": "weather?"},
+                    {
+                        "role": "assistant",
+                        "content": "checking",
+                        "provider_specific_fields": {"refusal": None},
+                    },
+                    {"role": "user", "content": "continue"},
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert "provider_specific_fields" not in backend.prompts_seen[0]
+
+
 async def test_absent_tool_calls_does_not_change_template_message_shape():
     template = ChatTemplate(
         "{{ 'tool_calls' in messages[0] }}|{{ messages[0].content }}"

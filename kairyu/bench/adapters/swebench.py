@@ -575,6 +575,14 @@ class SweBenchAdapter:
             "--config",
             "model.model_kwargs.tool_choice=required",
         ]
+        if self.spec.evaluator == "swebench-pro":
+            # The official Pro images declare /bin/bash as ENTRYPOINT.  Clear it
+            # so mini-SWE-agent's appended `sleep 2h` remains the container
+            # command instead of being interpreted as a nonexistent script.
+            command += [
+                "--config",
+                'environment.run_args=["--rm","--entrypoint",""]',
+            ]
         for field, value in _model_kwargs(target).items():
             command += ["--config", f"model.model_kwargs.{field}={value}"]
         if ctx.limit is not None and not already_selected:

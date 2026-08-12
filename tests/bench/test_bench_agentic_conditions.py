@@ -87,6 +87,7 @@ def test_swebench_variants_keep_their_official_conditions(
     assert _flag_value(command, "--split") == "test"
 
     if adapter.spec.evaluator == "swebench-pro":
+        assert configs[4] == 'environment.run_args=["--rm","--entrypoint",""]'
         return
     evaluation = adapter._evaluate_command(
         Path("preds.json"), ("a", "b"), "run", Path("reports"), 3
@@ -132,6 +133,7 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
         "agent.step_limit=1000",
         "model.cost_tracking=ignore_errors",
         "model.model_kwargs.tool_choice=required",
+        'environment.run_args=["--rm","--entrypoint",""]',
         "model.model_kwargs.max_tokens=8192",
     ]
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"

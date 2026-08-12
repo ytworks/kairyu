@@ -334,7 +334,13 @@ def _message_wire_shape(message: ChatMessage) -> dict[str, object]:
         for name in type(message).model_fields
         if name in fields_set
     }
-    wire.update(message.model_extra or {})
+    wire.update(
+        {
+            name: value
+            for name, value in (message.model_extra or {}).items()
+            if name != "provider_specific_fields"
+        }
+    )
     return wire
 
 
@@ -412,10 +418,13 @@ def _prepare_chat_messages(
                 raise ChatRequestError(
                     f"messages[{index}].role must be a non-empty string"
                 )
-            if message.model_extra:
+            unsupported_fields = set(message.model_extra or ()) - {
+                "provider_specific_fields"
+            }
+            if unsupported_fields:
                 raise ChatRequestError(
                     f"messages[{index}] has unsupported fields: "
-                    + ", ".join(sorted(message.model_extra))
+                    + ", ".join(sorted(unsupported_fields))
                 )
 
         wire = _message_wire_shape(message)

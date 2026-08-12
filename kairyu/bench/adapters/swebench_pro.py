@@ -15,6 +15,8 @@ _ANNOTATIONS = (
     "model.model_kwargs.*; explicit temperature and recommended sampling "
     "are rejected because this wrapper has no verified passthrough",
     "vendor extra_body has no harness equivalent and is NOT forwarded",
+    "the official image ENTRYPOINT is cleared so mini-SWE-agent can keep its "
+    "task container alive with the configured sleep command",
     "--attempts must remain 1; this wrapper has no verified repeated-trial "
     "or grouped chat seed-sweep path",
 )
