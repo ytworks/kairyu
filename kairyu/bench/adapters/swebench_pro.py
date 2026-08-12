@@ -39,7 +39,7 @@ from kairyu.bench.types import (
     PairResult,
 )
 
-_STAGE_TIMEOUT_S = 24 * 3600
+_STAGE_TIMEOUT_S = 72 * 3600
 _DATASET = "ScaleAI/SWE-bench_Pro"
 _DATASET_REVISION = "7ab5114912baf22bb098818e604c02fe7ad2c11f"
 _DATASET_ROWS = 731
@@ -261,6 +261,45 @@ def _validate_generation_trajectories(
         )
 
 
+def _prune_incomplete_predictions(
+    output_dir: Path,
+    expected_ids: set[str],
+) -> None:
+    """Keep only predictions backed by a valid, completed agent trajectory."""
+
+    predictions = output_dir / "preds.json"
+    if not predictions.is_file():
+        return
+    try:
+        payload = json.loads(predictions.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        predictions.unlink(missing_ok=True)
+        return
+    if not isinstance(payload, dict):
+        predictions.unlink(missing_ok=True)
+        return
+
+    reusable = {}
+    for instance_id, prediction in payload.items():
+        if instance_id not in expected_ids or not isinstance(prediction, dict):
+            continue
+        trajectory = output_dir / instance_id / f"{instance_id}.traj.json"
+        try:
+            trajectory_payload = json.loads(trajectory.read_text(encoding="utf-8"))
+            exit_status = trajectory_payload["info"]["exit_status"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError):
+            continue
+        if exit_status in _AGENT_OUTCOMES:
+            reusable[instance_id] = prediction
+
+    temporary = predictions.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(reusable, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(predictions)
+
+
 def parse_swebench_report(report: dict) -> tuple[list[ItemResult], int]:
     """Report -> per-instance items + official denominator (all submitted)."""
     resolved = report.get("resolved_ids") or []
@@ -478,6 +517,9 @@ class SweBenchProAdapter:
         evaluation_dir = workdir / "evaluation"
         evaluation_dir.mkdir(parents=True, exist_ok=True)
 
+        expected_ids = {str(row["instance_id"]) for row in selected_rows}
+        _prune_incomplete_predictions(generation_dir, expected_ids)
+
         generate_command = self._generate_command(
             target, ctx, generation_dir, dataset_dir
         )
@@ -501,7 +543,6 @@ class SweBenchProAdapter:
                 "generate stage produced no mini-output/preds.json file",
             )
         try:
-            expected_ids = {str(row["instance_id"]) for row in selected_rows}
             _validate_generation_trajectories(generation_dir, expected_ids)
             _prediction_list(
                 predictions,

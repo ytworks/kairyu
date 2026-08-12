@@ -63,6 +63,36 @@ def test_parse_swebench_report():
     assert by_id["numpy-4"].status == "failed"
 
 
+def test_swebench_resume_keeps_only_predictions_with_valid_trajectories(tmp_path):
+    output = tmp_path / "mini-output"
+    output.mkdir()
+    predictions = {
+        "valid": {"model_patch": "good"},
+        "runtime-error": {"model_patch": ""},
+        "missing-trajectory": {"model_patch": ""},
+        "outside-selection": {"model_patch": "old"},
+    }
+    (output / "preds.json").write_text(json.dumps(predictions), encoding="utf-8")
+    for instance_id, exit_status in (
+        ("valid", "Submitted"),
+        ("runtime-error", "RuntimeError"),
+    ):
+        trajectory_dir = output / instance_id
+        trajectory_dir.mkdir()
+        (trajectory_dir / f"{instance_id}.traj.json").write_text(
+            json.dumps({"info": {"exit_status": exit_status}}), encoding="utf-8"
+        )
+
+    swe_mod._prune_incomplete_predictions(
+        output,
+        {"valid", "runtime-error", "missing-trajectory"},
+    )
+
+    assert json.loads((output / "preds.json").read_text(encoding="utf-8")) == {
+        "valid": {"model_patch": "good"}
+    }
+
+
 def test_parse_harbor_results():
     items = parse_harbor_results(HARBOR_RESULTS)
     by_id = {item.item_id: item for item in items}
