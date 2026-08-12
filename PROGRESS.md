@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [progress] Tiered PR CI regressions reproduced and closed
+- What: The Open WebUI initial/outage/recovery browser phases pass after keeping the deterministic AUTO SSE marker inside the mock's prompt-boundary echo window; the tiered control test now stubs storage path preparation instead of attempting `/mnt/nvme` writes on hosted runners. Production NVMe enforcement and L2/L3 behavior are unchanged.
+- Refs: `scripts/webui_browser_smoke.mjs`; `tests/unit/test_tiered_frontier_examplectl.py`; PR #471
+
 ### 2026-08-12 — [progress] Tiered RTX PRO example closes full task-set scoring
 - What: The selected private-thinking MoA-3 policy launched all 89 Terminal-Bench 2.1 tasks and closed at 60/89 (67.42%) under official task verifiers and Harbor's zero-inclusive Mean: 86 verifier rewards (60 one, 26 zero), two rewardless infrastructure errors, and one rewardless operator-terminated CPU outlier. The score does not substitute diagnostic retries.
 - Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,terminalbench-result.json}`; run ID `terminalbench-2.1-auto-max-thinking2048-full-v1-20260812`; PR #471

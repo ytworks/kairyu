@@ -242,10 +242,21 @@ def test_tiered_control_requires_exact_eight_gpu_inventory() -> None:
 
 
 def test_tiered_control_uses_explicit_public_ui_host(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     control = _load(EXAMPLE / "control.py", "tiered_example_public_host")
     monkeypatch.setenv("PUBLIC_HOST", "gpu.example.test")
+    storage = {
+        "qwen_models": tmp_path / "qwen-models",
+        "deepseek_models": tmp_path / "deepseek-models",
+        "webui": tmp_path / "webui",
+        "deepseek_cache": tmp_path / "deepseek-cache",
+        **{
+            f"qwen_cache_{index}": tmp_path / f"qwen-cache-{index}"
+            for index in range(4)
+        },
+    }
+    monkeypatch.setattr(control, "_storage_paths", lambda: storage)
 
     assert control._public_ui_host() == "gpu.example.test"
     assert control._compose_env()["CHAT_UI_BIND_ADDRESS"] == "0.0.0.0"
