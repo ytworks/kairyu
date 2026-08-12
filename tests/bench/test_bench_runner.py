@@ -562,6 +562,21 @@ def test_direct_run_context_gets_a_local_execution_runner(tmp_path):
     assert ctx.execution_runner.metadata()["runner"] == "local"
 
 
+def test_runner_context_routes_external_artifacts_and_explicit_rerun(tmp_path):
+    config = make_config(tmp_path).model_copy(update={"rerun": True})
+    runner = SuiteRunner(
+        config,
+        probe_docker=lambda: (False, "docker unavailable (test)"),
+    )
+
+    ctx = runner._build_context(BenchCache(tmp_path / "cache"), "artifact-run")
+
+    assert ctx.rerun is True
+    assert ctx.artifacts_dir == (
+        Path(config.results_dir).resolve() / "artifact-run" / "artifacts"
+    )
+
+
 async def test_selected_execution_runner_is_built_once_and_recorded(
     tmp_path, http_factory, monkeypatch
 ):
@@ -971,7 +986,12 @@ async def test_full_accuracy_history_stamps_safe_and_withheld_cross_run_cells(
 
     store = ResultStore(tmp_path / "results", "test-run")
     scoreboard = json.loads((store.run_dir / "scoreboard.json").read_text(encoding="utf-8"))
-    unresolved = {"swe-bench-pro", "terminal-bench", "tau-bench-banking"}
+    unresolved = {
+        "swe-bench-pro",
+        "swe-bench-verified",
+        "terminal-bench",
+        "tau-bench-banking",
+    }
     unpinned_execution = {"livecodebench", "livecodebench-pro", "scicode"}
     allowed = set(ACCURACY_ROW_ORDER) - unresolved - unpinned_execution
     assert scoreboard["benchmarks"] == list(ACCURACY_ROW_ORDER)
@@ -1571,6 +1591,52 @@ async def test_evaluator_taint_forces_reexecution_after_crash_before_failed_pair
     assert run_calls == 2
     assert not marker.exists()
     assert (tmp_path / "results" / "scoreboards.jsonl").is_file()
+
+
+async def test_evaluator_taint_forces_fresh_swebench_artifacts(
+    tmp_path, http_factory, monkeypatch
+):
+    from kairyu.bench.adapters.swebench_verified import SweBenchVerifiedAdapter
+
+    fresh_artifact_flags = []
+
+    async def completed_pair(self, target, ctx):
+        fresh_artifact_flags.append(ctx.rerun)
+        now = utc_now()
+        return PairResult(
+            benchmark=self.info.name,
+            target=target.label(),
+            status="completed",
+            metrics={"score": 1.0, "n_total": 1, "n_scored": 1},
+            started_at=now,
+            finished_at=now,
+        )
+
+    monkeypatch.setattr(SweBenchVerifiedAdapter, "run", completed_pair)
+    monkeypatch.setattr(
+        "kairyu.bench.runner._environment", lambda **_kwargs: _clean_environment()
+    )
+    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    config = make_config(
+        tmp_path,
+        models=("m",),
+        only=("swe-bench-verified",),
+        offline_fixtures=True,
+        download=False,
+    )
+    store = ResultStore(tmp_path / "results", "test-run")
+    assert await _runner(config, http_factory).run() == 0
+    assert fresh_artifact_flags == [False]
+    fresh_artifact_flags.clear()
+    marker = store.mark_evaluator_tainted(
+        reason="prior evaluator drift",
+        adapters=("swe-bench-verified",),
+    )
+
+    assert await _runner(config, http_factory).run() == 0
+
+    assert fresh_artifact_flags == [True]
+    assert not marker.exists()
 
 
 def test_download_missing_checks_adapter_dataset_and_revision_pins(tmp_path):

@@ -15,6 +15,7 @@ import pytest
 
 from kairyu.bench.adapters.base import RunContext
 from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
+from kairyu.bench.adapters.swebench_verified import SweBenchVerifiedAdapter
 from kairyu.bench.adapters.tau_bench import (
     TauBenchBankingAdapter,
     data_dir_candidates,
@@ -49,7 +50,46 @@ def _harbor_agent(command: list[str]) -> dict:
     return config["agents"][0]
 
 
-# -- SWE-Bench Pro -------------------------------------------------------------
+# -- SWE-Bench -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("adapter", "subset", "dataset", "steps"),
+    [
+        pytest.param(
+            SweBenchProAdapter(),
+            "ScaleAI/SWE-bench_Pro",
+            "ScaleAI/SWE-bench_Pro",
+            1000,
+            id="pro",
+        ),
+        pytest.param(
+            SweBenchVerifiedAdapter(),
+            "verified",
+            "princeton-nlp/SWE-bench_Verified",
+            250,
+            id="verified",
+        ),
+    ],
+)
+def test_swebench_variants_keep_their_official_conditions(
+    tmp_path, adapter, subset, dataset, steps
+):
+    command = adapter._generate_command(_target(), _ctx(tmp_path), Path("mini-output"))
+    configs = [command[i + 1] for i, value in enumerate(command) if value == "--config"]
+    assert configs[:2] == ["swebench.yaml", f"agent.step_limit={steps}"]
+    assert _flag_value(command, "--subset") == subset
+    assert _flag_value(command, "--split") == "test"
+
+    evaluation = adapter._evaluate_command(
+        Path("preds.json"), ("a", "b"), "run", Path("reports"), 3
+    )
+    assert _flag_value(evaluation, "--dataset_name") == dataset
+    assert _flag_value(evaluation, "--split") == "test"
+    assert _flag_value(evaluation, "--max_workers") == "3"
+    assert _flag_value(evaluation, "--run_id") == "run"
+    assert _flag_value(evaluation, "--report_dir") == "reports"
+    assert evaluation[evaluation.index("--instance_ids") + 1 :] == ["a", "b"]
 
 
 def test_swebench_sets_fugu_step_limit(tmp_path):

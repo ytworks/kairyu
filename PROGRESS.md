@@ -76,7 +76,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics; Terminal-Bench keeps resumable raw Harbor jobs and bounds every agent phase to two effective hours
+- Benchmark/eval tooling: 12-slot Accuracy plus Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; SWE-bench Verified uses mini-SWE-agent's official 250-step `verified` flow plus the official harness with fail-closed denominators; Terminal-Bench keeps resumable raw Harbor jobs and bounds every agent phase to two effective hours
 - The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8, plus a measured tiered Qwen TP1x4 + DeepSeek TP4/EP4 stack; its no-auth external Open WebUI defaults to quality-first MoA-3 `kairyu-auto-max` and calls only loopback Kairyu L3. The selected policy cleared direct DeepSeek 3/4 vs 2/4 on the fixed pilot and its all-89 single-attempt Terminal-Bench run scored 60/89 with Harbor's zero-inclusive Mean; all persistent data and compilation caches are on NVMe
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
@@ -98,9 +98,23 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [amendment] SWE-bench fixes selection before generation
+- What: SWE-bench now persists the official ordered selection before generation, evaluates that full set even when a prediction is omitted, accepts the official v4.1 completed/error report overlap with error precedence, and retains redacted stage logs plus raw upstream evidence; failed runs resume while explicit reruns use isolated artifacts.
+- Why: mini-SWE-agent can exit successfully after a worker omits its prediction, so deriving `--instance_ids` from `preds.json` could shrink the denominator and deleting work directories could discard the only audit and resume evidence.
+- Refs: issue #472; `kairyu/bench/adapters/swebench.py`; `kairyu/bench/adapters/base.py`; `docs/superpowers/specs/2026-08-12-swe-bench-verified-design.md`
+
+### 2026-08-12 — [progress] SWE-bench Verified launches through Accuracy
+- What: Accuracy now runs the 500-task Verified test split through mini-SWE-agent's standard 250-step configuration and the official SWE-bench evaluator, preserves every selected task in the resolved-rate denominator, retains auditable commands and raw evidence, and extends the sourced comparison report with Fable 5's published result without claiming one-trial/five-trial parity.
+- Refs: issue #472; `kairyu/bench/adapters/swebench*.py`; `docs/benchmarks.md`; `tests/bench/test_bench_agentic*.py`; `tests/bench/test_bench_compare.py`
+
 ### 2026-08-12 — [progress] Tiered PR CI regressions reproduced and closed
 - What: The Open WebUI initial/outage/recovery browser phases pass after keeping the deterministic AUTO SSE marker inside the mock's prompt-boundary echo window; the tiered control test now stubs storage path preparation instead of attempting `/mnt/nvme` writes on hosted runners. Production NVMe enforcement and L2/L3 behavior are unchanged.
 - Refs: `scripts/webui_browser_smoke.mjs`; `tests/unit/test_tiered_frontier_examplectl.py`; PR #471
+
+### 2026-08-12 — [design] SWE-bench Verified joins the Accuracy suite
+- What: The Accuracy suite will run SWE-bench Verified through mini-SWE-agent's standard 250-step `verified` flow and the official SWE-bench harness, preserve exact selected-instance denominators and failure classes, and extend the sourced frontier comparison without inventing missing exact-model scores.
+- Why: Issue #472 requires the benchmark to launch like existing suites and follow their score-comparison reporting, while upstream methodology differences and OpenAI's retirement warning must remain explicit and auditable.
+- Refs: issue #472; `docs/superpowers/specs/2026-08-12-swe-bench-verified-design.md`
 
 ### 2026-08-12 — [progress] Tiered RTX PRO example closes full task-set scoring
 - What: The selected private-thinking MoA-3 policy launched all 89 Terminal-Bench 2.1 tasks and closed at 60/89 (67.42%) under official task verifiers and Harbor's zero-inclusive Mean: 86 verifier rewards (60 one, 26 zero), two rewardless infrastructure errors, and one rewardless operator-terminated CPU outlier. The score does not substitute diagnostic retries.
@@ -114,28 +128,3 @@ in `.claude/rules/progress-log.md`).
 ### 2026-08-12 — [progress] Thinking MoA-3 clears the quality floor
 - What: On the same fixed four Terminal-Bench 2.1 tasks, the 2048-token private-thinking MoA-3 policy scored 3/4 versus direct DeepSeek's 2/4. Both completed 4/4 items with zero failed/unjudged/skipped trials and null item errors on a clean source tree; `kairyu-auto-max` is selected for the full 89-task run.
 - Refs: `examples/qwen3.6-deepseek-v4-8gpu/MEASUREMENTS.md`; run ID `terminalbench-selection-thinking2048-vs-deepseek-20260812`; PR #471
-
-### 2026-08-12 — [progress] Thinking MoA-3 restores L3 reliability within its performance envelope
-- What: The generic 2048-token internal allowance completed the quality-first MoA-3 c1/c8/c16/c32 matrix with 128/128 non-empty public answers, valid traces, exact fan-out, and zero errors. Versus the failed 1024 run it preserves c1 TTFT/E2E within 1.2%/0.8%; versus ordinary MoA-3 at c8 it costs 18.8% TTFT but only 5.0% E2E while increasing public TPS 8.0%. It advances to the fixed quality pilot.
-- Refs: `examples/qwen3.6-deepseek-v4-8gpu/MEASUREMENTS.md`; run ID `l3-auto-max-thinking2048-public-v1-20260812`; PR #471
-
-### 2026-08-12 — [progress] Ordinary synthesis fails to preserve the quality floor
-- What: Ordinary-DeepSeek MoA-3 scored 0/3 completed pilot tasks, making the fourth task irrelevant to its maximum possible 1/4 score versus direct DeepSeek's clean 2/4. The quality candidate returns to private-thinking MoA-3 with a generic 2048-token internal allowance to eliminate the previously measured 1024-token boundary-exhaustion tail before re-running L3 performance and quality gates.
-- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,auto-max.yaml}`; run ID `terminalbench-selection-moa3-vs-deepseek-20260812`; PR #471
-
-### 2026-08-12 — [progress] MoA-2 fails the quality-selection gate
-- What: The performance-winning ordinary-chat MoA-2 candidate scored 1/3 completed Terminal-Bench 2.1 pilot tasks and failed the fourth request with `BadGatewayError`, below direct DeepSeek's clean 2/4 baseline. MoA-2 is rejected; the already performance-qualified MoA-3 ordinary-chat candidate advances to the same fixed four-task gate.
-- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,auto-max-chat.yaml}`; run ID `terminalbench-selection-moa2-vs-deepseek-20260812`; PR #471
-
-### 2026-08-12 — [progress] MoA-2 chat synthesis wins the L3 performance gate
-- What: The ordinary-DeepSeek MoA-2 candidate completed c1/c8/c16/c32 with 32/32 non-empty answers and valid traces at every row; versus MoA-3 it preserves c1 and cuts median TTFT by 17.1%/21.0%/20.7% at c8/c16/c32. The quality pilot now compares only this winner with direct DeepSeek, and validates raw zero-failed/unjudged/skipped/error evidence on a clean source tree.
-- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,benchmark.py}`; run ID `l3-auto-max-chat-moa2-public-v1-20260812`; PR #471
-
-### 2026-08-12 — [progress] Tiered quality candidate reduces fan-out, not proposal depth
-- What: The 512-token private-cap A/B retained 32/32 valid L3 responses but did not improve c1/c8 median TTFT beyond run noise, so the quality candidate restores the 1024-token allowance and changes ordinary-chat synthesis from MoA-3 to MoA-2 for the next performance/quality gate.
-- Refs: run IDs `l3-auto-max-chat-moa3-public-v1-20260812`, `l3-auto-max-chat-moa3-private512-public-v1-20260812`; `examples/qwen3.6-deepseek-v4-8gpu/`; PR #471
-
-### 2026-08-12 — [amendment] L2 bounds private work independently of public output
-- What: Orchestrator YAML and decorator specs now expose a validated, backend-neutral `internal_max_tokens` policy that caps private planning/proposal/verification generations without reducing the caller's final-answer budget. The tiered MoA-3 chat-synthesis candidate pins 512 after its reliable but 1024-token L3 matrix showed excessive c16/c32 latency.
-- Why: Private proposal length is an operator latency/quality tradeoff and must remain portable policy rather than a model- or example-specific core-code branch.
-- Refs: M11 D2; `kairyu/dsl/`; `examples/qwen3.6-deepseek-v4-8gpu/auto-max-chat.yaml`; run ID `l3-auto-max-chat-moa3-public-v1-20260812`; PR #471

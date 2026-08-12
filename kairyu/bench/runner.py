@@ -490,7 +490,13 @@ class SuiteRunner:
         # An injected reporter is guarded too: no reporter may end a run.
         self._progress = progress if isinstance(progress, SafeReporter) else SafeReporter(progress)
 
-    def _build_context(self, cache: BenchCache, run_id: str = "") -> RunContext:
+    def _build_context(
+        self,
+        cache: BenchCache,
+        run_id: str = "",
+        *,
+        force_fresh_artifacts: bool = False,
+    ) -> RunContext:
         config = self.config
         from kairyu.bench.execution import build_execution_runner
 
@@ -517,6 +523,8 @@ class SuiteRunner:
             seed=config.seed,
             attempts=config.attempts,
             run_id=run_id,
+            rerun=config.rerun or force_fresh_artifacts,
+            artifacts_dir=Path(config.results_dir).resolve() / run_id / "artifacts",
             concurrency=config.concurrency,
             retries=config.retries,
             request_timeout_s=config.request_timeout_s,
@@ -573,13 +581,17 @@ class SuiteRunner:
         cache = BenchCache(resolve_cache_root(config.cache_dir))
         run_id = config.run_id or _default_run_id()
         store = ResultStore(config.results_dir, run_id)
+        force_pair_rerun = store.has_evaluator_taint()
 
-        ctx = self._build_context(cache, run_id)
+        ctx = self._build_context(
+            cache,
+            run_id,
+            force_fresh_artifacts=force_pair_rerun,
+        )
         current_environment = _environment(execution_runner=ctx.execution_runner)
         # Reject a cross-source resume before downloads or target requests.  A
         # second validation in initialize_run closes the time-of-check gap.
         store.require_resumable_environment(current_environment)
-        force_pair_rerun = store.has_evaluator_taint()
         if config.download and not config.offline_fixtures:
             self._download_missing(adapters, cache, ctx)
 

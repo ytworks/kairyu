@@ -22,6 +22,7 @@ class SuiteInfo:
 # are filtered to what exists, so the scoreboard grows without reordering.
 ACCURACY_ROW_ORDER: tuple[str, ...] = (
     "swe-bench-pro",
+    "swe-bench-verified",
     "terminal-bench",
     "livecodebench",
     "livecodebench-pro",
@@ -125,6 +126,7 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
     from kairyu.bench.adapters.scicode import SciCodeAdapter
     from kairyu.bench.adapters.structured_output import StructuredOutputAdapter
     from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
+    from kairyu.bench.adapters.swebench_verified import SweBenchVerifiedAdapter
     from kairyu.bench.adapters.tau_bench import TauBenchBankingAdapter
     from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter
 
@@ -142,6 +144,7 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
         SciCodeAdapter(),
         StructuredOutputAdapter(),
         SweBenchProAdapter(),
+        SweBenchVerifiedAdapter(),
         TauBenchBankingAdapter(),
         TerminalBenchAdapter(),
         *ruler_niah_adapters(),

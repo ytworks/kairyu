@@ -157,7 +157,7 @@ is no tolerance or text-only equivalence.
 # 1. deploy a gateway (mock engines shown; swap for real backends)
 kairyu serve examples/deploy_multi_orchestrator.yaml &
 
-# 2. one command: download missing datasets, run all 11 slots, print the table
+# 2. one command: download missing datasets, run all 12 slots, print the table
 kairyu bench run --base-url http://localhost:8000/v1 \
     --model m1 --model kairyu-auto --model kairyu-auto-max
 
@@ -195,7 +195,7 @@ run.json                                      # fingerprint + identity + config 
 scoreboard.json                               # machine-readable table
 scoreboard.md                                 # Accuracy-suite table (also printed to stdout)
 comparison.json                               # measured vs published, machine-readable
-comparison.md                                 # accuracy report vs six frontier references
+comparison.md                                 # accuracy report vs eight frontier references
 config-comparison.json                        # optional config A/B gate artifact
 config-comparison.md                          # optional config A/B gate report
 quantization-sweep.json                       # seven-arm task-accuracy artifact
@@ -235,7 +235,8 @@ dataset-identity drift converts affected cached evidence to failed, so a restore
 resume must execute the pair again rather than relabel it.
 
 History records a complete eligible run without pretending that every cell has
-the same provenance strength. SWE-Bench Pro, Terminal-Bench, and τ³ retain
+the same provenance strength. SWE-Bench Pro, SWE-bench Verified, Terminal-Bench,
+and τ³ retain
 their normal cells and the run may be registered, but those cells carry the
 structured `withheld_unresolved_runtime` policy while their harness-managed
 remote data, images, or sandbox inputs cannot be resolved to immutable content.
@@ -659,11 +660,12 @@ all gates passed, exit 1 is a valid retained quality failure, and exit 2 means
 the input or evidence was invalid. The complete design is in
 [`docs/design/issue-372-quantization-sweep.md`](design/issue-372-quantization-sweep.md).
 
-## The 11 Accuracy slots
+## The 12 Accuracy slots
 
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
 | SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
+| SWE-bench Verified | `princeton-nlp/SWE-bench_Verified` test split (500 tasks) | mini-swe-agent (250 steps) + official SWE-bench docker harness, resolved rate | x86-64 Linux docker, `[bench-agentic]` |
 | Terminal-Bench 2.1 | `terminal-bench/terminal-bench-2-1` (Harbor Hub) | `harbor run` (terminus-2, 500 turns), Harbor Mean | docker, `[bench-agentic]` |
 | LiveCodeBench | `livecodebench/code_generation_lite` `release_v6` (1,055 problems, pinned commit) | sandboxed pass@1 (public+private tests) | — |
 | LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro` split `quater_2025_4_6` + `-Testcase` ZIPs | sandboxed pass@1 (lower bound: no testlib checker) | HF token |
@@ -771,7 +773,7 @@ the statement of what each helper was for.
 
 ## Live progress
 
-A full Accuracy run is thousands of judged items across eleven slots and can take
+A full Accuracy run is thousands of judged items across twelve slots and can take
 hours; a full Core run is 15,902 target calls. The runner therefore reports
 what it is doing for either suite:
 
@@ -783,11 +785,11 @@ what it is doing for either suite:
   lines instead of 2,500 and no line depends on the previous one being visible:
 
   ```
-  [bench] 22 benchmark×target pairs to run
-  [bench 7/22] hle × qwen3-32b
-  [bench 7/22] hle × qwen3-32b: 2500 items
-  [bench 7/22] hle × qwen3-32b: 412/2500 items (15s)
-  [bench 7/22] hle × qwen3-32b: done — partial (score=8.4)
+  [bench] 24 benchmark×target pairs to run
+  [bench 8/24] hle × qwen3-32b
+  [bench 8/24] hle × qwen3-32b: 2500 items
+  [bench 8/24] hle × qwen3-32b: 412/2500 items (15s)
+  [bench 8/24] hle × qwen3-32b: done — partial (score=8.4)
   ```
 
 - `--no-progress` disables it. The reporter is a pure observer: `progress` is
@@ -797,7 +799,7 @@ what it is doing for either suite:
   in a `finally` so cancellation does not leak it.
 - Agentic slots have no item count until their harness returns, so they are
   labelled `agentic harness` and emit a **heartbeat** every 15s. Without it an
-  8-hour SWE-Bench Pro or Terminal-Bench run would print one line and go silent —
+  8-hour SWE-bench or Terminal-Bench run would print one line and go silent —
   the exact case where "working" and "hung" must stay distinguishable.
 
 The play-by-play goes to **stderr** and the artifacts (download notes, the
@@ -808,8 +810,8 @@ scoreboard, and the accuracy report when the suite has one) to **stdout**, so
 
 Every Accuracy run also writes `comparison.md` / `comparison.json` (and prints the
 report), placing each measured cell next to the available published values for
-**Fable 5, GPT-5.6 Sol, DeepSeek-V4-Flash-0731, Qwen3.8 MAX, Kimi K3, and
-Fugu**. A second table reports measured-minus-reference gaps for every available
+**Fugu, Fugu Ultra, Fable 5, GPT-5.6 Sol, DeepSeek-V4-Flash-0731, Qwen3.8 MAX,
+GLM-5.2, and Kimi K3**. A second table reports measured-minus-reference gaps for every available
 model value; the legacy `Δ target` column remains measured minus Fugu.
 `kairyu bench report <run_id>` rebuilds it (`--no-comparison` to skip).
 
@@ -864,10 +866,11 @@ successful target call:
   reported, or the measured span is zero.
 - The report shows TTFT p50/p95, TPS p50, valid/total coverage, missing usage,
   request errors, and retry attempts. It never compares these values with the
-  six published models.
+  eight published models.
 
 MMLU's teacher-forced log-likelihood row is `not applicable`, because it does
-not generate an output stream. SWE-Bench Pro, Terminal-Bench, and τ³-Bench run
+not generate an output stream. SWE-Bench Pro, SWE-bench Verified, Terminal-Bench,
+and τ³-Bench run
 inside external harnesses that do not currently return per-target SSE timing;
 their performance cells are explicitly `unavailable` rather than mixing in
 harness wall time, judge traffic, or user-simulator traffic.
@@ -980,8 +983,8 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   claims nor needs an HF Git pin. A package content digest and an HF repository
   commit are intentionally not presented as interchangeable provenance.
   The **agentic** slots are the exception: mini-swe-agent, Harbor and the τ
-  harness fetch their own datasets and expose no revision knob, so SWE-Bench Pro
-  in particular tracks upstream (which has had post-release test fixes). That is
+  harness fetch their own datasets and expose no revision knob, so both SWE-bench
+  rows track upstream (which has had post-release test fixes). That is
   a real limitation of those harnesses, not something this suite can pin.
 
 - **Gated datasets** (GPQA Diamond, HLE, LiveCodeBench Pro): accept the license on the dataset
@@ -1066,15 +1069,16 @@ General chat suites may use `response_format` as an endpoint extension; the
 paired structured suite rejects the entire `extra_body_json` escape hatch so
 the control arm cannot inherit a hidden constraint.
 
-This policy reaches every slot that issues its own chat requests. The three
-external-harness slots (SWE-Bench Pro, Terminal-Bench, τ³) drive a separate CLI,
+This policy reaches every slot that issues its own chat requests. The four
+external-harness slots (SWE-Bench Pro, SWE-bench Verified, Terminal-Bench, τ³)
+drive a separate CLI,
 so each maps what its harness exposes and annotates what it cannot forward.
-`temperature` and `sampling_mode: recommended` are chat-only: all three
+`temperature` and `sampling_mode: recommended` are chat-only: all four
 external-harness rows fail closed as skipped when either is selected, because
 their pinned wrappers expose no verified equivalent. Run those rows separately
 with the default target policy. A full Accuracy chat sensitivity run can use
-`--exclude swe-bench-pro,terminal-bench,tau-bench-banking`; SWE-Bench Pro also
-requires `attempts: 1`, while Harbor and τ interpret a larger attempt budget as
+`--exclude swe-bench-pro,swe-bench-verified,terminal-bench,tau-bench-banking`;
+both SWE-bench rows also require `attempts: 1`, while Harbor and τ interpret a larger attempt budget as
 their own harness trial count rather than as the grouped seed protocol below.
 
 ### Sampling-sensitivity evidence and statistics
@@ -1260,22 +1264,90 @@ uv pip install 'tau2[knowledge] @ git+https://github.com/sierra-research/tau2-be
 export TAU2_DATA_DIR=/path/to/tau2-bench/data
 ```
 
-SWE-Bench Pro and Terminal-Bench evaluate inside per-task docker containers.
+SWE-Bench Pro, SWE-bench Verified, and Terminal-Bench evaluate inside per-task
+docker containers.
 `kairyu bench run` probes `docker info` once; without a working daemon those
-two rows report `skipped: docker unavailable` and everything else completes.
+three rows report `skipped: docker unavailable` and everything else completes.
 The τ-bench harness needs the user simulator (judge) served by the **same
 gateway** as the target (single `OPENAI_BASE_URL`).
+
+### SWE-bench Verified
+
+Run it through the same Accuracy entry point as every other slot:
+
+```bash
+uv run kairyu bench run --config bench/configs/accuracy.yaml \
+  --only swe-bench-verified --attempts 1
+```
+
+The adapter follows the upstream two-stage procedure. Generation uses
+mini-SWE-agent's [official SWE-bench entry point](https://mini-swe-agent.com/latest/usage/swebench/)
+with the `verified` subset, test split, standard `swebench.yaml` configuration,
+and the standard 250-step limit:
+
+```bash
+mini-extra swebench --model <model> --subset verified --split test \
+  --output <directory> --workers <concurrency> \
+  --config swebench.yaml --config agent.step_limit=250
+```
+
+Kairyu validates the generated `preds.json`, then invokes the
+[official SWE-bench evaluation harness](https://www.swebench.com/SWE-bench/reference/harness/):
+
+```bash
+python -m swebench.harness.run_evaluation \
+  --dataset_name princeton-nlp/SWE-bench_Verified --split test \
+  --predictions_path <preds.json> --max_workers <concurrency> \
+  --run_id <run-id> --report_dir <directory>
+```
+
+Before generation, Kairyu loads the official test split in dataset order,
+applies `--limit N` or `--smoke`, and persists those exact selected IDs. The
+same complete selection is passed through `--instance_ids`; otherwise an
+instance for which mini-SWE-agent emitted no prediction could silently disappear
+from the denominator. Prediction IDs must be a valid subset of the persisted
+selection, and the official schema-v2 report must account for every selected
+instance as submitted or incomplete. The score is `resolved / selected`;
+incomplete evaluations, empty patches, harness errors, and unresolved tasks all
+remain in the denominator.
+
+Expensive evidence is retained below
+`<results-dir>/<run-id>/artifacts/swe-bench-verified/<target>/`: the immutable
+selection manifest, complete mini-SWE-agent output (including trajectories,
+logs, and `preds.json`), Kairyu-captured stage logs, official evaluator logs,
+and the schema-v2 report. Kairyu redacts endpoint credentials from the stage
+logs and does not persist the subprocess environment. A failed pair reuses that
+directory to resume upstream work; explicit `--rerun` creates a distinct,
+persistent attempt directory. Recovery from a recorded evaluator-identity drift
+also uses a fresh attempt so old official task reports cannot satisfy the new
+evaluation.
+
+The upstream images are intended for x86-64 Linux Docker hosts; unsupported
+platforms are skipped instead of emitting a score. This benchmark also has an
+important interpretation limit: [OpenAI reports that it is increasingly
+contaminated and that many remaining tests reject valid fixes](https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/),
+and recommends SWE-bench Pro for frontier reporting. Kairyu therefore keeps a
+local run non-comparable to the [Fable 5 system-card result](https://www-cdn.anthropic.com/2f9323abbcc4abe219577539efe19a623c9ca2bd/Claude%20Fable%205%20%26%20Claude%20Mythos%205%20System%20Card.pdf):
+the local adapter runs one trial while the published 95.0 is a five-trial mean.
 
 Fugu's published turn and trial conditions are pinned in the invocations:
 
 | Slot | Condition | How it is passed |
 |---|---|---|
 | SWE-Bench Pro | 1,000 agent steps (harness default is 250) | `-c swebench.yaml -c agent.step_limit=1000` — the harness drops its default config as soon as `-c` is given, so the default file is restated |
+| SWE-bench Verified | 250 agent steps, `verified` test split | `--subset verified --split test -c swebench.yaml -c agent.step_limit=250`, followed by the official evaluator over `princeton-nlp/SWE-bench_Verified` |
 | Terminal-Bench 2.1 | terminus-2, 500 turns | `-a terminus-2 --ak max_turns=500`, dataset `-d terminal-bench/terminal-bench-2-1`, results in `--jobs-dir` |
 | τ³ Banking | `banking_knowledge`, all retrieval tools, low-effort user simulator | `--domain banking_knowledge --retrieval-config alltools --user-llm-args '{"reasoning_effort":"low"}'` (from the judge's sampling policy), results addressed by `--save-to <name>` under the harness data dir |
 
 Harness output and sampling, verified against the pinned harnesses:
 
+- **SWE-bench** may omit a prediction when an upstream worker fails without
+  making the overall generation process non-zero. Kairyu rejects duplicate,
+  blank, malformed, or extra IDs, but passes the pre-generation selection to
+  evaluation so every omitted prediction stays incomplete in the denominator.
+  It fails closed on a missing, ambiguous, or malformed official schema-v2
+  report. Generation and evaluation have independent timeout/failure
+  diagnostics and persistent logs.
 - **Harbor** writes a job-level `result.json` holding `trial_results`, each trial
   carrying its verdict under `verifier_result.rewards` — a *task-defined* dict.
   The adapter prefers the conventional keys (`reward`, `resolved`, `accuracy`,
@@ -1305,8 +1377,8 @@ For the external harnesses it continues to set trials per task where exposed
 attempt is another model request or full container run; Fugu reports τ³ Banking
 as **pass@4** and the Terminal-Bench leaderboard requires at least five, and
 both facts are annotated on the cell so a single-attempt number is never
-mistaken for either. SWE-Bench Pro has no verified repeated-trial flag and
-therefore skips unless `attempts: 1`.
+mistaken for either. Neither SWE-bench row has a verified repeated-trial flag and
+therefore both skip unless `attempts: 1`.
 
 ## Scale and cost
 

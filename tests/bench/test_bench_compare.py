@@ -69,11 +69,12 @@ def test_missing_suite_uses_accuracy_as_the_default():
     assert comparison["rows"][0]["published"]["Fugu"] == 95.5
 
 
-def test_published_scores_are_percentages_with_fugu_present():
+def test_published_scores_are_percentages_and_may_be_sparse():
     for benchmark, scores in PUBLISHED_SCORES.items():
-        assert "Fugu" in scores, benchmark
+        assert scores, benchmark
         for model, value in scores.items():
             assert 0.0 <= value <= 100.0, f"{benchmark}/{model} = {value}"
+    assert PUBLISHED_SCORES["swe-bench-verified"] == {"Fable 5": 95.0}
 
 
 def test_published_models_follow_the_headline_order():
@@ -115,6 +116,7 @@ def test_frontier_catalog_matches_selected_matrix_values_and_absences():
             "Qwen3.8 MAX": 67.7,
             "GLM-5.2": 62.1,
         },
+        "swe-bench-verified": {"Fable 5": 95.0},
         "terminal-bench": {
             "Fugu": 80.2,
             "Fugu Ultra": 82.1,
@@ -347,10 +349,43 @@ def test_report_marks_each_selected_score_with_its_source():
     main_row = next(
         line for line in markdown.splitlines() if line.startswith("| terminal-bench |")
     )
+    deepseek_marker = (
+        list(comparison["reference"]["sources"]).index("deepseek-v4-flash-0731") + 1
+    )
     assert "80.2 [S1]" in main_row
-    assert "82.7 [S4]" in main_row
+    assert f"82.7 [S{deepseek_marker}]" in main_row
     assert "## Published reference details" in markdown
     assert "Terminal-Bench 2.1; max effort; temperature=1; top_p=.95" in markdown
+
+
+def test_report_keeps_sparse_verified_reference_and_withholds_deltas():
+    comparison = build_comparison(
+        _scoreboard(
+            **{
+                "swe-bench-verified": {
+                    "status": "completed",
+                    "score": 0.94,
+                    "comparable": False,
+                    "incomparable_reasons": [
+                        "local run is one trial; published Fable 5 is a five-trial mean"
+                    ],
+                }
+            }
+        )
+    )
+    row = comparison["rows"][0]
+
+    assert row["published"] == {"Fable 5": 95.0}
+    assert row["deltas"]["qwen3-32b"] is None
+    assert row["deltas_by_reference"]["qwen3-32b"]["Fable 5"] is None
+    markdown = render_comparison_markdown(comparison)
+    main_row = next(
+        line for line in markdown.splitlines() if line.startswith("| swe-bench-verified |")
+    )
+    assert "95.0 [S" in main_row
+    assert main_row.endswith("| n/c |")
+    assert "Claude Fable 5 & Claude Mythos 5 System Card" in markdown
+    assert "Why SWE-bench Verified no longer measures frontier coding capabilities" in markdown
 
 
 def test_report_source_catalog_links_markers_and_dates():

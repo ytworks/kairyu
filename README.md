@@ -1005,7 +1005,7 @@ returns `invoice_ledger_invalid` instead of a partial invoice.
 
 `kairyu bench` runs answer-quality suites against any deployed gateway — single
 models and orchestration tiers become scoreboard columns. The default is the
-11-benchmark Accuracy suite based on Sakana's Fugu release; `--suite core` selects the deterministic
+12-benchmark Accuracy suite; `--suite core` selects the deterministic
 GSM8K/MMLU/IFEval regression suite; and `--suite structured` selects the fixed
 five-case JSON-Schema conformance corpus:
 
@@ -1016,6 +1016,8 @@ uv run kairyu bench run --base-url http://localhost:8000/v1 \
 uv run kairyu bench run --suite core --smoke \
     --base-url http://localhost:8000/v1 --model m1
 uv run kairyu bench run --config bench/configs/structured.yaml
+uv run kairyu bench run --config bench/configs/accuracy.yaml \
+    --only swe-bench-verified --attempts 1
 ```
 
 Structured conformance pairs the same prompt and seed with and without
@@ -1039,9 +1041,13 @@ Scoreboards also report target-only streamed TTFT p50/p95 and TPS p50 for direct
 generation rows. TPS is withheld without endpoint usage; MMLU is marked not
 applicable, and external agentic harness rows remain explicitly unavailable
 unless their own artifacts provide target-request timing. Accuracy comparison
-reports use a committed six-model source catalog (Fable 5, GPT-5.6 Sol,
-DeepSeek-V4-Flash-0731, Qwen3.8 MAX, Kimi K3, and Fugu) and never fill missing
-public values from another model or condition.
+reports use a committed eight-model source catalog (Fugu, Fugu Ultra, Fable 5,
+GPT-5.6 Sol, DeepSeek-V4-Flash-0731, Qwen3.8 MAX, GLM-5.2, and Kimi K3) and never
+fill missing public values from another model or condition. SWE-bench Verified
+uses mini-SWE-agent followed by the official SWE-bench harness; it requires
+Docker on x86-64 Linux and `kairyu[bench-agentic]`. Its local one-trial score is
+not presented as a like-for-like delta against Fable 5's published five-trial
+mean.
 
 Datasets download to `~/.cache/kairyu/benchmarks` (never committed); unmet preconditions
 (no docker, gated dataset, no judge) become annotated `skipped` cells, so the run always

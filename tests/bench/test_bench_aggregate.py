@@ -710,6 +710,7 @@ def test_only_contractually_binary_adapters_enable_wilson_intervals():
         *LONG_CONTEXT_ROW_ORDER,
         "scicode",
         "swe-bench-pro",
+        "swe-bench-verified",
         "structured-output",
     }
 
