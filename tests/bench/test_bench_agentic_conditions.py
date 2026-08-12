@@ -145,23 +145,29 @@ def test_terminal_bench_caps_output_limit_via_terminus_llm_kwargs(tmp_path):
     command = TerminalBenchAdapter()._command(
         _target(max_output_tokens=32768), _ctx(tmp_path), tmp_path
     )
-    assert _harbor_agent(command)["kwargs"] == {
-        "max_turns": 500,
-        "llm_call_kwargs": {
-            "max_tokens": 4096,
-            "response_format": {"type": "json_object"},
-        },
-    }
+    kwargs = _harbor_agent(command)["kwargs"]
+    assert kwargs["max_turns"] == 500
+    assert kwargs["llm_call_kwargs"]["max_tokens"] == 4096
+    response_format = kwargs["llm_call_kwargs"]["response_format"]
+    assert response_format["type"] == "json_schema"
+    schema = response_format["json_schema"]["schema"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["commands"]["maxItems"] == 3
+    assert (
+        schema["properties"]["commands"]["items"]["properties"]["keystrokes"][
+            "maxLength"
+        ]
+        == 2048
+    )
 
 
 def test_terminal_bench_preserves_smaller_output_limit(tmp_path):
     command = TerminalBenchAdapter()._command(
         _target(max_output_tokens=2048), _ctx(tmp_path), tmp_path
     )
-    assert _harbor_agent(command)["kwargs"]["llm_call_kwargs"] == {
-        "max_tokens": 2048,
-        "response_format": {"type": "json_object"},
-    }
+    llm_kwargs = _harbor_agent(command)["kwargs"]["llm_call_kwargs"]
+    assert llm_kwargs["max_tokens"] == 2048
+    assert llm_kwargs["response_format"]["type"] == "json_schema"
 
 
 @pytest.mark.parametrize("attempts", [1, 5])

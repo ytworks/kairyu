@@ -59,6 +59,36 @@ _AGENT_MAX_TIMEOUT_S = 900.0
 # command payload needs while preserving the public target declaration for
 # benchmarks that genuinely require long prose/code answers.
 _AGENT_MAX_OUTPUT_TOKENS = 4096
+_AGENT_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "terminus_command_batch",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "analysis": {"type": "string", "maxLength": 512},
+                "plan": {"type": "string", "maxLength": 512},
+                "commands": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "keystrokes": {"type": "string", "maxLength": 2048},
+                            "duration": {"type": "number"},
+                        },
+                        "required": ["keystrokes", "duration"],
+                        "additionalProperties": False,
+                    },
+                },
+                "task_complete": {"type": "boolean"},
+            },
+            "required": ["analysis", "plan", "commands"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 # Harbor's JobResult holds `trial_results`, and each TrialResult carries its
@@ -211,9 +241,10 @@ class TerminalBenchAdapter:
             "limit an OpenAI-compatible endpoint may apply a 16-token default, while "
             "the suite-wide 32K ceiling can consume the agent timeout on an "
             "unterminated JSON command batch",
-            "terminus-2's required JSON command object is declared through the "
-            "OpenAI response_format contract so the target closes a structurally "
-            "complete batch instead of emitting unparseable trailing prose",
+            "terminus-2's required JSON command object is declared as a strict "
+            "OpenAI json_schema with bounded analysis, plan, command count, and "
+            "keystroke lengths so the target closes a complete batch within the "
+            "token cap instead of emitting unparseable trailing output",
             "target reasoning_effort, top_p, seed, and vendor extra_body are NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
             "does not expose those fields as portable harness controls; explicit "
@@ -280,7 +311,7 @@ class TerminalBenchAdapter:
                                         target.max_output_tokens,
                                         _AGENT_MAX_OUTPUT_TOKENS,
                                     ),
-                                    "response_format": {"type": "json_object"},
+                                    "response_format": _AGENT_RESPONSE_FORMAT,
                                 },
                             },
                         }
@@ -401,7 +432,7 @@ class TerminalBenchAdapter:
                     target.max_output_tokens,
                     _AGENT_MAX_OUTPUT_TOKENS,
                 ),
-                "agent_response_format": {"type": "json_object"},
+                "agent_response_format": _AGENT_RESPONSE_FORMAT,
                 "agent_max_timeout_s_before_multiplier": _AGENT_MAX_TIMEOUT_S,
                 "agent_timeout_multiplier": _AGENT_TIMEOUT_MULTIPLIER,
                 "agent_effective_timeout_cap_s": (
