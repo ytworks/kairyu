@@ -145,6 +145,7 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         "kairyu-auto-max-moa3",
         "kairyu-auto-max-moa4",
     }
+    assert deployment.public_models == frozenset({"kairyu-auto-max"})
     assert deployment.chat_templates == {
         "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja",
         "deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja",
@@ -162,15 +163,15 @@ def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcri
     assert "Do not stop reasoning" not in template
 
 
-def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
+def test_tiered_l2_pins_explicit_product_dag_and_diagnostic_fanout() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
     standard = load_spec(EXAMPLE / "auto.yaml")
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
     chat = load_spec(EXAMPLE / "auto-max-chat.yaml")
 
     assert [worker.name for worker in standard.workers] == ["tier1", "tier2"]
-    assert standard.workers[0].model == "qwen3.6-27b"
-    assert standard.workers[1].model == "deepseek-v4-flash-0731"
+    assert standard.workers[0].engine_ref == "qwen3.6-27b"
+    assert standard.workers[1].engine_ref == "deepseek-v4-flash-0731"
     assert standard.router.kind == "rules"
     assert standard.router.thresholds is not None
     assert standard.router.thresholds.model_dump() == {
@@ -185,20 +186,39 @@ def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
     assert standard.budget.max_refine_depth == 0
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
-    assert maximum.moa_samples == 3
+    assert maximum.moa_samples == 0
     assert maximum.internal_max_tokens == 2048
+    assert maximum.expose_intermediate_outputs is True
     assert config["orchestration"]["internal_max_output_tokens"] == 2048
-    assert maximum.budget.max_steps == 4
+    assert config["orchestration"]["product_policy"] == "verifier-gated-role-dag"
+    assert config["orchestration"]["product_normal_calls"] == 7
+    assert config["orchestration"]["product_max_calls"] == 11
+    assert config["orchestration"]["product_max_refinements"] == 2
+    assert maximum.budget.max_steps == 11
+    assert maximum.budget.max_refine_depth == 2
+    assert [role.name for role in maximum.roles] == [
+        "planner",
+        "proposal_a",
+        "proposal_b",
+        "proposal_c",
+        "draft_synthesis",
+        "verifier",
+        "publisher",
+    ]
+    verifier = next(role for role in maximum.roles if role.name == "verifier")
+    publisher = next(role for role in maximum.roles if role.name == "publisher")
+    assert verifier.verifies == "draft_synthesis"
+    assert publisher.depends_on == ("draft_synthesis", "verifier")
     assert chat.router == maximum.router
     assert chat.moa_samples == 3
     assert chat.internal_max_tokens == 1024
     assert config["orchestration"]["auto_max_chat_moa_samples"] == 3
     assert config["orchestration"]["auto_max_chat_internal_max_output_tokens"] == 1024
     assert chat.budget.max_steps == 4
-    assert chat.budget.max_refine_depth == maximum.budget.max_refine_depth
-    assert chat.workers[0] == maximum.workers[0]
-    assert chat.workers[1].model == "deepseek-v4-flash-0731"
-    assert maximum.workers[1].model == "deepseek-v4-flash-0731-thinking"
+    assert chat.budget.max_refine_depth == 0
+    assert chat.workers[0].engine_ref == "qwen3.6-27b"
+    assert chat.workers[1].engine_ref == "deepseek-v4-flash-0731"
+    assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
     for samples in range(1, 5):
         candidate = load_spec(EXAMPLE / f"auto-max-moa{samples}.yaml")
         assert candidate.router.target_mode == "auto-max"
@@ -206,6 +226,9 @@ def test_tiered_l2_pins_moa_fanout_and_budget() -> None:
         assert candidate.moa_samples == samples
         assert candidate.budget.max_steps == samples + 1
         assert candidate.budget.max_refine_depth == 0
+
+    for path in EXAMPLE.glob("auto*.yaml"):
+        assert "base_url: http://kairyu:8000/v1" not in path.read_text()
 
 
 def test_tiered_chat_ui_calls_kairyu_l3() -> None:

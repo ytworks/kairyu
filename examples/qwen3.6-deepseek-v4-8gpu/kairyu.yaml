@@ -103,6 +103,10 @@ orchestrators:
   kairyu-auto-max-moa4:
     spec: /etc/kairyu/auto-max-moa4.yaml
 
+# The Chat UI product surface is fail-closed. Pools and diagnostic policies
+# remain deployment-owned runtime resources but are not public model IDs.
+public_models: [kairyu-auto-max]
+
 chat_templates:
   qwen3.6-27b: /etc/kairyu/qwen3.6-chat-template.jinja
   deepseek-v4-flash-0731: /etc/kairyu/deepseek-v4-0731.jinja

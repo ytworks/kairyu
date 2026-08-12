@@ -370,35 +370,44 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         )["count"]
     except (KeyError, OSError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Kairyu readiness evidence is incomplete: {error}") from error
-    required = {
-        "qwen3.6-27b",
-        "deepseek-v4-flash-0731",
-        "kairyu-auto",
-        "kairyu-auto-max",
-        SPEC["orchestration"]["auto_max_chat_model"],
-        *SPEC["orchestration"]["auto_max_candidate_models"],
-    }
-    if ready.get("status") != "ready" or not required <= models:
-        raise SystemExit(f"Kairyu model inventory is incomplete: {sorted(models)}")
+    product_model = SPEC["orchestration"]["auto_max_model"]
+    if ready.get("status") != "ready" or models != {product_model}:
+        raise SystemExit(
+            "Kairyu product model inventory must be exactly "
+            f"{[product_model]!r}, got {sorted(models)!r}"
+        )
     if type(token_count) is not int or token_count < 1:
         raise SystemExit("DeepSeek public-output tokenizer oracle is not ready")
-    if routing["kairyu-auto"].get("moa_samples") != 2:
-        raise SystemExit("Kairyu L2 does not report the selected two-proposal MoA")
-    if routing["kairyu-auto-max"].get("moa_samples") != 3:
-        raise SystemExit("Kairyu L2 does not report the selected three-proposal MoA")
-    expected_chat_samples = SPEC["orchestration"]["auto_max_chat_moa_samples"]
+    if set(routing) != {product_model}:
+        raise SystemExit(f"Kairyu product routing inventory is not isolated: {sorted(routing)}")
+    policy = routing[product_model]
+    expected_roles = [
+        "planner",
+        "proposal_a",
+        "proposal_b",
+        "proposal_c",
+        "draft_synthesis",
+        "verifier",
+        "publisher",
+    ]
+    if [role.get("name") for role in policy.get("roles", ())] != expected_roles:
+        raise SystemExit("Kairyu L2 does not report the required seven-role product DAG")
+    if policy.get("moa_samples") != 0:
+        raise SystemExit("Kairyu product policy must use the explicit DAG, not MoA")
+    if policy.get("budget", {}).get("max_steps") != 11:
+        raise SystemExit("Kairyu product policy max_steps must be 11")
+    if policy.get("budget", {}).get("max_refine_depth") != 2:
+        raise SystemExit("Kairyu product policy max_refine_depth must be 2")
+    if policy.get("expose_intermediate_outputs") is not True:
+        raise SystemExit("Kairyu product policy must expose separate intermediate output")
+    configured = policy.get("configured_engines", {})
+    if configured.get("tier1", {}).get("model") != "qwen3.6-27b":
+        raise SystemExit("Kairyu Tier1 L2 worker is not bound to the Qwen L1 pool")
     if (
-        routing[SPEC["orchestration"]["auto_max_chat_model"]].get("moa_samples")
-        != expected_chat_samples
+        configured.get("tier2", {}).get("model")
+        != "deepseek-v4-flash-0731-thinking"
     ):
-        raise SystemExit(
-            "Kairyu L2 does not report the configured chat synthesis candidate"
-        )
-    for samples, model in enumerate(
-        SPEC["orchestration"]["auto_max_candidate_models"], start=1
-    ):
-        if routing[model].get("moa_samples") != samples:
-            raise SystemExit(f"Kairyu L2 does not report MoA-{samples} for {model}")
+        raise SystemExit("Kairyu Tier2 L2 worker is not bound to the DeepSeek L1 pool")
 
 
 def _public_ui_host() -> str:
@@ -455,11 +464,7 @@ def up() -> None:
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
-    print(
-        "Models:     kairyu-auto, kairyu-auto-max, "
-        "kairyu-auto-max-chat, kairyu-auto-max-moa1..4, "
-        "qwen3.6-27b, deepseek-v4-flash-0731"
-    )
+    print("Chat model: kairyu-auto-max (the only public model)")
 
 
 def main() -> None:
