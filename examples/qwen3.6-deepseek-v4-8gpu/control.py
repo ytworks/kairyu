@@ -454,7 +454,10 @@ def up() -> None:
     _validate_ready(api_url, tokenizer_url)
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
-    print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
+    print(
+        f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} "
+        "-> Kairyu L3 only (UI auth disabled)"
+    )
     print(
         "Models:     kairyu-auto, kairyu-auto-max, "
         "kairyu-auto-max-chat, kairyu-auto-max-moa1..4, "

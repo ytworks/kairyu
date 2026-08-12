@@ -47,10 +47,18 @@ prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8003/v1
-Chat UI:    http://<outward-facing-host>:3000 (no authentication)
+Chat UI:    http://<outward-facing-host>:3000 -> Kairyu L3 only (UI auth disabled)
 ```
 
-Open WebUI listens on all host interfaces, requires no login, calls only
+`<outward-facing-host>:3000` is only the browser-facing address of Open WebUI.
+It is not a model/backend endpoint. Inside the Compose network, Open WebUI's
+sole OpenAI connection is `http://kairyu:8000/v1`; persistent endpoint
+overrides and Ollama access are disabled. The UI therefore sees exactly the
+model inventory and orchestration policies exposed by Kairyu L3, and has no
+route to a Qwen or DeepSeek L1 service. “UI auth disabled” refers only to the
+Open WebUI login screen and does not bypass L3.
+
+Open WebUI listens on all host interfaces, requires no UI login, calls only
 Kairyu L3, and defaults to the quality-first `kairyu-auto-max`. Direct
 `qwen3.6-27b`, direct `deepseek-v4-flash-0731`, fast `kairyu-auto`, and
 `kairyu-auto-max` all appear in the model inventory. During the selection gate,
