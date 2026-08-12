@@ -52,7 +52,8 @@ _DOCKERHUB_USERNAME = "jefzda"
 _STEP_LIMIT = 1000
 # mini-swe-agent merges -c specs recursively but DROPS its default config as
 # soon as -c is given, so the default file has to be restated by name.
-_BASE_CONFIG = "swebench.yaml"
+_BASE_CONFIG = "swebench_backticks.yaml"
+_MODEL_CLASS = "litellm_textbased"
 _AGENT_OUTCOMES = frozenset(
     {"Submitted", "LimitsExceeded", "TimeExceeded", "RepeatedFormatError"}
 )
@@ -285,8 +286,8 @@ class SweBenchProAdapter:
         needs_docker=True,
         agentic=True,
         annotations=(
-            "scaffold: mini-swe-agent (matches Fugu's published methodology), "
-            f"agent.step_limit={_STEP_LIMIT}",
+            "scaffold: mini-swe-agent text actions (official bundled SWE-bench "
+            f"backticks config), agent.step_limit={_STEP_LIMIT}",
             "target max_output_tokens, reasoning_effort, top_p, and seed are forwarded "
             "as model.model_kwargs.*; local-model cost lookup errors are ignored; "
             "explicit temperature and recommended sampling are rejected because this "
@@ -381,6 +382,8 @@ class SweBenchProAdapter:
             "swebench",
             "--model",
             f"openai/{target.model}",
+            "--model-class",
+            _MODEL_CLASS,
             "--subset",
             str(dataset_dir) if dataset_dir is not None else _DATASET,
             "--split",

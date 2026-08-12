@@ -61,7 +61,7 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
     # the harness drops its default config as soon as -c is given, so the
     # default file must be restated alongside the override
     assert configs == [
-        "swebench.yaml",
+        "swebench_backticks.yaml",
         "agent.step_limit=1000",
         "environment.cwd=/app",
         'environment.run_args=["--rm","--entrypoint",""]',
@@ -71,6 +71,7 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"
     assert _flag_value(command, "--split") == "test"
     assert _flag_value(command, "--output") == "mini-output"
+    assert _flag_value(command, "--model-class") == "litellm_textbased"
 
 
 def test_swebench_resolves_entrypoint_beside_active_python(tmp_path, monkeypatch):
