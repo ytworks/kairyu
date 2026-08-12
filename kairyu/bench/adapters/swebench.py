@@ -548,6 +548,9 @@ class SweBenchAdapter:
         target: BenchTarget,
         ctx: RunContext,
         output_dir: Path,
+        *,
+        subset: str | None = None,
+        already_selected: bool = False,
     ) -> list[str]:
         command = [
             "mini-extra",
@@ -555,7 +558,7 @@ class SweBenchAdapter:
             "--model",
             f"openai/{target.model}",
             "--subset",
-            self.spec.subset,
+            subset or self.spec.subset,
             "--split",
             "test",
             "--output",
@@ -569,7 +572,7 @@ class SweBenchAdapter:
         ]
         for field, value in _model_kwargs(target).items():
             command += ["--config", f"model.model_kwargs.{field}={value}"]
-        if ctx.limit is not None:
+        if ctx.limit is not None and not already_selected:
             command += ["--slice", f"0:{ctx.limit}"]
         return command
 
@@ -668,6 +671,7 @@ class SweBenchAdapter:
         predictions = generation_dir / "preds.json"
         selection_path = workdir / "selected-instances.json"
         pro_raw_samples = workdir / "selected-samples.jsonl"
+        pro_generation_dataset = workdir / "mini-swe-dataset"
         pro_predictions = workdir / "swebench-pro-predictions.json"
         pro_evaluation_dir = workdir / "swebench-pro-evaluation"
         artifacts: dict[str, object] = {
@@ -684,6 +688,7 @@ class SweBenchAdapter:
             artifacts.update(
                 {
                     "selected_samples": str(pro_raw_samples),
+                    "generation_dataset": str(pro_generation_dataset),
                     "evaluator_predictions": str(pro_predictions),
                     "evaluation_dir": str(pro_evaluation_dir),
                 }
@@ -712,6 +717,26 @@ class SweBenchAdapter:
                 )
                 selected_ids = tuple(row["instance_id"] for row in selected_rows)
                 _persist_jsonl(pro_raw_samples, selected_rows)
+                generation_rows = []
+                for row in selected_rows:
+                    dockerhub_tag = row.get("dockerhub_tag")
+                    if not isinstance(dockerhub_tag, str) or not dockerhub_tag:
+                        raise ValueError(
+                            f"{row['instance_id']} has no non-empty dockerhub_tag"
+                        )
+                    generation_rows.append(
+                        {
+                            **row,
+                            "image_name": (
+                                f"{_PRO_DOCKERHUB_USERNAME}/sweap-images:"
+                                f"{dockerhub_tag}"
+                            ),
+                        }
+                    )
+                pro_generation_dataset.mkdir(parents=True, exist_ok=True)
+                _persist_jsonl(
+                    pro_generation_dataset / "test.jsonl", generation_rows
+                )
             else:
                 selected_ids = load_selected_instance_ids(
                     self.spec.dataset, ctx.limit
@@ -764,7 +789,17 @@ class SweBenchAdapter:
                 check=False,
             )
 
-        generate_command = self._generate_command(target, ctx, generation_dir)
+        generate_command = self._generate_command(
+            target,
+            ctx,
+            generation_dir,
+            subset=(
+                str(pro_generation_dataset)
+                if self.spec.evaluator == "swebench-pro"
+                else None
+            ),
+            already_selected=self.spec.evaluator == "swebench-pro",
+        )
         methodology["generate_command"] = shlex.join(generate_command)
         failure = await self._invoke_stage(
             target,

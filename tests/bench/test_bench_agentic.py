@@ -87,7 +87,10 @@ def _supported_swebench_platform(monkeypatch, tmp_path):
         swe_mod,
         "load_selected_instance_rows",
         lambda dataset, limit: tuple(
-            {"instance_id": f"instance-{index}"}
+            {
+                "instance_id": f"instance-{index}",
+                "dockerhub_tag": f"repo-instance-{index}",
+            }
             for index in range(1, (limit or 1) + 1)
         ),
         raising=False,
@@ -491,8 +494,16 @@ async def test_swebench_pro_uses_official_pro_evaluator_and_full_selection(
 ):
     monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
     selected_rows = (
-        {"instance_id": "instance-1", "repo": "owner/repo"},
-        {"instance_id": "instance-2", "repo": "owner/repo"},
+        {
+            "instance_id": "instance-1",
+            "repo": "owner/repo",
+            "dockerhub_tag": "owner.repo-instance-1",
+        },
+        {
+            "instance_id": "instance-2",
+            "repo": "owner/repo",
+            "dockerhub_tag": "owner.repo-instance-2",
+        },
     )
     monkeypatch.setattr(
         swe_mod,
@@ -505,6 +516,24 @@ async def test_swebench_pro_uses_official_pro_evaluator_and_full_selection(
     def fake_run(command, capture_output, timeout, env, cwd, check):
         stages.append((list(command), Path(cwd)))
         if command[0] == "mini-extra":
+            generation_dataset = Path(
+                command[command.index("--subset") + 1]
+            )
+            generation_rows = [
+                json.loads(line)
+                for line in (generation_dataset / "test.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+            assert [row["instance_id"] for row in generation_rows] == [
+                "instance-1",
+                "instance-2",
+            ]
+            assert [row["image_name"] for row in generation_rows] == [
+                "jefzda/sweap-images:owner.repo-instance-1",
+                "jefzda/sweap-images:owner.repo-instance-2",
+            ]
+            assert "--slice" not in command
             output_dir = Path(command[command.index("--output") + 1])
             output_dir.mkdir()
             (output_dir / "preds.json").write_text(
