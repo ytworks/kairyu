@@ -52,6 +52,13 @@ _AGENT_TIMEOUT_MULTIPLIER = 8.0
 # an outlier task declaring a 3600-second agent budget receives eight hours,
 # even though the intended benchmark-wide allowance is two hours.
 _AGENT_MAX_TIMEOUT_S = 900.0
+# Terminus expects one compact JSON command batch. Letting an orchestration
+# publisher inherit the suite-wide 32K answer ceiling can spend ~13 minutes on
+# a single malformed/unterminated batch, exhausting the official agent timeout
+# before Harbor can obtain a verdict. This remains well above the agent's
+# command payload needs while preserving the public target declaration for
+# benchmarks that genuinely require long prose/code answers.
+_AGENT_MAX_OUTPUT_TOKENS = 4096
 
 
 # Harbor's JobResult holds `trial_results`, and each TrialResult carries its
@@ -199,9 +206,11 @@ class TerminalBenchAdapter:
             "one attempt per task by default (--attempts); the official "
             "leaderboard requires at least five; Harbor -k is a harness trial "
             "count, not grouped chat seed-sweep sensitivity",
-            "target max_output_tokens is forwarded through terminus-2's documented "
-            "llm_call_kwargs; without it an OpenAI-compatible endpoint may apply a "
-            "16-token default and truncate every JSON command batch",
+            "terminus-2's documented llm_call_kwargs receives the target output "
+            f"limit capped at {_AGENT_MAX_OUTPUT_TOKENS} tokens; without an explicit "
+            "limit an OpenAI-compatible endpoint may apply a 16-token default, while "
+            "the suite-wide 32K ceiling can consume the agent timeout on an "
+            "unterminated JSON command batch",
             "target reasoning_effort, top_p, seed, and vendor extra_body are NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
             "does not expose those fields as portable harness controls; explicit "
@@ -264,7 +273,10 @@ class TerminalBenchAdapter:
                             "kwargs": {
                                 "max_turns": _MAX_TURNS,
                                 "llm_call_kwargs": {
-                                    "max_tokens": target.max_output_tokens,
+                                    "max_tokens": min(
+                                        target.max_output_tokens,
+                                        _AGENT_MAX_OUTPUT_TOKENS,
+                                    ),
                                 },
                             },
                         }
@@ -381,6 +393,10 @@ class TerminalBenchAdapter:
                 "harness": "harbor",
                 "agent": _AGENT,
                 "max_turns": _MAX_TURNS,
+                "agent_max_output_tokens": min(
+                    target.max_output_tokens,
+                    _AGENT_MAX_OUTPUT_TOKENS,
+                ),
                 "agent_max_timeout_s_before_multiplier": _AGENT_MAX_TIMEOUT_S,
                 "agent_timeout_multiplier": _AGENT_TIMEOUT_MULTIPLIER,
                 "agent_effective_timeout_cap_s": (

@@ -141,13 +141,22 @@ def test_terminal_bench_sets_fugu_turn_budget(tmp_path):
     assert _harbor_agent(command)["kwargs"]["max_turns"] == 500
 
 
-def test_terminal_bench_forwards_output_limit_via_terminus_llm_kwargs(tmp_path):
+def test_terminal_bench_caps_output_limit_via_terminus_llm_kwargs(tmp_path):
     command = TerminalBenchAdapter()._command(
         _target(max_output_tokens=32768), _ctx(tmp_path), tmp_path
     )
     assert _harbor_agent(command)["kwargs"] == {
         "max_turns": 500,
-        "llm_call_kwargs": {"max_tokens": 32768},
+        "llm_call_kwargs": {"max_tokens": 4096},
+    }
+
+
+def test_terminal_bench_preserves_smaller_output_limit(tmp_path):
+    command = TerminalBenchAdapter()._command(
+        _target(max_output_tokens=2048), _ctx(tmp_path), tmp_path
+    )
+    assert _harbor_agent(command)["kwargs"]["llm_call_kwargs"] == {
+        "max_tokens": 2048
     }
 
 
