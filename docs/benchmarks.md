@@ -694,8 +694,11 @@ Pro is scored by the local sandbox, not the official judge.
   problems) and joins each `problem_id` to a `<problem_id>.zip` in the testcase
   repo (`testdata/<n>.in` / `.ans`). Acquisition **fails closed**: the split must
   yield exactly 167 problems, every archive must download, and each archive's
-  usable cases must match the `sum(subtasks[].n_cases)` it declares, with no
-  unpaired half in either direction. An archive that declares **no** count is not
+  official numbered cases `1..sum(subtasks[].n_cases)` must all be present, with
+  no unpaired half in either direction. Paired files numbered above that declared
+  denominator are retained as ignored-extra evidence rather than scored; the
+  pinned `2112B` archive has two such sample cases. An archive that declares
+  **no** count is not
   "as complete as whatever arrived" — that declaration is the only denominator
   evidence there is, so a missing or malformed `config.yaml` fails closed too. `download_file()` turns a timeout, a 401 and a 404 alike into
   `None`, so excluding a problem would cache a smaller denominator permanently —

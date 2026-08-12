@@ -98,6 +98,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [amendment] LiveCodeBench Pro honors its declared case range
+- What: LiveCodeBench Pro now scores the complete numbered `1..n_cases` range, records paired files above that range as ignored extras, and still rejects missing or unpaired declared cases.
+- Why: The pinned `2112B` archive declares 57 judge cases but retains paired sample files 58 and 59; treating those samples as denominator drift made the full official archive unusable.
+- Refs: `kairyu/bench/adapters/livecodebench_pro.py`; `tests/bench/test_bench_lcb_datasets.py`; `docs/benchmarks.md`
+
 ### 2026-08-12 — [amendment] MRCR accepts the corrected official 500-row slice
 - What: MRCR keeps exact `o200k_base` selection and a fail-closed 500-row denominator while retaining the corrected source's observed 106/96/98/100/100 per-bin distribution.
 - Why: The pinned December 2025 source repairs moved examples across adjacent exact-token boundaries, so enforcing the dataset card's original 100-per-bin shape rejected the complete corrected slice.

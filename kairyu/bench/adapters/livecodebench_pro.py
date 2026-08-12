@@ -46,6 +46,8 @@ class TestcaseArchive:
     declared_cases: int | None
     #: input or output halves with no counterpart, either direction
     unpaired: tuple[str, ...] = ()
+    #: paired numeric files beyond the config-declared official denominator
+    ignored_extra_cases: tuple[str, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -112,8 +114,24 @@ def read_testcase_archive(data: bytes) -> TestcaseArchive:
                 if f"{stem}{input_suffix}" not in names:
                     unpaired.append(name)
 
+        ordered_stems = sorted(stems)
+        ignored_extra_cases: tuple[str, ...] = ()
+        if declared is not None:
+            by_leaf = {leaf: stem for _, leaf, stem in ordered_stems}
+            expected_leaves = tuple(str(index) for index in range(1, declared + 1))
+            selected_stems = [
+                (float(leaf), leaf, by_leaf[leaf])
+                for leaf in expected_leaves
+                if leaf in by_leaf
+            ]
+            ignored_extra_cases = tuple(
+                leaf for _, leaf, _ in ordered_stems if leaf not in expected_leaves
+            )
+        else:
+            selected_stems = ordered_stems
+
         tests = []
-        for _, _, stem in sorted(stems):
+        for _, _, stem in selected_stems:
             tests.append(
                 {
                     "input": archive.read(f"{stem}{input_suffix}").decode(
@@ -126,7 +144,10 @@ def read_testcase_archive(data: bytes) -> TestcaseArchive:
                 }
             )
         return TestcaseArchive(
-            tests=tests, declared_cases=declared, unpaired=tuple(sorted(unpaired))
+            tests=tests,
+            declared_cases=declared,
+            unpaired=tuple(sorted(unpaired)),
+            ignored_extra_cases=ignored_extra_cases,
         )
 
 
@@ -226,6 +247,7 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
                     "fn_name": None,
                     "tests": parsed.tests,
                     "declared_cases": parsed.declared_cases,
+                    "ignored_extra_cases": list(parsed.ignored_extra_cases),
                     "time_limit": row.get("time_limit"),
                     "memory_limit": row.get("memory_limit"),
                 }

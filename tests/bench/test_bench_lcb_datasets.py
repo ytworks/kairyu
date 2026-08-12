@@ -306,8 +306,58 @@ def test_read_testcase_archive_reports_declared_cases():
     assert parsed.declared_cases == 3
     assert len(parsed.tests) == 3
     assert parsed.unpaired == ()
+    assert parsed.ignored_extra_cases == ()
     assert parsed.complete
     assert not read_testcase_archive(_zip_bytes({"README": "x"})).complete
+
+
+def test_archive_uses_declared_numbered_cases_and_records_paired_extras():
+    """Pinned archives may retain sample files above the judge denominator."""
+    from kairyu.bench.adapters.livecodebench_pro import read_testcase_archive
+
+    parsed = read_testcase_archive(
+        _zip_bytes(
+            {
+                "testdata/1.in": "official\n",
+                "testdata/1.ans": "OFFICIAL\n",
+                "testdata/2.in": "sample\n",
+                "testdata/2.ans": "SAMPLE\n",
+            },
+            config=(
+                "input_suffix: .in\noutput_suffix: .ans\n"
+                "subtasks:\n  - score: 100\n    n_cases: 1\n"
+            ),
+        )
+    )
+
+    assert parsed.tests == [
+        {"input": "official\n", "output": "OFFICIAL\n", "testtype": "stdin"}
+    ]
+    assert parsed.ignored_extra_cases == ("2",)
+    assert parsed.complete
+
+
+def test_archive_does_not_substitute_an_extra_for_a_missing_declared_case():
+    from kairyu.bench.adapters.livecodebench_pro import read_testcase_archive
+
+    parsed = read_testcase_archive(
+        _zip_bytes(
+            {
+                "testdata/1.in": "one\n",
+                "testdata/1.ans": "ONE\n",
+                "testdata/3.in": "extra\n",
+                "testdata/3.ans": "EXTRA\n",
+            },
+            config=(
+                "input_suffix: .in\noutput_suffix: .ans\n"
+                "subtasks:\n  - score: 100\n    n_cases: 2\n"
+            ),
+        )
+    )
+
+    assert len(parsed.tests) == 1
+    assert parsed.ignored_extra_cases == ("3",)
+    assert not parsed.complete
 
 
 @pytest.mark.parametrize(
