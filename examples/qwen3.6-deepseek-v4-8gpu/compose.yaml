@@ -259,6 +259,7 @@ services:
       DEFAULT_MODELS: kairyu-auto-max
       DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"stream_response":false}'
       ENABLE_PERSISTENT_CONFIG: "false"
+      RESET_CONFIG_ON_START: "true"
       ENABLE_SIGNUP: "false"
       ENABLE_LOGIN_FORM: "false"
       WEBUI_AUTH: "false"

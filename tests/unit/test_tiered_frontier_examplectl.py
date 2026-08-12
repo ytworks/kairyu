@@ -229,6 +229,7 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
     assert ui["environment"] | {
         "DEFAULT_MODELS": "kairyu-auto-max",
         "ENABLE_PERSISTENT_CONFIG": "false",
+        "RESET_CONFIG_ON_START": "true",
         "ENABLE_SIGNUP": "false",
         "ENABLE_LOGIN_FORM": "false",
         "WEBUI_AUTH": "false",
