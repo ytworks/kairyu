@@ -447,6 +447,7 @@ def _model_kwargs(target: BenchTarget) -> dict[str, object]:
         "reasoning_effort": target.reasoning_effort,
         "top_p": target.top_p,
         "seed": target.seed,
+        "max_tokens": target.max_output_tokens,
     }
     return {name: value for name, value in fields.items() if value is not None}
 

@@ -130,6 +130,7 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
         "swebench.yaml",
         "agent.step_limit=1000",
         "model.cost_tracking=ignore_errors",
+        "model.model_kwargs.max_tokens=8192",
     ]
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"
     assert _flag_value(command, "--split") == "test"
@@ -617,11 +618,11 @@ def test_swebench_forwards_named_sampling_to_model_kwargs(tmp_path):
     assert "model.model_kwargs.seed=7" in configs
 
 
-def test_swebench_omits_model_kwargs_when_unset(tmp_path):
+def test_swebench_forwards_output_limit_to_model_kwargs(tmp_path):
     command = SweBenchProAdapter()._generate_command(
-        _target(), _ctx(tmp_path), Path("preds.json")
+        _target(max_output_tokens=4096), _ctx(tmp_path), Path("preds.json")
     )
-    assert not any("model_kwargs" in part for part in command)
+    assert "model.model_kwargs.max_tokens=4096" in command
 
 
 def test_swebench_annotates_what_it_cannot_forward():
