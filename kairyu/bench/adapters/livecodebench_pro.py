@@ -22,13 +22,20 @@ from dataclasses import dataclass
 
 from kairyu.bench.adapters.base import AdapterInfo, DownloadContext, RunContext
 from kairyu.bench.adapters.livecodebench import LiveCodeBenchAdapter
-from kairyu.bench.types import DatasetUnavailable
+from kairyu.bench.types import (
+    BenchItem,
+    BenchTarget,
+    ChatRequestSpec,
+    DatasetUnavailable,
+    SkipItem,
+)
 
 # Fugu's condition: 2025 Q2, text only, no tools.
 _SPLIT = "quater_2025_4_6"
 _SPLIT_PROBLEMS = 167
 _PROBLEM_REVISION = "adebffce047dddb7768a86bace6aea4f7425e3bc"
 _TESTCASE_REVISION = "5257736c0a4e30ba0949d41c56a257c323d9c600"
+_KNOWN_MISSING_TESTCASES = frozenset({"2086F", "2101F", "2109B"})
 _DEFAULT_INPUT_SUFFIX = ".in"
 _DEFAULT_OUTPUT_SUFFIX = ".ans"
 
@@ -177,6 +184,14 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
             "testlib checker.cpp is not compiled, so multi-answer problems can only "
             "lose points — treat the score as a lower bound",
             "solutions are requested in Python; Fugu reports C++ solutions",
+            "the pinned official testcase repository has no archives for "
+            f"{', '.join(sorted(_KNOWN_MISSING_TESTCASES))}; those source rows "
+            "are retained and skipped rather than shrinking the 167-row split",
+        ),
+        comparable_to_published=False,
+        incomparable_reason=(
+            "the pinned official testcase repository omits 3 of the 167 source "
+            "problems"
         ),
     )
 
@@ -221,6 +236,23 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
             # a smaller denominator as if it were the whole split, and the
             # resulting rate is not even a lower bound on the full 167.
             if archive is None:
+                if key in _KNOWN_MISSING_TESTCASES:
+                    normalized.append(
+                        {
+                            "id": f"lcb-pro-{key}",
+                            "question": statement,
+                            "starter_code": "",
+                            "fn_name": None,
+                            "tests": [],
+                            "testcase_unavailable": (
+                                f"official testcase archive {key}.zip is absent from "
+                                f"{self._TESTCASE_DATASET}@{_TESTCASE_REVISION}"
+                            ),
+                            "time_limit": row.get("time_limit"),
+                            "memory_limit": row.get("memory_limit"),
+                        }
+                    )
+                    continue
                 raise DatasetUnavailable(
                     f"{self._TESTCASE_DATASET}@{_TESTCASE_REVISION} has no usable "
                     f"archive for problem {key} (missing, or the fetch failed); "
@@ -254,6 +286,14 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
             )
         return normalized
 
+    def build_request(
+        self, item: BenchItem, target: BenchTarget, ctx: RunContext
+    ) -> ChatRequestSpec | SkipItem:
+        reason = item.payload.get("testcase_unavailable")
+        if reason:
+            return SkipItem(reason=reason)
+        return super().build_request(item, target, ctx)
+
     def methodology(self, ctx: RunContext) -> dict:
         base = super().methodology(ctx)
         base.pop("release", None)
@@ -261,6 +301,7 @@ class LiveCodeBenchProAdapter(LiveCodeBenchAdapter):
         base["split"] = _SPLIT
         base["split_problems"] = _SPLIT_PROBLEMS
         base["testcases"] = f"{self._TESTCASE_DATASET}@{_TESTCASE_REVISION}"
+        base["missing_testcase_archives"] = sorted(_KNOWN_MISSING_TESTCASES)
         base["grading"] = (
             "per-line whitespace-normalized comparison against .ans; the shipped "
             "testlib checker.cpp is not compiled (lower bound)"

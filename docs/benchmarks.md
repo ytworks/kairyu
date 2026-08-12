@@ -664,7 +664,7 @@ the input or evidence was invalid. The complete design is in
 
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
-| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
+| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + official SWE-bench Pro local-Docker eval, resolved rate | docker, `[bench-agentic]`, `KAIRYU_SWEBENCH_PRO_EVAL_PATH` |
 | SWE-bench Verified | `princeton-nlp/SWE-bench_Verified` test split (500 tasks) | mini-swe-agent (250 steps) + official SWE-bench docker harness, resolved rate | x86-64 Linux docker, `[bench-agentic]` |
 | Terminal-Bench 2.1 | `terminal-bench/terminal-bench-2-1` (Harbor Hub) | `harbor run` (terminus-2, 500 turns), Harbor Mean | docker, `[bench-agentic]` |
 | LiveCodeBench | `livecodebench/code_generation_lite` `release_v6` (1,055 problems, pinned commit) | sandboxed pass@1 (public+private tests) | — |
@@ -693,16 +693,18 @@ Pro is scored by the local sandbox, not the official judge.
 - **LiveCodeBench Pro** pins Fugu's 2025 Q2 slice (`quater_2025_4_6`, 167
   problems) and joins each `problem_id` to a `<problem_id>.zip` in the testcase
   repo (`testdata/<n>.in` / `.ans`). Acquisition **fails closed**: the split must
-  yield exactly 167 problems, every archive must download, and each archive's
+  yield exactly 167 problems and each available archive's
   official numbered cases `1..sum(subtasks[].n_cases)` must all be present, with
   no unpaired half in either direction. Paired files numbered above that declared
   denominator are retained as ignored-extra evidence rather than scored; the
   pinned `2112B` archive has two such sample cases. An archive that declares
   **no** count is not
   "as complete as whatever arrived" — that declaration is the only denominator
-  evidence there is, so a missing or malformed `config.yaml` fails closed too. `download_file()` turns a timeout, a 401 and a 404 alike into
-  `None`, so excluding a problem would cache a smaller denominator permanently —
-  and a rate over a shrunken set is not even a lower bound on the full 167. The
+  evidence there is, so a missing or malformed `config.yaml` fails closed too.
+  The pinned testcase HEAD itself has no ZIPs for `2086F`, `2101F`, and `2109B`;
+  those three rows remain in the cached 167-row denominator with an explicit
+  skip reason. Any other absent fetch still fails closed because
+  `download_file()` turns a timeout, a 401 and a 404 alike into `None`. The
   testcase repo's pin is part of the cache identity (`AdapterInfo.extra_sources`)
   so repinning it rebuilds rather than leaving stale bytes "ready" under a new
   methodology. The archives also ship a per-problem testlib `checker.cpp` that

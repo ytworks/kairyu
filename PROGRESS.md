@@ -98,6 +98,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [amendment] LiveCodeBench Pro retains source-side testcase gaps
+- What: The pinned 167-row Q2 split now retains the three problem rows whose official testcase HEAD has no ZIP (`2086F`, `2101F`, `2109B`) as explicit skips, while every other missing fetch and every incomplete archive still fails closed.
+- Why: Requiring nonexistent archives made even the complete first ten problems impossible to cache and run; dropping the rows would silently shrink the source denominator.
+- Refs: `kairyu/bench/adapters/livecodebench_pro.py`; `tests/bench/test_bench_lcb_datasets.py`; `docs/benchmarks.md`
+
 ### 2026-08-12 — [amendment] τ³ 1.x rewards remain machine-readable
 - What: The Banking adapter accepts both the legacy top-level `reward` and official τ³ 1.x `reward_info.reward` result shapes, surfaces infrastructure diagnostics for unscored simulations, and resolves the current `TAU2_DATA_DIR` ahead of a previously imported harness module's cached path.
 - Why: τ³ 1.0.1 executed ten simulations but the legacy parser classified every result as missing its reward; repeated tests could also search a stale temporary results directory.

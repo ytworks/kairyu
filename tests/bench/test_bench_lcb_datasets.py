@@ -23,7 +23,7 @@ from kairyu.bench.adapters.livecodebench_pro import (
     parse_testcase_zip,
 )
 from kairyu.bench.cache import BenchCache
-from kairyu.bench.types import DatasetGated, DatasetUnavailable
+from kairyu.bench.types import BenchItem, DatasetGated, DatasetUnavailable, SkipItem
 
 
 def _ctx(tmp_path) -> DownloadContext:
@@ -258,6 +258,30 @@ def test_livecodebench_pro_fails_closed_on_a_missing_archive(tmp_path, monkeypat
     _patch_pro_hub(monkeypatch, problems, archives)
     with pytest.raises(DatasetUnavailable, match="no usable archive for problem p0100"):
         LiveCodeBenchProAdapter().normalize(_ctx(tmp_path))
+
+
+def test_livecodebench_pro_retains_known_upstream_archive_gaps(
+    tmp_path, monkeypatch
+):
+    problems = _full_split()
+    problems[100] = _pro_row("2109B")
+    archives = {
+        f"{row['problem_id']}.zip": _complete_archive()
+        for row in problems
+        if row["problem_id"] != "2109B"
+    }
+    _patch_pro_hub(monkeypatch, problems, archives)
+    adapter = LiveCodeBenchProAdapter()
+
+    rows = adapter.normalize(_ctx(tmp_path))
+
+    assert len(rows) == 167
+    missing = rows[100]
+    assert missing["id"] == "lcb-pro-2109B"
+    assert missing["tests"] == []
+    verdict = adapter.build_request(BenchItem(id=missing["id"], payload=missing), None, None)
+    assert isinstance(verdict, SkipItem)
+    assert "2109B.zip is absent" in verdict.reason
 
 
 def test_livecodebench_pro_fails_closed_on_an_incomplete_archive(tmp_path, monkeypatch):
