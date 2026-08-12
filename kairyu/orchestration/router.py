@@ -142,13 +142,6 @@ class CalibratedRuleRouter(RuleRouter):
 
     def _decide_with_context(self, query: str, context: dict | None) -> RouteDecision:
         features = extract_features(query)
-        if self._target_mode == "auto-max":
-            return RouteDecision(
-                target="multi_agent",
-                confidence=1.0,
-                features=features,
-                reason="auto-max: three tier1 proposals and tier2 synthesis",
-            )
         supplied_tokens = None if context is None else context.get("input_tokens")
         if supplied_tokens is not None:
             if not isinstance(supplied_tokens, int) or supplied_tokens < 0:
@@ -172,6 +165,13 @@ class CalibratedRuleRouter(RuleRouter):
                     f"char_len={features.char_len} exceeds conservative tier1 guard "
                     f"{self._artifact.tier1_max_input_chars}"
                 ),
+            )
+        if self._target_mode == "auto-max":
+            return RouteDecision(
+                target="multi_agent",
+                confidence=1.0,
+                features=features,
+                reason="auto-max: three tier1 proposals and tier2 synthesis",
             )
         decision = super()._decide(query)
         if decision.target == "multi_agent":

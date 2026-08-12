@@ -8,7 +8,10 @@ import pytest
 import kairyu.orchestration.router as router_module
 from kairyu.orchestration.features import extract_features
 from kairyu.orchestration.router import (
+    CalibratedRouterArtifact,
+    CalibratedRuleRouter,
     JsonlRouterLog,
+    RouteThresholds,
     RuleRouter,
     load_calibrated_router,
 )
@@ -86,6 +89,27 @@ def test_calibrated_router_rejects_hash_and_quality_gate(tmp_path) -> None:
         load_calibrated_router(path, expected_sha256="0" * 64)
     with pytest.raises(ValueError, match="0.99 quality"):
         load_calibrated_router(path, expected_sha256=digest)
+
+
+def test_auto_max_routes_over_tier1_capacity_directly_to_tier2() -> None:
+    artifact = CalibratedRouterArtifact(
+        artifact_id="test",
+        thresholds=RouteThresholds(),
+        tier1_max_input_tokens=100,
+        tier1_max_input_chars=100,
+        quality_ci_lower=1.0,
+        train_split_sha256="a" * 64,
+        holdout_split_sha256="b" * 64,
+    )
+    router = CalibratedRuleRouter(
+        artifact,
+        artifact_sha256="c" * 64,
+        target_mode="auto-max",
+    )
+
+    assert router.route("short").target == "multi_agent"
+    assert router.route("x" * 101).target == "tier2"
+    assert router.route("short", {"input_tokens": 101}).target == "tier2"
 
 
 def test_routing_p99_latency_under_10ms():
