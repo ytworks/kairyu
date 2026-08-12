@@ -267,6 +267,7 @@ services:
       WEBUI_ADMIN_PASSWORD: ${WEBUI_ADMIN_PASSWORD:-}
       WEBUI_ADMIN_NAME: ${WEBUI_ADMIN_NAME:-Kairyu Admin}
       ENABLE_OLLAMA_API: "false"
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
       RAG_EMBEDDING_ENGINE: ""
     volumes:
       - type: bind

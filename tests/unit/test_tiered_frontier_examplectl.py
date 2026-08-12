@@ -228,6 +228,7 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
         "ENABLE_SIGNUP": "false",
         "ENABLE_LOGIN_FORM": "false",
         "WEBUI_AUTH": "false",
+        "ENABLE_EVALUATION_ARENA_MODELS": "false",
     } == ui["environment"]
     assert ui["ports"] == ["${CHAT_UI_BIND_ADDRESS:-0.0.0.0}:${CHAT_UI_PORT:-3000}:8080"]
     assert ui["depends_on"] == {"kairyu": {"condition": "service_healthy"}}
