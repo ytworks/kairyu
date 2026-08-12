@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import kairyu.bench.cache as cache_module
 from kairyu.bench.adapters.base import (
     AdapterInfo,
     DownloadContext,
@@ -70,6 +71,30 @@ def test_cache_is_invalidated_by_revision_change(tmp_path):
     assert cache.is_ready("ds", "org/ds", "v1")  # matching pin
     assert not cache.is_ready("ds", "org/ds", "v2")  # bumped revision -> stale
     assert not cache.is_ready("ds", "org/other", "v1")  # different dataset
+
+
+def test_repeated_readiness_reuses_unchanged_content_verification(
+    tmp_path, monkeypatch
+):
+    cache = BenchCache(tmp_path / "cache")
+    cache.write_rows("ds", [{"id": "1"}], {"dataset": "org/ds", "revision": "v1"})
+    calls = 0
+    original = cache_module._sha256_file
+
+    def counted(path):
+        nonlocal calls
+        calls += 1
+        return original(path)
+
+    monkeypatch.setattr(cache_module, "_sha256_file", counted)
+
+    assert cache.is_ready("ds", "org/ds", "v1")
+    assert cache.is_ready("ds", "org/ds", "v1")
+    assert calls == 1
+
+    cache.data_path("ds").write_text('{"id": "2"}\n', encoding="utf-8")
+    assert not cache.is_ready("ds", "org/ds", "v1")
+    assert calls == 2
 
 
 def test_existence_only_readiness_rejects_mutated_data_without_modifying_cache(tmp_path):

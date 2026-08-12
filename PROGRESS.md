@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [progress] Benchmark cache reuses unchanged verification
+- What: One suite run now reuses a normalized cache's digest, parsed asset references, and manifest while its exact file identities stay unchanged; adapter-owned assets remain rehashed on every readiness check and any data/manifest mutation invalidates the reuse.
+- Refs: `kairyu/bench/cache.py`; `tests/bench/test_bench_download_resilience.py`
+
 ### 2026-08-12 — [amendment] Auto-max respects the tier1 input envelope
 - What: Calibrated auto-max now applies its token/character capacity guards before forcing multi-agent routing, sending oversized prompts directly to tier2 instead of dispatching impossible tier1 proposals.
 - Why: Long-context Accuracy inputs exceeded Qwen's 262K context while remaining valid for the example's 1M-context DeepSeek tier, causing every forced proposal to fail upstream.

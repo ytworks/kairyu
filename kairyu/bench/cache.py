@@ -17,6 +17,18 @@ from pathlib import Path, PurePosixPath
 _ENV_VAR = "KAIRYU_BENCH_CACHE"
 _DEFAULT = "~/.cache/kairyu/benchmarks"
 _SHA256_HEX = frozenset("0123456789abcdef")
+_FileIdentity = tuple[int, int, int, int, int]
+
+
+def _file_identity(path: Path) -> _FileIdentity:
+    metadata = path.stat()
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -109,6 +121,14 @@ def resolve_cache_root(flag: str | None = None) -> Path:
 class BenchCache:
     def __init__(self, root: Path) -> None:
         self.root = root
+        # A suite run asks the same readiness question while resolving
+        # downloads, identities, and runtime preconditions. Keep the expensive
+        # data digest/JSON scan only while both files retain their exact stat
+        # identity; adapter-owned assets are still hashed on every check.
+        self._verified_content: dict[
+            str,
+            tuple[_FileIdentity, _FileIdentity, dict, tuple[str, ...]],
+        ] = {}
 
     def adapter_dir(self, adapter: str) -> Path:
         return self.root / adapter
@@ -139,20 +159,35 @@ class BenchCache:
         if not (self.manifest_path(adapter).exists() and self.data_path(adapter).exists()):
             return False
         try:
-            manifest = self.read_manifest(adapter)
-            if not isinstance(manifest, dict):
-                return False
-            expected_digest = manifest.get("sha256")
+            data_identity = _file_identity(self.data_path(adapter))
+            manifest_identity = _file_identity(self.manifest_path(adapter))
+            verified = self._verified_content.get(adapter)
             if (
-                not isinstance(expected_digest, str)
-                or len(expected_digest) != 64
-                or any(character not in _SHA256_HEX for character in expected_digest)
+                verified is not None
+                and verified[0] == data_identity
+                and verified[1] == manifest_identity
             ):
-                return False
-            if _sha256_file(self.data_path(adapter)) != expected_digest:
-                return False
-            rows = self.read_rows(adapter)
-            references = _referenced_assets(rows)
+                manifest, references = verified[2], verified[3]
+            else:
+                manifest = self.read_manifest(adapter)
+                if not isinstance(manifest, dict):
+                    return False
+                expected_digest = manifest.get("sha256")
+                if (
+                    not isinstance(expected_digest, str)
+                    or len(expected_digest) != 64
+                    or any(character not in _SHA256_HEX for character in expected_digest)
+                ):
+                    return False
+                if _sha256_file(self.data_path(adapter)) != expected_digest:
+                    return False
+                references = _referenced_assets(self.read_rows(adapter))
+                self._verified_content[adapter] = (
+                    data_identity,
+                    manifest_identity,
+                    manifest,
+                    references,
+                )
             recorded_assets = manifest.get("assets")
             if not isinstance(recorded_assets, list):
                 return False
@@ -203,8 +238,10 @@ class BenchCache:
         self.manifest_path(adapter).write_text(
             json.dumps(full_manifest, indent=2), encoding="utf-8"
         )
+        self._verified_content.pop(adapter, None)
 
     def clear(self, adapter: str) -> None:
+        self._verified_content.pop(adapter, None)
         manifest = self.manifest_path(adapter)
         data = self.data_path(adapter)
         for path in (manifest, data):
