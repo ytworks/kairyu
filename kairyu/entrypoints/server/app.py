@@ -1068,7 +1068,7 @@ async def _stream_orchestrator(
         request.model,
         include_usage=include_usage,
     )
-    first = True
+    started_choices: set[int] = set()
     sent: dict[int, int] = {}
     logprobs_sent: dict[int, int] = {}
     final_result = None
@@ -1103,7 +1103,8 @@ async def _stream_orchestrator(
             )
             if not delta_text and not fresh_logprobs and completion.index in sent:
                 continue
-            is_first = completion.index not in sent
+            is_first = completion.index not in started_choices
+            started_choices.add(completion.index)
             sent[completion.index] = next_text
             if completion.logprob_content is not None:
                 logprobs_sent[completion.index] = len(completion.logprob_content)
@@ -1130,6 +1131,22 @@ async def _stream_orchestrator(
             async for event in stream:
                 if event.kind == "status":
                     yield f": status {event.text}\n\n"  # SSE comment (A2)
+                elif event.kind == "reasoning":
+                    if not event.text:
+                        continue
+                    is_first = 0 not in started_choices
+                    started_choices.add(0)
+                    yield _sse_chunk(
+                        response_id,
+                        created,
+                        request.model,
+                        0,
+                        ChunkDelta(
+                            role="assistant" if is_first else None,
+                            reasoning_content=event.text,
+                        ),
+                        include_usage=include_usage,
+                    )
                 elif event.kind == "delta":
                     if event.completions:
                         completions = event.completions
@@ -1162,8 +1179,8 @@ async def _stream_orchestrator(
                         )
                         completion_length += len(event.text)
                         owner.observe(None, completions)
-                        is_first = first
-                        first = False
+                        is_first = 0 not in started_choices
+                        started_choices.add(0)
                         yield _chat_content_sse_chunk(
                             content_encoder,
                             response_id,

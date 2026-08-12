@@ -40,6 +40,20 @@ def test_yaml_spec_round_trip():
     assert spec.shared_prefix == "SYS\n"
     assert spec.moa_samples == 3
     assert spec.internal_max_tokens == 512
+    assert spec.expose_intermediate_outputs is False
+
+
+def test_intermediate_output_visibility_is_explicit():
+    spec = load_spec(
+        """
+workers: [{name: tier1, backend: mock}]
+expose_intermediate_outputs: true
+"""
+    )
+    assert spec.expose_intermediate_outputs is True
+    assert build_orchestrator(spec).describe_routing()[
+        "expose_intermediate_outputs"
+    ] is True
 
 
 def test_yaml_spec_from_file(tmp_path):

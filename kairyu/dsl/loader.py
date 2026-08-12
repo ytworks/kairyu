@@ -135,4 +135,5 @@ def build_orchestrator(
         moa_samples=spec.moa_samples,
         engine_descriptors=engine_descriptors,
         owned_engines=owned_engines,
+        expose_intermediate_outputs=spec.expose_intermediate_outputs,
     )

@@ -15,10 +15,12 @@ class AgentPool:
         shared_prefix: str = "",
         moa_samples: int = 0,
         internal_max_tokens: int = 1024,
+        expose_intermediate_outputs: bool = False,
     ) -> None:
         self._shared_prefix = shared_prefix
         self._moa_samples = moa_samples
         self._internal_max_tokens = internal_max_tokens
+        self._expose_intermediate_outputs = expose_intermediate_outputs
         self._workers: list[WorkerSpec] = []
         self._roles: list[RoleNodeSpec] = []
         self._budget = BudgetSpec()
@@ -94,4 +96,5 @@ class AgentPool:
             shared_prefix=self._shared_prefix,
             internal_max_tokens=self._internal_max_tokens,
             moa_samples=self._moa_samples,
+            expose_intermediate_outputs=self._expose_intermediate_outputs,
         )

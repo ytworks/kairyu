@@ -113,6 +113,9 @@ class OrchestratorSpec(BaseModel):
     # Zero keeps the standard Conductor route. A positive value turns the
     # multi-agent route into that many parallel MoA proposals plus synthesis.
     moa_samples: int = Field(default=0, ge=0, le=16)
+    # Completed pre-final stage outputs may be surfaced separately from the
+    # answer. Hidden is the safe and backward-compatible default.
+    expose_intermediate_outputs: bool = False
 
     @model_validator(mode="after")
     def _roles_reference_known_workers(self) -> OrchestratorSpec:
