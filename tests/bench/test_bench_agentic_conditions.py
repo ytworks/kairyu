@@ -81,6 +81,8 @@ def test_swebench_variants_keep_their_official_conditions(
     assert _flag_value(command, "--subset") == subset
     assert _flag_value(command, "--split") == "test"
 
+    if adapter.spec.evaluator == "swebench-pro":
+        return
     evaluation = adapter._evaluate_command(
         Path("preds.json"), ("a", "b"), "run", Path("reports"), 3
     )
@@ -90,6 +92,27 @@ def test_swebench_variants_keep_their_official_conditions(
     assert _flag_value(evaluation, "--run_id") == "run"
     assert _flag_value(evaluation, "--report_dir") == "reports"
     assert evaluation[evaluation.index("--instance_ids") + 1 :] == ["a", "b"]
+
+
+def test_swebench_pro_uses_its_official_local_docker_evaluator(tmp_path):
+    root = tmp_path / "SWE-bench_Pro-os"
+    command = SweBenchProAdapter()._pro_evaluate_command(
+        root,
+        tmp_path / "samples.jsonl",
+        tmp_path / "predictions.json",
+        tmp_path / "evaluation",
+        3,
+    )
+
+    assert Path(command[0]).name.startswith("python")
+    assert command[1] == str(root / "swe_bench_pro_eval.py")
+    assert _flag_value(command, "--raw_sample_path") == str(tmp_path / "samples.jsonl")
+    assert _flag_value(command, "--patch_path") == str(tmp_path / "predictions.json")
+    assert _flag_value(command, "--output_dir") == str(tmp_path / "evaluation")
+    assert _flag_value(command, "--scripts_dir") == str(root / "run_scripts")
+    assert _flag_value(command, "--num_workers") == "3"
+    assert _flag_value(command, "--dockerhub_username") == "jefzda"
+    assert "--use_local_docker" in command
 
 
 def test_swebench_sets_fugu_step_limit(tmp_path):
@@ -445,6 +468,9 @@ def test_tau_uses_the_real_domain_and_retrieval_config(tmp_path):
 
 def test_tau_allows_a_disclosed_official_retrieval_variant(tmp_path, monkeypatch):
     monkeypatch.setenv("KAIRYU_TAU_RETRIEVAL_CONFIG", "bm25_grep")
+    monkeypatch.setattr(
+        "kairyu.bench.adapters.tau_bench.detect_harness", lambda: "tau2"
+    )
     ctx = _ctx(tmp_path, judge=_judge())
     adapter = TauBenchBankingAdapter()
     command = adapter._command("tau2", _target(), ctx, "run-name")
@@ -455,6 +481,9 @@ def test_tau_allows_a_disclosed_official_retrieval_variant(tmp_path, monkeypatch
 
 def test_tau_rejects_unknown_retrieval_variant(tmp_path, monkeypatch):
     monkeypatch.setenv("KAIRYU_TAU_RETRIEVAL_CONFIG", "invented")
+    monkeypatch.setattr(
+        "kairyu.bench.adapters.tau_bench.detect_harness", lambda: "tau2"
+    )
     reason = TauBenchBankingAdapter()._preconditions(
         _target(), _ctx(tmp_path, judge=_judge())
     )

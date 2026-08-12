@@ -98,6 +98,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [amendment] SWE-bench Pro uses its own official evaluator
+- What: Pro patch generation still uses mini-SWE-agent, but evaluation now runs the official `scaleapi/SWE-bench_Pro-os` local-Docker evaluator over the exact persisted source rows and all selected IDs, including explicit empty patches for missing predictions; boolean results must match the fixed denominator exactly.
+- Why: The generic SWE-bench harness has no repository specifications for Pro projects such as `NodeBB/NodeBB`, so it cannot evaluate the generated Pro patches.
+- Refs: `kairyu/bench/adapters/swebench{,_pro}.py`; `tests/bench/test_bench_agentic{,_conditions}.py`
+
 ### 2026-08-12 — [amendment] τ³ exposes official retrieval variants
 - What: The τ³ Banking adapter keeps Fugu's `alltools` default but accepts an explicit official harness retrieval variant, records non-default variants as incomparable, only requires the shell sandbox for variants that use it, and forwards benchmark concurrency to the harness.
 - Why: The tiered example exposes chat completions but not the `text-embedding-3-large` endpoint required by `alltools`; the official offline `bm25_grep` condition can exercise all ten tasks without silently pretending score parity.

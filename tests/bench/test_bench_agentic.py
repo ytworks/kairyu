@@ -15,6 +15,7 @@ from kairyu.bench.adapters.swebench import (
     find_swebench_report,
     load_prediction_ids,
     load_selected_instance_ids,
+    parse_swebench_pro_results,
     parse_swebench_report,
     unsupported_platform,
 )
@@ -72,7 +73,7 @@ HARBOR_RESULTS = {
 
 
 @pytest.fixture(autouse=True)
-def _supported_swebench_platform(monkeypatch):
+def _supported_swebench_platform(monkeypatch, tmp_path):
     monkeypatch.setattr(swe_mod, "unsupported_platform", lambda: None)
     monkeypatch.setattr(
         swe_mod,
@@ -82,6 +83,20 @@ def _supported_swebench_platform(monkeypatch):
         ),
         raising=False,
     )
+    monkeypatch.setattr(
+        swe_mod,
+        "load_selected_instance_rows",
+        lambda dataset, limit: tuple(
+            {"instance_id": f"instance-{index}"}
+            for index in range(1, (limit or 1) + 1)
+        ),
+        raising=False,
+    )
+    evaluator = tmp_path / "SWE-bench_Pro-os"
+    (evaluator / "run_scripts").mkdir(parents=True)
+    (evaluator / "dockerfiles").mkdir()
+    (evaluator / "swe_bench_pro_eval.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("KAIRYU_SWEBENCH_PRO_EVAL_PATH", str(evaluator))
 
 
 def _ctx(tmp_path, docker=(True, "docker available"), **overrides) -> RunContext:
@@ -141,6 +156,37 @@ def test_parse_swebench_report_accepts_official_completed_error_overlap():
     error = next(item for item in items if item.item_id == "error-1")
     assert error.status == "failed"
     assert error.details == {"outcome": "error"}
+
+
+def test_parse_swebench_pro_results_preserves_exact_boolean_denominator():
+    items = parse_swebench_pro_results(
+        {"instance-2": False, "instance-1": True},
+        selected_ids=("instance-1", "instance-2"),
+    )
+
+    assert [item.item_id for item in items] == ["instance-1", "instance-2"]
+    assert [item.score for item in items] == [1.0, 0.0]
+    assert all(item.status == "completed" for item in items)
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        pytest.param({"instance-1": True}, id="missing-id"),
+        pytest.param(
+            {"instance-1": True, "instance-2": False, "extra": False},
+            id="extra-id",
+        ),
+        pytest.param(
+            {"instance-1": 1, "instance-2": False}, id="non-boolean"
+        ),
+    ],
+)
+def test_parse_swebench_pro_results_fails_closed(report):
+    with pytest.raises(ValueError, match="IDs|boolean"):
+        parse_swebench_pro_results(
+            report, selected_ids=("instance-1", "instance-2")
+        )
 
 
 def _mutate_swebench_report(path: str, value) -> dict:
@@ -410,7 +456,7 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
         return Completed()
 
     monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
-    pair = await SweBenchProAdapter().run(
+    pair = await SweBenchVerifiedAdapter().run(
         make_target(model="kairyu-auto", api_key_env="SWEBENCH_TEST_KEY"),
         _ctx(tmp_path, limit=4, concurrency=3, run_id="test-run"),
     )
@@ -438,6 +484,85 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
         text = Path(path).read_text(encoding="utf-8")
         assert "super-secret-key" not in text
         assert "[REDACTED]" in text
+
+
+async def test_swebench_pro_uses_official_pro_evaluator_and_full_selection(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
+    selected_rows = (
+        {"instance_id": "instance-1", "repo": "owner/repo"},
+        {"instance_id": "instance-2", "repo": "owner/repo"},
+    )
+    monkeypatch.setattr(
+        swe_mod,
+        "load_selected_instance_rows",
+        lambda dataset, limit: selected_rows,
+    )
+    evaluator = tmp_path / "SWE-bench_Pro-os"
+    stages = []
+
+    def fake_run(command, capture_output, timeout, env, cwd, check):
+        stages.append((list(command), Path(cwd)))
+        if command[0] == "mini-extra":
+            output_dir = Path(command[command.index("--output") + 1])
+            output_dir.mkdir()
+            (output_dir / "preds.json").write_text(
+                json.dumps(
+                    {
+                        "instance-1": {
+                            "instance_id": "instance-1",
+                            "model_name_or_path": "m",
+                            "model_patch": "diff --git a/a b/a\n",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            assert Path(command[1]) == evaluator / "swe_bench_pro_eval.py"
+            assert Path(cwd) == evaluator
+            raw_samples = Path(command[command.index("--raw_sample_path") + 1])
+            assert [
+                json.loads(line)["instance_id"]
+                for line in raw_samples.read_text(encoding="utf-8").splitlines()
+            ] == ["instance-1", "instance-2"]
+            predictions = json.loads(
+                Path(command[command.index("--patch_path") + 1]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            assert [row["instance_id"] for row in predictions] == [
+                "instance-1",
+                "instance-2",
+            ]
+            assert predictions[1]["model_patch"] == ""
+            output_dir = Path(command[command.index("--output_dir") + 1])
+            (output_dir / "eval_results.json").write_text(
+                json.dumps({"instance-1": True, "instance-2": False}),
+                encoding="utf-8",
+            )
+
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
+    pair = await SweBenchProAdapter().run(
+        make_target(), _ctx(tmp_path, limit=2, concurrency=2, run_id="pro-flow")
+    )
+
+    assert pair.status == "completed"
+    assert pair.metrics["score"] == 0.5
+    assert pair.metrics["n_total"] == 2
+    assert pair.metrics["n_empty_patch"] == 1
+    assert len(stages) == 2
+    assert pair.methodology["evaluation"].startswith(
+        "scaleapi/SWE-bench_Pro-os"
+    )
 
 
 async def test_swebench_missing_prediction_stays_in_official_denominator(

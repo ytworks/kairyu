@@ -26,6 +26,7 @@ PRO_SPEC = SweBenchSpec(
     dataset="ScaleAI/SWE-bench_Pro",
     step_limit=1000,
     annotations=_ANNOTATIONS,
+    evaluator="swebench-pro",
 )
 
 

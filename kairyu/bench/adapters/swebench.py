@@ -40,6 +40,10 @@ from kairyu.bench.types import (
 _STAGE_TIMEOUT_S = 8 * 3600
 _BASE_CONFIG = "swebench.yaml"
 _SAFE_RUN_ID = re.compile(r"[^A-Za-z0-9_.-]+")
+_PRO_EVALUATOR_ENV = "KAIRYU_SWEBENCH_PRO_EVAL_PATH"
+_PRO_EVALUATOR_SCRIPT = "swe_bench_pro_eval.py"
+_PRO_EVALUATOR_RESULTS = "eval_results.json"
+_PRO_DOCKERHUB_USERNAME = "jefzda"
 
 _COUNT_TO_IDS = {
     "submitted_instances": "submitted_ids",
@@ -244,6 +248,55 @@ def load_selected_instance_ids(dataset: str, limit: int | None) -> tuple[str, ..
     return tuple(instance_ids)
 
 
+def load_selected_instance_rows(
+    dataset: str, limit: int | None
+) -> tuple[dict, ...]:
+    """Load exact source rows needed by SWE-bench Pro's own evaluator."""
+
+    rows = load_hf_rows(dataset, split="test")
+    if limit is not None:
+        rows = rows[:limit]
+    instance_ids = []
+    for row in rows:
+        instance_id = row.get("instance_id") if isinstance(row, dict) else None
+        if not isinstance(instance_id, str) or not instance_id:
+            raise ValueError("SWE-bench dataset contains an invalid instance_id")
+        instance_ids.append(instance_id)
+    if not instance_ids:
+        raise ValueError("SWE-bench selection is empty")
+    if len(instance_ids) != len(set(instance_ids)):
+        raise ValueError("SWE-bench selection contains duplicate instance IDs")
+    return tuple(rows)
+
+
+def parse_swebench_pro_results(
+    report: dict,
+    *,
+    selected_ids: Sequence[str],
+) -> list[ItemResult]:
+    """Validate the official Pro evaluator's exact boolean denominator."""
+
+    if not isinstance(report, dict):
+        raise ValueError("SWE-bench Pro eval_results.json must be an object")
+    selected = _selected_id_set(selected_ids)
+    assert selected is not None
+    if set(report) != selected:
+        raise ValueError(
+            "SWE-bench Pro result IDs must exactly equal the selected instance IDs"
+        )
+    if any(type(value) is not bool for value in report.values()):
+        raise ValueError("SWE-bench Pro results must be boolean verdicts")
+    return [
+        ItemResult(
+            item_id=item_id,
+            status="completed",
+            score=1.0 if report[item_id] else 0.0,
+            details={"outcome": "resolved" if report[item_id] else "unresolved"},
+        )
+        for item_id in selected_ids
+    ]
+
+
 def find_swebench_report(workdir: Path) -> dict:
     """Return the sole root schema-v2 report produced by the official harness."""
 
@@ -315,6 +368,80 @@ def _persist_selection(path: Path, payload: dict) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _persist_jsonl(path: Path, rows: Sequence[dict]) -> None:
+    text = "".join(
+        json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows
+    )
+    if path.exists():
+        try:
+            existing = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise ValueError(f"stored source rows are unreadable: {error}") from error
+        if existing != text:
+            raise ValueError("stored source rows do not match this run")
+        return
+    path.write_text(text, encoding="utf-8")
+
+
+def _write_swebench_pro_predictions(
+    source: Path,
+    destination: Path,
+    selected_ids: Sequence[str],
+    prefix: str,
+) -> None:
+    predictions = json.loads(source.read_text(encoding="utf-8"))
+    converted = []
+    for instance_id in selected_ids:
+        prediction = predictions.get(instance_id)
+        patch = "" if prediction is None else prediction.get("model_patch") or ""
+        converted.append(
+            {"instance_id": instance_id, "model_patch": patch, "prefix": prefix}
+        )
+    destination.write_text(json.dumps(converted, indent=2), encoding="utf-8")
+
+
+def swebench_pro_evaluator_root() -> tuple[Path | None, str | None]:
+    value = os.environ.get(_PRO_EVALUATOR_ENV, "").strip()
+    if not value:
+        return None, f"set {_PRO_EVALUATOR_ENV} to the official evaluator checkout"
+    root = Path(value)
+    if not root.is_absolute():
+        return None, f"{_PRO_EVALUATOR_ENV} must be an absolute path"
+    root = root.resolve()
+    required = (
+        root / _PRO_EVALUATOR_SCRIPT,
+        root / "run_scripts",
+        root / "dockerfiles",
+    )
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        return None, "official SWE-bench Pro evaluator is incomplete; missing: " + ", ".join(
+            missing
+        )
+    return root, None
+
+
+def checkout_revision(root: Path) -> str | None:
+    process = None
+    try:
+        process = subprocess.Popen(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        stdout, _ = process.communicate(timeout=10)
+        if process.returncode != 0:
+            return None
+        value = stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        if process is not None:
+            process.kill()
+            process.communicate()
+        return None
+    return value if re.fullmatch(r"[0-9a-f]{40}", value) else None
+
+
 def _model_kwargs(target: BenchTarget) -> dict[str, object]:
     fields = {
         "reasoning_effort": target.reasoning_effort,
@@ -352,6 +479,7 @@ class SweBenchSpec:
     dataset: str
     step_limit: int
     annotations: tuple[str, ...]
+    evaluator: str = "swebench"
     comparable_to_published: bool = True
     incomparable_reason: str = ""
 
@@ -409,6 +537,10 @@ class SweBenchAdapter:
         missing = harness_missing()
         if missing is not None:
             return f"{missing} not installed (pip install 'kairyu[bench-agentic]')"
+        if self.spec.evaluator == "swebench-pro":
+            _, evaluator_reason = swebench_pro_evaluator_root()
+            if evaluator_reason is not None:
+                return evaluator_reason
         return None
 
     def _generate_command(
@@ -469,6 +601,32 @@ class SweBenchAdapter:
             *instance_ids,
         ]
 
+    def _pro_evaluate_command(
+        self,
+        evaluator_root: Path,
+        raw_samples: Path,
+        predictions: Path,
+        output_dir: Path,
+        workers: int,
+    ) -> list[str]:
+        return [
+            sys.executable,
+            str(evaluator_root / _PRO_EVALUATOR_SCRIPT),
+            "--raw_sample_path",
+            str(raw_samples),
+            "--patch_path",
+            str(predictions),
+            "--output_dir",
+            str(output_dir),
+            "--scripts_dir",
+            str(evaluator_root / "run_scripts"),
+            "--num_workers",
+            str(workers),
+            "--dockerhub_username",
+            _PRO_DOCKERHUB_USERNAME,
+            "--use_local_docker",
+        ]
+
     def _run_id(self, ctx: RunContext) -> str:
         source = ctx.run_id or "bench"
         sanitized = _SAFE_RUN_ID.sub("-", source).strip("-.") or "bench"
@@ -509,6 +667,9 @@ class SweBenchAdapter:
         generation_dir = workdir / "mini-output"
         predictions = generation_dir / "preds.json"
         selection_path = workdir / "selected-instances.json"
+        pro_raw_samples = workdir / "selected-samples.jsonl"
+        pro_predictions = workdir / "swebench-pro-predictions.json"
+        pro_evaluation_dir = workdir / "swebench-pro-evaluation"
         artifacts: dict[str, object] = {
             "root": str(workdir),
             "selection": str(selection_path),
@@ -519,6 +680,14 @@ class SweBenchAdapter:
             "official_report": None,
             "stage_logs": {},
         }
+        if self.spec.evaluator == "swebench-pro":
+            artifacts.update(
+                {
+                    "selected_samples": str(pro_raw_samples),
+                    "evaluator_predictions": str(pro_predictions),
+                    "evaluation_dir": str(pro_evaluation_dir),
+                }
+            )
         methodology = {
             "metric": self.info.metric,
             "dataset": self.spec.dataset,
@@ -528,11 +697,25 @@ class SweBenchAdapter:
             "base_config": _BASE_CONFIG,
             "step_limit": self.spec.step_limit,
             "concurrency": ctx.concurrency,
-            "evaluation": "swebench.harness.run_evaluation (docker)",
+            "evaluation": (
+                "scaleapi/SWE-bench_Pro-os swe_bench_pro_eval.py (local docker)"
+                if self.spec.evaluator == "swebench-pro"
+                else "swebench.harness.run_evaluation (docker)"
+            ),
             "artifacts": artifacts,
         }
         try:
-            selected_ids = load_selected_instance_ids(self.spec.dataset, ctx.limit)
+            selected_rows = None
+            if self.spec.evaluator == "swebench-pro":
+                selected_rows = load_selected_instance_rows(
+                    self.spec.dataset, ctx.limit
+                )
+                selected_ids = tuple(row["instance_id"] for row in selected_rows)
+                _persist_jsonl(pro_raw_samples, selected_rows)
+            else:
+                selected_ids = load_selected_instance_ids(
+                    self.spec.dataset, ctx.limit
+                )
             selection = {
                 "schema_version": 1,
                 "dataset": self.spec.dataset,
@@ -549,6 +732,19 @@ class SweBenchAdapter:
                 methodology=methodology,
             )
         methodology["selected_instance_ids"] = list(selected_ids)
+
+        evaluator_root = None
+        if self.spec.evaluator == "swebench-pro":
+            evaluator_root, evaluator_reason = swebench_pro_evaluator_root()
+            if evaluator_root is None:
+                return self._failed(
+                    target,
+                    started_at,
+                    evaluator_reason or "official SWE-bench Pro evaluator unavailable",
+                    methodology=methodology,
+                )
+            methodology["evaluator_checkout"] = str(evaluator_root)
+            methodology["evaluator_revision"] = checkout_revision(evaluator_root)
 
         env = dict(os.environ)
         base = normalize_base_url(target.base_url)
@@ -612,13 +808,40 @@ class SweBenchAdapter:
             set(selected_ids) - set(prediction_ids)
         )
 
-        evaluate_command = self._evaluate_command(
-            predictions,
-            selected_ids,
-            self._run_id(ctx),
-            workdir,
-            ctx.concurrency,
-        )
+        if self.spec.evaluator == "swebench-pro":
+            assert evaluator_root is not None
+            try:
+                _write_swebench_pro_predictions(
+                    predictions,
+                    pro_predictions,
+                    selected_ids,
+                    self._run_id(ctx),
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+                return self._failed(
+                    target,
+                    started_at,
+                    f"could not convert SWE-bench Pro predictions: {error}",
+                    methodology=methodology,
+                )
+            pro_evaluation_dir.mkdir(parents=True, exist_ok=True)
+            evaluate_command = self._pro_evaluate_command(
+                evaluator_root,
+                pro_raw_samples,
+                pro_predictions,
+                pro_evaluation_dir,
+                ctx.concurrency,
+            )
+            evaluate_cwd = evaluator_root
+        else:
+            evaluate_command = self._evaluate_command(
+                predictions,
+                selected_ids,
+                self._run_id(ctx),
+                workdir,
+                ctx.concurrency,
+            )
+            evaluate_cwd = workdir
         methodology["evaluate_command"] = shlex.join(evaluate_command)
         failure = await self._invoke_stage(
             target,
@@ -629,25 +852,51 @@ class SweBenchAdapter:
             invoke,
             methodology,
             secrets,
+            cwd=evaluate_cwd,
         )
         if failure is not None:
             return failure
         try:
-            report_path, report = _find_swebench_report(workdir)
+            if self.spec.evaluator == "swebench-pro":
+                report_path = pro_evaluation_dir / _PRO_EVALUATOR_RESULTS
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                items = parse_swebench_pro_results(
+                    report,
+                    selected_ids=selected_ids,
+                )
+                total = len(selected_ids)
+                resolved = sum(report.values())
+                category_metrics = {
+                    "n_resolved": resolved,
+                    "n_unresolved": total - resolved,
+                    "n_empty_patch": len(
+                        set(selected_ids) - set(prediction_ids)
+                    ),
+                    "n_error": 0,
+                    "n_incomplete": 0,
+                }
+            else:
+                report_path, report = _find_swebench_report(workdir)
+                items, total = parse_swebench_report(
+                    report,
+                    selected_ids=selected_ids,
+                )
+                resolved = report["resolved_instances"]
+                category_metrics = {
+                    "n_resolved": report["resolved_instances"],
+                    "n_unresolved": report["unresolved_instances"],
+                    "n_empty_patch": report["empty_patch_instances"],
+                    "n_error": report["error_instances"],
+                    "n_incomplete": len(report["incomplete_ids"]),
+                }
             artifacts["official_report"] = str(report_path)
-            items, total = parse_swebench_report(
-                report,
-                selected_ids=selected_ids,
-            )
-        except ValueError as error:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
             return self._failed(
                 target,
                 started_at,
                 f"invalid evaluation report: {error}",
                 methodology=methodology,
             )
-
-        resolved = report["resolved_instances"]
         methodology["official_report"] = report
         pair = summarize_items(
             self.info.name,
@@ -660,13 +909,6 @@ class SweBenchAdapter:
             comparable=self.info.comparable_to_published,
             incomparable_reasons=incomparable_reasons,
         )
-        category_metrics = {
-            "n_resolved": report["resolved_instances"],
-            "n_unresolved": report["unresolved_instances"],
-            "n_empty_patch": report["empty_patch_instances"],
-            "n_error": report["error_instances"],
-            "n_incomplete": len(report["incomplete_ids"]),
-        }
         return pair.model_copy(update={"metrics": {**pair.metrics, **category_metrics}})
 
     async def _invoke_stage(
@@ -679,9 +921,11 @@ class SweBenchAdapter:
         invoke,
         methodology: dict,
         secrets: Sequence[str],
+        *,
+        cwd: Path | None = None,
     ) -> PairResult | None:
         try:
-            completed = await asyncio.to_thread(invoke, command, workdir)
+            completed = await asyncio.to_thread(invoke, command, cwd or workdir)
         except subprocess.TimeoutExpired as error:
             stage_logs = _write_stage_logs(
                 workdir,
@@ -757,5 +1001,8 @@ __all__ = [
     "harness_missing",
     "load_prediction_ids",
     "load_selected_instance_ids",
+    "load_selected_instance_rows",
     "parse_swebench_report",
+    "parse_swebench_pro_results",
+    "swebench_pro_evaluator_root",
 ]
