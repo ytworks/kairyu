@@ -572,6 +572,8 @@ class SweBenchAdapter:
             f"agent.step_limit={self.spec.step_limit}",
             "--config",
             "model.cost_tracking=ignore_errors",
+            "--config",
+            "model.model_kwargs.tool_choice=required",
         ]
         for field, value in _model_kwargs(target).items():
             command += ["--config", f"model.model_kwargs.{field}={value}"]

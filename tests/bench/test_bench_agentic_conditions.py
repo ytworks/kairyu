@@ -77,10 +77,11 @@ def test_swebench_variants_keep_their_official_conditions(
 ):
     command = adapter._generate_command(_target(), _ctx(tmp_path), Path("mini-output"))
     configs = [command[i + 1] for i, value in enumerate(command) if value == "--config"]
-    assert configs[:3] == [
+    assert configs[:4] == [
         "swebench.yaml",
         f"agent.step_limit={steps}",
         "model.cost_tracking=ignore_errors",
+        "model.model_kwargs.tool_choice=required",
     ]
     assert _flag_value(command, "--subset") == subset
     assert _flag_value(command, "--split") == "test"
@@ -130,6 +131,7 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
         "swebench.yaml",
         "agent.step_limit=1000",
         "model.cost_tracking=ignore_errors",
+        "model.model_kwargs.tool_choice=required",
         "model.model_kwargs.max_tokens=8192",
     ]
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"
@@ -623,6 +625,7 @@ def test_swebench_forwards_output_limit_to_model_kwargs(tmp_path):
         _target(max_output_tokens=4096), _ctx(tmp_path), Path("preds.json")
     )
     assert "model.model_kwargs.max_tokens=4096" in command
+    assert "model.model_kwargs.tool_choice=required" in command
 
 
 def test_swebench_annotates_what_it_cannot_forward():
