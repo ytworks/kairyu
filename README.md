@@ -269,7 +269,7 @@ Everything heavier is opt-in:
 | `--extra gpu` | flashinfer, triton, nixl | GPU kernels/fabric (Linux-only markers; macOS `uv sync` skips them) |
 | `--extra flashattention4` | `flash-attn-4[cu13]==4.0.0b24` | opt-in FlashAttention-4 prefill kernels using the upstream-recommended CUDA 13 extra (Linux only; combine with `--extra gpu` for delegated FlashInfer decode; both are included by `Dockerfile.cuda`) |
 | `--extra bench` | datasets/HF Hub, benchmark formats, progress UI, pinned IFEval scorer dependencies | installed benchmark-suite download and scoring |
-| `--extra bench-agentic` | mini-swe-agent, swebench, harbor | docker-based agentic benchmarks |
+| `--extra bench-agentic` | mini-swe-agent, ScaleAI evaluator dependencies, harbor | docker-based agentic benchmarks |
 | `--group dev` | pytest, ruff, transformers, openai, … | test suite + parity goldens |
 
 FlashAttention-3 is built from the official upstream source tree. The

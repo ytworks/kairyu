@@ -276,7 +276,7 @@ uv sync --group dev           # + テスト/lint ツールチェーン
 | `--extra otel` | opentelemetry-sdk | トレーシングスパン(なければ no-op) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU カーネル/ファブリック(Linux 限定マーカー。macOS の `uv sync` はスキップ) |
 | `--extra bench` | datasets/HF Hub、ベンチマーク形式、進捗 UI、固定 IFEval scorer 依存 | インストール済みベンチマークスイートの取得と採点 |
-| `--extra bench-agentic` | mini-swe-agent, swebench, harbor | docker ベースのエージェンティックベンチマーク |
+| `--extra bench-agentic` | mini-swe-agent、ScaleAI 評価器依存、harbor | docker ベースのエージェンティックベンチマーク |
 | `--group dev` | pytest, ruff, transformers, openai, … | テストスイート + パリティゴールデン |
 
 vLLM は Linux GPU ホストで `vllm` バックエンドを使う場合のみ必要です(同一環境に

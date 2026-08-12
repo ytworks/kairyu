@@ -94,7 +94,9 @@ bench = [
 # the Qwen Accuracy wrapper installs its pinned [knowledge] source — see the guide.
 bench-agentic = [
     "mini-swe-agent>=2",
-    "swebench>=4",
+    "docker>=6",  # local ScaleAI SWE-bench Pro evaluator
+    "pandas>=1.5",  # official evaluator result table
+    "tqdm>=4.64",  # official evaluator progress reporting
     "harbor>=0.17; python_version >= '3.12'",  # Terminal-Bench 2.x harness
 ]
 

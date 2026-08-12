@@ -663,7 +663,7 @@ the input or evidence was invalid. The complete design is in
 
 | Slot | Source | Scoring | Requires |
 |---|---|---|---|
-| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` | mini-swe-agent (1,000 steps) + swebench docker eval, resolved rate | docker, `[bench-agentic]` |
+| SWE-Bench Pro | `ScaleAI/SWE-bench_Pro` at a pinned commit (731 tasks) | mini-swe-agent text actions (1,000 steps) + pinned ScaleAI local-Docker evaluator, resolved rate | docker, `[bench-agentic]` |
 | Terminal-Bench 2.1 | `terminal-bench/terminal-bench-2-1` (Harbor Hub) | `harbor run` (terminus-2, 500 turns), Harbor Mean | docker, `[bench-agentic]` |
 | LiveCodeBench | `livecodebench/code_generation_lite` `release_v6` (1,055 problems, pinned commit) | sandboxed pass@1 (public+private tests) | — |
 | LiveCodeBench Pro | `QAQAQAQAQ/LiveCodeBench-Pro` split `quater_2025_4_6` + `-Testcase` ZIPs | sandboxed pass@1 (lower bound: no testlib checker) | HF token |
@@ -979,10 +979,13 @@ choose a new `--run-id`; `--rerun` cannot repurpose existing evidence.
   recomputed directly from the installed JSONL before parsing, so it neither
   claims nor needs an HF Git pin. A package content digest and an HF repository
   commit are intentionally not presented as interchangeable provenance.
-  The **agentic** slots are the exception: mini-swe-agent, Harbor and the τ
-  harness fetch their own datasets and expose no revision knob, so SWE-Bench Pro
-  in particular tracks upstream (which has had post-release test fixes). That is
-  a real limitation of those harnesses, not something this suite can pin.
+  Terminal-Bench and τ remain exceptions because their harnesses own data
+  acquisition without an equivalent immutable revision input. SWE-Bench Pro is
+  pinned separately: Kairyu exports exactly 731 rows from
+  `ScaleAI/SWE-bench_Pro` at the adapter revision and runs the official
+  `SWE-bench_Pro-os` evaluator at its recorded commit. Its Docker Hub task image
+  tags are still mutable, so the adapter discloses incomplete execution-image
+  provenance instead of claiming a content-addressed historical result.
 
 - **Gated datasets** (GPQA Diamond, HLE, LiveCodeBench Pro): accept the license on the dataset
   page (e.g. <https://huggingface.co/datasets/Idavidrein/gpqa>) and set
@@ -1252,7 +1255,7 @@ of general judge reliability.
 ## Agentic benchmarks (docker)
 
 ```bash
-uv sync --extra bench-agentic          # mini-swe-agent, swebench, harbor
+uv sync --extra bench-agentic          # mini-swe-agent, ScaleAI eval deps, harbor
 # Official tau-three is not on PyPI. Its v1.x package and CLI remain named
 # tau2; pin the v1.0.1 release commit and include the banking knowledge extra:
 uv pip install 'tau2[knowledge] @ git+https://github.com/sierra-research/tau2-bench.git@fc0055dc4e0a316c3f83133267fbd6faaa770992'
@@ -1270,7 +1273,7 @@ Fugu's published turn and trial conditions are pinned in the invocations:
 
 | Slot | Condition | How it is passed |
 |---|---|---|
-| SWE-Bench Pro | 1,000 agent steps (harness default is 250) | `-c swebench.yaml -c agent.step_limit=1000` — the harness drops its default config as soon as `-c` is given, so the default file is restated |
+| SWE-Bench Pro | 1,000 agent steps (harness default is 250) | `-c swebench_backticks.yaml -c agent.step_limit=1000`; `OpenAICompatTextbasedModel` keeps only standard OpenAI chat-message fields between turns and forwards the target output limit |
 | Terminal-Bench 2.1 | terminus-2, 500 turns | `-a terminus-2 --ak max_turns=500`, dataset `-d terminal-bench/terminal-bench-2-1`, results in `--jobs-dir` |
 | τ³ Banking | `banking_knowledge`, all retrieval tools, low-effort user simulator | `--domain banking_knowledge --retrieval-config alltools --user-llm-args '{"reasoning_effort":"low"}'` (from the judge's sampling policy), results addressed by `--save-to <name>` under the harness data dir |
 
@@ -1292,8 +1295,9 @@ Harness output and sampling, verified against the pinned harnesses:
   file, so a fixed name would make a second run interactive or resume
   simulations from another configuration.
 - **Sampling**: τ takes `--agent-llm-args` / `--user-llm-args`, and mini-swe-agent
-  takes `model.model_kwargs.*`, so their verified `reasoning_effort`, `top_p`,
-  and `seed` fields reach the harness. Vendor `extra_body` has no equivalent in
+  takes `model.model_kwargs.*`, so the target output limit and verified
+  `reasoning_effort`, `top_p`, and `seed` fields reach the harness. Vendor
+  `extra_body` has no equivalent in
   mini-swe-agent, and Harbor exposes no documented sampling passthrough for
   terminus-2; those omissions are annotated on the cell. Explicit target
   `temperature` and recommended-default omission are not claimed through any

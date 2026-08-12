@@ -90,6 +90,7 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./bench.sh serving-auto-max-moa3
 ./bench.sh serving-auto-max-moa4
 ./bench.sh orchestration
+./bench.sh swebench-pro
 ./bench.sh terminalbench-pilot
 ./bench.sh terminalbench
 ./bench.sh all
@@ -117,7 +118,12 @@ measurable. The same performance and quality gates select the final
 LiveCodeBench-quality diagnostic, including internal calls, internal tokens,
 route identity, and allocated GPU-seconds. `terminalbench-pilot` runs the same
 four named Terminal-Bench 2.1 tasks on direct DeepSeek and the quality-first
-thinking-MoA3 candidate. `terminalbench` runs the selected `kairyu-auto-max` over
+thinking-MoA3 candidate. `swebench-pro` runs the selected `kairyu-auto-max` over
+all 731 pinned public tasks with mini-swe-agent's bundled text-action scaffold,
+a 1,000-step budget, 16 workers, and the pinned official ScaleAI evaluator. Its
+dataset, evaluator, predictions, trajectories, Docker logs, and zero-inclusive
+official verdicts remain below the NVMe benchmark cache and result directory.
+`terminalbench` runs the selected `kairyu-auto-max` over
 all 89 tasks with terminus-2 and the published 500-turn budget. It deliberately
 passes no unsupported sampling knob. The one-trial full run launched all 89
 tasks and scored 60/89 (67.42%) with official task verifiers and Harbor's

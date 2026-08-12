@@ -1,9 +1,9 @@
 """SWE-Bench Pro: official two-stage flow — mini-swe-agent patches, docker eval.
 
 Stage 1 points mini-swe-agent's OpenAI-compatible client at the target
-gateway to generate patches for the public split; stage 2 runs the swebench
-docker evaluation harness and this adapter translates its report. Docker or
-the [bench-agentic] extra missing -> skipped, never a crash (user decision 1).
+gateway to generate patches for the public split; stage 2 runs ScaleAI's
+pinned SWE-bench Pro evaluator with local Docker and translates its report.
+Docker or the [bench-agentic] extra missing -> skipped, never a crash.
 """
 
 from __future__ import annotations
