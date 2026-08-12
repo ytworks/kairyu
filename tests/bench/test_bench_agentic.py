@@ -1,22 +1,58 @@
 """Agentic wrappers (SWE-Bench Pro / Terminal-Bench): skip paths + translation."""
 
+import copy
 import json
 from pathlib import Path
 
 import httpx
+import pytest
 from conftest import make_config, make_target
 
 from kairyu.bench.adapters import swebench_pro as swe_mod
 from kairyu.bench.adapters import terminal_bench as tb_mod
 from kairyu.bench.adapters.base import RunContext
-from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter, parse_swebench_report
+from kairyu.bench.adapters.swebench import (
+    find_swebench_report,
+    load_prediction_ids,
+    parse_swebench_report,
+)
+from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
 from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter, parse_harbor_results
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.runner import SuiteRunner
 from kairyu.bench.store import ResultStore
 
 SWEBENCH_REPORT = {
+    "schema_version": 2,
+    "total_instances": 5,
+    "submitted_instances": 4,
+    "completed_instances": 2,
+    "resolved_instances": 1,
+    "unresolved_instances": 1,
+    "empty_patch_instances": 1,
+    "error_instances": 1,
+    "completed_ids": ["resolved-1", "unresolved-1"],
+    "incomplete_ids": ["incomplete-1"],
+    "empty_patch_ids": ["empty-1"],
+    "submitted_ids": ["resolved-1", "unresolved-1", "empty-1", "error-1"],
+    "resolved_ids": ["resolved-1"],
+    "unresolved_ids": ["unresolved-1"],
+    "error_ids": ["error-1"],
+}
+
+SWEBENCH_FLOW_REPORT = {
+    "schema_version": 2,
     "total_instances": 4,
+    "submitted_instances": 4,
+    "completed_instances": 3,
+    "resolved_instances": 2,
+    "unresolved_instances": 1,
+    "empty_patch_instances": 0,
+    "error_instances": 1,
+    "completed_ids": ["astropy-1", "django-2", "flask-3"],
+    "incomplete_ids": [],
+    "empty_patch_ids": [],
+    "submitted_ids": ["astropy-1", "django-2", "flask-3", "numpy-4"],
     "resolved_ids": ["astropy-1", "django-2"],
     "unresolved_ids": ["flask-3"],
     "error_ids": ["numpy-4"],
@@ -42,13 +78,158 @@ def _ctx(tmp_path, docker=(True, "docker available"), **overrides) -> RunContext
     return RunContext(**defaults)
 
 
-def test_parse_swebench_report():
-    items, total = parse_swebench_report(SWEBENCH_REPORT)
-    assert total == 4
+def test_parse_swebench_report_preserves_every_official_outcome():
+    selected = (*SWEBENCH_REPORT["submitted_ids"], "incomplete-1")
+    items, total = parse_swebench_report(SWEBENCH_REPORT, selected_ids=selected)
+    assert total == 5
     by_id = {item.item_id: item for item in items}
-    assert by_id["astropy-1"].score == 1.0
-    assert by_id["flask-3"].score == 0.0
-    assert by_id["numpy-4"].status == "failed"
+    assert by_id["resolved-1"].score == 1.0
+    assert by_id["unresolved-1"].score == 0.0
+    assert by_id["empty-1"].score == 0.0
+    assert by_id["empty-1"].details == {"outcome": "empty_patch"}
+    assert by_id["error-1"].status == "failed"
+    assert by_id["error-1"].error == "SWE-bench harness error"
+    assert by_id["incomplete-1"].status == "failed"
+    assert by_id["incomplete-1"].error == "SWE-bench evaluation incomplete"
+
+
+def _mutate_swebench_report(path: str, value) -> dict:
+    report = copy.deepcopy(SWEBENCH_REPORT)
+    report[path] = value
+    return report
+
+
+@pytest.mark.parametrize(
+    ("report", "message"),
+    [
+        pytest.param(
+            _mutate_swebench_report("schema_version", 1),
+            "schema_version",
+            id="schema-version",
+        ),
+        pytest.param(
+            _mutate_swebench_report("total_instances", True),
+            "total_instances",
+            id="boolean-count",
+        ),
+        pytest.param(
+            _mutate_swebench_report("error_instances", -1),
+            "error_instances",
+            id="negative-count",
+        ),
+        pytest.param(
+            _mutate_swebench_report("resolved_instances", 2),
+            "resolved_instances.*resolved_ids",
+            id="mismatched-count",
+        ),
+        pytest.param(
+            _mutate_swebench_report("resolved_ids", ["resolved-1", "resolved-1"]),
+            "resolved_ids.*duplicate",
+            id="duplicate-ids",
+        ),
+        pytest.param(
+            _mutate_swebench_report("unresolved_ids", ["resolved-1"]),
+            "resolved_ids.*unresolved_ids.*disjoint",
+            id="resolved-unresolved-overlap",
+        ),
+        pytest.param(
+            _mutate_swebench_report("completed_ids", ["resolved-1", "other-1"]),
+            "completed_ids",
+            id="completed-partition",
+        ),
+        pytest.param(
+            _mutate_swebench_report("empty_patch_ids", ["resolved-1"]),
+            "outcome IDs.*disjoint",
+            id="terminal-overlap",
+        ),
+        pytest.param(
+            _mutate_swebench_report(
+                "submitted_ids", ["resolved-1", "unresolved-1", "empty-1", "other-1"]
+            ),
+            "submitted_ids",
+            id="submitted-partition",
+        ),
+    ],
+)
+def test_parse_swebench_report_rejects_malformed_schema(report, message):
+    with pytest.raises(ValueError, match=message):
+        parse_swebench_report(
+            report,
+            selected_ids=(*SWEBENCH_REPORT["submitted_ids"], "incomplete-1"),
+        )
+
+
+@pytest.mark.parametrize("selected_ids", [("resolved-1",), ()])
+def test_parse_swebench_report_rejects_selected_denominator_mismatch(selected_ids):
+    with pytest.raises(ValueError, match="selected IDs"):
+        parse_swebench_report(SWEBENCH_REPORT, selected_ids=selected_ids)
+
+
+def test_swebench_load_prediction_ids_validates_and_sorts_mini_swe_mapping(tmp_path):
+    path = tmp_path / "preds.json"
+    path.write_text(
+        json.dumps(
+            {
+                "b": {
+                    "instance_id": "b",
+                    "model_name_or_path": "m",
+                    "model_patch": "diff",
+                },
+                "a": {
+                    "instance_id": "a",
+                    "model_name_or_path": "m",
+                    "model_patch": "",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert load_prediction_ids(path) == ("a", "b")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param([], id="not-object"),
+        pytest.param({}, id="empty"),
+        pytest.param({"": {}}, id="empty-id"),
+        pytest.param({"a": []}, id="row-not-object"),
+        pytest.param(
+            {"a": {"instance_id": "b", "model_name_or_path": "m", "model_patch": ""}},
+            id="mismatched-instance-id",
+        ),
+        pytest.param(
+            {"a": {"instance_id": "a", "model_patch": ""}},
+            id="missing-model",
+        ),
+        pytest.param(
+            {"a": {"instance_id": "a", "model_name_or_path": "m", "model_patch": 1}},
+            id="invalid-patch",
+        ),
+    ],
+)
+def test_swebench_load_prediction_ids_rejects_malformed_mapping(tmp_path, payload):
+    path = tmp_path / "preds.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="prediction"):
+        load_prediction_ids(path)
+
+
+def test_find_swebench_report_requires_exactly_one_schema_v2_report(tmp_path):
+    report_path = tmp_path / "model.run.json"
+    report_path.write_text(json.dumps(SWEBENCH_REPORT), encoding="utf-8")
+    assert find_swebench_report(tmp_path) == SWEBENCH_REPORT
+
+    second = tmp_path / "other.run.json"
+    second.write_text(json.dumps(SWEBENCH_REPORT), encoding="utf-8")
+    with pytest.raises(ValueError, match="multiple"):
+        find_swebench_report(tmp_path)
+
+
+def test_find_swebench_report_rejects_missing_report(tmp_path):
+    (tmp_path / "unrelated.json").write_text('{"resolved_ids": []}', encoding="utf-8")
+    with pytest.raises(ValueError, match="no SWE-bench schema-v2 report"):
+        find_swebench_report(tmp_path)
 
 
 def test_parse_harbor_results():
@@ -98,7 +279,7 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
             predictions = Path(command[command.index("--predictions_path") + 1])
             assert predictions.is_file()
             (cwd / "kairyu-bench.report.json").write_text(
-                json.dumps(SWEBENCH_REPORT), encoding="utf-8"
+                json.dumps(SWEBENCH_FLOW_REPORT), encoding="utf-8"
             )
 
         class Completed:
