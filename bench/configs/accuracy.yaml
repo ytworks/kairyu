@@ -51,9 +51,9 @@ targets:
 # Recommended mode is request intent, not remote attestation that the endpoint
 # loaded particular defaults. Bind the expected deployment with served_config.
 # Explicit temperature and recommended mode are chat-only. SWE-Bench Pro,
-# Terminal-Bench, and tau-bench-banking fail closed as skipped under either;
-# exclude those rows for this run and run them separately with the default
-# target policy. SWE-Bench Pro additionally requires attempts=1.
+# SWE-bench Verified, Terminal-Bench, and tau-bench-banking fail closed as
+# skipped under either; exclude those rows for this run and run them separately
+# with the default target policy. Both SWE-bench rows require attempts=1.
 
 # LLM judge for free-form grading (HLE, CharXiv) and the tau-bench user
 # simulator. Pointing it at the deployed gateway keeps judging self-hosted;
@@ -68,7 +68,7 @@ judge:
 # smoke: true                # tiny deterministic subset (CI)
 # seed: 0                    # item selection, not the target request seed
 # attempts: 4                # grouped chat sweep; unset target seed gives 0..3
-# exclude: [swe-bench-pro, terminal-bench, tau-bench-banking]  # for chat-only policy
+# exclude: [swe-bench-pro, swe-bench-verified, terminal-bench, tau-bench-banking]  # chat-only
 concurrency: 16
 # results_dir: bench/results/accuracy
 # cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE

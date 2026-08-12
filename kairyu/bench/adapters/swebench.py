@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -245,6 +246,14 @@ def harness_missing() -> str | None:
     return None
 
 
+def unsupported_platform() -> str | None:
+    system = platform.system()
+    machine = platform.machine()
+    if system == "Linux" and machine.lower() in {"x86_64", "amd64"}:
+        return None
+    return f"requires a Linux x86-64 host; detected {system or 'unknown'} {machine or 'unknown'}"
+
+
 @dataclass(frozen=True)
 class SweBenchSpec:
     name: str
@@ -304,6 +313,9 @@ class SweBenchAdapter:
         available, reason = ctx.docker
         if not available:
             return reason
+        platform_reason = unsupported_platform()
+        if platform_reason is not None:
+            return platform_reason
         missing = harness_missing()
         if missing is not None:
             return f"{missing} not installed (pip install 'kairyu[bench-agentic]')"

@@ -15,6 +15,7 @@ from kairyu.bench.adapters.swebench import (
     find_swebench_report,
     load_prediction_ids,
     parse_swebench_report,
+    unsupported_platform,
 )
 from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
 from kairyu.bench.adapters.swebench_verified import SweBenchVerifiedAdapter
@@ -69,6 +70,11 @@ HARBOR_RESULTS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _supported_swebench_platform(monkeypatch):
+    monkeypatch.setattr(swe_mod, "unsupported_platform", lambda: None)
+
+
 def _ctx(tmp_path, docker=(True, "docker available"), **overrides) -> RunContext:
     defaults = dict(
         cache=BenchCache(tmp_path / "cache"),
@@ -77,6 +83,22 @@ def _ctx(tmp_path, docker=(True, "docker available"), **overrides) -> RunContext
     )
     defaults.update(overrides)
     return RunContext(**defaults)
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "expected"),
+    [("Linux", "x86_64", None), ("Darwin", "arm64", "Linux x86-64")],
+)
+def test_swebench_platform_contract(monkeypatch, system, machine, expected):
+    monkeypatch.setattr(swe_mod.platform, "system", lambda: system)
+    monkeypatch.setattr(swe_mod.platform, "machine", lambda: machine)
+
+    reason = unsupported_platform()
+
+    if expected is None:
+        assert reason is None
+    else:
+        assert expected in reason
 
 
 def test_parse_swebench_report_preserves_every_official_outcome():
@@ -261,6 +283,19 @@ async def test_swebench_skips_without_packages(tmp_path, monkeypatch):
     pair = await SweBenchProAdapter().run(make_target(), _ctx(tmp_path))
     assert pair.status == "skipped"
     assert "bench-agentic" in pair.reason
+
+
+async def test_swebench_verified_skips_unsupported_platform(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        swe_mod,
+        "unsupported_platform",
+        lambda: "requires a Linux x86-64 host; detected Darwin arm64",
+    )
+
+    pair = await SweBenchVerifiedAdapter().run(make_target(), _ctx(tmp_path))
+
+    assert pair.status == "skipped"
+    assert "Linux x86-64" in pair.reason
 
 
 async def test_terminal_bench_skips_without_harbor(tmp_path, monkeypatch):
