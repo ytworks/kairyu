@@ -17,7 +17,7 @@ transcription. To refresh, re-read both images and update `RETRIEVED_ON`.
 
 The eight-model comparison in ``FRONTIER_SCORE_RECORDS`` was refreshed from the
 provider pages, model cards, technical report, and third-party leaderboards in
-``REFERENCE_SOURCES`` on **2026-08-11**. Each selected value keeps its source,
+``REFERENCE_SOURCES`` on **2026-08-12**. Each selected value keeps its source,
 source class, condition, and notes; alternate conditions are retained separately.
 
 ## What the published numbers are, and are not
@@ -98,6 +98,26 @@ REFERENCE_SOURCES: dict[str, dict[str, object]] = {
         "publisher": "Anthropic",
         "published_on": "2026-06-09",
         "retrieved_on": "2026-08-11",
+        "tier": "primary",
+    },
+    "anthropic-fable-5-system-card": {
+        "title": "Claude Fable 5 & Claude Mythos 5 System Card",
+        "url": (
+            "https://www-cdn.anthropic.com/"
+            "2f9323abbcc4abe219577539efe19a623c9ca2bd/"
+            "Claude%20Fable%205%20%26%20Claude%20Mythos%205%20System%20Card.pdf"
+        ),
+        "publisher": "Anthropic",
+        "published_on": "2026-06-09",
+        "retrieved_on": "2026-08-12",
+        "tier": "primary",
+    },
+    "openai-swe-bench-verified-retirement": {
+        "title": "Why SWE-bench Verified no longer measures frontier coding capabilities",
+        "url": "https://openai.com/index/why-we-no-longer-evaluate-swe-bench-verified/",
+        "publisher": "OpenAI",
+        "published_on": "2026-02-23",
+        "retrieved_on": "2026-08-12",
         "tier": "primary",
     },
     "openai-gpt-5-6": {
@@ -234,6 +254,7 @@ PUBLISHED_SCORES: dict[str, dict[str, float]] = {
         "GPT 5.5": 58.6,
         "Fable 5": 80.0,
     },
+    "swe-bench-verified": {"Fable 5": 95.0},
     "terminal-bench": {
         "Fugu": 80.2,
         "Fugu Ultra": 82.1,
@@ -359,6 +380,22 @@ _FRONTIER_ROWS: dict[str, tuple[dict[str, object], ...]] = {
             "glm-5-2-card",
             condition="OpenHands; tailored prompt; temperature=1; top_p=1",
             source_class="provider",
+        ),
+    ),
+    "swe-bench-verified": (
+        _record(
+            "Fable 5",
+            95.0,
+            "anthropic-fable-5-system-card",
+            condition=(
+                "SWE-bench Verified; standard configuration; mean of five trials; "
+                "thinking blocks included"
+            ),
+            source_class="provider",
+            notes=(
+                "local kairyu runs use one trial; OpenAI retired this benchmark for "
+                "frontier launch comparisons because of flawed tests and contamination"
+            ),
         ),
     ),
     "terminal-bench": (
@@ -583,26 +620,33 @@ _FRONTIER_ROWS: dict[str, tuple[dict[str, object], ...]] = {
     ),
 }
 
+def _fugu_records(
+    benchmark: str, scores: dict[str, float]
+) -> tuple[dict[str, object], ...]:
+    records = []
+    for model in ("Fugu", "Fugu Ultra"):
+        score = scores.get(model)
+        if score is None:
+            continue
+        records.append(
+            _record(
+                model,
+                score,
+                "fugu-release",
+                condition="Sakana release-table condition; no common provider harness",
+                source_class="provider",
+                notes=(
+                    "mini-swe-agent scaffolding"
+                    if benchmark == "swe-bench-pro"
+                    else None
+                ),
+            )
+        )
+    return tuple(records)
+
+
 FRONTIER_SCORE_RECORDS: dict[str, tuple[dict[str, object], ...]] = {
-    benchmark: (
-        _record(
-            "Fugu",
-            scores["Fugu"],
-            "fugu-release",
-            condition="Sakana release-table condition; no common provider harness",
-            source_class="provider",
-            notes="mini-swe-agent scaffolding" if benchmark == "swe-bench-pro" else None,
-        ),
-        _record(
-            "Fugu Ultra",
-            scores["Fugu Ultra"],
-            "fugu-release",
-            condition="Sakana release-table condition; no common provider harness",
-            source_class="provider",
-            notes="mini-swe-agent scaffolding" if benchmark == "swe-bench-pro" else None,
-        ),
-        *_FRONTIER_ROWS.get(benchmark, ()),
-    )
+    benchmark: (*_fugu_records(benchmark, scores), *_FRONTIER_ROWS.get(benchmark, ()))
     for benchmark, scores in PUBLISHED_SCORES.items()
 }
 
