@@ -18,6 +18,7 @@ workers:
   - name: tier2
     backend: mock
     model: large
+expose_intermediate_outputs: true
 roles:
   - name: planner
     worker: tier2
@@ -47,6 +48,7 @@ roles:
     assert descriptor["target_resolution"]["tier1"]["engine"] == "tier1"
     assert descriptor["roles"][1]["depends_on"] == ["planner"]
     assert descriptor["internal_max_tokens"] == 1024
+    assert descriptor["expose_intermediate_outputs"] is True
     serialized = response.text
     assert "secret.internal" not in serialized
     assert "SECRET_KEY" not in serialized
