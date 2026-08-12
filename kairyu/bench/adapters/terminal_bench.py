@@ -71,11 +71,15 @@ _AGENT_RESPONSE_FORMAT = {
                 "plan": {"type": "string", "maxLength": 512},
                 "commands": {
                     "type": "array",
-                    "maxItems": 3,
+                    "maxItems": 1,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "keystrokes": {"type": "string", "maxLength": 2048},
+                            "keystrokes": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 2048,
+                            },
                             "duration": {"type": "number"},
                         },
                         "required": ["keystrokes", "duration"],
@@ -242,9 +246,9 @@ class TerminalBenchAdapter:
             "the suite-wide 32K ceiling can consume the agent timeout on an "
             "unterminated JSON command batch",
             "terminus-2's required JSON command object is declared as a strict "
-            "OpenAI json_schema with bounded analysis, plan, command count, and "
-            "keystroke lengths so the target closes a complete batch within the "
-            "token cap instead of emitting unparseable trailing output",
+            "OpenAI json_schema with bounded analysis, plan, and one atomic "
+            "non-empty command per turn so the target closes a complete batch "
+            "without concatenating commands or emitting trailing output",
             "target reasoning_effort, top_p, seed, and vendor extra_body are NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
             "does not expose those fields as portable harness controls; explicit "

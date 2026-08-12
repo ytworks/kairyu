@@ -152,13 +152,12 @@ def test_terminal_bench_caps_output_limit_via_terminus_llm_kwargs(tmp_path):
     assert response_format["type"] == "json_schema"
     schema = response_format["json_schema"]["schema"]
     assert schema["additionalProperties"] is False
-    assert schema["properties"]["commands"]["maxItems"] == 3
-    assert (
-        schema["properties"]["commands"]["items"]["properties"]["keystrokes"][
-            "maxLength"
-        ]
-        == 2048
-    )
+    assert schema["properties"]["commands"]["maxItems"] == 1
+    keystrokes = schema["properties"]["commands"]["items"]["properties"][
+        "keystrokes"
+    ]
+    assert keystrokes["minLength"] == 1
+    assert keystrokes["maxLength"] == 2048
 
 
 def test_terminal_bench_preserves_smaller_output_limit(tmp_path):
