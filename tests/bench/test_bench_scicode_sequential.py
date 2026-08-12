@@ -65,10 +65,16 @@ def test_group_by_problem_orders_steps():
 
 
 def test_select_problem_groups_keeps_whole_problems():
-    groups = [[_item("a", i) for i in range(3)], [_item("b", i) for i in range(3)]]
-    picked = select_problem_groups(groups, limit=4, seed=0)
-    # 3 fits, 6 does not: one whole problem, never a truncated chain
-    assert [len(group) for group in picked] == [3]
+    groups = [
+        [_item("a", i) for i in range(5)],
+        [_item("b", i) for i in range(3)],
+        [_item("c", i) for i in range(2)],
+        [_item("d", i) for i in range(4)],
+    ]
+    picked = select_problem_groups(groups, limit=3, seed=0)
+    assert len(picked) == 3
+    assert all(group in groups for group in picked)
+    assert all(len(group) == len(groups[groups.index(group)]) for group in picked)
     assert select_problem_groups(groups, limit=None, seed=0) == groups
     assert select_problem_groups(groups, limit=99, seed=0) == groups
 
@@ -170,7 +176,9 @@ async def test_later_steps_see_earlier_generated_code(tmp_path):
     assert pair.score == 1.0, [item.error for item in pair.items]
     # the second prompt carried the first step's generated implementation
     assert "def vector_norm(v):" in prompts[1]
-    assert pair.methodology["limit_granularity"] == "whole problems"
+    assert pair.methodology["limit_granularity"] == (
+        "problem chains (all scoreable sub-steps)"
+    )
     assert "sequential per problem" in pair.methodology["evaluation"]
 
 

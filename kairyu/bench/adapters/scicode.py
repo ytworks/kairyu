@@ -226,27 +226,18 @@ def group_by_problem(items: list[BenchItem]) -> list[list[BenchItem]]:
 def select_problem_groups(
     groups: list[list[BenchItem]], limit: int | None, seed: int
 ) -> list[list[BenchItem]]:
-    """Deterministic subset that keeps WHOLE problems.
+    """Select at most ``limit`` deterministic WHOLE problem chains.
 
-    A sub-step limit that cut a problem in half would evaluate steps whose
-    dependencies were never generated, so the limit is applied at problem
-    granularity (at least one problem always survives).
+    Treating ``limit`` as a sub-step budget can turn ``--limit 3`` into one
+    five-step problem.  SciCode's independent source items are problem chains,
+    so the adapter applies the limit to groups and evaluates every scoreable
+    sub-step in each selected group.
     """
-    total = sum(len(group) for group in groups)
-    if limit is None or total <= limit:
+    if limit is None or len(groups) <= limit:
         return groups
     order = list(range(len(groups)))
     random.Random(seed).shuffle(order)
-    picked: list[int] = []
-    used = 0
-    for index in order:
-        size = len(groups[index])
-        if picked and used + size > limit:
-            continue
-        picked.append(index)
-        used += size
-        if used >= limit:
-            break
+    picked = order[:limit]
     return [groups[index] for index in sorted(picked)]
 
 
@@ -647,7 +638,7 @@ class SciCodeAdapter(GenerativeAdapter):
             "problem (the dataset ships no reference code)"
         )
         base["background"] = "problem-level and step-level background included"
-        base["limit_granularity"] = "whole problems"
+        base["limit_granularity"] = "problem chains (all scoreable sub-steps)"
         base["golden_data_sources"] = [
             f"{repo}@{revision or 'main'}" for repo, revision in _H5_SOURCES
         ]
