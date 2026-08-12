@@ -59,6 +59,7 @@ async def test_run_one_reads_usage_chunk_for_token_tpot():
             seed=7,
             min_tokens=6,
             ignore_eos=True,
+            capture_response=True,
         )
     assert calls[0]["stream_options"] == {"include_usage": True}
     assert trace_headers == [None]
@@ -67,6 +68,7 @@ async def test_run_one_reads_usage_chunk_for_token_tpot():
     assert calls[0]["min_tokens"] == 6
     assert calls[0]["ignore_eos"] is True
     assert metrics.completion_tokens == 6  # from the include_usage final chunk
+    assert metrics.response_text == "4"
     assert metrics.token_granular is True
     assert metrics.trace_status == "not_requested"
     assert metrics.tpot_s >= 0.0
@@ -123,6 +125,31 @@ async def test_run_one_falls_back_when_target_rejects_stream_options():
         "ignore_eos": True,
     }.items():
         assert calls[1][field] == value
+
+
+async def test_run_one_rejects_sanitized_sse_error_instead_of_counting_success():
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/chat/completions")
+    async def chat(_request: dict):
+        async def events():
+            yield (
+                'data: {"error":{"message":"upstream backend error",'
+                '"type":"upstream_error","code":"backend_error"}}\n\n'
+            )
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream")
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://t/v1",
+    ) as client:
+        with pytest.raises(RuntimeError, match=r"target stream failed \(backend_error\)"):
+            await serving_bench.run_one(client, "m", "fail", max_tokens=4)
 
 
 def test_summary_retains_raw_request_timings_and_token_throughput():
@@ -189,6 +216,45 @@ def test_summary_retains_raw_request_timings_and_token_throughput():
     ]
 
 
+def test_summary_separates_public_tokens_from_orchestration_usage():
+    results = [
+        serving_bench.RequestMetrics(
+            ttft_s=0.1,
+            total_s=0.5,
+            output_chunks=3,
+            completion_tokens=40,
+            public_completion_tokens=5,
+        ),
+        serving_bench.RequestMetrics(
+            ttft_s=0.2,
+            total_s=0.6,
+            output_chunks=3,
+            completion_tokens=60,
+            public_completion_tokens=7,
+        ),
+    ]
+
+    summary, samples = serving_bench.summarize_results(
+        results,
+        wall_ns=1_000_000_000,
+        dataset_label="orchestration",
+        ttft_slo_s=1.0,
+    )
+
+    assert summary["completion_tokens_total"] == 100
+    assert summary["output_tokens_per_s"] == 100.0
+    assert summary["public_completion_tokens_total"] == 12
+    assert summary["public_output_tokens_per_s"] == 12.0
+    assert summary["tpot_method"] == "public-token"
+    assert summary["generation_tokens_per_s_p50"] == 12.5
+    assert summary["public_generation_tokens_per_s_mean"] == 12.5
+    assert summary["reported_output_tokens_per_e2e_s_mean"] == 90.0
+    assert summary["e2e_p50_ms"] == 500.0
+    assert summary["e2e_p99_ms"] == 600.0
+    assert [sample["public_completion_tokens"] for sample in samples] == [5, 7]
+    assert "response_text" not in str(samples)
+
+
 def test_shared_target_form_normalizes_url_and_uses_env_secret(monkeypatch):
     monkeypatch.setenv("SERVING_API_KEY", "private-value")
     args = serving_bench.build_parser().parse_args(
@@ -216,6 +282,29 @@ def test_stage_trace_is_an_explicit_recorded_opt_in():
 
     assert args.stage_trace is True
     assert serving_bench.build_run_config(args)["stage_trace"] is True
+
+
+def test_public_tokenizer_requires_a_pinned_model_and_records_both():
+    parser = serving_bench.build_parser()
+    incomplete = parser.parse_args(
+        ["--public-tokenizer-url", "http://tokenizer.test/tokenize"]
+    )
+    with pytest.raises(ValueError, match="provided together"):
+        serving_bench.serving_artifact_paths(incomplete)
+
+    args = parser.parse_args(
+        [
+            "--public-tokenizer-url",
+            "http://tokenizer.test/tokenize",
+            "--public-tokenizer-model",
+            "pinned-model",
+            "--results-dir",
+            "",
+        ]
+    )
+    config = serving_bench.build_run_config(args)
+    assert config["public_tokenizer_url"] == "http://tokenizer.test/tokenize"
+    assert config["public_tokenizer_model"] == "pinned-model"
 
 
 def test_client_profile_is_an_independent_recorded_opt_in():
@@ -369,6 +458,69 @@ def _trace(*, request_id="chatcmpl-traced"):
             },
         ],
     }
+
+
+def test_trace_retains_only_bounded_moa_count_and_usage_scalars():
+    trace = _trace()
+    trace["events"][1].update(
+        {
+            "node": "moa",
+            "role": "moa",
+            "kind": "synthesis",
+            "attempt": 0,
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 45,
+                "cached_tokens": 20,
+            },
+            "detail": {"proposals": 3, "secret": "must-not-be-retained"},
+        }
+    )
+
+    _, stages = serving_bench._parse_trace(trace, response_id="chatcmpl-traced")
+    moa = stages[1]
+    assert moa.proposals == 3
+    assert (moa.input_tokens, moa.output_tokens, moa.cached_tokens) == (120, 45, 20)
+    assert "secret" not in str(moa.as_dict())
+
+    metric = serving_bench.RequestMetrics(
+        ttft_s=0.1,
+        total_s=0.2,
+        output_chunks=2,
+        completion_tokens=3,
+        trace_status="valid",
+        trace_version="2.0",
+        trace_stages=stages,
+    )
+    summary, _ = serving_bench.summarize_results(
+        [metric],
+        wall_ns=1_000_000_000,
+        dataset_label="moa-trace",
+        ttft_slo_s=1.0,
+    )
+    moa_summary = summary["stage_latency_ms"]["moa/moa/synthesis"]
+    assert moa_summary["proposal_counts"] == [3]
+    assert moa_summary["usage_totals"] == {
+        "input_tokens": 120,
+        "output_tokens": 45,
+        "cached_tokens": 20,
+    }
+
+
+@pytest.mark.parametrize("proposals", [None, 0, 17, "3"])
+def test_successful_moa_trace_rejects_missing_or_unsafe_proposal_count(proposals):
+    trace = _trace()
+    trace["events"][1].update(
+        {
+            "node": "moa",
+            "role": "moa",
+            "kind": "synthesis",
+            "detail": {"proposals": proposals},
+        }
+    )
+
+    with pytest.raises(ValueError, match="1..16 proposals"):
+        serving_bench._parse_trace(trace, response_id="chatcmpl-traced")
 
 
 async def test_run_one_extracts_only_sanitized_terminal_trace_and_not_as_output():
@@ -705,6 +857,10 @@ def test_direct_stage_trace_uses_scalar_duration_and_discards_raw_detail():
         "first_token_ms",
         "post_first_ms",
         "total_ms",
+        "input_tokens",
+        "output_tokens",
+        "cached_tokens",
+        "proposals",
     }
     assert "aggregation" not in stage.as_dict()
     assert "scope" not in stage.as_dict()

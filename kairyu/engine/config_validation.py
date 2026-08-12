@@ -39,6 +39,7 @@ _OPENAI_OPTIONS = frozenset(
         "capabilities",
         "image_input_policy",
         "allow_templated_chat_passthrough",
+        "completion_reasoning_end_tag",
         "chat_tokenizer",
         "model_revision",
         "max_model_len",
@@ -249,6 +250,23 @@ def _validate_openai(options: Mapping[str, object]) -> None:
     if type(allow_passthrough) is not bool:
         raise ValueError(
             "openai backend allow_templated_chat_passthrough must be a boolean"
+        )
+    reasoning_end_tag = options.get("completion_reasoning_end_tag")
+    if reasoning_end_tag is not None and (
+        not isinstance(reasoning_end_tag, str)
+        or not reasoning_end_tag
+        or len(reasoning_end_tag) > 128
+    ):
+        raise ValueError(
+            "openai backend completion_reasoning_end_tag must be a non-empty "
+            "string of at most 128 characters or null"
+        )
+    if reasoning_end_tag is not None and (
+        capabilities.upstream != "vllm" or allow_passthrough is not True
+    ):
+        raise ValueError(
+            "openai backend completion_reasoning_end_tag requires upstream='vllm' "
+            "and allow_templated_chat_passthrough=true"
         )
     for field in (
         "chat_tokenizer",

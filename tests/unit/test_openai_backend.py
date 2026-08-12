@@ -734,6 +734,122 @@ async def test_vllm_templated_prompt_uses_completions_without_second_chat_templa
     await backend.shutdown()
 
 
+async def test_vllm_templated_completion_separates_configured_private_reasoning():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "private chain</think>public answer",
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+        completion_reasoning_end_tag="</think>",
+    )
+
+    output = (
+        await backend.generate(_request(TemplatedPrompt("<Assistant><think>")))
+    ).completions[0]
+
+    assert output.text == "public answer"
+    assert output.reasoning_content == "private chain"
+    await backend.shutdown()
+
+
+async def test_vllm_private_completion_reasoning_rejects_logprobs_before_dispatch():
+    transport_calls: list[httpx.Request] = []
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda request: (
+                transport_calls.append(request)
+                or httpx.Response(200, json={"choices": []})
+            )
+        ),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+        completion_reasoning_end_tag="</think>",
+    )
+
+    with pytest.raises(
+        UpstreamClientError,
+        match="logprobs after filtering private completion reasoning",
+    ) as exc_info:
+        await backend.generate(
+            _request(
+                TemplatedPrompt("<Assistant><think>"),
+                SamplingParams(max_tokens=64, logprobs=1),
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert transport_calls == []
+    assert backend._client is None
+
+
+async def test_vllm_templated_completion_missing_reasoning_terminator_fails_closed():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"index": 0, "text": "private chain"}]},
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+        completion_reasoning_end_tag="</think>",
+    )
+
+    with pytest.raises(RuntimeError, match="private-reasoning terminator"):
+        await backend.generate(_request(TemplatedPrompt("<Assistant><think>")))
+
+    await backend.shutdown()
+
+
+async def test_vllm_templated_completion_without_public_answer_fails_closed():
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"index": 0, "text": "private chain</think>\n"}
+                    ]
+                },
+            )
+        ),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+        completion_reasoning_end_tag="</think>",
+    )
+
+    with pytest.raises(RuntimeError, match="without public content"):
+        await backend.generate(_request(TemplatedPrompt("<Assistant><think>")))
+
+    await backend.shutdown()
+
+
 async def test_generate_forwards_representable_sampling_payload():
     captured: dict = {}
     backend = OpenAICompatBackend(
@@ -2060,6 +2176,61 @@ async def test_vllm_templated_prompt_streams_completion_text():
 
     assert results[-1].text == "direct answer"
     assert results[-1].completions[0].reasoning_content is None
+    await backend.shutdown()
+
+
+async def test_vllm_templated_completion_stream_hides_split_reasoning_marker():
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=_sse_chunks_transport(
+            {"choices": [{"index": 0, "text": "hidden</thi"}]},
+            {"choices": [{"index": 0, "text": "nk>pub"}]},
+            {"choices": [{"index": 0, "text": "lic"}]},
+            {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]},
+        ),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+        completion_reasoning_end_tag="</think>",
+    )
+
+    results = [
+        result
+        async for result in backend.stream(
+            _request(TemplatedPrompt("<Assistant><think>"))
+        )
+    ]
+
+    assert results[-1].text == "public"
+    assert results[-1].completions[0].reasoning_content == "hidden"
+    assert "".join(result.text_delta or "" for result in results) == "public"
+    assert all("</think>" not in result.text for result in results)
+    await backend.shutdown()
+
+
+async def test_vllm_templated_completion_stream_without_public_answer_fails_closed():
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="m",
+        api_key_env=None,
+        transport=_sse_chunks_transport(
+            {"choices": [{"index": 0, "text": "hidden</think>"}]},
+            {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]},
+        ),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+        completion_reasoning_end_tag="</think>",
+    )
+
+    with pytest.raises(RuntimeError, match="without public content"):
+        _ = [
+            result
+            async for result in backend.stream(
+                _request(TemplatedPrompt("<Assistant><think>"))
+            )
+        ]
+
     await backend.shutdown()
 
 

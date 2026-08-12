@@ -53,6 +53,22 @@ from kairyu.sampling_params import SamplingParams
 _KEEPALIVE_INTERVAL_S = 15.0  # SSE keep-alive cadence for long multi-stage runs (M8)
 
 
+def _public_multistage_completions(
+    completions: tuple[CompletionOutput, ...],
+) -> tuple[CompletionOutput, ...]:
+    """Keep final text/tool metadata while withholding private stage reasoning."""
+
+    return tuple(
+        replace(
+            completion,
+            reasoning_content=None,
+            reasoning_delta=None,
+            reasoning_offset=None,
+        )
+        for completion in completions
+    )
+
+
 _DEFAULT_ROLES = (
     RoleSpec(
         name="planner",
@@ -1404,14 +1420,16 @@ class Orchestrator:
                 )
                 return result_with_trace(
                     text=moa.final_text,
-                    completions=moa.completions
-                    or (
-                        CompletionOutput(
-                            index=0,
-                            text=moa.final_text,
-                            token_ids=(),
-                            finish_reason="stop",
-                        ),
+                    completions=_public_multistage_completions(
+                        moa.completions
+                        or (
+                            CompletionOutput(
+                                index=0,
+                                text=moa.final_text,
+                                token_ids=(),
+                                finish_reason="stop",
+                            ),
+                        )
                     ),
                     prompt_tokens=moa.usage[0],
                     completion_tokens=moa.usage[1],
@@ -1431,7 +1449,7 @@ class Orchestrator:
             trace_events.extend(result.trace)
             return result_with_trace(
                 text=result.final_text,
-                completions=result.completions,
+                completions=_public_multistage_completions(result.completions),
                 prompt_tokens=result.usage[0],
                 completion_tokens=result.usage[1],
                 cached_tokens=result.cached_tokens,
@@ -1953,12 +1971,16 @@ class Orchestrator:
                     if event is None:
                         yield OrchestratorEvent(kind="status", text="working")
                     elif event.kind == "delta":
+                        if not event.text:
+                            continue
                         if first_token_at is None:
                             first_token_at = utc_now_iso()
                         yield OrchestratorEvent(
                             kind="delta",
                             text=event.text,
-                            completions=event.completions,
+                            completions=_public_multistage_completions(
+                                event.completions
+                            ),
                         )
                     else:
                         moa_result = event.result
@@ -2147,14 +2169,16 @@ class Orchestrator:
                 kind="result",
                 result=result_with_trace(
                     text=moa_result.final_text,
-                    completions=moa_result.completions
-                    or (
-                        CompletionOutput(
-                            index=0,
-                            text=moa_result.final_text,
-                            token_ids=(),
-                            finish_reason="stop",
-                        ),
+                    completions=_public_multistage_completions(
+                        moa_result.completions
+                        or (
+                            CompletionOutput(
+                                index=0,
+                                text=moa_result.final_text,
+                                token_ids=(),
+                                finish_reason="stop",
+                            ),
+                        )
                     ),
                     prompt_tokens=moa_result.usage[0],
                     completion_tokens=moa_result.usage[1],
@@ -2186,10 +2210,14 @@ class Orchestrator:
                 if event is None:
                     yield OrchestratorEvent(kind="status", text="working")
                 elif event.kind == "delta":
+                    if not event.text:
+                        continue
                     yield OrchestratorEvent(
                         kind="delta",
                         text=event.text,
-                        completions=event.completions,
+                        completions=_public_multistage_completions(
+                            event.completions
+                        ),
                     )
                 else:
                     conductor_result = event.result
@@ -2203,7 +2231,9 @@ class Orchestrator:
                 kind="error",
                 result=result_with_trace(
                     text=conductor_result.final_text,
-                    completions=conductor_result.completions,
+                    completions=_public_multistage_completions(
+                        conductor_result.completions
+                    ),
                     prompt_tokens=conductor_result.usage[0],
                     completion_tokens=conductor_result.usage[1],
                     cached_tokens=conductor_result.cached_tokens,
@@ -2221,7 +2251,9 @@ class Orchestrator:
             kind="result",
             result=result_with_trace(
                 text=conductor_result.final_text,
-                completions=conductor_result.completions,
+                completions=_public_multistage_completions(
+                    conductor_result.completions
+                ),
                 prompt_tokens=conductor_result.usage[0],
                 completion_tokens=conductor_result.usage[1],
                 cached_tokens=conductor_result.cached_tokens,

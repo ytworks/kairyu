@@ -1,0 +1,32 @@
+# L2 quality-candidate tier: force 4 parallel Qwen proposals followed by
+# one DeepSeek synthesis. Candidate specs differ only in proposal count and the
+# minimum step budget required to admit the complete MoA operation.
+workers:
+  - name: tier1
+    backend: openai
+    model: qwen3.6-27b
+    base_url: http://kairyu:8000/v1
+    api_key_env: null
+    options:
+      upstream: kairyu
+      timeout_s: 86400
+  - name: tier2
+    backend: openai
+    model: deepseek-v4-flash-0731-thinking
+    base_url: http://kairyu:8000/v1
+    api_key_env: null
+    options:
+      upstream: kairyu
+      timeout_s: 86400
+
+router:
+  kind: calibrated
+  artifact: /etc/kairyu/router.json
+  sha256: 9b3cc02780fd5a1cdf1073557b66900e14dd59b6dd655b961f6f85bc3cb51ca5
+  target_mode: auto-max
+
+moa_samples: 4
+
+budget:
+  max_steps: 5
+  max_refine_depth: 0

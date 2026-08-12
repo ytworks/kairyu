@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-11. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-12. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -74,10 +74,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Incremental architecture-state paths for Qwen3.6 and DeepSeek V4 plus an explicit recompute diagnostic mode; DeepSeek EP2/4/8 Attention-DP and direct packed-FP4 execution are implemented, with SM120 single-kernel and two-rank NCCL smokes green
 - Device-side sampling, penalties, spec verification, page-table caching; TP step headers sleep on Gloo while fixed-layout delta payloads use the bounded NCCL model group and rare controls remain Gloo objects; structured masks stay on CUDA with only selected IDs returned to the host matcher; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
-- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; Codex CLI and IDE tool-calling work end-to-end
+- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics
-- The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8; both route Open WebUI through Kairyu L3 to pinned vLLM L1. Qwen's no-MTP/16K-batch configuration completed its final serving and LiveCodeBench-20 gates after MTP and 32K-batch candidates failed performance or stability checks, with all persistent data and compilation caches on NVMe
+- Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics; Terminal-Bench keeps resumable raw Harbor jobs and bounds every agent phase to two effective hours
+- The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8, plus a measured tiered Qwen TP1x4 + DeepSeek TP4/EP4 stack; its no-auth external Open WebUI defaults to quality-first MoA-3 `kairyu-auto-max` and calls only loopback Kairyu L3. The selected policy cleared direct DeepSeek 3/4 vs 2/4 on the fixed pilot and its all-89 single-attempt Terminal-Bench run scored 60/89 with Harbor's zero-inclusive Mean; all persistent data and compilation caches are on NVMe
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -98,31 +98,44 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
-### 2026-08-11 — [progress] One-GPU Qwen3.6 example completes measured gate
-- What: The one-command Qwen3.6-27B FP8 stack on one RTX PRO 6000 completed its final unique-prefix 8K/256 matrix (41.43 output tok/s with 190.82 ms median TTFT at c1; 842.35 output tok/s with 1.247 s median TTFT at c32) and deterministic LiveCodeBench subset (11/20, 55.0%, 20/20 scored, zero request errors/retries/unmeasured rows). No-MTP won TTFT at every tested concurrency and aggregate throughput at c16/c32; MTP-5 crashed at c16 and the 32K prefill budget exhausted VRAM at c32.
-- Refs: PR #469; `examples/qwen3.6-27b-1gpu/MEASUREMENTS.md`; run IDs `final-no-mtp-20260811` and `qwen36-fp8-no-mtp-lcb20-20260811`
+### 2026-08-12 — [progress] Tiered PR CI regressions reproduced and closed
+- What: The Open WebUI initial/outage/recovery browser phases pass after keeping the deterministic AUTO SSE marker inside the mock's prompt-boundary echo window; the tiered control test now stubs storage path preparation instead of attempting `/mnt/nvme` writes on hosted runners. Production NVMe enforcement and L2/L3 behavior are unchanged.
+- Refs: `scripts/webui_browser_smoke.mjs`; `tests/unit/test_tiered_frontier_examplectl.py`; PR #471
 
-### 2026-08-11 — [progress] One-GPU Qwen3.6 vLLM example enters runtime validation
-- What: A second example adds one-command Open WebUI -> Kairyu L3 -> pinned vLLM L1 serving for the official Qwen3.6-27B FP8 checkpoint on one selected RTX PRO 6000; model/UI persistence is fail-closed below `/mnt/nvme`, and independent/all serving plus deterministic 20-row LiveCodeBench runners are contract-tested. Runtime tuning and measured evidence remain in progress.
-- Refs: `examples/qwen3.6-27b-1gpu/`; `tests/unit/test_frontier_examplectl.py`
+### 2026-08-12 — [progress] Tiered RTX PRO example closes full task-set scoring
+- What: The selected private-thinking MoA-3 policy launched all 89 Terminal-Bench 2.1 tasks and closed at 60/89 (67.42%) under official task verifiers and Harbor's zero-inclusive Mean: 86 verifier rewards (60 one, 26 zero), two rewardless infrastructure errors, and one rewardless operator-terminated CPU outlier. The score does not substitute diagnostic retries.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,terminalbench-result.json}`; run ID `terminalbench-2.1-auto-max-thinking2048-full-v1-20260812`; PR #471
 
-### 2026-08-11 — [progress] Accuracy comparisons cite every reference score
-- What: Accuracy reports now compare local runs with the final eight-model benchmark matrix, preserve missing values, and attach source markers, dates, source class, conditions, and notes to selected and alternate scores in Markdown and JSON.
-- Refs: `kairyu/bench/{reference.py,compare.py}`; `tests/bench/test_bench_compare.py`; `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`
+### 2026-08-12 — [amendment] Agentic evidence survives interruption with bounded outliers
+- What: Terminal-Bench now retains its raw Harbor job directory for authoritative per-task evidence/resume, and sets agent `max_timeout_sec=900` before the existing 8x multiplier so every task has a 7200-second effective agent cap. Official Harbor reward/Mean semantics remain unchanged.
+- Why: A 3600-second task declaration previously expanded to eight hours and interrupt cleanup deleted the partial raw job, making one pathological task both operationally unbounded and non-resumable.
+- Refs: `kairyu/bench/adapters/terminal_bench.py`; `tests/bench/test_bench_agentic*.py`; PR #471
 
-### 2026-08-11 — [design] Accuracy reports bind reference scores to sources
-- What: The Accuracy comparison will use the supplied eight-model matrix and render a source marker, linked source metadata, measurement condition, and notes for every selected or alternate published score; missing values remain missing and old DeepSeek snapshots do not fill the 0731 column.
-- Why: A numeric comparison without cell-level provenance obscures provider, third-party, harness, and version differences and cannot be audited from the generated report.
-- Refs: `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`; `kairyu/bench/{reference.py,compare.py}`
+### 2026-08-12 — [progress] Thinking MoA-3 clears the quality floor
+- What: On the same fixed four Terminal-Bench 2.1 tasks, the 2048-token private-thinking MoA-3 policy scored 3/4 versus direct DeepSeek's 2/4. Both completed 4/4 items with zero failed/unjudged/skipped trials and null item errors on a clean source tree; `kairyu-auto-max` is selected for the full 89-task run.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/MEASUREMENTS.md`; run ID `terminalbench-selection-thinking2048-vs-deepseek-20260812`; PR #471
 
-### 2026-08-11 — [progress] Full DeepSeek-V4 LiveCodeBench evidence completes
-- What: The clean-cache TP8+EP8 DSpark-5 example completed and scored all 1,055 LiveCodeBench release_v6 problems: 759 passed (71.9431%), all target timings measured, and zero request errors, retries, or unmeasured rows. The warm serving matrix reached 168.01 output tok/s at c1 with 220.10 ms median TTFT and 972.93 output tok/s at c32.
-- Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/MEASUREMENTS.md`; run IDs `livecodebench-full-tp8-ep8-dspark5-clean-sse16m-20260811` and `tp8-ep8-dspark5-warm-20260811`
+### 2026-08-12 — [progress] Thinking MoA-3 restores L3 reliability within its performance envelope
+- What: The generic 2048-token internal allowance completed the quality-first MoA-3 c1/c8/c16/c32 matrix with 128/128 non-empty public answers, valid traces, exact fan-out, and zero errors. Versus the failed 1024 run it preserves c1 TTFT/E2E within 1.2%/0.8%; versus ordinary MoA-3 at c8 it costs 18.8% TTFT but only 5.0% E2E while increasing public TPS 8.0%. It advances to the fixed quality pilot.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/MEASUREMENTS.md`; run ID `l3-auto-max-thinking2048-public-v1-20260812`; PR #471
 
-### 2026-08-11 — [progress] Frontier benchmark streams support 32K-token evidence
-- What: The strict benchmark SSE reader retains its fail-closed bound but raises it from 1 MiB to 16 MiB so 32K-token DeepSeek streams are not rejected solely by per-token JSON framing. The example runner now also rejects a nominally successful CLI run unless all 1,055 LiveCodeBench rows have measured, error-free evidence.
-- Refs: PR #468; `kairyu/bench/streaming.py`; `examples/deepseek-v4-flash-0731-8gpu/benchmark.py`; full-run diagnosis on 2026-08-11
+### 2026-08-12 — [progress] Ordinary synthesis fails to preserve the quality floor
+- What: Ordinary-DeepSeek MoA-3 scored 0/3 completed pilot tasks, making the fourth task irrelevant to its maximum possible 1/4 score versus direct DeepSeek's clean 2/4. The quality candidate returns to private-thinking MoA-3 with a generic 2048-token internal allowance to eliminate the previously measured 1024-token boundary-exhaustion tail before re-running L3 performance and quality gates.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,auto-max.yaml}`; run ID `terminalbench-selection-moa3-vs-deepseek-20260812`; PR #471
 
-### 2026-08-11 — [progress] Kairyu-owned vLLM prompts bypass a second chat template
-- What: Pre-rendered `TemplatedPrompt` requests sent to a vLLM-compatible backend now use `/completions` for both buffered and streaming generation. This preserves the checkpoint's single prompt boundary, prevents DeepSeek chat mode from being wrapped into thinking mode again, and returns final answer text to Open WebUI.
-- Refs: PR #468; `kairyu/engine/openai_backend.py`; `tests/unit/test_openai_backend.py`; real DeepSeek-V4 direct and streaming probes on 2026-08-11
+### 2026-08-12 — [progress] MoA-2 fails the quality-selection gate
+- What: The performance-winning ordinary-chat MoA-2 candidate scored 1/3 completed Terminal-Bench 2.1 pilot tasks and failed the fourth request with `BadGatewayError`, below direct DeepSeek's clean 2/4 baseline. MoA-2 is rejected; the already performance-qualified MoA-3 ordinary-chat candidate advances to the same fixed four-task gate.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,auto-max-chat.yaml}`; run ID `terminalbench-selection-moa2-vs-deepseek-20260812`; PR #471
+
+### 2026-08-12 — [progress] MoA-2 chat synthesis wins the L3 performance gate
+- What: The ordinary-DeepSeek MoA-2 candidate completed c1/c8/c16/c32 with 32/32 non-empty answers and valid traces at every row; versus MoA-3 it preserves c1 and cuts median TTFT by 17.1%/21.0%/20.7% at c8/c16/c32. The quality pilot now compares only this winner with direct DeepSeek, and validates raw zero-failed/unjudged/skipped/error evidence on a clean source tree.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,benchmark.py}`; run ID `l3-auto-max-chat-moa2-public-v1-20260812`; PR #471
+
+### 2026-08-12 — [progress] Tiered quality candidate reduces fan-out, not proposal depth
+- What: The 512-token private-cap A/B retained 32/32 valid L3 responses but did not improve c1/c8 median TTFT beyond run noise, so the quality candidate restores the 1024-token allowance and changes ordinary-chat synthesis from MoA-3 to MoA-2 for the next performance/quality gate.
+- Refs: run IDs `l3-auto-max-chat-moa3-public-v1-20260812`, `l3-auto-max-chat-moa3-private512-public-v1-20260812`; `examples/qwen3.6-deepseek-v4-8gpu/`; PR #471
+
+### 2026-08-12 — [amendment] L2 bounds private work independently of public output
+- What: Orchestrator YAML and decorator specs now expose a validated, backend-neutral `internal_max_tokens` policy that caps private planning/proposal/verification generations without reducing the caller's final-answer budget. The tiered MoA-3 chat-synthesis candidate pins 512 after its reliable but 1024-token L3 matrix showed excessive c16/c32 latency.
+- Why: Private proposal length is an operator latency/quality tradeoff and must remain portable policy rather than a model- or example-specific core-code branch.
+- Refs: M11 D2; `kairyu/dsl/`; `examples/qwen3.6-deepseek-v4-8gpu/auto-max-chat.yaml`; run ID `l3-auto-max-chat-moa3-public-v1-20260812`; PR #471

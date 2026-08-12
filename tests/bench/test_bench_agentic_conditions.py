@@ -44,6 +44,11 @@ def _flag_value(command: list[str], flag: str) -> str:
     return command[command.index(flag) + 1]
 
 
+def _harbor_agent(command: list[str]) -> dict:
+    config = json.loads(Path(_flag_value(command, "--config")).read_text())
+    return config["agents"][0]
+
+
 # -- SWE-Bench Pro -------------------------------------------------------------
 
 
@@ -86,12 +91,24 @@ def test_terminal_bench_uses_harbor_flags_that_exist(tmp_path):
     # Terminal-Bench 2.1 is a Harbor Hub organization/package, not the legacy
     # registry's `name@version` entry.
     assert _flag_value(command, "-d") == "terminal-bench/terminal-bench-2-1"
-    assert _flag_value(command, "-a") == "terminus-2"
+    agent = _harbor_agent(command)
+    assert agent["name"] == "terminus-2"
+    assert agent["model_name"] == "openai/m"
 
 
 def test_terminal_bench_sets_fugu_turn_budget(tmp_path):
     command = TerminalBenchAdapter()._command(_target(), _ctx(tmp_path), tmp_path)
-    assert _flag_value(command, "--ak") == "max_turns=500"
+    assert _harbor_agent(command)["kwargs"]["max_turns"] == 500
+
+
+def test_terminal_bench_forwards_output_limit_via_terminus_llm_kwargs(tmp_path):
+    command = TerminalBenchAdapter()._command(
+        _target(max_output_tokens=32768), _ctx(tmp_path), tmp_path
+    )
+    assert _harbor_agent(command)["kwargs"] == {
+        "max_turns": 500,
+        "llm_call_kwargs": {"max_tokens": 32768},
+    }
 
 
 @pytest.mark.parametrize("attempts", [1, 5])
@@ -102,9 +119,58 @@ def test_terminal_bench_passes_attempts(tmp_path, attempts):
     assert _flag_value(command, "-k") == str(attempts)
 
 
+def test_terminal_bench_passes_concurrency(tmp_path):
+    command = TerminalBenchAdapter()._command(
+        _target(), _ctx(tmp_path, concurrency=4), tmp_path
+    )
+    assert _flag_value(command, "--n-concurrent") == "4"
+
+
+def test_terminal_bench_expands_only_the_agent_execution_timeout(tmp_path):
+    command = TerminalBenchAdapter()._command(_target(), _ctx(tmp_path), tmp_path)
+    assert _flag_value(command, "--agent-timeout-multiplier") == "8.0"
+    assert _harbor_agent(command)["max_timeout_sec"] == 900.0
+    assert "--timeout-multiplier" not in command
+    assert "--verifier-timeout-multiplier" not in command
+
+
 def test_terminal_bench_limit_is_a_task_cap(tmp_path):
     command = TerminalBenchAdapter()._command(_target(), _ctx(tmp_path, limit=3), tmp_path)
     assert _flag_value(command, "--n-tasks") == "3"
+
+
+def test_terminal_bench_can_use_pinned_local_dataset_and_task_filter(
+    tmp_path, monkeypatch
+):
+    dataset = tmp_path / "terminal-bench-2-1"
+    dataset.mkdir()
+    monkeypatch.setenv("KAIRYU_TERMINAL_BENCH_PATH", str(dataset))
+    monkeypatch.setenv("KAIRYU_TERMINAL_BENCH_TASKS", "write-compressor, fix-git")
+    monkeypatch.setattr("kairyu.bench.adapters.terminal_bench.shutil.which", lambda _: "harbor")
+
+    adapter = TerminalBenchAdapter()
+    command = adapter._command(_target(), _ctx(tmp_path), tmp_path / "jobs")
+
+    assert "-d" not in command
+    assert _flag_value(command, "--path") == str(dataset)
+    assert [
+        command[index + 1]
+        for index, value in enumerate(command)
+        if value == "--include-task-name"
+    ] == ["write-compressor", "fix-git"]
+    assert adapter._preconditions(_target(), _ctx(tmp_path)) is None
+
+
+def test_terminal_bench_rejects_missing_local_dataset(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "KAIRYU_TERMINAL_BENCH_PATH", str(tmp_path / "missing-terminal-bench")
+    )
+    monkeypatch.setattr("kairyu.bench.adapters.terminal_bench.shutil.which", lambda _: "harbor")
+
+    reason = TerminalBenchAdapter()._preconditions(_target(), _ctx(tmp_path))
+
+    assert reason is not None
+    assert "existing absolute directory" in reason
 
 
 @pytest.mark.parametrize(
@@ -132,9 +198,8 @@ async def test_agentic_harnesses_reject_chat_only_sampling_policy(
 
 # -- Harbor result schema ------------------------------------------------------
 
-# Shape of Harbor 0.17's job-level result.json: JobResult.trial_results, each
-# TrialResult carrying its verdict under verifier_result.rewards (a task-defined
-# dict) or an exception_info.
+# Embedded JobResult shape retained by older Harbor versions. Harbor 0.17's
+# final job-level file excludes trial_results and is covered separately below.
 HARBOR_JOB_RESULT = {
     "id": "3f1b0e6a-0000-4000-8000-000000000000",
     "started_at": "2026-07-25T00:00:00",
@@ -197,6 +262,32 @@ def test_ambiguous_reward_dict_is_failed_not_guessed():
     assert "ambiguous reward keys" in items[0].error
 
 
+def test_parse_harbor_results_rejects_string_entries_without_crashing():
+    from kairyu.bench.adapters.terminal_bench import parse_harbor_results
+
+    items = parse_harbor_results({"results": ["not-a-trial"]})
+
+    assert len(items) == 1
+    assert items[0].status == "failed"
+    assert "not an object" in items[0].error
+
+
+def test_parse_harbor_results_counts_declared_but_missing_trials():
+    from kairyu.bench.adapters.terminal_bench import parse_harbor_results
+
+    items = parse_harbor_results(
+        {
+            "n_total_trials": 2,
+            "trial_results": [HARBOR_JOB_RESULT["trial_results"][0]],
+        }
+    )
+
+    assert len(items) == 2
+    assert items[0].score == 1.0
+    assert items[1].status == "failed"
+    assert "omitted" in items[1].error
+
+
 async def test_terminal_bench_reads_the_real_harbor_output(tmp_path, monkeypatch):
     """A successful `harbor run` must not report 'no harbor results file found'."""
     import json as _json
@@ -231,6 +322,53 @@ async def test_terminal_bench_reads_the_real_harbor_output(tmp_path, monkeypatch
     # zero in the denominator -- not an exclusion that would inflate the score
     assert pair.score == pytest.approx((1.0 + 0.0 + 0.5 + 0.0) / 4)
     assert "errored ones as zero" in pair.methodology["denominator"]
+
+
+async def test_terminal_bench_reads_harbor_017_per_trial_results(tmp_path, monkeypatch):
+    """Harbor 0.17 omits trial_results from the final job-level result."""
+    import json as _json
+
+    import kairyu.bench.adapters.terminal_bench as tb
+
+    monkeypatch.setattr(tb.shutil, "which", lambda name: "/usr/bin/harbor")
+
+    def fake_run(command, capture_output, timeout, env, check):
+        jobs_dir = Path(command[command.index("--jobs-dir") + 1])
+        job = jobs_dir / "2026-08-11__00-00-00"
+        job.mkdir(parents=True)
+        (job / "result.json").write_text(
+            _json.dumps(
+                {
+                    "id": "job",
+                    "n_total_trials": 4,
+                    "stats": {"n_completed_trials": 4},
+                }
+            ),
+            encoding="utf-8",
+        )
+        for entry in HARBOR_JOB_RESULT["trial_results"]:
+            trial = job / entry["trial_name"]
+            trial.mkdir()
+            (trial / "result.json").write_text(_json.dumps(entry), encoding="utf-8")
+        # This resembles an agent artifact that triggered the production crash.
+        (job / "agent-artifact.json").write_text(
+            _json.dumps({"results": ["stdout", "stderr"]}), encoding="utf-8"
+        )
+
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(tb.subprocess, "run", fake_run)
+    pair = await TerminalBenchAdapter().run(_target(), _ctx(tmp_path))
+
+    assert pair.status == "partial"
+    assert pair.metrics["n_total"] == 4
+    assert pair.metrics["n_failed"] == 1
+    assert pair.score == pytest.approx((1.0 + 0.0 + 0.5 + 0.0) / 4)
 
 
 def test_harbor_mean_counts_every_trial():

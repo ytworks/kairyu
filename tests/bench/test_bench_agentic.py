@@ -151,6 +151,7 @@ async def test_terminal_bench_flow(tmp_path, monkeypatch):
         seen["command"] = list(command)
         seen["env"] = env
         jobs_dir = command[command.index("--jobs-dir") + 1]
+        seen["jobs_dir"] = jobs_dir
         import pathlib
 
         path = pathlib.Path(jobs_dir) / "results.json"
@@ -167,13 +168,12 @@ async def test_terminal_bench_flow(tmp_path, monkeypatch):
     pair = await TerminalBenchAdapter().run(make_target(model="m"), _ctx(tmp_path))
     assert pair.status == "partial"  # tb-004 has no verdict
     assert pair.metrics["n_total"] == 4
-    assert seen["command"][:4] == [
-        "harbor",
-        "run",
-        "-d",
-        "terminal-bench/terminal-bench-2-1",
-    ]
+    assert seen["command"][:3] == ["harbor", "run", "--config"]
+    assert "terminal-bench/terminal-bench-2-1" in seen["command"]
     assert seen["env"]["OPENAI_BASE_URL"] == "http://gw/v1"
+    assert Path(seen["jobs_dir"]).is_dir()
+    assert pair.methodology["harbor_jobs_dir"] == seen["jobs_dir"]
+    assert pair.methodology["agent_effective_timeout_cap_s"] == 7200.0
 
 
 async def test_harness_failure_reports_stderr(tmp_path, monkeypatch):

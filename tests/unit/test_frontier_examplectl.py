@@ -24,13 +24,17 @@ def _load(path: Path, name: str):
     return module
 
 
-def test_examples_surface_contains_the_two_hardware_examples() -> None:
+def test_examples_surface_contains_the_three_hardware_examples() -> None:
     environments = sorted(
         path.name
         for path in (ROOT / "examples").iterdir()
         if path.is_dir() and not path.name.startswith("__")
     )
-    assert environments == ["deepseek-v4-flash-0731-8gpu", "qwen3.6-27b-1gpu"]
+    assert environments == [
+        "deepseek-v4-flash-0731-8gpu",
+        "qwen3.6-27b-1gpu",
+        "qwen3.6-deepseek-v4-8gpu",
+    ]
 
 
 def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:

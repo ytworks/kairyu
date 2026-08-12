@@ -11,6 +11,67 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-12 — [progress] Empty reasoning finals fail closed
+- What: Completion reasoning filters now require non-empty public content after the private terminator, and the serving harness rejects sanitized SSE errors. The tiered example adds a matched MoA-3 ordinary-chat synthesis candidate after thinking MoA returned one empty public answer in the c8 L3 matrix.
+- Refs: `kairyu/engine/openai_backend.py`; `bench/serving_bench.py`; `examples/qwen3.6-deepseek-v4-8gpu/`; run ID `l3-auto-max-moa3-public-v2-20260812`; PR #471
+
+### 2026-08-12 — [progress] Private reasoning rejects unsafe token metadata
+- What: A pre-rendered vLLM completion with a configured private-reasoning boundary now rejects logprobs before dispatch, preventing raw hidden-token metadata from bypassing the text filter; ordinary direct backends retain logprobs support.
+- Refs: `kairyu/engine/openai_backend.py`; `tests/unit/test_openai_backend.py`; PR #471
+
+### 2026-08-12 — [progress] L3 benchmarks separate public output from private work
+- What: The serving harness can count final assistant content with a pinned tokenizer after the timed interval, reporting public TPS/TPOT beside cumulative orchestration tokens and E2E p50/p99. The tiered example uses natural-EOS reasoning requests plus a loopback-only DeepSeek tokenizer oracle; ChatUI still reaches only Kairyu L3.
+- Refs: `bench/serving_bench.py`; `examples/qwen3.6-deepseek-v4-8gpu/`; PR #471
+
+### 2026-08-12 — [progress] L2 exposes the answer, not private synthesis work
+- What: OpenAI-compatible vLLM completion replicas can now opt into a bounded fail-closed private-reasoning terminator for buffered and streamed output; multi-stage orchestration strips reasoning metadata at its public boundary, and role-tagged conversation JSON explicitly remains context rather than a response envelope. The tiered DeepSeek thinking alias enables this generic contract.
+- Refs: `kairyu/engine/openai_backend.py`; `kairyu/orchestration/orchestrator.py`; `kairyu/entrypoints/server/chat_service.py`; `examples/qwen3.6-deepseek-v4-8gpu/`; PR #471
+
+### 2026-08-11 — [progress] Tiered Chat UI defaults to the quality-first L3 path
+- What: The eight-GPU tiered launcher now exposes an explicitly unauthenticated Open WebUI on all host interfaces, prints its outward-facing URL, and disables persistent UI configuration so every start selects `kairyu-auto-max`; Kairyu L3 remains loopback-only and the UI has no L1/L2 bypass.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,control.py,README.md}`; `tests/unit/test_tiered_frontier_examplectl.py`; PR #471
+
+### 2026-08-11 — [progress] MoA preserves the original response contract
+- What: Proposal roles now independently draft against an explicit original-request boundary, while synthesis treats candidates as untrusted advice and must preserve machine-readable output contracts without leaking ensemble meta-analysis; focused MoA/orchestrator/backend regressions pass.
+- Refs: `kairyu/orchestration/moa.py`; `tests/unit/test_moa.py`; PR #471
+
+### 2026-08-11 — [progress] Prefix affinity obeys replica overload policy
+- What: ReplicaPool now applies its configured queue-depth valve after both prefix-aware and session-affine placement, retaining idle KV locality while overflowing concurrent warm-prefix work to least-outstanding replicas; focused orchestration and backend regressions pass.
+- Refs: `kairyu/orchestration/replica.py`; `tests/unit/test_kv_routing.py`; PR #471
+
+### 2026-08-11 — [progress] Tiered eight-GPU vLLM example enters runtime validation
+- What: Added a one-command Open WebUI -> Kairyu L3/L2 -> vLLM L1 contract for four Qwen3.6 FP8 TP1 replicas plus one DeepSeek-V4 TP4/EP4 tier, with rule routing, MoA-2/MoA-3, `/mnt/nvme`-only persistence, independent/all serving and orchestration runners, and a full-dataset Terminal-Bench 2.1 entrypoint. Static and contract tests pass; runtime tuning and complete evidence remain in progress.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/`; `tests/unit/test_tiered_frontier_examplectl.py`
+
+### 2026-08-11 — [progress] One-GPU Qwen3.6 example completes measured gate
+- What: The one-command Qwen3.6-27B FP8 stack on one RTX PRO 6000 completed its final unique-prefix 8K/256 matrix (41.43 output tok/s with 190.82 ms median TTFT at c1; 842.35 output tok/s with 1.247 s median TTFT at c32) and deterministic LiveCodeBench subset (11/20, 55.0%, 20/20 scored, zero request errors/retries/unmeasured rows). No-MTP won TTFT at every tested concurrency and aggregate throughput at c16/c32; MTP-5 crashed at c16 and the 32K prefill budget exhausted VRAM at c32.
+- Refs: PR #469; `examples/qwen3.6-27b-1gpu/MEASUREMENTS.md`; run IDs `final-no-mtp-20260811` and `qwen36-fp8-no-mtp-lcb20-20260811`
+
+### 2026-08-11 — [progress] One-GPU Qwen3.6 vLLM example enters runtime validation
+- What: A second example adds one-command Open WebUI -> Kairyu L3 -> pinned vLLM L1 serving for the official Qwen3.6-27B FP8 checkpoint on one selected RTX PRO 6000; model/UI persistence is fail-closed below `/mnt/nvme`, and independent/all serving plus deterministic 20-row LiveCodeBench runners are contract-tested. Runtime tuning and measured evidence remain in progress.
+- Refs: `examples/qwen3.6-27b-1gpu/`; `tests/unit/test_frontier_examplectl.py`
+
+### 2026-08-11 — [progress] Accuracy comparisons cite every reference score
+- What: Accuracy reports now compare local runs with the final eight-model benchmark matrix, preserve missing values, and attach source markers, dates, source class, conditions, and notes to selected and alternate scores in Markdown and JSON.
+- Refs: `kairyu/bench/{reference.py,compare.py}`; `tests/bench/test_bench_compare.py`; `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`
+
+### 2026-08-11 — [design] Accuracy reports bind reference scores to sources
+- What: The Accuracy comparison will use the supplied eight-model matrix and render a source marker, linked source metadata, measurement condition, and notes for every selected or alternate published score; missing values remain missing and old DeepSeek snapshots do not fill the 0731 column.
+- Why: A numeric comparison without cell-level provenance obscures provider, third-party, harness, and version differences and cannot be audited from the generated report.
+- Refs: `docs/superpowers/specs/2026-08-11-accuracy-reference-sources-design.md`; `kairyu/bench/{reference.py,compare.py}`
+
+### 2026-08-11 — [progress] Full DeepSeek-V4 LiveCodeBench evidence completes
+- What: The clean-cache TP8+EP8 DSpark-5 example completed and scored all 1,055 LiveCodeBench release_v6 problems: 759 passed (71.9431%), all target timings measured, and zero request errors, retries, or unmeasured rows. The warm serving matrix reached 168.01 output tok/s at c1 with 220.10 ms median TTFT and 972.93 output tok/s at c32.
+- Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/MEASUREMENTS.md`; run IDs `livecodebench-full-tp8-ep8-dspark5-clean-sse16m-20260811` and `tp8-ep8-dspark5-warm-20260811`
+
+### 2026-08-11 — [progress] Frontier benchmark streams support 32K-token evidence
+- What: The strict benchmark SSE reader retains its fail-closed bound but raises it from 1 MiB to 16 MiB so 32K-token DeepSeek streams are not rejected solely by per-token JSON framing. The example runner now also rejects a nominally successful CLI run unless all 1,055 LiveCodeBench rows have measured, error-free evidence.
+- Refs: PR #468; `kairyu/bench/streaming.py`; `examples/deepseek-v4-flash-0731-8gpu/benchmark.py`; full-run diagnosis on 2026-08-11
+
+### 2026-08-11 — [progress] Kairyu-owned vLLM prompts bypass a second chat template
+- What: Pre-rendered `TemplatedPrompt` requests sent to a vLLM-compatible backend now use `/completions` for both buffered and streaming generation. This preserves the checkpoint's single prompt boundary, prevents DeepSeek chat mode from being wrapped into thinking mode again, and returns final answer text to Open WebUI.
+- Refs: PR #468; `kairyu/engine/openai_backend.py`; `tests/unit/test_openai_backend.py`; real DeepSeek-V4 direct and streaming probes on 2026-08-11
+
 ### 2026-08-11 — [progress] Open WebUI tool metadata no longer blocks text requests
 - What: The DeepSeek prompt template now ignores `tools` metadata emitted by OpenAI-compatible UIs and renders the ordinary text conversation; model-side function-tool execution remains outside this example. The failing Open WebUI prompt was reproduced against Kairyu.
 - Refs: PR #468; `examples/deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja`; `tests/unit/test_frontier_examplectl.py`

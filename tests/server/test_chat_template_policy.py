@@ -14,6 +14,7 @@ from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     render_prompt,
     validate_chat_input,
+    validate_orchestration_chat_input,
 )
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionRequest,
@@ -96,6 +97,25 @@ def test_low_level_app_rejects_template_and_legacy_policy_overlap():
             chat_templates={"m": ChatTemplate("ok")},
             legacy_chat_models={"m"},
         )
+
+
+def test_orchestration_conversation_json_is_context_not_response_schema():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "Be concise."},
+                {"role": "user", "content": "PAC1 Antagonistの適応症は？"},
+            ],
+        }
+    )
+
+    validated = validate_orchestration_chat_input(request)
+
+    assert "conversation data, not a response schema" in validated.prompt
+    assert "do not add a role/content envelope" in validated.prompt
+    assert "PAC1 Antagonistの適応症は？" in validated.prompt
+    assert "Kairyu L2 conversation (JSON)" not in validated.prompt
 
 
 def test_batch_worker_rejects_template_and_legacy_policy_overlap(tmp_path):

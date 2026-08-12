@@ -1,0 +1,109 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+  api_keys_env: null
+  max_concurrency: 256
+  admission_wait_timeout_s: 86400
+
+pools:
+  qwen3.6-27b:
+    replicas:
+      - backend: openai
+        health_url: http://qwen-0:8000/health
+        options: &qwen
+          base_url: http://qwen-0:8000/v1
+          model: qwen3.6-27b
+          api_key_env: null
+          timeout_s: 86400
+          upstream: vllm
+          allow_templated_chat_passthrough: true
+          chat_tokenizer: /models/qwen/qwen3.6-27b-fp8
+          model_revision: e89b16ebf1988b3d6befa7de50abc2d76f26eb09
+          max_model_len: 262144
+          quantization_format: fp8
+          cache_descriptor:
+            family: qwen3.6-hybrid-deltanet-paged-kv
+          tensor_parallel_size: 1
+          mtp_enabled: false
+          container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
+      - backend: openai
+        health_url: http://qwen-1:8000/health
+        options: {<<: *qwen, base_url: http://qwen-1:8000/v1}
+      - backend: openai
+        health_url: http://qwen-2:8000/health
+        options: {<<: *qwen, base_url: http://qwen-2:8000/v1}
+      - backend: openai
+        health_url: http://qwen-3:8000/health
+        options: {<<: *qwen, base_url: http://qwen-3:8000/v1}
+    unhealthy_after: 1
+    # Overflow as soon as the affine replica has one in-flight request. Agent
+    # turns and MoA proposals deliberately share a cache session; a larger
+    # threshold funnels concurrent work onto one GPU and leaves 3 replicas idle.
+    queue_depth_threshold: 0
+    prefix_index: true
+    probe_interval_s: 2.0
+
+  deepseek-v4-flash-0731:
+    replicas:
+      - backend: openai
+        health_url: http://deepseek:8000/health
+        options: &deepseek
+          base_url: http://deepseek:8000/v1
+          model: deepseek-v4-flash-0731
+          api_key_env: null
+          timeout_s: 86400
+          upstream: vllm
+          allow_templated_chat_passthrough: true
+          chat_tokenizer: /models/deepseek/deepseek-v4-flash-0731
+          model_revision: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
+          max_model_len: 1048576
+          quantization_format: mixed-fp4-fp8
+          cache_descriptor:
+            family: deepseek-v4-hca-csa-dsa
+            block_size: 256
+          tensor_parallel_size: 4
+          expert_parallel_size: 4
+          attention_data_parallel_size: 1
+          dspark_enabled: true
+          container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
+    unhealthy_after: 1
+    queue_depth_threshold: 8
+    prefix_index: true
+    probe_interval_s: 2.0
+
+  # The L2 worker uses the same attested L1 but a max-thinking prompt policy.
+  deepseek-v4-flash-0731-thinking:
+    replicas:
+      - backend: openai
+        health_url: http://deepseek:8000/health
+        options:
+          <<: *deepseek
+          # This prompt begins inside <think>. vLLM /completions does not run
+          # its chat reasoning parser, so Kairyu privately separates everything
+          # before the first terminator and exposes only the final answer.
+          completion_reasoning_end_tag: "</think>"
+    unhealthy_after: 1
+    queue_depth_threshold: 8
+    prefix_index: true
+    probe_interval_s: 2.0
+
+orchestrators:
+  kairyu-auto:
+    spec: /etc/kairyu/auto.yaml
+  kairyu-auto-max:
+    spec: /etc/kairyu/auto-max.yaml
+  kairyu-auto-max-chat:
+    spec: /etc/kairyu/auto-max-chat.yaml
+  kairyu-auto-max-moa1:
+    spec: /etc/kairyu/auto-max-moa1.yaml
+  kairyu-auto-max-moa2:
+    spec: /etc/kairyu/auto-max-moa2.yaml
+  kairyu-auto-max-moa3:
+    spec: /etc/kairyu/auto-max-moa3.yaml
+  kairyu-auto-max-moa4:
+    spec: /etc/kairyu/auto-max-moa4.yaml
+
+chat_templates:
+  qwen3.6-27b: /etc/kairyu/qwen3.6-chat-template.jinja
+  deepseek-v4-flash-0731: /etc/kairyu/deepseek-v4-0731.jinja
+  deepseek-v4-flash-0731-thinking: /etc/kairyu/deepseek-thinking.jinja

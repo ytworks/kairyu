@@ -39,7 +39,10 @@ const phaseTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_PHASE_TIMEOUT_MS', 120_00
 
 const models = Object.freeze([directModel, autoModel]);
 const initialDefaultMarker = 'KAIRYU_WEBUI_INITIAL_DEFAULT_197';
-const initialAutoMarker = 'KAIRYU_WEBUI_INITIAL_AUTO_197';
+// AUTO wraps the query in a prompt-injection boundary before the deterministic
+// mock echoes its final 48 characters. Keep the SSE marker plus `_SSE` within
+// the 16 characters that remain ahead of that boundary.
+const initialAutoMarker = 'KA_AUTO_197';
 const reconnectMarker = 'KAIRYU_WEBUI_RECONNECT_197';
 const outageMarker = 'KAIRYU_WEBUI_OUTAGE_197';
 const recoveryMarker = 'KAIRYU_WEBUI_RECOVERY_197';

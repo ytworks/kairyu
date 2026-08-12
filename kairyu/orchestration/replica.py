@@ -12,8 +12,10 @@ per the m5 D4 seam amendment. Placement policy, in order:
    by rendezvous (HRW) hashing over the ELIGIBLE replicas (healthy ∧ not
    draining), so removing or draining one replica only remaps its sessions.
    A blank root hint takes this path directly without speculative prefix work.
-3. **Load-skew valve** — if the affine replica's outstanding-request count
-   exceeds ``queue_depth_threshold``, fall back to least-outstanding.
+3. **Load-skew valve** — if the prefix-aware or affine replica's
+   outstanding-request count exceeds ``queue_depth_threshold``, fall back to
+   least-outstanding.  A warm prefix remains sticky while it is within the
+   configured queue budget, but cannot bypass the pool's overload policy.
 4. **Least outstanding** for cold session-less traffic (ties break to
    insertion order).
 
@@ -1101,6 +1103,19 @@ class ReplicaPool:
         # first equal key, preserving the historical stable tie break.
         return min(candidates, key=lambda rid: self._entries[rid].outstanding)
 
+    def _apply_queue_depth_valve(
+        self,
+        selected: str,
+        eligible: tuple[str, ...],
+        reason: str,
+        session_id: str | None,
+    ) -> tuple[str, str, str | None]:
+        """Overflow a busy affinity choice without weakening idle KV reuse."""
+
+        if self._entries[selected].outstanding > self._queue_depth_threshold:
+            return self._least_outstanding(eligible), "queue_depth_fallback", session_id
+        return selected, reason, session_id
+
     def _select(
         self,
         request: GenerationRequest,
@@ -1166,16 +1181,24 @@ class ReplicaPool:
                     )
                 )
             if best is not None:
-                return best, prefix_reason, session_id
+                return self._apply_queue_depth_valve(
+                    best,
+                    eligible,
+                    prefix_reason,
+                    session_id,
+                )
         if session_id:
             affine = _rendezvous_winner(
                 session_id,
                 eligible,
                 self._encoded_replica_ids,
             )
-            if self._entries[affine].outstanding > self._queue_depth_threshold:
-                return self._least_outstanding(eligible), "queue_depth_fallback", session_id
-            return affine, "session_affinity", session_id
+            return self._apply_queue_depth_valve(
+                affine,
+                eligible,
+                "session_affinity",
+                session_id,
+            )
         return self._least_outstanding(eligible), "least_outstanding", None
 
     def _should_track_prefix(self, request: GenerationRequest) -> bool:
