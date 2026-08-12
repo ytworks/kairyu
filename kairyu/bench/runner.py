@@ -517,6 +517,8 @@ class SuiteRunner:
             seed=config.seed,
             attempts=config.attempts,
             run_id=run_id,
+            rerun=config.rerun,
+            artifacts_dir=Path(config.results_dir).resolve() / run_id / "artifacts",
             concurrency=config.concurrency,
             retries=config.retries,
             request_timeout_s=config.request_timeout_s,

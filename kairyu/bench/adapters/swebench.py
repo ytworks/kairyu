@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import os
@@ -28,6 +29,7 @@ from kairyu.bench.adapters.base import (
     target_api_key,
     utc_now,
 )
+from kairyu.bench.hub import load_hf_rows
 from kairyu.bench.types import (
     BenchTarget,
     DownloadReport,
@@ -102,19 +104,33 @@ def parse_swebench_report(
         if counts[count_name] != len(ids[ids_name]):
             raise ValueError(f"{count_name} does not match {ids_name}")
 
+    resolved_outcomes = ids["resolved_ids"] | ids["unresolved_ids"]
     if ids["resolved_ids"] & ids["unresolved_ids"]:
         raise ValueError("resolved_ids and unresolved_ids must be disjoint")
-    if ids["completed_ids"] != ids["resolved_ids"] | ids["unresolved_ids"]:
-        raise ValueError("completed_ids must equal resolved_ids plus unresolved_ids")
+    if resolved_outcomes & ids["error_ids"]:
+        raise ValueError(
+            "submitted outcome IDs must be disjoint except for the official "
+            "completed/error overlap"
+        )
+    if ids["completed_ids"] & ids["empty_patch_ids"] or ids["error_ids"] & ids[
+        "empty_patch_ids"
+    ]:
+        raise ValueError(
+            "submitted outcome IDs must be disjoint except for the official "
+            "completed/error overlap"
+        )
+    # SWE-bench 4.1 adds an ID to completed_ids as soon as its report file
+    # exists, then also to error_ids when that file is empty or malformed.
+    # Every non-error completed report must still have exactly one verdict.
+    if ids["completed_ids"] - ids["error_ids"] != resolved_outcomes:
+        raise ValueError(
+            "completed_ids minus error_ids must equal resolved_ids plus unresolved_ids"
+        )
 
-    terminal = (ids["completed_ids"], ids["empty_patch_ids"], ids["error_ids"])
-    if any(
-        left & right
-        for index, left in enumerate(terminal)
-        for right in terminal[index + 1 :]
-    ):
-        raise ValueError("submitted outcome IDs must be disjoint")
-    if ids["submitted_ids"] != set().union(*terminal):
+    submitted_outcomes = (
+        ids["completed_ids"] | ids["empty_patch_ids"] | ids["error_ids"]
+    )
+    if ids["submitted_ids"] != submitted_outcomes:
         raise ValueError(
             "submitted_ids must equal completed, empty-patch, and error IDs"
         )
@@ -201,28 +217,102 @@ def load_prediction_ids(path: Path) -> tuple[str, ...]:
         model = prediction.get("model_name_or_path")
         if not isinstance(model, str) or not model:
             raise ValueError(f"prediction {instance_id!r} has an invalid model_name_or_path")
-        patch = prediction.get("model_patch")
+        if "model_patch" not in prediction:
+            raise ValueError(f"prediction {instance_id!r} has no model_patch")
+        patch = prediction["model_patch"]
         if patch is not None and not isinstance(patch, str):
             raise ValueError(f"prediction {instance_id!r} has an invalid model_patch")
     return tuple(sorted(predictions))
 
 
+def load_selected_instance_ids(dataset: str, limit: int | None) -> tuple[str, ...]:
+    """Load the exact official split order before generation fixes the denominator."""
+
+    rows = load_hf_rows(dataset, split="test")
+    if limit is not None:
+        rows = rows[:limit]
+    instance_ids = []
+    for row in rows:
+        instance_id = row.get("instance_id") if isinstance(row, dict) else None
+        if not isinstance(instance_id, str) or not instance_id:
+            raise ValueError("SWE-bench dataset contains an invalid instance_id")
+        instance_ids.append(instance_id)
+    if not instance_ids:
+        raise ValueError("SWE-bench selection is empty")
+    if len(instance_ids) != len(set(instance_ids)):
+        raise ValueError("SWE-bench selection contains duplicate instance IDs")
+    return tuple(instance_ids)
+
+
 def find_swebench_report(workdir: Path) -> dict:
     """Return the sole root schema-v2 report produced by the official harness."""
 
-    candidates = []
+    return _find_swebench_report(workdir)[1]
+
+
+def _find_swebench_report(workdir: Path) -> tuple[Path, dict]:
+    candidates: list[tuple[Path, dict]] = []
     for path in sorted(workdir.glob("*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
         if isinstance(data, dict) and data.get("schema_version") == 2:
-            candidates.append(data)
+            candidates.append((path, data))
     if not candidates:
         raise ValueError("no SWE-bench schema-v2 report produced")
     if len(candidates) > 1:
         raise ValueError("multiple SWE-bench schema-v2 reports produced")
     return candidates[0]
+
+
+def _safe_component(value: str) -> str:
+    prefix = _SAFE_RUN_ID.sub("-", value).strip("-.")[:80] or "value"
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{digest}"
+
+
+def _redact_output(value: bytes | str | None, secrets: Sequence[str]) -> str:
+    if value is None:
+        text = ""
+    elif isinstance(value, bytes):
+        text = value.decode(errors="replace")
+    else:
+        text = value
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    return text
+
+
+def _write_stage_logs(
+    workdir: Path,
+    stage: str,
+    stdout: bytes | str | None,
+    stderr: bytes | str | None,
+    secrets: Sequence[str],
+) -> dict[str, str]:
+    log_dir = workdir / "stage-logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    for stream, value in (("stdout", stdout), ("stderr", stderr)):
+        path = log_dir / f"{stage}.{stream}.log"
+        path.write_text(_redact_output(value, secrets), encoding="utf-8")
+        paths[f"{stage}_{stream}"] = str(path)
+    return paths
+
+
+def _persist_selection(path: Path, payload: dict) -> None:
+    text = json.dumps(payload, indent=2, sort_keys=True)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"stored selection manifest is unreadable: {error}") from error
+        if existing != payload:
+            raise ValueError("stored selection manifest does not match this run")
+        return
+    path.write_text(text, encoding="utf-8")
 
 
 def _model_kwargs(target: BenchTarget) -> dict[str, object]:
@@ -402,11 +492,71 @@ class SweBenchAdapter:
                 incomparable_reasons=incomparable_reasons,
             )
 
+        artifact_root = ctx.artifacts_dir or (
+            ctx.cache.root / "run-artifacts" / (ctx.run_id or "direct")
+        )
+        stable_workdir = (
+            Path(artifact_root) / self.info.name / _safe_component(target.label())
+        ).resolve()
+        if ctx.rerun:
+            stable_workdir.mkdir(parents=True, exist_ok=True)
+            workdir = Path(
+                tempfile.mkdtemp(prefix="rerun-", dir=stable_workdir)
+            ).resolve()
+        else:
+            workdir = stable_workdir
+        workdir.mkdir(parents=True, exist_ok=True)
+        generation_dir = workdir / "mini-output"
+        predictions = generation_dir / "preds.json"
+        selection_path = workdir / "selected-instances.json"
+        artifacts: dict[str, object] = {
+            "root": str(workdir),
+            "selection": str(selection_path),
+            "generation_dir": str(generation_dir),
+            "predictions": str(predictions),
+            "mini_swe_agent_log": str(generation_dir / "minisweagent.log"),
+            "evaluation_logs": str(workdir / "logs" / "run_evaluation"),
+            "official_report": None,
+            "stage_logs": {},
+        }
+        methodology = {
+            "metric": self.info.metric,
+            "dataset": self.spec.dataset,
+            "subset": self.spec.subset,
+            "split": "test",
+            "scaffold": "mini-swe-agent",
+            "base_config": _BASE_CONFIG,
+            "step_limit": self.spec.step_limit,
+            "concurrency": ctx.concurrency,
+            "evaluation": "swebench.harness.run_evaluation (docker)",
+            "artifacts": artifacts,
+        }
+        try:
+            selected_ids = load_selected_instance_ids(self.spec.dataset, ctx.limit)
+            selection = {
+                "schema_version": 1,
+                "dataset": self.spec.dataset,
+                "split": "test",
+                "limit": ctx.limit,
+                "instance_ids": list(selected_ids),
+            }
+            _persist_selection(selection_path, selection)
+        except Exception as error:  # noqa: BLE001 - dataset backends vary
+            return self._failed(
+                target,
+                started_at,
+                f"could not establish SWE-bench selection: {error}",
+                methodology=methodology,
+            )
+        methodology["selected_instance_ids"] = list(selected_ids)
+
         env = dict(os.environ)
         base = normalize_base_url(target.base_url)
         env["OPENAI_BASE_URL"] = base
         env["OPENAI_API_BASE"] = base
-        env["OPENAI_API_KEY"] = target_api_key(target) or "sk-local"
+        api_key = target_api_key(target)
+        env["OPENAI_API_KEY"] = api_key or "sk-local"
+        secrets = (api_key,) if api_key else ()
 
         def invoke(command: list[str], cwd: Path) -> subprocess.CompletedProcess:
             return subprocess.run(
@@ -418,86 +568,92 @@ class SweBenchAdapter:
                 check=False,
             )
 
-        with tempfile.TemporaryDirectory(prefix=f"kairyu-{self.info.name}-") as tmp:
-            workdir = Path(tmp)
-            generation_dir = workdir / "mini-output"
-            predictions = generation_dir / "preds.json"
-            generate_command = self._generate_command(target, ctx, generation_dir)
-            failure = await self._invoke_stage(
+        generate_command = self._generate_command(target, ctx, generation_dir)
+        methodology["generate_command"] = shlex.join(generate_command)
+        failure = await self._invoke_stage(
+            target,
+            started_at,
+            "generate",
+            generate_command,
+            workdir,
+            invoke,
+            methodology,
+            secrets,
+        )
+        if failure is not None:
+            return failure
+        if not predictions.is_file():
+            return self._failed(
                 target,
                 started_at,
-                "generate",
-                generate_command,
-                workdir,
-                invoke,
+                "generate stage produced no mini-output/preds.json file",
+                methodology=methodology,
             )
-            if failure is not None:
-                return failure
-            if not predictions.is_file():
-                return self._failed(
-                    target,
-                    started_at,
-                    "generate stage produced no mini-output/preds.json file",
-                )
-            try:
-                instance_ids = load_prediction_ids(predictions)
-            except ValueError as error:
-                return self._failed(
-                    target,
-                    started_at,
-                    f"invalid mini-output/preds.json prediction file: {error}",
-                )
+        try:
+            prediction_ids = load_prediction_ids(predictions)
+        except ValueError as error:
+            return self._failed(
+                target,
+                started_at,
+                f"invalid mini-output/preds.json prediction file: {error}",
+                methodology=methodology,
+            )
+        unexpected_ids = sorted(set(prediction_ids) - set(selected_ids))
+        if unexpected_ids:
+            return self._failed(
+                target,
+                started_at,
+                "mini-output/preds.json contains IDs outside the persisted selection: "
+                + ", ".join(unexpected_ids),
+                methodology=methodology,
+            )
+        methodology["prediction_instance_ids"] = list(prediction_ids)
+        methodology["missing_prediction_ids"] = sorted(
+            set(selected_ids) - set(prediction_ids)
+        )
 
-            evaluate_command = self._evaluate_command(
-                predictions,
-                instance_ids,
-                self._run_id(ctx),
-                workdir,
-                ctx.concurrency,
+        evaluate_command = self._evaluate_command(
+            predictions,
+            selected_ids,
+            self._run_id(ctx),
+            workdir,
+            ctx.concurrency,
+        )
+        methodology["evaluate_command"] = shlex.join(evaluate_command)
+        failure = await self._invoke_stage(
+            target,
+            started_at,
+            "evaluate",
+            evaluate_command,
+            workdir,
+            invoke,
+            methodology,
+            secrets,
+        )
+        if failure is not None:
+            return failure
+        try:
+            report_path, report = _find_swebench_report(workdir)
+            artifacts["official_report"] = str(report_path)
+            items, total = parse_swebench_report(
+                report,
+                selected_ids=selected_ids,
             )
-            failure = await self._invoke_stage(
+        except ValueError as error:
+            return self._failed(
                 target,
                 started_at,
-                "evaluate",
-                evaluate_command,
-                workdir,
-                invoke,
+                f"invalid evaluation report: {error}",
+                methodology=methodology,
             )
-            if failure is not None:
-                return failure
-            try:
-                report = find_swebench_report(workdir)
-                items, total = parse_swebench_report(
-                    report,
-                    selected_ids=instance_ids,
-                )
-            except ValueError as error:
-                return self._failed(
-                    target,
-                    started_at,
-                    f"invalid evaluation report: {error}",
-                )
 
         resolved = report["resolved_instances"]
+        methodology["official_report"] = report
         pair = summarize_items(
             self.info.name,
             target.label(),
             items,
-            methodology={
-                "metric": self.info.metric,
-                "dataset": self.spec.dataset,
-                "subset": self.spec.subset,
-                "split": "test",
-                "scaffold": "mini-swe-agent",
-                "base_config": _BASE_CONFIG,
-                "step_limit": self.spec.step_limit,
-                "concurrency": ctx.concurrency,
-                "selected_instance_ids": list(instance_ids),
-                "official_report": report,
-                "evaluation": "swebench.harness.run_evaluation (docker)",
-                "generate_command": shlex.join(generate_command),
-                "evaluate_command": shlex.join(evaluate_command),
-            },
+            methodology=methodology,
             annotations=self.info.annotations,
             started_at=started_at,
             score_fn=lambda _: resolved / total if total else None,
@@ -521,27 +677,48 @@ class SweBenchAdapter:
         command: list[str],
         workdir: Path,
         invoke,
+        methodology: dict,
+        secrets: Sequence[str],
     ) -> PairResult | None:
         try:
             completed = await asyncio.to_thread(invoke, command, workdir)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as error:
+            stage_logs = _write_stage_logs(
+                workdir,
+                stage,
+                error.stdout,
+                error.stderr,
+                secrets,
+            )
+            methodology["artifacts"]["stage_logs"].update(stage_logs)
             return self._failed(
                 target,
                 started_at,
                 f"{stage} stage timed out ({_STAGE_TIMEOUT_S}s)",
+                methodology=methodology,
             )
         except OSError as error:
             return self._failed(
                 target,
                 started_at,
                 f"{stage} stage could not start: {error}",
+                methodology=methodology,
             )
+        stage_logs = _write_stage_logs(
+            workdir,
+            stage,
+            completed.stdout,
+            completed.stderr,
+            secrets,
+        )
+        methodology["artifacts"]["stage_logs"].update(stage_logs)
         if completed.returncode != 0:
-            stderr = completed.stderr.decode(errors="replace")[-500:]
+            stderr = _redact_output(completed.stderr, secrets)[-500:]
             return self._failed(
                 target,
                 started_at,
                 f"{stage} stage failed (rc={completed.returncode}): {stderr}",
+                methodology=methodology,
             )
         return None
 
@@ -550,6 +727,8 @@ class SweBenchAdapter:
         target: BenchTarget,
         started_at: str,
         reason: str,
+        *,
+        methodology: dict | None = None,
     ) -> PairResult:
         incomparable_reasons = (
             (self.info.incomparable_reason,)
@@ -562,6 +741,7 @@ class SweBenchAdapter:
             status="failed",
             reason=reason,
             metrics={"score": None, "n_total": 0},
+            methodology=methodology or {},
             annotations=self.info.annotations,
             comparable=self.info.comparable_to_published,
             incomparable_reasons=incomparable_reasons,
@@ -576,5 +756,6 @@ __all__ = [
     "find_swebench_report",
     "harness_missing",
     "load_prediction_ids",
+    "load_selected_instance_ids",
     "parse_swebench_report",
 ]

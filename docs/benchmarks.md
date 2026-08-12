@@ -1288,7 +1288,7 @@ and the standard 250-step limit:
 ```bash
 mini-extra swebench --model <model> --subset verified --split test \
   --output <directory> --workers <concurrency> \
-  -c swebench.yaml -c agent.step_limit=250
+  --config swebench.yaml --config agent.step_limit=250
 ```
 
 Kairyu validates the generated `preds.json`, then invokes the
@@ -1301,13 +1301,24 @@ python -m swebench.harness.run_evaluation \
   --run_id <run-id> --report_dir <directory>
 ```
 
-For `--limit N` or `--smoke`, the exact prediction IDs are also passed through
-`--instance_ids`; otherwise the official harness would retain the full 500-task
-denominator. Kairyu accepts only one schema-v2 report whose submitted IDs match
-those predictions exactly. The score is `resolved / selected`; incomplete
-evaluations, empty patches, harness errors, and unresolved tasks remain in the
-denominator. Commands, selected IDs, raw predictions, and the official report
-are retained in the pair methodology/artifacts without copying credentials.
+Before generation, Kairyu loads the official test split in dataset order,
+applies `--limit N` or `--smoke`, and persists those exact selected IDs. The
+same complete selection is passed through `--instance_ids`; otherwise an
+instance for which mini-SWE-agent emitted no prediction could silently disappear
+from the denominator. Prediction IDs must be a valid subset of the persisted
+selection, and the official schema-v2 report must account for every selected
+instance as submitted or incomplete. The score is `resolved / selected`;
+incomplete evaluations, empty patches, harness errors, and unresolved tasks all
+remain in the denominator.
+
+Expensive evidence is retained below
+`<results-dir>/<run-id>/artifacts/swe-bench-verified/<target>/`: the immutable
+selection manifest, complete mini-SWE-agent output (including trajectories,
+logs, and `preds.json`), Kairyu-captured stage logs, official evaluator logs,
+and the schema-v2 report. Kairyu redacts endpoint credentials from the stage
+logs and does not persist the subprocess environment. A failed pair reuses that
+directory to resume upstream work; explicit `--rerun` creates a distinct,
+persistent attempt directory.
 
 The upstream images are intended for x86-64 Linux Docker hosts; unsupported
 platforms are skipped instead of emitting a score. This benchmark also has an
@@ -1328,10 +1339,13 @@ Fugu's published turn and trial conditions are pinned in the invocations:
 
 Harness output and sampling, verified against the pinned harnesses:
 
-- **SWE-bench** first writes one prediction per selected instance. Kairyu rejects
-  missing, duplicate, blank, or extra IDs before evaluation, and fails closed on
-  a missing, ambiguous, or malformed official schema-v2 report. Generation and
-  evaluation have independent timeout/failure diagnostics.
+- **SWE-bench** may omit a prediction when an upstream worker fails without
+  making the overall generation process non-zero. Kairyu rejects duplicate,
+  blank, malformed, or extra IDs, but passes the pre-generation selection to
+  evaluation so every omitted prediction stays incomplete in the denominator.
+  It fails closed on a missing, ambiguous, or malformed official schema-v2
+  report. Generation and evaluation have independent timeout/failure
+  diagnostics and persistent logs.
 - **Harbor** writes a job-level `result.json` holding `trial_results`, each trial
   carrying its verdict under `verifier_result.rewards` — a *task-defined* dict.
   The adapter prefers the conventional keys (`reward`, `resolved`, `accuracy`,

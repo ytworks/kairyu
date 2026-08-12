@@ -79,17 +79,20 @@ python -m swebench.harness.run_evaluation \
   --dataset_name princeton-nlp/SWE-bench_Verified \
   --split test \
   --predictions_path <preds.json> \
-  --instance_ids <exact prediction IDs...> \
+  --instance_ids <exact selected IDs...> \
   --max_workers <concurrency> \
   --run_id <stable run identifier> \
   --report_dir <adapter work directory>
 ```
 
-Passing the exact prediction IDs is required. For `--limit N`, the official
-report denominator must be the selected N instances, not all 500 dataset
-instances. The adapter will read and validate the prediction mapping before
-evaluation, reject an empty or malformed mapping, and pass its keys to
-`--instance_ids`.
+Passing the exact pre-generation selection is required. For `--limit N`, the
+official report denominator must be the selected N instances, not all 500
+dataset instances. The adapter loads the official test split in dataset order,
+applies the limit, and persists that selection before launching mini-SWE-agent.
+It then validates that the non-empty prediction mapping is a subset of the
+selection and passes the full selected set to `--instance_ids`. A worker that
+exits without writing a prediction therefore remains an official incomplete
+instance instead of silently shrinking the denominator.
 
 The official harness runs tests inside architecture-specific Docker images.
 The adapter must therefore fail with a clear precondition message when Docker,
@@ -129,22 +132,30 @@ parallel special-purpose entry point.
 
 ## Work directory and stored provenance
 
-During execution, the isolated adapter work directory contains:
+During execution, the persistent adapter work directory contains:
 
+- an immutable selection manifest written before generation;
 - the `mini-output/` generation directory, trajectories, logs, and `preds.json`;
+- redacted stdout/stderr captured independently for each subprocess stage;
 - the official SWE-bench report JSON;
 - the official harness's separately managed per-instance evaluation logs.
 
 Kairyu's persisted pair result embeds the official report's validated category
 counts and ID lists, plus the generated and evaluated commands, dataset names,
-split, selected instance IDs, scaffold/config name, step limit, concurrency,
-seed, and pinned evaluator distribution identities already captured by the
-suite fingerprint. The potentially very large mini-SWE-agent trajectories,
-container images, and upstream harness log tree are not copied into the normal
-scoreboard result directory.
+split, selected/predicted/missing instance IDs, scaffold/config name, step
+limit, concurrency, and pinned evaluator distribution identities already
+captured by the suite fingerprint. The large mini-SWE-agent and upstream
+evaluator trees stay below the run's artifact root and are referenced by stable
+paths from the pair result instead of being embedded in scoreboard JSON.
+
+A normal retry of a failed pair reuses the stable work directory so upstream
+per-instance work can resume. An explicit suite `--rerun` creates a distinct
+persistent attempt subdirectory and therefore cannot reuse earlier predictions
+as fresh evidence.
 
 Secrets from endpoint credentials or environment variables must not be copied
-into commands or report artifacts.
+into commands, methodology, or Kairyu-captured stage logs. The subprocess
+environment itself is never persisted.
 
 The normal suite reporter continues to produce `scoreboard.json`,
 `scoreboard.md`, `comparison.json`, and `comparison.md`; no separate score
@@ -156,8 +167,11 @@ Consume SWE-bench report schema version 2 and validate it fail-closed. The
 parser must verify that count fields match their corresponding ID arrays, IDs
 are unique and mutually exclusive where required, all submitted IDs belong to
 the exact selected set, and category totals cover the selected denominator.
-Malformed, ambiguous, missing, or multiple candidate reports are benchmark
-failures, not partial scores.
+SWE-bench 4.1 may put an empty or malformed existing task report in both
+`completed_ids` and `error_ids`; the parser accepts only that documented overlap,
+gives the error outcome precedence, and requires every non-error completed ID to
+be resolved or unresolved. Malformed, ambiguous, missing, or multiple candidate
+reports are benchmark failures, not partial scores.
 
 Map official outcomes to Kairyu items as follows:
 
@@ -228,7 +242,8 @@ Development follows test-driven development. Focused tests will establish:
    discovery for `swe-bench-verified`.
 2. The exact official generation/evaluation arguments, including the retained
    base config, `verified`/`test`, 250 steps, concurrency, and selected IDs.
-3. `--limit` evaluation against exactly the generated IDs.
+3. `--limit` evaluation against the persisted pre-generation selection,
+   including a task omitted from `preds.json` as an incomplete denominator item.
 4. Strict schema-v2 parsing for resolved, unresolved, empty-patch, error, and
    incomplete outcomes plus rejected malformed/ambiguous artifacts.
 5. Shared-code regression coverage proving Pro still uses its dataset and

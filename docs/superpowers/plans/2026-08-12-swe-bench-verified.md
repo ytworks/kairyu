@@ -11,9 +11,9 @@
 ## Global Constraints
 
 - The public benchmark key is exactly `swe-bench-verified` and its display name is `SWE-bench Verified`.
-- Generation uses `mini-extra swebench --subset verified --split test` with `-c swebench.yaml`; the standard config remains at 250 steps and a $3 cost limit.
-- Evaluation uses `python -m swebench.harness.run_evaluation`, dataset `princeton-nlp/SWE-bench_Verified`, split `test`, exact generated `--instance_ids`, `--max_workers`, `--run_id`, and `--report_dir`.
-- `--limit N` must yield an official denominator of exactly the generated IDs, never the whole 500-row split.
+- Generation uses `mini-extra swebench --subset verified --split test` with `--config swebench.yaml`; the standard config remains at 250 steps and a $3 cost limit.
+- Evaluation uses `python -m swebench.harness.run_evaluation`, dataset `princeton-nlp/SWE-bench_Verified`, split `test`, the exact pre-generation selection as `--instance_ids`, `--max_workers`, `--run_id`, and `--report_dir`.
+- `--limit N` must yield an official denominator of exactly the selected IDs, even when generation omits one, never the whole 500-row split or only the emitted predictions.
 - Official schema version 2 is parsed fail-closed; resolved, unresolved, empty-patch, error, and incomplete IDs all remain in the denominator.
 - Existing `swe-bench-pro` keeps dataset `ScaleAI/SWE-bench_Pro` and `agent.step_limit=1000`.
 - The new comparison row publishes only Fable 5 at 95.0; all other exact-model values remain absent.
@@ -70,7 +70,7 @@ def test_parse_swebench_report_preserves_every_official_outcome():
 
 - [ ] **Step 2: Add malformed-schema tests before implementation**
 
-Use parametrized mutations for a non-2 schema version, boolean/negative/mismatched counts, duplicate IDs, overlap between terminal categories, `completed_ids != resolved_ids | unresolved_ids`, `submitted_ids != completed | empty | error`, and `selected_ids != submitted | incomplete`. Each assertion must expect a `ValueError` naming the violated field or set relationship.
+Use parametrized mutations for a non-2 schema version, boolean/negative/mismatched counts, duplicate IDs, invalid overlap between terminal categories, `completed_ids - error_ids != resolved_ids | unresolved_ids`, `submitted_ids != completed | empty | error`, and `selected_ids != submitted | incomplete`. SWE-bench 4.1's documented completed/error overlap for an empty or malformed report file must be accepted with error precedence. Each rejected mutation must expect a `ValueError` naming the violated field or set relationship.
 
 - [ ] **Step 3: Add prediction mapping and report-discovery tests**
 
@@ -84,7 +84,7 @@ def test_load_prediction_ids_validates_and_sorts_mini_swe_mapping(tmp_path):
     assert load_prediction_ids(path) == ("a", "b")
 ```
 
-Also reject non-objects, empty objects, empty/non-string IDs, non-object rows, mismatched `instance_id`, missing/non-string `model_name_or_path`, and a `model_patch` that is neither a string nor null. Report discovery must accept exactly one root schema-v2 report and reject zero or multiple candidates.
+Also reject non-objects, empty objects, empty/non-string IDs, non-object rows, mismatched `instance_id`, missing/non-string `model_name_or_path`, a missing `model_patch`, and a `model_patch` that is neither a string nor null. Report discovery must accept exactly one root schema-v2 report and reject zero or multiple candidates.
 
 - [ ] **Step 4: Run the focused tests and observe the expected import/assertion failures**
 
@@ -135,14 +135,16 @@ def parse_swebench_report(report, *, selected_ids=None):
     for count_name, ids_name in _COUNT_TO_IDS.items():
         if counts[count_name] != len(ids[ids_name]):
             raise ValueError(f"{count_name} does not match {ids_name}")
+    resolved = ids["resolved_ids"] | ids["unresolved_ids"]
     if ids["resolved_ids"] & ids["unresolved_ids"]:
         raise ValueError("resolved_ids and unresolved_ids must be disjoint")
-    if ids["completed_ids"] != ids["resolved_ids"] | ids["unresolved_ids"]:
-        raise ValueError("completed_ids must equal resolved_ids plus unresolved_ids")
-    terminal = (ids["completed_ids"], ids["empty_patch_ids"], ids["error_ids"])
-    if any(left & right for index, left in enumerate(terminal) for right in terminal[index + 1:]):
-        raise ValueError("submitted outcome IDs must be disjoint")
-    if ids["submitted_ids"] != set().union(*terminal):
+    if resolved & ids["error_ids"] or ids["completed_ids"] & ids["empty_patch_ids"]:
+        raise ValueError("submitted outcome IDs have an invalid overlap")
+    # v4.1 can mark an existing malformed task report completed and errored.
+    if ids["completed_ids"] - ids["error_ids"] != resolved:
+        raise ValueError("non-error completed IDs must equal resolved plus unresolved")
+    terminal = ids["completed_ids"] | ids["empty_patch_ids"] | ids["error_ids"]
+    if ids["submitted_ids"] != terminal:
         raise ValueError("submitted_ids must equal completed, empty-patch, and error IDs")
     selected = set(selected_ids) if selected_ids is not None else (
         ids["submitted_ids"] | ids["incomplete_ids"]
@@ -214,7 +216,7 @@ In the actual assertion, check `--max_workers`, `--run_id`, and `--report_dir` b
 
 - [ ] **Step 2: Write the failing end-to-end fake-subprocess test**
 
-The fake generation stage writes a valid four-row mini-SWE prediction mapping. The fake evaluation stage asserts the exact sorted IDs and writes a complete schema-v2 report with two resolved, one unresolved, and one harness error. Assert score `0.5`, total `4`, partial status, both stored commands, report category counts, and no credential value in serialized methodology.
+The fake dataset selection establishes four exact IDs before generation. The fake generation stage writes a valid four-row mini-SWE prediction mapping. The fake evaluation stage asserts those selected IDs and writes a complete schema-v2 report with two resolved, one unresolved, and one harness error. Add a second case where one prediction is omitted but remains incomplete in the four-item denominator. Assert score `0.5`, total `4`, partial status, both stored commands, report category counts, persistent artifact paths, redacted captured logs, and no credential value in serialized methodology.
 
 - [ ] **Step 3: Add fail-closed tests**
 
@@ -257,7 +259,7 @@ class SweBenchAdapter:
         ]
 ```
 
-In `run`, validate predictions between stages, derive a run id containing `ctx.run_id` and the adapter name, parse exactly one report, and call `summarize_items` with the specification's comparability fields. Persist `official_report`, selected IDs, both shell-joined commands, dataset, subset, split, scaffold, step limit, and concurrency in `methodology`; never persist environment values.
+In `run`, load and persist the official dataset selection before generation, validate predictions as its subset between stages, derive a run id containing `ctx.run_id` and the adapter name, pass the full selection to evaluation, parse exactly one report, and call `summarize_items` with the specification's comparability fields. Persist the mini-SWE output, selection manifest, redacted stage logs, evaluator logs, `official_report`, selected/predicted/missing IDs, both shell-joined commands, dataset, subset, split, scaffold, step limit, and concurrency below the run artifact root; never persist environment values. Reuse failed-run artifacts normally, but isolate explicit `--rerun` attempts.
 
 - [ ] **Step 6: Replace Pro with a thin specification while retaining compatibility exports**
 
@@ -464,7 +466,7 @@ uv run kairyu bench run \
   --only swe-bench-verified
 ```
 
-Explain that mini-SWE-agent generates with `verified`/`test` and standard `swebench.yaml` (250 steps, $3 task cap), then swebench 4.x evaluates the exact generated IDs in Docker. State that Linux x86 images may not run on other architectures, empty/error/incomplete tasks stay in the denominator, a full run has 500 tasks, and `--limit` evaluates only its exact selected IDs. List `scoreboard.{json,md}` and `comparison.{json,md}` and explain the Fable 95.0 orientation-only five-trial value.
+Explain that Kairyu fixes the official test-split selection first, mini-SWE-agent generates with `verified`/`test` and standard `swebench.yaml` (250 steps, $3 task cap), then swebench 4.x evaluates all selected IDs in Docker. State that Linux x86 images may not run on other architectures, omitted predictions and empty/error/incomplete tasks stay in the denominator, a full run has 500 tasks, and `--limit` evaluates only its exact selected IDs. Document persistent raw artifacts and explicit-rerun isolation. List `scoreboard.{json,md}` and `comparison.{json,md}` and explain the Fable 95.0 orientation-only five-trial value.
 
 - [ ] **Step 4: Update the Accuracy config comment**
 

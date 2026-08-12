@@ -562,6 +562,21 @@ def test_direct_run_context_gets_a_local_execution_runner(tmp_path):
     assert ctx.execution_runner.metadata()["runner"] == "local"
 
 
+def test_runner_context_routes_external_artifacts_and_explicit_rerun(tmp_path):
+    config = make_config(tmp_path).model_copy(update={"rerun": True})
+    runner = SuiteRunner(
+        config,
+        probe_docker=lambda: (False, "docker unavailable (test)"),
+    )
+
+    ctx = runner._build_context(BenchCache(tmp_path / "cache"), "artifact-run")
+
+    assert ctx.rerun is True
+    assert ctx.artifacts_dir == (
+        Path(config.results_dir).resolve() / "artifact-run" / "artifacts"
+    )
+
+
 async def test_selected_execution_runner_is_built_once_and_recorded(
     tmp_path, http_factory, monkeypatch
 ):
