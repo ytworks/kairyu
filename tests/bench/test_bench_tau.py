@@ -19,7 +19,7 @@ from kairyu.bench.types import JudgeConfig, JudgeEndpointConfig
 
 SAMPLE_RESULTS = {
     "simulations": [
-        {"task_id": "banking_001", "reward": 1.0},
+        {"task_id": "banking_001", "reward_info": {"reward": 1.0}},
         {"task_id": "banking_002", "reward": 0.0},
         {"task_id": "banking_003", "reward": 0.5},
     ]
@@ -53,6 +53,13 @@ def test_parse_tau_results_shapes():
 
     missing = parse_tau_results([{"task_id": "x"}])
     assert missing[0].status == "failed"
+
+
+def test_parse_tau_results_prefers_exported_reward_when_both_shapes_exist():
+    items = parse_tau_results(
+        [{"task_id": "x", "reward": 0.25, "reward_info": {"reward": 1.0}}]
+    )
+    assert items[0].score == 0.25
 
 
 async def test_skipped_without_harness(tmp_path, monkeypatch):

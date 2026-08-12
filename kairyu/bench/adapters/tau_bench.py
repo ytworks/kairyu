@@ -161,6 +161,11 @@ def parse_tau_results(data) -> list[ItemResult]:
     items: list[ItemResult] = []
     for index, entry in enumerate(entries):
         reward = entry.get("reward")
+        # τ³ v1.x moved the official aggregate under reward_info while older
+        # τ² results and a few exported forms keep it at the top level.
+        reward_info = entry.get("reward_info")
+        if reward is None and isinstance(reward_info, dict):
+            reward = reward_info.get("reward")
         task_id = str(entry.get("task_id", entry.get("id", index)))
         if reward is None:
             items.append(ItemResult(item_id=task_id, status="failed", error="no reward in entry"))
