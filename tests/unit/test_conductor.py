@@ -533,6 +533,41 @@ async def test_visible_intermediates_are_attributed_and_separate_from_final():
     assert "published answer" not in reasoning
 
 
+async def test_unary_reasoning_starts_with_actual_final_model_attribution():
+    backend = ScriptedBackend(["draft", "published answer"])
+    roles = (
+        RoleSpec(name="draft", worker="tier1", prompt="draft: {query}"),
+        RoleSpec(
+            name="publisher",
+            worker="tier2",
+            prompt="publish: {draft}",
+            role_type="publisher",
+            depends_on=("draft",),
+        ),
+    )
+    conductor = Conductor(
+        roles=roles,
+        workers={"tier1": backend, "tier2": backend},
+        worker_trace={
+            "tier1": WorkerTraceIdentity(engine="qwen-pool", model="Qwen3.6-27B"),
+            "tier2": WorkerTraceIdentity(engine="deepseek-pool", model="DeepSeek-V4"),
+        },
+        expose_intermediate_outputs=True,
+    )
+
+    result = await conductor.run("task")
+
+    assert result.reasoning_content is not None
+    assert result.reasoning_content.startswith("### Final answer attribution")
+    assert "L2 role: `publisher`" in result.reasoning_content
+    assert "L1 worker: `tier2`" in result.reasoning_content
+    assert "Engine: `deepseek-pool`" in result.reasoning_content
+    assert "Model: `DeepSeek-V4`" in result.reasoning_content
+    assert result.reasoning_content.index("Final answer attribution") < (
+        result.reasoning_content.index("### draft")
+    )
+
+
 async def test_intermediates_remain_hidden_by_default():
     backend = ScriptedBackend(["draft", "published answer"])
     roles = (

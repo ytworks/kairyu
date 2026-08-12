@@ -643,13 +643,13 @@ async function assertBrowserStreaming(modelId, marker) {
 	);
 }
 
-async function sendUiMessage(modelId, marker) {
+async function sendUiMessage(modelId, marker, prompt = `Reply with this exact local marker: ${marker}`) {
 	await selectModel(modelId);
 	const log = page.locator('ul[role="log"]');
 	const before = await log.locator('[role="listitem"]').count();
 
 	const input = page.locator('#chat-input');
-	await input.fill(`Reply with this exact local marker: ${marker}`);
+	await input.fill(prompt);
 	const responsePromise = page.waitForResponse(
 		(response) => {
 			const request = response.request();
@@ -886,9 +886,11 @@ async function assertTieredProductInventory() {
 }
 
 async function assertTieredReasoningUi() {
+	const prompt = 'PAC1 antagonistのMOAを簡潔に説明してください';
 	const responseItem = await sendUiMessage(
 		productModel,
-		'KAIRYU_TIERED_UI_OK'
+		prompt,
+		prompt
 	);
 	const reasoningToggle = responseItem.locator('button[aria-expanded]').filter({
 		hasText: /Thought|Thinking/
@@ -943,6 +945,8 @@ async function assertTieredReasoningUi() {
 		);
 	}
 	for (const identity of [
+		'Final answer attribution',
+		'publisher',
 		'tier1',
 		'tier2',
 		'qwen3.6-27b',

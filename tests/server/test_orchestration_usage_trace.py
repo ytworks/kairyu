@@ -181,6 +181,11 @@ def test_visible_intermediates_use_reasoning_content_with_model_attribution(
         content = message["content"]
 
     assert content == "final synthesized answer"
+    if not stream:
+        assert reasoning.startswith("### Final answer attribution")
+        assert "L2 role: `synthesizer`" in reasoning
+        assert "L1 worker: `tier2`" in reasoning
+        assert "Model: `DeepSeek-V4`" in reasoning
     assert "useful intermediate answer" in reasoning
     assert "PASS" in reasoning
     assert "L2 role: `planner`" in reasoning

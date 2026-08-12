@@ -553,13 +553,36 @@ class Conductor:
             )
         )
 
-    @staticmethod
-    def _reasoning_content(run: _RunState) -> str | None:
-        if not run.intermediate_outputs:
-            return None
-        return "\n\n---\n\n".join(
-            output.as_markdown() for output in run.intermediate_outputs
+    def _attribution_summary(self, spec: RoleSpec) -> str:
+        identity = self._worker_trace[spec.worker]
+        model = identity.model or "unspecified"
+        return "\n".join(
+            (
+                "### Final answer attribution",
+                "",
+                f"- L2 role: `{spec.role_type}`",
+                f"- L1 worker: `{spec.worker}`",
+                f"- Engine: `{identity.engine}`",
+                f"- Model: `{model}`",
+            )
         )
+
+    def _reasoning_content(
+        self,
+        run: _RunState,
+        *,
+        include_final_attribution: bool = True,
+    ) -> str | None:
+        if not self._expose_intermediate_outputs:
+            return None
+        sections = [output.as_markdown() for output in run.intermediate_outputs]
+        if not include_final_attribution:
+            return "\n\n---\n\n".join(sections) or None
+        final = self._final_output_unit(run)
+        if final is None:
+            return None
+        sections.insert(0, self._attribution_summary(final))
+        return "\n\n---\n\n".join(sections)
 
     async def _generate(
         self,
@@ -824,14 +847,18 @@ class Conductor:
             )
 
     def _final_text(self, run: _RunState) -> str:
+        unit = self._final_output_unit(run)
+        return run.outputs[unit.name] if unit is not None else ""
+
+    def _final_output_unit(self, run: _RunState) -> RoleSpec | None:
         terminal = self._terminal_units()
         synthesizers = [unit for unit in terminal if unit.role_type == "synthesizer"]
         for unit in synthesizers + terminal:
             if unit.name in run.outputs:
-                return run.outputs[unit.name]
+                return unit
         if run.completion_order:
-            return run.outputs[run.completion_order[-1]]
-        return ""
+            return self._by_name[run.completion_order[-1]]
+        return None
 
     def _terminal_units(self) -> list[RoleSpec]:
         dependents: set[str] = set()
@@ -1148,7 +1175,10 @@ class Conductor:
                 trace=tuple(run.trace),
                 usage=tuple(run.usage),
                 cached_tokens=run.cached_tokens,
-                reasoning_content=self._reasoning_content(run),
+                reasoning_content=self._reasoning_content(
+                    run,
+                    include_final_attribution=False,
+                ),
             )
             raise ConductorStreamError(error, result) from error
         final_text = self._final_text(run)
@@ -1169,6 +1199,9 @@ class Conductor:
                 trace=tuple(run.trace),
                 usage=tuple(run.usage),
                 cached_tokens=run.cached_tokens,
-                reasoning_content=self._reasoning_content(run),
+                reasoning_content=self._reasoning_content(
+                    run,
+                    include_final_attribution=False,
+                ),
             ),
         )
