@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 
 from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
@@ -227,6 +227,7 @@ class Orchestrator:
         cost_model: CostModel = zero_cost,
         moa_samples: int = 0,
         engine_descriptors: Mapping[str, EngineDescriptor] | None = None,
+        owned_engines: Iterable[EngineBackend] | None = None,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
@@ -235,6 +236,11 @@ class Orchestrator:
                 "orchestration shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
             )
         self._engines = dict(engines)
+        self._owned_engines = tuple(
+            {id(engine): engine for engine in (
+                self._engines.values() if owned_engines is None else owned_engines
+            )}.values()
+        )
         self._owner_token = object()
         supplied_descriptors = dict(engine_descriptors or {})
         self._engine_descriptors = {
@@ -274,7 +280,7 @@ class Orchestrator:
     async def startup(self) -> None:
         """Eagerly start owned process resources before serving auto models."""
 
-        for engine in {id(engine): engine for engine in self._engines.values()}.values():
+        for engine in self._owned_engines:
             startup = getattr(engine, "startup", None)
             if callable(startup):
                 await startup()
@@ -355,7 +361,7 @@ class Orchestrator:
         }
 
     async def shutdown(self) -> None:
-        await shutdown_all(self._engines.values(), "Orchestrator")
+        await shutdown_all(self._owned_engines, "Orchestrator")
 
     def _resolve_engine_name(self, tier: str, notes: list[str]) -> str:
         if tier in self._engines:

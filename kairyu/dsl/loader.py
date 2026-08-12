@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import yaml
@@ -30,6 +31,8 @@ def load_spec(source: str | Path) -> OrchestratorSpec:
 
 
 def _build_worker(worker: WorkerSpec) -> EngineBackend:
+    if worker.engine_ref is not None:
+        raise ValueError("engine_ref workers require deployment engine resolution")
     options = dict(worker.options)
     if worker.model is not None:
         options.setdefault("model", worker.model)
@@ -43,18 +46,45 @@ def _build_worker(worker: WorkerSpec) -> EngineBackend:
     return create_backend(worker.backend, **options)
 
 
-def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
-    engines = {worker.name: _build_worker(worker) for worker in spec.workers}
+def build_orchestrator(
+    spec: OrchestratorSpec,
+    *,
+    engine_refs: Mapping[str, EngineBackend] | None = None,
+) -> Orchestrator:
+    available_refs = dict(engine_refs or {})
+    engines: dict[str, EngineBackend] = {}
+    owned_engines: list[EngineBackend] = []
+    for worker in spec.workers:
+        if worker.engine_ref is not None:
+            try:
+                engines[worker.name] = available_refs[worker.engine_ref]
+            except KeyError as error:
+                raise ValueError(
+                    f"worker {worker.name!r} references unknown deployment engine "
+                    f"{worker.engine_ref!r}"
+                ) from error
+        else:
+            engine = _build_worker(worker)
+            engines[worker.name] = engine
+            owned_engines.append(engine)
     engine_descriptors = {
         worker.name: EngineDescriptor(
-            backend_type=worker.backend,
+            backend_type=(
+                type(engines[worker.name]).__name__
+                if worker.engine_ref is not None
+                else worker.backend
+            ),
             model=(
-                worker.model
-                if worker.model is not None
+                worker.engine_ref
+                if worker.engine_ref is not None
                 else (
-                    worker.options.get("model")
-                    if isinstance(worker.options.get("model"), str)
-                    else None
+                    worker.model
+                    if worker.model is not None
+                    else (
+                        worker.options.get("model")
+                        if isinstance(worker.options.get("model"), str)
+                        else None
+                    )
                 )
             ),
         )
@@ -104,4 +134,5 @@ def build_orchestrator(spec: OrchestratorSpec) -> Orchestrator:
         cost_model=cost_model,
         moa_samples=spec.moa_samples,
         engine_descriptors=engine_descriptors,
+        owned_engines=owned_engines,
     )

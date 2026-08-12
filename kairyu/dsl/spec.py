@@ -13,6 +13,7 @@ class WorkerSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: str
+    engine_ref: str | None = Field(default=None, min_length=1)
     backend: str = "mock"
     model: str | None = None
     base_url: str | None = None
@@ -21,6 +22,20 @@ class WorkerSpec(BaseModel):
 
     @model_validator(mode="after")
     def _validate_openai_capabilities(self) -> WorkerSpec:
+        if self.engine_ref is not None:
+            factory_fields = {
+                "backend",
+                "model",
+                "base_url",
+                "api_key_env",
+                "options",
+            } & self.model_fields_set
+            if factory_fields:
+                raise ValueError(
+                    "engine_ref workers cannot also declare factory fields: "
+                    f"{sorted(factory_fields)}"
+                )
+            return self
         if self.backend == "openai":
             resolve_openai_capabilities(
                 self.options.get("upstream", "generic"),

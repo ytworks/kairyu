@@ -789,7 +789,7 @@ def build_app_from_spec(
             orchestrator_spec = orchestrator_spec.model_copy(
                 update={"workers": tuple(workers)}
             )
-        return build_orchestrator(orchestrator_spec)
+        return build_orchestrator(orchestrator_spec, engine_refs=engines)
 
     orchestrator: Orchestrator | None = None
     if spec.orchestrator is not None:

@@ -836,6 +836,44 @@ legacy_chat_models: [kairyu-auto]
     assert worker.shutdown_count == 1
 
 
+async def test_lifespan_borrowed_orchestrator_engine_has_one_owner(
+    monkeypatch,
+    tmp_path,
+):
+    borrowed = _StartupBackend()
+    (tmp_path / "orchestrator.yaml").write_text(
+        "workers:\n  - {name: tier1, engine_ref: direct}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda *_args, **_kwargs: borrowed,
+    )
+
+    def unexpected_factory(*_args, **_kwargs):
+        raise AssertionError("borrowed workers must not construct a backend")
+
+    monkeypatch.setattr("kairyu.dsl.loader.create_backend", unexpected_factory)
+    app = build_app_from_spec(
+        load_deployment_spec(
+            """
+engines:
+  direct: {backend: mock}
+orchestrator: {spec: orchestrator.yaml}
+legacy_chat_models: [kairyu-auto]
+"""
+        ),
+        base_dir=tmp_path,
+    )
+
+    async with app.router.lifespan_context(app):
+        assert borrowed.startup_count == 1
+        assert borrowed.shutdown_count == 0
+
+    assert borrowed.shutdown_count == 1
+
+
 async def test_lifespan_startup_failure_prevents_serving_and_shuts_down_all_owned_resources(
     monkeypatch,
 ):
@@ -1728,7 +1766,8 @@ async def test_lifespan_attempts_orchestrator_shutdown_after_engine_failure(tmp_
         "kairyu.deploy.builder.create_backend", lambda *_args, **_kwargs: failing_engine
     )
     monkeypatch.setattr(
-        "kairyu.deploy.builder.build_orchestrator", lambda _spec: owned_orchestrator
+        "kairyu.deploy.builder.build_orchestrator",
+        lambda _spec, **_kwargs: owned_orchestrator,
     )
     spec = load_deployment_spec(
         f"""

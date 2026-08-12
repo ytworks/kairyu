@@ -914,6 +914,7 @@ def _validate_orchestrator(
     *,
     reference_field: str,
     checked_models: set[tuple[str, str, str, str]],
+    deployment_engine_refs: frozenset[str],
 ) -> list[ValidationFinding]:
     if not path.is_file():
         return [
@@ -944,6 +945,19 @@ def _validate_orchestrator(
 
     findings = _validate_orchestrator_topology(spec, artifact=path)
     for index, worker in enumerate(spec.workers):
+        worker_field = f"workers[{index}]"
+        if worker.engine_ref is not None:
+            if worker.engine_ref not in deployment_engine_refs:
+                findings.append(
+                    _finding(
+                        artifact=path,
+                        field=f"{worker_field}.engine_ref",
+                        check="schema",
+                        code="schema.unknown_engine_ref",
+                        message="engine_ref does not match an engines: or pools: name",
+                    )
+                )
+            continue
         options: dict[object, object] = dict(worker.options)
         builtin_native = (
             worker.backend in _NATIVE_BACKENDS
@@ -955,7 +969,6 @@ def _validate_orchestrator(
             options.setdefault("base_url", worker.base_url)
         if worker.backend == "openai" or worker.api_key_env is not None:
             options.setdefault("api_key_env", worker.api_key_env)
-        worker_field = f"workers[{index}]"
         if (
             builtin_native
             and worker.model is not None
@@ -1178,6 +1191,12 @@ def validate_deployment(config: str | Path) -> ValidationReport:
         )
 
     checked_orchestrators: set[Path] = set()
+    deployment_engine_refs = frozenset(
+        {
+            *(name for name in _mapping(raw.get("engines")) if isinstance(name, str)),
+            *(name for name in _mapping(raw.get("pools")) if isinstance(name, str)),
+        }
+    )
     for field, reference in _iter_orchestrator_references(raw):
         path = Path(reference)
         if not path.is_absolute():
@@ -1192,6 +1211,7 @@ def validate_deployment(config: str | Path) -> ValidationReport:
                 path,
                 reference_field=field,
                 checked_models=checked_models,
+                deployment_engine_refs=deployment_engine_refs,
             )
         )
     template_findings = _validate_chat_templates(raw, config_path=config_path)

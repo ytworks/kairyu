@@ -3,6 +3,7 @@ from pydantic import ValidationError
 
 from kairyu.dsl.decorators import AgentPool
 from kairyu.dsl.loader import build_orchestrator, load_spec
+from kairyu.engine.mock import MockBackend
 
 YAML_SPEC = """
 shared_prefix: "SYS\\n"
@@ -66,6 +67,57 @@ workers:
   - {name: repeated, backend: mock}
   - {name: repeated, backend: mock}
 """
+        )
+
+
+@pytest.mark.parametrize(
+    "factory_field",
+    (
+        "backend: mock",
+        "model: internal",
+        "base_url: http://internal/v1",
+        "api_key_env: KEY",
+        "options: {}",
+    ),
+)
+def test_engine_ref_rejects_factory_fields(factory_field):
+    with pytest.raises(ValidationError, match="engine_ref workers"):
+        load_spec(
+            f"""
+workers:
+  - name: tier1
+    engine_ref: internal
+    {factory_field}
+"""
+        )
+
+
+async def test_engine_ref_dispatches_to_borrowed_object_without_factory(monkeypatch):
+    borrowed = MockBackend(responses={"hello": "borrowed answer"})
+
+    def unexpected_factory(*_args, **_kwargs):
+        raise AssertionError("engine_ref must not construct a backend")
+
+    monkeypatch.setattr("kairyu.dsl.loader.create_backend", unexpected_factory)
+    orchestrator = build_orchestrator(
+        load_spec("workers: [{name: tier1, engine_ref: internal}]"),
+        engine_refs={"internal": borrowed},
+    )
+
+    result = await orchestrator.run("hello")
+
+    assert result.text == "borrowed answer"
+    assert borrowed.prompts_seen
+    assert orchestrator.describe_routing()["configured_engines"] == {
+        "tier1": {"backend_type": "MockBackend", "model": "internal"}
+    }
+
+
+def test_engine_ref_rejects_unknown_deployment_engine():
+    with pytest.raises(ValueError, match="unknown deployment engine 'missing'"):
+        build_orchestrator(
+            load_spec("workers: [{name: tier1, engine_ref: missing}]"),
+            engine_refs={},
         )
 
 
