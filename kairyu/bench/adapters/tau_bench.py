@@ -146,6 +146,9 @@ def harness_data_dir(flavor: str) -> Path | None:
     under it. Guessing that layout is how a successful run gets reported as
     producing no results, so the value is imported rather than reconstructed.
     """
+    env_dir = os.environ.get("TAU2_DATA_DIR")
+    if env_dir:
+        return Path(env_dir)
     for module in dict.fromkeys((f"{flavor}.utils.utils", "tau2.utils.utils")):
         try:
             imported = importlib.import_module(module)
@@ -160,9 +163,8 @@ def harness_data_dir(flavor: str) -> Path | None:
 def data_dir_candidates(flavor: str) -> list[Path]:
     """Roots that may hold `simulations/<save_to>/results.json`.
 
-    The harness's own `DATA_DIR` comes first; the rest are fallbacks for when it
-    cannot be imported (a partially installed harness, or a flavor that renamed
-    the module).
+    The harness's resolution comes first; `harness_data_dir()` consults the
+    live environment before an already-imported module's cached value.
     """
     roots: list[Path] = []
     resolved = harness_data_dir(flavor)
@@ -205,9 +207,24 @@ def parse_tau_results(data) -> list[ItemResult]:
     items: list[ItemResult] = []
     for index, entry in enumerate(entries):
         reward = entry.get("reward")
+        reward_info = entry.get("reward_info")
+        if reward is None and isinstance(reward_info, dict):
+            reward = reward_info.get("reward")
         task_id = str(entry.get("task_id", entry.get("id", index)))
         if reward is None:
-            items.append(ItemResult(item_id=task_id, status="failed", error="no reward in entry"))
+            info = entry.get("info")
+            harness_error = info.get("error") if isinstance(info, dict) else None
+            items.append(
+                ItemResult(
+                    item_id=task_id,
+                    status="failed",
+                    error=(
+                        str(harness_error)
+                        if harness_error
+                        else "no reward in entry"
+                    ),
+                )
+            )
         else:
             items.append(ItemResult(item_id=task_id, status="completed", score=float(reward)))
     return items

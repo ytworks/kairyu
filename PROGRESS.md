@@ -98,6 +98,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-12 — [amendment] τ³ 1.x rewards remain machine-readable
+- What: The Banking adapter accepts both the legacy top-level `reward` and official τ³ 1.x `reward_info.reward` result shapes, surfaces infrastructure diagnostics for unscored simulations, and resolves the current `TAU2_DATA_DIR` ahead of a previously imported harness module's cached path.
+- Why: τ³ 1.0.1 executed ten simulations but the legacy parser classified every result as missing its reward; repeated tests could also search a stale temporary results directory.
+- Refs: `kairyu/bench/adapters/tau_bench.py`; `tests/bench/test_bench_tau.py`
+
 ### 2026-08-12 — [amendment] SWE-bench Pro uses its own official evaluator
 - What: Pro patch generation still uses mini-SWE-agent, but evaluation now runs the official `scaleapi/SWE-bench_Pro-os` local-Docker evaluator over the exact persisted source rows and all selected IDs, including explicit empty patches for missing predictions; boolean results must match the fixed denominator exactly.
 - Why: The generic SWE-bench harness has no repository specifications for Pro projects such as `NodeBB/NodeBB`, so it cannot evaluate the generated Pro patches.

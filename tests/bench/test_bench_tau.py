@@ -57,8 +57,16 @@ def test_parse_tau_results_shapes():
     bare_list = parse_tau_results([{"reward": 0.25}])
     assert bare_list[0].score == 0.25
 
-    missing = parse_tau_results([{"task_id": "x"}])
+    tau3 = parse_tau_results(
+        [{"task_id": "banking_004", "reward_info": {"reward": 1.0}}]
+    )
+    assert tau3[0].score == 1.0
+
+    missing = parse_tau_results(
+        [{"task_id": "x", "info": {"error": "upstream failed"}}]
+    )
     assert missing[0].status == "failed"
+    assert missing[0].error == "upstream failed"
 
 
 async def test_skipped_without_harness(tmp_path, monkeypatch):
