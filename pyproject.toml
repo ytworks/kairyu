@@ -85,6 +85,7 @@ bench = [
     "nltk==3.9.2",  # pinned IFEval tokenization semantics; punkt_tab cached separately
     "pillow>=10",
     "h5py>=3.11",  # SciCode golden data (test_data.h5)
+    "scipy>=1.14",  # SciCode source dependencies used by official test cases
     "tiktoken>=0.7",  # official o200k_base bins for the MRCRv2 slice
     "tqdm>=4.66",  # interactive progress bars; absence degrades to log lines
     "jsonschema==4.26.0",  # pinned Draft 2020-12 structured-output scoring semantics

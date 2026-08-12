@@ -36,7 +36,7 @@ class _RecordingExecutionRunner:
     def __init__(
         self,
         *,
-        modules: tuple[str, ...] = ("numpy",),
+        modules: tuple[str, ...] = ("numpy", "scipy"),
         available: tuple[bool, str] = (True, ""),
         stdout: str = "5\n",
     ) -> None:
@@ -343,6 +343,16 @@ def test_scicode_probes_the_selected_runners_modules(tmp_path):
 
     assert execution_runner.module_probes == ["numpy"]
     assert reason == "selected execution runner lacks numpy (pip install numpy)"
+
+
+def test_scicode_requires_scipy_in_the_selected_runner(tmp_path):
+    execution_runner = _RecordingExecutionRunner(modules=("numpy",))
+    ctx = _scicode_ctx(tmp_path, execution_runner)
+
+    reason = SciCodeAdapter().check_preconditions(make_target(), ctx)
+
+    assert execution_runner.module_probes == ["numpy", "scipy"]
+    assert reason == "selected execution runner lacks scipy (pip install scipy)"
 
 
 def test_execution_adapters_fail_closed_when_the_selected_runner_is_unavailable(

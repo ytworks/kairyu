@@ -385,6 +385,8 @@ class SciCodeAdapter(GenerativeAdapter):
             return f"selected execution runner unavailable ({detail})"
         if not ctx.execution_runner.has_module("numpy"):
             return "selected execution runner lacks numpy (pip install numpy)"
+        if not ctx.execution_runner.has_module("scipy"):
+            return "selected execution runner lacks scipy (pip install scipy)"
         return None
 
     def build_request(

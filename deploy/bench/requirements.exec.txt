@@ -1,9 +1,13 @@
-# Runtime used by SciCode's pinned HDF5 oracle. LiveCodeBench itself needs only
-# the Python standard library. Hashes are the CPython 3.12 manylinux wheels from
-# uv.lock for x86_64 and aarch64; --require-hashes rejects every other artifact.
+# Runtime used by SciCode's pinned HDF5 oracle and source-declared numerical
+# dependencies. LiveCodeBench itself needs only the Python standard library.
+# Hashes are the CPython 3.12 manylinux wheels from uv.lock for x86_64 and
+# aarch64; --require-hashes rejects every other artifact.
 numpy==2.5.0 \
     --hash=sha256:aaa760137137e8d3c920d27927748215b56014f92667dc9b6c27dfc61249255a \
     --hash=sha256:a1a4874217b36d5ac8fc876f52e39df56f8182c88463e9e2dceabf7ca8b7efb8
 h5py==3.16.0 \
     --hash=sha256:dfc21898ff025f1e8e67e194965a95a8d4754f452f83454538f98f8a3fcb207e \
     --hash=sha256:ff24039e2573297787c3063df64b60aab0591980ac898329a08b0320e0cf2527
+scipy==1.18.0 \
+    --hash=sha256:1f55797419e16e7f30cf88ffb3113ce0467f00cfe3f70d5c281730b21769bfc2 \
+    --hash=sha256:52a96e21517c7292375c0e27dd796a811f03fcea5fd4d108fdfea8145dcf17ab

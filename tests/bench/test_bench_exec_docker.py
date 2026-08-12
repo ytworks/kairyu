@@ -326,4 +326,5 @@ def test_supplied_image_has_scicode_runtime(runners):
     assert container.has_module("json")
     assert container.has_module("numpy")
     assert container.has_module("h5py")
+    assert container.has_module("scipy")
     assert not container.has_module("definitely_not_a_module_xyz")
