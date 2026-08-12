@@ -39,6 +39,11 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     }
     assert spec["deepseek_l1_loopback_port"] == 8005
     assert spec["benchmarks"]["serving"]["auto_max_combined_max_tokens"] == 4096
+    assert spec["benchmarks"]["terminalbench"] | {
+        "agent_max_timeout_s_before_multiplier": 900,
+        "agent_timeout_multiplier": 8.0,
+        "effective_agent_timeout_s": 7200,
+    } == spec["benchmarks"]["terminalbench"]
     assert spec["allocation"] == {
         "tier1": {
             "model": "qwen3.6-27b",
@@ -450,6 +455,23 @@ def test_tiered_terminalbench_validator_requires_clean_error_free_raw_items(
         )
         == 1
     )
+
+
+def test_tiered_terminalbench_result_uses_zero_inclusive_harbor_mean() -> None:
+    result = json.loads((EXAMPLE / "terminalbench-result.json").read_text())
+
+    assert result["attempts"] == 1
+    assert result["all_tasks_launched"] is True
+    assert result["official_verifier_rewards"] + result[
+        "missing_reward_counted_as_zero"
+    ] == result["total_trials"] == 89
+    assert result["reward_one"] + result["reward_zero"] == result[
+        "official_verifier_rewards"
+    ]
+    assert result["score"] == pytest.approx(result["reward_one"] / 89)
+    assert result["harbor_exceptions"]["count"] == 4
+    assert len(result["operator_interruptions"]) == 1
+    assert result["diagnostic_retries_substituted_into_score"] is False
 
 
 def test_tiered_moa_candidate_serving_requires_exact_trace_count(

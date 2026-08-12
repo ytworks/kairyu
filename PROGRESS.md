@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: Accuracy/Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; shared fail-closed evidence replay mechanics; Terminal-Bench keeps resumable raw Harbor jobs and bounds every agent phase to two effective hours
-- The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8, plus a contract-tested tiered Qwen TP1x4 + DeepSeek TP4/EP4 L2 stack entering runtime validation; its externally bound no-auth Open WebUI defaults to quality-first `kairyu-auto-max` and calls only loopback-exposed Kairyu L3, which owns pinned vLLM L1. Qwen's no-MTP/16K-batch configuration completed its final serving and LiveCodeBench-20 gates after MTP and 32K-batch candidates failed performance or stability checks, with all persistent data and compilation caches on NVMe
+- The example surface includes measured RTX PRO 6000 deployments for 8-GPU DeepSeek and one-GPU Qwen3.6 FP8, plus a measured tiered Qwen TP1x4 + DeepSeek TP4/EP4 stack; its no-auth external Open WebUI defaults to quality-first MoA-3 `kairyu-auto-max` and calls only loopback Kairyu L3. The selected policy cleared direct DeepSeek 3/4 vs 2/4 on the fixed pilot and its all-89 single-attempt Terminal-Bench run scored 60/89 with Harbor's zero-inclusive Mean; all persistent data and compilation caches are on NVMe
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-12 — [progress] Tiered RTX PRO example closes full task-set scoring
+- What: The selected private-thinking MoA-3 policy launched all 89 Terminal-Bench 2.1 tasks and closed at 60/89 (67.42%) under official task verifiers and Harbor's zero-inclusive Mean: 86 verifier rewards (60 one, 26 zero), two rewardless infrastructure errors, and one rewardless operator-terminated CPU outlier. The score does not substitute diagnostic retries.
+- Refs: `examples/qwen3.6-deepseek-v4-8gpu/{MEASUREMENTS.md,terminalbench-result.json}`; run ID `terminalbench-2.1-auto-max-thinking2048-full-v1-20260812`; PR #471
 
 ### 2026-08-12 — [amendment] Agentic evidence survives interruption with bounded outliers
 - What: Terminal-Bench now retains its raw Harbor job directory for authoritative per-task evidence/resume, and sets agent `max_timeout_sec=900` before the existing 8x multiplier so every task has a 7200-second effective agent cap. Official Harbor reward/Mean semantics remain unchanged.

@@ -349,16 +349,26 @@ class TerminalBenchAdapter:
             completed = await asyncio.to_thread(_invoke)
         except subprocess.TimeoutExpired:
             return self._failed(
-                target, started_at, f"harbor timed out after {_HARNESS_TIMEOUT_S}s"
+                target,
+                started_at,
+                f"harbor timed out after {_HARNESS_TIMEOUT_S}s; raw job retained at "
+                f"{output_dir}",
             )
         if completed.returncode != 0:
             stderr = completed.stderr.decode(errors="replace")[-500:]
             return self._failed(
-                target, started_at, f"harbor failed (rc={completed.returncode}): {stderr}"
+                target,
+                started_at,
+                f"harbor failed (rc={completed.returncode}): {stderr}; raw job "
+                f"retained at {output_dir}",
             )
         data = self._find_results(output_dir)
         if data is None:
-            return self._failed(target, started_at, "no harbor results file found")
+            return self._failed(
+                target,
+                started_at,
+                f"no harbor results file found; raw job retained at {output_dir}",
+            )
         items = parse_harbor_results(data)
 
         return summarize_items(

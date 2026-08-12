@@ -1,9 +1,21 @@
 # Measurements
 
-Runtime validation is in progress. All performance values in this document are
-measured at the public Kairyu L3 OpenAI-compatible endpoint, never at a vLLM L1
-endpoint. Terminal-Bench 2.1 evidence and the final served-configuration hash
-will be added only after the L1/L2 selection gates close.
+Runtime validation is complete. All performance values in this document were
+measured at the Kairyu L3 OpenAI-compatible endpoint used by ChatUI, never at a
+vLLM L1 endpoint.
+
+## Selected deployment
+
+- L1: four Qwen3.6-27B-FP8 TP1 replicas on GPUs 0-3, plus one
+  DeepSeek-V4-Flash-0731 TP4+EP4 replica on GPUs 4-7.
+- Tier2: DSpark-5, 16,384 batch tokens, 32 sequences, FP8 KV, prefix caching,
+  chunked prefill, and `FULL_AND_PIECEWISE` CUDA Graphs.
+- L2 `kairyu-auto-max`: fixed quality route, three parallel Qwen proposals,
+  private-thinking DeepSeek synthesis, `internal_max_tokens=2048`, four total
+  steps, and no recursive refinement. `kairyu-auto` remains the static-rule
+  low-latency mode and uses direct routes for ordinary requests.
+- L3: Kairyu OpenAI-compatible API on loopback port 8003. Only unauthenticated
+  Open WebUI is externally exposed, and it defaults to `kairyu-auto-max`.
 
 ## L3 auto-max performance selection
 
@@ -33,6 +45,15 @@ Run IDs:
 - `l3-auto-max-chat-moa3-public-v1-20260812`
 - `l3-auto-max-chat-moa2-public-v1-20260812`
 - `l3-auto-max-thinking2048-public-v1-20260812`
+
+Against the selected warm `kairyu-auto` Tier1-direct path, `auto-max` pays the
+intended quality cost. At c1/c8/c16/c32 its median semantic TTFT is
+5.94x/7.40x/6.70x/7.92x higher and median E2E is
+1.96x/3.55x/4.28x/5.03x higher. The exact corresponding `auto` rows are the
+TP1 x 4 rows in the Tier1 table below. The comparison is a user-visible
+latency envelope, not a same-output-length TPS A/B: `auto` emits exactly 256
+tokens while thinking `auto-max` ends naturally after its public answer and
+also performs three private proposals plus synthesis.
 
 MoA-2 retains MoA-3's c1 envelope while reducing cumulative internal output
 by 21.5%. At c8 it improves median TTFT by 17.1%, median E2E by 12.3%, and
@@ -99,10 +120,54 @@ every item. The benchmark harness source was clean at commit
 
 Run ID: `terminalbench-selection-thinking2048-vs-deepseek-20260812`.
 
-This is a selection subset, not a published-score comparison. The selected
-`kairyu-auto-max` must now complete all 89 Terminal-Bench 2.1 tasks before its
-score can be compared with the 82.7 DeepSeek-V4-Flash-0731 reference or the
-74/89 (83.15%) local target.
+This is a selection subset, not a published-score comparison.
+
+## Terminal-Bench 2.1 full task-set result
+
+The selected `kairyu-auto-max` launched all 89 Terminal-Bench 2.1 tasks through
+Harbor 0.17.0 with terminus-2, `max_turns=500`, `max_output_tokens=32768`, one
+attempt, and concurrency four. Scoring follows Harbor's official Mean exactly:
+every trial has equal weight and a missing reward or exception contributes zero
+rather than leaving the denominator.
+
+| Outcome | Count |
+|---|---:|
+| Official task-verifier rewards | 86 |
+| Verifier reward 1 | 60 |
+| Verifier reward 0 | 26 |
+| No verifier reward (counted as 0) | 3 |
+| Total denominator | 89 |
+| **Harbor-Mean-equivalent score** | **60/89 = 67.42%** |
+
+Harbor recorded four exceptions: two `AgentTimeoutError` trials that also had a
+zero verifier reward (`path-tracing`, `make-doom-for-mips`) and two Docker image
+pull `RuntimeError` trials with no reward (`vulnerable-secret`,
+`circuit-fibsqrt`). The final `train-fasttext` trial was operator-terminated
+after 6:24:18 and contributes the third missing-reward zero. Thus the exact
+execution-event count is four Harbor exceptions plus one operator interruption;
+none is dropped or replaced by a diagnostic retry.
+
+The task-set run began at 2026-08-12 05:30:47 JST and was closed at 16:39:13
+JST, an elapsed 11:08:26. `train-fasttext` exposed a harness defect: its
+3600-second task budget was multiplied by eight, giving one task an eight-hour
+agent allowance. The generic adapter now sets `max_timeout_sec=900` before the
+8x multiplier, so all future tasks have a two-hour effective ceiling, and keeps
+the raw Harbor directory on NVMe so interrupted jobs remain resumable. This
+post-run correction does not alter the score above.
+
+Run ID: `terminalbench-2.1-auto-max-thinking2048-full-v1-20260812` (inner Kairyu
+run `terminalbench-2.1`). Source commit:
+`2a29705a3224800520a5e7858a6eff74da3f12cb`; clean source-tree SHA-256:
+`ab84667283da628491a94a17c4dd7721b32ab8142da5b871d48923f3e474b49f`;
+served-config SHA-256:
+`03ee92f08f0a16c1b0a4dd132852b818d0874ca8737c0549a9934435d551be31`.
+
+This one-attempt score is not a five-trial leaderboard submission. It is the
+requested single full-task-set measurement using official per-task verifiers
+and official zero-inclusive aggregation. The provider-published 82.7 DeepSeek
+reference is reported under different conditions and is not a local A/B; the
+like-for-like local quality evidence remains the fixed pilot's 3/4 auto-max
+versus 2/4 direct DeepSeek result above.
 
 ## Tier1 topology selection
 
@@ -222,3 +287,22 @@ initialization to 73.05 s. The generated caches exist outside the containers at
 94 MiB for DeepSeek and approximately 239-240 MiB for each Qwen replica after
 the reuse check. The selected DeepSeek process also reported 45.74 GiB of KV
 cache, or 2,947,608 tokens (2.81x the configured 1M-token context), with FP8 KV.
+
+## Cold/warm separation and runtime identity
+
+All request-latency tables exclude an explicit warm-up and use a fresh
+row-specific prefix namespace; they are warm serving measurements and cannot be
+misread as cold-start latency or a full-prefix replay. Cold startup was measured
+separately. Before the corrected persistent-cache layout, DeepSeek engine
+initialization took 560.68 s; restarting the selected DSpark-5/16K configuration
+with the warmed NVMe cache took 73.05 s, an 87.0% reduction. The first TP4 Qwen
+candidate cache build took 201.41 s, including 109.54 s compilation; those
+candidate-only artifacts were not used as warm request samples.
+
+The measurements use eight NVIDIA RTX PRO 6000 Blackwell Server Edition GPUs.
+Qwen revision is `e89b16ebf1988b3d6befa7de50abc2d76f26eb09`; DeepSeek revision
+is `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`; vLLM source revision is
+`aa0d51302747ea80f282e26949708b3253409fe2`; and the vLLM image ID is
+`sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`.
+The externally reachable no-auth ChatUI validated after the run is
+`http://61.206.39.14:3000`; Kairyu L3 remains loopback-only.

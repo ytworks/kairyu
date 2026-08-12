@@ -47,8 +47,8 @@ Chat UI:    http://<outward-facing-host>:3000 (no authentication)
 
 Open WebUI listens on all host interfaces, requires no login, calls only
 Kairyu L3, and defaults to the quality-first `kairyu-auto-max`. Direct
-`qwen3.6-27b`, direct `deepseek-v4-flash-0731`, and `kairyu-auto-max` also
-appear in the model inventory. During the selection gate,
+`qwen3.6-27b`, direct `deepseek-v4-flash-0731`, fast `kairyu-auto`, and
+`kairyu-auto-max` all appear in the model inventory. During the selection gate,
 `kairyu-auto-max-chat` retains the diagnostic ordinary-DeepSeek MoA-3 policy.
 Both its MoA-2 and MoA-3 variants scored below direct DeepSeek in the fixed
 Terminal-Bench pilot. The selected quality policy is `kairyu-auto-max`: three
@@ -110,21 +110,28 @@ proposal count and retain bounded internal input/output token totals in their
 trace evidence. ChatUI has no route to the loopback L1 port and continues to
 call only Kairyu L3.
 
-The thinking MoA-3 and ordinary chat-synthesis MoA-3 paths remain separately measurable.
-same performance and quality gates select the final `kairyu-auto-max` policy.
+The thinking MoA-3 and ordinary chat-synthesis MoA-3 paths remain separately
+measurable. The same performance and quality gates select the final
+`kairyu-auto-max` policy.
 `orchestration` runs Kairyu's fixed direct/auto/auto-max L2 latency and
 LiveCodeBench-quality diagnostic, including internal calls, internal tokens,
 route identity, and allocated GPU-seconds. `terminalbench-pilot` runs the same
 four named Terminal-Bench 2.1 tasks on direct DeepSeek and the quality-first
 thinking-MoA3 candidate. `terminalbench` runs the selected `kairyu-auto-max` over
 all 89 tasks with terminus-2 and the published 500-turn budget. It deliberately
-passes no unsupported sampling knob. The one-trial full result is a complete
-task-set measurement, not an official five-trial leaderboard entry.
+passes no unsupported sampling knob. The one-trial full run launched all 89
+tasks and scored 60/89 (67.42%) with official task verifiers and Harbor's
+zero-inclusive Mean; it is not a five-trial leaderboard entry. The two
+image-pull errors and one operator-interrupted outlier remain zeros and are not
+replaced by diagnostic retries.
 
 The Harbor dataset is exported once to
 `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-data/terminal-bench-2-1`;
-Harbor job temporaries use the adjacent `bench-tmp/` directory. This avoids
-Harbor's home-directory cache for example-owned runs.
+Harbor jobs use the adjacent `bench-tmp/` directory and are retained for raw
+per-task evidence and `harbor job resume`. The agent config caps every task at
+two effective hours (`max_timeout_sec=900` before the 8x multiplier). This
+avoids Harbor's home-directory cache and eight-hour outliers for example-owned
+runs.
 
 `all` continues through every benchmark after an individual failure and always
 finalizes `run.json`. Artifacts go to
@@ -147,5 +154,6 @@ L3 API remains on loopback. The UI is intentionally unauthenticated, so restrict
 port 3000 at the firewall or place appropriate TLS/access controls in front of
 it when exposure beyond a trusted network is not intended.
 
-See [MEASUREMENTS.md](MEASUREMENTS.md) for selected-runtime evidence and the
-completed Terminal-Bench result.
+See [MEASUREMENTS.md](MEASUREMENTS.md) for the selected-runtime analysis and
+[`terminalbench-result.json`](terminalbench-result.json) for the exact
+zero-inclusive full-task-set score ledger.
