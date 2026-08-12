@@ -92,6 +92,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Human sign-off pending on M2–M4 design reviews
+- SWE-bench Verified Accuracy integration is designed for issue #472; implementation is pending
 
 ## Change Log
 
@@ -101,6 +102,11 @@ in `.claude/rules/progress-log.md`).
 ### 2026-08-12 — [progress] Tiered PR CI regressions reproduced and closed
 - What: The Open WebUI initial/outage/recovery browser phases pass after keeping the deterministic AUTO SSE marker inside the mock's prompt-boundary echo window; the tiered control test now stubs storage path preparation instead of attempting `/mnt/nvme` writes on hosted runners. Production NVMe enforcement and L2/L3 behavior are unchanged.
 - Refs: `scripts/webui_browser_smoke.mjs`; `tests/unit/test_tiered_frontier_examplectl.py`; PR #471
+
+### 2026-08-12 — [design] SWE-bench Verified joins the Accuracy suite
+- What: The Accuracy suite will run SWE-bench Verified through mini-SWE-agent's standard 250-step `verified` flow and the official SWE-bench harness, preserve exact selected-instance denominators and failure classes, and extend the sourced frontier comparison without inventing missing exact-model scores.
+- Why: Issue #472 requires the benchmark to launch like existing suites and follow their score-comparison reporting, while upstream methodology differences and OpenAI's retirement warning must remain explicit and auditable.
+- Refs: issue #472; `docs/superpowers/specs/2026-08-12-swe-bench-verified-design.md`
 
 ### 2026-08-12 — [progress] Tiered RTX PRO example closes full task-set scoring
 - What: The selected private-thinking MoA-3 policy launched all 89 Terminal-Bench 2.1 tasks and closed at 60/89 (67.42%) under official task verifiers and Harbor's zero-inclusive Mean: 86 verifier rewards (60 one, 26 zero), two rewardless infrastructure errors, and one rewardless operator-terminated CPU outlier. The score does not substitute diagnostic retries.
