@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/f1a-churn.yml"
+      - "scripts/install_kind_tools.sh"
       - "scripts/kind_churn_gate.sh"
       - "deploy/kind/f1a/**"
       - "bench/fleet_churn_bench.py"
@@ -32,11 +33,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
-      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
-        with:
-          install_only: true
-          version: v0.32.0
-          kubectl_version: v1.36.3
+      - name: Install kind and kubectl
+        env:
+          KIND_VERSION: v0.32.0
+          KUBECTL_VERSION: v1.36.3
+        run: bash scripts/install_kind_tools.sh
       - name: Run F1a fleet churn gate
         shell: bash
         run: bash scripts/kind_churn_gate.sh "--${PROFILE}"
