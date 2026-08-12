@@ -1,8 +1,12 @@
 # Measurements
 
-Runtime validation is complete. All performance values in this document were
-measured at the Kairyu L3 OpenAI-compatible endpoint used by ChatUI, never at a
-vLLM L1 endpoint.
+> **Historical evidence:** these measurements predate the current verifier-gated
+> `kairyu-auto-max` role DAG. They must not be attributed to the current policy;
+> a fresh layered-path run is required.
+
+Runtime validation was complete for the measured policy. All performance values
+in this document were measured at the Kairyu L3 OpenAI-compatible endpoint used
+by ChatUI, never at a vLLM L1 endpoint.
 
 ## Selected deployment
 
