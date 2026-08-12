@@ -2,11 +2,41 @@
 
 from __future__ import annotations
 
+import asyncio
+import importlib.util
 import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
-from kairyu.bench.types import ItemResult
+from kairyu.bench.adapters.base import (
+    AdapterInfo,
+    DownloadContext,
+    RunContext,
+    external_harness_sampling_incompatibility,
+    normalize_base_url,
+    skipped_pair,
+    summarize_items,
+    target_api_key,
+    utc_now,
+)
+from kairyu.bench.types import (
+    BenchTarget,
+    DownloadReport,
+    ItemResult,
+    PairResult,
+)
+
+_STAGE_TIMEOUT_S = 8 * 3600
+_BASE_CONFIG = "swebench.yaml"
+_SAFE_RUN_ID = re.compile(r"[^A-Za-z0-9_.-]+")
 
 _COUNT_TO_IDS = {
     "submitted_instances": "submitted_ids",
@@ -194,8 +224,345 @@ def find_swebench_report(workdir: Path) -> dict:
     return candidates[0]
 
 
+def _model_kwargs(target: BenchTarget) -> dict[str, object]:
+    fields = {
+        "reasoning_effort": target.reasoning_effort,
+        "top_p": target.top_p,
+        "seed": target.seed,
+    }
+    return {name: value for name, value in fields.items() if value is not None}
+
+
+def harness_missing() -> str | None:
+    for module, package in (
+        ("minisweagent", "mini-swe-agent"),
+        ("swebench", "swebench"),
+    ):
+        if importlib.util.find_spec(module) is None:
+            return package
+    if shutil.which("mini-extra") is None:
+        return "mini-swe-agent executable"
+    return None
+
+
+@dataclass(frozen=True)
+class SweBenchSpec:
+    name: str
+    display_name: str
+    subset: str
+    dataset: str
+    step_limit: int
+    annotations: tuple[str, ...]
+    comparable_to_published: bool = True
+    incomparable_reason: str = ""
+
+
+class SweBenchAdapter:
+    """Official mini-SWE-agent generation followed by SWE-bench Docker eval."""
+
+    def __init__(self, spec: SweBenchSpec) -> None:
+        self.spec = spec
+        self.info = AdapterInfo(
+            name=spec.name,
+            display_name=spec.display_name,
+            metric="resolved rate",
+            binary_outcomes=True,
+            hf_dataset=spec.dataset,
+            needs_docker=True,
+            agentic=True,
+            annotations=spec.annotations,
+            comparable_to_published=spec.comparable_to_published,
+            incomparable_reason=spec.incomparable_reason,
+            evaluation_distributions=("mini-swe-agent", "swebench"),
+            evaluation_executables=("mini-extra",),
+            history_provenance_complete=False,
+            history_provenance_reason=(
+                "the harness fetches a mutable remote dataset and task container "
+                "images without resolved content identities"
+            ),
+        )
+
+    def download(self, ctx: DownloadContext) -> DownloadReport:
+        return DownloadReport(
+            adapter=self.info.name,
+            status="ok",
+            detail="instances and images are fetched by the SWE-bench harness at run time",
+        )
+
+    def _preconditions(self, target: BenchTarget, ctx: RunContext) -> str | None:
+        sampling_reason = external_harness_sampling_incompatibility(
+            target,
+            harness="mini-swe-agent",
+        )
+        if sampling_reason is not None:
+            return sampling_reason
+        if ctx.attempts != 1:
+            return (
+                "mini-swe-agent has no verified --attempts passthrough; "
+                f"{self.info.display_name} requires attempts=1"
+            )
+        available, reason = ctx.docker
+        if not available:
+            return reason
+        missing = harness_missing()
+        if missing is not None:
+            return f"{missing} not installed (pip install 'kairyu[bench-agentic]')"
+        return None
+
+    def _generate_command(
+        self,
+        target: BenchTarget,
+        ctx: RunContext,
+        output_dir: Path,
+    ) -> list[str]:
+        command = [
+            "mini-extra",
+            "swebench",
+            "--model",
+            f"openai/{target.model}",
+            "--subset",
+            self.spec.subset,
+            "--split",
+            "test",
+            "--output",
+            str(output_dir),
+            "--workers",
+            str(ctx.concurrency),
+            "--config",
+            _BASE_CONFIG,
+            "--config",
+            f"agent.step_limit={self.spec.step_limit}",
+        ]
+        for field, value in _model_kwargs(target).items():
+            command += ["--config", f"model.model_kwargs.{field}={value}"]
+        if ctx.limit is not None:
+            command += ["--slice", f"0:{ctx.limit}"]
+        return command
+
+    def _evaluate_command(
+        self,
+        predictions: Path,
+        instance_ids: Sequence[str],
+        run_id: str,
+        report_dir: Path,
+        workers: int,
+    ) -> list[str]:
+        return [
+            sys.executable,
+            "-m",
+            "swebench.harness.run_evaluation",
+            "--dataset_name",
+            self.spec.dataset,
+            "--split",
+            "test",
+            "--predictions_path",
+            str(predictions),
+            "--max_workers",
+            str(workers),
+            "--run_id",
+            run_id,
+            "--report_dir",
+            str(report_dir),
+            "--instance_ids",
+            *instance_ids,
+        ]
+
+    def _run_id(self, ctx: RunContext) -> str:
+        source = ctx.run_id or "bench"
+        sanitized = _SAFE_RUN_ID.sub("-", source).strip("-.") or "bench"
+        return f"kairyu-{sanitized}-{self.info.name}"
+
+    async def run(self, target: BenchTarget, ctx: RunContext) -> PairResult:
+        started_at = utc_now()
+        reason = self._preconditions(target, ctx)
+        incomparable_reasons = (
+            (self.info.incomparable_reason,)
+            if not self.info.comparable_to_published
+            else ()
+        )
+        if reason is not None:
+            return skipped_pair(
+                self.info.name,
+                target.label(),
+                reason,
+                annotations=self.info.annotations,
+                comparable=self.info.comparable_to_published,
+                incomparable_reasons=incomparable_reasons,
+            )
+
+        env = dict(os.environ)
+        base = normalize_base_url(target.base_url)
+        env["OPENAI_BASE_URL"] = base
+        env["OPENAI_API_BASE"] = base
+        env["OPENAI_API_KEY"] = target_api_key(target) or "sk-local"
+
+        def invoke(command: list[str], cwd: Path) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                timeout=_STAGE_TIMEOUT_S,
+                env=env,
+                cwd=cwd,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory(prefix=f"kairyu-{self.info.name}-") as tmp:
+            workdir = Path(tmp)
+            generation_dir = workdir / "mini-output"
+            predictions = generation_dir / "preds.json"
+            generate_command = self._generate_command(target, ctx, generation_dir)
+            failure = await self._invoke_stage(
+                target,
+                started_at,
+                "generate",
+                generate_command,
+                workdir,
+                invoke,
+            )
+            if failure is not None:
+                return failure
+            if not predictions.is_file():
+                return self._failed(
+                    target,
+                    started_at,
+                    "generate stage produced no mini-output/preds.json file",
+                )
+            try:
+                instance_ids = load_prediction_ids(predictions)
+            except ValueError as error:
+                return self._failed(
+                    target,
+                    started_at,
+                    f"invalid mini-output/preds.json prediction file: {error}",
+                )
+
+            evaluate_command = self._evaluate_command(
+                predictions,
+                instance_ids,
+                self._run_id(ctx),
+                workdir,
+                ctx.concurrency,
+            )
+            failure = await self._invoke_stage(
+                target,
+                started_at,
+                "evaluate",
+                evaluate_command,
+                workdir,
+                invoke,
+            )
+            if failure is not None:
+                return failure
+            try:
+                report = find_swebench_report(workdir)
+                items, total = parse_swebench_report(
+                    report,
+                    selected_ids=instance_ids,
+                )
+            except ValueError as error:
+                return self._failed(
+                    target,
+                    started_at,
+                    f"invalid evaluation report: {error}",
+                )
+
+        resolved = report["resolved_instances"]
+        pair = summarize_items(
+            self.info.name,
+            target.label(),
+            items,
+            methodology={
+                "metric": self.info.metric,
+                "dataset": self.spec.dataset,
+                "subset": self.spec.subset,
+                "split": "test",
+                "scaffold": "mini-swe-agent",
+                "base_config": _BASE_CONFIG,
+                "step_limit": self.spec.step_limit,
+                "concurrency": ctx.concurrency,
+                "selected_instance_ids": list(instance_ids),
+                "official_report": report,
+                "evaluation": "swebench.harness.run_evaluation (docker)",
+                "generate_command": shlex.join(generate_command),
+                "evaluate_command": shlex.join(evaluate_command),
+            },
+            annotations=self.info.annotations,
+            started_at=started_at,
+            score_fn=lambda _: resolved / total if total else None,
+            comparable=self.info.comparable_to_published,
+            incomparable_reasons=incomparable_reasons,
+        )
+        category_metrics = {
+            "n_resolved": report["resolved_instances"],
+            "n_unresolved": report["unresolved_instances"],
+            "n_empty_patch": report["empty_patch_instances"],
+            "n_error": report["error_instances"],
+            "n_incomplete": len(report["incomplete_ids"]),
+        }
+        return pair.model_copy(update={"metrics": {**pair.metrics, **category_metrics}})
+
+    async def _invoke_stage(
+        self,
+        target: BenchTarget,
+        started_at: str,
+        stage: str,
+        command: list[str],
+        workdir: Path,
+        invoke,
+    ) -> PairResult | None:
+        try:
+            completed = await asyncio.to_thread(invoke, command, workdir)
+        except subprocess.TimeoutExpired:
+            return self._failed(
+                target,
+                started_at,
+                f"{stage} stage timed out ({_STAGE_TIMEOUT_S}s)",
+            )
+        except OSError as error:
+            return self._failed(
+                target,
+                started_at,
+                f"{stage} stage could not start: {error}",
+            )
+        if completed.returncode != 0:
+            stderr = completed.stderr.decode(errors="replace")[-500:]
+            return self._failed(
+                target,
+                started_at,
+                f"{stage} stage failed (rc={completed.returncode}): {stderr}",
+            )
+        return None
+
+    def _failed(
+        self,
+        target: BenchTarget,
+        started_at: str,
+        reason: str,
+    ) -> PairResult:
+        incomparable_reasons = (
+            (self.info.incomparable_reason,)
+            if not self.info.comparable_to_published
+            else ()
+        )
+        return PairResult(
+            benchmark=self.info.name,
+            target=target.label(),
+            status="failed",
+            reason=reason,
+            metrics={"score": None, "n_total": 0},
+            annotations=self.info.annotations,
+            comparable=self.info.comparable_to_published,
+            incomparable_reasons=incomparable_reasons,
+            started_at=started_at,
+            finished_at=utc_now(),
+        )
+
+
 __all__ = [
+    "SweBenchAdapter",
+    "SweBenchSpec",
     "find_swebench_report",
+    "harness_missing",
     "load_prediction_ids",
     "parse_swebench_report",
 ]

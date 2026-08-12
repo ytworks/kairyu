@@ -8,7 +8,7 @@ import httpx
 import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters import swebench_pro as swe_mod
+from kairyu.bench.adapters import swebench as swe_mod
 from kairyu.bench.adapters import terminal_bench as tb_mod
 from kairyu.bench.adapters.base import RunContext
 from kairyu.bench.adapters.swebench import (
@@ -17,6 +17,7 @@ from kairyu.bench.adapters.swebench import (
     parse_swebench_report,
 )
 from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
+from kairyu.bench.adapters.swebench_verified import SweBenchVerifiedAdapter
 from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter, parse_harbor_results
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.runner import SuiteRunner
@@ -245,7 +246,11 @@ def test_parse_harbor_results():
 
 async def test_both_skip_without_docker(tmp_path):
     ctx = _ctx(tmp_path, docker=(False, "docker unavailable (binary not found)"))
-    for adapter in (SweBenchProAdapter(), TerminalBenchAdapter()):
+    for adapter in (
+        SweBenchProAdapter(),
+        SweBenchVerifiedAdapter(),
+        TerminalBenchAdapter(),
+    ):
         pair = await adapter.run(make_target(), ctx)
         assert pair.status == "skipped"
         assert "docker unavailable" in pair.reason
@@ -268,16 +273,30 @@ async def test_terminal_bench_skips_without_harbor(tmp_path, monkeypatch):
 async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkeypatch):
     monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
     stages = []
+    selected_ids = tuple(SWEBENCH_FLOW_REPORT["submitted_ids"])
 
     def fake_run(command, capture_output, timeout, env, cwd, check):
         stages.append(list(command))
         if "run_evaluation" not in " ".join(command):
             output_dir = Path(command[command.index("--output") + 1])
             output_dir.mkdir()
-            (output_dir / "preds.json").write_text("{}", encoding="utf-8")
+            predictions = {
+                instance_id: {
+                    "instance_id": instance_id,
+                    "model_name_or_path": "openai/kairyu-auto",
+                    "model_patch": "diff --git a/a b/a\n",
+                }
+                for instance_id in reversed(selected_ids)
+            }
+            (output_dir / "preds.json").write_text(
+                json.dumps(predictions), encoding="utf-8"
+            )
         else:
             predictions = Path(command[command.index("--predictions_path") + 1])
             assert predictions.is_file()
+            assert command[command.index("--instance_ids") + 1 :] == sorted(selected_ids)
+            assert command[command.index("--max_workers") + 1] == "3"
+            assert command[command.index("--report_dir") + 1] == str(cwd)
             (cwd / "kairyu-bench.report.json").write_text(
                 json.dumps(SWEBENCH_FLOW_REPORT), encoding="utf-8"
             )
@@ -291,7 +310,8 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
 
     monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
     pair = await SweBenchProAdapter().run(
-        make_target(model="kairyu-auto"), _ctx(tmp_path, limit=4)
+        make_target(model="kairyu-auto"),
+        _ctx(tmp_path, limit=4, concurrency=3, run_id="test-run"),
     )
     assert pair.status == "partial"  # the error instance keeps it honest
     assert pair.metrics["score"] == 0.5  # 2 resolved / 4 total (official denominator)
@@ -303,6 +323,11 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
     assert output_dir.name == "mini-output"
     assert predictions == output_dir / "preds.json"
     assert "swebench.harness.run_evaluation" in " ".join(stages[1])
+    assert pair.methodology["selected_instance_ids"] == sorted(selected_ids)
+    assert pair.methodology["official_report"]["error_instances"] == 1
+    assert "generate_command" in pair.methodology
+    assert "evaluate_command" in pair.methodology
+    assert "OPENAI_API_KEY" not in json.dumps(pair.methodology)
 
 
 async def test_swebench_fails_closed_when_generation_writes_no_predictions(
@@ -322,6 +347,154 @@ async def test_swebench_fails_closed_when_generation_writes_no_predictions(
     pair = await SweBenchProAdapter().run(make_target(), _ctx(tmp_path, limit=1))
     assert pair.status == "failed"
     assert "mini-output/preds.json" in pair.reason
+
+
+async def test_swebench_fails_closed_when_predictions_are_malformed(tmp_path, monkeypatch):
+    monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
+
+    def fake_run(command, capture_output, timeout, env, cwd, check):
+        output_dir = Path(command[command.index("--output") + 1])
+        output_dir.mkdir()
+        (output_dir / "preds.json").write_text("{}", encoding="utf-8")
+
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
+    pair = await SweBenchVerifiedAdapter().run(make_target(), _ctx(tmp_path, limit=1))
+    assert pair.status == "failed"
+    assert pair.metrics["score"] is None
+    assert "prediction" in pair.reason
+
+
+@pytest.mark.parametrize(
+    ("failing_stage", "returncode", "expected"),
+    [
+        pytest.param("generate", 2, "generate stage failed", id="generate"),
+        pytest.param("evaluate", 3, "evaluate stage failed", id="evaluate"),
+    ],
+)
+async def test_swebench_subprocess_failure_is_stage_specific(
+    tmp_path, monkeypatch, failing_stage, returncode, expected
+):
+    monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
+
+    def fake_run(command, capture_output, timeout, env, cwd, check):
+        is_evaluation = "run_evaluation" in " ".join(command)
+        stage = "evaluate" if is_evaluation else "generate"
+        if not is_evaluation:
+            output_dir = Path(command[command.index("--output") + 1])
+            output_dir.mkdir()
+            (output_dir / "preds.json").write_text(
+                json.dumps(
+                    {
+                        "instance-1": {
+                            "instance_id": "instance-1",
+                            "model_name_or_path": "m",
+                            "model_patch": "diff",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        class Completed:
+            stdout = b""
+            stderr = b"stage exploded"
+
+            def __init__(self):
+                self.returncode = returncode if stage == failing_stage else 0
+
+        return Completed()
+
+    monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
+    pair = await SweBenchVerifiedAdapter().run(make_target(), _ctx(tmp_path, limit=1))
+    assert pair.status == "failed"
+    assert pair.metrics["score"] is None
+    assert expected in pair.reason
+    assert "stage exploded" in pair.reason
+
+
+@pytest.mark.parametrize("failing_stage", ["generate", "evaluate"])
+async def test_swebench_timeout_is_stage_specific(
+    tmp_path, monkeypatch, failing_stage
+):
+    monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
+
+    def fake_run(command, capture_output, timeout, env, cwd, check):
+        is_evaluation = "run_evaluation" in " ".join(command)
+        stage = "evaluate" if is_evaluation else "generate"
+        if stage == failing_stage:
+            raise swe_mod.subprocess.TimeoutExpired(command, timeout)
+        output_dir = Path(command[command.index("--output") + 1])
+        output_dir.mkdir()
+        (output_dir / "preds.json").write_text(
+            json.dumps(
+                {
+                    "instance-1": {
+                        "instance_id": "instance-1",
+                        "model_name_or_path": "m",
+                        "model_patch": "diff",
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
+    pair = await SweBenchVerifiedAdapter().run(make_target(), _ctx(tmp_path, limit=1))
+    assert pair.status == "failed"
+    assert pair.metrics["score"] is None
+    assert f"{failing_stage} stage timed out" in pair.reason
+
+
+async def test_swebench_fails_closed_on_invalid_official_report(tmp_path, monkeypatch):
+    monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
+
+    def fake_run(command, capture_output, timeout, env, cwd, check):
+        if "run_evaluation" not in " ".join(command):
+            output_dir = Path(command[command.index("--output") + 1])
+            output_dir.mkdir()
+            (output_dir / "preds.json").write_text(
+                json.dumps(
+                    {
+                        "instance-1": {
+                            "instance_id": "instance-1",
+                            "model_name_or_path": "m",
+                            "model_patch": "diff",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            report = copy.deepcopy(SWEBENCH_FLOW_REPORT)
+            report["schema_version"] = 1
+            (cwd / "invalid.json").write_text(json.dumps(report), encoding="utf-8")
+
+        class Completed:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        return Completed()
+
+    monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
+    pair = await SweBenchVerifiedAdapter().run(make_target(), _ctx(tmp_path, limit=1))
+    assert pair.status == "failed"
+    assert pair.metrics["score"] is None
+    assert "report" in pair.reason
 
 
 async def test_terminal_bench_flow(tmp_path, monkeypatch):
