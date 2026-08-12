@@ -673,7 +673,7 @@ the input or evidence was invalid. The complete design is in
 | CharXiv Reasoning | `princeton-nlp/CharXiv` | judge-graded, vision content-parts | vision target + judge |
 | GPQA Diamond | `Idavidrein/gpqa` (gated) | MCQ exact match, seed-shuffled choices | HF token |
 | SciCode | `SciCode1/SciCode` | sequential sub-step tests (+`test_data.h5` golden data) | numpy in venv |
-| τ³-Bench Banking | official `tau2` v1.x package, `banking_knowledge` + `alltools` | official reward (agent = target, user-sim = judge) | tau2-bench `[knowledge]` + judge |
+| τ³-Bench Banking | official `tau2` v1.x package, `banking_knowledge` + `full_kb` | official reward (agent = target, user-sim = judge) | tau2-bench `[knowledge]` + judge |
 | Long Context Reasoning | `THUDM/LongBench-v2` **substitute** | MCQ exact match | — |
 | MRCRv2 | `openai/mrcr` (8-needle, ≤128K) | official prepend + SequenceMatcher ratio | long-context target |
 
@@ -1337,7 +1337,7 @@ Fugu's published turn and trial conditions are pinned in the invocations:
 | SWE-Bench Pro | 1,000 agent steps (harness default is 250) | `-c swebench.yaml -c agent.step_limit=1000` — the harness drops its default config as soon as `-c` is given, so the default file is restated |
 | SWE-bench Verified | 250 agent steps, `verified` test split | `--subset verified --split test -c swebench.yaml -c agent.step_limit=250`, followed by the official evaluator over `princeton-nlp/SWE-bench_Verified` |
 | Terminal-Bench 2.1 | terminus-2, 500 turns | `-a terminus-2 --ak max_turns=500`, dataset `-d terminal-bench/terminal-bench-2-1`, results in `--jobs-dir` |
-| τ³ Banking | `banking_knowledge`, all retrieval tools, low-effort user simulator | `--domain banking_knowledge --retrieval-config alltools --user-llm-args '{"reasoning_effort":"low"}'` (from the judge's sampling policy), results addressed by `--save-to <name>` under the harness data dir |
+| τ³ Banking | `banking_knowledge`, official full-KB prompt, low-effort user simulator | `--domain banking_knowledge --retrieval-config full_kb --user-llm-args '{"reasoning_effort":"low"}'` (from the judge's sampling policy), results addressed by `--save-to <name>` under the harness data dir. This avoids adding the separate `text-embedding-3-large` service required by the default `alltools` policy to a single-public-model target; the recorded result is explicitly incomparable with Fugu's `alltools` condition. |
 
 Harness output and sampling, verified against the pinned harnesses:
 

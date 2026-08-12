@@ -23,7 +23,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -49,9 +48,12 @@ _HARNESS_TIMEOUT_S = 4 * 3600
 # The harness exposes banking as `banking_knowledge`; `banking` is not one of
 # its domains, so the previous command could only ever fail.
 _DOMAIN = "banking_knowledge"
-# Fugu enables every knowledge-retrieval tool. `alltools` is also the harness
-# default, but pinning it makes the condition part of the record.
-_RETRIEVAL_CONFIG = "alltools"
+# ``alltools`` is the harness default and Fugu condition, but it hard-codes a
+# second public OpenAI embeddings model (text-embedding-3-large). Kairyu's
+# single-public-model pilot cannot expose that service without violating its
+# target boundary, so use the harness's official no-retrieval-tool alternative
+# and mark the resulting score incomparable below.
+_RETRIEVAL_CONFIG = "full_kb"
 _RESULTS_NAME = "results.json"
 
 
@@ -90,17 +92,6 @@ def is_tau3_release(flavor: str) -> bool:
     except ValueError:
         return False
     return major >= 1
-
-
-def missing_alltools_runtime() -> tuple[str, ...]:
-    """Missing official alltools shell-sandbox binaries on this host."""
-    if sys.platform.startswith("linux"):
-        required = ("srt", "rg", "bwrap", "socat")
-    elif sys.platform == "darwin":
-        required = ("srt", "rg")
-    else:
-        return (f"supported platform (got {sys.platform})",)
-    return tuple(binary for binary in required if shutil.which(binary) is None)
 
 
 def harness_data_dir(flavor: str) -> Path | None:
@@ -187,7 +178,8 @@ class TauBenchBankingAdapter:
         judge_preferred=True,  # the user simulator rides the judge config
         annotations=(
             f"domain {_DOMAIN}, retrieval config {_RETRIEVAL_CONFIG} "
-            "(Fugu enables every knowledge-retrieval tool)",
+            "(the official full knowledge base is inlined; Fugu instead uses "
+            "the alltools retrieval condition)",
             "one trial per task by default (--attempts); Fugu reports pass@4; "
             "--num-trials is a harness trial count, not grouped chat seed-sweep "
             "sensitivity",
@@ -200,8 +192,7 @@ class TauBenchBankingAdapter:
         evaluation_executables=("tau3", "tau2"),
         history_provenance_complete=False,
         history_provenance_reason=(
-            "the harness may use mutable TAU2_DATA_DIR content and unresolved system "
-            "sandbox executables"
+            "the harness may use mutable TAU2_DATA_DIR content"
         ),
     )
 
@@ -224,11 +215,6 @@ class TauBenchBankingAdapter:
             return (
                 "tau harness not installed (install official tau2-bench v1.x "
                 "with the knowledge extra)"
-            )
-        missing_runtime = missing_alltools_runtime()
-        if missing_runtime:
-            return "tau alltools sandbox runtime unavailable; missing: " + ", ".join(
-                missing_runtime
             )
         if ctx.judge is None:
             return (
@@ -313,7 +299,10 @@ class TauBenchBankingAdapter:
         flavor = detect_harness()
         version = harness_version(flavor)
         annotations = self.info.annotations
-        incomparable: tuple[str, ...] = ()
+        incomparable: tuple[str, ...] = (
+            "the official full_kb retrieval policy differs from Fugu's alltools "
+            "condition; scores are not directly comparable",
+        )
         if not is_tau3_release(flavor):
             annotations = annotations + (
                 "pre-1.0 tau2 banking substitute — the tau3 release is not installed; "
@@ -321,7 +310,7 @@ class TauBenchBankingAdapter:
             )
             # A run-time substitution: the comparison report must withhold this
             # cell's delta, not merely footnote it.
-            incomparable = (
+            incomparable += (
                 "the tau2 banking harness stood in for tau3; scores are not "
                 "directly comparable to Fugu's τ³ number",
             )

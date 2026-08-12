@@ -3,7 +3,6 @@
 import json
 
 import httpx
-import pytest
 from conftest import make_config, make_target
 
 from kairyu.bench.adapters import tau_bench
@@ -25,11 +24,6 @@ SAMPLE_RESULTS = {
         {"task_id": "banking_003", "reward": 0.5},
     ]
 }
-
-
-@pytest.fixture(autouse=True)
-def _alltools_runtime_available(monkeypatch):
-    monkeypatch.setattr(tau_bench, "missing_alltools_runtime", lambda: ())
 
 
 def _ctx(tmp_path, judge_base="http://gw/v1", **overrides) -> RunContext:
@@ -67,16 +61,6 @@ async def test_skipped_without_harness(tmp_path, monkeypatch):
     pair = await adapter.run(make_target(), _ctx(tmp_path))
     assert pair.status == "skipped"
     assert "tau2-bench" in pair.reason
-
-
-async def test_skipped_without_alltools_runtime(tmp_path, monkeypatch):
-    monkeypatch.setattr(tau_bench, "detect_harness", lambda: "tau2")
-    monkeypatch.setattr(
-        tau_bench, "missing_alltools_runtime", lambda: ("srt", "socat")
-    )
-    pair = await TauBenchBankingAdapter().run(make_target(), _ctx(tmp_path))
-    assert pair.status == "skipped"
-    assert "srt, socat" in pair.reason
 
 
 async def test_skipped_without_user_simulator(tmp_path, monkeypatch):
@@ -200,7 +184,8 @@ async def test_official_tau3_v1_keeps_tau2_cli_without_substitute_annotation(
     monkeypatch.setattr(tau_bench.subprocess, "run", fake_run)
     adapter = TauBenchBankingAdapter()
     pair = await adapter.run(make_target(), _ctx(tmp_path))
-    assert pair.comparable is True
+    assert pair.comparable is False
+    assert any("full_kb" in note and "alltools" in note for note in pair.incomparable_reasons)
     assert not any("substitute" in note for note in pair.annotations)
     assert pair.methodology["harness"] == "tau2"
     assert pair.methodology["harness_version"] == "1.0.1"
@@ -226,6 +211,7 @@ async def test_pre_v1_tau2_adds_substitute_annotation(tmp_path, monkeypatch):
     pair = await TauBenchBankingAdapter().run(make_target(), _ctx(tmp_path))
     assert pair.comparable is False
     assert any("pre-1.0 tau2" in note for note in pair.annotations)
+    assert len(pair.incomparable_reasons) == 2
 
 
 async def test_harness_failure_is_failed_pair(tmp_path, monkeypatch):

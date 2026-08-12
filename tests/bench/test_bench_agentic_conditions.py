@@ -435,12 +435,12 @@ def _judge(**kwargs) -> JudgeClient:
     return JudgeClient(config, http_factory=lambda: httpx.AsyncClient())
 
 
-def test_tau_uses_the_real_domain_and_retrieval_config(tmp_path):
+def test_tau_uses_real_domain_and_single_public_model_retrieval_config(tmp_path):
     ctx = _ctx(tmp_path, judge=_judge())
     command = TauBenchBankingAdapter()._command("tau2", _target(), ctx, "run-name")
     # there is no `banking` domain in the harness, only banking_knowledge
     assert _flag_value(command, "--domain") == "banking_knowledge"
-    assert _flag_value(command, "--retrieval-config") == "alltools"
+    assert _flag_value(command, "--retrieval-config") == "full_kb"
 
 
 def test_tau_addresses_results_by_name_not_path(tmp_path):
