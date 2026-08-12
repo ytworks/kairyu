@@ -15,6 +15,17 @@ engines:
       api_key_env: null
       timeout_s: 86400
       upstream: vllm
+      capabilities:
+        allow_prompt_kinds: [multimodal]
+      image_input_policy:
+        max_images: 1
+        max_image_bytes: 8388608
+        max_total_image_bytes: 8388608
+        max_image_pixels: 2097152
+        max_total_image_pixels: 2097152
+        max_image_dimension: 4096
+        max_image_aspect_ratio: 200
+        max_processed_prompt_tokens: 262144
       allow_templated_chat_passthrough: true
       chat_tokenizer: /models/qwen3.6-27b-fp8
       model_revision: e89b16ebf1988b3d6befa7de50abc2d76f26eb09
@@ -26,5 +37,6 @@ engines:
       mtp_enabled: false
       container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
 
-chat_templates:
-  qwen3.6-27b: /etc/kairyu/qwen3.6-chat-template.jinja
+# The upstream Qwen processor owns both multimodal content parts and its native
+# checkpoint template. Kairyu validates images before preserving that payload.
+legacy_chat_models: [qwen3.6-27b]

@@ -66,6 +66,7 @@ def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
     for service in ("vllm", "kairyu"):
         model_mount = compose["services"][service]["volumes"][0]
         assert model_mount["source"] == "${MODEL_STORAGE_PATH}"
+    assert compose["services"]["kairyu"]["build"]["args"] == {"KAIRYU_VISION": "1"}
     assert compose["services"]["vllm"]["volumes"][1]["source"] == "${VLLM_CACHE_PATH}"
     assert webui["volumes"][0]["source"] == "${WEBUI_STORAGE_PATH}"
 
@@ -88,7 +89,17 @@ def test_qwen_vllm_command_pins_the_sm120_latency_throughput_contract() -> None:
     }
     for option, value in expected_pairs.items():
         assert command[command.index(option) + 1] == value
-    assert "--language-model-only" in command
+    assert "--language-model-only" not in command
+    assert json.loads(command[command.index("--mm-processor-kwargs") + 1]) == {
+        "min_pixels": 65536,
+        "max_pixels": 2097152,
+    }
+    assert command[command.index("--limit-mm-per-prompt.image") + 1] == "1"
+    assert command[command.index("--limit-mm-per-prompt.video") + 1] == "0"
+    assert json.loads(command[command.index("--default-chat-template-kwargs") + 1]) == {
+        "enable_thinking": False
+    }
+    assert service["environment"]["VLLM_MEDIA_URL_ALLOW_REDIRECTS"] == "0"
     assert "--enable-prefix-caching" in command
     assert "--enable-chunked-prefill" in command
     assert "--enable-flashinfer-autotune" in command
@@ -112,12 +123,14 @@ def test_qwen_kairyu_l3_owns_chat_and_declares_vllm_l1() -> None:
     assert entry.backend == "openai"
     validate_backend_options(entry.backend, entry.options)
     assert entry.options["upstream"] == "vllm"
+    assert entry.options["capabilities"] == {"allow_prompt_kinds": ["multimodal"]}
+    assert entry.options["image_input_policy"]["max_images"] == 1
+    assert entry.options["image_input_policy"]["max_image_pixels"] == 2097152
     assert entry.options["allow_templated_chat_passthrough"] is True
     assert entry.options["tensor_parallel_size"] == 1
     assert entry.options["mtp_enabled"] is False
-    assert spec.chat_templates == {
-        "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja"
-    }
+    assert spec.legacy_chat_models == {"qwen3.6-27b"}
+    assert spec.chat_templates == {}
 
 
 def test_qwen_template_defaults_chat_to_direct_and_benchmark_to_thinking() -> None:

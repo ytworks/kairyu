@@ -16,6 +16,17 @@ pools:
           api_key_env: null
           timeout_s: 86400
           upstream: vllm
+          capabilities:
+            allow_prompt_kinds: [multimodal]
+          image_input_policy:
+            max_images: 1
+            max_image_bytes: 8388608
+            max_total_image_bytes: 8388608
+            max_image_pixels: 2097152
+            max_total_image_pixels: 2097152
+            max_image_dimension: 4096
+            max_image_aspect_ratio: 200
+            max_processed_prompt_tokens: 262144
           allow_templated_chat_passthrough: true
           chat_tokenizer: /models/qwen/qwen3.6-27b-fp8
           model_revision: e89b16ebf1988b3d6befa7de50abc2d76f26eb09
@@ -103,7 +114,11 @@ orchestrators:
   kairyu-auto-max-moa4:
     spec: /etc/kairyu/auto-max-moa4.yaml
 
+# Image-bearing direct Qwen requests must preserve their structured content
+# parts for the upstream processor; its text-only compatibility path likewise
+# owns the native checkpoint template.
+legacy_chat_models: [qwen3.6-27b]
+
 chat_templates:
-  qwen3.6-27b: /etc/kairyu/qwen3.6-chat-template.jinja
   deepseek-v4-flash-0731: /etc/kairyu/deepseek-v4-0731.jinja
   deepseek-v4-flash-0731-thinking: /etc/kairyu/deepseek-thinking.jinja

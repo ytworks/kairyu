@@ -14,6 +14,11 @@ model over PCIe with TP4. DeepSeek is sharded TP4+EP4 for capacity and retains
 the measured eight-GPU example's FP8 KV, DSpark-5, SM120 fallbacks, prefix
 caching, chunked batching, and full/piecewise CUDA Graphs.
 
+Direct `qwen3.6-27b` requests support one image (up to 8 MiB and 2,097,152
+pixels). Kairyu validates the image and preserves the structured content for
+Qwen's native multimodal processor; the text-only L2 orchestration policies do
+not synthesize image-bearing requests through DeepSeek.
+
 Kairyu owns the public L3 API and both L2 policies. `kairyu-auto` routes short
 requests to Qwen, difficult requests to DeepSeek, and large/multi-step requests
 through two parallel Qwen proposals plus DeepSeek synthesis. `kairyu-auto-max`

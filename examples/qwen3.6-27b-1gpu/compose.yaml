@@ -10,6 +10,7 @@ services:
       HF_HUB_OFFLINE: "1"
       HF_HUB_DISABLE_TELEMETRY: "1"
       VLLM_NO_USAGE_STATS: "1"
+      VLLM_MEDIA_URL_ALLOW_REDIRECTS: "0"
       VLLM_USE_DEEP_GEMM: "0"
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       SAFETENSORS_FAST_GPU: "1"
@@ -27,7 +28,14 @@ services:
       - qwen3.6-27b
       - --max-model-len
       - "262144"
-      - --language-model-only
+      - --mm-processor-kwargs
+      - '{"min_pixels":65536,"max_pixels":2097152}'
+      - --limit-mm-per-prompt.image
+      - "1"
+      - --limit-mm-per-prompt.video
+      - "0"
+      - --default-chat-template-kwargs
+      - '{"enable_thinking":false}'
       - --dtype
       - bfloat16
       - --kv-cache-dtype
@@ -78,6 +86,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        KAIRYU_VISION: "1"
     image: ${KAIRYU_IMAGE:-local/kairyu:qwen36-vllm-example}
     command: [/etc/kairyu/kairyu.yaml]
     environment:
@@ -88,7 +98,6 @@ services:
         target: /models
         read_only: true
       - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
-      - ./chat_template.jinja:/etc/kairyu/qwen3.6-chat-template.jinja:ro
     depends_on:
       vllm: {condition: service_healthy}
     ports:

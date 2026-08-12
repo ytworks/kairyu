@@ -73,6 +73,17 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         devices = service["deploy"]["resources"]["reservations"]["devices"][0]
         assert devices["device_ids"] == [str(index)]
         assert "--tensor-parallel-size" not in service["command"]
+        assert "--language-model-only" not in service["command"]
+        assert _option(service["command"], "--limit-mm-per-prompt.image") == "1"
+        assert _option(service["command"], "--limit-mm-per-prompt.video") == "0"
+        assert json.loads(_option(service["command"], "--mm-processor-kwargs")) == {
+            "min_pixels": 65536,
+            "max_pixels": 2097152,
+        }
+        assert json.loads(
+            _option(service["command"], "--default-chat-template-kwargs")
+        ) == {"enable_thinking": False}
+        assert service["environment"]["VLLM_MEDIA_URL_ALLOW_REDIRECTS"] == "0"
         assert _option(service["command"], "--max-num-seqs") == "32"
         assert service["volumes"][-1]["target"] == "/root/.cache"
         assert service["environment"] | {
@@ -83,6 +94,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
             "TILELANG_TMP_DIR": "/root/.cache/tilelang/tmp",
         } == service["environment"]
     deepseek = compose["services"]["deepseek"]
+    assert compose["services"]["kairyu"]["build"]["args"] == {"KAIRYU_VISION": "1"}
     devices = deepseek["deploy"]["resources"]["reservations"]["devices"][0]
     assert devices["device_ids"] == ["4", "5", "6", "7"]
     assert _option(deepseek["command"], "--tensor-parallel-size") == "4"
@@ -127,6 +139,10 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         validate_backend_options(replica.backend, replica.options)
         assert replica.options["tensor_parallel_size"] == 1
         assert replica.options["upstream"] == "vllm"
+        assert replica.options["capabilities"] == {
+            "allow_prompt_kinds": ["multimodal"]
+        }
+        assert replica.options["image_input_policy"]["max_images"] == 1
     deepseek = deployment.pools["deepseek-v4-flash-0731"]
     assert len(deepseek.replicas) == 1
     validate_backend_options(deepseek.replicas[0].backend, deepseek.replicas[0].options)
@@ -145,8 +161,8 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         "kairyu-auto-max-moa3",
         "kairyu-auto-max-moa4",
     }
+    assert deployment.legacy_chat_models == {"qwen3.6-27b"}
     assert deployment.chat_templates == {
-        "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja",
         "deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja",
         "deepseek-v4-flash-0731-thinking": "/etc/kairyu/deepseek-thinking.jinja",
     }

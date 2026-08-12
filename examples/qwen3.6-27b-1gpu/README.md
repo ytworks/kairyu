@@ -7,13 +7,13 @@ Open WebUI -> Kairyu L3 (:8001) -> vLLM L1 (one selected TP1 GPU)
 ```
 
 The serving checkpoint is the official `Qwen/Qwen3.6-27B-FP8` revision. The
-configuration keeps the native 262,144-token context but loads only the text
-backbone: FP8 weights and KV cache, FP16 Gated-DeltaNet state, prefix caching,
+configuration keeps the native 262,144-token context and enables the native
+image processor: FP8 weights and KV cache, FP16 Gated-DeltaNet state, prefix caching,
 chunked prefill, FlashInfer autotuning, and full/piecewise CUDA Graphs. Native
 MTP is deliberately disabled because the local c32 screen was materially faster
-without it. Kairyu owns the checkpoint's official chat template and forwards
-the rendered prompt to vLLM's completions endpoint, so Open WebUI always talks
-to Kairyu L3 rather than directly to L1.
+without it. Kairyu validates one image per request (up to 8 MiB and 2,097,152
+pixels) and preserves structured chat content for Qwen's native processor, so
+Open WebUI always talks to Kairyu L3 rather than directly to L1.
 
 The selected no-MTP configuration measured **41.43 output tok/s with 190.82 ms
 median TTFT at c1** and **842.35 output tok/s with 1.247 s median TTFT at c32**
