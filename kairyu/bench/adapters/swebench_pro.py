@@ -53,7 +53,7 @@ _STEP_LIMIT = 1000
 # mini-swe-agent merges -c specs recursively but DROPS its default config as
 # soon as -c is given, so the default file has to be restated by name.
 _BASE_CONFIG = "swebench_backticks.yaml"
-_MODEL_CLASS = "litellm_textbased"
+_MODEL_CLASS = "kairyu.bench.mini_swe_agent.OpenAICompatTextbasedModel"
 _AGENT_OUTCOMES = frozenset(
     {"Submitted", "LimitsExceeded", "TimeExceeded", "RepeatedFormatError"}
 )

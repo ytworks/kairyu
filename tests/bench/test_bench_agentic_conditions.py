@@ -71,7 +71,9 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"
     assert _flag_value(command, "--split") == "test"
     assert _flag_value(command, "--output") == "mini-output"
-    assert _flag_value(command, "--model-class") == "litellm_textbased"
+    assert _flag_value(command, "--model-class") == (
+        "kairyu.bench.mini_swe_agent.OpenAICompatTextbasedModel"
+    )
 
 
 def test_swebench_resolves_entrypoint_beside_active_python(tmp_path, monkeypatch):
@@ -84,6 +86,31 @@ def test_swebench_resolves_entrypoint_beside_active_python(tmp_path, monkeypatch
     )
 
     assert command[0] == str(python.with_name("mini-extra"))
+
+
+def test_swebench_text_model_strips_litellm_message_extensions():
+    pytest.importorskip("minisweagent")
+    from kairyu.bench.mini_swe_agent import OpenAICompatTextbasedModel
+
+    model = OpenAICompatTextbasedModel(
+        model_name="openai/local",
+        cost_tracking="ignore_errors",
+    )
+    prepared = model._prepare_messages_for_api(
+        [
+            {
+                "role": "assistant",
+                "content": "answer",
+                "tool_calls": None,
+                "provider_specific_fields": {"reasoning_content": "private"},
+                "extra": {"local": True},
+            }
+        ]
+    )
+
+    assert prepared == [
+        {"role": "assistant", "content": "answer", "tool_calls": None}
+    ]
 
 
 def test_swebench_normalizes_official_image_and_complete_problem():
