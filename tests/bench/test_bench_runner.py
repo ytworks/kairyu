@@ -20,6 +20,7 @@ from kairyu.bench.runner import (
     _adapter_identity,
     _methodology_history_ineligibility,
     _recordable_config,
+    _result_history_ineligibility,
     _run_fingerprint,
     _run_identity,
     _source_provenance,
@@ -484,6 +485,29 @@ def test_unresolved_runtime_is_a_cell_policy_not_whole_run_ineligibility(tmp_pat
             "code execution lacks a resolved immutable image and platform identity",
         ),
     }
+
+
+def test_scored_unresolved_dataset_is_not_appended_to_history(tmp_path):
+    from kairyu.bench.adapters import all_adapters
+
+    identity = _adapter_identity(
+        all_adapters()["swe-bench-pro"],
+        BenchCache(tmp_path / "cache"),
+        offline_fixtures=True,
+    )
+    pair = PairResult(
+        benchmark="swe-bench-pro",
+        target="m",
+        status="completed",
+        metrics={"score": 0.0, "n_total": 1, "n_scored": 1},
+    )
+
+    assert "content-bound dataset manifest" in (
+        _result_history_ineligibility([pair], [identity]) or ""
+    )
+    assert _result_history_ineligibility(
+        [pair.model_copy(update={"status": "skipped"})], [identity]
+    ) is None
 
 
 def test_ifeval_score_time_distributions_are_content_bound(tmp_path):

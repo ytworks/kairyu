@@ -22,6 +22,7 @@ import platform
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -266,6 +267,26 @@ def _methodology_history_ineligibility(adapter_identities: list[dict]) -> str | 
                     f"benchmark {identity.get('name')!r} resolves an external harness "
                     "executable that is unverified or PATH-shadowed"
                 )
+    return None
+
+
+def _result_history_ineligibility(
+    pairs: Sequence[PairResult], adapter_identities: list[dict]
+) -> str | None:
+    identities = {identity.get("name"): identity for identity in adapter_identities}
+    for pair in pairs:
+        if pair.status not in {"completed", "partial"}:
+            continue
+        identity = identities.get(pair.benchmark)
+        if not isinstance(identity, dict) or identity.get("dataset") is None:
+            continue
+        if not isinstance(identity.get("sha256"), str) or not isinstance(
+            identity.get("assets"), list
+        ):
+            return (
+                f"benchmark {pair.benchmark!r} produced scored evidence without "
+                "a content-bound dataset manifest and asset identity list"
+            )
     return None
 
 
@@ -1054,6 +1075,10 @@ class SuiteRunner:
                 store.save_comparison(comparison, comparison_markdown)
                 print(comparison_markdown)
 
+        if history_ineligibility is None:
+            history_ineligibility = _result_history_ineligibility(
+                pairs, adapter_identities
+            )
         failed = (
             source_tainted or evaluator_tainted or any(pair.status == "failed" for pair in pairs)
         )
