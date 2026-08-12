@@ -9,7 +9,7 @@ from conftest import make_config, make_target
 
 from kairyu.bench.adapters import swebench_pro as swe_mod
 from kairyu.bench.adapters import terminal_bench as tb_mod
-from kairyu.bench.adapters.base import RunContext
+from kairyu.bench.adapters.base import RunContext, cache_pins
 from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter, parse_swebench_report
 from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter, parse_harbor_results
 from kairyu.bench.cache import BenchCache
@@ -41,6 +41,17 @@ def _ctx(tmp_path, docker=(True, "docker available"), **overrides) -> RunContext
     )
     defaults.update(overrides)
     return RunContext(**defaults)
+
+
+def _swe_ctx(tmp_path, count: int) -> RunContext:
+    ctx = _ctx(tmp_path, limit=count, run_id="test-run")
+    adapter = SweBenchProAdapter()
+    ctx.cache.write_rows(
+        adapter.info.name,
+        [{"instance_id": f"item-{index}"} for index in range(count)],
+        cache_pins(adapter.info),
+    )
+    return ctx
 
 
 def test_parse_swebench_report():
@@ -87,19 +98,36 @@ async def test_terminal_bench_skips_without_harbor(tmp_path, monkeypatch):
 
 async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkeypatch):
     monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
+    monkeypatch.setattr(swe_mod, "adapter_cache_ready", lambda adapter, cache: True)
     stages = []
 
     def fake_run(command, capture_output, timeout, env, cwd, check):
         stages.append(list(command))
-        if "run_evaluation" not in " ".join(command):
+        if "swe_bench_pro_eval.py" not in " ".join(command):
             output_dir = Path(command[command.index("--output") + 1])
             output_dir.mkdir()
-            (output_dir / "preds.json").write_text("{}", encoding="utf-8")
+            (output_dir / "preds.json").write_text(
+                json.dumps(
+                    {
+                        f"item-{index}": {"model_patch": f"patch-{index}"}
+                        for index in range(4)
+                    }
+                ),
+                encoding="utf-8",
+            )
         else:
-            predictions = Path(command[command.index("--predictions_path") + 1])
+            predictions = Path(
+                next(part.split("=", 1)[1] for part in command if part.startswith("--patch_path="))
+            )
             assert predictions.is_file()
-            (cwd / "kairyu-bench.report.json").write_text(
-                json.dumps(SWEBENCH_REPORT), encoding="utf-8"
+            output_dir = Path(
+                next(part.split("=", 1)[1] for part in command if part.startswith("--output_dir="))
+            )
+            (output_dir / "eval_results.json").write_text(
+                json.dumps(
+                    {"item-0": True, "item-1": True, "item-2": False, "item-3": False}
+                ),
+                encoding="utf-8",
             )
 
         class Completed:
@@ -111,25 +139,29 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
 
     monkeypatch.setattr(swe_mod, "subprocess", SimpleNamespace(run=fake_run))
     pair = await SweBenchProAdapter().run(
-        make_target(model="kairyu-auto"), _ctx(tmp_path, limit=4)
+        make_target(model="kairyu-auto"), _swe_ctx(tmp_path, 4)
     )
-    assert pair.status == "partial"  # the error instance keeps it honest
+    assert pair.status == "completed"
     assert pair.metrics["score"] == 0.5  # 2 resolved / 4 total (official denominator)
     assert Path(stages[0][0]).name == "mini-extra"
     assert stages[0][1] == "swebench"
     assert "openai/kairyu-auto" in stages[0]
     assert "--slice" in stages[0]
     output_dir = Path(stages[0][stages[0].index("--output") + 1])
-    predictions = Path(stages[1][stages[1].index("--predictions_path") + 1])
+    predictions = Path(
+        next(part.split("=", 1)[1] for part in stages[1] if part.startswith("--patch_path="))
+    )
     assert output_dir.name == "mini-output"
-    assert predictions == output_dir / "preds.json"
-    assert "swebench.harness.run_evaluation" in " ".join(stages[1])
+    assert predictions.name == "predictions.json"
+    assert "swe_bench_pro_eval.py" in " ".join(stages[1])
+    assert "--use_local_docker" in stages[1]
 
 
 async def test_swebench_fails_closed_when_generation_writes_no_predictions(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(swe_mod, "harness_missing", lambda: None)
+    monkeypatch.setattr(swe_mod, "adapter_cache_ready", lambda adapter, cache: True)
 
     def fake_run(command, capture_output, timeout, env, cwd, check):
         class Completed:
@@ -140,7 +172,7 @@ async def test_swebench_fails_closed_when_generation_writes_no_predictions(
         return Completed()
 
     monkeypatch.setattr(swe_mod, "subprocess", SimpleNamespace(run=fake_run))
-    pair = await SweBenchProAdapter().run(make_target(), _ctx(tmp_path, limit=1))
+    pair = await SweBenchProAdapter().run(make_target(), _swe_ctx(tmp_path, 1))
     assert pair.status == "failed"
     assert "mini-output/preds.json" in pair.reason
 

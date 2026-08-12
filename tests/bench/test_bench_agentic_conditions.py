@@ -60,7 +60,11 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
     configs = [command[i + 1] for i, part in enumerate(command) if part == "--config"]
     # the harness drops its default config as soon as -c is given, so the
     # default file must be restated alongside the override
-    assert configs == ["swebench.yaml", "agent.step_limit=1000"]
+    assert configs == [
+        "swebench.yaml",
+        "agent.step_limit=1000",
+        "environment.cwd=/app",
+    ]
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"
     assert _flag_value(command, "--split") == "test"
     assert _flag_value(command, "--output") == "mini-output"
@@ -76,6 +80,28 @@ def test_swebench_resolves_entrypoint_beside_active_python(tmp_path, monkeypatch
     )
 
     assert command[0] == str(python.with_name("mini-extra"))
+
+
+def test_swebench_normalizes_official_image_and_complete_problem():
+    rows = [
+        {
+            "instance_id": f"instance-{index}",
+            "problem_statement": "problem",
+            "requirements": "requirements",
+            "interface": "interface",
+            "dockerhub_tag": f"repo.instance-{index}",
+        }
+        for index in range(731)
+    ]
+
+    normalized = swe_mod._normalize_rows(rows)
+
+    assert len(normalized) == 731
+    assert normalized[0]["image_name"] == "jefzda/sweap-images:repo.instance-0"
+    assert normalized[0]["problem_statement"] == (
+        "problem\n\nRequirements:\nrequirements"
+        "\n\nNew interfaces introduced:\ninterface"
+    )
 
 
 def test_swebench_step_limit_is_disclosed():
