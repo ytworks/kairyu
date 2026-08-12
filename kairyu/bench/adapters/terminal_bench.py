@@ -48,6 +48,10 @@ _MAX_TURNS = 500
 # agent-only multiplier preserves verifier/build timeouts while allowing two
 # hours for the agent phase of each task.
 _AGENT_TIMEOUT_MULTIPLIER = 8.0
+# Harbor applies ``max_timeout_sec`` before the multiplier.  Without this cap,
+# an outlier task declaring a 3600-second agent budget receives eight hours,
+# even though the intended benchmark-wide allowance is two hours.
+_AGENT_MAX_TIMEOUT_S = 900.0
 
 
 # Harbor's JobResult holds `trial_results`, and each TrialResult carries its
@@ -189,9 +193,9 @@ class TerminalBenchAdapter:
         annotations=(
             f"agent scaffold: {_AGENT} via the Harbor harness, "
             f"max_turns={_MAX_TURNS} (Fugu's condition)",
-            "Harbor agent execution timeout multiplier=8.0; a 900-second task "
-            "budget becomes 7200 seconds while verifier and build timeouts stay "
-            "at their task-defined values",
+            "Harbor agent max_timeout_sec=900 is applied before the 8.0x agent "
+            "execution multiplier, so every task has a 7200-second effective "
+            "agent cap while verifier and build timeouts stay task-defined",
             "one attempt per task by default (--attempts); the official "
             "leaderboard requires at least five; Harbor -k is a harness trial "
             "count, not grouped chat seed-sweep sensitivity",
@@ -239,27 +243,51 @@ class TerminalBenchAdapter:
                 return f"{_LOCAL_DATASET_ENV} must name an existing absolute directory"
         return None
 
+    @staticmethod
+    def _agent_config(target: BenchTarget, output_dir: Path) -> Path:
+        """Write the granular Harbor agent config needed for a hard timeout cap.
+
+        Harbor's ``-a``/``-m`` flags replace every agent loaded from ``--config``.
+        The cap therefore has to live in a complete dynamic AgentConfig rather
+        than in a partial config combined with those convenience flags.
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / "kairyu-agent-config.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "agents": [
+                        {
+                            "name": _AGENT,
+                            "model_name": f"openai/{target.model}",
+                            "max_timeout_sec": _AGENT_MAX_TIMEOUT_S,
+                            "kwargs": {
+                                "max_turns": _MAX_TURNS,
+                                "llm_call_kwargs": {
+                                    "max_tokens": target.max_output_tokens,
+                                },
+                            },
+                        }
+                    ]
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return path
+
     def _command(self, target: BenchTarget, ctx: RunContext, output_dir: Path) -> list[str]:
+        agent_config = self._agent_config(target, output_dir)
         command = [
             "harbor",
             "run",
+            "--config",
+            str(agent_config),
             *(self._dataset_arguments()),
-            "-a",
-            _AGENT,
-            "-m",
-            f"openai/{target.model}",
             # `harbor run` writes into --jobs-dir; --output-dir belongs to
             # `harbor jobs download` and is rejected here.
             "--jobs-dir",
             str(output_dir),
-            "--ak",
-            f"max_turns={_MAX_TURNS}",
-            "--ak",
-            "llm_call_kwargs="
-            + json.dumps(
-                {"max_tokens": target.max_output_tokens},
-                separators=(",", ":"),
-            ),
             "-k",
             str(ctx.attempts),
             "--n-concurrent",
@@ -301,34 +329,37 @@ class TerminalBenchAdapter:
         env["OPENAI_API_BASE"] = base
         env["OPENAI_API_KEY"] = target_api_key(target) or "sk-local"
 
-        with tempfile.TemporaryDirectory(prefix="kairyu-tb-") as tmp:
-            output_dir = Path(tmp)
-            command = self._command(target, ctx, output_dir)
+        # Keep the raw Harbor job directory.  It is the authoritative per-task
+        # evidence and lets an interrupted long run be resumed with
+        # ``harbor job resume``.  The caller controls its filesystem through
+        # TMPDIR (the production example pins that to /mnt/nvme).
+        output_dir = Path(tempfile.mkdtemp(prefix="kairyu-tb-"))
+        command = self._command(target, ctx, output_dir)
 
-            def _invoke() -> subprocess.CompletedProcess:
-                return subprocess.run(
-                    command,
-                    capture_output=True,
-                    timeout=_HARNESS_TIMEOUT_S,
-                    env=env,
-                    check=False,
-                )
+        def _invoke() -> subprocess.CompletedProcess:
+            return subprocess.run(
+                command,
+                capture_output=True,
+                timeout=_HARNESS_TIMEOUT_S,
+                env=env,
+                check=False,
+            )
 
-            try:
-                completed = await asyncio.to_thread(_invoke)
-            except subprocess.TimeoutExpired:
-                return self._failed(
-                    target, started_at, f"harbor timed out after {_HARNESS_TIMEOUT_S}s"
-                )
-            if completed.returncode != 0:
-                stderr = completed.stderr.decode(errors="replace")[-500:]
-                return self._failed(
-                    target, started_at, f"harbor failed (rc={completed.returncode}): {stderr}"
-                )
-            data = self._find_results(output_dir)
-            if data is None:
-                return self._failed(target, started_at, "no harbor results file found")
-            items = parse_harbor_results(data)
+        try:
+            completed = await asyncio.to_thread(_invoke)
+        except subprocess.TimeoutExpired:
+            return self._failed(
+                target, started_at, f"harbor timed out after {_HARNESS_TIMEOUT_S}s"
+            )
+        if completed.returncode != 0:
+            stderr = completed.stderr.decode(errors="replace")[-500:]
+            return self._failed(
+                target, started_at, f"harbor failed (rc={completed.returncode}): {stderr}"
+            )
+        data = self._find_results(output_dir)
+        if data is None:
+            return self._failed(target, started_at, "no harbor results file found")
+        items = parse_harbor_results(data)
 
         return summarize_items(
             self.info.name,
@@ -340,7 +371,12 @@ class TerminalBenchAdapter:
                 "harness": "harbor",
                 "agent": _AGENT,
                 "max_turns": _MAX_TURNS,
+                "agent_max_timeout_s_before_multiplier": _AGENT_MAX_TIMEOUT_S,
                 "agent_timeout_multiplier": _AGENT_TIMEOUT_MULTIPLIER,
+                "agent_effective_timeout_cap_s": (
+                    _AGENT_MAX_TIMEOUT_S * _AGENT_TIMEOUT_MULTIPLIER
+                ),
+                "harbor_jobs_dir": str(output_dir),
                 "attempts": ctx.attempts,
                 "denominator": (
                     "every trial, errored ones as zero (Harbor's own Mean maps a "

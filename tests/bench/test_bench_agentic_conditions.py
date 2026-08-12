@@ -44,6 +44,11 @@ def _flag_value(command: list[str], flag: str) -> str:
     return command[command.index(flag) + 1]
 
 
+def _harbor_agent(command: list[str]) -> dict:
+    config = json.loads(Path(_flag_value(command, "--config")).read_text())
+    return config["agents"][0]
+
+
 # -- SWE-Bench Pro -------------------------------------------------------------
 
 
@@ -86,25 +91,24 @@ def test_terminal_bench_uses_harbor_flags_that_exist(tmp_path):
     # Terminal-Bench 2.1 is a Harbor Hub organization/package, not the legacy
     # registry's `name@version` entry.
     assert _flag_value(command, "-d") == "terminal-bench/terminal-bench-2-1"
-    assert _flag_value(command, "-a") == "terminus-2"
+    agent = _harbor_agent(command)
+    assert agent["name"] == "terminus-2"
+    assert agent["model_name"] == "openai/m"
 
 
 def test_terminal_bench_sets_fugu_turn_budget(tmp_path):
     command = TerminalBenchAdapter()._command(_target(), _ctx(tmp_path), tmp_path)
-    assert _flag_value(command, "--ak") == "max_turns=500"
+    assert _harbor_agent(command)["kwargs"]["max_turns"] == 500
 
 
 def test_terminal_bench_forwards_output_limit_via_terminus_llm_kwargs(tmp_path):
     command = TerminalBenchAdapter()._command(
         _target(max_output_tokens=32768), _ctx(tmp_path), tmp_path
     )
-    agent_kwargs = [
-        command[index + 1] for index, value in enumerate(command) if value == "--ak"
-    ]
-    assert agent_kwargs == [
-        "max_turns=500",
-        'llm_call_kwargs={"max_tokens":32768}',
-    ]
+    assert _harbor_agent(command)["kwargs"] == {
+        "max_turns": 500,
+        "llm_call_kwargs": {"max_tokens": 32768},
+    }
 
 
 @pytest.mark.parametrize("attempts", [1, 5])
@@ -125,6 +129,7 @@ def test_terminal_bench_passes_concurrency(tmp_path):
 def test_terminal_bench_expands_only_the_agent_execution_timeout(tmp_path):
     command = TerminalBenchAdapter()._command(_target(), _ctx(tmp_path), tmp_path)
     assert _flag_value(command, "--agent-timeout-multiplier") == "8.0"
+    assert _harbor_agent(command)["max_timeout_sec"] == 900.0
     assert "--timeout-multiplier" not in command
     assert "--verifier-timeout-multiplier" not in command
 
