@@ -98,6 +98,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-13 — [design] Tiered UI owns one layered orchestration path
+- What: The tiered example will expose one product model, borrow deployment L1 pools directly from L2, run a bounded verifier-gated DAG, and show policy-enabled model-attributed intermediate output separately from the final answer.
+- Why: The prior loopback L3 workers and single-pass MoA policy did not exercise the intended L3→L2→L1 boundary, while the product UI now requires inspectable intermediate work without mixing it into the committed answer.
+- Refs: EO-D1..EO-D5; `docs/design/example-layered-orchestration.md`; `docs/superpowers/plans/2026-08-13-example-layered-orchestration-correction.md`
+
 ### 2026-08-12 — [amendment] SWE-bench fixes selection before generation
 - What: SWE-bench now persists the official ordered selection before generation, evaluates that full set even when a prediction is omitted, accepts the official v4.1 completed/error report overlap with error precedence, and retains redacted stage logs plus raw upstream evidence; failed runs resume while explicit reruns use isolated artifacts.
 - Why: mini-SWE-agent can exit successfully after a worker omits its prediction, so deriving `--instance_ids` from `preds.json` could shrink the denominator and deleting work directories could discard the only audit and resume evidence.
