@@ -115,6 +115,8 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "127.0.0.1:${DEEPSEEK_L1_PORT:-8005}:8000"
     ]
     assert "--enable-expert-parallel" in deepseek["command"]
+    assert "--enable-auto-tool-choice" in deepseek["command"]
+    assert _option(deepseek["command"], "--tool-call-parser") == "deepseek_v4"
     assert _option(deepseek["command"], "--max-num-batched-tokens") == "16384"
     assert deepseek["volumes"][1]["target"] == "/root/.cache"
     assert deepseek["environment"] | {

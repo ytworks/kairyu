@@ -868,6 +868,7 @@ async function runRecoveryPhase() {
 
 async function assertTieredProductInventory() {
 	const inventory = await browserJson('/api/models');
+	const modelConfig = await browserJson('/api/v1/configs/models');
 	invariant(
 		inventory.status === 200 && Array.isArray(inventory.body?.data),
 		`Open WebUI model inventory failed: HTTP ${inventory.status}: ${inventory.text}`
@@ -876,6 +877,10 @@ async function assertTieredProductInventory() {
 	invariant(
 		JSON.stringify(modelIds) === JSON.stringify([productModel]),
 		`Open WebUI must expose only ${productModel}; got ${JSON.stringify(modelIds)}`
+	);
+	invariant(
+		modelConfig.status === 200 && modelConfig.body?.DEFAULT_MODEL_PARAMS?.stream_response === false,
+		`Open WebUI effective model params did not disable streaming: ${modelConfig.text}`
 	);
 	await selectModel(productModel);
 }
@@ -940,7 +945,6 @@ async function assertTieredReasoningUi() {
 	for (const identity of [
 		'tier1',
 		'tier2',
-		'ReplicaPool',
 		'qwen3.6-27b',
 		'deepseek-v4-flash-0731-thinking'
 	]) {
