@@ -361,6 +361,8 @@ class SweBenchProAdapter:
             f"agent.step_limit={_STEP_LIMIT}",
             "--config",
             "environment.cwd=/app",
+            "--config",
+            'environment.run_args=["--rm","--entrypoint",""]',
         ]
         # The harness forwards `model.model_kwargs.*` to its LLM client, so the
         # endpoint's named sampling policy can reach the agent's requests. Vendor

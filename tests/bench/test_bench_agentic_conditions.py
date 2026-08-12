@@ -64,6 +64,7 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
         "swebench.yaml",
         "agent.step_limit=1000",
         "environment.cwd=/app",
+        'environment.run_args=["--rm","--entrypoint",""]',
     ]
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"
     assert _flag_value(command, "--split") == "test"
