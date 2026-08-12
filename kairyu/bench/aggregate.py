@@ -113,7 +113,9 @@ def _wilson_bounds(successes: int, trials: int) -> tuple[float, float] | None:
         * math.sqrt(proportion * (1 - proportion) / trials + z_squared / (4 * trials**2))
         / denominator
     )
-    return max(0.0, center - margin), min(1.0, center + margin)
+    lower = 0.0 if successes == 0 else max(0.0, center - margin)
+    upper = 1.0 if successes == trials else min(1.0, center + margin)
+    return lower, upper
 
 
 def _binary_confidence_interval(pair: PairResult, *, declared_binary: bool) -> dict | None:

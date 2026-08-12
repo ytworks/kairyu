@@ -669,6 +669,11 @@ def test_wilson_bounds(successes, trials, expected):
     assert _wilson_bounds(successes, trials) == pytest.approx(expected, abs=1e-10)
 
 
+def test_wilson_bounds_keep_exact_probability_endpoints():
+    assert _wilson_bounds(0, 10)[0] == 0.0
+    assert _wilson_bounds(10, 10)[1] == 1.0
+
+
 @pytest.mark.parametrize(
     ("successes", "trials"),
     [(-1, 1), (2, 1), (0, 0)],
