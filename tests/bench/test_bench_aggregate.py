@@ -669,6 +669,11 @@ def test_wilson_bounds(successes, trials, expected):
     assert _wilson_bounds(successes, trials) == pytest.approx(expected, abs=1e-10)
 
 
+def test_wilson_bounds_are_exact_at_binary_population_edges():
+    assert _wilson_bounds(0, 5)[0] == 0.0
+    assert _wilson_bounds(5, 5)[1] == 1.0
+
+
 @pytest.mark.parametrize(
     ("successes", "trials"),
     [(-1, 1), (2, 1), (0, 0)],
