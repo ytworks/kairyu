@@ -1210,8 +1210,8 @@ def test_history_revalidates_complete_evaluator_methodology(tmp_path, mutation, 
 @pytest.mark.parametrize("status", ["completed", "partial"])
 @pytest.mark.parametrize(
     ("name", "complete"),
-    [("gsm8k", True), ("swe-bench-pro", False)],
-    ids=["source-complete", "unresolved-harness"],
+    [("gsm8k", True), ("swe-bench-pro", False), ("swe-bench-verified", False)],
+    ids=["source-complete", "unresolved-pro-harness", "unresolved-verified-harness"],
 )
 def test_scored_dataset_rows_require_content_bound_cache_identity(
     tmp_path, status, name, complete
@@ -1415,6 +1415,13 @@ def test_history_rejects_failed_run_evidence(tmp_path):
             id="mutable-agentic-data",
         ),
         pytest.param(
+            "swe-bench-verified",
+            False,
+            "withheld_unresolved_runtime",
+            "runtime dataset, image, or executable content is unresolved",
+            id="mutable-verified-agentic-data",
+        ),
+        pytest.param(
             "scicode",
             True,
             "withheld_unpinned_execution",
@@ -1429,8 +1436,11 @@ def test_history_withholds_only_unresolved_runtime_cells(
     metadata = _metadata()
     identity = metadata["identity"]["adapters"][0]
     identity["name"] = name
-    if name == "swe-bench-pro":
-        identity["dataset"] = "ScaleAI/SWE-bench_Pro"
+    if name in {"swe-bench-pro", "swe-bench-verified"}:
+        identity["dataset"] = {
+            "swe-bench-pro": "ScaleAI/SWE-bench_Pro",
+            "swe-bench-verified": "princeton-nlp/SWE-bench_Verified",
+        }[name]
         identity["revision"] = None
         identity["history_provenance"].update(
             {

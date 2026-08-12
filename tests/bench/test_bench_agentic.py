@@ -1,4 +1,4 @@
-"""Agentic wrappers (SWE-Bench Pro / Terminal-Bench): skip paths + translation."""
+"""Agentic wrappers: skip paths, official evaluation, and result translation."""
 
 import copy
 import json
@@ -547,7 +547,7 @@ async def test_harness_failure_reports_stderr(tmp_path, monkeypatch):
     assert "unknown flag" in pair.reason
 
 
-async def test_full_suite_smoke_has_all_eleven_rows(tmp_path, http_factory):
+async def test_full_suite_smoke_has_all_twelve_rows(tmp_path, http_factory):
     """Every Accuracy slot appears and unavailable agentic rows skip cleanly."""
     from kairyu.bench.adapters import ACCURACY_ROW_ORDER
 
@@ -563,7 +563,7 @@ async def test_full_suite_smoke_has_all_eleven_rows(tmp_path, http_factory):
     )
     assert scoreboard["benchmarks"] == list(ACCURACY_ROW_ORDER)
     store = ResultStore(tmp_path / "results", "test-run")
-    for name in ("swe-bench-pro", "terminal-bench"):
+    for name in ("swe-bench-pro", "swe-bench-verified", "terminal-bench"):
         pair = store.load_pair(name, "m")
         assert pair.status == "skipped"
         assert "docker unavailable" in pair.reason

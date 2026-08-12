@@ -971,7 +971,12 @@ async def test_full_accuracy_history_stamps_safe_and_withheld_cross_run_cells(
 
     store = ResultStore(tmp_path / "results", "test-run")
     scoreboard = json.loads((store.run_dir / "scoreboard.json").read_text(encoding="utf-8"))
-    unresolved = {"swe-bench-pro", "terminal-bench", "tau-bench-banking"}
+    unresolved = {
+        "swe-bench-pro",
+        "swe-bench-verified",
+        "terminal-bench",
+        "tau-bench-banking",
+    }
     unpinned_execution = {"livecodebench", "livecodebench-pro", "scicode"}
     allowed = set(ACCURACY_ROW_ORDER) - unresolved - unpinned_execution
     assert scoreboard["benchmarks"] == list(ACCURACY_ROW_ORDER)

@@ -55,7 +55,12 @@ _COMMON_EVALUATION_RESOURCES = frozenset(
     }
 )
 _UNRESOLVED_RUNTIME_ADAPTERS = frozenset(
-    {"swe-bench-pro", "terminal-bench", "tau-bench-banking"}
+    {
+        "swe-bench-pro",
+        "swe-bench-verified",
+        "terminal-bench",
+        "tau-bench-banking",
+    }
 )
 _NON_DATASET_ADAPTERS = frozenset({"terminal-bench", "tau-bench-banking"})
 _CONTENT_ADDRESSED_EXECUTION_ADAPTERS = frozenset(
