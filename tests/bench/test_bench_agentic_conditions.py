@@ -147,7 +147,10 @@ def test_terminal_bench_caps_output_limit_via_terminus_llm_kwargs(tmp_path):
     )
     assert _harbor_agent(command)["kwargs"] == {
         "max_turns": 500,
-        "llm_call_kwargs": {"max_tokens": 4096},
+        "llm_call_kwargs": {
+            "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        },
     }
 
 
@@ -156,7 +159,8 @@ def test_terminal_bench_preserves_smaller_output_limit(tmp_path):
         _target(max_output_tokens=2048), _ctx(tmp_path), tmp_path
     )
     assert _harbor_agent(command)["kwargs"]["llm_call_kwargs"] == {
-        "max_tokens": 2048
+        "max_tokens": 2048,
+        "response_format": {"type": "json_object"},
     }
 
 

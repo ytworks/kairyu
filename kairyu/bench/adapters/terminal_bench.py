@@ -211,6 +211,9 @@ class TerminalBenchAdapter:
             "limit an OpenAI-compatible endpoint may apply a 16-token default, while "
             "the suite-wide 32K ceiling can consume the agent timeout on an "
             "unterminated JSON command batch",
+            "terminus-2's required JSON command object is declared through the "
+            "OpenAI response_format contract so the target closes a structurally "
+            "complete batch instead of emitting unparseable trailing prose",
             "target reasoning_effort, top_p, seed, and vendor extra_body are NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
             "does not expose those fields as portable harness controls; explicit "
@@ -277,6 +280,7 @@ class TerminalBenchAdapter:
                                         target.max_output_tokens,
                                         _AGENT_MAX_OUTPUT_TOKENS,
                                     ),
+                                    "response_format": {"type": "json_object"},
                                 },
                             },
                         }
@@ -397,6 +401,7 @@ class TerminalBenchAdapter:
                     target.max_output_tokens,
                     _AGENT_MAX_OUTPUT_TOKENS,
                 ),
+                "agent_response_format": {"type": "json_object"},
                 "agent_max_timeout_s_before_multiplier": _AGENT_MAX_TIMEOUT_S,
                 "agent_timeout_multiplier": _AGENT_TIMEOUT_MULTIPLIER,
                 "agent_effective_timeout_cap_s": (
