@@ -256,7 +256,7 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
             )
 
     for command, expected in (
-        (["bench", "list"], "suite accuracy (11 slots)"),
+        (["bench", "list"], "suite accuracy (12 slots)"),
         (["bench", "list", "--suite", "core"], "suite core (3 slots)"),
         (
             ["bench", "list", "--suite", "long-context"],
