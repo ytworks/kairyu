@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -37,10 +38,27 @@ RESULTS_ROOT = Path(
     )
 )
 TERMINAL_BENCH_DATASET = ENVIRONMENT_STORAGE / "bench-data/terminal-bench-2-1"
+ACCURACY_CACHE = ENVIRONMENT_STORAGE / "bench-data/accuracy-cache"
+TAU2_DATASET = ENVIRONMENT_STORAGE / "bench-data/tau2-bench/data"
+ACCURACY_SLOTS = (
+    "swe-bench-pro",
+    "swe-bench-verified",
+    "terminal-bench",
+    "livecodebench",
+    "livecodebench-pro",
+    "hle",
+    "charxiv-reasoning",
+    "gpqa-diamond",
+    "scicode",
+    "tau-bench-banking",
+    "long-context-reasoning",
+    "mrcr-v2",
+)
 BENCHMARKS = (
     "serving-auto-max",
     "terminalbench-pilot",
     "terminalbench",
+    "accuracy-pilot",
 )
 
 
@@ -388,6 +406,194 @@ def serving_auto_max(run_dir: Path) -> int:
     )
 
 
+def _execution_image() -> str:
+    tag = os.environ.get("BENCH_EXEC_IMAGE", "kairyu-bench-exec:local")
+    inspect = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", tag],
+        cwd=ROOT,
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if inspect.returncode:
+        _run(
+            [
+                "docker",
+                "build",
+                "--file",
+                "deploy/bench/Dockerfile.exec",
+                "--tag",
+                tag,
+                "deploy/bench",
+            ]
+        )
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{.Id}}", tag],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+    image_id = inspect.stdout.strip()
+    if not image_id.startswith("sha256:"):
+        raise SystemExit("benchmark execution image is not content-addressed")
+    return image_id
+
+
+def accuracy_pilot(run_dir: Path) -> int:
+    """Run the unfiltered 12-slot Accuracy suite with three source selections."""
+    config = SPEC["benchmarks"]["accuracy_pilot"]
+    run_id = run_dir.parent.name
+    base_url = f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1"
+    model = SPEC["orchestration"]["auto_max_model"]
+    command = [
+        str(ROOT / ".venv/bin/python"),
+        "-m",
+        "kairyu.entrypoints.cli",
+        "bench",
+        "run",
+        "--base-url",
+        base_url,
+        "--model",
+        model,
+        "--served-config-label",
+        config["served_config_label"],
+        "--served-config-sha256",
+        _served_config_sha256(),
+        "--max-context-tokens",
+        str(config["max_context_tokens"]),
+        "--max-output-tokens",
+        str(config["max_output_tokens"]),
+        "--request-timeout-s",
+        str(config["request_timeout_s"]),
+        "--suite",
+        "accuracy",
+        "--limit",
+        str(config["limit"]),
+        "--seed",
+        str(config["seed"]),
+        "--attempts",
+        str(config["attempts"]),
+        "--judge-base-url",
+        base_url,
+        "--judge-model",
+        model,
+        "--concurrency",
+        str(config["concurrency"]),
+        "--cache-dir",
+        str(ACCURACY_CACHE),
+        "--results-dir",
+        str(run_dir),
+        "--run-id",
+        run_id,
+        "--exec-runner",
+        "docker",
+        "--exec-image",
+        _execution_image(),
+        "--no-progress",
+    ]
+    env = dict(os.environ)
+    env["KAIRYU_TERMINAL_BENCH_PATH"] = str(TERMINAL_BENCH_DATASET)
+    env["TAU2_DATA_DIR"] = str(TAU2_DATASET)
+    code = _run(
+        command,
+        log=run_dir / "accuracy.log",
+        check=False,
+        env=env,
+    )
+    if code:
+        return code
+    return _validate_accuracy_pilot(run_dir / run_id, model=model)
+
+
+def _finite_number(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _validate_accuracy_pilot(run_path: Path, *, model: str) -> int:
+    """Fail closed unless every selected real item in all 12 slots is scored."""
+    try:
+        scoreboard = json.loads((run_path / "scoreboard.json").read_text(encoding="utf-8"))
+        cells = scoreboard["cells"]
+        if set(cells) != set(ACCURACY_SLOTS):
+            raise ValueError(f"scoreboard slots are {sorted(cells)}")
+        raw_results: dict[str, dict] = {}
+        for path in run_path.glob("*--*/*.json"):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            benchmark = payload.get("benchmark")
+            if benchmark in raw_results:
+                raise ValueError(f"duplicate raw result for {benchmark}")
+            if isinstance(benchmark, str):
+                raw_results[benchmark] = payload
+        if set(raw_results) != set(ACCURACY_SLOTS):
+            raise ValueError(f"raw result slots are {sorted(raw_results)}")
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        print(f"invalid Accuracy pilot artifacts: {error}", file=sys.stderr)
+        return 1
+
+    for benchmark in ACCURACY_SLOTS:
+        result = raw_results[benchmark]
+        metrics = result.get("metrics")
+        items = result.get("items")
+        identity = result.get("source_identity")
+        try:
+            cell = cells[benchmark][model]
+        except (KeyError, TypeError) as error:
+            print(f"Accuracy pilot has no {benchmark}/{model} cell: {error}", file=sys.stderr)
+            return 1
+        expected = len(items) if isinstance(items, list) else -1
+        if benchmark != "scicode":
+            expected = 3
+        complete = (
+            result.get("target") == model
+            and result.get("status") == "completed"
+            and isinstance(metrics, dict)
+            and _finite_number(metrics.get("score"))
+            and metrics.get("n_total") == expected
+            and metrics.get("n_scored") == expected
+            and metrics.get("n_unjudged") == 0
+            and metrics.get("n_skipped") == 0
+            and metrics.get("n_failed") == 0
+            and isinstance(identity, dict)
+            and identity.get("source_tree_clean") is True
+            and isinstance(items, list)
+            and len(items) == expected
+            and expected > 0
+            and all(
+                isinstance(item, dict)
+                and item.get("status") == "completed"
+                and _finite_number(item.get("score"))
+                and item.get("error") is None
+                for item in items
+            )
+            and cell.get("status") == "completed"
+            and _finite_number(cell.get("score"))
+            and cell.get("n") == expected
+            and cell.get("n_scored") == expected
+        )
+        if complete and benchmark == "scicode":
+            chains = {
+                item["item_id"].rsplit(".", 1)[0]
+                for item in items
+                if isinstance(item.get("item_id"), str) and "." in item["item_id"]
+            }
+            complete = len(chains) == 3
+        performance = cell.get("performance")
+        if complete and isinstance(performance, dict) and "errors" in performance:
+            complete = performance.get("errors") == 0
+        if not complete:
+            print(
+                f"Accuracy pilot evidence is incomplete for {benchmark}: "
+                f"raw_status={result.get('status')!r}, metrics={metrics!r}, "
+                f"items={len(items) if isinstance(items, list) else None!r}, "
+                f"cell={cell!r}",
+                file=sys.stderr,
+            )
+            return 1
+    return 0
+
+
 def _terminalbench_run(
     run_dir: Path,
     *,
@@ -601,6 +807,7 @@ def main() -> None:
         print("serving-auto-max  verifier-gated product DAG serving matrix")
         print("terminalbench-pilot  four-task product-model pilot")
         print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
+        print("accuracy-pilot    all 12 Accuracy slots, three real selections each")
         print("all               every benchmark above, continuing after failures")
         return
 

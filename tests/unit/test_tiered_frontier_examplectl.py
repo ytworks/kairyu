@@ -403,6 +403,118 @@ def test_tiered_terminalbench_pilot_pins_product_model_and_tasks(
     )
 
 
+def test_tiered_accuracy_pilot_pins_unfiltered_twelve_slot_contract(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_accuracy_pilot")
+    observed: list[str] = []
+    observed_env: dict[str, str] = {}
+    run_dir = tmp_path / "accuracy-12x3" / "accuracy-pilot"
+    run_dir.mkdir(parents=True)
+
+    def fake_run(command, *, log=None, check=True, env=None):
+        observed.extend(command)
+        observed_env.update(env or {})
+        return 0
+
+    monkeypatch.setattr(benchmark, "_run", fake_run)
+    monkeypatch.setattr(benchmark, "_execution_image", lambda: "sha256:" + "a" * 64)
+    monkeypatch.setattr(benchmark, "_served_config_sha256", lambda: "b" * 64)
+    monkeypatch.setattr(
+        benchmark, "_validate_accuracy_pilot", lambda _path, **_kwargs: 0
+    )
+
+    assert benchmark.accuracy_pilot(run_dir) == 0
+    assert _option(observed, "--base-url") == "http://127.0.0.1:8003/v1"
+    assert _option(observed, "--model") == "kairyu-auto-max"
+    assert _option(observed, "--judge-base-url") == "http://127.0.0.1:8003/v1"
+    assert _option(observed, "--judge-model") == "kairyu-auto-max"
+    assert _option(observed, "--served-config-sha256") == "b" * 64
+    assert _option(observed, "--max-context-tokens") == "131072"
+    assert _option(observed, "--max-output-tokens") == "32768"
+    assert _option(observed, "--request-timeout-s") == "86400"
+    assert _option(observed, "--suite") == "accuracy"
+    assert _option(observed, "--limit") == "3"
+    assert _option(observed, "--seed") == "0"
+    assert _option(observed, "--attempts") == "1"
+    assert _option(observed, "--concurrency") == "1"
+    assert _option(observed, "--run-id") == "accuracy-12x3"
+    assert _option(observed, "--exec-runner") == "docker"
+    assert _option(observed, "--exec-image") == "sha256:" + "a" * 64
+    assert _option(observed, "--cache-dir") == str(benchmark.ACCURACY_CACHE)
+    assert observed_env["KAIRYU_TERMINAL_BENCH_PATH"] == str(
+        benchmark.TERMINAL_BENCH_DATASET
+    )
+    assert observed_env["TAU2_DATA_DIR"] == str(benchmark.TAU2_DATASET)
+    for forbidden in ("--only", "--exclude", "--smoke", "--offline-fixtures", "--no-vision"):
+        assert forbidden not in observed
+
+
+def test_tiered_accuracy_pilot_validator_requires_all_scoreable_items_and_chains(
+    tmp_path: Path,
+) -> None:
+    benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_accuracy_validator")
+    model = "kairyu-auto-max"
+    cells = {}
+    raw_paths = {}
+    for slot in benchmark.ACCURACY_SLOTS:
+        item_ids = (
+            ["scicode-1.1", "scicode-1.2", "scicode-2.1", "scicode-3.1"]
+            if slot == "scicode"
+            else [f"{slot}-{index}" for index in range(3)]
+        )
+        items = [
+            {"item_id": item_id, "status": "completed", "score": 0.0, "error": None}
+            for item_id in item_ids
+        ]
+        count = len(items)
+        cells[slot] = {
+            model: {
+                "status": "completed",
+                "score": 0.0,
+                "n": count,
+                "n_scored": count,
+                "performance": {"errors": 0},
+            }
+        }
+        result_dir = tmp_path / f"{slot}--hash"
+        result_dir.mkdir()
+        raw = {
+            "benchmark": slot,
+            "target": model,
+            "status": "completed",
+            "source_identity": {"source_tree_clean": True},
+            "metrics": {
+                "score": 0.0,
+                "n_total": count,
+                "n_scored": count,
+                "n_unjudged": 0,
+                "n_skipped": 0,
+                "n_failed": 0,
+            },
+            "items": items,
+        }
+        raw_path = result_dir / "target.json"
+        raw_path.write_text(json.dumps(raw))
+        raw_paths[slot] = (raw_path, raw)
+    (tmp_path / "scoreboard.json").write_text(json.dumps({"cells": cells}))
+
+    assert benchmark._validate_accuracy_pilot(tmp_path, model=model) == 0
+
+    scicode_path, scicode = raw_paths["scicode"]
+    scicode["items"][-1]["item_id"] = "scicode-2.2"
+    scicode_path.write_text(json.dumps(scicode))
+    assert benchmark._validate_accuracy_pilot(tmp_path, model=model) == 1
+
+    scicode["items"][-1]["item_id"] = "scicode-3.1"
+    scicode_path.write_text(json.dumps(scicode))
+    hle_path, hle = raw_paths["hle"]
+    hle["items"][1]["error"] = "judge failed"
+    hle["metrics"]["n_failed"] = 1
+    hle_path.write_text(json.dumps(hle))
+    assert benchmark._validate_accuracy_pilot(tmp_path, model=model) == 1
+
+
 def test_tiered_all_dispatches_every_benchmark(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

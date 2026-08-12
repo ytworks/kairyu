@@ -83,6 +83,7 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./bench.sh serving-auto-max
 ./bench.sh terminalbench-pilot
 ./bench.sh terminalbench
+./bench.sh accuracy-pilot --run-id <fresh-run-id>
 ./bench.sh all
 ```
 
@@ -91,6 +92,15 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 same product model over all 89 tasks with terminus-2 and the published 500-turn
 budget. Historical MoA results in `MEASUREMENTS.md` do not transfer to this DAG
 without a fresh run. ChatUI continues to call only Kairyu L3.
+
+`accuracy-pilot` runs the unfiltered 12-slot Accuracy suite against the single
+public `kairyu-auto-max` L3 endpoint with real data, `--limit 3 --attempts 1
+--seed 0`, the same L3 model as judge/user simulator, and the content-addressed
+Docker execution image. Its post-run gate requires every selected item (and
+every scoreable sub-step in three selected SciCode problem chains) to complete
+with a numeric score and no failed, skipped, or unjudged evidence. Accuracy
+cache and results remain on NVMe; retain the pinned tau2-bench checkout under
+the example's `bench-data/` directory.
 
 The Harbor dataset is exported once to
 `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-data/terminal-bench-2-1`;

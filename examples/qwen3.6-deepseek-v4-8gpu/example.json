@@ -102,6 +102,16 @@
         "db-wal-recovery"
       ],
       "pilot_models": ["kairyu-auto-max"]
+    },
+    "accuracy_pilot": {
+      "limit": 3,
+      "attempts": 1,
+      "seed": 0,
+      "max_context_tokens": 131072,
+      "max_output_tokens": 32768,
+      "request_timeout_s": 86400,
+      "concurrency": 1,
+      "served_config_label": "rtx-pro-6000-blackwell-8x-qwen-tp1x4-deepseek-tp4-ep4-l3-auto-max"
     }
   }
 }
