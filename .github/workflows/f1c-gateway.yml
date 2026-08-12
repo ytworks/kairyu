@@ -53,7 +53,7 @@ jobs:
           curl --fail --location --retry 5 --retry-all-errors \
             "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64.sha256sum" \
             --output "${tools_dir}/kind.sha256"
-          echo "$(cat "${tools_dir}/kind.sha256")  ${tools_dir}/kind" | sha256sum --check
+          echo "$(awk '{print $1}' "${tools_dir}/kind.sha256")  ${tools_dir}/kind" | sha256sum --check
 
           curl --fail --location --retry 5 --retry-all-errors \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
@@ -61,7 +61,7 @@ jobs:
           curl --fail --location --retry 5 --retry-all-errors \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256" \
             --output "${tools_dir}/kubectl.sha256"
-          echo "$(cat "${tools_dir}/kubectl.sha256")  ${tools_dir}/kubectl" | sha256sum --check
+          echo "$(awk '{print $1}' "${tools_dir}/kubectl.sha256")  ${tools_dir}/kubectl" | sha256sum --check
 
           chmod +x "${tools_dir}/kind" "${tools_dir}/kubectl"
           echo "${tools_dir}" >> "${GITHUB_PATH}"
