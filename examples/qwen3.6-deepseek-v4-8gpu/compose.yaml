@@ -231,13 +231,7 @@ services:
         read_only: true
       - deepseek-models:/models/deepseek:ro
       - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
-      - ./auto.yaml:/etc/kairyu/auto.yaml:ro
       - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
-      - ./auto-max-chat.yaml:/etc/kairyu/auto-max-chat.yaml:ro
-      - ./auto-max-moa1.yaml:/etc/kairyu/auto-max-moa1.yaml:ro
-      - ./auto-max-moa2.yaml:/etc/kairyu/auto-max-moa2.yaml:ro
-      - ./auto-max-moa3.yaml:/etc/kairyu/auto-max-moa3.yaml:ro
-      - ./auto-max-moa4.yaml:/etc/kairyu/auto-max-moa4.yaml:ro
       - ./router.json:/etc/kairyu/router.json:ro
       - ./deepseek-thinking.jinja:/etc/kairyu/deepseek-thinking.jinja:ro
       - ../qwen3.6-27b-1gpu/chat_template.jinja:/etc/kairyu/qwen3.6-chat-template.jinja:ro

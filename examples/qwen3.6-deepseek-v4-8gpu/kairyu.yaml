@@ -88,23 +88,11 @@ pools:
     probe_interval_s: 2.0
 
 orchestrators:
-  kairyu-auto:
-    spec: /etc/kairyu/auto.yaml
   kairyu-auto-max:
     spec: /etc/kairyu/auto-max.yaml
-  kairyu-auto-max-chat:
-    spec: /etc/kairyu/auto-max-chat.yaml
-  kairyu-auto-max-moa1:
-    spec: /etc/kairyu/auto-max-moa1.yaml
-  kairyu-auto-max-moa2:
-    spec: /etc/kairyu/auto-max-moa2.yaml
-  kairyu-auto-max-moa3:
-    spec: /etc/kairyu/auto-max-moa3.yaml
-  kairyu-auto-max-moa4:
-    spec: /etc/kairyu/auto-max-moa4.yaml
 
-# The Chat UI product surface is fail-closed. Pools and diagnostic policies
-# remain deployment-owned runtime resources but are not public model IDs.
+# The Chat UI product surface is fail-closed. Its L1 pools remain
+# deployment-owned runtime resources but are not public model IDs.
 public_models: [kairyu-auto-max]
 
 chat_templates:

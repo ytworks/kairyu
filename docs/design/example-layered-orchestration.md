@@ -26,8 +26,9 @@ workers remain owned by their orchestrator.
 The product deployment sets a fail-closed `public_models` allowlist. Public
 model discovery and generation routes use that allowlist; lifecycle,
 readiness, metrics, and internal orchestration continue to cover all runtime
-resources. Direct L1 models and policy candidates live on an opt-in,
-loopback-only benchmark gateway.
+resources. This product example does not register direct L1 models or policy
+candidates as orchestrators; it keeps one orchestration YAML and one public
+model.
 
 ### EO-D3 — The quality path is an explicit bounded DAG
 

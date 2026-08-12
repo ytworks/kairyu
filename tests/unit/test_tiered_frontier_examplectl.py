@@ -27,6 +27,31 @@ def _option(command: list[str], name: str) -> str:
     return command[command.index(name) + 1]
 
 
+def test_tiered_browser_gate_requires_one_model_and_separate_reasoning_ui() -> None:
+    browser = (ROOT / "scripts/webui_browser_smoke.mjs").read_text()
+    wrapper = (EXAMPLE / "browser-smoke.sh").read_text()
+
+    assert "WEBUI_SMOKE_PHASE=tiered" in wrapper
+    assert "EXPECTED_PRODUCT_MODEL=kairyu-auto-max" in wrapper
+    assert "inventory.body.data.map" in browser
+    assert "JSON.stringify([productModel])" in browser
+    assert "button[aria-expanded]" in browser
+    assert "intermediate processing was not initially folded" in browser
+    assert "child !== reasoningRoot" in browser
+    assert "child.classList.contains('markdown-prose')" in browser
+    for attribution in (
+        "L2 role:",
+        "L1 worker:",
+        "Engine:",
+        "Model:",
+        "tier1",
+        "tier2",
+        "qwen3.6-27b",
+        "deepseek-v4-flash-0731-thinking",
+    ):
+        assert attribution in browser
+
+
 def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> None:
     spec = json.loads((EXAMPLE / "example.json").read_text())
     compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
@@ -137,13 +162,7 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     thinking = deployment.pools["deepseek-v4-flash-0731-thinking"]
     assert thinking.replicas[0].options["completion_reasoning_end_tag"] == "</think>"
     assert set(deployment.orchestrators) == {
-        "kairyu-auto",
         "kairyu-auto-max",
-        "kairyu-auto-max-chat",
-        "kairyu-auto-max-moa1",
-        "kairyu-auto-max-moa2",
-        "kairyu-auto-max-moa3",
-        "kairyu-auto-max-moa4",
     }
     assert deployment.public_models == frozenset({"kairyu-auto-max"})
     assert deployment.chat_templates == {
@@ -163,27 +182,13 @@ def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcri
     assert "Do not stop reasoning" not in template
 
 
-def test_tiered_l2_pins_explicit_product_dag_and_diagnostic_fanout() -> None:
+def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
-    standard = load_spec(EXAMPLE / "auto.yaml")
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
-    chat = load_spec(EXAMPLE / "auto-max-chat.yaml")
 
-    assert [worker.name for worker in standard.workers] == ["tier1", "tier2"]
-    assert standard.workers[0].engine_ref == "qwen3.6-27b"
-    assert standard.workers[1].engine_ref == "deepseek-v4-flash-0731"
-    assert standard.router.kind == "rules"
-    assert standard.router.thresholds is not None
-    assert standard.router.thresholds.model_dump() == {
-        "multi_step_markers": 64,
-        "multi_agent_min_chars": 262144,
-        "reasoning_keywords": 64,
-        "math_symbols": 512,
-        "tier2_min_chars": 131072,
-    }
-    assert standard.moa_samples == 2
-    assert standard.budget.max_steps == 3
-    assert standard.budget.max_refine_depth == 0
+    assert [worker.name for worker in maximum.workers] == ["tier1", "tier2"]
+    assert maximum.workers[0].engine_ref == "qwen3.6-27b"
+    assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
@@ -209,26 +214,8 @@ def test_tiered_l2_pins_explicit_product_dag_and_diagnostic_fanout() -> None:
     publisher = next(role for role in maximum.roles if role.name == "publisher")
     assert verifier.verifies == "draft_synthesis"
     assert publisher.depends_on == ("draft_synthesis", "verifier")
-    assert chat.router == maximum.router
-    assert chat.moa_samples == 3
-    assert chat.internal_max_tokens == 1024
-    assert config["orchestration"]["auto_max_chat_moa_samples"] == 3
-    assert config["orchestration"]["auto_max_chat_internal_max_output_tokens"] == 1024
-    assert chat.budget.max_steps == 4
-    assert chat.budget.max_refine_depth == 0
-    assert chat.workers[0].engine_ref == "qwen3.6-27b"
-    assert chat.workers[1].engine_ref == "deepseek-v4-flash-0731"
-    assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
-    for samples in range(1, 5):
-        candidate = load_spec(EXAMPLE / f"auto-max-moa{samples}.yaml")
-        assert candidate.router.target_mode == "auto-max"
-        assert candidate.workers == maximum.workers
-        assert candidate.moa_samples == samples
-        assert candidate.budget.max_steps == samples + 1
-        assert candidate.budget.max_refine_depth == 0
-
-    for path in EXAMPLE.glob("auto*.yaml"):
-        assert "base_url: http://kairyu:8000/v1" not in path.read_text()
+    assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
+    assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 
 
 def test_tiered_chat_ui_calls_kairyu_l3() -> None:
@@ -251,6 +238,11 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
         "qwen-3": {"condition": "service_healthy"},
         "deepseek": {"condition": "service_healthy"},
     }
+    policy_mounts = {
+        volume for volume in compose["services"]["kairyu"]["volumes"]
+        if isinstance(volume, str) and "/auto" in volume
+    }
+    assert policy_mounts == {"./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro"}
 
 
 def test_tiered_control_requires_exact_eight_gpu_inventory() -> None:
@@ -336,7 +328,7 @@ def test_tiered_terminalbench_command_is_full_dataset_without_sampling_claims(
     assert "--sampling-seed" not in observed
 
 
-def test_tiered_terminalbench_pilot_pins_same_tasks_for_all_candidates(
+def test_tiered_terminalbench_pilot_pins_product_model_and_tasks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_tb_pilot")
@@ -363,7 +355,7 @@ def test_tiered_terminalbench_pilot_pins_same_tasks_for_all_candidates(
         if value == "--model"
     ]
     config = benchmark.SPEC["benchmarks"]["terminalbench"]
-    assert models == config["pilot_models"]
+    assert models == ["kairyu-auto-max"] == config["pilot_models"]
     assert observed[observed.index("--limit") + 1] == str(len(config["pilot_tasks"]))
     assert observed_env["KAIRYU_TERMINAL_BENCH_PATH"] == str(dataset)
     assert observed_env["KAIRYU_TERMINAL_BENCH_TASKS"] == ",".join(
@@ -508,10 +500,10 @@ def test_tiered_terminalbench_result_uses_zero_inclusive_harbor_mean() -> None:
     assert result["diagnostic_retries_substituted_into_score"] is False
 
 
-def test_tiered_moa_candidate_serving_requires_exact_trace_count(
+def test_tiered_product_serving_requires_publisher_trace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_moa_serving")
+    benchmark = _load(EXAMPLE / "benchmark.py", "tiered_example_product_serving")
     observed: list[tuple[str, dict]] = []
 
     def fake_serving(model, _run_dir, **kwargs):
@@ -519,21 +511,19 @@ def test_tiered_moa_candidate_serving_requires_exact_trace_count(
         return 0
 
     monkeypatch.setattr(benchmark, "_serving", fake_serving)
-    for samples in range(1, 5):
-        function = getattr(benchmark, f"serving_auto_max_moa{samples}")
-        assert function(tmp_path / str(samples)) == 0
+    assert benchmark.serving_auto_max(tmp_path) == 0
 
-    assert [model for model, _ in observed] == [
-        f"kairyu-auto-max-moa{samples}" for samples in range(1, 5)
+    assert observed == [
+        (
+            "kairyu-auto-max",
+            {
+                "tensor_parallel": 4,
+                "replicas": 1,
+                "expected_route": "publisher",
+                "expected_role": "publisher",
+                "expected_kind": "generation",
+                "warmup_requests": 4,
+                "natural_completion": True,
+            },
+        )
     ]
-    for samples, (_, kwargs) in enumerate(observed, start=1):
-        assert kwargs | {
-            "tensor_parallel": 4,
-            "replicas": 1,
-            "expected_route": "moa",
-            "expected_role": "moa",
-            "expected_kind": "synthesis",
-            "expected_moa_samples": samples,
-            "warmup_requests": 4,
-            "natural_completion": True,
-        } == kwargs

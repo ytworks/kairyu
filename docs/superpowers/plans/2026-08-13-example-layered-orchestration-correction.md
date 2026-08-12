@@ -12,8 +12,8 @@ intermediate work in a separate expandable reasoning surface.
 **Architecture:** Separate the public product model registry from internal L1
 worker pools, inject those pools into L2 by object reference instead of calling
 Kairyu's own L3 HTTP endpoint, express the quality policy as an explicit
-Conductor DAG with a verifier-gated synthesis loop, and keep direct/candidate
-models in an opt-in loopback benchmark profile. The measured vLLM workers may
+Conductor DAG with a verifier-gated synthesis loop, and remove the obsolete
+direct/candidate orchestration definitions from this example. The measured vLLM workers may
 be used while the structural work lands, but the example is not finally
 compliant with the product roadmap until the same path passes on native Kairyu
 L1 workers.
@@ -121,10 +121,9 @@ private-stage policy.
 - [ ] Record that a deployment-owned orchestrator may borrow existing engine
   and pool objects and that borrowed resources are not owned by the
   orchestrator lifecycle.
-- [ ] Amend the UI gate: the product profile exposes only orchestration models;
-  direct and candidate models belong to a separate loopback diagnostic profile.
-  Preserve generic Kairyu's ability to expose direct models outside this
-  profile.
+- [ ] Amend the UI gate: this example exposes one orchestration model and does
+  not register obsolete direct or policy-candidate orchestrators. Preserve
+  generic Kairyu's ability to expose direct models in other deployments.
 - [ ] Supersede the single-pass `auto-max` example decision with the explicit
   verifier-gated DAG above.
 - [ ] State the two evidence phases: structural vLLM-backed closure, followed by
@@ -212,9 +211,9 @@ criterion.
 - [ ] Add an immutable `expose_intermediate_outputs` orchestration policy flag,
   default false, and expose it in sanitized routing diagnostics.
 
-**Acceptance:** The product gateway can own Qwen/DeepSeek pools and diagnostic
-objects while exposing exactly one model to Open WebUI and accepting exactly
-that model on public generation routes.
+**Acceptance:** The product gateway can own Qwen/DeepSeek pools while exposing
+exactly one model to Open WebUI and accepting exactly that model on public
+generation routes.
 
 ---
 
@@ -223,8 +222,6 @@ that model on public generation routes.
 **Files:**
 
 - Modify: `examples/qwen3.6-deepseek-v4-8gpu/auto-max.yaml`
-- Add or modify: a benchmark-only orchestration policy under
-  `examples/qwen3.6-deepseek-v4-8gpu/`
 - Modify: `tests/unit/test_tiered_frontier_examplectl.py`
 - Modify: `tests/unit/test_conductor.py`
 - Modify: `tests/unit/test_orchestrator.py`
@@ -253,7 +250,7 @@ stage supplies the L3 answer.
 
 ---
 
-### Task 5: Rebuild the example product and diagnostic surfaces
+### Task 5: Rebuild the example product surface
 
 **Files:**
 
@@ -269,27 +266,22 @@ stage supplies the L3 answer.
 - [ ] Configure the product gateway with
   `public_models: [kairyu-auto-max]`. Keep Open WebUI's sole API base at the
   product gateway and keep `DEFAULT_MODELS: kairyu-auto-max`.
-- [ ] Set `expose_intermediate_outputs: true` only on the UI-visible product
-  policy. Keep diagnostic policies hidden unless separately requested.
-- [ ] Remove direct Qwen/DeepSeek and `auto-max-moa1..4` from the product model
-  inventory and readiness assertion. Keep their pools as internal resources.
-- [ ] Add an opt-in Compose `benchmark` profile with a second loopback-only
-  gateway/config for direct baselines and policy candidates. It may connect to
-  the same L1 services, but it must not share the Chat UI network alias or bind
-  a non-loopback host port.
-- [ ] Point all orchestration workers in both profiles directly at their L1
-  pool refs. No example YAML may contain `base_url: http://kairyu:8000/v1`.
+- [ ] Set `expose_intermediate_outputs: true` on the UI-visible product policy.
+- [ ] Remove obsolete `auto`, `auto-max-chat`, and `auto-max-moa1..4`
+  orchestration definitions and YAML files. Keep only the two L1 pools as
+  internal runtime resources.
+- [ ] Point the product orchestration workers directly at their L1 pool refs.
+  No example YAML may contain `base_url: http://kairyu:8000/v1`.
 - [ ] Make `control.py` validate the product inventory is exactly the declared
   UI-visible set, not merely a superset. Validate the `/routing` DAG, refinement
   bounds, and absence of self-referential worker URLs.
-- [ ] Move direct/policy-selection benchmark commands to the benchmark gateway.
-  Keep the product-path serving and browser checks against the product gateway.
+- [ ] Remove benchmark commands that depend on the deleted orchestration model
+  IDs. Keep product-path serving and browser checks against the product gateway.
 - [ ] Preserve historical vLLM measurements as historical records; add new
   rows instead of rewriting results produced by the single-pass policy.
 
-**Acceptance:** Starting the default profile gives the browser one model and
-one route. Starting the benchmark profile adds only loopback diagnostic access
-and does not change the browser inventory.
+**Acceptance:** Starting the example gives the browser one model, one route,
+and one orchestration YAML.
 
 ---
 
@@ -297,7 +289,7 @@ and does not change the browser inventory.
 
 **Files:**
 
-- Add: `scripts/tiered_orchestration_browser_smoke.mjs`
+- Modify: `scripts/webui_browser_smoke.mjs`
 - Modify: `examples/qwen3.6-deepseek-v4-8gpu/compose.yaml`
 - Modify: `.github/workflows/ci.yml` only for CPU/mock browser coverage
 - Modify: `tests/unit/test_tiered_frontier_examplectl.py`
@@ -401,8 +393,8 @@ The work is complete only when all of the following are true:
    the trace/usage accounts for it.
 4. Completed intermediate work is visible only in the separate expandable,
    model-attributed reasoning surface; only the publisher is final `content`.
-5. Direct baselines and candidate policies remain reproducible through an
-   opt-in loopback benchmark profile.
+5. The example contains one orchestration YAML and no obsolete candidate
+   policies or alternate Chat UI routes.
 6. The default example uses native Kairyu L1 and passes its full-checkpoint GPU
    gates. Before that switch, structural work may be merged but must be labeled
    transitional rather than complete.

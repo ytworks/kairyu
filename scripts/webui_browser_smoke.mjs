@@ -9,6 +9,7 @@
  *   WEBUI_SMOKE_PHASE=initial  node scripts/webui_browser_smoke.mjs
  *   WEBUI_SMOKE_PHASE=outage   node scripts/webui_browser_smoke.mjs
  *   WEBUI_SMOKE_PHASE=recovery node scripts/webui_browser_smoke.mjs
+ *   WEBUI_SMOKE_PHASE=tiered   node scripts/webui_browser_smoke.mjs
  *
  * `initial` requires a fresh Open WebUI data volume. `outage` runs while
  * Kairyu is stopped, and `recovery` runs after Kairyu is started again without
@@ -17,7 +18,7 @@
 
 import { chromium } from 'playwright';
 
-const PHASES = new Set(['initial', 'outage', 'recovery']);
+const PHASES = new Set(['initial', 'outage', 'recovery', 'tiered']);
 const phase = process.env.WEBUI_SMOKE_PHASE ?? 'initial';
 const baseUrl = new URL(
 	process.env.WEBUI_SMOKE_BASE_URL ??
@@ -31,13 +32,14 @@ const browserWsEndpoint = process.env.WEBUI_SMOKE_BROWSER_WS_ENDPOINT ?? '';
 const chromiumExecutable = process.env.WEBUI_SMOKE_CHROMIUM_EXECUTABLE ?? '';
 const directModel = process.env.EXPECTED_DIRECT_MODEL ?? 'default';
 const autoModel = process.env.EXPECTED_AUTO_MODEL ?? 'kairyu-auto';
+const productModel = process.env.EXPECTED_PRODUCT_MODEL ?? 'kairyu-auto-max';
 
 const actionTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_ACTION_TIMEOUT_MS', 20_000);
 const navigationTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_NAVIGATION_TIMEOUT_MS', 30_000);
 const responseTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_RESPONSE_TIMEOUT_MS', 45_000);
 const phaseTimeoutMs = positiveIntegerEnv('WEBUI_SMOKE_PHASE_TIMEOUT_MS', 120_000);
 
-const models = Object.freeze([directModel, autoModel]);
+const models = Object.freeze(phase === 'tiered' ? [productModel] : [directModel, autoModel]);
 const initialDefaultMarker = 'KAIRYU_WEBUI_INITIAL_DEFAULT_197';
 // AUTO wraps the query in a prompt-injection boundary before the deterministic
 // mock echoes its final 48 characters. Keep the SSE marker plus `_SSE` within
@@ -864,15 +866,125 @@ async function runRecoveryPhase() {
 	await step('RAG retrieval and answer after gateway restart', assertRagAfterGatewayRestart);
 }
 
+async function assertTieredProductInventory() {
+	const inventory = await browserJson('/api/models');
+	invariant(
+		inventory.status === 200 && Array.isArray(inventory.body?.data),
+		`Open WebUI model inventory failed: HTTP ${inventory.status}: ${inventory.text}`
+	);
+	const modelIds = inventory.body.data.map((model) => model?.id).filter(Boolean).sort();
+	invariant(
+		JSON.stringify(modelIds) === JSON.stringify([productModel]),
+		`Open WebUI must expose only ${productModel}; got ${JSON.stringify(modelIds)}`
+	);
+	await selectModel(productModel);
+}
+
+async function assertTieredReasoningUi() {
+	const responseItem = await sendUiMessage(
+		productModel,
+		'Explain in one short sentence why independent review improves an answer.'
+	);
+	const reasoningToggle = responseItem.locator('button[aria-expanded]').filter({
+		hasText: /Thought|Thinking/
+	});
+	invariant(
+		(await reasoningToggle.count()) === 1,
+		`expected one reasoning toggle in the assistant answer, got ${await reasoningToggle.count()}`
+	);
+	invariant(
+		(await reasoningToggle.getAttribute('aria-expanded')) === 'false',
+		'intermediate processing was not initially folded'
+	);
+
+	await reasoningToggle.click({ timeout: actionTimeoutMs });
+	await page.waitForFunction(
+		(button) => button.getAttribute('aria-expanded') === 'true',
+		await reasoningToggle.elementHandle(),
+		{ timeout: actionTimeoutMs }
+	);
+
+	const separation = await responseItem.evaluate((item) => {
+		const toggle = [...item.querySelectorAll('button[aria-expanded]')].find((button) =>
+			/Thought|Thinking/.test(button.textContent ?? '')
+		);
+		if (!toggle || !toggle.parentElement) {
+			return { error: 'reasoning toggle/root not found' };
+		}
+		const reasoningRoot = toggle.parentElement;
+		const outputRoot = reasoningRoot.parentElement;
+		if (!outputRoot) {
+			return { error: 'assistant output root not found' };
+		}
+		const finalRoots = [...outputRoot.children].filter(
+			(child) => child !== reasoningRoot && child.classList.contains('markdown-prose')
+		);
+		return {
+			reasoning: reasoningRoot.innerText.trim(),
+			finals: finalRoots.map((root) => root.innerText.trim()).filter(Boolean),
+			distinctNodes: finalRoots.every((root) => root !== reasoningRoot)
+		};
+	});
+	invariant(!separation.error, separation.error);
+	invariant(
+		separation.distinctNodes && separation.finals.length === 1,
+		`reasoning and final answer were not separate sibling sections: ${JSON.stringify(separation)}`
+	);
+
+	for (const label of ['L2 role:', 'L1 worker:', 'Engine:', 'Model:']) {
+		invariant(
+			separation.reasoning.includes(label),
+			`expanded reasoning did not show ${label}: ${separation.reasoning}`
+		);
+	}
+	for (const identity of [
+		'tier1',
+		'tier2',
+		'ReplicaPool',
+		'qwen3.6-27b',
+		'deepseek-v4-flash-0731-thinking'
+	]) {
+		invariant(
+			separation.reasoning.includes(identity),
+			`expanded reasoning did not attribute ${identity}: ${separation.reasoning}`
+		);
+	}
+	const finalText = separation.finals[0];
+	invariant(finalText.length > 0, 'L3 final-answer section was empty');
+	invariant(
+		!['L2 role:', 'L1 worker:', 'Engine:', 'Model:'].some((label) => finalText.includes(label)),
+		`L3 final answer mixed in orchestration attribution: ${finalText}`
+	);
+}
+
+async function runTieredPhase() {
+	await step('open no-auth tiered chat', async () => {
+		await goto('/');
+		await waitForChatSurface();
+	});
+	await step('single product model inventory', assertTieredProductInventory);
+	await step('folded attributed reasoning and separate final answer', assertTieredReasoningUi);
+}
+
 async function main() {
-	invariant(PHASES.has(phase), `WEBUI_SMOKE_PHASE must be initial, outage, or recovery; got ${phase}`);
+	invariant(
+		PHASES.has(phase),
+		`WEBUI_SMOKE_PHASE must be initial, outage, recovery, or tiered; got ${phase}`
+	);
 	invariant(
 		['http:', 'https:'].includes(baseUrl.protocol),
 		`WEBUI_SMOKE_BASE_URL must be HTTP(S), got ${baseUrl.href}`
 	);
 	invariant(baseUrl.pathname === '/', `WEBUI_SMOKE_BASE_URL must not contain a path: ${baseUrl.href}`);
-	invariant(directModel === 'default', `EXPECTED_DIRECT_MODEL must be default, got ${directModel}`);
-	invariant(autoModel === 'kairyu-auto', `EXPECTED_AUTO_MODEL must be kairyu-auto, got ${autoModel}`);
+	if (phase === 'tiered') {
+		invariant(
+			productModel === 'kairyu-auto-max',
+			`EXPECTED_PRODUCT_MODEL must be kairyu-auto-max, got ${productModel}`
+		);
+	} else {
+		invariant(directModel === 'default', `EXPECTED_DIRECT_MODEL must be default, got ${directModel}`);
+		invariant(autoModel === 'kairyu-auto', `EXPECTED_AUTO_MODEL must be kairyu-auto, got ${autoModel}`);
+	}
 
 	browser = await step('launch Playwright Chromium', launchBrowser);
 	context = await step('create isolated browser context', () =>
@@ -898,8 +1010,10 @@ async function main() {
 		await runInitialPhase();
 	} else if (phase === 'outage') {
 		await runOutagePhase();
-	} else {
+	} else if (phase === 'recovery') {
 		await runRecoveryPhase();
+	} else {
+		await runTieredPhase();
 	}
 
 	console.log(`WEBUI BROWSER SMOKE PASS: ${phase}`);
