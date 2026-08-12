@@ -102,6 +102,12 @@ def harness_data_dir(flavor: str) -> Path | None:
     under it. Guessing that layout is how a successful run gets reported as
     producing no results, so the value is imported rather than reconstructed.
     """
+    # The harness resolves this at import time, so a long-lived process can
+    # retain a value from an earlier run. Preserve the harness's documented
+    # environment precedence using the live value before consulting the module.
+    env_dir = os.environ.get("TAU2_DATA_DIR")
+    if env_dir:
+        return Path(env_dir)
     for module in dict.fromkeys((f"{flavor}.utils.utils", "tau2.utils.utils")):
         try:
             imported = importlib.import_module(module)
