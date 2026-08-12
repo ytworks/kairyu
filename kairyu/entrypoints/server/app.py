@@ -1799,6 +1799,9 @@ def create_app(
     price_sheet: PriceSheet | None = None,
     legacy_chat_models: AbstractSet[str] | None = None,
     orchestration_chat_models: AbstractSet[str] | None = None,
+    runtime_engines: Mapping[str, EngineBackend] | None = None,
+    runtime_embedding_backends: Mapping[str, EmbeddingBackend] | None = None,
+    runtime_orchestrators: Mapping[str, Orchestrator] | None = None,
 ) -> FastAPI:
     settings = settings or ServerSettings()
     legacy_chat_models = frozenset(legacy_chat_models or ())
@@ -1844,6 +1847,17 @@ def create_app(
             f"{sorted(templated_auto_models)}"
         )
     served_embedding_backends = dict(embedding_backends or {})
+    health_engines = dict(
+        served_engines if runtime_engines is None else runtime_engines
+    )
+    health_embedding_backends = dict(
+        served_embedding_backends
+        if runtime_embedding_backends is None
+        else runtime_embedding_backends
+    )
+    health_orchestrators = dict(
+        auto_models if runtime_orchestrators is None else runtime_orchestrators
+    )
     collisions = (
         (set(auto_models) & set(served_engines))
         | (set(served_embedding_backends) & set(served_engines))
@@ -1878,7 +1892,7 @@ def create_app(
     if metrics is not None:
         if slo_admission is not None:
             metrics.track_slo_admission(slo_admission)
-        for name, engine in served_engines.items():
+        for name, engine in health_engines.items():
             if isinstance(engine, ReplicaPool):
                 metrics.track_pool(name, engine)
             metrics.track_scheduler(name, engine)
@@ -1889,11 +1903,11 @@ def create_app(
     )
     add_health_routes(
         app,
-        served_engines,
+        health_engines,
         metrics,
         admin_keys=admin_keys,
-        embedding_backends=served_embedding_backends,
-        orchestrators=auto_models,
+        embedding_backends=health_embedding_backends,
+        orchestrators=health_orchestrators,
     )
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
 

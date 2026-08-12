@@ -1108,6 +1108,60 @@ legacy_chat_models: [kairyu-auto, kairyu-auto-max]
             assert response.json()["choices"][0]["message"]["content"]
 
 
+async def test_public_models_hide_internal_engines_but_keep_them_in_readiness(
+    tmp_path,
+    monkeypatch,
+):
+    class _InternalNotReady(MockBackend):
+        def readiness(self) -> EngineReadiness:
+            return EngineReadiness(False, "internal L1 is not ready")
+
+    internal = _InternalNotReady()
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda *_args, **_kwargs: internal,
+    )
+    (tmp_path / "product.yaml").write_text(
+        "workers:\n  - {name: tier1, engine_ref: internal}\n",
+        encoding="utf-8",
+    )
+    app = build_app_from_spec(
+        load_deployment_spec(
+            """
+engines:
+  internal: {backend: mock}
+orchestrators:
+  product: {spec: product.yaml}
+public_models: [product]
+"""
+        ),
+        base_dir=tmp_path,
+    )
+
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        routing = await client.get("/routing")
+        ready = await client.get("/readyz")
+        chat = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("hidden", model="internal"),
+        )
+        completions = await client.post(
+            "/v1/completions",
+            json={"model": "internal", "prompt": "hidden"},
+        )
+        responses = await client.post(
+            "/v1/responses",
+            json={"model": "internal", "input": "hidden"},
+        )
+
+    assert {item["id"] for item in models.json()["data"]} == {"product"}
+    assert set(routing.json()["models"]) == {"product"}
+    assert ready.status_code == 503
+    assert chat.status_code == completions.status_code == responses.status_code == 404
+
+
 async def test_legacy_orchestrator_composes_with_named(tmp_path):
     (tmp_path / "auto.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
     (tmp_path / "auto_max.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
