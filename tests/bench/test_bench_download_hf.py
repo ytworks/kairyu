@@ -43,14 +43,14 @@ def test_scicode_downloads_and_is_idempotent(tmp_path):
     assert again.status == "cached"
 
 
-def test_mrcr_selects_exactly_the_official_bins(tmp_path):
-    """The real slice must be 100 samples in each official bin at or below 128K.
+def test_mrcr_selects_exactly_the_corrected_official_slice(tmp_path):
+    """The corrected real slice must retain 500 exact-token-selected rows.
 
-    This is the assertion that a chars/4 approximation cannot make: the bins are
-    defined by exact `o200k_base` counts over prompt + answer, so only real data
-    plus the real tokenizer can confirm the population matches Fugu's.
+    Repairs in the pinned December 2025 source moved a few rows across adjacent
+    token boundaries, so the original 100-per-bin distribution is no longer an
+    invariant.  Exact `o200k_base` selection and the total denominator remain.
     """
-    from kairyu.bench.adapters.mrcr import MrcrAdapter, expected_rows, selected_bins
+    from kairyu.bench.adapters.mrcr import MrcrAdapter, expected_rows
 
     cache = BenchCache(tmp_path / "cache")
     adapter = MrcrAdapter()
@@ -65,4 +65,4 @@ def test_mrcr_selects_exactly_the_official_bins(tmp_path):
         per_bin[row["token_bin"]] = per_bin.get(row["token_bin"], 0) + 1
         assert row["total_tokens"] <= 131_072
         assert row["total_tokens"] >= row["prompt_tokens"]
-    assert per_bin == dict.fromkeys(selected_bins(), 100)
+    assert per_bin == {8192: 106, 16384: 96, 32768: 98, 65536: 100, 131072: 100}

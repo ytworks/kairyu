@@ -229,15 +229,19 @@ def test_mrcr_normalize_selects_the_official_bins(tmp_path, monkeypatch, capsys)
     assert "kept 500/" in out and "per-bin counts" in out
 
 
-def test_mrcr_normalize_fails_closed_when_the_bins_do_not_match(tmp_path, monkeypatch):
-    """A moved population must not be averaged as if it were Fugu's slice."""
+def test_mrcr_normalize_fails_closed_when_the_denominator_does_not_match(
+    tmp_path, monkeypatch
+):
+    """A missing source row must not silently shrink the corrected slice."""
     _patch_mrcr(monkeypatch, _official_slice()[:-1])
-    with pytest.raises(DatasetUnavailable, match="100 rows in each"):
+    with pytest.raises(DatasetUnavailable, match="expected 500 rows"):
         MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
 
 
-def test_mrcr_requires_100_rows_in_every_selected_bin(tmp_path, monkeypatch):
-    """500 rows weighted 99/101/100/100/100 is a different population."""
+def test_mrcr_accepts_corrected_rows_that_cross_adjacent_bins(
+    tmp_path, monkeypatch, capsys
+):
+    """Source repairs may move rows between exact bins without changing the slice."""
     from kairyu.bench.adapters.mrcr import selected_bins
 
     bins = selected_bins()
@@ -248,9 +252,12 @@ def test_mrcr_requires_100_rows_in_every_selected_bin(tmp_path, monkeypatch):
             rows.append(_mrcr_row(8, tokens=bound - 100, answer_tokens=100))
     assert len(rows) == 500  # the total alone would have passed
     _patch_mrcr(monkeypatch, rows)
-    with pytest.raises(DatasetUnavailable, match="100 rows in each") as error:
-        MrcrAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))
-    assert "8192: 99" in str(error.value)
+    normalized = MrcrAdapter().normalize(
+        DownloadContext(cache=BenchCache(tmp_path / "c"))
+    )
+
+    assert len(normalized) == 500
+    assert "8192: 99" in capsys.readouterr().out
 
 
 def test_mrcr_context_gate_uses_the_exact_prompt_count(tmp_path):
@@ -314,6 +321,7 @@ def test_mrcr_methodology_discloses_the_slice(tmp_path):
     assert methodology["selected_bins"] == [8192, 16384, 32768, 65536, 131_072]
     assert methodology["expected_rows"] == 500
     assert "prompt+answer" in methodology["selection"]
+    assert "corrected pinned source" in methodology["selection"]
     assert any("8-needle" in note for note in MrcrAdapter().info.annotations)
 
 

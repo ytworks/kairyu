@@ -43,7 +43,10 @@ _MAX_CONTEXT_TOKENS = 131_072  # "up to 128K context"
 #   (131072, 262144] (262144, 524288] (524288, 1048576]
 # Five of those bins sit at or below 128K, so Fugu's 8-needle slice is exactly
 # 500 rows. A chars/4 approximation over the prompt alone cannot land on those
-# boundaries, so it cannot select the same population.
+# boundaries, so it cannot select the same population.  The corrected pinned
+# dataset retains 500 rows in this slice, but a few repaired examples moved
+# across adjacent exact-token boundaries; the observed per-bin counts are
+# therefore evidence, not an invariant that the corrected source satisfies.
 _BIN_UPPER_BOUNDS = (8192, 16384, 32768, 65536, 131_072, 262_144, 524_288, 1_048_576)
 _SAMPLES_PER_BIN = 100
 _ENCODING = "o200k_base"
@@ -71,7 +74,7 @@ def selected_bins() -> tuple[int, ...]:
 
 
 def expected_rows() -> int:
-    """100 samples per selected bin, per the dataset card."""
+    """Total rows in the corrected official 8-needle slice through 128K."""
     return _SAMPLES_PER_BIN * len(selected_bins())
 
 
@@ -161,15 +164,17 @@ class MrcrAdapter(GenerativeAdapter):
                     "est_prompt_tokens": prompt_tokens(messages, row.get("n_chars")),
                 }
             )
-        # Per bin, not just in total: 500 rows weighted 99/101/100/100/100 is a
-        # different population than the official 100-per-bin slice, and it would
-        # otherwise be cached while the report claims the official one.
-        expected_per_bin = dict.fromkeys(selected_bins(), _SAMPLES_PER_BIN)
-        if per_bin != expected_per_bin:
+        # The December 2025 source correction changed some prompts/answers enough
+        # to cross adjacent exact-token boundaries.  The pinned source therefore
+        # no longer satisfies the card's original 100-per-bin invariant even
+        # though exact selection still yields the complete 500-row <=128K slice.
+        # Keep the exact observed bin counts in every normalized row/cache log,
+        # but fail closed if the selected denominator changes.
+        if len(normalized) != expected_rows():
             raise DatasetUnavailable(
                 f"{self.info.hf_dataset}@{self.info.hf_revision} did not yield the "
-                f"official {_NEEDLES}-needle slice: expected {_SAMPLES_PER_BIN} rows "
-                f"in each of {list(selected_bins())}, got "
+                f"corrected official {_NEEDLES}-needle slice: expected "
+                f"{expected_rows()} rows across {list(selected_bins())}, got "
                 f"{dict(sorted(per_bin.items()))} ({len(normalized)} rows total)"
             )
         # The excluded counts are the denominator story; never silent.
@@ -227,7 +232,9 @@ class MrcrAdapter(GenerativeAdapter):
         base["selection"] = (
             f"only n_needles == {_NEEDLES} rows whose exact {_ENCODING} "
             "prompt+answer token count falls in an official bin at or below "
-            f"{_MAX_CONTEXT_TOKENS} ({_SAMPLES_PER_BIN} samples per bin)"
+            f"{_MAX_CONTEXT_TOKENS} ({expected_rows()} rows in the corrected "
+            "pinned source; observed per-bin counts are retained because repaired "
+            "examples can cross adjacent boundaries)"
         )
         base["truncation_policy"] = (
             f"items whose exact {_ENCODING} prompt tokens exceed the target's "

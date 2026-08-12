@@ -708,20 +708,22 @@ Pro is scored by the local sandbox, not the official judge.
   **lower bound**.
 
 **MRCRv2 population.** The published `openai/mrcr` split mixes 2-, 4- and
-8-needle items across eight length bins up to 1M tokens, with **100 samples per
-(needle count, bin)**. The card defines those bins by the tokens used by
-**prompt + answer** under `o200k_base`, with boundaries `[4096, 8192]`,
+8-needle items across eight length bins up to 1M tokens. The card originally
+defined **100 samples per (needle count, bin)** and defines those bins by the
+tokens used by **prompt + answer** under `o200k_base`, with boundaries `[4096, 8192]`,
 `(8192, 16384]`, … `(524288, 1048576]`.
 
 Fugu reports the **8-needle** subset at up to **128K**, which is the five bins at
-or below 131,072 — exactly **500 rows**. The adapter counts tokens with the
-official encoder (so `tiktoken` is required; without it the cell is skipped
-rather than approximated), assigns each row to its official bin, keeps the
-selected bins, prints the per-bin counts, and **fails closed** unless there are
-exactly 100 rows in *each* of them — 500 in total weighted 99/101/100/100/100
-would be a different population reported as the official slice. An approximation such as chars/4 over the prompt alone cannot reproduce
-those boundaries, and averaging the whole 2,400-row split would score an easier,
-shorter population against Fugu's number.
+or below 131,072 — exactly **500 rows**. The pinned December 2025 correction
+repaired prompts and answers, moving a few rows across adjacent exact-token
+boundaries; its observed distribution is 106/96/98/100/100 while the complete
+selected denominator remains 500. The adapter counts tokens with the official
+encoder (so `tiktoken` is required; without it the cell is skipped rather than
+approximated), assigns each row to its official bin, keeps the selected bins,
+prints the observed per-bin counts, and **fails closed** unless there are
+exactly 500 selected rows. An approximation such as chars/4 over the prompt
+alone cannot reproduce those boundaries, and averaging the whole 2,400-row
+split would score an easier, shorter population against Fugu's number.
 
 The target's own `max_context_tokens` gate is separate: it uses the exact
 prompt-only token count, matching the official runner's
