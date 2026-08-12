@@ -244,6 +244,10 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
         "draft_synthesis",
         "verifier",
     )
+    assert publisher.worker == "tier1"
+    assert publisher.extra_args == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 

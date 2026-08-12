@@ -21,7 +21,7 @@ caching, chunked batching, and full/piecewise CUDA Graphs.
 Kairyu exposes exactly one public product model, `kairyu-auto-max`. Its request
 enters L3 once, then L2 borrows the deployment-owned L1 pools through
 `engine_ref`: DeepSeek planning, three parallel Qwen proposals, DeepSeek draft
-synthesis, verification, and DeepSeek publishing. Image requests first run one
+synthesis and verification, then direct-output Qwen publishing. Image requests first run one
 conditional Qwen vision-grounding role; its grounded text is an explicit input
 to planning, synthesis, verification, and publishing, while text-only requests
 skip that role. A failed verifier can repeat synthesis and verification at most

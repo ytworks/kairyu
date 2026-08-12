@@ -88,8 +88,11 @@ roles:
       Draft: {draft_synthesis}
 
   - name: publisher
-    worker: tier2
+    worker: tier1
     role_type: publisher
+    extra_args:
+      chat_template_kwargs:
+        enable_thinking: false
     depends_on: [vision_grounding, draft_synthesis, verifier]
     prompt: |
       [publisher] Return only the final answer to the user. Incorporate the
