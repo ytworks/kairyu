@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from kairyu.bench.adapters import swebench_pro as swe_mod
 from kairyu.bench.adapters.base import RunContext
 from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
 from kairyu.bench.adapters.tau_bench import (
@@ -63,6 +64,18 @@ def test_swebench_sets_fugu_step_limit(tmp_path):
     assert _flag_value(command, "--subset") == "ScaleAI/SWE-bench_Pro"
     assert _flag_value(command, "--split") == "test"
     assert _flag_value(command, "--output") == "mini-output"
+
+
+def test_swebench_resolves_entrypoint_beside_active_python(tmp_path, monkeypatch):
+    python = tmp_path / "bin" / "python"
+    monkeypatch.setattr(swe_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(swe_mod.sys, "executable", str(python))
+
+    command = SweBenchProAdapter()._generate_command(
+        _target(), _ctx(tmp_path), tmp_path / "output"
+    )
+
+    assert command[0] == str(python.with_name("mini-extra"))
 
 
 def test_swebench_step_limit_is_disclosed():

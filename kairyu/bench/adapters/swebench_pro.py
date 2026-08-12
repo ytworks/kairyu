@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -55,6 +56,14 @@ def harness_missing() -> str | None:
         if importlib.util.find_spec(module) is None:
             return package
     return None
+
+
+def mini_extra_executable() -> str:
+    """Resolve the console script when Python's venv is not on ``PATH``."""
+    executable = shutil.which("mini-extra")
+    if executable is not None:
+        return executable
+    return str(Path(sys.executable).with_name("mini-extra"))
 
 
 def parse_swebench_report(report: dict) -> tuple[list[ItemResult], int]:
@@ -130,7 +139,7 @@ class SweBenchProAdapter:
         self, target: BenchTarget, ctx: RunContext, output_dir: Path
     ) -> list[str]:
         command = [
-            "mini-extra",
+            mini_extra_executable(),
             "swebench",
             "--model",
             f"openai/{target.model}",

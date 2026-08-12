@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 from conftest import make_config, make_target
@@ -108,13 +109,14 @@ async def test_swebench_two_stage_flow_and_official_denominator(tmp_path, monkey
 
         return Completed()
 
-    monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(swe_mod, "subprocess", SimpleNamespace(run=fake_run))
     pair = await SweBenchProAdapter().run(
         make_target(model="kairyu-auto"), _ctx(tmp_path, limit=4)
     )
     assert pair.status == "partial"  # the error instance keeps it honest
     assert pair.metrics["score"] == 0.5  # 2 resolved / 4 total (official denominator)
-    assert stages[0][:2] == ["mini-extra", "swebench"]
+    assert Path(stages[0][0]).name == "mini-extra"
+    assert stages[0][1] == "swebench"
     assert "openai/kairyu-auto" in stages[0]
     assert "--slice" in stages[0]
     output_dir = Path(stages[0][stages[0].index("--output") + 1])
@@ -137,7 +139,7 @@ async def test_swebench_fails_closed_when_generation_writes_no_predictions(
 
         return Completed()
 
-    monkeypatch.setattr(swe_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(swe_mod, "subprocess", SimpleNamespace(run=fake_run))
     pair = await SweBenchProAdapter().run(make_target(), _ctx(tmp_path, limit=1))
     assert pair.status == "failed"
     assert "mini-output/preds.json" in pair.reason
