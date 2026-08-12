@@ -146,8 +146,9 @@ class RunContext:
     # agentic adapters continue mapping this to their harness trial flag.
     attempts: int = 1
     run_id: str = ""  # provenance for artifacts the external harnesses name themselves
-    # True means the caller explicitly requested fresh external-harness evidence.
-    # Failed-pair resume keeps this false so costly partial artifacts can be reused.
+    # True means the suite requires fresh external-harness evidence, either for
+    # explicit --rerun or evaluator-taint recovery. Failed-pair resume keeps
+    # this false so costly partial artifacts can be reused.
     rerun: bool = False
     # Persistent root for expensive external-harness evidence. SuiteRunner
     # binds this below the immutable run directory; direct tests may override it.

@@ -151,7 +151,9 @@ paths from the pair result instead of being embedded in scoreboard JSON.
 A normal retry of a failed pair reuses the stable work directory so upstream
 per-instance work can resume. An explicit suite `--rerun` creates a distinct
 persistent attempt subdirectory and therefore cannot reuse earlier predictions
-as fresh evidence.
+as fresh evidence. Recovery after a persisted evaluator-identity drift uses the
+same fresh-artifact path, preventing old official task reports from surviving
+an evaluator change.
 
 Secrets from endpoint credentials or environment variables must not be copied
 into commands, methodology, or Kairyu-captured stage logs. The subprocess

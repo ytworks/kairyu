@@ -1318,7 +1318,9 @@ logs, and `preds.json`), Kairyu-captured stage logs, official evaluator logs,
 and the schema-v2 report. Kairyu redacts endpoint credentials from the stage
 logs and does not persist the subprocess environment. A failed pair reuses that
 directory to resume upstream work; explicit `--rerun` creates a distinct,
-persistent attempt directory.
+persistent attempt directory. Recovery from a recorded evaluator-identity drift
+also uses a fresh attempt so old official task reports cannot satisfy the new
+evaluation.
 
 The upstream images are intended for x86-64 Linux Docker hosts; unsupported
 platforms are skipped instead of emitting a score. This benchmark also has an

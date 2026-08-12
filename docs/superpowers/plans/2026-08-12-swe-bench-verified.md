@@ -259,7 +259,7 @@ class SweBenchAdapter:
         ]
 ```
 
-In `run`, load and persist the official dataset selection before generation, validate predictions as its subset between stages, derive a run id containing `ctx.run_id` and the adapter name, pass the full selection to evaluation, parse exactly one report, and call `summarize_items` with the specification's comparability fields. Persist the mini-SWE output, selection manifest, redacted stage logs, evaluator logs, `official_report`, selected/predicted/missing IDs, both shell-joined commands, dataset, subset, split, scaffold, step limit, and concurrency below the run artifact root; never persist environment values. Reuse failed-run artifacts normally, but isolate explicit `--rerun` attempts.
+In `run`, load and persist the official dataset selection before generation, validate predictions as its subset between stages, derive a run id containing `ctx.run_id` and the adapter name, pass the full selection to evaluation, parse exactly one report, and call `summarize_items` with the specification's comparability fields. Persist the mini-SWE output, selection manifest, redacted stage logs, evaluator logs, `official_report`, selected/predicted/missing IDs, both shell-joined commands, dataset, subset, split, scaffold, step limit, and concurrency below the run artifact root; never persist environment values. Reuse failed-run artifacts normally, but isolate explicit `--rerun` attempts and evaluator-taint recovery.
 
 - [ ] **Step 6: Replace Pro with a thin specification while retaining compatibility exports**
 

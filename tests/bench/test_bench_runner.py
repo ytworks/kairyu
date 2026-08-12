@@ -1593,6 +1593,52 @@ async def test_evaluator_taint_forces_reexecution_after_crash_before_failed_pair
     assert (tmp_path / "results" / "scoreboards.jsonl").is_file()
 
 
+async def test_evaluator_taint_forces_fresh_swebench_artifacts(
+    tmp_path, http_factory, monkeypatch
+):
+    from kairyu.bench.adapters.swebench_verified import SweBenchVerifiedAdapter
+
+    fresh_artifact_flags = []
+
+    async def completed_pair(self, target, ctx):
+        fresh_artifact_flags.append(ctx.rerun)
+        now = utc_now()
+        return PairResult(
+            benchmark=self.info.name,
+            target=target.label(),
+            status="completed",
+            metrics={"score": 1.0, "n_total": 1, "n_scored": 1},
+            started_at=now,
+            finished_at=now,
+        )
+
+    monkeypatch.setattr(SweBenchVerifiedAdapter, "run", completed_pair)
+    monkeypatch.setattr(
+        "kairyu.bench.runner._environment", lambda **_kwargs: _clean_environment()
+    )
+    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    config = make_config(
+        tmp_path,
+        models=("m",),
+        only=("swe-bench-verified",),
+        offline_fixtures=True,
+        download=False,
+    )
+    store = ResultStore(tmp_path / "results", "test-run")
+    assert await _runner(config, http_factory).run() == 0
+    assert fresh_artifact_flags == [False]
+    fresh_artifact_flags.clear()
+    marker = store.mark_evaluator_tainted(
+        reason="prior evaluator drift",
+        adapters=("swe-bench-verified",),
+    )
+
+    assert await _runner(config, http_factory).run() == 0
+
+    assert fresh_artifact_flags == [True]
+    assert not marker.exists()
+
+
 def test_download_missing_checks_adapter_dataset_and_revision_pins(tmp_path):
     cache = BenchCache(tmp_path / "cache")
     cache.write_rows(
