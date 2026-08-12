@@ -222,6 +222,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        KAIRYU_VISION: "1"
     image: ${KAIRYU_IMAGE:-local/kairyu:tiered-frontier-example}
     command: [/etc/kairyu/kairyu.yaml]
     environment:

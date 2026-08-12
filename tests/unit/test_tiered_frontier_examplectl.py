@@ -141,6 +141,11 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
 def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     raw = (EXAMPLE / "kairyu.yaml").read_text()
     deployment = load_deployment_spec(raw, resolve_credentials=False)
+    compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
+
+    assert compose["services"]["kairyu"]["build"]["args"] == {
+        "KAIRYU_VISION": "1"
+    }
 
     assert set(deployment.pools) == {
         "qwen3.6-27b",
