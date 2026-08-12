@@ -142,6 +142,173 @@ runs.
 finalizes `run.json`. Artifacts go to
 `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/<UTC-run-id>/`.
 
+### Full Accuracy runs (all 12 slots)
+
+The commands below run each complete benchmark population. They intentionally
+contain neither `--limit` nor `--smoke`. Start the stack first, run them from
+the repository root, and use a fresh `STAMP` for a new measurement. Three
+gated Hugging Face datasets require `HF_TOKEN`; inject it into the current
+shell from the machine's secret environment. Do not put the token in this
+README, a command argument, `.env`, or a run artifact.
+
+```bash
+./examples/qwen3.6-deepseek-v4-8gpu/run.sh up
+
+: "${HF_TOKEN:?Set the accepted Hugging Face token in this shell environment}"
+
+API=http://127.0.0.1:8003/v1
+NVME_ROOT=${NVME_STORAGE_ROOT:-/mnt/nvme/kairyu}
+ACCURACY_ROOT="$NVME_ROOT/model-volumes/qwen3.6-deepseek-v4-8gpu"
+CACHE="$ACCURACY_ROOT/bench-data/accuracy-cache"
+RESULTS="$ACCURACY_ROOT/bench-results/accuracy-full"
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+SERVED_SHA=641de6442eec69afdee1b657b36649382543f56e94dad7c16bb03e46e3abe082
+SERVED_LABEL=rtx-pro-6000-blackwell-8x-qwen-tp1x4-deepseek-tp4-ep4
+
+mkdir -p "$CACHE" "$RESULTS"
+
+COMMON=(
+  --suite accuracy
+  --base-url "$API"
+  --served-config-label "$SERVED_LABEL"
+  --served-config-sha256 "$SERVED_SHA"
+  --max-context-tokens 262144
+  --request-timeout-s 86400
+  --attempts 1
+  --cache-dir "$CACHE"
+  --results-dir "$RESULTS"
+)
+TEXT_CHAT=(
+  "${COMMON[@]}"
+  --model kairyu-auto-max-chat
+  --no-vision
+  --max-output-tokens 65536
+  --recommended-sampling
+  --concurrency 4
+)
+VISION_JUDGED=(
+  "${COMMON[@]}"
+  --model qwen3.6-27b
+  --max-output-tokens 8192
+  --recommended-sampling
+  --judge-base-url "$API"
+  --judge-model deepseek-v4-flash-0731
+  --concurrency 4
+)
+```
+
+Build and identify the immutable sandbox image before the three generated-code
+slots. `EXEC_IMAGE` must be the `sha256:...` ID printed by Docker, not a mutable
+tag.
+
+```bash
+docker build -f deploy/bench/Dockerfile.exec \
+  -t kairyu-bench-exec:local deploy/bench
+EXEC_IMAGE=$(docker image inspect kairyu-bench-exec:local --format '{{.Id}}')
+SANDBOX=(--exec-runner docker --exec-image "$EXEC_IMAGE")
+```
+
+Run the eight non-agentic slots as follows:
+
+```bash
+# 1. LiveCodeBench — complete 1,055-problem release_v6 population
+uv run kairyu bench run "${TEXT_CHAT[@]}" "${SANDBOX[@]}" \
+  --only livecodebench --run-id "livecodebench-full-$STAMP"
+
+# 2. LiveCodeBench Pro — complete pinned 167-row population (uses HF_TOKEN)
+uv run kairyu bench run "${TEXT_CHAT[@]}" "${SANDBOX[@]}" \
+  --only livecodebench-pro --run-id "livecodebench-pro-full-$STAMP"
+
+# 3. Humanity's Last Exam — complete gated population, including images
+uv run kairyu bench run "${VISION_JUDGED[@]}" \
+  --only hle --run-id "hle-full-$STAMP"
+
+# 4. CharXiv Reasoning — complete vision population
+uv run kairyu bench run "${VISION_JUDGED[@]}" \
+  --only charxiv-reasoning --run-id "charxiv-reasoning-full-$STAMP"
+
+# 5. GPQA Diamond — complete gated Diamond split (uses HF_TOKEN)
+uv run kairyu bench run "${COMMON[@]}" \
+  --model kairyu-auto-max --no-vision --max-output-tokens 65536 \
+  --recommended-sampling --concurrency 4 \
+  --only gpqa-diamond --run-id "gpqa-diamond-full-$STAMP"
+
+# 6. SciCode — all problems and their complete sequential sub-step chains
+uv run kairyu bench run "${TEXT_CHAT[@]}" "${SANDBOX[@]}" \
+  --only scicode --run-id "scicode-full-$STAMP"
+
+# 7. Long Context Reasoning — complete pinned LongBench-v2 substitute
+uv run kairyu bench run "${TEXT_CHAT[@]}" \
+  --only long-context-reasoning \
+  --run-id "long-context-reasoning-full-$STAMP"
+
+# 8. MRCRv2 — complete selected 500-row, 8-needle, <=128K population
+uv run kairyu bench run "${TEXT_CHAT[@]}" \
+  --only mrcr-v2 --run-id "mrcr-v2-full-$STAMP"
+```
+
+The four agentic slots require the agentic extra and a working local Docker
+daemon. The official tau-three release still installs and runs under the
+`tau2` package/CLI name. Keep its task data on NVMe and point `TAU2_DATA_DIR`
+at the pinned checkout; the tiered example uses the official offline
+`bm25_grep` retrieval condition because it does not expose the embedding model
+required by `alltools`.
+
+```bash
+uv sync --extra bench-agentic
+TAU_CHECKOUT="$ACCURACY_ROOT/bench-data/tau2-bench"
+test -d "$TAU_CHECKOUT/.git" || \
+  git clone https://github.com/sierra-research/tau2-bench.git "$TAU_CHECKOUT"
+git -C "$TAU_CHECKOUT" fetch origin fc0055dc4e0a316c3f83133267fbd6faaa770992
+git -C "$TAU_CHECKOUT" switch --detach fc0055dc4e0a316c3f83133267fbd6faaa770992
+uv pip install "$TAU_CHECKOUT[knowledge]"
+
+export TAU2_DATA_DIR="$TAU_CHECKOUT/data"
+export KAIRYU_TAU_RETRIEVAL_CONFIG=bm25_grep
+```
+
+```bash
+# 9. tau-three Banking — every official Banking task, one trial per task
+uv run kairyu bench run "${COMMON[@]}" \
+  --model kairyu-auto-max-chat --no-vision --max-output-tokens 65536 \
+  --judge-base-url "$API" --judge-model deepseek-v4-flash-0731 \
+  --judge-reasoning-effort low --concurrency 1 \
+  --only tau-bench-banking --run-id "tau-bench-banking-full-$STAMP"
+
+# 10. SWE-bench Pro — complete split, 1,000 mini-SWE-agent steps per task
+# The path itself is recorded, but no credential is.
+SWE_PRO_EVAL="$ACCURACY_ROOT/bench-data/SWE-bench_Pro-os"
+test -d "$SWE_PRO_EVAL/.git" || \
+  git clone --recurse-submodules \
+    https://github.com/scaleapi/SWE-bench_Pro-os.git "$SWE_PRO_EVAL"
+git -C "$SWE_PRO_EVAL" fetch origin ca10a60a5fcae51e6948ffe1485d4153d421e6c5
+git -C "$SWE_PRO_EVAL" switch --detach ca10a60a5fcae51e6948ffe1485d4153d421e6c5
+git -C "$SWE_PRO_EVAL" submodule update --init --recursive
+export KAIRYU_SWEBENCH_PRO_EVAL_PATH="$SWE_PRO_EVAL"
+uv run kairyu bench run "${COMMON[@]}" \
+  --model kairyu-auto --no-vision --max-output-tokens 4096 \
+  --reasoning-effort low --concurrency 4 \
+  --only swe-bench-pro --run-id "swe-bench-pro-full-$STAMP"
+
+# 11. SWE-bench Verified — all 500 tasks, 250 steps per task
+uv run kairyu bench run "${COMMON[@]}" \
+  --model kairyu-auto --no-vision --max-output-tokens 4096 \
+  --reasoning-effort low --concurrency 4 \
+  --only swe-bench-verified --run-id "swe-bench-verified-full-$STAMP"
+
+# 12. Terminal-Bench 2.1 — all 89 tasks, terminus-2, 500 turns
+# This example-owned wrapper exports the dataset to NVMe, retains Harbor jobs,
+# runs the full population, and validates that all 89 results are present.
+./examples/qwen3.6-deepseek-v4-8gpu/bench.sh terminalbench \
+  --run-id "terminal-bench-full-$STAMP" --no-start
+```
+
+`--attempts 1` means one trial per source item. This is a full-population run,
+but it is not Terminal-Bench's five-trial leaderboard condition or tau-three's
+published pass@4 condition. Increase their trial count only when that separate,
+much more expensive comparison is intended. Reusing the same `--run-id`
+resumes matching evidence; use a new ID when any immutable input changes.
+
 ## Reproducibility pins
 
 - Qwen revision: `e89b16ebf1988b3d6befa7de50abc2d76f26eb09`
