@@ -178,6 +178,9 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert "completion_reasoning_end_tag" not in deepseek.replicas[0].options
     thinking = deployment.pools["deepseek-v4-flash-0731-thinking"]
     assert thinking.replicas[0].options["completion_reasoning_end_tag"] == "</think>"
+    assert thinking.replicas[0].options["capabilities"]["allow_extra_args"] == [
+        "chat_template_kwargs"
+    ]
     assert set(deployment.orchestrators) == {
         "kairyu-auto-max",
     }
