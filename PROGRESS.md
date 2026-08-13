@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: 12-slot Accuracy plus Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; SWE-bench Verified uses mini-SWE-agent's official 250-step `verified` flow plus the official harness with fail-closed denominators; Terminal-Bench keeps resumable raw Harbor jobs and bounds every agent phase to two effective hours
-- The tiered RTX PRO example now has one public model and one orchestration YAML: Open WebUI calls Kairyu L3 once, L2 borrows the Qwen/DeepSeek L1 pools directly, runs the bounded planner/proposal/synthesis/verifier/publisher DAG, and returns model-attributed intermediate work in the same answer's expandable reasoning item while keeping publisher content separate. Its composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes; prior MoA-3 measurements remain historical evidence only
+- The tiered RTX PRO example now has one public model and one orchestration YAML: Open WebUI calls Kairyu L3 once, L2 borrows the Qwen/DeepSeek L1 pools directly, runs the bounded planner/proposal/synthesis/verifier/publisher DAG, and returns model-attributed intermediate work in the same answer's expandable reasoning item while keeping publisher content separate. Both this path and the single-Qwen example accept image chat and complete the fail-closed 10-item CharXiv smoke; its composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-13 — [progress] Example vision CharXiv validation closes
+- What: Both the single-Qwen and tiered Qwen/DeepSeek examples completed their deterministic 10-item CharXiv image runs with all 10 target requests measured and scored and zero target failures; the tiered DAG confines private DeepSeek reasoning to planning/synthesis/verification and uses its image-capable non-thinking Qwen pool for proposals and final publication.
+- Refs: PR #478; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/`; `bench/results/examples/qwen3.6-27b-1gpu/charxiv-10-gpu-validation-6/`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/charxiv-10-gpu-validation-4/`
 
 ### 2026-08-13 — [verified] Single-Qwen CharXiv vision closes 10/10
 - What: The 1-GPU Qwen example completed its deterministic CharXiv run with `n=10`, `n_scored=10`, `requests=10`, `errors=0`, and `unmeasured_requests=0`; score was 60%. Tiered orchestration validation remains in progress.
