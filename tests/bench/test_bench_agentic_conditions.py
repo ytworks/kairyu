@@ -24,6 +24,7 @@ from kairyu.bench.adapters.tau_bench import (
 from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.judge import JudgeClient
+from kairyu.bench.terminus import terminated_keystrokes
 from kairyu.bench.types import BenchTarget, JudgeConfig
 
 
@@ -132,7 +133,8 @@ def test_terminal_bench_uses_harbor_flags_that_exist(tmp_path):
     # registry's `name@version` entry.
     assert _flag_value(command, "-d") == "terminal-bench/terminal-bench-2-1"
     agent = _harbor_agent(command)
-    assert agent["name"] == "terminus-2"
+    assert agent["import_path"] == "kairyu.bench.terminus:KairyuTerminus2"
+    assert "name" not in agent
     assert agent["model_name"] == "openai/m"
 
 
@@ -158,7 +160,21 @@ def test_terminal_bench_caps_output_limit_via_terminus_llm_kwargs(tmp_path):
     ]
     assert keystrokes["minLength"] == 1
     assert keystrokes["maxLength"] == 2048
-    assert keystrokes["pattern"] == "(?:\\n$|^C-[cd]$)"
+    assert "pattern" not in keystrokes
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("pwd", "pwd\n"),
+        ("printf x\nprintf y", "printf x\nprintf y\n"),
+        ("\n", "\n"),
+        ("C-c", "C-c"),
+        ("C-d", "C-d"),
+    ],
+)
+def test_terminal_bench_executes_complete_command_boundaries(given, expected):
+    assert terminated_keystrokes(given) == expected
 
 
 def test_terminal_bench_preserves_smaller_output_limit(tmp_path):

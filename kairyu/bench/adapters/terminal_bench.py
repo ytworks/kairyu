@@ -39,6 +39,7 @@ _DATASET = "terminal-bench/terminal-bench-2-1"
 _LOCAL_DATASET_ENV = "KAIRYU_TERMINAL_BENCH_PATH"
 _INCLUDE_TASKS_ENV = "KAIRYU_TERMINAL_BENCH_TASKS"
 _AGENT = "terminus-2"
+_AGENT_IMPORT_PATH = "kairyu.bench.terminus:KairyuTerminus2"
 # Fugu's condition. Harbor's terminus-2 default turn budget is lower, which
 # truncates long traces well before the published limit.
 _MAX_TURNS = 500
@@ -79,7 +80,6 @@ _AGENT_RESPONSE_FORMAT = {
                                 "type": "string",
                                 "minLength": 1,
                                 "maxLength": 2048,
-                                "pattern": "(?:\\n$|^C-[cd]$)",
                             },
                             "duration": {"type": "number"},
                         },
@@ -248,9 +248,9 @@ class TerminalBenchAdapter:
             "unterminated JSON command batch",
             "terminus-2's required JSON command object is declared as a strict "
             "OpenAI json_schema with bounded analysis, plan, and one atomic "
-            "non-empty command per turn; ordinary commands are newline-terminated "
-            "and C-c/C-d remain supported as standalone control keystrokes, so the "
-            "target executes a complete batch without concatenating commands",
+            "non-empty command per turn; a thin terminus-2 subclass applies the "
+            "agent's documented trailing-newline invariant immediately before "
+            "execution while preserving standalone C-c/C-d control keystrokes",
             "target reasoning_effort, top_p, seed, and vendor extra_body are NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
             "does not expose those fields as portable harness controls; explicit "
@@ -307,7 +307,7 @@ class TerminalBenchAdapter:
                 {
                     "agents": [
                         {
-                            "name": _AGENT,
+                            "import_path": _AGENT_IMPORT_PATH,
                             "model_name": f"openai/{target.model}",
                             "max_timeout_sec": _AGENT_MAX_TIMEOUT_S,
                             "kwargs": {
@@ -433,6 +433,7 @@ class TerminalBenchAdapter:
                 "dataset": _DATASET,
                 "harness": "harbor",
                 "agent": _AGENT,
+                "agent_import_path": _AGENT_IMPORT_PATH,
                 "max_turns": _MAX_TURNS,
                 "agent_max_output_tokens": min(
                     target.max_output_tokens,
