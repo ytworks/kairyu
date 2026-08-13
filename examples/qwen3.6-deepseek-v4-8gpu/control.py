@@ -459,7 +459,10 @@ def up() -> None:
         ],
         env=env,
     )
-    api_url = f"http://127.0.0.1:{env['API_PORT']}"
+    validation_api_host = (
+        "127.0.0.1" if env["API_BIND_ADDRESS"] == "0.0.0.0" else env["API_BIND_ADDRESS"]
+    )
+    api_url = f"http://{validation_api_host}:{env['API_PORT']}"
     advertised_api_host = (
         ui_host if env["API_BIND_ADDRESS"] == "0.0.0.0" else env["API_BIND_ADDRESS"]
     )
