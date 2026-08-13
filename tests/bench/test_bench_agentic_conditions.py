@@ -12,6 +12,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from harbor.agents.terminus_2.terminus_2 import Command
 
 from kairyu.bench.adapters.base import RunContext
 from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
@@ -24,7 +25,12 @@ from kairyu.bench.adapters.tau_bench import (
 from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.judge import JudgeClient
-from kairyu.bench.terminus import command_transport_prompt, terminated_keystrokes
+from kairyu.bench.terminus import (
+    KairyuTerminus2,
+    command_transport_error,
+    command_transport_prompt,
+    terminated_keystrokes,
+)
 from kairyu.bench.types import BenchTarget, JudgeConfig
 
 
@@ -191,6 +197,58 @@ def test_terminal_bench_prompt_discloses_one_line_file_transport():
     assert "with `>>`" in prompt
     assert prompt.count("{instruction}") == 1
     assert prompt.count("{terminal_state}") == 1
+
+
+@pytest.mark.parametrize(
+    "keystrokes",
+    [
+        "pwd",
+        "pwd\n",
+        "C-c",
+        "C-d",
+        "python3 -c 'print(1 << 2)'",
+        "printf '%s\\n' 'one' 'two' >> /app/out.py",
+    ],
+)
+def test_terminal_bench_transport_accepts_atomic_commands(keystrokes):
+    assert command_transport_error(keystrokes) is None
+
+
+@pytest.mark.parametrize(
+    ("keystrokes", "reason"),
+    [
+        ("x" * 1201, "transport maximum is 1200"),
+        ("printf 'one\ntwo'", "embedded newlines"),
+        ("cat << 'EOF'", "heredocs are unsupported"),
+        ("printf 'unterminated", "unbalanced shell quoting"),
+    ],
+)
+def test_terminal_bench_transport_rejects_unexecutable_shapes(keystrokes, reason):
+    assert reason in (command_transport_error(keystrokes) or "")
+
+
+async def test_terminal_bench_rejects_heredoc_before_sending_terminal_keys():
+    class Session:
+        sent: list[str] = []
+
+        async def get_incremental_output(self):
+            return "root@task:/app#"
+
+        async def send_keys(self, keystrokes, **_kwargs):
+            self.sent.append(keystrokes)
+
+    agent = object.__new__(KairyuTerminus2)
+    session = Session()
+
+    timed_out, output = await agent._execute_commands(
+        [Command(keystrokes="cat << 'EOF'", duration_sec=0.1)],
+        session,
+    )
+
+    assert timed_out is False
+    assert session.sent == []
+    assert "rejected the command without executing it" in output
+    assert "root@task:/app#" in output
 
 
 def test_terminal_bench_preserves_smaller_output_limit(tmp_path):
