@@ -209,7 +209,7 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     ]
     assert maximum.workers[0].engine_ref == "qwen3.6-27b"
     assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
-    assert maximum.workers[2].engine_ref == "deepseek-v4-flash-0731"
+    assert maximum.workers[2].engine_ref == "qwen3.6-27b"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
