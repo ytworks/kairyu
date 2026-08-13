@@ -24,7 +24,7 @@ from kairyu.bench.adapters.tau_bench import (
 from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter
 from kairyu.bench.cache import BenchCache
 from kairyu.bench.judge import JudgeClient
-from kairyu.bench.terminus import terminated_keystrokes
+from kairyu.bench.terminus import command_transport_prompt, terminated_keystrokes
 from kairyu.bench.types import BenchTarget, JudgeConfig
 
 
@@ -175,6 +175,19 @@ def test_terminal_bench_caps_output_limit_via_terminus_llm_kwargs(tmp_path):
 )
 def test_terminal_bench_executes_complete_command_boundaries(given, expected):
     assert terminated_keystrokes(given) == expected
+
+
+def test_terminal_bench_prompt_discloses_one_line_file_transport():
+    upstream = "official prompt with {instruction} and {terminal_state}"
+
+    prompt = command_transport_prompt(upstream)
+
+    assert prompt.startswith(upstream)
+    assert "at most one command object" in prompt
+    assert "Do not use shell heredocs" in prompt
+    assert "base64-encode" in prompt
+    assert prompt.count("{instruction}") == 1
+    assert prompt.count("{terminal_state}") == 1
 
 
 def test_terminal_bench_preserves_smaller_output_limit(tmp_path):

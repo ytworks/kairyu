@@ -250,7 +250,9 @@ class TerminalBenchAdapter:
             "OpenAI json_schema with bounded analysis, plan, and one atomic "
             "non-empty command per turn; a thin terminus-2 subclass applies the "
             "agent's documented trailing-newline invariant immediately before "
-            "execution while preserving standalone C-c/C-d control keystrokes",
+            "execution while preserving standalone C-c/C-d control keystrokes, "
+            "and appends a generic no-heredoc/base64-file transport note to the "
+            "unchanged official prompt so multiline JSON strings are not flattened",
             "target reasoning_effort, top_p, seed, and vendor extra_body are NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
             "does not expose those fields as portable harness controls; explicit "

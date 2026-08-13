@@ -5,6 +5,20 @@ from __future__ import annotations
 from harbor.agents.terminus_2.terminus_2 import Command, Terminus2
 
 _STANDALONE_CONTROL_KEYSTROKES = frozenset({"C-c", "C-d"})
+_COMMAND_TRANSPORT_ADDENDUM = """\
+Kairyu command transport constraints:
+- Return at most one command object in each response.
+- Do not use shell heredocs or commands that require embedded newlines; this
+  JSON command transport can flatten those newlines before execution.
+- To write a multiline file, base64-encode its complete contents and use one
+  single-line command such as `printf %s ENCODED | base64 -d > /path/file`.
+  Inspect or test the file in a later turn.
+"""
+
+
+def command_transport_prompt(upstream: str) -> str:
+    """Append the generic transport contract without replacing Harbor's prompt."""
+    return upstream.rstrip() + "\n\n" + _COMMAND_TRANSPORT_ADDENDUM
 
 
 def terminated_keystrokes(keystrokes: str) -> str:
@@ -16,6 +30,10 @@ def terminated_keystrokes(keystrokes: str) -> str:
 
 class KairyuTerminus2(Terminus2):
     """Official terminus-2 with command execution boundaries made atomic."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._prompt_template = command_transport_prompt(self._prompt_template)
 
     async def _execute_commands(self, commands, session):
         normalized = [
