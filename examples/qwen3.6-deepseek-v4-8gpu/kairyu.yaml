@@ -65,8 +65,6 @@ pools:
           api_key_env: null
           timeout_s: 86400
           upstream: vllm
-          capabilities:
-            allow_extra_args: [chat_template_kwargs]
           allow_templated_chat_passthrough: true
           chat_tokenizer: /models/deepseek/deepseek-v4-flash-0731
           model_revision: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb

@@ -178,9 +178,6 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert "completion_reasoning_end_tag" not in deepseek.replicas[0].options
     thinking = deployment.pools["deepseek-v4-flash-0731-thinking"]
     assert thinking.replicas[0].options["completion_reasoning_end_tag"] == "</think>"
-    assert thinking.replicas[0].options["capabilities"]["allow_extra_args"] == [
-        "chat_template_kwargs"
-    ]
     assert set(deployment.orchestrators) == {
         "kairyu-auto-max",
     }
@@ -246,15 +243,13 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     assert vision.extra_args == {
         "chat_template_kwargs": {"enable_thinking": False}
     }
-    assert planner.extra_args == {
-        "chat_template_kwargs": {"thinking_mode": "chat"}
-    }
-    assert draft.extra_args == {
-        "chat_template_kwargs": {"thinking_mode": "chat"}
-    }
-    assert verifier.extra_args == {
-        "chat_template_kwargs": {"thinking_mode": "chat"}
-    }
+    assert planner.extra_args == {}
+    assert draft.extra_args == {}
+    assert verifier.extra_args == {}
+    for deepseek_role in (planner, draft, verifier):
+        assert "emit </think> followed immediately by a non-empty" in (
+            " ".join(deepseek_role.prompt.split())
+        )
     assert proposals
     assert all(
         proposal.extra_args
