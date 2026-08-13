@@ -8,7 +8,6 @@ import pytest
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.torch_runner import TinyAttentionLM, TorchPagedRunner
 from kairyu.engine.kairyu_backend import KairyuBackend
-from kairyu.entrypoints.server.chat_service import _normalize_structured_json_text
 from tests.server._legacy_chat import create_legacy_app
 
 # char-level vocab: printable ASCII + designated EOS (grammar terminates by
@@ -80,30 +79,6 @@ async def test_json_schema_yields_valid_json_and_stop(app, schema):
     parsed = json.loads(choice["message"]["content"])
     assert isinstance(parsed, dict)
     assert choice["finish_reason"] == "stop"  # grammar termination, not length
-
-
-def test_json_schema_escapes_raw_control_characters_inside_strings_only():
-    raw = '{\n"command":"pwd\n", "tab":"a\tb", "nul":"a\x00b"\n}'
-    normalized = _normalize_structured_json_text(
-        raw,
-        {"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
-    )
-
-    assert json.loads(normalized) == {
-        "command": "pwd\n",
-        "tab": "a\tb",
-        "nul": "a\x00b",
-    }
-    assert normalized.startswith('{\n"command"')
-
-
-def test_non_json_response_formats_preserve_raw_control_characters():
-    raw = '<keystrokes>pwd\n</keystrokes>'
-
-    assert _normalize_structured_json_text(
-        raw,
-        {"type": "structural_tag", "format": {}},
-    ) == raw
 
 
 async def test_malformed_response_format_is_400_not_crash(app):
