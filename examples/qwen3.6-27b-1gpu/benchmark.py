@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serving and fixed 20-problem LiveCodeBench runner for this environment."""
+"""Serving, LiveCodeBench, and CharXiv runner for this environment."""
 
 from __future__ import annotations
 

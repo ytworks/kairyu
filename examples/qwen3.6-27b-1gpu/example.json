@@ -57,7 +57,7 @@
       "reasoning_effort": "max",
       "temperature": 1.0,
       "top_p": 0.95,
-      "max_output_tokens": 2048,
+      "max_output_tokens": 8192,
       "concurrency": 1,
       "seed": 0,
       "attempts": 1
