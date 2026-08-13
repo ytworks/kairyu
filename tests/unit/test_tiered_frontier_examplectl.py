@@ -143,6 +143,9 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "custom_ops": ["all"],
     }
     assert compose["services"]["kairyu"]["build"]["args"] == {"KAIRYU_VISION": "1"}
+    assert compose["services"]["kairyu"]["ports"] == [
+        "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8003}:8000"
+    ]
 
 
 def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
@@ -302,6 +305,9 @@ def test_tiered_control_uses_explicit_public_ui_host(
     monkeypatch.setattr(control, "_storage_paths", lambda: storage)
 
     assert control._public_ui_host() == "gpu.example.test"
+    assert control._compose_env()["API_BIND_ADDRESS"] == "127.0.0.1"
+    monkeypatch.setenv("API_BIND_ADDRESS", "0.0.0.0")
+    assert control._compose_env()["API_BIND_ADDRESS"] == "0.0.0.0"
     assert control._compose_env()["CHAT_UI_BIND_ADDRESS"] == "0.0.0.0"
     assert control._compose_env()["DEEPSEEK_L1_PORT"] == "8005"
 

@@ -122,12 +122,13 @@ finalizes `run.json`. Artifacts go to
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 
 Override API/UI/tokenizer-oracle ports with `API_PORT`, `CHAT_UI_PORT`, and
-`DEEPSEEK_L1_PORT`. The launcher discovers
+`DEEPSEEK_L1_PORT`. The L3 API stays on loopback by default; set
+`API_BIND_ADDRESS=0.0.0.0` to expose it explicitly. The launcher discovers
 the outward-facing IPv4 address used in the printed URL; set `PUBLIC_HOST` when
 the browser must use a DNS name, public NAT address, or reverse proxy. Kairyu's
-L3 API remains on loopback. The UI is intentionally unauthenticated, so restrict
-port 3000 at the firewall or place appropriate TLS/access controls in front of
-it when exposure beyond a trusted network is not intended.
+L3 API and the UI are intentionally unauthenticated, so restrict ports 8003 and
+3000 at the firewall or place appropriate TLS/access controls in front of them
+when exposure beyond a trusted network is not intended.
 
 See [MEASUREMENTS.md](MEASUREMENTS.md) for the historical runtime-selection
 analysis and

@@ -96,6 +96,7 @@ def _compose_env() -> dict[str, str]:
             "DEEPSEEK_CACHE_PATH": str(paths["deepseek_cache"]),
             "VLLM_IMAGE": os.environ.get("VLLM_IMAGE", SPEC["vllm"]["image"]),
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
+            "API_BIND_ADDRESS": os.environ.get("API_BIND_ADDRESS", "127.0.0.1"),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
             "DEEPSEEK_L1_PORT": os.environ.get(
                 "DEEPSEEK_L1_PORT", str(SPEC["deepseek_l1_loopback_port"])
@@ -459,10 +460,13 @@ def up() -> None:
         env=env,
     )
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
+    advertised_api_host = (
+        ui_host if env["API_BIND_ADDRESS"] == "0.0.0.0" else env["API_BIND_ADDRESS"]
+    )
     tokenizer_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}/tokenize"
     _validate_ready(api_url, tokenizer_url)
     print("\nEnvironment is ready.")
-    print(f"OpenAI API: {api_url}/v1")
+    print(f"OpenAI API: http://{advertised_api_host}:{env['API_PORT']}/v1")
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
     print("Chat model: kairyu-auto-max (the only public model)")
 
