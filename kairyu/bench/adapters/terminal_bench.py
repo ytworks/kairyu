@@ -79,6 +79,7 @@ _AGENT_RESPONSE_FORMAT = {
                                 "type": "string",
                                 "minLength": 1,
                                 "maxLength": 2048,
+                                "pattern": "(?:\\n$|^C-[cd]$)",
                             },
                             "duration": {"type": "number"},
                         },
@@ -247,8 +248,9 @@ class TerminalBenchAdapter:
             "unterminated JSON command batch",
             "terminus-2's required JSON command object is declared as a strict "
             "OpenAI json_schema with bounded analysis, plan, and one atomic "
-            "non-empty command per turn so the target closes a complete batch "
-            "without concatenating commands or emitting trailing output",
+            "non-empty command per turn; ordinary commands are newline-terminated "
+            "and C-c/C-d remain supported as standalone control keystrokes, so the "
+            "target executes a complete batch without concatenating commands",
             "target reasoning_effort, top_p, seed, and vendor extra_body are NOT "
             "forwarded: Harbor's agent kwargs are agent-defined and terminus-2 "
             "does not expose those fields as portable harness controls; explicit "

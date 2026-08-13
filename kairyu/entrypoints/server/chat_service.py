@@ -295,6 +295,50 @@ def _validate_response_format(response_format: dict | None) -> None:
         raise ChatRequestError("response_format.format must be a structural-tag object")
 
 
+def _normalize_structured_json_text(text: str, response_format: dict | None) -> str:
+    """Escape raw JSON string controls emitted by schema-constrained decoding.
+
+    JSON Schema string patterns operate on decoded string values, so a pattern
+    such as ``\\n$`` can make the grammar emit the matching LF byte between JSON
+    quotes.  JSON itself requires that byte to be serialized as ``\\n``.  Repair
+    only control characters inside strings; whitespace between JSON tokens and
+    every non-JSON response format remain byte-for-byte unchanged.
+    """
+    if not response_format or response_format.get("type") not in {
+        "json_object",
+        "json_schema",
+    }:
+        return text
+
+    escaped_controls = {
+        "\b": r"\b",
+        "\t": r"\t",
+        "\n": r"\n",
+        "\f": r"\f",
+        "\r": r"\r",
+    }
+    output: list[str] = []
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string and ord(character) < 0x20:
+            output.append(escaped_controls.get(character, f"\\u{ord(character):04x}"))
+            escaped = False
+            continue
+        output.append(character)
+        if not in_string:
+            if character == '"':
+                in_string = True
+            continue
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == '"':
+            in_string = False
+    return "".join(output)
+
+
 def validate_chat_policy(
     chat_templates: Mapping[str, ChatTemplate] | None,
     legacy_chat_models: AbstractSet[str] | None = None,
@@ -1376,6 +1420,7 @@ def _build_choice(
     tool_call_protocol: ToolCallProtocol = ToolCallProtocol.GENERIC,
     reasoning_content: str | None = None,
     reasoning_effort: str | None = None,
+    response_format: dict | None = None,
 ) -> Choice:
     if reasoning_content is None and reasoning_effort is not None:
         candidate = text
@@ -1386,6 +1431,7 @@ def _build_choice(
             reasoning_content, text = candidate.split("</think>", 1)
         elif has_opening:
             reasoning_content, text = candidate, ""
+    text = _normalize_structured_json_text(text, response_format)
     tool_calls = []
     if tool_choice.mode != "none":
         tool_calls = [
@@ -1458,6 +1504,7 @@ def completion_response(
             tool_call_protocol,
             completion.reasoning_content,
             request.reasoning_effort,
+            request.response_format,
         )
         for completion in completions
     ]

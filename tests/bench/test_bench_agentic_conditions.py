@@ -158,6 +158,7 @@ def test_terminal_bench_caps_output_limit_via_terminus_llm_kwargs(tmp_path):
     ]
     assert keystrokes["minLength"] == 1
     assert keystrokes["maxLength"] == 2048
+    assert keystrokes["pattern"] == "(?:\\n$|^C-[cd]$)"
 
 
 def test_terminal_bench_preserves_smaller_output_limit(tmp_path):
