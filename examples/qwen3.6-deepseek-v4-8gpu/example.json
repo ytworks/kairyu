@@ -104,6 +104,7 @@
     },
     "charxiv": {
       "problems": 10,
+      "reasoning_effort": "low",
       "max_output_tokens": 4096,
       "extra_body": {
         "chat_template_kwargs": {"enable_thinking": false}
