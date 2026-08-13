@@ -81,5 +81,8 @@ gates.
   internal usage and metadata trace accounting.
 - Open WebUI shows model-attributed intermediate output behind its reasoning
   disclosure control and shows the publisher answer separately.
+- An assistant response containing `reasoning_content` can be appended to the
+  next Chat Completions request through the pinned LiteLLM message shape;
+  nullable provider metadata is ignored without weakening non-null validation.
 - The product URL is reported from the actual bound host after a live browser
   and API smoke, and the native-L1 limitation remains explicit until closed.
