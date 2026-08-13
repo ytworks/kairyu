@@ -191,6 +191,8 @@ class GenerationRequest:
     # string instead of importing the L3 enum.
     tool_call_protocol: str = "generic"
     reasoning_effort: str | None = None
+    # Per-request variables for an upstream-owned multimodal HF chat template.
+    chat_template_kwargs: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         # Defense in depth for callers holding a SamplingParams created by an
@@ -208,7 +210,24 @@ class GenerationRequest:
             )
         if self.reasoning_effort not in {None, "low", "high", "max"}:
             raise ValueError("reasoning_effort must be low, high, max, or null")
+        if self.chat_template_kwargs is not None:
+            if not isinstance(self.chat_template_kwargs, Mapping) or any(
+                not isinstance(key, str) or not key
+                for key in self.chat_template_kwargs
+            ):
+                raise TypeError(
+                    "chat_template_kwargs must map non-empty string keys or be null"
+                )
+            object.__setattr__(
+                self,
+                "chat_template_kwargs",
+                dict(self.chat_template_kwargs),
+            )
         kind = prompt_kind(self.prompt)
+        if self.chat_template_kwargs is not None and kind != "multimodal":
+            raise ValueError(
+                "chat_template_kwargs require an upstream-owned multimodal prompt"
+            )
         if (
             kind != "text"
             and self.cache_hint is not None
@@ -778,6 +797,35 @@ def backend_supports_slo_defer(
     )
     if type(supported) is not bool:
         raise TypeError("backend supports_slo_defer must be a boolean")
+    return supported
+
+
+def backend_supports_prompt_kind(backend: object, kind: str) -> bool:
+    """Resolve an optional prompt-kind capability without probing a request.
+
+    Composite callers need this before deriving a request: in particular, an
+    orchestrator must decide which workers receive structured media and which
+    receive only the textual role context. Backends that do not publish the
+    capability retain the typed-prompt contract's fail-closed default.
+    """
+
+    supports = getattr(backend, "supports_prompt_kind", None)
+    supported = supports(kind) if callable(supports) else kind == "text"
+    if type(supported) is not bool:
+        raise TypeError("backend supports_prompt_kind must return a boolean")
+    return supported
+
+
+def backend_supports_chat_template_kwargs(
+    backend: object,
+    keys: frozenset[str],
+) -> bool:
+    """Resolve whether a backend can apply upstream HF template variables."""
+
+    supports = getattr(backend, "supports_chat_template_kwargs", None)
+    supported = supports(keys) if callable(supports) else False
+    if type(supported) is not bool:
+        raise TypeError("backend supports_chat_template_kwargs must return a boolean")
     return supported
 
 

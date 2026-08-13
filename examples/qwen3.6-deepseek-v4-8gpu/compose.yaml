@@ -27,7 +27,12 @@ x-qwen: &qwen
     - qwen3.6-27b
     - --max-model-len
     - "262144"
-    - --language-model-only
+    - --mm-processor-kwargs
+    - '{"min_pixels":65536,"max_pixels":2097152}'
+    - --limit-mm-per-prompt.image
+    - "1"
+    - --limit-mm-per-prompt.video
+    - "0"
     - --dtype
     - bfloat16
     - --kv-cache-dtype
@@ -53,6 +58,8 @@ x-qwen: &qwen
     - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
     - --generation-config
     - vllm
+    - --default-chat-template-kwargs
+    - '{"enable_thinking":false}'
     - --reasoning-parser
     - qwen3
     - --enable-auto-tool-choice
@@ -223,6 +230,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        KAIRYU_VISION: "1"
     image: ${KAIRYU_IMAGE:-local/kairyu:tiered-frontier-example}
     command: [/etc/kairyu/kairyu.yaml]
     environment:
@@ -237,7 +246,6 @@ services:
       - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
       - ./router.json:/etc/kairyu/router.json:ro
       - ./deepseek-thinking.jinja:/etc/kairyu/deepseek-thinking.jinja:ro
-      - ../qwen3.6-27b-1gpu/chat_template.jinja:/etc/kairyu/qwen3.6-chat-template.jinja:ro
       - ../deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
     depends_on:
       qwen-0: {condition: service_healthy}
@@ -246,7 +254,7 @@ services:
       qwen-3: {condition: service_healthy}
       deepseek: {condition: service_healthy}
     ports:
-      - 127.0.0.1:${API_PORT:-8003}:8000
+      - ${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8003}:8000
     healthcheck:
       test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=2)']
       interval: 5s

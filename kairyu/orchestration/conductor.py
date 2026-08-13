@@ -20,8 +20,16 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    backend_supports_chat_template_kwargs,
+    backend_supports_prompt_kind,
 )
-from kairyu.engine.prompt import TemplatedPrompt, prompt_kind, prompt_text
+from kairyu.engine.prompt import (
+    MultimodalPrompt,
+    TemplatedPrompt,
+    derive_multimodal_prompt,
+    prompt_kind,
+    prompt_text,
+)
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
 from kairyu.orchestration.trace import (
@@ -208,6 +216,8 @@ class Conductor:
         final_parallel_tool_calls: bool | None = None,
         final_tool_call_protocol: str = "generic",
         expose_intermediate_outputs: bool = False,
+        multimodal_prompt: MultimodalPrompt | None = None,
+        chat_template_kwargs: Mapping[str, object] | None = None,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -231,6 +241,10 @@ class Conductor:
         self._cost_model = cost_model
         self._usage_observer = usage_observer
         self._expose_intermediate_outputs = expose_intermediate_outputs
+        self._multimodal_prompt = multimodal_prompt
+        self._chat_template_kwargs = (
+            None if chat_template_kwargs is None else dict(chat_template_kwargs)
+        )
         supplied_trace = dict(worker_trace or {})
         self._worker_trace = {
             worker: supplied_trace.get(
@@ -350,10 +364,34 @@ class Conductor:
         body = template.format_map(_SafeDict(query=query, **outputs))
         return f"{self._shared_prefix}{body}"
 
-    def _cache_hint(self, session: str) -> CacheHint:
+    def _worker_prompt(self, spec: RoleSpec, text: str):
+        if self._multimodal_prompt is None or not backend_supports_prompt_kind(
+            self._workers[spec.worker],
+            "multimodal",
+        ):
+            return text
+        return derive_multimodal_prompt(self._multimodal_prompt, text)
+
+    def _worker_chat_template_kwargs(
+        self,
+        spec: RoleSpec,
+        prompt: object,
+    ) -> Mapping[str, object] | None:
+        if not isinstance(prompt, MultimodalPrompt):
+            return None
+        if self._chat_template_kwargs is not None and not backend_supports_chat_template_kwargs(
+            self._workers[spec.worker],
+            frozenset(self._chat_template_kwargs),
+        ):
+            raise ValueError(
+                f"worker {spec.worker!r} does not support chat_template_kwargs"
+            )
+        return self._chat_template_kwargs
+
+    def _cache_hint(self, session: str, *, multimodal: bool = False) -> CacheHint:
         return CacheHint(
             session_id=session,
-            prefix_fingerprint=self._prefix_fingerprint,
+            prefix_fingerprint="" if multimodal else self._prefix_fingerprint,
         )
 
     @staticmethod
@@ -401,9 +439,21 @@ class Conductor:
                     spec,
                     GenerationRequest(
                         request_id=f"preflight-role-{spec.name}-{request_id_suffix}",
-                        prompt=self._render(spec.prompt, query, {}),
+                        prompt=(
+                            role_prompt := self._worker_prompt(
+                                spec,
+                                self._render(spec.prompt, query, {}),
+                            )
+                        ),
                         sampling_params=sampling_params,
-                        cache_hint=self._cache_hint(session),
+                        cache_hint=self._cache_hint(
+                            session,
+                            multimodal=isinstance(role_prompt, MultimodalPrompt),
+                        ),
+                        chat_template_kwargs=self._worker_chat_template_kwargs(
+                            spec,
+                            role_prompt,
+                        ),
                         tools=tools,
                         tool_choice=tool_choice,
                         tools_in_prompt=tools_in_prompt,
@@ -434,11 +484,19 @@ class Conductor:
         ) = (
             self._request_intent(spec)
         )
+        request_prompt = self._worker_prompt(spec, prompt)
         candidate = GenerationRequest(
             request_id=f"{session}-{spec.name}-{attempt}",
-            prompt=prompt,
+            prompt=request_prompt,
             sampling_params=sampling_params,
-            cache_hint=self._cache_hint(session),
+            cache_hint=self._cache_hint(
+                session,
+                multimodal=isinstance(request_prompt, MultimodalPrompt),
+            ),
+            chat_template_kwargs=self._worker_chat_template_kwargs(
+                spec,
+                request_prompt,
+            ),
             tools=tools,
             tool_choice=tool_choice,
             tools_in_prompt=tools_in_prompt,
@@ -465,7 +523,12 @@ class Conductor:
         prepared = run.prepared_initial_requests.get(spec.name)
         if prepared is None:
             return None
-        text = prompt_text(prepared.prompt)
+        prompt = prepared.prompt
+        text = (
+            prompt_text(prompt.base)
+            if isinstance(prompt, MultimodalPrompt)
+            else prompt_text(prompt)
+        )
         if text is None:
             raise RuntimeError(
                 f"prepared initial role request {spec.name!r} is not text"

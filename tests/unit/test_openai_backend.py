@@ -75,6 +75,7 @@ def _request(
     explicit_generation_neutrals: bool = False,
     parallel_tool_calls: bool | None = None,
     trace_requested: bool = False,
+    chat_template_kwargs: dict[str, object] | None = None,
 ) -> GenerationRequest:
     params = sampling_params or SamplingParams(temperature=0.2, max_tokens=64)
     if not explicit_generation_neutrals:
@@ -91,6 +92,7 @@ def _request(
         sampling_params=params,
         parallel_tool_calls=parallel_tool_calls,
         trace_requested=trace_requested,
+        chat_template_kwargs=chat_template_kwargs,
     )
 
 
@@ -1638,13 +1640,19 @@ async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage():
         api_key_env=None,
         transport=httpx.MockTransport(handler),
         upstream="vllm",
-        capabilities={"allow_prompt_kinds": ["multimodal"]},
+        capabilities={
+            "allow_prompt_kinds": ["multimodal"],
+            "allow_chat_template_kwargs": ["enable_thinking"],
+        },
         image_input_policy={
             "max_images": 1,
             "max_processed_prompt_tokens": 512,
         },
     )
-    request = _request(_multimodal_prompt())
+    request = _request(
+        _multimodal_prompt(),
+        chat_template_kwargs={"enable_thinking": False},
+    )
 
     result = await backend.generate(request)
 
@@ -1668,6 +1676,9 @@ async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage():
             ],
         },
     ]
+    assert captured["body"]["chat_template_kwargs"] == {
+        "enable_thinking": False
+    }
     assert result.text == "RED"
     assert result.usage is not None
     assert result.usage.prompt_tokens == 37
@@ -1675,6 +1686,36 @@ async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage():
     bound = backend.admission_upper_bound(request)
     assert bound.tokens == 512 + 64
     assert bound.refundable_on_exact_usage is True
+
+
+async def test_multimodal_template_kwargs_must_be_explicitly_allowlisted():
+    transport_calls = []
+    backend = OpenAICompatBackend(
+        base_url="http://vlm:8000/v1",
+        model="vlm",
+        api_key_env=None,
+        upstream="vllm",
+        capabilities={
+            "allow_prompt_kinds": ["multimodal"],
+            "allow_chat_template_kwargs": ["enable_thinking"],
+        },
+        image_input_policy={"max_images": 1},
+        transport=httpx.MockTransport(
+            lambda request: (
+                transport_calls.append(request)
+                or httpx.Response(200, json={"choices": []})
+            )
+        ),
+    )
+
+    with pytest.raises(UpstreamClientError, match="preserve_thinking"):
+        await backend.generate(
+            _request(
+                _multimodal_prompt(),
+                chat_template_kwargs={"preserve_thinking": True},
+            ),
+        )
+    assert transport_calls == []
 
 
 def test_multimodal_backend_requires_stream_usage_reporting():

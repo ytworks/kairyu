@@ -36,6 +36,23 @@ def test_parse_verdict():
     assert parse_verdict("**Correct**: yes") is True
 
 
+def test_charxiv_preserves_target_output_budget_for_reasoning_models():
+    request = CharXivAdapter().build_request(
+        BenchItem(
+            id="charxiv",
+            payload={
+                "question": "What is shown?",
+                "answer": "one",
+                "image": "data:image/png;base64,AAAA",
+            },
+        ),
+        make_target(max_output_tokens=8192),
+        SimpleNamespace(),
+    )
+
+    assert request.max_tokens == 8192
+
+
 @pytest.mark.parametrize(
     ("name", "sha256"),
     [

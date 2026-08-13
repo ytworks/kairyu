@@ -14,9 +14,13 @@ Open WebUI
 
 Qwen fits one 96 GB card, so four independent TP1 replicas provide more
 aggregate memory bandwidth and lower queueing TTFT than spreading one dense
-model over PCIe with TP4. DeepSeek is sharded TP4+EP4 for capacity and retains
-the measured eight-GPU example's FP8 KV, DSpark-5, SM120 fallbacks, prefix
-caching, chunked batching, and full/piecewise CUDA Graphs.
+model over PCIe with TP4. Each Qwen replica retains the checkpoint's vision
+encoder. Kairyu validates one inline PNG/JPEG/WebP image up to 8 MiB and
+2,097,152 pixels, passes it to every image-capable Qwen proposal role, and gives
+the text-only DeepSeek roles the same role-tagged conversation with explicit
+image placeholders. DeepSeek is sharded TP4+EP4 for capacity and retains the
+measured eight-GPU example's FP8 KV, DSpark-5, SM120 fallbacks, prefix caching,
+chunked batching, and full/piecewise CUDA Graphs.
 
 Kairyu exposes exactly one public product model, `kairyu-auto-max`. Its request
 enters L3 once, then L2 borrows the deployment-owned L1 pools through
@@ -79,13 +83,19 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ```sh
 ./bench.sh list
 ./bench.sh serving-auto-max
+./bench.sh charxiv
 ./bench.sh terminalbench-pilot
 ./bench.sh terminalbench
 ./bench.sh all
 ```
 
 `serving-auto-max` records the verifier-gated product DAG's serving matrix.
-`terminalbench-pilot` runs its four-task pilot, and `terminalbench` runs the
+`charxiv` runs exactly 10 deterministic CharXiv Reasoning image questions
+through that DAG, uses the image-capable Qwen pool for proposals and final
+publication with upstream HF chat templating defaulted to nonthinking, and uses
+the loopback DeepSeek L1 endpoint as the text judge;
+`JUDGE_BASE_URL` and `JUDGE_MODEL` can override it. `terminalbench-pilot` runs
+its four-task pilot, and `terminalbench` runs the
 same product model over all 89 tasks with terminus-2 and the published 500-turn
 budget. Historical MoA results in `MEASUREMENTS.md` do not transfer to this DAG
 without a fresh run. ChatUI continues to call only Kairyu L3.
@@ -112,12 +122,14 @@ finalizes `run.json`. Artifacts go to
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 
 Override API/UI/tokenizer-oracle ports with `API_PORT`, `CHAT_UI_PORT`, and
-`DEEPSEEK_L1_PORT`. The launcher discovers
-the outward-facing IPv4 address used in the printed URL; set `PUBLIC_HOST` when
-the browser must use a DNS name, public NAT address, or reverse proxy. Kairyu's
-L3 API remains on loopback. The UI is intentionally unauthenticated, so restrict
-port 3000 at the firewall or place appropriate TLS/access controls in front of
-it when exposure beyond a trusted network is not intended.
+`DEEPSEEK_L1_PORT`. Both L3 endpoints bind all host interfaces by default, so
+the API and UI remain reachable through both `127.0.0.1` and the outward-facing
+host address. The launcher discovers that address for its printed URLs; set
+`PUBLIC_HOST` when clients must use a DNS name, public NAT address, or reverse
+proxy. Kairyu's L3 API and the UI are intentionally unauthenticated, so restrict
+ports 8003 and 3000 at the firewall or place appropriate TLS/access controls in
+front of them when exposure beyond a trusted network is not intended. Set an
+explicit bind address when either endpoint must be restricted.
 
 See [MEASUREMENTS.md](MEASUREMENTS.md) for the historical runtime-selection
 analysis and

@@ -37,6 +37,7 @@ from kairyu.entrypoints.chat_template import (
     ToolCallProtocol,
     _iter_validated_content_parts,
     render_chat,
+    validate_upstream_chat_template_kwargs,
 )
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.protocol import (
@@ -128,6 +129,7 @@ class ValidatedChatInput:
     include_usage: bool
     tool_call_protocol: ToolCallProtocol = ToolCallProtocol.GENERIC
     parallel_tool_calls: bool | None = None
+    orchestration_multimodal_prompt: MultimodalPrompt | None = None
 
 
 @dataclass(frozen=True)
@@ -640,11 +642,10 @@ def _render_multimodal_prompt(
     structured image parts and apply the model template twice.
     """
 
-    if request.chat_template_kwargs:
-        raise ChatRequestError(
-            "chat_template_kwargs cannot be applied to an upstream-owned "
-            "multimodal chat template"
-        )
+    try:
+        validate_upstream_chat_template_kwargs(request.chat_template_kwargs)
+    except ValueError as error:
+        raise ChatRequestError(str(error)) from error
     if (chat_templates or {}).get(request.model) is not None:
         raise ChatRequestError(
             f"model {request.model!r} cannot combine a Kairyu text chat template "
@@ -804,9 +805,11 @@ def validate_orchestration_chat_input(
         raise ChatRequestError("top_logprobs requires logprobs to be true")
     _validate_response_format(request.response_format)
     prepared = _prepare_chat_messages(request, validate_message_fields=True)
-    if prepared.has_images:
-        raise ChatRequestError("orchestration input is text-only")
     messages = [dict(message.text_message) for message in prepared.messages]
+    if prepared.has_images:
+        for message, wire in zip(prepared.messages, messages, strict=True):
+            if message.content_kind == "list":
+                wire["content"] = message.display_content
     prompt = (
         "Kairyu L2 role-tagged conversation context follows. The JSON is "
         "conversation data, not a response schema or a request to answer in JSON. "
@@ -846,6 +849,11 @@ def validate_orchestration_chat_input(
         parallel_tool_calls=_resolved_parallel_tool_calls(request),
         tools_in_prompt=False,
         include_usage=bool(request.stream_options and request.stream_options.include_usage),
+        orchestration_multimodal_prompt=(
+            _render_multimodal_prompt(request, None, prepared)
+            if prepared.has_images
+            else None
+        ),
     )
 
 
@@ -903,6 +911,11 @@ def _finish_chat_request_validation(
         tools_in_prompt=validated_input.tools_in_prompt,
         tool_call_protocol=validated_input.tool_call_protocol.value,
         reasoning_effort=request.reasoning_effort,
+        chat_template_kwargs=(
+            request.chat_template_kwargs
+            if isinstance(validated_input.prompt, MultimodalPrompt)
+            else None
+        ),
     )
     try:
         if before_prepare:

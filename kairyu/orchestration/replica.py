@@ -51,6 +51,8 @@ from kairyu.engine.backend import (
     backend_admission_upper_bound,
     backend_admission_upper_bound_async,
     backend_admission_upper_bound_key,
+    backend_supports_chat_template_kwargs,
+    backend_supports_prompt_kind,
     backend_supports_slo_defer,
     prepare_backend_request,
     shutdown_all,
@@ -696,6 +698,27 @@ class ReplicaPool:
         if candidates is None:
             candidates = self._eligible_ids()
         return self._candidates_support_slo_defer(candidates, request=request)
+
+    def supports_prompt_kind(self, kind: str) -> bool:
+        """Expose the intersection of every currently placeable replica."""
+
+        candidates = self._eligible_ids()
+        return bool(candidates) and all(
+            backend_supports_prompt_kind(self._entries[replica_id].backend, kind)
+            for replica_id in candidates
+        )
+
+    def supports_chat_template_kwargs(self, keys: frozenset[str]) -> bool:
+        """Expose the intersection of every currently placeable replica."""
+
+        candidates = self._eligible_ids()
+        return bool(candidates) and all(
+            backend_supports_chat_template_kwargs(
+                self._entries[replica_id].backend,
+                keys,
+            )
+            for replica_id in candidates
+        )
 
     def _candidates_support_slo_defer(
         self,

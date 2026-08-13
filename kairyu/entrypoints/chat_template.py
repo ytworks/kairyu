@@ -52,6 +52,29 @@ _LLAMA_PROTOCOL_TEMPLATE_KWARGS = frozenset(
 )
 
 
+def validate_upstream_chat_template_kwargs(
+    template_kwargs: Mapping[str, object] | None,
+) -> None:
+    """Reject client variables that could replace trusted HF chat inputs."""
+
+    if template_kwargs is None:
+        return
+    if not isinstance(template_kwargs, Mapping) or any(
+        not isinstance(key, str) or not key for key in template_kwargs
+    ):
+        raise ValueError("chat_template_kwargs must map non-empty string keys")
+    reserved = template_kwargs.keys() & (
+        _HF_TEMPLATE_CONTROL_VARIABLES
+        | _HF_STANDARD_SPECIAL_TOKEN_VARIABLES
+        | _LLAMA_PROTOCOL_TEMPLATE_KWARGS
+    )
+    if reserved:
+        raise ValueError(
+            "chat_template_kwargs contains reserved template variables: "
+            f"{sorted(reserved)}"
+        )
+
+
 class ToolCallProtocol(StrEnum):
     """Model-native tool syntax attested by a server-owned chat template."""
 

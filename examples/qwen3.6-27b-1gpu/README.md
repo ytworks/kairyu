@@ -7,13 +7,14 @@ Open WebUI -> Kairyu L3 (:8001) -> vLLM L1 (one selected TP1 GPU)
 ```
 
 The serving checkpoint is the official `Qwen/Qwen3.6-27B-FP8` revision. The
-configuration keeps the native 262,144-token context but loads only the text
-backbone: FP8 weights and KV cache, FP16 Gated-DeltaNet state, prefix caching,
-chunked prefill, FlashInfer autotuning, and full/piecewise CUDA Graphs. Native
-MTP is deliberately disabled because the local c32 screen was materially faster
-without it. Kairyu owns the checkpoint's official chat template and forwards
-the rendered prompt to vLLM's completions endpoint, so Open WebUI always talks
-to Kairyu L3 rather than directly to L1.
+configuration keeps its native vision encoder and 262,144-token context, with
+FP8 weights and KV cache, FP16 Gated-DeltaNet state, prefix caching, chunked
+prefill, FlashInfer autotuning, and full/piecewise CUDA Graphs. Kairyu validates
+one inline PNG/JPEG/WebP image up to 8 MiB and 2,097,152 pixels, then preserves
+the OpenAI content parts for the checkpoint-owned processor and chat template
+in vLLM. Native MTP remains disabled because the local c32 text screen was
+materially faster without it. Open WebUI always talks to Kairyu L3 rather than
+directly to L1.
 
 The selected no-MTP configuration measured **41.43 output tok/s with 190.82 ms
 median TTFT at c1** and **842.35 output tok/s with 1.247 s median TTFT at c32**
@@ -54,6 +55,7 @@ Lifecycle commands are `./run.sh up`, `./run.sh status`, `./run.sh logs`, and
 ./bench.sh list
 ./bench.sh serving
 ./bench.sh livecodebench
+./bench.sh charxiv
 ./bench.sh all
 ```
 
@@ -62,8 +64,13 @@ approximately 8K-token inputs and exactly 256 generated tokens at concurrency
 1, 8, 16, and 32. Its deterministic prompts do not share a first prefix block,
 so prefix-cache reuse cannot inflate the matrix. `livecodebench` runs exactly
 20 deterministic `release_v6` problems at pass@1 in the content-addressed,
-networkless Docker executor. `all` runs both and still finalizes its manifest
-when one benchmark fails.
+networkless Docker executor. `charxiv` runs exactly 10 deterministic CharXiv
+Reasoning questions with their chart images and judge-grades every answer;
+the short-answer target disables Qwen thinking through its upstream HF chat
+template while leaving ordinary chat and LiveCodeBench unchanged.
+`JUDGE_BASE_URL` and `JUDGE_MODEL` can select a separate OpenAI-compatible
+judge, while the default uses this local Qwen endpoint. `all` continues after
+an individual benchmark failure and still finalizes its manifest.
 
 Artifacts go to
 `bench/results/examples/qwen3.6-27b-1gpu/<UTC-run-id>/`.

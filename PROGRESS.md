@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Benchmark/eval tooling: 12-slot Accuracy plus Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; SWE-bench Verified uses mini-SWE-agent's official 250-step `verified` flow plus the official harness with fail-closed denominators; Terminal-Bench keeps resumable raw Harbor jobs and bounds every agent phase to two effective hours
-- The tiered RTX PRO example now has one public model and one orchestration YAML: Open WebUI calls Kairyu L3 once, L2 borrows the Qwen/DeepSeek L1 pools directly, runs the bounded planner/proposal/synthesis/verifier/publisher DAG, and returns model-attributed intermediate work in the same answer's expandable reasoning item while keeping publisher content separate. Its composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes; prior MoA-3 measurements remain historical evidence only
+- The tiered RTX PRO example now has one public model and one orchestration YAML: Open WebUI calls Kairyu L3 once, L2 borrows the Qwen/DeepSeek L1 pools directly, runs the bounded planner/proposal/synthesis/verifier/publisher DAG, and returns model-attributed intermediate work in the same answer's expandable reasoning item while keeping publisher content separate. Both this path and the single-Qwen example accept image chat and complete the fail-closed 10-item CharXiv smoke; its composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -98,29 +98,32 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-13 — [amendment] Tiered L3 endpoints stay locally and externally reachable
+- What: The example now binds both its Chat UI and public L3 API to all host interfaces by default while advertising the real host address, so both endpoints remain reachable through localhost and the external address; explicit bind overrides remain available.
+- Why: Binding the API only to the external interface made its normal host-local URL unavailable, while publishing `0.0.0.0` as a client URL confused the listen address with the address clients should use.
+- Refs: PR #478; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,control.py,README.md}`
+
+### 2026-08-13 — [progress] Tiered Chat UI response repair closes GPU gates
+- What: Default Qwen L1 chat now returns non-empty public content with no hidden reasoning, L3 returns separate non-empty final and attributed reasoning output, the pinned tiered browser smoke passes, and the deterministic CharXiv rerun completes 10/10 scored requests with zero errors or unmeasured requests.
+- Refs: PR #478; commit `56c640a`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/20260813T055825Z/`
+
+### 2026-08-13 — [progress] Tiered Chat UI publication defaults to visible content
+- What: The tiered example's Qwen replicas now default upstream HF chat templating to nonthinking while preserving request-level overrides and vision handling, so proposal and publisher roles return public content instead of exhausting their budget in reasoning-only output; GPU validation is in progress.
+- Refs: PR #478; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,README.md}`; `tests/unit/test_tiered_frontier_examplectl.py`
+
+### 2026-08-13 — [progress] Example vision CharXiv validation closes
+- What: Both the single-Qwen and tiered Qwen/DeepSeek examples completed their deterministic 10-item CharXiv image runs with all 10 target requests measured and scored and zero target failures; the tiered DAG confines private DeepSeek reasoning to planning/synthesis/verification and uses its image-capable non-thinking Qwen pool for proposals and final publication.
+- Refs: PR #478; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/`; `bench/results/examples/qwen3.6-27b-1gpu/charxiv-10-gpu-validation-6/`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/charxiv-10-gpu-validation-4/`
+
+### 2026-08-13 — [verified] Single-Qwen CharXiv vision closes 10/10
+- What: The 1-GPU Qwen example completed its deterministic CharXiv run with `n=10`, `n_scored=10`, `requests=10`, `errors=0`, and `unmeasured_requests=0`; score was 60%. Tiered orchestration validation remains in progress.
+- Refs: `examples/qwen3.6-27b-1gpu/`; `bench/results/examples/qwen3.6-27b-1gpu/charxiv-10-gpu-validation-6/`
+
+### 2026-08-13 — [progress] Example vision orchestration enters GPU validation
+- What: L3 now preserves validated image inputs for L2, role DAGs pass media only to capable workers, both Qwen examples enable the pinned checkpoint's vision encoder, and each owns a fail-closed 10-item CharXiv command; real-GPU closure is in progress.
+- Refs: `kairyu/orchestration/`; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/`
+
 ### 2026-08-13 — [amendment] Kind CI tool setup is shared and verified
 - What: All four kind gates now use one pinned installer with bounded nested retries, HTTPS-only downloads, SHA-256 verification, and executable version checks; a policy test bans the flaky action path from every workflow.
 - Why: Per-workflow fixes left the same dependency-acquisition failure in other gates, incorrectly surfacing CI infrastructure failures as product-quality failures.
 - Refs: PR #476; `scripts/install_kind_tools.sh`; `.github/workflows/{ci,f1a-churn,f1b-rollout,f1c-gateway}.yml`; `tests/unit/test_ci_workflow_policy.py`
-
-### 2026-08-13 — [progress] Tiered PR infrastructure flakes are bounded
-- What: F1c now installs pinned kind/kubectl binaries with retried, checksum-verified downloads, and F1b retries one failed import of its already-frozen image archives. Product gate behavior is unchanged.
-- Refs: PR #476; `.github/workflows/f1c-gateway.yml`; `scripts/kind_rollout_gate.sh`
-
-### 2026-08-13 — [progress] Tiered example collapses to one layered product path
-- What: The example now keeps one `auto-max.yaml` policy and one public Chat UI model; L2 borrows deployment-owned L1 pools, runs the bounded seven-role DAG, and streams attributed intermediate output separately from publisher content in the same response. Obsolete auto/MoA candidate YAMLs and commands were removed.
-- Refs: PR #476; `examples/qwen3.6-deepseek-v4-8gpu/`; `scripts/webui_browser_smoke.mjs`
-
-### 2026-08-13 — [design] Tiered UI owns one layered orchestration path
-- What: The tiered example will expose one product model, borrow deployment L1 pools directly from L2, run a bounded verifier-gated DAG, and show policy-enabled model-attributed intermediate output separately from the final answer.
-- Why: The prior loopback L3 workers and single-pass MoA policy did not exercise the intended L3→L2→L1 boundary, while the product UI now requires inspectable intermediate work without mixing it into the committed answer.
-- Refs: EO-D1..EO-D5; `docs/design/example-layered-orchestration.md`; `docs/superpowers/plans/2026-08-13-example-layered-orchestration-correction.md`
-
-### 2026-08-12 — [amendment] SWE-bench fixes selection before generation
-- What: SWE-bench now persists the official ordered selection before generation, evaluates that full set even when a prediction is omitted, accepts the official v4.1 completed/error report overlap with error precedence, and retains redacted stage logs plus raw upstream evidence; failed runs resume while explicit reruns use isolated artifacts.
-- Why: mini-SWE-agent can exit successfully after a worker omits its prediction, so deriving `--instance_ids` from `preds.json` could shrink the denominator and deleting work directories could discard the only audit and resume evidence.
-- Refs: issue #472; `kairyu/bench/adapters/swebench.py`; `kairyu/bench/adapters/base.py`; `docs/superpowers/specs/2026-08-12-swe-bench-verified-design.md`
-
-### 2026-08-12 — [progress] SWE-bench Verified launches through Accuracy
-- What: Accuracy now runs the 500-task Verified test split through mini-SWE-agent's standard 250-step configuration and the official SWE-bench evaluator, preserves every selected task in the resolved-rate denominator, retains auditable commands and raw evidence, and extends the sourced comparison report with Fable 5's published result without claiming one-trial/five-trial parity.
-- Refs: issue #472; `kairyu/bench/adapters/swebench*.py`; `docs/benchmarks.md`; `tests/bench/test_bench_agentic*.py`; `tests/bench/test_bench_compare.py`

@@ -294,6 +294,43 @@ class MultimodalPrompt:
         object.__setattr__(self, "messages", copied_messages)
 
 
+def derive_multimodal_prompt(
+    source: MultimodalPrompt,
+    text: str,
+) -> MultimodalPrompt:
+    """Attach source media once to a newly derived textual instruction.
+
+    L2 role prompts are new conversations, so copying the source chat layout
+    would also copy its user/assistant control flow. Preserve the media and
+    per-item detail while making the derived role text the sole user message.
+    """
+
+    if not isinstance(source, MultimodalPrompt):
+        raise TypeError("source must be a MultimodalPrompt")
+    if type(text) is not str:
+        raise TypeError("derived multimodal text must be a string")
+    details = {
+        part.item_index: part.detail
+        for message in source.messages
+        for part in message.content
+        if part.type == "item"
+    }
+    content = [MultimodalMessagePart("text", text=text)]
+    content.extend(
+        MultimodalMessagePart(
+            "item",
+            item_index=index,
+            detail=details.get(index),
+        )
+        for index in range(len(source.items))
+    )
+    return MultimodalPrompt(
+        base=TextPrompt(text),
+        items=source.items,
+        messages=(MultimodalMessage("user", tuple(content)),),
+    )
+
+
 PromptInput: TypeAlias = (
     str | TextPrompt | TemplatedPrompt | TokensPrompt | MultimodalPrompt
 )

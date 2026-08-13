@@ -39,6 +39,7 @@ RESULTS_ROOT = Path(
 TERMINAL_BENCH_DATASET = ENVIRONMENT_STORAGE / "bench-data/terminal-bench-2-1"
 BENCHMARKS = (
     "serving-auto-max",
+    "charxiv",
     "terminalbench-pilot",
     "terminalbench",
 )
@@ -388,6 +389,97 @@ def serving_auto_max(run_dir: Path) -> int:
     )
 
 
+def charxiv(run_dir: Path) -> int:
+    config = SPEC["benchmarks"]["charxiv"]
+    base_url = f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1"
+    judge_base_url = os.environ.get(
+        "JUDGE_BASE_URL",
+        f"http://127.0.0.1:{os.environ.get('DEEPSEEK_L1_PORT', 8005)}/v1",
+    )
+    model = SPEC["orchestration"]["auto_max_model"]
+    command = [
+        str(ROOT / ".venv/bin/python"),
+        "-m",
+        "kairyu.entrypoints.cli",
+        "bench",
+        "run",
+        "--base-url",
+        base_url,
+        "--model",
+        model,
+        "--served-config-label",
+        "rtx-pro-6000-blackwell-8x-qwen-vlm-deepseek-auto-max",
+        "--served-config-sha256",
+        _served_config_sha256(),
+        "--max-context-tokens",
+        str(SPEC["models"]["tier1"]["max_context_tokens"]),
+        "--max-output-tokens",
+        str(config["max_output_tokens"]),
+        "--request-timeout-s",
+        "86400",
+        "--extra-body",
+        json.dumps(config["extra_body"], separators=(",", ":")),
+        "--judge-base-url",
+        judge_base_url,
+        "--judge-model",
+        os.environ.get("JUDGE_MODEL", SPEC["models"]["tier2"]["served_name"]),
+        "--suite",
+        "accuracy",
+        "--only",
+        "charxiv-reasoning",
+        "--limit",
+        str(config["problems"]),
+        "--seed",
+        str(config["seed"]),
+        "--attempts",
+        str(config["attempts"]),
+        "--concurrency",
+        str(config["concurrency"]),
+        "--results-dir",
+        str(run_dir),
+        "--run-id",
+        "charxiv-10",
+        "--no-progress",
+    ]
+    code = _run(command, log=run_dir / "charxiv.log", check=False)
+    if code:
+        return code
+    return _validate_charxiv(run_dir, model=model)
+
+
+def _validate_charxiv(run_dir: Path, *, model: str) -> int:
+    scoreboard_path = run_dir / "charxiv-10" / "scoreboard.json"
+    try:
+        scoreboard = json.loads(scoreboard_path.read_text(encoding="utf-8"))
+        cell = scoreboard["cells"]["charxiv-reasoning"][model]
+        performance = cell["performance"]
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        print(f"invalid CharXiv scoreboard: {error}", file=sys.stderr)
+        return 1
+
+    expected = int(SPEC["benchmarks"]["charxiv"]["problems"])
+    complete = (
+        cell.get("status") == "completed"
+        and cell.get("n") == expected
+        and cell.get("n_scored") == expected
+        and performance.get("requests") == expected
+        and performance.get("errors") == 0
+        and performance.get("unmeasured_requests") == 0
+    )
+    if not complete:
+        print(
+            "CharXiv did not produce complete 10-item evidence: "
+            f"status={cell.get('status')!r}, n={cell.get('n')!r}, "
+            f"n_scored={cell.get('n_scored')!r}, "
+            f"requests={performance.get('requests')!r}, "
+            f"errors={performance.get('errors')!r}, "
+            f"unmeasured={performance.get('unmeasured_requests')!r}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def _terminalbench_run(
     run_dir: Path,
     *,
@@ -599,6 +691,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.benchmark == "list":
         print("serving-auto-max  verifier-gated product DAG serving matrix")
+        print("charxiv          deterministic 10-item vision and judge run")
         print("terminalbench-pilot  four-task product-model pilot")
         print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
         print("all               every benchmark above, continuing after failures")

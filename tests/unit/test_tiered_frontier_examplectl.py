@@ -98,6 +98,16 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         devices = service["deploy"]["resources"]["reservations"]["devices"][0]
         assert devices["device_ids"] == [str(index)]
         assert "--tensor-parallel-size" not in service["command"]
+        assert "--language-model-only" not in service["command"]
+        assert json.loads(_option(service["command"], "--mm-processor-kwargs")) == {
+            "min_pixels": 65_536,
+            "max_pixels": 2_097_152,
+        }
+        assert _option(service["command"], "--limit-mm-per-prompt.image") == "1"
+        assert _option(service["command"], "--limit-mm-per-prompt.video") == "0"
+        assert json.loads(
+            _option(service["command"], "--default-chat-template-kwargs")
+        ) == {"enable_thinking": False}
         assert _option(service["command"], "--max-num-seqs") == "32"
         assert service["volumes"][-1]["target"] == "/root/.cache"
         assert service["environment"] | {
@@ -135,6 +145,10 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "cudagraph_mode": "FULL_AND_PIECEWISE",
         "custom_ops": ["all"],
     }
+    assert compose["services"]["kairyu"]["build"]["args"] == {"KAIRYU_VISION": "1"}
+    assert compose["services"]["kairyu"]["ports"] == [
+        "${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8003}:8000"
+    ]
 
 
 def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
@@ -154,6 +168,11 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         validate_backend_options(replica.backend, replica.options)
         assert replica.options["tensor_parallel_size"] == 1
         assert replica.options["upstream"] == "vllm"
+        assert replica.options["capabilities"] == {
+            "allow_prompt_kinds": ["multimodal"],
+            "allow_chat_template_kwargs": ["enable_thinking"],
+        }
+        assert replica.options["image_input_policy"]["max_images"] == 1
     deepseek = deployment.pools["deepseek-v4-flash-0731"]
     assert len(deepseek.replicas) == 1
     validate_backend_options(deepseek.replicas[0].backend, deepseek.replicas[0].options)
@@ -168,10 +187,11 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     }
     assert deployment.public_models == frozenset({"kairyu-auto-max"})
     assert deployment.chat_templates == {
-        "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja",
         "deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja",
         "deepseek-v4-flash-0731-thinking": "/etc/kairyu/deepseek-thinking.jinja",
     }
+    assert deployment.legacy_chat_models == frozenset({"qwen3.6-27b"})
+    assert deployment.server.max_chat_body_bytes == 16_777_216
 
 
 def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcript() -> None:
@@ -188,9 +208,14 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
 
-    assert [worker.name for worker in maximum.workers] == ["tier1", "tier2"]
+    assert [worker.name for worker in maximum.workers] == [
+        "tier1",
+        "tier2",
+        "publisher",
+    ]
     assert maximum.workers[0].engine_ref == "qwen3.6-27b"
     assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
+    assert maximum.workers[2].engine_ref == "qwen3.6-27b"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
@@ -215,6 +240,7 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     verifier = next(role for role in maximum.roles if role.name == "verifier")
     publisher = next(role for role in maximum.roles if role.name == "publisher")
     assert verifier.verifies == "draft_synthesis"
+    assert publisher.worker == "publisher"
     assert publisher.depends_on == ("draft_synthesis", "verifier")
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
@@ -282,6 +308,9 @@ def test_tiered_control_uses_explicit_public_ui_host(
     monkeypatch.setattr(control, "_storage_paths", lambda: storage)
 
     assert control._public_ui_host() == "gpu.example.test"
+    assert control._compose_env()["API_BIND_ADDRESS"] == "0.0.0.0"
+    monkeypatch.setenv("API_BIND_ADDRESS", "127.0.0.1")
+    assert control._compose_env()["API_BIND_ADDRESS"] == "127.0.0.1"
     assert control._compose_env()["CHAT_UI_BIND_ADDRESS"] == "0.0.0.0"
     assert control._compose_env()["DEEPSEEK_L1_PORT"] == "8005"
 
@@ -334,6 +363,31 @@ def test_tiered_terminalbench_command_is_full_dataset_without_sampling_claims(
     assert "--recommended-sampling" not in observed
     assert "--top-p" not in observed
     assert "--sampling-seed" not in observed
+
+
+def test_tiered_charxiv_command_pins_ten_orchestrated_vision_items(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    benchmark = _load(EXAMPLE / "benchmark.py", "tiered_charxiv_benchmark")
+    observed: list[str] = []
+
+    def fake_run(command, *, log=None, check=True, env=None):
+        observed.extend(command)
+        return 0
+
+    monkeypatch.setattr(benchmark, "_run", fake_run)
+    monkeypatch.setattr(benchmark, "_validate_charxiv", lambda _path, **_kwargs: 0)
+
+    assert benchmark.charxiv(tmp_path) == 0
+    assert observed[observed.index("--model") + 1] == "kairyu-auto-max"
+    assert observed[observed.index("--only") + 1] == "charxiv-reasoning"
+    assert observed[observed.index("--limit") + 1] == "10"
+    assert observed[observed.index("--concurrency") + 1] == "1"
+    assert json.loads(observed[observed.index("--extra-body") + 1]) == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+    assert "--no-vision" not in observed
+    assert observed[observed.index("--judge-model") + 1] == "deepseek-v4-flash-0731"
 
 
 def test_tiered_terminalbench_pilot_pins_product_model_and_tasks(
