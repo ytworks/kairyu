@@ -21,12 +21,14 @@ caching, chunked batching, and full/piecewise CUDA Graphs.
 Kairyu exposes exactly one public product model, `kairyu-auto-max`. Its request
 enters L3 once, then L2 borrows the deployment-owned L1 pools through
 `engine_ref`: DeepSeek planning, three parallel Qwen proposals, DeepSeek draft
-synthesis and verification, then direct-output Qwen publishing. Image requests first run one
-conditional Qwen vision-grounding role; its grounded text is an explicit input
-to planning, synthesis, verification, and publishing, while text-only requests
-skip that role. A failed verifier can repeat synthesis and verification at most
-twice (`moa_samples: 0`, `max_refine_depth: 2`, `max_steps: 12`); L2 never calls
-the public L3 endpoint recursively.
+synthesis and verification, then Qwen publishing. Every role uses its model's
+direct-output template mode so the next role receives a non-empty stage result
+rather than private scratchpad alone. Image requests first run one conditional
+Qwen vision-grounding role; its grounded text is an explicit input to planning,
+synthesis, verification, and publishing, while text-only requests skip that
+role. A failed verifier can repeat synthesis and verification at most twice
+(`moa_samples: 0`, `max_refine_depth: 2`, `max_steps: 12`); L2 never calls the
+public L3 endpoint recursively.
 
 In the same assistant response, completed L2/L1 stages are sent as
 model-attributed `reasoning_content` and rendered by pinned Open WebUI in a

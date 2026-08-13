@@ -232,12 +232,32 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     verifier = next(role for role in maximum.roles if role.name == "verifier")
     publisher = next(role for role in maximum.roles if role.name == "publisher")
     vision = next(role for role in maximum.roles if role.name == "vision_grounding")
+    planner = next(role for role in maximum.roles if role.name == "planner")
+    draft = next(role for role in maximum.roles if role.name == "draft_synthesis")
+    proposals = [
+        role for role in maximum.roles if role.name.startswith("proposal_")
+    ]
     assert vision.worker == "tier1"
     assert vision.role_type == "vision"
     assert vision.depends_on == ()
     assert vision.extra_args == {
         "chat_template_kwargs": {"enable_thinking": False}
     }
+    assert planner.extra_args == {
+        "chat_template_kwargs": {"thinking_mode": "chat"}
+    }
+    assert draft.extra_args == {
+        "chat_template_kwargs": {"thinking_mode": "chat"}
+    }
+    assert verifier.extra_args == {
+        "chat_template_kwargs": {"thinking_mode": "chat"}
+    }
+    assert proposals
+    assert all(
+        proposal.extra_args
+        == {"chat_template_kwargs": {"enable_thinking": False}}
+        for proposal in proposals
+    )
     assert verifier.verifies == "draft_synthesis"
     assert publisher.depends_on == (
         "vision_grounding",
