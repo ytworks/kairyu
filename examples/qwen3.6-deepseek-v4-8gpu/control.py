@@ -96,7 +96,7 @@ def _compose_env() -> dict[str, str]:
             "DEEPSEEK_CACHE_PATH": str(paths["deepseek_cache"]),
             "VLLM_IMAGE": os.environ.get("VLLM_IMAGE", SPEC["vllm"]["image"]),
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
-            "API_BIND_ADDRESS": os.environ.get("API_BIND_ADDRESS", "127.0.0.1"),
+            "API_BIND_ADDRESS": os.environ.get("API_BIND_ADDRESS", "0.0.0.0"),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
             "DEEPSEEK_L1_PORT": os.environ.get(
                 "DEEPSEEK_L1_PORT", str(SPEC["deepseek_l1_loopback_port"])

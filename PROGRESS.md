@@ -98,6 +98,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-13 — [amendment] Tiered L3 endpoints stay locally and externally reachable
+- What: The example now binds both its Chat UI and public L3 API to all host interfaces by default while advertising the real host address, so both endpoints remain reachable through localhost and the external address; explicit bind overrides remain available.
+- Why: Binding the API only to the external interface made its normal host-local URL unavailable, while publishing `0.0.0.0` as a client URL confused the listen address with the address clients should use.
+- Refs: PR #478; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,control.py,README.md}`
+
 ### 2026-08-13 — [progress] Tiered Chat UI response repair closes GPU gates
 - What: Default Qwen L1 chat now returns non-empty public content with no hidden reasoning, L3 returns separate non-empty final and attributed reasoning output, the pinned tiered browser smoke passes, and the deterministic CharXiv rerun completes 10/10 scored requests with zero errors or unmeasured requests.
 - Refs: PR #478; commit `56c640a`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/20260813T055825Z/`
