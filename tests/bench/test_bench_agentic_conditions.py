@@ -184,8 +184,11 @@ def test_terminal_bench_prompt_discloses_one_line_file_transport():
 
     assert prompt.startswith(upstream)
     assert "at most one command object" in prompt
+    assert "below 1200 characters" in prompt
     assert "Do not use shell heredocs" in prompt
-    assert "base64-encode" in prompt
+    assert "Do not calculate or emit base64" in prompt
+    assert "printf '%s\\n'" in prompt
+    assert "with `>>`" in prompt
     assert prompt.count("{instruction}") == 1
     assert prompt.count("{terminal_state}") == 1
 

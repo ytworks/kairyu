@@ -8,11 +8,14 @@ _STANDALONE_CONTROL_KEYSTROKES = frozenset({"C-c", "C-d"})
 _COMMAND_TRANSPORT_ADDENDUM = """\
 Kairyu command transport constraints:
 - Return at most one command object in each response.
+- Keep each keystrokes value below 1200 characters. Split longer work across
+  later turns; inspect the result after each chunk.
 - Do not use shell heredocs or commands that require embedded newlines; this
   JSON command transport can flatten those newlines before execution.
-- To write a multiline file, base64-encode its complete contents and use one
-  single-line command such as `printf %s ENCODED | base64 -d > /path/file`.
-  Inspect or test the file in a later turn.
+- Do not calculate or emit base64 data. To write a multiline file, use one
+  single-line `printf '%s\\n' 'line 1' 'line 2' > /path/file` command for the
+  first few lines, then similarly append a few lines per later turn with `>>`.
+  Shell-quote every line and keep the whole command below 1200 characters.
 """
 
 
