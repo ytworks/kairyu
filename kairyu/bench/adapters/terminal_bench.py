@@ -79,7 +79,7 @@ _AGENT_RESPONSE_FORMAT = {
                             "keystrokes": {
                                 "type": "string",
                                 "minLength": 1,
-                                "maxLength": 2048,
+                                "maxLength": 1200,
                             },
                             "duration": {"type": "number"},
                         },

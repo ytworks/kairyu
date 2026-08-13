@@ -165,7 +165,7 @@ def test_terminal_bench_caps_output_limit_via_terminus_llm_kwargs(tmp_path):
         "keystrokes"
     ]
     assert keystrokes["minLength"] == 1
-    assert keystrokes["maxLength"] == 2048
+    assert keystrokes["maxLength"] == 1200
     assert "pattern" not in keystrokes
 
 
