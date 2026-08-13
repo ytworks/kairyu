@@ -101,7 +101,7 @@ class CharXivAdapter(GenerativeAdapter):
         ]
         return ChatRequestSpec(
             messages=({"role": "user", "content": content},),
-            max_tokens=min(target.max_output_tokens, 2048),
+            max_tokens=target.max_output_tokens,
         )
 
     async def score(
