@@ -98,6 +98,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-13 — [progress] Tiered Chat UI response repair closes GPU gates
+- What: Default Qwen L1 chat now returns non-empty public content with no hidden reasoning, L3 returns separate non-empty final and attributed reasoning output, the pinned tiered browser smoke passes, and the deterministic CharXiv rerun completes 10/10 scored requests with zero errors or unmeasured requests.
+- Refs: PR #478; commit `56c640a`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/20260813T055825Z/`
+
 ### 2026-08-13 — [progress] Tiered Chat UI publication defaults to visible content
 - What: The tiered example's Qwen replicas now default upstream HF chat templating to nonthinking while preserving request-level overrides and vision handling, so proposal and publisher roles return public content instead of exhausting their budget in reasoning-only output; GPU validation is in progress.
 - Refs: PR #478; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,README.md}`; `tests/unit/test_tiered_frontier_examplectl.py`
