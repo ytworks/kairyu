@@ -92,7 +92,7 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 `serving-auto-max` records the verifier-gated product DAG's serving matrix.
 `charxiv` runs exactly 10 deterministic CharXiv Reasoning image questions
 through that DAG, disables Qwen thinking through its upstream HF chat template,
-uses low DeepSeek reasoning effort for the short final answer, and uses the
+uses the ordinary nonthinking DeepSeek worker for the publisher, and uses the
 loopback DeepSeek L1 endpoint as the text judge;
 `JUDGE_BASE_URL` and `JUDGE_MODEL` can override it. `terminalbench-pilot` runs
 its four-task pilot, and `terminalbench` runs the

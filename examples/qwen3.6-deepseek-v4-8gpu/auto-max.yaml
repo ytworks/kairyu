@@ -6,6 +6,8 @@ workers:
     engine_ref: qwen3.6-27b
   - name: tier2
     engine_ref: deepseek-v4-flash-0731-thinking
+  - name: publisher
+    engine_ref: deepseek-v4-flash-0731
 
 router:
   kind: calibrated
@@ -71,7 +73,7 @@ roles:
       Draft: {draft_synthesis}
 
   - name: publisher
-    worker: tier2
+    worker: publisher
     role_type: publisher
     depends_on: [draft_synthesis, verifier]
     prompt: |

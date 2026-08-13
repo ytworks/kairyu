@@ -202,9 +202,14 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
 
-    assert [worker.name for worker in maximum.workers] == ["tier1", "tier2"]
+    assert [worker.name for worker in maximum.workers] == [
+        "tier1",
+        "tier2",
+        "publisher",
+    ]
     assert maximum.workers[0].engine_ref == "qwen3.6-27b"
     assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
+    assert maximum.workers[2].engine_ref == "deepseek-v4-flash-0731"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
@@ -229,6 +234,7 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     verifier = next(role for role in maximum.roles if role.name == "verifier")
     publisher = next(role for role in maximum.roles if role.name == "publisher")
     assert verifier.verifies == "draft_synthesis"
+    assert publisher.worker == "publisher"
     assert publisher.depends_on == ("draft_synthesis", "verifier")
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
@@ -368,7 +374,6 @@ def test_tiered_charxiv_command_pins_ten_orchestrated_vision_items(
     assert observed[observed.index("--only") + 1] == "charxiv-reasoning"
     assert observed[observed.index("--limit") + 1] == "10"
     assert observed[observed.index("--concurrency") + 1] == "1"
-    assert observed[observed.index("--reasoning-effort") + 1] == "low"
     assert json.loads(observed[observed.index("--extra-body") + 1]) == {
         "chat_template_kwargs": {"enable_thinking": False}
     }
