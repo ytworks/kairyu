@@ -367,6 +367,7 @@ def test_tiered_charxiv_command_pins_ten_orchestrated_vision_items(
     assert observed[observed.index("--only") + 1] == "charxiv-reasoning"
     assert observed[observed.index("--limit") + 1] == "10"
     assert observed[observed.index("--concurrency") + 1] == "1"
+    assert observed[observed.index("--reasoning-effort") + 1] == "low"
     assert "--no-vision" not in observed
     assert observed[observed.index("--judge-model") + 1] == "deepseek-v4-flash-0731"
 

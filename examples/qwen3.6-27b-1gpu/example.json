@@ -54,7 +54,7 @@
     },
     "charxiv": {
       "problems": 10,
-      "reasoning_effort": "max",
+      "reasoning_effort": "low",
       "temperature": 1.0,
       "top_p": 0.95,
       "max_output_tokens": 8192,

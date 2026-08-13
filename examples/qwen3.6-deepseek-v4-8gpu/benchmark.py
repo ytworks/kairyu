@@ -417,6 +417,8 @@ def charxiv(run_dir: Path) -> int:
         str(config["max_output_tokens"]),
         "--request-timeout-s",
         "86400",
+        "--reasoning-effort",
+        config["reasoning_effort"],
         "--judge-base-url",
         judge_base_url,
         "--judge-model",
