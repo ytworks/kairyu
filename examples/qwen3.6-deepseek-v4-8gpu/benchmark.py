@@ -787,7 +787,6 @@ def _served_config_sha256() -> str:
         "kairyu.yaml",
         "auto-max.yaml",
         "router.json",
-        "deepseek-thinking.jinja",
     ):
         path = HERE / name
         digest.update(name.encode())

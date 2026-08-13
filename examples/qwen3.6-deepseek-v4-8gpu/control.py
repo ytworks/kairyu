@@ -406,7 +406,7 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         raise SystemExit("Kairyu Tier1 L2 worker is not bound to the Qwen L1 pool")
     if (
         configured.get("tier2", {}).get("model")
-        != "deepseek-v4-flash-0731-thinking"
+        != "deepseek-v4-flash-0731"
     ):
         raise SystemExit("Kairyu Tier2 L2 worker is not bound to the DeepSeek L1 pool")
 

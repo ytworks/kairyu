@@ -5,7 +5,7 @@ workers:
   - name: tier1
     engine_ref: qwen3.6-27b
   - name: tier2
-    engine_ref: deepseek-v4-flash-0731-thinking
+    engine_ref: deepseek-v4-flash-0731
 
 router:
   kind: calibrated
@@ -32,9 +32,8 @@ roles:
     role_type: planner
     depends_on: [vision_grounding]
     prompt: |
-      [planner] Think privately and briefly. Before the token budget ends, emit
-      </think> followed immediately by a non-empty compact plan for the user's
-      task. The plan after </think> is the only result passed to later roles.
+      [planner] Analyze the task carefully, then return a non-empty compact plan
+      for the user's task. Return the plan as the complete stage result.
       Task: {query}
       Visual grounding (empty when no image was supplied): {vision_grounding}
 
@@ -79,9 +78,8 @@ roles:
     role_type: synthesizer
     depends_on: [vision_grounding, proposal_a, proposal_b, proposal_c]
     prompt: |
-      [draft_synthesis] Think privately and briefly. Before the token budget
-      ends, emit </think> followed immediately by a non-empty strongest accurate
-      draft. The draft after </think> is the only result passed to later roles.
+      [draft_synthesis] Compare the proposals carefully, then return a non-empty
+      strongest accurate draft as the complete stage result.
       Task: {query}
       Visual grounding (empty when no image was supplied): {vision_grounding}
       Proposal A: {proposal_a}
@@ -94,10 +92,10 @@ roles:
     verifies: draft_synthesis
     depends_on: [vision_grounding, draft_synthesis]
     prompt: |
-      [verifier] Think privately and briefly while checking the draft against
-      the task. Before the token budget ends, emit </think> followed immediately
-      by a non-empty verdict. Start that verdict with PASS when the draft is
-      ready to publish; otherwise start with FAIL and give actionable defects.
+      [verifier] Check the draft carefully against the task, then return a
+      non-empty verdict as the complete stage result. Start with PASS when the
+      draft is ready to publish; otherwise start with FAIL and give actionable
+      defects.
       Task: {query}
       Visual grounding (empty when no image was supplied): {vision_grounding}
       Draft: {draft_synthesis}

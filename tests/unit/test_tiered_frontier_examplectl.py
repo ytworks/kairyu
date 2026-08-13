@@ -47,7 +47,7 @@ def test_tiered_browser_gate_requires_one_model_and_separate_reasoning_ui() -> N
         "tier1",
         "tier2",
         "qwen3.6-27b",
-        "deepseek-v4-flash-0731-thinking",
+        "deepseek-v4-flash-0731",
     ):
         assert attribution in browser
 
@@ -150,7 +150,6 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert set(deployment.pools) == {
         "qwen3.6-27b",
         "deepseek-v4-flash-0731",
-        "deepseek-v4-flash-0731-thinking",
     }
     qwen = deployment.pools["qwen3.6-27b"]
     assert len(qwen.replicas) == 4
@@ -176,8 +175,6 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert deepseek.replicas[0].options["expert_parallel_size"] == 4
     assert deepseek.replicas[0].options["dspark_enabled"] is True
     assert "completion_reasoning_end_tag" not in deepseek.replicas[0].options
-    thinking = deployment.pools["deepseek-v4-flash-0731-thinking"]
-    assert thinking.replicas[0].options["completion_reasoning_end_tag"] == "</think>"
     assert set(deployment.orchestrators) == {
         "kairyu-auto-max",
     }
@@ -185,18 +182,7 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert deployment.chat_templates == {
         "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja",
         "deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja",
-        "deepseek-v4-flash-0731-thinking": "/etc/kairyu/deepseek-thinking.jinja",
     }
-
-
-def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcript() -> None:
-    template = (EXAMPLE / "deepseek-thinking.jinja").read_text()
-
-    assert "Reason privately and carefully" in template
-    assert "converge promptly" in template
-    assert "non-empty final answer immediately follows </think>" in template
-    assert "entire deliberation process" not in template
-    assert "Do not stop reasoning" not in template
 
 
 def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
@@ -205,7 +191,7 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
 
     assert [worker.name for worker in maximum.workers] == ["tier1", "tier2"]
     assert maximum.workers[0].engine_ref == "qwen3.6-27b"
-    assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
+    assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
@@ -247,9 +233,10 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
     assert draft.extra_args == {}
     assert verifier.extra_args == {}
     for deepseek_role in (planner, draft, verifier):
-        assert "emit </think> followed immediately by a non-empty" in (
-            " ".join(deepseek_role.prompt.split())
-        )
+        normalized = " ".join(deepseek_role.prompt.split())
+        assert "non-empty" in normalized
+        assert "complete stage result" in normalized
+        assert "</think>" not in normalized
     assert proposals
     assert all(
         proposal.extra_args

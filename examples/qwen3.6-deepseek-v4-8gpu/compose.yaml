@@ -237,7 +237,6 @@ services:
       - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
       - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
       - ./router.json:/etc/kairyu/router.json:ro
-      - ./deepseek-thinking.jinja:/etc/kairyu/deepseek-thinking.jinja:ro
       - ../qwen3.6-27b-1gpu/chat_template.jinja:/etc/kairyu/qwen3.6-chat-template.jinja:ro
       - ../deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
     depends_on:

@@ -83,22 +83,6 @@ pools:
     prefix_index: true
     probe_interval_s: 2.0
 
-  # The L2 worker uses the same attested L1 but a max-thinking prompt policy.
-  deepseek-v4-flash-0731-thinking:
-    replicas:
-      - backend: openai
-        health_url: http://deepseek:8000/health
-        options:
-          <<: *deepseek
-          # This prompt begins inside <think>. vLLM /completions does not run
-          # its chat reasoning parser, so Kairyu privately separates everything
-          # before the first terminator and exposes only the final answer.
-          completion_reasoning_end_tag: "</think>"
-    unhealthy_after: 1
-    queue_depth_threshold: 8
-    prefix_index: true
-    probe_interval_s: 2.0
-
 orchestrators:
   kairyu-auto-max:
     spec: /etc/kairyu/auto-max.yaml
@@ -110,4 +94,3 @@ public_models: [kairyu-auto-max]
 chat_templates:
   qwen3.6-27b: /etc/kairyu/qwen3.6-chat-template.jinja
   deepseek-v4-flash-0731: /etc/kairyu/deepseek-v4-0731.jinja
-  deepseek-v4-flash-0731-thinking: /etc/kairyu/deepseek-thinking.jinja
