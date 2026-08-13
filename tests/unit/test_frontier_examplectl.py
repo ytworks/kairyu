@@ -119,7 +119,10 @@ def test_qwen_kairyu_l3_declares_strict_multimodal_vllm_l1() -> None:
     assert entry.backend == "openai"
     validate_backend_options(entry.backend, entry.options)
     assert entry.options["upstream"] == "vllm"
-    assert entry.options["capabilities"] == {"allow_prompt_kinds": ["multimodal"]}
+    assert entry.options["capabilities"] == {
+        "allow_prompt_kinds": ["multimodal"],
+        "allow_chat_template_kwargs": ["enable_thinking"],
+    }
     assert entry.options["image_input_policy"] == {
         "max_images": 1,
         "max_image_bytes": 8_388_608,
@@ -407,7 +410,9 @@ def test_qwen_charxiv_command_pins_ten_vision_items(
     assert observed[observed.index("--only") + 1] == "charxiv-reasoning"
     assert observed[observed.index("--limit") + 1] == "10"
     assert observed[observed.index("--concurrency") + 1] == "1"
-    assert observed[observed.index("--reasoning-effort") + 1] == "low"
+    assert json.loads(observed[observed.index("--extra-body") + 1]) == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
     assert "--no-vision" not in observed
     assert observed[observed.index("--judge-model") + 1] == "qwen3.6-27b"
 

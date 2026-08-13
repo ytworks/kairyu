@@ -66,6 +66,8 @@ so prefix-cache reuse cannot inflate the matrix. `livecodebench` runs exactly
 20 deterministic `release_v6` problems at pass@1 in the content-addressed,
 networkless Docker executor. `charxiv` runs exactly 10 deterministic CharXiv
 Reasoning questions with their chart images and judge-grades every answer;
+the short-answer target disables Qwen thinking through its upstream HF chat
+template while leaving ordinary chat and LiveCodeBench unchanged.
 `JUDGE_BASE_URL` and `JUDGE_MODEL` can select a separate OpenAI-compatible
 judge, while the default uses this local Qwen endpoint. `all` continues after
 an individual benchmark failure and still finalizes its manifest.

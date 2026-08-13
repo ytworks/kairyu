@@ -37,6 +37,7 @@ from kairyu.entrypoints.chat_template import (
     ToolCallProtocol,
     _iter_validated_content_parts,
     render_chat,
+    validate_upstream_chat_template_kwargs,
 )
 from kairyu.entrypoints.server.metering import resolve_usage_counts
 from kairyu.entrypoints.server.protocol import (
@@ -641,11 +642,10 @@ def _render_multimodal_prompt(
     structured image parts and apply the model template twice.
     """
 
-    if request.chat_template_kwargs:
-        raise ChatRequestError(
-            "chat_template_kwargs cannot be applied to an upstream-owned "
-            "multimodal chat template"
-        )
+    try:
+        validate_upstream_chat_template_kwargs(request.chat_template_kwargs)
+    except ValueError as error:
+        raise ChatRequestError(str(error)) from error
     if (chat_templates or {}).get(request.model) is not None:
         raise ChatRequestError(
             f"model {request.model!r} cannot combine a Kairyu text chat template "
@@ -911,6 +911,11 @@ def _finish_chat_request_validation(
         tools_in_prompt=validated_input.tools_in_prompt,
         tool_call_protocol=validated_input.tool_call_protocol.value,
         reasoning_effort=request.reasoning_effort,
+        chat_template_kwargs=(
+            request.chat_template_kwargs
+            if isinstance(validated_input.prompt, MultimodalPrompt)
+            else None
+        ),
     )
     try:
         if before_prepare:

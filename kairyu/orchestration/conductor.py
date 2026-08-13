@@ -20,6 +20,7 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    backend_supports_chat_template_kwargs,
     backend_supports_prompt_kind,
 )
 from kairyu.engine.prompt import (
@@ -216,6 +217,7 @@ class Conductor:
         final_tool_call_protocol: str = "generic",
         expose_intermediate_outputs: bool = False,
         multimodal_prompt: MultimodalPrompt | None = None,
+        chat_template_kwargs: Mapping[str, object] | None = None,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -240,6 +242,9 @@ class Conductor:
         self._usage_observer = usage_observer
         self._expose_intermediate_outputs = expose_intermediate_outputs
         self._multimodal_prompt = multimodal_prompt
+        self._chat_template_kwargs = (
+            None if chat_template_kwargs is None else dict(chat_template_kwargs)
+        )
         supplied_trace = dict(worker_trace or {})
         self._worker_trace = {
             worker: supplied_trace.get(
@@ -367,6 +372,22 @@ class Conductor:
             return text
         return derive_multimodal_prompt(self._multimodal_prompt, text)
 
+    def _worker_chat_template_kwargs(
+        self,
+        spec: RoleSpec,
+        prompt: object,
+    ) -> Mapping[str, object] | None:
+        if not isinstance(prompt, MultimodalPrompt):
+            return None
+        if self._chat_template_kwargs is not None and not backend_supports_chat_template_kwargs(
+            self._workers[spec.worker],
+            frozenset(self._chat_template_kwargs),
+        ):
+            raise ValueError(
+                f"worker {spec.worker!r} does not support chat_template_kwargs"
+            )
+        return self._chat_template_kwargs
+
     def _cache_hint(self, session: str, *, multimodal: bool = False) -> CacheHint:
         return CacheHint(
             session_id=session,
@@ -429,6 +450,10 @@ class Conductor:
                             session,
                             multimodal=isinstance(role_prompt, MultimodalPrompt),
                         ),
+                        chat_template_kwargs=self._worker_chat_template_kwargs(
+                            spec,
+                            role_prompt,
+                        ),
                         tools=tools,
                         tool_choice=tool_choice,
                         tools_in_prompt=tools_in_prompt,
@@ -467,6 +492,10 @@ class Conductor:
             cache_hint=self._cache_hint(
                 session,
                 multimodal=isinstance(request_prompt, MultimodalPrompt),
+            ),
+            chat_template_kwargs=self._worker_chat_template_kwargs(
+                spec,
+                request_prompt,
             ),
             tools=tools,
             tool_choice=tool_choice,

@@ -18,6 +18,7 @@ engines:
       upstream: vllm
       capabilities:
         allow_prompt_kinds: [multimodal]
+        allow_chat_template_kwargs: [enable_thinking]
       image_input_policy:
         max_images: 1
         max_image_bytes: 8388608

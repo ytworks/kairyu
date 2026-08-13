@@ -2248,6 +2248,11 @@ def create_app(
                     tool_call_protocol=validated_input.tool_call_protocol.value,
                     reasoning_effort=request.reasoning_effort,
                     multimodal_prompt=validated_input.orchestration_multimodal_prompt,
+                    chat_template_kwargs=(
+                        request.chat_template_kwargs
+                        if validated_input.orchestration_multimodal_prompt is not None
+                        else None
+                    ),
                 )
                 selected = auto_models[request.model]
                 try:

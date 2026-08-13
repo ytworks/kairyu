@@ -15,6 +15,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
     backend_admission_upper_bound,
+    backend_supports_chat_template_kwargs,
     backend_supports_prompt_kind,
     prepare_backend_request,
     shutdown_all,
@@ -23,7 +24,11 @@ from kairyu.engine.backend import (
 from kairyu.engine.backend import (
     admission_upper_bound as generation_admission_upper_bound,
 )
-from kairyu.engine.prompt import TemplatedPrompt, derive_multimodal_prompt
+from kairyu.engine.prompt import (
+    MultimodalPrompt,
+    TemplatedPrompt,
+    derive_multimodal_prompt,
+)
 from kairyu.models.generation import GenerationDefaults
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import (
@@ -470,6 +475,7 @@ class Orchestrator:
                     raise ValueError(
                         f"orchestration route {decision.target!r} does not support image inputs"
                     )
+                media_keys = keys
             else:
                 fallback = next(iter(self._engines))
                 role_keys = {
@@ -483,6 +489,25 @@ class Orchestrator:
                     raise ValueError(
                         "multimodal orchestration requires at least one image-capable worker"
                     )
+                media_keys = tuple(
+                    key
+                    for key in role_keys
+                    if backend_supports_prompt_kind(
+                        self._engines[key],
+                        "multimodal",
+                    )
+                )
+            if call.chat_template_kwargs is not None and not all(
+                backend_supports_chat_template_kwargs(
+                    self._engines[key],
+                    frozenset(call.chat_template_kwargs),
+                )
+                for key in media_keys
+            ):
+                raise ValueError(
+                    "image-capable orchestration workers do not all support "
+                    "chat_template_kwargs"
+                )
         if call.sampling_params.n <= 1:
             return
         final_role = self._conductor_final_role()
@@ -515,16 +540,17 @@ class Orchestrator:
     ) -> tuple[_IntentRequest, ...]:
         requests: list[_IntentRequest] = []
         for key in self._final_engine_keys(decision):
+            prompt = self._engine_prompt(
+                key,
+                call,
+                f"{self._shared_prefix}{call.prompt}",
+            )
             requests.append(
                 _IntentRequest(
                     key,
                     GenerationRequest(
                         request_id=f"preflight-{key}",
-                        prompt=self._engine_prompt(
-                            key,
-                            call,
-                            f"{self._shared_prefix}{call.prompt}",
-                        ),
+                        prompt=prompt,
                         sampling_params=call.sampling_params,
                         tools=call.tools,
                         tool_choice=call.tool_choice,
@@ -532,6 +558,11 @@ class Orchestrator:
                         parallel_tool_calls=call.parallel_tool_calls,
                         tool_call_protocol=call.tool_call_protocol,
                         reasoning_effort=call.reasoning_effort,
+                        chat_template_kwargs=(
+                            call.chat_template_kwargs
+                            if isinstance(prompt, MultimodalPrompt)
+                            else None
+                        ),
                     ),
                 )
             )
@@ -545,13 +576,14 @@ class Orchestrator:
     ) -> GenerationRequest:
         """Build a direct request without copying its prompt on the loop."""
 
+        prompt = self._engine_prompt(
+            engine_key,
+            call,
+            f"{self._shared_prefix}{call.prompt}",
+        )
         return GenerationRequest(
             request_id=request_id,
-            prompt=self._engine_prompt(
-                engine_key,
-                call,
-                f"{self._shared_prefix}{call.prompt}",
-            ),
+            prompt=prompt,
             sampling_params=call.sampling_params,
             # No random session: route by shared-prefix overlap and load.
             cache_hint=None,
@@ -561,6 +593,11 @@ class Orchestrator:
             parallel_tool_calls=call.parallel_tool_calls,
             tool_call_protocol=call.tool_call_protocol,
             reasoning_effort=call.reasoning_effort,
+            chat_template_kwargs=(
+                call.chat_template_kwargs
+                if isinstance(prompt, MultimodalPrompt)
+                else None
+            ),
         )
 
     def _engine_prompt(
@@ -595,18 +632,24 @@ class Orchestrator:
             return tuple(_IntentRequest(key, request) for request in setup.proposal_requests)
         requests: list[_IntentRequest] = []
         for key in self._internal_engine_keys(decision):
+            prompt = self._engine_prompt(
+                key,
+                call,
+                f"{self._shared_prefix}{call.prompt}",
+            )
             requests.append(
                 _IntentRequest(
                     key,
                     GenerationRequest(
                         request_id=f"preflight-internal-{key}",
-                        prompt=self._engine_prompt(
-                            key,
-                            call,
-                            f"{self._shared_prefix}{call.prompt}",
-                        ),
+                        prompt=prompt,
                         sampling_params=sampling_params,
                         reasoning_effort=call.reasoning_effort,
+                        chat_template_kwargs=(
+                            call.chat_template_kwargs
+                            if isinstance(prompt, MultimodalPrompt)
+                            else None
+                        ),
                     ),
                 )
             )
@@ -1103,6 +1146,7 @@ class Orchestrator:
             usage_observer=usage_observer,
             expose_intermediate_outputs=self._expose_intermediate_outputs,
             multimodal_prompt=call.multimodal_prompt,
+            chat_template_kwargs=call.chat_template_kwargs,
         )
 
     def _conductor_worker_trace(self) -> dict[str, WorkerTraceIdentity]:

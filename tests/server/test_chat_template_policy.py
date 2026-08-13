@@ -14,6 +14,7 @@ from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     render_prompt,
     validate_chat_input,
+    validate_chat_request,
     validate_orchestration_chat_input,
 )
 from kairyu.entrypoints.server.protocol import (
@@ -363,10 +364,15 @@ async def test_runtime_template_error_is_controlled_for_http_and_batch(
     assert backend.prompts_seen == ()
 
 
-async def test_multimodal_chat_rejects_unforwarded_template_kwargs_predispatch():
-    backend = MockBackend()
-    app = create_app({"vlm": backend}, legacy_chat_models={"vlm"})
-    body = {
+def test_multimodal_chat_preserves_upstream_template_kwargs():
+    class VisionBackend:
+        request = None
+
+        def validate_request(self, request):
+            self.request = request
+
+    backend = VisionBackend()
+    request = ChatCompletionRequest.model_validate({
         "model": "vlm",
         "messages": [
             {
@@ -380,15 +386,44 @@ async def test_multimodal_chat_rejects_unforwarded_template_kwargs_predispatch()
                 ],
             }
         ],
-        "chat_template_kwargs": {"enable_thinking": True},
+        "chat_template_kwargs": {"enable_thinking": False},
+    })
+
+    validated = validate_chat_request(
+        request,
+        {"vlm": backend},
+        None,
+        request_id="chat-template-kwargs",
+        legacy_chat_models={"vlm"},
+    )
+
+    assert isinstance(validated.generation_request.prompt, MultimodalPrompt)
+    assert validated.generation_request.chat_template_kwargs == {
+        "enable_thinking": False
     }
 
-    async with _client(app) as client:
-        response = await client.post("/v1/chat/completions", json=body)
 
-    assert response.status_code == 400
-    assert "upstream-owned multimodal" in response.json()["error"]["message"]
-    assert backend.prompts_seen == ()
+def test_multimodal_chat_rejects_reserved_upstream_template_kwargs():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "vlm",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,image"},
+                        }
+                    ],
+                }
+            ],
+            "chat_template_kwargs": {"messages": []},
+        }
+    )
+
+    with pytest.raises(ChatRequestError, match="reserved template variables"):
+        validate_chat_input(request, None, allow_multimodal=True)
 
 
 def test_multimodal_chat_bypasses_strict_local_text_template_policy():
@@ -600,7 +635,7 @@ def test_single_tool_constraint_preserves_original_content_shape(
         (
             {"enable_thinking": True},
             {"vlm": ChatTemplate("ok")},
-            "upstream-owned multimodal",
+            "cannot combine",
         ),
         (None, {"vlm": ChatTemplate("ok")}, "cannot combine"),
         (None, None, "tool transcript fields"),

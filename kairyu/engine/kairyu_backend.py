@@ -2334,6 +2334,7 @@ class KairyuBackend:
                     parallel_tool_calls=request.parallel_tool_calls,
                     tool_call_protocol=request.tool_call_protocol,
                     reasoning_effort=request.reasoning_effort,
+                    chat_template_kwargs=request.chat_template_kwargs,
                 )
             )
         return subs

@@ -34,6 +34,7 @@ class OrchestrationRequest:
     tool_call_protocol: str = "generic"
     reasoning_effort: str | None = None
     multimodal_prompt: MultimodalPrompt | None = None
+    chat_template_kwargs: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -55,6 +56,23 @@ class OrchestrationRequest:
             MultimodalPrompt,
         ):
             raise TypeError("multimodal_prompt must be a MultimodalPrompt or null")
+        if self.chat_template_kwargs is not None:
+            if self.multimodal_prompt is None:
+                raise ValueError(
+                    "chat_template_kwargs require a multimodal orchestration prompt"
+                )
+            if not isinstance(self.chat_template_kwargs, Mapping) or any(
+                not isinstance(key, str) or not key
+                for key in self.chat_template_kwargs
+            ):
+                raise TypeError(
+                    "chat_template_kwargs must map non-empty string keys or be null"
+                )
+            object.__setattr__(
+                self,
+                "chat_template_kwargs",
+                dict(self.chat_template_kwargs),
+            )
 
     def internal_sampling_params(
         self,

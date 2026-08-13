@@ -562,6 +562,17 @@ def _validated_request_payload(
         payload["priority"] = request.priority
     if request.reasoning_effort is not None:
         payload["reasoning_effort"] = request.reasoning_effort
+    if request.chat_template_kwargs is not None:
+        unsupported = (
+            set(request.chat_template_kwargs) - capabilities.chat_template_kwargs
+        )
+        if unsupported:
+            raise _client_error(
+                capabilities.upstream,
+                "does not support chat_template_kwargs: "
+                + ", ".join(sorted(unsupported)),
+            )
+        payload["chat_template_kwargs"] = dict(request.chat_template_kwargs)
     return payload
 
 
@@ -717,6 +728,11 @@ class OpenAICompatBackend:
 
         return kind in self._capabilities.prompt_kinds
 
+    def supports_chat_template_kwargs(self, keys: frozenset[str]) -> bool:
+        """Publish whether this upstream owns configurable HF templating."""
+
+        return keys <= self._capabilities.chat_template_kwargs
+
     @property
     def request_validation_key(self) -> tuple[
         OpenAIRequestCapabilities,
@@ -784,6 +800,17 @@ class OpenAICompatBackend:
                 self._capabilities.upstream,
                 "cannot return logprobs after filtering private completion reasoning",
             )
+        if request.chat_template_kwargs is not None:
+            unsupported = (
+                set(request.chat_template_kwargs)
+                - self._capabilities.chat_template_kwargs
+            )
+            if unsupported:
+                raise _client_error(
+                    self._capabilities.upstream,
+                    "does not support chat_template_kwargs: "
+                    + ", ".join(sorted(unsupported)),
+                )
         if isinstance(request.prompt, MultimodalPrompt):
             if type(request.prompt.base) is not str and not isinstance(
                 request.prompt.base,

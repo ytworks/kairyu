@@ -163,7 +163,8 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         assert replica.options["tensor_parallel_size"] == 1
         assert replica.options["upstream"] == "vllm"
         assert replica.options["capabilities"] == {
-            "allow_prompt_kinds": ["multimodal"]
+            "allow_prompt_kinds": ["multimodal"],
+            "allow_chat_template_kwargs": ["enable_thinking"],
         }
         assert replica.options["image_input_policy"]["max_images"] == 1
     deepseek = deployment.pools["deepseek-v4-flash-0731"]
@@ -367,7 +368,9 @@ def test_tiered_charxiv_command_pins_ten_orchestrated_vision_items(
     assert observed[observed.index("--only") + 1] == "charxiv-reasoning"
     assert observed[observed.index("--limit") + 1] == "10"
     assert observed[observed.index("--concurrency") + 1] == "1"
-    assert observed[observed.index("--reasoning-effort") + 1] == "low"
+    assert json.loads(observed[observed.index("--extra-body") + 1]) == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
     assert "--no-vision" not in observed
     assert observed[observed.index("--judge-model") + 1] == "deepseek-v4-flash-0731"
 

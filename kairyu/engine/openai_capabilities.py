@@ -102,6 +102,7 @@ class OpenAIRequestCapabilities:
     prompt_kinds: frozenset[str] = frozenset({"text"})
     # Appended to preserve the positional ABI of the existing capability key.
     parallel_tool_calls: bool = False
+    chat_template_kwargs: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_fields", frozenset(self.sampling_fields))
@@ -112,10 +113,22 @@ class OpenAIRequestCapabilities:
             frozenset(self.forward_neutral_fields),
         )
         object.__setattr__(self, "prompt_kinds", frozenset(self.prompt_kinds))
+        object.__setattr__(
+            self,
+            "chat_template_kwargs",
+            frozenset(self.chat_template_kwargs),
+        )
         if not isinstance(self.upstream, str) or not self.upstream:
             raise ValueError("upstream must be a non-empty string")
         if type(self.parallel_tool_calls) is not bool:
             raise ValueError("parallel_tool_calls capability must be a boolean")
+        if any(
+            not isinstance(key, str) or not key
+            for key in self.chat_template_kwargs
+        ):
+            raise ValueError(
+                "chat_template_kwargs capability must contain non-empty strings"
+            )
         unknown = self.sampling_fields - SAMPLING_FIELD_NAMES
         if unknown:
             raise ValueError(f"unknown OpenAI sampling capability fields: {sorted(unknown)}")
@@ -222,6 +235,7 @@ _OVERRIDE_KEYS = frozenset(
         "allow_sampling_fields",
         "deny_sampling_fields",
         "parallel_tool_calls",
+        "allow_chat_template_kwargs",
         "strict_tools",
     }
 )
@@ -322,6 +336,10 @@ def resolve_openai_capabilities(
             "enabling parallel_tool_calls requires upstream='generic'; "
             "named provider presets may only be narrowed"
         )
+    allow_chat_template_kwargs = _string_set(
+        overrides.get("allow_chat_template_kwargs"),
+        field="allow_chat_template_kwargs",
+    )
     return replace(
         base,
         sampling_fields=(base.sampling_fields | allow_sampling) - deny_sampling,
@@ -330,6 +348,9 @@ def resolve_openai_capabilities(
         forward_neutral_fields=base.forward_neutral_fields - deny_sampling,
         strict_tools=strict_tools,
         parallel_tool_calls=parallel_tool_calls,
+        chat_template_kwargs=(
+            base.chat_template_kwargs | allow_chat_template_kwargs
+        ),
         prompt_kinds=base.prompt_kinds | allow_prompt_kinds,
     )
 

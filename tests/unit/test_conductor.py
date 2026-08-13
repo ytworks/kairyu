@@ -26,8 +26,10 @@ class ScriptedBackend:
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
         self.prompts_seen: list[str] = []
+        self.requests_seen: list[GenerationRequest] = []
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests_seen.append(request)
         self.prompts_seen.append(request.prompt)
         text = self._responses.pop(0)
         return GenerationResult(
@@ -46,6 +48,9 @@ class ScriptedBackend:
 class VisionScriptedBackend(ScriptedBackend):
     def supports_prompt_kind(self, kind: str) -> bool:
         return kind in {"text", "multimodal"}
+
+    def supports_chat_template_kwargs(self, keys: frozenset[str]) -> bool:
+        return keys <= {"enable_thinking"}
 
 
 class GateBackend:
@@ -257,6 +262,7 @@ async def test_multimodal_media_reaches_only_capable_role_workers():
         roles=roles,
         workers={"text": text, "vision": vision},
         multimodal_prompt=media,
+        chat_template_kwargs={"enable_thinking": False},
     )
 
     result = await conductor.run("question <image:0>")
@@ -268,6 +274,10 @@ async def test_multimodal_media_reaches_only_capable_role_workers():
     assert vision_prompt.items == media.items
     assert vision_prompt.messages[0].content[0].text.startswith("inspect:")
     assert vision_prompt.messages[0].content[1].item_index == 0
+    assert vision.requests_seen[0].chat_template_kwargs == {
+        "enable_thinking": False
+    }
+    assert all(request.chat_template_kwargs is None for request in text.requests_seen)
     assert result.final_text == "final"
 
 

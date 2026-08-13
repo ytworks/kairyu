@@ -61,11 +61,12 @@ def test_parallel_tool_fields_preserve_existing_public_positional_abi():
     assert request.trace_requested is True
     assert request.parallel_tool_calls is None
 
-    assert list(inspect.signature(Conductor).parameters)[-4:] == [
+    assert list(inspect.signature(Conductor).parameters)[-5:] == [
         "final_parallel_tool_calls",
         "final_tool_call_protocol",
         "expose_intermediate_outputs",
         "multimodal_prompt",
+        "chat_template_kwargs",
     ]
     assert list(inspect.signature(run_moa).parameters)[-2:] == [
         "final_parallel_tool_calls",
