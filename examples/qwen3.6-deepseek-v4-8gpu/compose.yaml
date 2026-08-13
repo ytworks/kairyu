@@ -58,6 +58,8 @@ x-qwen: &qwen
     - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
     - --generation-config
     - vllm
+    - --default-chat-template-kwargs
+    - '{"enable_thinking":false}'
     - --reasoning-parser
     - qwen3
     - --enable-auto-tool-choice

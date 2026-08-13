@@ -105,6 +105,9 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         }
         assert _option(service["command"], "--limit-mm-per-prompt.image") == "1"
         assert _option(service["command"], "--limit-mm-per-prompt.video") == "0"
+        assert json.loads(
+            _option(service["command"], "--default-chat-template-kwargs")
+        ) == {"enable_thinking": False}
         assert _option(service["command"], "--max-num-seqs") == "32"
         assert service["volumes"][-1]["target"] == "/root/.cache"
         assert service["environment"] | {
