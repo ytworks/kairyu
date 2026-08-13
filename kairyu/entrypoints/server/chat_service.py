@@ -336,8 +336,21 @@ def _message_wire_shape(message: ChatMessage) -> dict[str, object]:
         for name in type(message).model_fields
         if name in fields_set
     }
-    wire.update(message.model_extra or {})
+    wire.update(
+        {
+            name: value
+            for name, value in (message.model_extra or {}).items()
+            if not _is_ignored_message_extra(name, value)
+        }
+    )
     return wire
+
+
+_IGNORED_NULL_MESSAGE_EXTRAS = frozenset({"provider_specific_fields"})
+
+
+def _is_ignored_message_extra(name: str, value: object) -> bool:
+    return name in _IGNORED_NULL_MESSAGE_EXTRAS and value is None
 
 
 def _prepare_message_content(
@@ -414,10 +427,15 @@ def _prepare_chat_messages(
                 raise ChatRequestError(
                     f"messages[{index}].role must be a non-empty string"
                 )
-            if message.model_extra:
+            unsupported_fields = {
+                name
+                for name, value in (message.model_extra or {}).items()
+                if not _is_ignored_message_extra(name, value)
+            }
+            if unsupported_fields:
                 raise ChatRequestError(
                     f"messages[{index}] has unsupported fields: "
-                    + ", ".join(sorted(message.model_extra))
+                    + ", ".join(sorted(unsupported_fields))
                 )
 
         wire = _message_wire_shape(message)

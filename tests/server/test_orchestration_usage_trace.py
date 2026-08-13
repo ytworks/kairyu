@@ -195,6 +195,39 @@ def test_visible_intermediates_use_reasoning_content_with_model_attribution(
     assert "final synthesized answer" not in reasoning
 
 
+def test_visible_reasoning_response_round_trips_through_litellm_history(tmp_path):
+    backend = AccountingBackend()
+    app = _app(tmp_path, backend, expose_intermediate_outputs=True)
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": COMPLEX}],
+            },
+        )
+        assistant = first.json()["choices"][0]["message"]
+        assistant["provider_specific_fields"] = None
+        second = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "messages": [
+                    {"role": "user", "content": COMPLEX},
+                    assistant,
+                    {"role": "user", "content": "Continue."},
+                ],
+            },
+        )
+
+    assert first.status_code == 200
+    assert assistant["reasoning_content"]
+    assert second.status_code == 200
+
+
 def test_non_auto_usage_shape_is_unchanged_and_auto_fields_are_discoverable(
     tmp_path,
 ):
