@@ -118,6 +118,38 @@ def test_orchestration_conversation_json_is_context_not_response_schema():
     assert "Kairyu L2 conversation (JSON)" not in validated.prompt
 
 
+def test_orchestration_preserves_image_input_separately_from_role_context():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "auto",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Read the chart."},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,AAAA",
+                                "detail": "high",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    validated = validate_orchestration_chat_input(request)
+
+    assert isinstance(validated.prompt, str)
+    assert "Read the chart.<image:0>" in validated.prompt
+    media = validated.orchestration_multimodal_prompt
+    assert media is not None
+    assert media.items[0].data == "data:image/png;base64,AAAA"
+    assert media.messages[0].content[1].detail == "high"
+
+
 def test_batch_worker_rejects_template_and_legacy_policy_overlap(tmp_path):
     with pytest.raises(ValueError, match="both chat_templates and legacy_chat_models"):
         BatchWorker(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from kairyu.engine.prompt import MultimodalPrompt
 from kairyu.sampling_params import (
     PARALLEL_TOOL_CALLS_EXTRA_ARG,
     SamplingParams,
@@ -32,6 +33,7 @@ class OrchestrationRequest:
     parallel_tool_calls: bool | None = None
     tool_call_protocol: str = "generic"
     reasoning_effort: str | None = None
+    multimodal_prompt: MultimodalPrompt | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -48,6 +50,11 @@ class OrchestrationRequest:
             )
         if self.reasoning_effort not in {None, "low", "high", "max"}:
             raise ValueError("reasoning_effort must be low, high, max, or null")
+        if self.multimodal_prompt is not None and not isinstance(
+            self.multimodal_prompt,
+            MultimodalPrompt,
+        ):
+            raise TypeError("multimodal_prompt must be a MultimodalPrompt or null")
 
     def internal_sampling_params(
         self,

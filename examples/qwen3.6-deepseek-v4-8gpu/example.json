@@ -101,6 +101,13 @@
         "db-wal-recovery"
       ],
       "pilot_models": ["kairyu-auto-max"]
+    },
+    "charxiv": {
+      "problems": 10,
+      "max_output_tokens": 4096,
+      "concurrency": 1,
+      "seed": 0,
+      "attempts": 1
     }
   }
 }

@@ -14,9 +14,13 @@ Open WebUI
 
 Qwen fits one 96 GB card, so four independent TP1 replicas provide more
 aggregate memory bandwidth and lower queueing TTFT than spreading one dense
-model over PCIe with TP4. DeepSeek is sharded TP4+EP4 for capacity and retains
-the measured eight-GPU example's FP8 KV, DSpark-5, SM120 fallbacks, prefix
-caching, chunked batching, and full/piecewise CUDA Graphs.
+model over PCIe with TP4. Each Qwen replica retains the checkpoint's vision
+encoder. Kairyu validates one inline PNG/JPEG/WebP image up to 8 MiB and
+2,097,152 pixels, passes it to every image-capable Qwen proposal role, and gives
+the text-only DeepSeek roles the same role-tagged conversation with explicit
+image placeholders. DeepSeek is sharded TP4+EP4 for capacity and retains the
+measured eight-GPU example's FP8 KV, DSpark-5, SM120 fallbacks, prefix caching,
+chunked batching, and full/piecewise CUDA Graphs.
 
 Kairyu exposes exactly one public product model, `kairyu-auto-max`. Its request
 enters L3 once, then L2 borrows the deployment-owned L1 pools through
@@ -79,13 +83,17 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ```sh
 ./bench.sh list
 ./bench.sh serving-auto-max
+./bench.sh charxiv
 ./bench.sh terminalbench-pilot
 ./bench.sh terminalbench
 ./bench.sh all
 ```
 
 `serving-auto-max` records the verifier-gated product DAG's serving matrix.
-`terminalbench-pilot` runs its four-task pilot, and `terminalbench` runs the
+`charxiv` runs exactly 10 deterministic CharXiv Reasoning image questions
+through that DAG and uses the loopback DeepSeek L1 endpoint as the text judge;
+`JUDGE_BASE_URL` and `JUDGE_MODEL` can override it. `terminalbench-pilot` runs
+its four-task pilot, and `terminalbench` runs the
 same product model over all 89 tasks with terminus-2 and the published 500-turn
 budget. Historical MoA results in `MEASUREMENTS.md` do not transfer to this DAG
 without a fresh run. ChatUI continues to call only Kairyu L3.

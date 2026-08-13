@@ -781,6 +781,22 @@ def backend_supports_slo_defer(
     return supported
 
 
+def backend_supports_prompt_kind(backend: object, kind: str) -> bool:
+    """Resolve an optional prompt-kind capability without probing a request.
+
+    Composite callers need this before deriving a request: in particular, an
+    orchestrator must decide which workers receive structured media and which
+    receive only the textual role context. Backends that do not publish the
+    capability retain the typed-prompt contract's fail-closed default.
+    """
+
+    supports = getattr(backend, "supports_prompt_kind", None)
+    supported = supports(kind) if callable(supports) else kind == "text"
+    if type(supported) is not bool:
+        raise TypeError("backend supports_prompt_kind must return a boolean")
+    return supported
+
+
 @dataclass(frozen=True)
 class EngineReadiness:
     """An engine's own answer to "could I serve a request right now?".

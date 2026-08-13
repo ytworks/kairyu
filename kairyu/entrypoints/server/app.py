@@ -2247,6 +2247,7 @@ def create_app(
                     response_format=request.response_format,
                     tool_call_protocol=validated_input.tool_call_protocol.value,
                     reasoning_effort=request.reasoning_effort,
+                    multimodal_prompt=validated_input.orchestration_multimodal_prompt,
                 )
                 selected = auto_models[request.model]
                 try:

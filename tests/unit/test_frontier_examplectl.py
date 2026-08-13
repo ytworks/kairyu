@@ -68,6 +68,7 @@ def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
         assert model_mount["source"] == "${MODEL_STORAGE_PATH}"
     assert compose["services"]["vllm"]["volumes"][1]["source"] == "${VLLM_CACHE_PATH}"
     assert webui["volumes"][0]["source"] == "${WEBUI_STORAGE_PATH}"
+    assert compose["services"]["kairyu"]["build"]["args"] == {"KAIRYU_VISION": "1"}
 
 
 def test_qwen_vllm_command_pins_the_sm120_latency_throughput_contract() -> None:
@@ -88,7 +89,13 @@ def test_qwen_vllm_command_pins_the_sm120_latency_throughput_contract() -> None:
     }
     for option, value in expected_pairs.items():
         assert command[command.index(option) + 1] == value
-    assert "--language-model-only" in command
+    assert "--language-model-only" not in command
+    assert json.loads(command[command.index("--mm-processor-kwargs") + 1]) == {
+        "min_pixels": 65_536,
+        "max_pixels": 2_097_152,
+    }
+    assert command[command.index("--limit-mm-per-prompt.image") + 1] == "1"
+    assert command[command.index("--limit-mm-per-prompt.video") + 1] == "0"
     assert "--enable-prefix-caching" in command
     assert "--enable-chunked-prefill" in command
     assert "--enable-flashinfer-autotune" in command
@@ -104,7 +111,7 @@ def test_qwen_vllm_command_pins_the_sm120_latency_throughput_contract() -> None:
     assert "VLLM_USE_FASTOKENS" not in service["environment"]
 
 
-def test_qwen_kairyu_l3_owns_chat_and_declares_vllm_l1() -> None:
+def test_qwen_kairyu_l3_declares_strict_multimodal_vllm_l1() -> None:
     raw = (QWEN_EXAMPLE / "kairyu.yaml").read_text()
     spec = load_deployment_spec(raw)
     assert set(spec.engines) == {"qwen3.6-27b"}
@@ -112,12 +119,22 @@ def test_qwen_kairyu_l3_owns_chat_and_declares_vllm_l1() -> None:
     assert entry.backend == "openai"
     validate_backend_options(entry.backend, entry.options)
     assert entry.options["upstream"] == "vllm"
-    assert entry.options["allow_templated_chat_passthrough"] is True
+    assert entry.options["capabilities"] == {"allow_prompt_kinds": ["multimodal"]}
+    assert entry.options["image_input_policy"] == {
+        "max_images": 1,
+        "max_image_bytes": 8_388_608,
+        "max_total_image_bytes": 8_388_608,
+        "max_image_pixels": 2_097_152,
+        "max_total_image_pixels": 2_097_152,
+        "max_image_dimension": 4096,
+        "max_image_aspect_ratio": 200,
+        "max_processed_prompt_tokens": 262_144,
+    }
     assert entry.options["tensor_parallel_size"] == 1
     assert entry.options["mtp_enabled"] is False
-    assert spec.chat_templates == {
-        "qwen3.6-27b": "/etc/kairyu/qwen3.6-chat-template.jinja"
-    }
+    assert spec.server.max_chat_body_bytes == 16_777_216
+    assert spec.chat_templates == {}
+    assert spec.legacy_chat_models == frozenset({"qwen3.6-27b"})
 
 
 def test_qwen_template_defaults_chat_to_direct_and_benchmark_to_thinking() -> None:
@@ -373,6 +390,27 @@ def test_qwen_livecodebench_validation_requires_all_twenty_rows(
     assert benchmark._validate_livecodebench(tmp_path) == 1
 
 
+def test_qwen_charxiv_command_pins_ten_vision_items(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_charxiv_benchmark")
+    observed: list[str] = []
+
+    def fake_run(command, *, log=None, check=True):
+        observed.extend(command)
+        return 0
+
+    monkeypatch.setattr(benchmark, "_run", fake_run)
+    monkeypatch.setattr(benchmark, "_validate_charxiv", lambda _path, **_kwargs: 0)
+
+    assert benchmark.charxiv(tmp_path) == 0
+    assert observed[observed.index("--only") + 1] == "charxiv-reasoning"
+    assert observed[observed.index("--limit") + 1] == "10"
+    assert observed[observed.index("--concurrency") + 1] == "1"
+    assert "--no-vision" not in observed
+    assert observed[observed.index("--judge-model") + 1] == "qwen3.6-27b"
+
+
 def test_qwen_serving_prompts_do_not_share_the_first_prefix(tmp_path: Path) -> None:
     benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_example_serving")
     dataset = tmp_path / "serving.json"
@@ -410,7 +448,7 @@ def test_qwen_serving_validation_rejects_partial_streams(tmp_path: Path) -> None
     assert benchmark._validate_serving_row(row_dir, requests=2, output_tokens=4) == 1
 
 
-def test_qwen_all_dispatches_both_benchmarks(
+def test_qwen_all_dispatches_every_benchmark(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_example_all")
@@ -423,6 +461,7 @@ def test_qwen_all_dispatches_both_benchmarks(
         "livecodebench",
         lambda _path: observed.append("livecodebench") or 0,
     )
+    monkeypatch.setattr(benchmark, "charxiv", lambda _path: observed.append("charxiv") or 0)
     monkeypatch.setattr(
         "sys.argv",
         ["benchmark.py", "all", "--no-start", "--run-id", "all-start"],
@@ -430,6 +469,10 @@ def test_qwen_all_dispatches_both_benchmarks(
     with pytest.raises(SystemExit) as exit_info:
         benchmark.main()
     assert exit_info.value.code == 0
-    assert observed == ["serving", "livecodebench"]
+    assert observed == ["serving", "livecodebench", "charxiv"]
     manifest = json.loads((tmp_path / "all-start" / "run.json").read_text())
-    assert manifest["exit_codes"] == {"serving": 0, "livecodebench": 0}
+    assert manifest["exit_codes"] == {
+        "serving": 0,
+        "livecodebench": 0,
+        "charxiv": 0,
+    }

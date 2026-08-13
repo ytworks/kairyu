@@ -12,7 +12,7 @@ from kairyu.engine.backend import (
     GenerationUsage,
 )
 from kairyu.engine.mock import MockBackend
-from kairyu.engine.prompt import TemplatedPrompt
+from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt, TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import Conductor, RoleSpec
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
@@ -41,6 +41,11 @@ class ScriptedBackend:
 
     async def shutdown(self) -> None:
         return None
+
+
+class VisionScriptedBackend(ScriptedBackend):
+    def supports_prompt_kind(self, kind: str) -> bool:
+        return kind in {"text", "multimodal"}
 
 
 class GateBackend:
@@ -223,6 +228,47 @@ async def test_linear_dag_passes_upstream_output_downstream():
     assert "build a cli" in backend.prompts_seen[0]
     assert planner_output[-20:] in backend.prompts_seen[1]
     assert result.final_text == result.outputs["worker"]
+
+
+async def test_multimodal_media_reaches_only_capable_role_workers():
+    text = ScriptedBackend(["plan", "final"])
+    vision = VisionScriptedBackend(["chart evidence"])
+    roles = (
+        RoleSpec(name="planner", worker="text", prompt="plan: {query}"),
+        RoleSpec(
+            name="vision",
+            worker="vision",
+            prompt="inspect: {query}; plan: {planner}",
+            depends_on=("planner",),
+        ),
+        RoleSpec(
+            name="publisher",
+            worker="text",
+            prompt="publish: {vision}",
+            role_type="synthesizer",
+            depends_on=("vision",),
+        ),
+    )
+    media = MultimodalPrompt(
+        "display",
+        (MultimodalItem("image", "uri", "data:image/png;base64,AAAA"),),
+    )
+    conductor = Conductor(
+        roles=roles,
+        workers={"text": text, "vision": vision},
+        multimodal_prompt=media,
+    )
+
+    result = await conductor.run("question <image:0>")
+
+    assert all(isinstance(prompt, str) for prompt in text.prompts_seen)
+    assert len(vision.prompts_seen) == 1
+    vision_prompt = vision.prompts_seen[0]
+    assert isinstance(vision_prompt, MultimodalPrompt)
+    assert vision_prompt.items == media.items
+    assert vision_prompt.messages[0].content[0].text.startswith("inspect:")
+    assert vision_prompt.messages[0].content[1].item_index == 0
+    assert result.final_text == "final"
 
 
 async def test_conductor_sums_cached_tokens_across_units():

@@ -14,6 +14,8 @@ from kairyu.engine.backend import (
     GenerationRequest,
     GenerationResult,
     GenerationUsage,
+    backend_admission_upper_bound,
+    backend_supports_prompt_kind,
     prepare_backend_request,
     shutdown_all,
     validate_backend_request_before_prepare,
@@ -21,7 +23,7 @@ from kairyu.engine.backend import (
 from kairyu.engine.backend import (
     admission_upper_bound as generation_admission_upper_bound,
 )
-from kairyu.engine.prompt import TemplatedPrompt
+from kairyu.engine.prompt import TemplatedPrompt, derive_multimodal_prompt
 from kairyu.models.generation import GenerationDefaults
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.conductor import (
@@ -454,6 +456,33 @@ class Orchestrator:
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> None:
+        if call.multimodal_prompt is not None:
+            if self._moa_samples > 0 and (
+                decision is None or decision.target == "multi_agent"
+            ):
+                raise ValueError("multimodal orchestration does not support MoA sampling")
+            if decision is not None and decision.target != "multi_agent":
+                keys = self._final_engine_keys(decision)
+                if not all(
+                    backend_supports_prompt_kind(self._engines[key], "multimodal")
+                    for key in keys
+                ):
+                    raise ValueError(
+                        f"orchestration route {decision.target!r} does not support image inputs"
+                    )
+            else:
+                fallback = next(iter(self._engines))
+                role_keys = {
+                    role.worker if role.worker in self._engines else fallback
+                    for role in self._roles
+                }
+                if not any(
+                    backend_supports_prompt_kind(self._engines[key], "multimodal")
+                    for key in role_keys
+                ):
+                    raise ValueError(
+                        "multimodal orchestration requires at least one image-capable worker"
+                    )
         if call.sampling_params.n <= 1:
             return
         final_role = self._conductor_final_role()
@@ -491,7 +520,11 @@ class Orchestrator:
                     key,
                     GenerationRequest(
                         request_id=f"preflight-{key}",
-                        prompt=f"{self._shared_prefix}{call.prompt}",
+                        prompt=self._engine_prompt(
+                            key,
+                            call,
+                            f"{self._shared_prefix}{call.prompt}",
+                        ),
                         sampling_params=call.sampling_params,
                         tools=call.tools,
                         tool_choice=call.tool_choice,
@@ -508,12 +541,17 @@ class Orchestrator:
         self,
         call: OrchestrationRequest,
         request_id: str,
+        engine_key: str,
     ) -> GenerationRequest:
         """Build a direct request without copying its prompt on the loop."""
 
         return GenerationRequest(
             request_id=request_id,
-            prompt=f"{self._shared_prefix}{call.prompt}",
+            prompt=self._engine_prompt(
+                engine_key,
+                call,
+                f"{self._shared_prefix}{call.prompt}",
+            ),
             sampling_params=call.sampling_params,
             # No random session: route by shared-prefix overlap and load.
             cache_hint=None,
@@ -524,6 +562,19 @@ class Orchestrator:
             tool_call_protocol=call.tool_call_protocol,
             reasoning_effort=call.reasoning_effort,
         )
+
+    def _engine_prompt(
+        self,
+        engine_key: str,
+        call: OrchestrationRequest,
+        text: str,
+    ):
+        if call.multimodal_prompt is None or not backend_supports_prompt_kind(
+            self._engines[engine_key],
+            "multimodal",
+        ):
+            return text
+        return derive_multimodal_prompt(call.multimodal_prompt, text)
 
     def _internal_intent_requests(
         self,
@@ -549,7 +600,11 @@ class Orchestrator:
                     key,
                     GenerationRequest(
                         request_id=f"preflight-internal-{key}",
-                        prompt=f"{self._shared_prefix}{call.prompt}",
+                        prompt=self._engine_prompt(
+                            key,
+                            call,
+                            f"{self._shared_prefix}{call.prompt}",
+                        ),
                         sampling_params=sampling_params,
                         reasoning_effort=call.reasoning_effort,
                     ),
@@ -985,6 +1040,23 @@ class Orchestrator:
                 reasoning_effort=call.reasoning_effort,
             )
         )
+        media_stage_bounds = [
+            backend_admission_upper_bound(
+                self._engines[intent.engine_key],
+                intent.request,
+            ).tokens
+            for intent in self._internal_intent_requests(call, None)
+            if call.multimodal_prompt is not None
+            and backend_supports_prompt_kind(
+                self._engines[intent.engine_key],
+                "multimodal",
+            )
+        ]
+        if media_stage_bounds:
+            private_work = max(
+                private_work,
+                private_steps * max(media_stage_bounds),
+            )
         # The last stage can ingest every preceding private output. Candidate
         # fan-out duplicates that prefill just as it duplicates the supplied
         # prompt, tools, response schema, and decode ceiling.
@@ -1030,6 +1102,7 @@ class Orchestrator:
             worker_trace=self._conductor_worker_trace(),
             usage_observer=usage_observer,
             expose_intermediate_outputs=self._expose_intermediate_outputs,
+            multimodal_prompt=call.multimodal_prompt,
         )
 
     def _conductor_worker_trace(self) -> dict[str, WorkerTraceIdentity]:
@@ -1088,6 +1161,7 @@ class Orchestrator:
                 self._direct_generation_request,
                 call,
                 f"direct-{uuid.uuid4().hex[:12]}",
+                engine_name,
             )
         started_at = utc_now_iso()
         try:
@@ -1489,7 +1563,17 @@ class Orchestrator:
             )
         except _DirectExecutionError as error:
             trace_events.append(error.event)
-            if decision.target == "tier1" and "tier2" in self._engines:
+            if (
+                decision.target == "tier1"
+                and "tier2" in self._engines
+                and (
+                    call.multimodal_prompt is None
+                    or backend_supports_prompt_kind(
+                        self._engines["tier2"],
+                        "multimodal",
+                    )
+                )
+            ):
                 notes.append("failover: tier1 failed; retrying once on tier2")
                 try:
                     direct_result, usage, direct_event = await self._run_direct(
@@ -1649,6 +1733,7 @@ class Orchestrator:
                     self._direct_generation_request,
                     call,
                     f"direct-{uuid.uuid4().hex[:12]}",
+                    engine_name,
                 )
             last = None
             latest_usage = None
@@ -1714,6 +1799,13 @@ class Orchestrator:
                     decision.target == "tier1"
                     and "tier2" in self._engines
                     and not "".join(text_parts)
+                    and (
+                        call.multimodal_prompt is None
+                        or backend_supports_prompt_kind(
+                            self._engines["tier2"],
+                            "multimodal",
+                        )
+                    )
                 ):
                     notes.append("failover: tier1 failed before output; retrying once on tier2")
                     failover_queued_at = utc_now_iso()
@@ -1723,6 +1815,7 @@ class Orchestrator:
                         self._direct_generation_request,
                         call,
                         f"direct-{uuid.uuid4().hex[:12]}",
+                        "tier2",
                     )
                     failover_last = None
                     failover_usage = None

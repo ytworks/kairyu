@@ -712,6 +712,11 @@ class OpenAICompatBackend:
 
         return self._capabilities
 
+    def supports_prompt_kind(self, kind: str) -> bool:
+        """Publish the resolved prompt contract to composite backends."""
+
+        return kind in self._capabilities.prompt_kinds
+
     @property
     def request_validation_key(self) -> tuple[
         OpenAIRequestCapabilities,

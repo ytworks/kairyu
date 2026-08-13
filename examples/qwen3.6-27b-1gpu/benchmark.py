@@ -263,6 +263,68 @@ def livecodebench(run_dir: Path) -> int:
     return _validate_livecodebench(run_dir)
 
 
+def charxiv(run_dir: Path) -> int:
+    config = SPEC["benchmarks"]["charxiv"]
+    base_url = f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1"
+    model = SPEC["model"]["served_name"]
+    command = [
+        str(ROOT / ".venv/bin/python"),
+        "-m",
+        "kairyu.entrypoints.cli",
+        "bench",
+        "run",
+        "--base-url",
+        base_url,
+        "--model",
+        model,
+        "--served-config-label",
+        _served_config_label(),
+        "--served-config-sha256",
+        _served_config_sha256(),
+        "--max-context-tokens",
+        str(SPEC["model"]["max_context_tokens"]),
+        "--max-output-tokens",
+        str(config["max_output_tokens"]),
+        "--request-timeout-s",
+        "86400",
+        "--reasoning-effort",
+        config["reasoning_effort"],
+        "--temperature",
+        str(config["temperature"]),
+        "--top-p",
+        str(config["top_p"]),
+        "--sampling-seed",
+        str(config["seed"]),
+        "--judge-base-url",
+        os.environ.get("JUDGE_BASE_URL", base_url),
+        "--judge-model",
+        os.environ.get("JUDGE_MODEL", model),
+        "--judge-reasoning-effort",
+        config["reasoning_effort"],
+        "--suite",
+        "accuracy",
+        "--only",
+        "charxiv-reasoning",
+        "--limit",
+        str(config["problems"]),
+        "--seed",
+        str(config["seed"]),
+        "--attempts",
+        str(config["attempts"]),
+        "--concurrency",
+        str(config["concurrency"]),
+        "--results-dir",
+        str(run_dir),
+        "--run-id",
+        "charxiv-10",
+        "--no-progress",
+    ]
+    code = _run(command, log=run_dir / "charxiv.log", check=False)
+    if code:
+        return code
+    return _validate_charxiv(run_dir, model=model)
+
+
 def _served_config_label() -> str:
     prefix = "rtx-pro-6000-blackwell-1x-vllm-fp8"
     mtp_tokens = int(SPEC["vllm"]["mtp_speculative_tokens"])
@@ -304,6 +366,39 @@ def _validate_livecodebench(run_dir: Path) -> int:
     return 0
 
 
+def _validate_charxiv(run_dir: Path, *, model: str) -> int:
+    scoreboard_path = run_dir / "charxiv-10" / "scoreboard.json"
+    try:
+        scoreboard = json.loads(scoreboard_path.read_text(encoding="utf-8"))
+        cell = scoreboard["cells"]["charxiv-reasoning"][model]
+        performance = cell["performance"]
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        print(f"invalid CharXiv scoreboard: {error}", file=sys.stderr)
+        return 1
+
+    expected = int(SPEC["benchmarks"]["charxiv"]["problems"])
+    complete = (
+        cell.get("status") == "completed"
+        and cell.get("n") == expected
+        and cell.get("n_scored") == expected
+        and performance.get("requests") == expected
+        and performance.get("errors") == 0
+        and performance.get("unmeasured_requests") == 0
+    )
+    if not complete:
+        print(
+            "CharXiv did not produce complete 10-item evidence: "
+            f"status={cell.get('status')!r}, n={cell.get('n')!r}, "
+            f"n_scored={cell.get('n_scored')!r}, "
+            f"requests={performance.get('requests')!r}, "
+            f"errors={performance.get('errors')!r}, "
+            f"unmeasured={performance.get('unmeasured_requests')!r}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
 def _served_config_sha256() -> str:
     digest = hashlib.sha256()
     for name in ("compose.yaml", "kairyu.yaml"):
@@ -317,14 +412,18 @@ def _served_config_sha256() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("benchmark", choices=("serving", "livecodebench", "all", "list"))
+    parser.add_argument(
+        "benchmark",
+        choices=("serving", "livecodebench", "charxiv", "all", "list"),
+    )
     parser.add_argument("--run-id")
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
     if args.benchmark == "list":
         print("serving       fixed 8K-input/256-output TTFT and throughput at c=1,8,16,32")
         print("livecodebench deterministic 20-item release_v6 pass@1 run")
-        print("all           serving followed by LiveCodeBench-20")
+        print("charxiv       deterministic 10-item vision and judge run")
+        print("all           serving, LiveCodeBench-20, then CharXiv-10")
         return
 
     _ensure_environment(args.no_start)
@@ -341,11 +440,15 @@ def main() -> None:
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    selected = ("serving", "livecodebench") if args.benchmark == "all" else (args.benchmark,)
+    selected = (
+        ("serving", "livecodebench", "charxiv")
+        if args.benchmark == "all"
+        else (args.benchmark,)
+    )
     results: dict[str, int] = {}
     for name in selected:
         try:
-            results[name] = serving(run_dir) if name == "serving" else livecodebench(run_dir)
+            results[name] = globals()[name](run_dir)
         except Exception as error:
             print(f"{name} failed: {error}", file=sys.stderr)
             results[name] = 1
