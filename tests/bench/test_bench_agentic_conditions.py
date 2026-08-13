@@ -193,8 +193,8 @@ def test_terminal_bench_prompt_discloses_one_line_file_transport():
     assert "below 1200 characters" in prompt
     assert "Do not use shell heredocs" in prompt
     assert "Do not calculate or emit base64" in prompt
-    assert "printf '%s\\n'" in prompt
-    assert "with `>>`" in prompt
+    assert "echo 'line 1'" in prompt
+    assert ">> /path/file" in prompt
     assert prompt.count("{instruction}") == 1
     assert prompt.count("{terminal_state}") == 1
 
@@ -207,7 +207,8 @@ def test_terminal_bench_prompt_discloses_one_line_file_transport():
         "C-c",
         "C-d",
         "python3 -c 'print(1 << 2)'",
-        "printf '%s\\n' 'one' 'two' >> /app/out.py",
+        "printf '%s' value",
+        "echo 'one' >> /app/out.py",
     ],
 )
 def test_terminal_bench_transport_accepts_atomic_commands(keystrokes):
@@ -220,6 +221,7 @@ def test_terminal_bench_transport_accepts_atomic_commands(keystrokes):
         ("x" * 1201, "transport maximum is 1200"),
         ("printf 'one\ntwo'", "embedded newlines"),
         ("cat << 'EOF'", "heredocs are unsupported"),
+        ("printf '%s' 'one' >> /app/out.py", "omits line endings"),
         ("printf 'unterminated", "unbalanced shell quoting"),
     ],
 )

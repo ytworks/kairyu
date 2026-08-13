@@ -16,9 +16,9 @@ Kairyu command transport constraints:
 - Do not use shell heredocs or commands that require embedded newlines; this
   JSON command transport can flatten those newlines before execution.
 - Do not calculate or emit base64 data. To write a multiline file, use one
-  single-line `printf '%s\\n' 'line 1' 'line 2' > /path/file` command for the
-  first few lines, then similarly append a few lines per later turn with `>>`.
-  Shell-quote every line and keep the whole command below 1200 characters.
+  single-line `echo 'line 1' > /path/file` command for the first line, then
+  append a few shell-quoted lines per later turn with commands such as
+  `echo 'line 2' >> /path/file`. Keep the whole command below 1200 characters.
 """
 
 
@@ -53,7 +53,14 @@ def command_transport_error(keystrokes: str) -> str | None:
     except ValueError:
         return "keystrokes has unbalanced shell quoting"
     if "<<" in tokens:
-        return "shell heredocs are unsupported; append a few quoted lines with printf"
+        return "shell heredocs are unsupported; append a few quoted lines with echo"
+    if any(
+        tokens[index] == "printf"
+        and index + 1 < len(tokens)
+        and tokens[index + 1] == "%s"
+        for index in range(len(tokens))
+    ) and any(token in {">", ">>"} for token in tokens):
+        return "printf %s omits line endings; append shell-quoted lines with echo"
     return None
 
 
