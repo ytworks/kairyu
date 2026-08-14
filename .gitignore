@@ -221,6 +221,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Local isolated implementation worktrees
+.worktrees/
+
 # Benchmark artifacts (kairyu bench): routine per-run results are noise and data
 # is downloaded to the cache dir — neither belongs in the repo.
 #
