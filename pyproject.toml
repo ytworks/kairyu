@@ -148,6 +148,7 @@ markers = [
 # the spawned engine service (m8 D6) flushes coverage on clean exit
 concurrency = ["thread", "multiprocessing"]
 sigterm = true
+source = ["kairyu"]
 omit = ["*/*_gpu.py", "kairyu/kernels/*", "kairyu/bench/_vendor/*"]
 
 [tool.coverage.report]

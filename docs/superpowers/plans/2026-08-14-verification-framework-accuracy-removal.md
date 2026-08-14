@@ -24,6 +24,9 @@ bench/results/   immutable legacy artifacts and legacy index
 - Keep Core, Quantization, Structured Output, Long Context, and their tests.
 - Keep all L1 correctness and performance coverage, but move it under
   `verification/` with stable gate IDs.
+- Verification gates are themselves checkout-only test harnesses. Enforce their
+  static invariants in their validation paths and registry checks; do not add a
+  second pytest layer that tests fixed gate geometry, schemas, or CLI structure.
 - Preserve every tracked file under `bench/results/` byte-for-byte.
 - Do not ship `evals/`, `verification/`, or `evidence/` in the wheel.
 - Do not leave compatibility imports or an installed `kairyu bench` command.
@@ -44,8 +47,9 @@ bench/results/   immutable legacy artifacts and legacy index
    tiered coding workload) so verification does not import `evals/`.
 8. Remove `kairyu bench`, update packaging, CLI, CI, scripts, examples, ignore
    rules, and documentation for the new command surfaces.
-9. Move tests by ownership, add dependency-boundary/registry/evidence tests,
-   and verify legacy artifact hashes did not change.
+9. Retain only product and evaluation behavior tests under their owning test
+   directories. Run dependency-boundary, registry, and evidence inventory checks
+   directly, and verify legacy artifact hashes did not change.
 10. Run focused tests after each move, then the full CPU suite, Ruff, wheel
     contents check, registry inventory check, and documentation link checks.
 
@@ -56,5 +60,5 @@ bench/results/   immutable legacy artifacts and legacy index
 - `evals` exposes only Core, Quantization, Structured Output, Long Context.
 - Verification inventory contains the former correctness/performance gates,
   and formal performance results fail closed without a correctness digest.
-- Import-boundary and wheel-content tests pass.
+- Import-boundary, registry, evidence inventory, and wheel-content checks pass.
 - `bench/results/` has the same tracked path-to-SHA-256 map as before the move.

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Shared helpers for the gpu_gates scripts (m19 D3). Every script supports
-# --dry-run: print the exact commands (referencing REAL files/tests — pinned
-# by tests/verification/test_gpu_gates_scripts.py) without executing anything.
+# --dry-run: print the exact commands without executing anything.
 set -euo pipefail
 KAIRYU_BENCH_MODEL=${KAIRYU_BENCH_MODEL:-default}
 DRY_RUN=0

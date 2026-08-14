@@ -10,6 +10,7 @@ import re
 from dataclasses import replace
 
 _COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_CONTENT_SHA = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 # adapter name -> (expected dataset id, commit sha)
 # The dataset id is part of the record so a pin can never silently attach to a
@@ -45,6 +46,27 @@ SECONDARY_PINS: dict[str, tuple[tuple[str, str], ...]] = {
 
 def is_commit_sha(revision: str | None) -> bool:
     return bool(revision and _COMMIT_SHA.match(revision))
+
+
+def is_pinned_revision(dataset: str, revision: str | None) -> bool:
+    if dataset.startswith("package:"):
+        return bool(revision and _CONTENT_SHA.fullmatch(revision))
+    return is_commit_sha(revision)
+
+
+def _assert_pin_tables() -> None:
+    for name, (dataset, revision) in DATASET_PINS.items():
+        assert name
+        assert "/" in dataset
+        assert is_commit_sha(revision)
+    for name, sources in SECONDARY_PINS.items():
+        assert name and sources
+        for source, revision in sources:
+            assert source
+            assert is_commit_sha(revision)
+
+
+_assert_pin_tables()
 
 
 def pinned_revision(adapter_name: str, dataset: str | None) -> str | None:

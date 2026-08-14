@@ -93,6 +93,7 @@ _REQUIRED_KWARGS = {
     "startend:end_checker": {"end_phrase"},
     "startend:quotation": set(),
 }
+assert set(_REQUIRED_KWARGS) == _EXPECTED_INSTRUCTION_IDS
 
 _CHECKER_REVISION = "066e1eda43f4785922e3994e95429e496080231f"
 _PUNKT_REVISION = "550b6625bcef1f2abff2ff770a5a0d272c9c6b2a"

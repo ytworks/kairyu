@@ -180,7 +180,6 @@ evidence envelope, and gate invocation contract.
 
 ~~~bash
 uv run --frozen pytest tests/evals
-uv run --frozen pytest tests/verification
 uv run --frozen python scripts/verify_verification_registry.py
 uv run --frozen python scripts/verify_bench_results_index.py
 uv run --frozen python scripts/verify_bench_wheel.py

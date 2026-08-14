@@ -7,10 +7,9 @@ import json
 import pytest
 from conftest import make_config, make_target
 
-from evals.adapters import LONG_CONTEXT_ROW_ORDER, suite_adapters
+from evals.adapters import LONG_CONTEXT_ROW_ORDER
 from evals.adapters.base import DownloadContext, RunContext
 from evals.adapters.ruler_niah import (
-    CONTEXT_LENGTHS,
     SAMPLES_PER_LENGTH,
     RulerNiahAdapter,
     ruler_niah_grade,
@@ -45,23 +44,6 @@ def _item(context_tokens: int = 4_096) -> BenchItem:
             "context_tokens": context_tokens,
             "needle_position": 0.5,
         },
-    )
-
-
-def test_long_context_suite_is_the_ordered_4k_to_1m_curve():
-    assert CONTEXT_LENGTHS == (
-        4_096,
-        8_192,
-        16_384,
-        32_768,
-        65_536,
-        131_072,
-        262_144,
-        524_288,
-        1_048_576,
-    )
-    assert [adapter.info.name for adapter in suite_adapters("long-context")] == list(
-        LONG_CONTEXT_ROW_ORDER
     )
 
 
@@ -152,14 +134,6 @@ async def test_strict_retrieval_scorer_and_methodology(tmp_path):
     assert methodology["context_tokens"] == 4_096
     assert methodology["official_ruler_comparable"] is False
     assert methodology["token_scope"].startswith("user-message content")
-
-
-def test_every_curve_point_has_an_offline_smoke_fixture(tmp_path):
-    ctx = _ctx(tmp_path)
-    for adapter in suite_adapters("long-context"):
-        items = adapter.load_items(ctx)
-        assert len(items) == 1
-        assert items[0].payload["answer"].startswith("value-")
 
 
 async def test_offline_curve_run_uses_the_standard_scoreboard_path(

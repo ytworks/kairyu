@@ -13,7 +13,6 @@ import pytest
 from conftest import make_config, make_target
 
 from evals._vendor.ifeval import IFEvalInput, evaluate_response
-from evals._vendor.ifeval.instructions_registry import INSTRUCTION_DICT
 from evals.adapters import all_adapters
 from evals.adapters import ifeval as ifeval_module
 from evals.adapters.base import (
@@ -274,15 +273,6 @@ def _ifeval_rows() -> list[dict]:
             }
         )
     return rows
-
-
-def test_ifeval_checker_registry_matches_all_declared_instruction_ids() -> None:
-    assert len(INSTRUCTION_DICT) == 25
-    assert (
-        set(INSTRUCTION_DICT)
-        == set(ifeval_module._EXPECTED_INSTRUCTION_IDS)
-        == set(ifeval_module._REQUIRED_KWARGS)
-    )
 
 
 def test_ifeval_request_byte_preserves_prompt_as_sole_user_message(tmp_path) -> None:

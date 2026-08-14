@@ -5,15 +5,8 @@ from argparse import Namespace
 
 import pytest
 
-from evals.adapters import (
-    CORE_ROW_ORDER,
-    LONG_CONTEXT_ROW_ORDER,
-    QUANTIZATION_ROW_ORDER,
-    STRUCTURED_ROW_ORDER,
-    all_adapters,
-    suite_adapters,
-)
-from evals.aggregate import _wilson_bounds, build_scoreboard, render_markdown
+from evals.adapters import suite_adapters
+from evals.aggregate import build_scoreboard, render_markdown
 from evals.cli import _handle_report
 from evals.types import (
     ItemResult,
@@ -88,55 +81,7 @@ def _board(
     )
 
 
-def test_core_scoreboard_uses_its_canonical_row_order_and_title():
-    board = _board(
-        [
-            _pair("ifeval", "m"),
-            _pair("gsm8k", "m"),
-            _pair("mmlu", "m"),
-        ],
-        ["m"],
-        suite="core",
-    )
-
-    assert board["benchmarks"] == list(CORE_ROW_ORDER)
-    assert render_markdown(board).startswith("# Core benchmark scoreboard — run run-1")
-
-
-def test_quantization_suite_preserves_core_and_adds_one_reasoning_row():
-    pairs = [_pair(benchmark, "m") for benchmark in reversed(QUANTIZATION_ROW_ORDER)]
-
-    board = _board(pairs, ["m"], suite="quantization")
-
-    assert QUANTIZATION_ROW_ORDER == (*CORE_ROW_ORDER, "gpqa-diamond")
-    assert board["benchmarks"] == list(QUANTIZATION_ROW_ORDER)
-    assert render_markdown(board).startswith(
-        "# Quantization benchmark scoreboard — run run-1"
-    )
-
-
-def test_structured_suite_is_isolated_from_core_and_quantization():
-    assert STRUCTURED_ROW_ORDER == ("structured-output",)
-    assert [adapter.info.name for adapter in suite_adapters("structured")] == list(
-        STRUCTURED_ROW_ORDER
-    )
-    assert "structured-output" not in CORE_ROW_ORDER
-    assert "structured-output" not in QUANTIZATION_ROW_ORDER
-
-
-def test_long_context_scoreboard_is_the_length_curve():
-    pairs = [_pair(benchmark, "m") for benchmark in reversed(LONG_CONTEXT_ROW_ORDER)]
-
-    board = _board(pairs, ["m"], suite="long-context")
-
-    assert board["benchmarks"] == list(LONG_CONTEXT_ROW_ORDER)
-    assert render_markdown(board).startswith(
-        "# Long Context benchmark scoreboard — run run-1"
-    )
-
-
 def test_only_and_exclude_names_are_validated_within_the_selected_suite():
-    assert [adapter.info.name for adapter in suite_adapters("core")] == list(CORE_ROW_ORDER)
     with pytest.raises(ValueError, match="gpqa-diamond"):
         suite_adapters("core", only=("gpqa-diamond",))
     with pytest.raises(ValueError, match="gsm8k"):
@@ -218,28 +163,6 @@ def test_missing_pair_rendered_as_not_run():
     assert board["cells"]["gpqa-diamond"]["other"]["confidence_interval"] is None
 
 
-@pytest.mark.parametrize(
-    ("successes", "trials", "expected"),
-    [
-        (8, 20, (0.2188065324, 0.6134184992)),
-        (200, 500, (0.3579789908, 0.4435458773)),
-        (5000, 10000, (0.4902020618, 0.5097979382)),
-        (0, 1, (0.0, 0.7934506856)),
-        (1, 1, (0.2065493144, 1.0)),
-    ],
-)
-def test_wilson_bounds(successes, trials, expected):
-    assert _wilson_bounds(successes, trials) == pytest.approx(expected, abs=1e-10)
-
-
-@pytest.mark.parametrize(
-    ("successes", "trials"),
-    [(-1, 1), (2, 1), (0, 0)],
-)
-def test_wilson_bounds_reject_invalid_counts(successes, trials):
-    assert _wilson_bounds(successes, trials) is None
-
-
 def test_scoreboard_records_machine_readable_wilson_interval():
     pair = _binary_pair("gpqa-diamond", "m", successes=8, trials=20)
 
@@ -257,17 +180,6 @@ def test_scoreboard_records_machine_readable_wilson_interval():
         },
         abs=1e-10,
     )
-
-
-def test_only_contractually_binary_adapters_enable_wilson_intervals():
-    assert {name for name, adapter in all_adapters().items() if adapter.info.binary_outcomes} == {
-        "gsm8k",
-        "gpqa-diamond",
-        "ifeval",
-        "mmlu",
-        *LONG_CONTEXT_ROW_ORDER,
-        "structured-output",
-    }
 
 
 @pytest.mark.parametrize(

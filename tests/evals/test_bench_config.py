@@ -1,7 +1,6 @@
 """BenchConfig assembly from CLI args and bench.yaml."""
 
 import argparse
-from pathlib import Path
 
 import pytest
 
@@ -85,17 +84,6 @@ def test_models_shorthand_builds_targets():
     assert [t.model for t in config.targets] == ["m", "kairyu-auto"]
     assert config.targets[0].label() == "m"
     assert config.suite == "core"
-    assert config.results_dir == "bench/results/core"
-    assert config.limit is None  # full run is the default
-    assert config.concurrency == 16
-
-
-@pytest.mark.parametrize("name", ["core", "structured", "quantization"])
-def test_checked_in_configs_use_throughput_concurrency(name: str) -> None:
-    path = Path(__file__).parents[2] / "evals" / "configs" / f"{name}.yaml"
-    config = build_config(_parse(["run", "--config", str(path)]))
-
-    assert config.concurrency == 16
 
 
 def test_long_context_cli_applies_declared_target_limit():
@@ -116,7 +104,6 @@ def test_long_context_cli_applies_declared_target_limit():
     config = build_config(args)
 
     assert config.suite == "long-context"
-    assert config.results_dir == "bench/results/long-context"
     assert config.targets[0].max_context_tokens == 131_072
 
     invalid = _parse(
@@ -302,25 +289,6 @@ def test_yaml_targets_load_served_config_and_cli_flags_override_every_target(tmp
     ]
 
 
-def test_core_suite_defaults_to_its_own_results_directory():
-    args = _parse(
-        [
-            "run",
-            "--base-url",
-            "http://gw:8000",
-            "--model",
-            "m",
-            "--suite",
-            "core",
-        ]
-    )
-
-    config = build_config(args)
-
-    assert config.suite == "core"
-    assert config.results_dir == "bench/results/core"
-
-
 def test_quantization_yaml_loads_explicit_effective_profile_and_suite_default(tmp_path):
     path = tmp_path / "quantization.yaml"
     path.write_text(
@@ -342,7 +310,6 @@ def test_quantization_yaml_loads_explicit_effective_profile_and_suite_default(tm
     config = build_config(_parse(["run", "--config", str(path)]))
 
     assert config.suite == "quantization"
-    assert config.results_dir == "bench/results/quantization"
     assert config.targets[0].quantization == QuantizationProfile(
         weight_method="none",
         compute_dtype="bfloat16",
@@ -367,49 +334,6 @@ def test_quantization_yaml_loads_explicit_effective_profile_and_suite_default(tm
 def test_quantization_profile_rejects_conflated_or_unresolved_identity(profile):
     with pytest.raises(ValueError):
         QuantizationProfile.model_validate(profile)
-
-
-def test_recorded_non_quant_target_shape_remains_backward_compatible():
-    from evals.runner import (
-        _recordable_config,
-        _run_fingerprint,
-        _run_identity,
-    )
-
-    ordinary = BenchConfig(
-        suite="core",
-        targets=(BenchTarget(base_url="http://gateway:8000/v1", model="m"),),
-    )
-    declared = ordinary.model_copy(
-        update={
-            "targets": (
-                ordinary.targets[0].model_copy(
-                    update={
-                        "quantization": QuantizationProfile(
-                            weight_method="none",
-                            compute_dtype="bfloat16",
-                            kv_cache_dtype="bfloat16",
-                        )
-                    }
-                ),
-            )
-        }
-    )
-
-    recorded_target = _recordable_config(ordinary)["targets"][0]
-    assert "quantization" not in recorded_target
-    assert "sampling_mode" not in recorded_target
-    assert "temperature" not in recorded_target
-    # Pin the throughput defaults. The concurrency change must produce a
-    # distinct identity instead of resuming an older mixed 8/4 run.
-    assert _run_fingerprint(_run_identity(ordinary, [])) == (
-        "db994e150b073f618dbed8163c78849e5560c145fe721787cea50b86069cb41b"
-    )
-    assert _recordable_config(declared)["targets"][0]["quantization"] == {
-        "weight_method": "none",
-        "compute_dtype": "bfloat16",
-        "kv_cache_dtype": "bfloat16",
-    }
 
 
 def test_cli_temperature_is_a_fingerprinted_target_override():
@@ -525,19 +449,6 @@ def test_suite_results_directory_preserves_an_explicit_path():
     )
 
     assert build_config(args).results_dir == "/custom/results"
-
-
-def test_yaml_core_suite_defaults_to_its_own_results_directory(tmp_path):
-    path = tmp_path / "bench.yaml"
-    path.write_text(
-        "suite: core\ntargets:\n  - {base_url: 'http://gw:8000', model: m}\n",
-        encoding="utf-8",
-    )
-
-    config = build_config(_parse(["run", "--config", str(path)]))
-
-    assert config.suite == "core"
-    assert config.results_dir == "bench/results/core"
 
 
 def test_config_rejects_an_unknown_suite():

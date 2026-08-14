@@ -9,13 +9,7 @@ from pathlib import Path
 import pytest
 
 import evidence.reporting as reporting
-from evals.adapters.base import (
-    normalize_base_url as legacy_normalize_base_url,
-)
-from evals.adapters.base import target_api_key as legacy_target_api_key
-from evals.config import parse_target_flag
 from evals.targets import (
-    normalize_base_url,
     parse_target_spec,
     resolve_api_key_env,
     target_api_key,
@@ -73,14 +67,6 @@ def test_target_parser_rejects_ambiguous_or_secret_like_specs(spec: str) -> None
     with pytest.raises(ValueError) as exc_info:
         parse_target_spec(spec)
     assert "sk-literal-secret" not in str(exc_info.value)
-
-
-def test_legacy_target_imports_reexport_shared_contracts() -> None:
-    target = parse_target_flag("gateway=http://gateway.test=model=BENCH_API_KEY")
-
-    assert target.base_url == "http://gateway.test/v1"
-    assert legacy_normalize_base_url is normalize_base_url
-    assert legacy_target_api_key is target_api_key
 
 
 def test_api_key_resolution_is_explicit_and_error_never_contains_value() -> None:

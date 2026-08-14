@@ -102,9 +102,28 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
         StructuredOutputAdapter(),
         *ruler_niah_adapters(),
     ]
-    from evals.pins import apply_pins
+    from evals.pins import (
+        DATASET_PINS,
+        SECONDARY_PINS,
+        apply_pins,
+        is_pinned_revision,
+    )
 
-    return {adapter.info.name: adapter for adapter in apply_pins(adapters)}
+    registry = {adapter.info.name: adapter for adapter in apply_pins(adapters)}
+    for suite_name, definition in SUITES.items():
+        assert definition.name == suite_name
+        assert definition.row_order
+        assert len(definition.row_order) == len(set(definition.row_order))
+        assert set(definition.row_order) <= set(registry)
+    assert set(DATASET_PINS) <= set(registry)
+    for name, sources in SECONDARY_PINS.items():
+        assert name in registry
+        assert registry[name].info.extra_sources == sources
+    for adapter in registry.values():
+        info = adapter.info
+        if info.hf_dataset is not None:
+            assert is_pinned_revision(info.hf_dataset, info.hf_revision)
+    return registry
 
 
 def suite_adapters(

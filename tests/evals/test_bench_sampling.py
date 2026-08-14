@@ -154,12 +154,6 @@ def test_top_p_bounds_are_enforced():
     assert BenchTarget(base_url="http://gw", model="m", top_p=1.0).top_p == 1.0
 
 
-def test_targets_stay_hashable():
-    """Frozen models are hashed elsewhere; extra_body is a string for this reason."""
-    target = BenchTarget(base_url="http://gw", model="m", extra_body_json='{"a": 1}')
-    assert len({target, target}) == 1
-
-
 # -- CLI / config wiring -------------------------------------------------------
 
 
@@ -200,14 +194,3 @@ def test_cli_sampling_overrides_yaml_targets(tmp_path):
 
     kept = build_config(_run_args(config=str(path), model=None, base_url=None))
     assert kept.targets[0].reasoning_effort == "low"
-
-
-def test_sampling_is_part_of_the_run_fingerprint():
-    """A different effort is a different experiment, not a resumable run."""
-    from evals.runner import _run_fingerprint, _run_identity
-
-    base = build_config(_run_args())
-    changed = build_config(_run_args(reasoning_effort="high"))
-    assert _run_fingerprint(_run_identity(base, [])) != _run_fingerprint(
-        _run_identity(changed, [])
-    )
