@@ -1237,7 +1237,7 @@ async def test_chat_message_alternate_prompt_carriers_are_rejected_before_dispat
     assert backend.prompts_seen == ()
 
 
-async def test_non_null_litellm_message_metadata_is_rejected_before_dispatch():
+async def test_litellm_assistant_dump_is_accepted_as_history():
     backend = MockBackend()
     app = create_legacy_app(engines={"chat": backend})
 
@@ -1248,17 +1248,104 @@ async def test_non_null_litellm_message_metadata_is_rejected_before_dispatch():
                 "model": "chat",
                 "messages": [
                     {
+                        "role": "user",
+                        "content": "first",
+                        "provider_specific_fields": None,
+                    },
+                    {
                         "role": "assistant",
                         "content": "prior answer",
-                        "provider_specific_fields": {"reasoning_content": "work"},
-                    }
+                        "reasoning_content": "visible work",
+                        "function_call": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup",
+                                    "arguments": '{"query":"first"}',
+                                },
+                            }
+                        ],
+                        "provider_specific_fields": {"refusal": None},
+                    },
+                    {
+                        "role": "tool",
+                        "content": '{"result":"ok"}',
+                        "tool_call_id": "call_1",
+                    },
+                    {"role": "user", "content": "continue"},
                 ],
             },
         )
 
+    assert response.status_code == 200
+    assert len(backend.prompts_seen) == 1
+    assert "provider_specific_fields" not in backend.prompts_seen[0]
+    assert "function_call" not in backend.prompts_seen[0]
+
+
+@pytest.mark.parametrize(
+    ("message", "unsupported"),
+    [
+        (
+            {
+                "role": "assistant",
+                "content": "prior answer",
+                "provider_specific_fields": "not-an-object",
+            },
+            "provider_specific_fields",
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": "prior answer",
+                "provider_specific_fields": [],
+            },
+            "provider_specific_fields",
+        ),
+        (
+            {
+                "role": "user",
+                "content": "hello",
+                "provider_specific_fields": {"refusal": None},
+            },
+            "provider_specific_fields",
+        ),
+        (
+            {
+                "role": "assistant",
+                "content": "prior answer",
+                "function_call": {"name": "legacy", "arguments": "{}"},
+            },
+            "function_call",
+        ),
+        (
+            {"role": "user", "content": "hello", "function_call": None},
+            "function_call",
+        ),
+        (
+            {"role": "assistant", "content": "prior answer", "unknown": None},
+            "unknown",
+        ),
+    ],
+)
+async def test_unsupported_litellm_message_metadata_is_rejected_before_dispatch(
+    message,
+    unsupported,
+):
+    backend = MockBackend()
+    app = create_legacy_app(engines={"chat": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={"model": "chat", "messages": [message]},
+        )
+
     assert response.status_code == 400
     assert response.json()["error"] == {
-        "message": "messages[0] has unsupported fields: provider_specific_fields",
+        "message": f"messages[0] has unsupported fields: {unsupported}",
         "type": "invalid_request_error",
         "code": "invalid_request",
     }

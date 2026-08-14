@@ -210,7 +210,8 @@ def test_visible_reasoning_response_round_trips_through_litellm_history(tmp_path
             },
         )
         assistant = first.json()["choices"][0]["message"]
-        assistant["provider_specific_fields"] = None
+        assistant["function_call"] = None
+        assistant["provider_specific_fields"] = {"refusal": None}
         second = client.post(
             "/v1/chat/completions",
             json={

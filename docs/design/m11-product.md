@@ -691,3 +691,12 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   the normal Open WebUI owned-file upload path and prove that two different
   images produce different correct model answers. This acceptance item does not
   claim native multimodal tool-continuation support.
+- **A19 (D4, Issue #482; supersedes the #480 assistant-history amendment)**:
+  LiteLLM assistant history may carry object-valued
+  `provider_specific_fields` and nullable legacy `function_call` metadata.
+  Kairyu accepts those shapes only on assistant messages and drops them at the
+  shared preparation boundary before rendering or orchestration. Nullable
+  provider metadata remains accepted on every role for backward compatibility;
+  non-object provider values, provider objects on other roles, non-null legacy
+  calls, and unrelated extras remain fail-closed before dispatch. These
+  compatibility fields stay absent from the typed `ChatMessage` schema.

@@ -340,17 +340,22 @@ def _message_wire_shape(message: ChatMessage) -> dict[str, object]:
         {
             name: value
             for name, value in (message.model_extra or {}).items()
-            if not _is_ignored_message_extra(name, value)
+            if not _is_ignored_message_extra(message, name, value)
         }
     )
     return wire
 
 
-_IGNORED_NULL_MESSAGE_EXTRAS = frozenset({"provider_specific_fields"})
-
-
-def _is_ignored_message_extra(name: str, value: object) -> bool:
-    return name in _IGNORED_NULL_MESSAGE_EXTRAS and value is None
+def _is_ignored_message_extra(
+    message: ChatMessage,
+    name: str,
+    value: object,
+) -> bool:
+    if name == "provider_specific_fields":
+        return value is None or (
+            message.role == "assistant" and isinstance(value, dict)
+        )
+    return name == "function_call" and message.role == "assistant" and value is None
 
 
 def _prepare_message_content(
@@ -430,7 +435,7 @@ def _prepare_chat_messages(
             unsupported_fields = {
                 name
                 for name, value in (message.model_extra or {}).items()
-                if not _is_ignored_message_extra(name, value)
+                if not _is_ignored_message_extra(message, name, value)
             }
             if unsupported_fields:
                 raise ChatRequestError(
