@@ -1,4 +1,4 @@
-"""Public ``kairyu bench compare-runs`` dispatch and failure behavior."""
+"""Public ``python -m evals compare-runs`` dispatch and failure behavior."""
 
 from evals import __main__ as cli
 from evals.cli import handle

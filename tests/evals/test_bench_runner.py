@@ -286,7 +286,7 @@ def test_shared_score_bearing_runtime_changes_fingerprint(tmp_path, monkeypatch,
 
 
 
-def test_editable_external_harness_is_not_treated_as_content_verified(tmp_path, monkeypatch):
+def test_editable_external_package_is_not_treated_as_content_verified(tmp_path, monkeypatch):
     from evals.adapters import base as adapter_base
 
     direct_url = tmp_path / "harness-1.0.dist-info" / "direct_url.json"

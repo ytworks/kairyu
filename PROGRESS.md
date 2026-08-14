@@ -64,7 +64,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G5: F1a–F1d, F2a–F2d, F4a, F4b all closed; F4c decided (keep per-replica RadixKV + F2 routing, thresholded revisit)
 - F5a/b/c (priority, noisy-neighbor, SLO admission): closed
 - G6: P-A, P-B1–P-B4, P-C2/C3/C4 green (incl. Open WebUI P-B3 browser gate); remaining P-C gates continue
-- #150 LiveCodeBench TP8 gate: passed after deadlock fix; #364 `logits_dtype`: valid negative, withdrawn
+- #150 TP8 long-generation stability gate: passed after deadlock fix; #364 `logits_dtype`: valid negative, withdrawn
 
 ### What works today
 
@@ -77,22 +77,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example has one public chat model, one public pinned offline embedding model, and one orchestration YAML: Open WebUI lists only the chat model, L2 borrows the Qwen/DeepSeek L1 pools directly, and launcher readiness proves a two-input 384-dimensional embedding response. Both this path and the single-Qwen example accept image chat and complete the fail-closed 10-item CharXiv smoke; its composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example has one public chat model, one public pinned offline embedding model, and one orchestration YAML: Open WebUI lists only the chat model, L2 borrows the Qwen/DeepSeek L1 pools directly, and launcher readiness proves a two-input 384-dimensional embedding response. Both this path and the single-Qwen example accept image chat; the tiered example's composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
 ### Open items / blockers
 
-- The checkout-only verification split is implemented: 68 Kairyu correctness,
-  performance, resilience, and diagnostic gates live under `verification/` with
-  a strict registry and neutral `evidence/` contracts. The named Accuracy suite
-  implementation and dependencies are removed; active docs/examples cleanup remains in PR #486.
 - G2 A6 performance gap vs vLLM is the open hard gate; full TP4/8 HTTP matrix deferred until closed
 - Issue #333 verdict: process-split is not the A6 cause (`no_material_reduction`, ratio 0.92 vs ≤0.90 line)
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
 - Production stage-sharded pipeline parallelism is a separate roadmap dependency (current PP report is not it)
 - Learned-draft real-checkpoint acceptance/performance evidence remains open; FP8-E4M3 KV remains disabled after its calibrated re-bake failed exact-output and decode-envelope checks
-- Frontier full-checkpoint 262K/1M quality/performance evidence, DeepSeek EP4/EP8 topology lock, CUDA Graph pointer stability, MTP/DSpark selection, 30-minute soak, and failure recovery remain open
+- Frontier full-checkpoint 262K/1M correctness/performance evidence, DeepSeek EP4/EP8 topology lock, CUDA Graph pointer stability, MTP/DSpark selection, 30-minute soak, and failure recovery remain open
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Human sign-off pending on M2–M4 design reviews
@@ -101,6 +97,13 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-14 — [progress] Accuracy removal and verification migration completed
+- What: removed the named Accuracy suite and its code, fixtures, dependencies,
+  tests, examples, and active documentation; retained four explicit eval suites
+  and moved Kairyu serving/correctness gates to checkout-only verification.
+- Refs: PR #486; `evals/`; `verification/`; `evidence/`;
+  `docs/design/verification-framework.md`
 
 ### 2026-08-14 — [progress] Accuracy implementation removed
 - What: removed the externally migrated Accuracy adapters, judge and published

@@ -1,4 +1,4 @@
-"""Public ``kairyu bench quant-sweep`` dispatch and exit semantics."""
+"""Public ``python -m evals quant-sweep`` dispatch and exit semantics."""
 
 from __future__ import annotations
 

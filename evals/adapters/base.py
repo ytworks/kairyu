@@ -781,30 +781,6 @@ async def call_chat(
         raise RequestFailed(response.status_code, response.text)
 
 
-def external_harness_sampling_incompatibility(
-    target: BenchTarget,
-    *,
-    harness: str,
-) -> str | None:
-    """Reject chat-only sampling controls at external harness boundaries.
-
-    These wrappers do not construct the OpenAI request body themselves.  An
-    explicit temperature or generation-default omission therefore cannot be
-    claimed unless the pinned harness exposes a verified equivalent.
-    """
-
-    if target.sampling_mode == "recommended":
-        return (
-            f"{harness} has no verified generation-default omission passthrough; "
-            "sampling_mode='recommended' is supported only by chat adapters"
-        )
-    if target.temperature is not None:
-        return (
-            f"{harness} has no verified temperature passthrough; explicit target "
-            "temperature is supported only by chat adapters"
-        )
-    return None
-
 
 def _invalid_loglikelihood_response(message: str) -> RequestFailed:
     return LogLikelihoodSchemaError(200, f"invalid loglikelihood response: {message}")
@@ -1292,7 +1268,7 @@ class DatasetAdapter(ABC):
         if self.info.needs_vision and not target.supports_vision:
             return f"target {target.label()!r} does not support vision inputs"
         if not ctx.offline_fixtures and not adapter_cache_ready(self, ctx.cache):
-            detail = ctx.download_failures.get(self.info.name, "run `kairyu bench download`")
+            detail = ctx.download_failures.get(self.info.name, "run `python -m evals download`")
             return f"dataset not in cache ({detail})"
         return None
 

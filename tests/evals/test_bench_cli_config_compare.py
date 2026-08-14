@@ -1,4 +1,4 @@
-"""Public ``kairyu bench compare`` dispatch, artifacts, and exit semantics."""
+"""Public ``python -m evals compare`` dispatch, artifacts, and exit semantics."""
 
 from __future__ import annotations
 

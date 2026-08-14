@@ -71,15 +71,9 @@ def _validate_extra_body(value: str | None) -> str | None:
 class SamplingOptions(BaseModel):
     """Request knobs that belong to an endpoint, not to a benchmark.
 
-    Fugu reports scores at each model's maximum reasoning effort, and its τ³
-    user simulator ran at `low`; reproducing either needs the effort (and, for
-    vendors that spell it differently, `extra_body`) to reach the wire.
-    Adapters own prompts and `max_tokens`; the target owns sampling.
-
-    Slots that issue their own chat requests pick this up through `call_chat`.
-    The three external-harness slots (SWE-Bench Pro, Terminal-Bench, τ³) cannot:
-    they drive a separate CLI, so each maps whatever its harness exposes and
-    annotates what it cannot forward — see `wire_overrides()` callers.
+    Adapters own prompts and `max_tokens`; the target owns sampling. Chat
+    adapters apply these options through `call_chat`, and the run fingerprint
+    records the exact target policy sent on the wire.
     """
 
     reasoning_effort: str | None = None
@@ -329,10 +323,8 @@ class BenchConfig(BaseModel):
     only: tuple[str, ...] = ()
     exclude: tuple[str, ...] = ()
     seed: int = 0
-    # Trials per source task. Chat adapters retain an ordered seed sweep beneath
-    # each dataset item; Terminal-Bench and tau map the same budget to `-k` and
-    # `--num-trials`. The default stays 1 because every attempt adds a model or
-    # full docker/agent run.
+    # Trials per source item. Adapters retain an ordered seed sweep beneath each
+    # dataset row. The default stays 1 because every attempt adds a model call.
     attempts: int = Field(default=1, ge=1)
     # Sixteen in-flight requests lets one engine continuously batch work for
     # per-GPU throughput; this is true request concurrency, not queue depth.
@@ -1021,10 +1013,9 @@ class PairResult(BaseModel):
     methodology: dict = Field(default_factory=dict)
     annotations: tuple[str, ...] = ()
     # Whether this cell may be compared with a published full-suite score, and
-    # why not. Static substitutions (LongBench for Long Context Reasoning),
-    # run-time ones (the tau2 fallback) and run-level ones (a subset run, fixture
-    # data) all land here, so the report never has to infer comparability from a
-    # benchmark-name allow list.
+    # why not. Declared dataset substitutions and run-level restrictions such
+    # as subsets or fixture data land here, so the report never infers
+    # comparability from a benchmark-name allow list.
     comparable: bool = True
     incomparable_reasons: tuple[str, ...] = ()
     # Separate from published-score comparability. An unresolved harness/data

@@ -469,7 +469,7 @@ class IfevalAdapter(GenerativeAdapter):
             self.info.name, **cache_pins(self.info)
         ):
             detail = ctx.download_failures.get(
-                self.info.name, "run `kairyu bench download`"
+                self.info.name, "run `python -m evals download`"
             )
             return f"dataset not in cache ({detail})"
         dependency_error = _checker_dependency_error()

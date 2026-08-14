@@ -1,6 +1,6 @@
 # Verification framework and Accuracy removal
 
-Status: accepted; implementation in progress (2026-08-14)
+Status: accepted; implemented (2026-08-14)
 
 ## Decision
 
