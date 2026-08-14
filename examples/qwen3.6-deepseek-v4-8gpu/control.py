@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import socket
@@ -360,11 +361,56 @@ def _post_json_url(url: str, payload: dict) -> dict:
         return json.loads(response.read())
 
 
+def _validate_embedding_smoke(payload: dict) -> None:
+    embedding = SPEC["embedding"]
+    model = embedding["served_name"]
+    if payload.get("model") != model:
+        raise SystemExit(
+            "Kairyu embedding response has the wrong model identity: "
+            f"expected {model!r}, got {payload.get('model')!r}"
+        )
+    data = payload.get("data")
+    if not isinstance(data, list) or [
+        row.get("index") if isinstance(row, dict) else None for row in data
+    ] != [0, 1]:
+        raise SystemExit("Kairyu embedding response must preserve indices [0, 1]")
+    dimensions = embedding["dimensions"]
+    for row in data:
+        vector = row.get("embedding")
+        if not isinstance(vector, list) or len(vector) != dimensions:
+            raise SystemExit(
+                f"Kairyu embedding response vectors must have {dimensions} dimensions"
+            )
+        if not all(
+            type(value) in {int, float} and math.isfinite(value) for value in vector
+        ):
+            raise SystemExit("Kairyu embedding response vectors must contain finite numbers")
+    usage = payload.get("usage")
+    prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+    total_tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+    if (
+        type(prompt_tokens) is not int
+        or prompt_tokens < 1
+        or type(total_tokens) is not int
+        or total_tokens != prompt_tokens
+    ):
+        raise SystemExit("Kairyu embedding response must report positive exact usage")
+
+
 def _validate_ready(api_url: str, tokenizer_url: str) -> None:
     try:
         ready = _json_url(f"{api_url}/readyz")
         models = {row["id"] for row in _json_url(f"{api_url}/v1/models")["data"]}
         routing = _json_url(f"{api_url}/routing")["models"]
+        embedding_model = SPEC["embedding"]["served_name"]
+        embedding_response = _post_json_url(
+            f"{api_url}/v1/embeddings",
+            {
+                "model": embedding_model,
+                "input": ["kairyu readiness probe", "two-input contract"],
+                "encoding_format": "float",
+            },
+        )
         token_count = _post_json_url(
             tokenizer_url,
             {"model": "deepseek-v4-flash-0731", "prompt": "kairyu"},
@@ -372,11 +418,13 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
     except (KeyError, OSError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Kairyu readiness evidence is incomplete: {error}") from error
     product_model = SPEC["orchestration"]["auto_max_model"]
-    if ready.get("status") != "ready" or models != {product_model}:
+    expected_models = {product_model, embedding_model}
+    if ready.get("status") != "ready" or models != expected_models:
         raise SystemExit(
-            "Kairyu product model inventory must be exactly "
-            f"{[product_model]!r}, got {sorted(models)!r}"
+            "Kairyu public model inventory must be exactly "
+            f"{sorted(expected_models)!r}, got {sorted(models)!r}"
         )
+    _validate_embedding_smoke(embedding_response)
     if type(token_count) is not int or token_count < 1:
         raise SystemExit("DeepSeek public-output tokenizer oracle is not ready")
     if set(routing) != {product_model}:
@@ -471,7 +519,8 @@ def up() -> None:
     print("\nEnvironment is ready.")
     print(f"OpenAI API: http://{advertised_api_host}:{env['API_PORT']}/v1")
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
-    print("Chat model: kairyu-auto-max (the only public model)")
+    print("Chat model:      kairyu-auto-max (the only Chat UI model)")
+    print("Embedding model: embed-small")
 
 
 def main() -> None:

@@ -5,11 +5,12 @@ Applies to: `examples/qwen3.6-deepseek-v4-8gpu/`.
 
 ## Goal
 
-The tiered Chat UI must expose one product model whose request crosses Kairyu
-L3 once, executes a bounded multi-model workflow in L2 against deployment-owned
-L1 engines, and returns one final L3 answer. The UI may reveal completed
-intermediate work only when the product policy explicitly enables it, and must
-keep that work visually separate from the final answer.
+The tiered Chat UI must expose one chat product model whose request crosses
+Kairyu L3 once, executes a bounded multi-model workflow in L2 against
+deployment-owned L1 engines, and returns one final L3 answer. The public API
+also exposes a separately typed embedding capability. The UI may reveal
+completed intermediate work only when the product policy explicitly enables
+it, and must keep that work visually separate from the final answer.
 
 ## Decisions
 
@@ -28,7 +29,8 @@ model discovery and generation routes use that allowlist; lifecycle,
 readiness, metrics, and internal orchestration continue to cover all runtime
 resources. This product example does not register direct L1 models or policy
 candidates as orchestrators; it keeps one orchestration YAML and one public
-model.
+chat model. A public embedding model is not a chat policy candidate and remains
+absent from `/routing`.
 
 ### EO-D3 — The quality path is an explicit bounded DAG
 
@@ -71,10 +73,25 @@ example remains transitional until the same full-checkpoint product path passes
 the native Qwen3.6 and DeepSeek V4 correctness, recovery, soak, and performance
 gates.
 
+### EO-D6 — The public embedding capability is pinned and truthful
+
+The example publishes `embed-small` through the existing production FastEmbed
+backend. Its image contains the immutable MiniLM repository revision, model
+digest, and provenance digest, and runtime startup is offline. Public model
+discovery therefore contains `kairyu-auto-max` and `embed-small`, while
+`/routing` contains only the chat product. The launcher must pass a real
+two-input embeddings request and validate model identity, ordered indices, two
+finite 384-dimensional vectors, and positive exact usage. Open WebUI manually
+allows only the chat model on its connection so the embedding ID cannot appear
+as a chat choice.
+
 ## Acceptance
 
-- `/v1/models` on the product gateway lists exactly the product orchestrator;
-  guessed internal model names fail on public generation APIs.
+- `/v1/models` on the product gateway lists exactly the product orchestrator
+  and `embed-small`; `/routing` and Open WebUI list only the product chat model,
+  and guessed internal model names fail on public generation APIs.
+- `/v1/embeddings` returns two ordered finite 384-dimensional vectors from the
+  pinned offline bundle and reports non-empty exact usage.
 - A request follows `L3 -> L2 -> L1... -> L2 -> L3` without a second L3 ingress
   and without duplicate lifecycle ownership.
 - Scripted verifier failures cause real bounded synthesis retries, with exact

@@ -47,6 +47,20 @@
       "quantization": "mixed-fp4-fp8"
     }
   },
+  "embedding": {
+    "served_name": "embed-small",
+    "backend": "fastembed",
+    "model": "sentence-transformers/all-MiniLM-L6-v2",
+    "model_path": "/opt/kairyu/models/all-MiniLM-L6-v2",
+    "repository": "Qdrant/all-MiniLM-L6-v2-onnx",
+    "revision": "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079",
+    "model_sha256": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+    "provenance_sha256": "57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c",
+    "dimensions": 384,
+    "batch_size": 64,
+    "threads": 2,
+    "max_concurrency": 2
+  },
   "vllm": {
     "image": "local/vllm-openai:sm120-aa0d513027",
     "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",

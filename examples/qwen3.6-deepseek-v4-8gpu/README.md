@@ -10,6 +10,10 @@ Open WebUI
             -> deployment-owned L1 pool: DeepSeek-V4-Flash-0731 TP4+EP4 (GPU 4-7)
         -> Kairyu L2 verified synthesis and bounded refinement
     -> Kairyu L3 final answer
+
+Embedding clients
+    -> Kairyu L3 embeddings API (:8003; model embed-small)
+        -> pinned offline FastEmbed MiniLM bundle (384 dimensions)
 ```
 
 Qwen fits one 96 GB card, so four independent TP1 replicas provide more
@@ -22,8 +26,9 @@ image placeholders. DeepSeek is sharded TP4+EP4 for capacity and retains the
 measured eight-GPU example's FP8 KV, DSpark-5, SM120 fallbacks, prefix caching,
 chunked batching, and full/piecewise CUDA Graphs.
 
-Kairyu exposes exactly one public product model, `kairyu-auto-max`. Its request
-enters L3 once, then L2 borrows the deployment-owned L1 pools through
+Kairyu exposes one public chat model, `kairyu-auto-max`, and one public
+embedding model, `embed-small`. A chat request enters L3 once, then L2 borrows
+the deployment-owned L1 pools through
 `engine_ref`: DeepSeek planning, three parallel Qwen proposals, DeepSeek draft
 synthesis, verification, and DeepSeek publishing. A failed verifier can repeat
 synthesis and verification at most twice (`moa_samples: 0`,
@@ -50,19 +55,37 @@ remain open. See
 
 The command validates the exact eight-card inventory and NUMA affinity, builds
 the pinned vLLM source image if absent, verifies or downloads both exact model
-revisions, builds Kairyu, waits for all seven services, verifies `/routing`, and
+revisions, builds Kairyu with the pinned offline MiniLM bundle, waits for all
+seven services, verifies `/routing`, sends a two-input embedding smoke, and
 prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8003/v1
 Chat UI:    http://<outward-facing-host>:3000 (no authentication)
+Chat model:      kairyu-auto-max (the only Chat UI model)
+Embedding model: embed-small
 ```
 
 Open WebUI listens on all host interfaces, requires no login, calls only
-Kairyu L3, and defaults to `kairyu-auto-max`, the only model returned by the
-product `/v1/models` endpoint. The L1 pools are not Chat UI choices. The
-launcher validates that exact public inventory and the explicit seven-role DAG
-before printing the URL.
+Kairyu L3, and is explicitly limited to `kairyu-auto-max`. The public
+`/v1/models` endpoint additionally returns `embed-small`; the L1 pools are not
+public IDs or Chat UI choices. The launcher validates that exact public
+inventory, the explicit seven-role DAG, and two ordered finite 384-dimensional
+embedding vectors with positive usage before printing the URL.
+
+The embedding model is the truthfully named
+`sentence-transformers/all-MiniLM-L6-v2` FastEmbed deployment, not an alias for
+OpenAI's `text-embedding-3-large`. Probe it directly with:
+
+```sh
+curl -sS http://127.0.0.1:8003/v1/embeddings \
+  -H 'Content-Type: application/json' \
+  --data '{"model":"embed-small","input":["first","second"],"encoding_format":"float"}'
+```
+
+Selecting this model from tau2's pinned `banking_knowledge/alltools` consumer
+is tracked separately in `ytworks/kairyu-bench#5`; this deployment does not
+mislabel MiniLM to satisfy tau2's historical OpenAI model default.
 
 All persistent state is bind-backed below `/mnt/nvme`:
 
