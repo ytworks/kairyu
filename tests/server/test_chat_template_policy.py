@@ -75,7 +75,16 @@ def test_public_render_prompt_rejects_unverified_special_tokens():
         render_prompt(request, {"m": template})
 
 
-def test_litellm_assistant_metadata_preserves_reasoning_only():
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"provider_specific_fields": None},
+        {"provider_specific_fields": {}},
+        {"provider_specific_fields": {"refusal": None}},
+    ],
+)
+def test_litellm_assistant_metadata_preserves_reasoning_only(metadata):
     request = ChatCompletionRequest.model_validate(
         {
             "model": "m",
@@ -84,7 +93,7 @@ def test_litellm_assistant_metadata_preserves_reasoning_only():
                     "role": "assistant",
                     "content": "prior answer",
                     "reasoning_content": "visible work",
-                    "provider_specific_fields": None,
+                    **metadata,
                 }
             ],
         }
@@ -92,12 +101,13 @@ def test_litellm_assistant_metadata_preserves_reasoning_only():
     template = ChatTemplate(
         "{{ messages[0].reasoning_content }}|"
         "{{ messages[0].content }}|"
-        "{{ 'provider_specific_fields' in messages[0] }}"
+        "{{ 'provider_specific_fields' in messages[0] }}|"
+        "{{ 'refusal' in messages[0] }}"
     )
 
     validated = validate_chat_input(request, {"m": template})
 
-    assert validated.prompt == "visible work|prior answer|False"
+    assert validated.prompt == "visible work|prior answer|False|False"
 
 
 def test_low_level_app_logs_missing_policy_at_construction(caplog):
