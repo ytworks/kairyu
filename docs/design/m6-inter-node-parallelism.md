@@ -79,7 +79,7 @@ recv(src) -> (page_ids, seq_meta)           # into pre-registered pages
   batches at the aggregation granularity internally.
 - Implementations: `LocalTransport` (in-process copy — CPU tests; also the M5 intra-node
   handoff degenerate case) and one GPU-phase network transport, chosen by a bake-off
-  (NCCL p2p with staging vs UCX/RDMA SGL) run by `bench/kv_transfer_bench.py`. B2 gates
+  (NCCL p2p with staging vs UCX/RDMA SGL) run by `verification/l1/performance/kv_transfer_bench.py`. B2 gates
   whichever wins. **The bench must run against the real sharded per-layer page layout,
   not an idealized contiguous buffer** — otherwise B2 green-lights a transport that
   fails inside B3.
@@ -167,7 +167,7 @@ The redesign pipelines **across scheduler steps**, not within one:
 
 ### D6 — Fabric truth-in-reporting
 
-`bench/kv_transfer_bench.py` doubles as the fabric microbench: it measures raw
+`verification/l1/performance/kv_transfer_bench.py` doubles as the fabric microbench: it measures raw
 link bandwidth first, then paged transfer efficiency against it — B2's "measured, not
 nominal" rule (G2 §8) falls out of one script. Results embed NCCL/UCX versions and
 `ibstat`-equivalent link info.
@@ -188,7 +188,7 @@ number this design deliberately does not build.
 
 1. **CPU-testable now**: `ClusterSpec` + validation + YAML loading; `KVTransport`
    protocol + `LocalTransport` + a TCP-loopback transport (real serialization, real
-   async, no RDMA) so `bench/kv_transfer_bench.py` runs end-to-end on CPU;
+   async, no RDMA) so `verification/l1/performance/kv_transfer_bench.py` runs end-to-end on CPU;
    streamed P-D handoff logic (execute-hooked sends, completed-page granularity,
    cached-page skip, preemption exemption, requeue-on-failure) against fake transports;
    the async `ModelRunner` submit/handle contract + `PipelinedModelRunner` two-step
@@ -223,10 +223,10 @@ number this design deliberately does not build.
 
 | Gate | Script | Notes |
 |---|---|---|
-| B1 | `bench/serving_bench.py --dp-replicas node-a,node-b` + `bench/multiturn_prefix.py --replicas node-a,node-b` | goodput vs single node; router p99 incl. hop; affinity hit-rate retention across nodes reported (not gated — B1's gate is goodput; the hit rate substantiates §5's affinity reliance) |
-| B2 | `bench/kv_transfer_bench.py` (new; CPU-runnable with loopback) | raw fabric first, then ≥64-page batches **on the real sharded layout**; ≥20 GB/s, ≤8 µs/token |
-| B3 | `bench/pd_mixed.py --prefill-node A --decode-node B` | TTFT inflation vs M5 colocated; TPOT p99 retention; layer-group streaming on/off ablation |
-| B4 | `bench/serving_bench.py --pp 2` | TPOT inflation, throughput efficiency, bubble fraction |
+| B1 | `verification/l1/performance/serving_bench.py --dp-replicas node-a,node-b` + `verification/fleet/performance/multiturn_prefix.py --replicas node-a,node-b` | goodput vs single node; router p99 incl. hop; affinity hit-rate retention across nodes reported (not gated — B1's gate is goodput; the hit rate substantiates §5's affinity reliance) |
+| B2 | `verification/l1/performance/kv_transfer_bench.py` (new; CPU-runnable with loopback) | raw fabric first, then ≥64-page batches **on the real sharded layout**; ≥20 GB/s, ≤8 µs/token |
+| B3 | `verification/l1/performance/pd_mixed.py --prefill-node A --decode-node B` | TTFT inflation vs M5 colocated; TPOT p99 retention; layer-group streaming on/off ablation |
+| B4 | `verification/l1/performance/serving_bench.py --pp 2` | TPOT inflation, throughput efficiency, bubble fraction |
 | B5 | same scripts vs vLLM multi-node (Ray) for PP=2 and 2-node DP only (§3) | parity axes per G2 |
 
 ## 7. Review record

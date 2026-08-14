@@ -208,7 +208,7 @@ oracle and cannot replace either reference cell.
 ### D5 — Fixed inputs and common-prefix comparison
 
 The input set is the exact 64-text `_TEXT_PROMPTS` tuple from
-`bench/parity_tp.py`. Evidence stores the text, tokenizer-produced IDs, and
+`verification/l1/correctness/parity_tp.py`. Evidence stores the text, tokenizer-produced IDs, and
 canonical hashes. Generation is 16 greedy tokens with seed `20260702`,
 temperature 0, top-p 1, no top-k truncation, and EOS ignored until token 16.
 
@@ -257,8 +257,8 @@ only to non-binding timing fields.
 
 ### D6 — Evidence and replay
 
-`bench/g4_ma1_qwen3_235b_nvfp4_capture.py` produces the source-bound arm
-fragments and canonical JSONL; `bench/g4_ma1_qwen3_235b_nvfp4_bench.py`
+`verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_capture.py` produces the source-bound arm
+fragments and canonical JSONL; `verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_bench.py`
 performs run, verify, and raw-only replay. The raw JSONL is the authority. It
 records run/cell/rank lifecycle,
 configuration, complete environment and topology, checkpoint members and
@@ -302,7 +302,7 @@ allocation and page-table view; they are not four rate samples and do not
 claim a bytewise readback of physical KV contents.
 
 The formal operator,
-`bench/g4_ma2_qwen3_235b_ep_kv_bench.py`, arms one opt-in, bounded recorder on
+`verification/l1/correctness/g4_ma2_qwen3_235b_ep_kv_bench.py`, arms one opt-in, bounded recorder on
 all EP ranks before the trace and gathers it once afterward over the existing
 gloo control group. It records only the first prefill view of each request:
 prompt/cache token counts, the actual prefill start (including the scheduler's
@@ -477,8 +477,8 @@ runtimes use identical internal projection sharding. SGLang also fixes
 `--log-level-http warning`, caps decode CUDA-graph batch size with
 `--cuda-graph-max-bs-decode 32`, and disables prefill CUDA graph.
 
-`bench/g4_ma3_kairyu_server.py` is the dedicated production-server launcher,
-and `bench/g4_ma3_sglang_bench.py` prepares one immutable seed-0 ShareGPT trace.
+`verification/l1/performance/g4_ma3_kairyu_server.py` is the dedicated production-server launcher,
+and `verification/l1/performance/g4_ma3_sglang_bench.py` prepares one immutable seed-0 ShareGPT trace.
 The complete matrix contains exactly ten fresh, sequential generations: one
 retained preflight for each already-fixed production arm, then four formal
 pairs in K/S, S/K, S/K, K/S order. The preflights freeze their selection before

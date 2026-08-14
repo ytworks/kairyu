@@ -312,7 +312,7 @@ def test_sequence_parallel_matches_plain_tp(spawn2, llama_dir):
     # Megatron TP+SP: the residual stream between blocks is sharded along TOKENS
     # and the norms run on the shard. Norms are per-token, so this is the SAME
     # arithmetic — the gain is activation memory, not latency (rs+ag moves what
-    # one all_reduce does; bench/reduce_scatter_bench.py measures it at ~0.96x).
+    # one all_reduce does; verification/l1/performance/reduce_scatter_bench.py measures it at ~0.96x).
     results = spawn2(dist_targets.sequence_parallel_parity, llama_dir)
     for rank, result in enumerate(results):
         assert result["max_error"] < 1e-4, f"rank {rank}: {result['max_error']}"

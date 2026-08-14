@@ -999,7 +999,7 @@ returns `invoice_ledger_invalid` instead of a partial invoice.
 | `scripts/webui_smoke.sh` | pinned Open WebUI browser E2E: first user, direct/AUTO streaming, persistence, outage, recovery |
 | `scripts/webui_vlm_smoke.sh` | eight-GPU direct + Open WebUI image-chat E2E |
 | `scripts/gpu_gates/*.sh` | GPU-day gate scripts (runbook §0–§9); all support `--dry-run` |
-| `bench/serving_bench.py`, `bench/frontier_compare.py`, `bench/kv_transfer_bench.py` | latency/goodput/transfer benches |
+| `verification/l1/performance/serving_bench.py`, `verification/product/performance/frontier_compare.py`, `verification/l1/performance/kv_transfer_bench.py` | latency/goodput/transfer benches |
 
 ## 8. Benchmarks
 
@@ -1061,7 +1061,7 @@ manifest, 17 synthetic benchmark stand-ins, the structured conformance corpus,
 and the judge-calibration corpus (19 JSONL resources total). Top-level
 `bench/*.py` developer/formal wrappers, `bench/results/`, and `tests/` remain
 checkout-only; their stable inventory and compatibility policy are in
-[`bench/README.md`](bench/README.md).
+[`verification/README.md`](verification/README.md).
 
 ## 9. Development
 
@@ -1069,10 +1069,10 @@ checkout-only; their stable inventory and compatibility policy are in
 uv run --frozen pytest --fail-on-skip  # portable tests + coverage (gate: 80%)
 uv run --frozen ruff check .           # lint (E, F, I, UP, B; line length 100)
 uv run --frozen kairyu bench entrypoints --check-repo .
-uv run --frozen python scripts/verify_bench_entrypoints.py
+uv run --frozen python scripts/verify_verification_registry.py
 uv run --frozen python scripts/verify_bench_wheel.py
-uv run --frozen python bench/router_latency.py
-uv run --frozen python bench/orchestration_mock_bench.py
+uv run --frozen python verification/orchestration/performance/router_latency.py
+uv run --frozen python verification/orchestration/performance/orchestration_mock_bench.py
 ```
 
 | pytest invocation | scope |

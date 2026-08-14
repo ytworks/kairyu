@@ -249,7 +249,7 @@ git commit -m "docs(bench): rename accuracy benchmark examples"
 **Files:**
 - Modify: `README.md`
 - Modify: `README.ja.md`
-- Modify: `bench/README.md`
+- Modify: `verification/README.md`
 - Modify: `docs/benchmarks.md`
 - Modify: `docs/design/issue-367-core-evals.md`
 - Modify: `docs/design/issue-372-quantization-sweep.md`
@@ -296,7 +296,7 @@ prefix, config, script, test, or display label.
 - [ ] **Step 5: Commit documentation migration**
 
 ```bash
-git add README.md README.ja.md bench/README.md docs/benchmarks.md docs/design/issue-367-core-evals.md docs/design/issue-372-quantization-sweep.md PROGRESS.md
+git add README.md README.ja.md verification/README.md docs/benchmarks.md docs/design/issue-367-core-evals.md docs/design/issue-372-quantization-sweep.md PROGRESS.md
 git commit -m "docs(bench): describe the accuracy suite"
 ```
 

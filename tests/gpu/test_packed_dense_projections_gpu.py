@@ -6,9 +6,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from evals.profiling import profile_scope
 from kairyu.models.config import parse_model_config
 from kairyu.models.llama import DenseDecoder
+from verification.l1.performance.profiling import profile_scope
 
 pytestmark = pytest.mark.gpu
 

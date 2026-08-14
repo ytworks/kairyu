@@ -124,7 +124,7 @@ so the correction does not serialize supported eager implementations.
 
 ## 5. Evidence and replay boundary
 
-`bench/batch_invariance_bench.py` is a checkout-only, path-only formal
+`verification/l1/correctness/batch_invariance_bench.py` is a checkout-only, path-only formal
 operator.  Evidence commands must begin as `python -I -B` through the direct
 script path.  Before importing repository code, the wrapper proves the tracked
 tree clean, rejects import-shadowing untracked/ignored code and symlinks, and

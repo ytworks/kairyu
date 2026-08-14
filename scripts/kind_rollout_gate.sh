@@ -229,8 +229,8 @@ source_inputs=(
   pyproject.toml
   uv.lock
   kairyu
-  bench/fleet_churn_bench.py
-  bench/fleet_rollout_bench.py
+  verification/fleet/resilience/fleet_churn_bench.py
+  verification/fleet/resilience/fleet_rollout_bench.py
   scripts/kind_rollout_gate.sh
   deploy/kind/f1a
   deploy/kind/f1b
@@ -583,8 +583,8 @@ while IFS= read -r input; do
   frozen_args+=(--frozen-input "$input")
 done < <(
   "$GIT" ls-files -- \
-    bench/fleet_churn_bench.py \
-    bench/fleet_rollout_bench.py \
+    verification/fleet/resilience/fleet_churn_bench.py \
+    verification/fleet/resilience/fleet_rollout_bench.py \
     scripts/kind_rollout_gate.sh \
     .github/workflows/f1b-rollout.yml \
     deploy/kind/f1a \
@@ -597,7 +597,7 @@ fi
 
 ulimit -n 65536 2>/dev/null || true
 export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1b-uv-cache}
-"$UV" run --frozen python bench/fleet_rollout_bench.py \
+"$UV" run --frozen python verification/fleet/resilience/fleet_rollout_bench.py \
   --profile "$PROFILE" \
   --gateway-url "$GATEWAY_URL" \
   --kubectl "$KUBECTL" \
@@ -625,7 +625,7 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1b-uv-cache}
   --output "$OUTPUT" \
   --assert-gate
 
-"$UV" run --frozen python bench/fleet_rollout_bench.py \
+"$UV" run --frozen python verification/fleet/resilience/fleet_rollout_bench.py \
   --verify-artifact "$OUTPUT" \
   --assert-gate >"$VERIFIER_OUTPUT"
 echo "F1b ${PROFILE} zero-failure rollout gate passed: ${OUTPUT}"

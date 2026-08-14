@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from evals.profiling import profile_scope
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import EngineSampling, mix_seed
 from kairyu.kernels.sampling_gpu import (
     _stateless_random_words,
     stateless_gumbel_argmax,
 )
+from verification.l1.performance.profiling import profile_scope
 
 pytestmark = pytest.mark.gpu
 

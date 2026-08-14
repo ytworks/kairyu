@@ -1708,7 +1708,7 @@ async def test_backend_streams_stop_holdback_through_depth_two() -> None:
 
 
 def test_qwen_benchmark_generation_uses_configured_production_depth() -> None:
-    from bench.future_token_bench import _run_generation
+    from verification.l1.performance.future_token_bench import _run_generation
 
     runner = _PositionRunner(base=1000)
     outputs = _run_generation(

@@ -44,7 +44,7 @@ call sites use all_reduce (+ local slice).
 > result). It is **not** a same-call-site optimization, and the earlier note
 > saying so was wrong.
 >
-> Method (`bench/reduce_scatter_bench.py`): per-trial **worst-rank** elapsed via
+> Method (`verification/l1/performance/reduce_scatter_bench.py`): per-trial **worst-rank** elapsed via
 > CUDA events, barrier-bounded so ranks start together, MAX-reduced across ranks
 > — a collective finishes when its slowest participant does, so a per-rank
 > minimum measures nothing about it. Buffers are prepared outside the timed

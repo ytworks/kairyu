@@ -18,7 +18,7 @@ Date: 2026-07-03
   pcie-gddr / nvlink-hbm pools from the roadmap hardware matrix).
 - **D3 `scripts/gpu_gates/`**: runbook §0/§1/§2/§3/§6/§7/§9 + G4/G5 gates
   as executable scripts. EVERY script supports `--dry-run`;
-  `tests/unit/test_gpu_gates_scripts.py` pins that (a) dry-run emits the
+  `tests/verification/test_gpu_gates_scripts.py` pins that (a) dry-run emits the
   command plan, (b) every referenced tests/scripts/bench/deploy path EXISTS
   today — deploy day cannot discover missing files.
 - **D4 `[gpu]` extra**: flashinfer-python/triton/nixl with

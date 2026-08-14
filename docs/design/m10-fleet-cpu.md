@@ -211,7 +211,7 @@ remain byte-identical to the original full-prefix protocol. Splits reuse the
 existing digest suffix and derive only the new upper node; stored and removed
 events read node-local hashes directly. Caches without an event sink allocate
 no hashers and perform no SHA work. Reproduce the long-prefix comparison with
-`uv run python bench/kv_event_hash_bench.py --tokens 32768 --repeats 5`.
+`uv run python verification/fleet/correctness/kv_event_hash_bench.py --tokens 32768 --repeats 5`.
 
 ### D8 — Learning placement
 

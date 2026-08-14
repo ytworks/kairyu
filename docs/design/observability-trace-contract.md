@@ -28,7 +28,7 @@ existing string trace.
   its legacy SSE trace comment. Events are not emitted live, so clients see one
   stable trace envelope after execution rather than having to assemble mutable
   fragments.
-- `bench/serving_bench.py --stage-trace` sends the opt-in header, records
+- `verification/l1/performance/serving_bench.py --stage-trace` sends the opt-in header, records
   valid/partial/missing/invalid coverage, reports an observed/missing request
   denominator for every native stage, and computes nearest-rank p50/p99 stage
   durations. Producer labels that are not safe artifact identifiers cause only

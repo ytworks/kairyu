@@ -131,7 +131,7 @@
 
 ### Task 16: CI, coverage gate, bench skeleton, README
 
-**Files:** Create `.github/workflows/ci.yml`, `bench/router_latency.py`, `bench/orchestration_mock_bench.py`, `examples/` (basic offline inference, YAML DSL, server), update `README.md`.
+**Files:** Create `.github/workflows/ci.yml`, `verification/orchestration/performance/router_latency.py`, `verification/orchestration/performance/orchestration_mock_bench.py`, `examples/` (basic offline inference, YAML DSL, server), update `README.md`.
 
 - [x] CI: uv, Python 3.11+3.12 matrix, `ruff check`, `pytest --cov --cov-fail-under=80`.
 - [x] Bench skeletons print real measured numbers (router p50/p99, mock orchestration wall time) — no fabricated results; real engine benches land in M2.

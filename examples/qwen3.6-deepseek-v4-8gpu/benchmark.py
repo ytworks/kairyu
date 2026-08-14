@@ -277,7 +277,7 @@ def _serving(
     warmup_code = _run(
         [
             str(ROOT / ".venv/bin/python"),
-            str(ROOT / "bench/serving_bench.py"),
+            str(ROOT / "verification/l1/performance/serving_bench.py"),
             "--base-url",
             f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1",
             "--model",
@@ -324,7 +324,7 @@ def _serving(
         code = _run(
             [
                 str(ROOT / ".venv/bin/python"),
-                str(ROOT / "bench/serving_bench.py"),
+                str(ROOT / "verification/l1/performance/serving_bench.py"),
                 "--base-url",
                 f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1",
                 "--model",

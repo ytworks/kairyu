@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from evals.profiling import profile_scope
 from kairyu.kernels.rms_norm_gpu import try_joint_qk_rms_norm
 from kairyu.models.layers import RMSNorm
+from verification.l1.performance.profiling import profile_scope
 
 pytestmark = pytest.mark.gpu
 

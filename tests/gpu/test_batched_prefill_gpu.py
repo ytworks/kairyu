@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from evals.profiling import profile_scope
 from kairyu.engine.core.prefill import PrefillSequence, build_prefill_batch
+from verification.l1.performance.profiling import profile_scope
 
 pytestmark = pytest.mark.gpu
 

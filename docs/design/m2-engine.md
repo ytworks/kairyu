@@ -109,7 +109,7 @@ measured 47.1% lower wall time and 56.5% lower TPOT than the list path on the sa
   BlockRemoved sink restores its selected victim for retry. Thus the oldest
   valid refcount-0 leaf is selected without walking the radix tree, while the
   exact LRU and event order remain unchanged. Reproduce with
-  `uv run python bench/radix_eviction_bench.py --leaves 100000 --evictions 100`.
+  `uv run python verification/l1/performance/radix_eviction_bench.py --leaves 100000 --evictions 100`.
 - `GenerationRequest.cache_hint.session_id` (plumbed in M1) pins a session's radix path
   against eviction between orchestration steps (bounded TTL so abandoned sessions drain).
 - No copy-on-write needed (amended per review): sharing is page-aligned and partial pages
@@ -151,7 +151,7 @@ measured 47.1% lower wall time and 56.5% lower TPOT than the list path on the sa
 - Model zoo M2: Llama-3.1-8B only (goal-specified). Architecture-agnostic loader deferred.
 - Correctness gate: **teacher-forced** token-level parity with HF transformers BF16 on 64
   fixed prompts — both sides given the identical prefix at every position, only the next
-  token compared (`bench/parity_hf.py`). FP8 compared by logprob tolerance, not exact
+  token compared (`verification/l1/correctness/parity_hf.py`). FP8 compared by logprob tolerance, not exact
   match; the tolerance is measured, not asserted.
 
   *(Amended 2026-07-25 after the first hardware run — see g2 §7's amendment.* Free-running
@@ -188,7 +188,7 @@ unit tests are possible, and keeps the GPU session focused on integration + meas
 | Script | Workload | Metrics | Baselines |
 |---|---|---|---|
 | `bench/serving_sharegpt.py` | ShareGPT, 128/256 concurrent | TTFT p50/p99, TPOT, goodput | vLLM V1, SGLang |
-| `bench/multiturn_prefix.py` | synthetic multi-turn, 50% shared prefix | KV hit rate, TTFT | vLLM (prefix caching on) |
+| `verification/fleet/performance/multiturn_prefix.py` | synthetic multi-turn, 50% shared prefix | KV hit rate, TTFT | vLLM (prefix caching on) |
 | `bench/orchestration_e2e.py` | M1 Conductor DAG on real engine | per-step TTFT vs cold | vLLM backend via M1 |
 
 Identical: model, dtype, max_num_batched_tokens, request trace, hardware, driver. Configs

@@ -1748,7 +1748,11 @@ class TestF5Logic:
 
 
 def test_frontier_scoreboard_schema():
-    from bench.frontier_compare import TargetReport, TrialResult, build_scoreboard
+    from verification.product.performance.frontier_compare import (
+        TargetReport,
+        TrialResult,
+        build_scoreboard,
+    )
 
     report = TargetReport(name="kairyu", model="m")
     report.trials.append(
@@ -1800,7 +1804,7 @@ def _frontier_chunk(content=None, *, completion_tokens=None):
 
 
 async def test_frontier_tpot_uses_final_completion_tokens(monkeypatch):
-    from bench import frontier_compare
+    from verification.product.performance import frontier_compare
 
     client = _FakeFrontierClient(
         [
@@ -1826,7 +1830,7 @@ async def test_frontier_tpot_uses_final_completion_tokens(monkeypatch):
 
 
 async def test_frontier_missing_usage_never_substitutes_chunk_count(monkeypatch):
-    from bench import frontier_compare
+    from verification.product.performance import frontier_compare
 
     client = _FakeFrontierClient([_frontier_chunk("first"), _frontier_chunk("second")])
     clock = iter([0.0, 1.0, 4.0, 5.0])

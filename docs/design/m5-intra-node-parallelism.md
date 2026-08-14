@@ -147,11 +147,11 @@ maps.) The design is now:
 
 ### D6 — Scaling measurement is part of the deliverable, not an afterthought
 
-`bench/serving_bench.py` grows `--tensor-parallel`, `--dp-replicas`, `--pd` topology
+`verification/l1/performance/serving_bench.py` grows `--tensor-parallel`, `--dp-replicas`, `--pd` topology
 arguments and a sweep mode that emits the TP=2 base and TP=4/8 points into one results
 file (G2 §8 same-file rule). A6 uses the stricter committed
-`bench/run_g2_a6_formal.py` operator with
-`bench/g2_a6_vllm_bench.py`: one fresh-server shard per arm/TP/workload/paired
+`verification/l1/performance/run_g2_a6_formal.py` operator with
+`verification/l1/performance/g2_a6_vllm_bench.py`: one fresh-server shard per arm/TP/workload/paired
 round, strict one-attempt SSE accounting, a complete raw matrix, and independent
 replay. Each cell first retains the unique-prompt synchronized
 B=1/2/4/8/16 graph-size request warmup. That evidence binds request geometry
@@ -161,10 +161,10 @@ hashes before/after, immutable image and post-start container identities,
 mount/import/YAML/startup-message provenance, resolved backend/package
 attestation, and equal 8,192-block usable KV capacity after Kairyu's one graph
 scratch block and vLLM's one mandatory `BlockPool` null block.
-`bench/multiturn_prefix.py`
+`verification/fleet/performance/multiturn_prefix.py`
 defines the deterministic A6/A7 shared-prefix
 workload geometry and retains its CPU KV-manager sanity check;
-`bench/tp_kv_hit_g2_a7_bench.py` runs that geometry through the production engine and
+`verification/l1/performance/tp_kv_hit_g2_a7_bench.py` runs that geometry through the production engine and
 gateway. The former also retains its `--replicas` mode for A8's affinity hit-rate
 clause.
 
@@ -220,12 +220,12 @@ Same split as M2 §3. CPU now, GPU session later:
 
 | Gate | Script | Notes |
 |---|---|---|
-| A1, A2 | `bench/parity_tp.py` (new) | 64 fixed prompts, overlap ON/OFF; 8B TP=1 vs TP=2, 70B TP=2 vs 4/8 |
-| A3–A5 | `bench/serving_bench.py --sweep-tp 2,4,8` | TP=2 base in same results file; plus a report-only TPOT point at concurrency 64 (stresses all-reduce growth; no threshold, A9 spirit) |
-| A6 | `bench/run_g2_a6_formal.py` + `bench/g2_a6_vllm_bench.py` vs pinned stock vLLM TP=4/8 | Four paired fresh-server rounds over the binding ShareGPT c128 burst and serialized shared-prefix trace; unique B=1/2/4/8/16 graph warmup; full source/checkpoint/runtime attestation; report-only fixed open-loop sweep; raw/manifest independent replay |
-| A7 | `bench/tp_kv_hit_g2_a7_bench.py` | fixed 50%-shared-prefix trace on the real native Qwen3-32B engine at TP4/8, direct and through the single-replica gateway; each engine-derived prompt-token hit rate must be strictly >80%, with raw/config/topology evidence verified from the committed artifact |
-| A8, A9 | `bench/serving_bench.py --dp-replicas 2` + `multiturn_prefix.py --replicas 2` | goodput, router p99, affinity hit retention; DP-vs-TP sweep |
-| A10 | `bench/pd_mixed.py` (new) | long-prefill + decode-SLO mix; handoff p99 |
+| A1, A2 | `verification/l1/correctness/parity_tp.py` (new) | 64 fixed prompts, overlap ON/OFF; 8B TP=1 vs TP=2, 70B TP=2 vs 4/8 |
+| A3–A5 | `verification/l1/performance/serving_bench.py --sweep-tp 2,4,8` | TP=2 base in same results file; plus a report-only TPOT point at concurrency 64 (stresses all-reduce growth; no threshold, A9 spirit) |
+| A6 | `verification/l1/performance/run_g2_a6_formal.py` + `verification/l1/performance/g2_a6_vllm_bench.py` vs pinned stock vLLM TP=4/8 | Four paired fresh-server rounds over the binding ShareGPT c128 burst and serialized shared-prefix trace; unique B=1/2/4/8/16 graph warmup; full source/checkpoint/runtime attestation; report-only fixed open-loop sweep; raw/manifest independent replay |
+| A7 | `verification/l1/performance/tp_kv_hit_g2_a7_bench.py` | fixed 50%-shared-prefix trace on the real native Qwen3-32B engine at TP4/8, direct and through the single-replica gateway; each engine-derived prompt-token hit rate must be strictly >80%, with raw/config/topology evidence verified from the committed artifact |
+| A8, A9 | `verification/l1/performance/serving_bench.py --dp-replicas 2` + `multiturn_prefix.py --replicas 2` | goodput, router p99, affinity hit retention; DP-vs-TP sweep |
+| A10 | `verification/l1/performance/pd_mixed.py` (new) | long-prefill + decode-SLO mix; handoff p99 |
 
 A7 closed on Qwen3-32B and 8× RTX PRO 6000 on 2026-07-29. TP4 and TP8
 produced the same engine-token accounting at each path: direct 87.6725% and

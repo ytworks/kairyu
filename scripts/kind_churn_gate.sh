@@ -11,7 +11,7 @@ Environment overrides:
   F1A_CLUSTER_NAME, F1A_KIND_CONFIG, F1A_MANIFEST_DIR
   F1A_RESULTS_DIR, F1A_GATEWAY_PORT
 
-The formal profile is frozen in bench/fleet_churn_bench.py.  --smoke only
+The formal profile is frozen in verification/fleet/resilience/fleet_churn_bench.py.  --smoke only
 shortens the same protocol to a four-replica kustomize overlay and two epochs.
 EOF
 }
@@ -220,7 +220,7 @@ source_inputs=(
   pyproject.toml
   uv.lock
   kairyu
-  bench/fleet_churn_bench.py
+  verification/fleet/resilience/fleet_churn_bench.py
   scripts/kind_churn_gate.sh
   deploy/kind/f1a
   .github/workflows/f1a-churn.yml
@@ -547,7 +547,7 @@ fi
 
 ulimit -n 65536 2>/dev/null || true
 export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1a-uv-cache}
-"$UV" run --frozen python bench/fleet_churn_bench.py \
+"$UV" run --frozen python verification/fleet/resilience/fleet_churn_bench.py \
   --profile "$PROFILE" \
   --gateway-url "$GATEWAY_URL" \
   --kubectl "$KUBECTL" \
@@ -574,7 +574,7 @@ export UV_CACHE_DIR=${UV_CACHE_DIR:-/tmp/kairyu-f1a-uv-cache}
   --output "$OUTPUT" \
   --assert-gate
 
-"$UV" run --frozen python bench/fleet_churn_bench.py \
+"$UV" run --frozen python verification/fleet/resilience/fleet_churn_bench.py \
   --verify-artifact "$OUTPUT" \
   --assert-gate >"$VERIFIER_OUTPUT"
 echo "F1a ${PROFILE} churn gate passed: ${OUTPUT}"

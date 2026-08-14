@@ -62,7 +62,7 @@ performance evidence. Reproduce any proposed improvement without a profiler
 using the unchanged owning gate. The helper is also not a substitute for the
 separate per-Torch-operator profiler workflow.
 
-Conversely, `bench/serving_bench.py --profile` is only the local HTTP client's
+Conversely, `verification/l1/performance/serving_bench.py --profile` is only the local HTTP client's
 CPU `torch.profiler` sidecar; it cannot see this launched server, its engine/TP
 children, or their GPUs. `serving_bench.py --stage-trace` is a third contract:
 privacy-minimized timing reported by the target itself. Keep all three sources
@@ -184,7 +184,7 @@ for KAIRYU_PROFILE_READY_ATTEMPT in $(seq 1 300); do
 done
 curl -fsS http://127.0.0.1:8000/readyz >/dev/null
 
-.venv/bin/python bench/serving_bench.py \
+.venv/bin/python verification/l1/performance/serving_bench.py \
   --base-url http://127.0.0.1:8000 --model "$KAIRYU_PROFILE_MODEL" \
   --num-requests 32 --concurrency 32 --max-tokens 128 \
   --temperature 0 --seed 0 --ignore-eos --results-dir ''
@@ -196,7 +196,7 @@ while (( $(date -u +%s) < KAIRYU_PROFILE_CAPTURE_NOT_BEFORE )); do
 done
 date -u +%Y-%m-%dT%H:%M:%S.%3NZ \
   > "$KAIRYU_PROFILE_DIR/measurement-start-utc.txt"
-.venv/bin/python bench/serving_bench.py \
+.venv/bin/python verification/l1/performance/serving_bench.py \
   --base-url http://127.0.0.1:8000 --model "$KAIRYU_PROFILE_MODEL" \
   --num-requests 256 --concurrency 32 --max-tokens 128 \
   --temperature 0 --seed 0 --ignore-eos \
@@ -247,14 +247,14 @@ fake and mirrored in `tests/gpu/`). The real runner is `PagedModelRunner`
 
 ```bash
 ./examples/deepseek-v4-flash-0731-8gpu/run.sh      # pinned 8-GPU Kairyu L3 + vLLM L1 stack
-uv run python bench/serving_bench.py --model kairyu --num-requests 256 --concurrency 128
-uv run python bench/multiturn_prefix.py           # CPU workload/KV-manager diagnostic
+uv run python verification/l1/performance/serving_bench.py --model kairyu --num-requests 256 --concurrency 128
+uv run python verification/fleet/performance/multiturn_prefix.py           # CPU workload/KV-manager diagnostic
 # Real-engine TP4/8 direct+gateway A7 procedure: §6.
 # baselines on the SAME box, same trace:
 vllm serve meta-llama/Llama-3.1-8B-Instruct --enable-prefix-caching &
-uv run python bench/serving_bench.py --base-url http://localhost:8000 --model <vllm>
+uv run python verification/l1/performance/serving_bench.py --base-url http://localhost:8000 --model <vllm>
 python -m sglang.launch_server --model-path ... &
-uv run python bench/serving_bench.py --base-url http://localhost:30000 --model <sglang>
+uv run python verification/l1/performance/serving_bench.py --base-url http://localhost:30000 --model <sglang>
 ```
 
 Controls checklist (m2-engine.md §5) for performance claims: ≥3 runs, fixed
@@ -293,7 +293,7 @@ docker run --rm --gpus device=0 --entrypoint python \
   -v /tmp:/host-tmp \
   -w /workspace \
   kairyu-depth-ab:20260731-issue156 \
-  /workspace/bench/draft_quant_qwen.py \
+  /workspace/verification/l1/correctness/draft_quant_qwen.py \
   --model-path /model/qwen3-32b \
   --draft-path /draft \
   --source-commit "$(git rev-parse HEAD)" \
@@ -374,11 +374,11 @@ GPU-only remainder (design m5 §4.2).
 
   ```bash
   CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run --frozen python \
-    bench/decode_page_table_cache_qwen.py \
+    verification/l1/performance/decode_page_table_cache_qwen.py \
     --model-path /models/qwen3-32b \
     --output bench/results/issue-229-page-table-cache-qwen3-32b-tp8-<date>.json \
     --assert-gate
-  uv run --frozen python bench/decode_page_table_cache_qwen.py \
+  uv run --frozen python verification/l1/performance/decode_page_table_cache_qwen.py \
     --verify bench/results/issue-229-page-table-cache-qwen3-32b-tp8-<date>.json \
     --model-path /models/qwen3-32b --assert-gate
   ```
@@ -400,15 +400,15 @@ GPU-only remainder (design m5 §4.2).
   CUDA_VISIBLE_DEVICES=0,1 uv run --frozen python scripts/test_prerequisites.py \
     --min-gpus 2 --require-nccl --require-module transformers
   CUDA_VISIBLE_DEVICES=0,1 uv run --frozen pytest --fail-on-skip -m gpu tests/gpu/test_tp_sampling_owner_nccl.py -v --no-cov
-  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run --frozen python bench/tp_sampling_owner_bench.py \
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run --frozen python verification/l1/correctness/tp_sampling_owner_bench.py \
     --world-size 8 --assert-gate \
     --output bench/results/issue-225-tp-sampling-comm-<gpu>-<date>.json
-  uv run --frozen python bench/tp_sampling_owner_bench.py \
+  uv run --frozen python verification/l1/correctness/tp_sampling_owner_bench.py \
     --verify bench/results/issue-225-tp-sampling-comm-<gpu>-<date>.json --assert-gate
-  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run --frozen python bench/tp_sampling_owner_qwen.py \
+  CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 uv run --frozen python verification/l1/correctness/tp_sampling_owner_qwen.py \
     --model-path /models/qwen3-32b --assert-gate \
     --output bench/results/issue-225-tp-sampling-qwen3-32b-<gpu>-<date>.json
-  uv run --frozen python bench/tp_sampling_owner_qwen.py \
+  uv run --frozen python verification/l1/correctness/tp_sampling_owner_qwen.py \
     --verify bench/results/issue-225-tp-sampling-qwen3-32b-<gpu>-<date>.json \
     --assert-gate
   ```
@@ -456,21 +456,21 @@ GPU-only remainder (design m5 §4.2).
   topology. Both evidence files must independently replay against their
   recorded source commit before closure.
 - Gate A1: Llama-3.1-8B, 64 fixed prompts, 16-token full continuations:
-  `bench/parity_tp.py --tp 1,2 --num-prompts 64 --max-new-tokens 16
+  `verification/l1/correctness/parity_tp.py --tp 1,2 --num-prompts 64 --max-new-tokens 16
   --model-path <checkpoint>` records TP1/2 with overlap ON/OFF. Run
-  `bench/parity_hf.py` against one shared reference at `--tp 1` and `--tp 2`,
-  then pass all four files to `bench/gate_a1.py`. The assembler retains the raw
+  `verification/l1/correctness/parity_hf.py` against one shared reference at `--tp 1` and `--tp 2`,
+  then pass all four files to `verification/l1/correctness/gate_a1.py`. The assembler retains the raw
   continuations/reference and fails unless both amended teacher-forced verdicts,
   overlap transparency, checkpoint/prompt identity, and clean-code provenance pass.
 - Gate A2: use
   `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic@f50dbad2c84590ca17dc51e207c34321b65ff14b`
   with compressed-tensors FP8 W8A8 and BF16 model/KV dtype. First create one
-  shared 64×16 HF reference with `bench/parity_hf.py --reference-only
+  shared 64×16 HF reference with `verification/l1/correctness/parity_hf.py --reference-only
   --reference-device-map auto --reference-batch-size 8`; then run the same
   command without `--reference-only` at `--tp 2`, `--tp 4`, and `--tp 8`.
   Always pass the pinned source through `--checkpoint-repo` and
   `--checkpoint-revision`. Assemble the four raw files with
-  `bench/gate_a2.py --reference ... --teacher-tp2 ... --teacher-tp4 ...
+  `verification/l1/correctness/gate_a2.py --reference ... --teacher-tp2 ... --teacher-tp4 ...
   --teacher-tp8 ... --out ...`. The assembler requires 64×16 raw positions
   at every TP degree, all 15 complete safetensors SHA-256s, the measured
   reference noise floor, CUDA/NCCL/topology provenance, and one clean commit;
@@ -479,15 +479,15 @@ GPU-only remainder (design m5 §4.2).
   `bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json` (HF
   1005/1024; TP2/4/8 1006/1005/1006; zero substantive disagreements at every
   degree; all ten assembler checks pass).
-- Gates A3–A5: `bench/serving_bench.py --sweep-tp 2,4,8` (TP=2 base in same file;
+- Gates A3–A5: `verification/l1/performance/serving_bench.py --sweep-tp 2,4,8` (TP=2 base in same file;
   conc-64 report-only point).
 - Gate A6: prepare the pinned trace bundle with
-  `.venv/bin/python bench/g2_a6_vllm_bench.py prepare-traces
+  `.venv/bin/python verification/l1/performance/g2_a6_vllm_bench.py prepare-traces
   --tokenizer /tmp/kairyu-a7-qwen3-32b-tokenizer.json
   --dataset /tmp/ShareGPT_V3_unfiltered_cleaned_split.json
   --output /tmp/a6-traces/g2-a6-traces.json`, then run
-  `.venv/bin/python bench/run_g2_a6_formal.py --dry-run` and
-  `.venv/bin/python bench/run_g2_a6_formal.py` from a clean committed tree
+  `.venv/bin/python verification/l1/performance/run_g2_a6_formal.py --dry-run` and
+  `.venv/bin/python verification/l1/performance/run_g2_a6_formal.py` from a clean committed tree
   against
   Qwen3-32B and pinned stock vLLM 0.26.0 at TP4/8. Collect all four paired
   K/V, V/K, V/K, K/V fresh-server rounds for both the 128-request c128
@@ -516,7 +516,7 @@ GPU-only remainder (design m5 §4.2).
   ```bash
   cp -a /tmp/g2-a6-formal/artifact \
     bench/results/g2-a6-vllm-qwen3-32b-<gpu>-<date>
-  .venv/bin/python bench/g2_a6_vllm_bench.py verify \
+  .venv/bin/python verification/l1/performance/g2_a6_vllm_bench.py verify \
     --artifact bench/results/g2-a6-vllm-qwen3-32b-<gpu>-<date> \
     --assert-gate
   sha256sum /tmp/g2-a6-formal/artifact/g2-a6-vllm-manifest.json \
@@ -538,12 +538,12 @@ GPU-only remainder (design m5 §4.2).
   KAIRYU_ISSUE333_PYTHON=/absolute/path/to/existing-kairyu-venv/bin/python
   KAIRYU_ISSUE333_RESULTS=/absolute/path/to/writable-kairyu-checkout
   "$KAIRYU_ISSUE333_PYTHON" -B \
-    "$KAIRYU_ISSUE333_SOURCE/bench/g2_a6_vllm_bench.py" prepare-traces \
+    "$KAIRYU_ISSUE333_SOURCE/verification/l1/performance/g2_a6_vllm_bench.py" prepare-traces \
     --tokenizer /tmp/kairyu-a7-qwen3-32b-tokenizer.json \
     --dataset /tmp/ShareGPT_V3_unfiltered_cleaned_split.json \
     --output /tmp/issue-333-traces/g2-a6-traces.json
   "$KAIRYU_ISSUE333_PYTHON" -B \
-    "$KAIRYU_ISSUE333_SOURCE/bench/issue_333_proc_http_bench.py" run \
+    "$KAIRYU_ISSUE333_SOURCE/verification/l1/performance/issue_333_proc_http_bench.py" run \
     --repo "$KAIRYU_ISSUE333_SOURCE" \
     --env-artifact \
       "$KAIRYU_ISSUE333_SOURCE/bench/results/env-2026-07-30.json" \
@@ -553,13 +553,13 @@ GPU-only remainder (design m5 §4.2).
     --work-dir /tmp/issue-333-proc-http \
     --assert-integrity
   "$KAIRYU_ISSUE333_PYTHON" -B \
-    "$KAIRYU_ISSUE333_SOURCE/bench/issue_333_proc_http_bench.py" verify \
+    "$KAIRYU_ISSUE333_SOURCE/verification/l1/performance/issue_333_proc_http_bench.py" verify \
     --artifact /tmp/issue-333-proc-http/artifact \
     --assert-integrity
   cp -a /tmp/issue-333-proc-http \
     "$KAIRYU_ISSUE333_RESULTS/bench/results/issue-333-proc-http-qwen3-32b-<gpu>-<date>"
   "$KAIRYU_ISSUE333_PYTHON" -B \
-    "$KAIRYU_ISSUE333_SOURCE/bench/issue_333_proc_http_bench.py" verify \
+    "$KAIRYU_ISSUE333_SOURCE/verification/l1/performance/issue_333_proc_http_bench.py" verify \
     --artifact \
       "$KAIRYU_ISSUE333_RESULTS/bench/results/issue-333-proc-http-qwen3-32b-<gpu>-<date>/artifact" \
     --assert-integrity
@@ -610,7 +610,7 @@ GPU-only remainder (design m5 §4.2).
   0.9204811339283963, `no_material_reduction`, hypothesis `not_supported`).
   The invalid v1 observation remains separately retained as
   `bench/results/issue-333-proc-http-qwen3-32b-rtxpro6000-discarded-v1-2026-08-05/`.
-- Gate A7: run `bench/tp_kv_hit_g2_a7_bench.py` against Qwen3-32B at TP4
+- Gate A7: run `verification/l1/performance/tp_kv_hit_g2_a7_bench.py` against Qwen3-32B at TP4
   and TP8, once through each replica's direct endpoint and once through its
   single-replica gateway. Assemble
   `bench/results/g2-a7-kv-hit-qwen3-32b-<gpu>-<date>/`; the verifier must
@@ -646,7 +646,7 @@ GPU-only remainder (design m5 §4.2).
   ```bash
   export KAIRYU_A8_TRACE_BUNDLE='/tmp/a6-traces/g2-a6-traces.json'
   export KAIRYU_A8_EXPECTED_COMMIT='<40-lowercase-hex-commit>'
-  uv run --frozen python bench/dp_scaling_g2_a8_bench.py measure \
+  uv run --frozen python verification/l1/performance/dp_scaling_g2_a8_bench.py measure \
     --single-url http://127.0.0.1:8200/v1 \
     --dp-url http://127.0.0.1:8202/v1 \
     --trace-bundle "$KAIRYU_A8_TRACE_BUNDLE" \
@@ -655,9 +655,9 @@ GPU-only remainder (design m5 §4.2).
     --image-id "$KAIRYU_A8_IMAGE_ID" \
     --expected-commit "$KAIRYU_A8_EXPECTED_COMMIT" \
     --assert-gate
-  uv run --frozen python bench/dp_scaling_g2_a8_bench.py verify \
+  uv run --frozen python verification/l1/performance/dp_scaling_g2_a8_bench.py verify \
     --artifact "$KAIRYU_A8_RUN_DIR" --assert-gate
-  uv run --frozen python bench/dp_scaling_g2_a8_bench.py replay \
+  uv run --frozen python verification/l1/performance/dp_scaling_g2_a8_bench.py replay \
     --artifact "$KAIRYU_A8_RUN_DIR" --assert-gate
   ```
 
@@ -740,7 +740,7 @@ GPU-only remainder (design m5 §4.2).
   curl -fsS http://127.0.0.1:8301/readyz
 
   export KAIRYU_A9_EXPECTED_COMMIT='<40-lowercase-hex-commit>'
-  uv run --frozen python bench/g2_a9_dp_tp_crossover_bench.py measure \
+  uv run --frozen python verification/l1/performance/g2_a9_dp_tp_crossover_bench.py measure \
     --engine-url http://127.0.0.1:8300/v1 \
     --gateway-url http://127.0.0.1:8301/v1 \
     --trace-bundle /tmp/a6-traces/g2-a6-traces.json \
@@ -749,9 +749,9 @@ GPU-only remainder (design m5 §4.2).
     --image-id "$KAIRYU_A9_IMAGE_ID" \
     --expected-commit "$KAIRYU_A9_EXPECTED_COMMIT" \
     --assert-gate
-  uv run --frozen python bench/g2_a9_dp_tp_crossover_bench.py verify \
+  uv run --frozen python verification/l1/performance/g2_a9_dp_tp_crossover_bench.py verify \
     --artifact "$KAIRYU_A9_RUN_DIR" --assert-gate
-  uv run --frozen python bench/g2_a9_dp_tp_crossover_bench.py replay \
+  uv run --frozen python verification/l1/performance/g2_a9_dp_tp_crossover_bench.py replay \
     --artifact "$KAIRYU_A9_RUN_DIR" --assert-gate
   ```
 
@@ -769,7 +769,7 @@ GPU-only remainder (design m5 §4.2).
   Goodput and TTFT use the A8 definitions. TPOT is explicitly versioned as
   `stream-terminal-token-v1`:
   `(stream terminal - first content) / (completion_tokens - 1)`. This matches
-  `bench/serving_bench.py` and includes the final usage/finish/`[DONE]` tail;
+  `verification/l1/performance/serving_bench.py` and includes the final usage/finish/`[DONE]` tail;
   it must not be relabeled as `frontier_compare.py`'s last-content TPOT.
   Report every rate and repeat, median/MAD, observed maximum in-flight count,
   all measured ordering transitions with both arms' observed concurrency at
@@ -829,12 +829,12 @@ GPU-only remainder (design m5 §4.2).
   tree:
 
   ```bash
-  CUDA_VISIBLE_DEVICES=0,1 uv run python bench/pd_overlap_qwen.py \
+  CUDA_VISIBLE_DEVICES=0,1 uv run python verification/l1/performance/pd_overlap_qwen.py \
     --model-path <qwen3-32b-checkpoint> \
     --prefill-device 0 --decode-device 1 \
     --output bench/results/issue-223-pd-overlap-qwen3-32b-<gpu>-<date>.json \
     --assert-gate
-  uv run python bench/pd_overlap_qwen.py \
+  uv run python verification/l1/performance/pd_overlap_qwen.py \
     --verify bench/results/issue-223-pd-overlap-qwen3-32b-<gpu>-<date>.json \
     --assert-gate
   ```
@@ -846,13 +846,13 @@ GPU-only remainder (design m5 §4.2).
   throughput, and ratios between the two fixed-order conditions are
   **diagnostic only**: OS scheduling, runtime launch, clock, thermal, and
   shared-host jitter must not turn a short performance sample into a correctness
-  gate. The historical `bench/pd_mixed.py` ≤5 ms p99 target is therefore not a
+  gate. The historical `verification/l1/performance/pd_mixed.py` ≤5 ms p99 target is therefore not a
   closure criterion for #223.
 
 ## 7. M6 — 2-node day(s), IB/RoCE ≥400Gb/s (prereq: all M5 gates; goal G2 gates B1–B5)
 
 CPU half already merged: ClusterSpec, KVTransport protocol + LocalFabric +
-TCP-loopback, `bench/kv_transfer_bench.py` (CPU-runnable), `openai_backend` remote-
+TCP-loopback, `verification/l1/performance/kv_transfer_bench.py` (CPU-runnable), `openai_backend` remote-
 replica fixes (real SSE, pooled client, optional auth, token counts).
 
 - 7.1 Record fabric truth: raw microbench via `kv_transfer_bench.py` →
@@ -889,7 +889,7 @@ image, and drill are unchanged.
   `scripts/compose_smoke.sh` end to end, including the kill/recover step
   (drains one GPU replica — schedule accordingly).
 - 9.3 Repeat A7's formal gateway arm with per-session `user` ids using
-  `bench/tp_kv_hit_g2_a7_bench.py`. Record the
+  `verification/l1/performance/tp_kv_hit_g2_a7_bench.py`. Record the
   `kairyu_pool_decisions_total{reason="session_affinity"}` count beside the
   engine-derived prompt-token hit rate, but never use routing counters as
   cache-hit truth (G2 A7/A8 through the M7 path).
@@ -898,7 +898,7 @@ image, and drill are unchanged.
   hardware.
 - 9.5 F5a priority overload: use the Qwen3-32B example's one-replica gateway,
   tenant class mapping, and Batch API, then run
-  `uv run python bench/priority_overload_gpu_bench.py --assert-gate
+  `uv run python verification/fleet/resilience/priority_overload_gpu_bench.py --assert-gate
   --model-revision <40-hex-revision> --replica-image-digest <sha256:...>
   --gateway-image-digest <sha256:...>`.
   The harness performs an untimed warmup, calibrates steady-state capacity,
@@ -943,7 +943,7 @@ image, and drill are unchanged.
   inventory/topology and defaults to the four endpoints above:
 
   ```bash
-  uv run python bench/kv_aware_ttft_f2c_bench.py \
+  uv run python verification/fleet/performance/kv_aware_ttft_f2c_bench.py \
     --profile formal \
     --output-dir bench/results/f2c-kv-aware-ttft-qwen3-32b-<date> \
     --model qwen3-32b \
@@ -953,7 +953,7 @@ image, and drill are unchanged.
     --expected-commit <40-hex-source-commit> \
     --assert-gate
 
-  uv run python bench/kv_aware_ttft_f2c_bench.py \
+  uv run python verification/fleet/performance/kv_aware_ttft_f2c_bench.py \
     --verify-artifact bench/results/f2c-kv-aware-ttft-qwen3-32b-<date> \
     --assert-gate
 
@@ -1006,14 +1006,14 @@ image, and drill are unchanged.
   without turning host or device timing into a correctness gate.
 
   ```bash
-  uv run python bench/batched_spec_verify_qwen.py \
+  uv run python verification/l1/correctness/batched_spec_verify_qwen.py \
     --model-path /path/to/qwen3-32b \
     --tp 8 \
     --output \
       bench/results/issue-215-batched-spec-verify-qwen3-32b-tp8-<date>.json \
     --assert-gate
 
-  uv run python bench/batched_spec_verify_qwen.py \
+  uv run python verification/l1/correctness/batched_spec_verify_qwen.py \
     --verify \
       bench/results/issue-215-batched-spec-verify-qwen3-32b-tp8-<date>.json \
     --model-path /path/to/qwen3-32b \
@@ -1045,7 +1045,7 @@ image, and drill are unchanged.
   paired real-engine token usage:
 
   ```bash
-  uv run --frozen python bench/global_kv_pool_decision.py \
+  uv run --frozen python verification/fleet/diagnostic/global_kv_pool_decision.py \
     --verify-artifact \
     bench/results/f4c-global-kv-pool-decision-2026-07-31.json \
     --assert-gate
@@ -1161,7 +1161,7 @@ image, and drill are unchanged.
     --mount \
       "type=bind,src=$RUN_ROOT/metadata/tp4,dst=/run/kairyu-meta,readonly" \
     "$IMAGE_ID" \
-    bench/dram_kv_tier_qwen.py run \
+    verification/fleet/performance/dram_kv_tier_qwen.py run \
       --tp 4 --model-path /models/qwen3-32b \
       --output /evidence/dram-kv-tier-qwen3-32b-tp4-raw.jsonl \
       --image-id "$IMAGE_ID" \
@@ -1203,7 +1203,7 @@ image, and drill are unchanged.
     --mount \
       "type=bind,src=$RUN_ROOT/metadata/tp8,dst=/run/kairyu-meta,readonly" \
     "$IMAGE_ID" \
-    bench/dram_kv_tier_qwen.py run \
+    verification/fleet/performance/dram_kv_tier_qwen.py run \
       --tp 8 --model-path /models/qwen3-32b \
       --output /evidence/dram-kv-tier-qwen3-32b-tp8-raw.jsonl \
       --image-id "$IMAGE_ID" \
@@ -1241,7 +1241,7 @@ image, and drill are unchanged.
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
-    "$IMAGE_ID" bench/dram_kv_tier_qwen.py assemble \
+    "$IMAGE_ID" verification/fleet/performance/dram_kv_tier_qwen.py assemble \
       --tp4-raw /evidence/tp4/dram-kv-tier-qwen3-32b-tp4-raw.jsonl \
       --tp8-raw /evidence/tp8/dram-kv-tier-qwen3-32b-tp8-raw.jsonl \
       --output-dir /evidence/artifact --assert-gate
@@ -1253,7 +1253,7 @@ image, and drill are unchanged.
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
-    "$IMAGE_ID" bench/dram_kv_tier_qwen.py verify \
+    "$IMAGE_ID" verification/fleet/performance/dram_kv_tier_qwen.py verify \
       --artifact-dir /evidence/artifact --assert-gate
 
   docker run --rm --user "$HOST_UID:$HOST_GID" \
@@ -1261,7 +1261,7 @@ image, and drill are unchanged.
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
-    "$IMAGE_ID" bench/dram_kv_tier_qwen.py replay \
+    "$IMAGE_ID" verification/fleet/performance/dram_kv_tier_qwen.py replay \
       --tp4-raw /evidence/artifact/dram-kv-tier-qwen3-32b-tp4-raw.jsonl \
       --tp8-raw /evidence/artifact/dram-kv-tier-qwen3-32b-tp8-raw.jsonl \
       --assert-gate
@@ -1413,7 +1413,7 @@ image, and drill are unchanged.
       --mount "type=bind,src=$RUN_ROOT/$label,dst=/evidence" \
       --mount \
         "type=bind,src=$RUN_ROOT/metadata/$label,dst=/run/kairyu-meta,readonly" \
-      "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py run \
+      "$IMAGE_ID" verification/fleet/correctness/agentic_kv_tier_f4b_bench.py run \
         --arm "$arm" --round "$round" --cohort "$cohort" \
         --model-path /models/qwen3-32b \
         "${PROFILE_ARGS[@]}" \
@@ -1458,7 +1458,7 @@ image, and drill are unchanged.
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
-    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py assemble \
+    "$IMAGE_ID" verification/fleet/correctness/agentic_kv_tier_f4b_bench.py assemble \
       --raw /evidence/round0-off/round0-off-raw.jsonl \
       --raw /evidence/round0-on/round0-on-raw.jsonl \
       --raw /evidence/round1-on/round1-on-raw.jsonl \
@@ -1471,7 +1471,7 @@ image, and drill are unchanged.
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
-    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py verify \
+    "$IMAGE_ID" verification/fleet/correctness/agentic_kv_tier_f4b_bench.py verify \
       --artifact /evidence/artifact --assert-gate
 
   docker run --rm --user "$HOST_UID:$HOST_GID" \
@@ -1479,7 +1479,7 @@ image, and drill are unchanged.
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
-    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py replay \
+    "$IMAGE_ID" verification/fleet/correctness/agentic_kv_tier_f4b_bench.py replay \
       --raw /evidence/artifact/agentic-kv-tier-f4b-raw.jsonl \
       --assert-gate
   ```
@@ -1528,7 +1528,7 @@ image, and drill are unchanged.
       --mount "type=bind,src=$RUN_ROOT/$label,dst=/evidence" \
       --mount \
         "type=bind,src=$QUALITY_METADATA/$label,dst=/run/kairyu-meta,readonly" \
-      "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py quality-run \
+      "$IMAGE_ID" verification/fleet/correctness/agentic_kv_tier_f4b_bench.py quality-run \
         --arm "$arm" --cohort A \
         --performance-raw-sha256 "$PERFORMANCE_RAW_SHA256" \
         --model-path /models/qwen3-32b \
@@ -1561,7 +1561,7 @@ image, and drill are unchanged.
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount "type=bind,src=$RUN_ROOT,dst=/evidence" \
-    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py seal-quality \
+    "$IMAGE_ID" verification/fleet/correctness/agentic_kv_tier_f4b_bench.py seal-quality \
       --performance-artifact /evidence/artifact \
       --quality-raw /evidence/quality-off/quality-off-raw.jsonl \
       --quality-raw /evidence/quality-on/quality-on-raw.jsonl \
@@ -1573,7 +1573,7 @@ image, and drill are unchanged.
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
-    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py verify-quality \
+    "$IMAGE_ID" verification/fleet/correctness/agentic_kv_tier_f4b_bench.py verify-quality \
       --artifact /evidence/artifact-with-quality --assert-gate
 
   docker run --rm --user "$HOST_UID:$HOST_GID" \
@@ -1581,7 +1581,7 @@ image, and drill are unchanged.
     -w /workspace/kairyu \
     --mount "type=bind,src=$SOURCE_ROOT,dst=/workspace/kairyu,readonly" \
     --mount "type=bind,src=$RUN_ROOT,dst=/evidence,readonly" \
-    "$IMAGE_ID" bench/agentic_kv_tier_f4b_bench.py replay-quality \
+    "$IMAGE_ID" verification/fleet/correctness/agentic_kv_tier_f4b_bench.py replay-quality \
       --performance-raw \
         /evidence/artifact-with-quality/agentic-kv-tier-f4b-raw.jsonl \
       --quality-raw \
@@ -1707,21 +1707,21 @@ image, and drill are unchanged.
 
   ```bash
   uv run --frozen python -I -B \
-    bench/kv_answer_equivalence_bench.py run-native \
+    verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
     --cell f2c-tp2 --model-path <model-path> \
     --parent-manifest <f2c-parent-manifest> \
     --parent-raw <f2c-parent-raw> \
     --output <run-root>/f2c-tp2.jsonl --assert-gate
 
   uv run --frozen python -I -B \
-    bench/kv_answer_equivalence_bench.py run-native \
+    verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
     --cell f2d-tp2 --model-path <model-path> \
     --parent-manifest <f2d-parent-manifest> \
     --parent-raw <f2d-parent-raw> \
     --output <run-root>/f2d-tp2.jsonl --assert-gate
 
   uv run --frozen python -I -B \
-    bench/kv_answer_equivalence_bench.py run-native \
+    verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
     --cell f4a-tp4 --model-path <model-path> \
     --parent-manifest <f4a-parent-manifest> \
     --parent-raw <f4a-tp4-parent-raw> \
@@ -1729,7 +1729,7 @@ image, and drill are unchanged.
     --output <run-root>/f4a-tp4.jsonl --assert-gate
 
   uv run --frozen python -I -B \
-    bench/kv_answer_equivalence_bench.py run-native \
+    verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
     --cell f4a-tp8 --model-path <model-path> \
     --parent-manifest <f4a-parent-manifest> \
     --parent-raw <f4a-tp8-parent-raw> \
@@ -1737,7 +1737,7 @@ image, and drill are unchanged.
     --output <run-root>/f4a-tp8.jsonl --assert-gate
 
   uv run --frozen python -I -B \
-    bench/kv_answer_equivalence_bench.py run-native \
+    verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
     --cell f4b-tp4 --model-path <model-path> \
     --parent-manifest <f4b-parent-manifest> \
     --parent-raw <f4b-parent-raw> \
@@ -1753,7 +1753,7 @@ image, and drill are unchanged.
 
   ```bash
   uv run --frozen python -I -B \
-    bench/kv_answer_equivalence_bench.py assemble \
+    verification/l1/correctness/kv_answer_equivalence_bench.py assemble \
     --f2c-tp2 <run-root>/f2c-tp2.jsonl \
     --f2d-tp2 <run-root>/f2d-tp2.jsonl \
     --f4a-tp4 <run-root>/f4a-tp4.jsonl \
@@ -1762,11 +1762,11 @@ image, and drill are unchanged.
     --output-dir bench/results/<b7-artifact> --assert-gate
 
   uv run --frozen python -I -B \
-    bench/kv_answer_equivalence_bench.py verify \
+    verification/l1/correctness/kv_answer_equivalence_bench.py verify \
     --artifact bench/results/<b7-artifact> --assert-gate
 
   uv run --frozen python -I -B \
-    bench/kv_answer_equivalence_bench.py replay \
+    verification/l1/correctness/kv_answer_equivalence_bench.py replay \
     --artifact bench/results/<b7-artifact> --assert-gate
   ```
 
@@ -1808,16 +1808,16 @@ image, and drill are unchanged.
 
   ```bash
   uv run --frozen python -I -B \
-    bench/batch_invariance_bench.py run-native \
+    verification/l1/correctness/batch_invariance_bench.py run-native \
     --model-path <qwen3-32b-model-path> \
     --output-dir bench/results/<a12-artifact> --assert-gate
 
   uv run --frozen python -I -B \
-    bench/batch_invariance_bench.py verify \
+    verification/l1/correctness/batch_invariance_bench.py verify \
     --artifact bench/results/<a12-artifact> --assert-gate
 
   uv run --frozen python -I -B \
-    bench/batch_invariance_bench.py replay \
+    verification/l1/correctness/batch_invariance_bench.py replay \
     --artifact bench/results/<a12-artifact> --assert-gate
   ```
 
@@ -1882,15 +1882,15 @@ image, and drill are unchanged.
     -v /tmp/kairyu-issue170-flashinfer:/tmp/kairyu-issue170-flashinfer \
     -w /workspace \
     "$IMAGE" \
-    bench/fp8_kv_g4_ekv_bench.py measure \
+    verification/l1/correctness/fp8_kv_g4_ekv_bench.py measure \
     --model-path /models/qwen3-32b \
     --image-id "$IMAGE_ID" \
     --output-dir /runtime-state/artifact \
     --assert-gate
 
-  .venv/bin/python bench/fp8_kv_g4_ekv_bench.py verify \
+  .venv/bin/python verification/l1/correctness/fp8_kv_g4_ekv_bench.py verify \
     --artifact "$RESULT_ROOT/artifact" --assert-gate
-  .venv/bin/python bench/fp8_kv_g4_ekv_bench.py replay \
+  .venv/bin/python verification/l1/correctness/fp8_kv_g4_ekv_bench.py replay \
     --artifact "$RESULT_ROOT/artifact" --assert-gate
   ```
 
@@ -1968,7 +1968,7 @@ image, and drill are unchanged.
   while IFS= read -r bound_source; do
     git ls-files --error-unmatch -- "$bound_source" >/dev/null
   done < <(.venv/bin/python - <<'PY'
-from bench.g4_ma1_qwen3_235b_nvfp4_bench import BOUND_SOURCE_FILES
+from verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_bench import BOUND_SOURCE_FILES
 
 print(*BOUND_SOURCE_FILES, sep="\n")
 PY
@@ -2029,7 +2029,7 @@ PY
     "$KAIRYU_REPO_DIGEST" infinity)
   docker start "$PREPARE_CONTAINER"
   docker exec "$PREPARE_CONTAINER" /app/.venv/bin/python \
-    bench/g4_ma1_qwen3_235b_nvfp4_capture.py prepare \
+    verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_capture.py prepare \
     --model-path "$MODEL_PATH" \
     --image-repo-digest "$KAIRYU_REPO_DIGEST" \
     --image-config-id "$KAIRYU_CONFIG_ID" \
@@ -2054,7 +2054,7 @@ PY
   docker start "$REF2"
   docker container inspect "$REF2" > "$RESULT_ROOT/reference-ep2-inspect.json"
   docker exec "$REF2" bash -lc 'exec python "$@"' bash \
-    /workspace/bench/g4_ma1_qwen3_235b_nvfp4_capture.py reference-arm \
+    /workspace/verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_capture.py reference-arm \
     --model-path "$MODEL_PATH" --world-size 2 \
     --host-snapshot /results/host-start.json \
     --image-repo-digest "$REF_IMAGE" --image-config-id "$REF_CONFIG_ID" \
@@ -2077,7 +2077,7 @@ PY
   docker start "$KAIRYU2"
   docker container inspect "$KAIRYU2" > "$RESULT_ROOT/kairyu-ep2-inspect.json"
   docker exec "$KAIRYU2" /app/.venv/bin/python \
-    bench/g4_ma1_qwen3_235b_nvfp4_capture.py kairyu-arm \
+    verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_capture.py kairyu-arm \
     --model-path "$MODEL_PATH" --world-size 2 \
     --host-snapshot /results/host-start.json \
     --reference-fragment /results/reference-ep2.json \
@@ -2102,7 +2102,7 @@ PY
   docker start "$REF4"
   docker container inspect "$REF4" > "$RESULT_ROOT/reference-ep4-inspect.json"
   docker exec "$REF4" bash -lc 'exec python "$@"' bash \
-    /workspace/bench/g4_ma1_qwen3_235b_nvfp4_capture.py reference-arm \
+    /workspace/verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_capture.py reference-arm \
     --model-path "$MODEL_PATH" --world-size 4 \
     --host-snapshot /results/host-start.json \
     --image-repo-digest "$REF_IMAGE" --image-config-id "$REF_CONFIG_ID" \
@@ -2125,7 +2125,7 @@ PY
   docker start "$KAIRYU4"
   docker container inspect "$KAIRYU4" > "$RESULT_ROOT/kairyu-ep4-inspect.json"
   docker exec "$KAIRYU4" /app/.venv/bin/python \
-    bench/g4_ma1_qwen3_235b_nvfp4_capture.py kairyu-arm \
+    verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_capture.py kairyu-arm \
     --model-path "$MODEL_PATH" --world-size 4 \
     --host-snapshot /results/host-start.json \
     --reference-fragment /results/reference-ep4.json \
@@ -2150,7 +2150,7 @@ PY
     -w /workspace "$KAIRYU_REPO_DIGEST" infinity)
   docker start "$FINALIZE_CONTAINER"
   docker exec "$FINALIZE_CONTAINER" /app/.venv/bin/python \
-    bench/g4_ma1_qwen3_235b_nvfp4_capture.py assemble \
+    verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_capture.py assemble \
     --model-path "$MODEL_PATH" --host-snapshot /results/host-start.json \
     --reference-ep2 /results/reference-ep2.json \
     --kairyu-ep2 /results/kairyu-ep2.json \
@@ -2161,12 +2161,12 @@ PY
   docker stop "$FINALIZE_CONTAINER"
   docker rm "$FINALIZE_CONTAINER"
 
-  .venv/bin/python bench/g4_ma1_qwen3_235b_nvfp4_bench.py run \
+  .venv/bin/python verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_bench.py run \
     --capture "$RESULT_ROOT/engine-capture.jsonl" \
     --output-dir "$RESULT_ROOT/artifact" --assert-gate
-  .venv/bin/python bench/g4_ma1_qwen3_235b_nvfp4_bench.py verify \
+  .venv/bin/python verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_bench.py verify \
     --artifact "$RESULT_ROOT/artifact" --assert-gate
-  .venv/bin/python bench/g4_ma1_qwen3_235b_nvfp4_bench.py replay \
+  .venv/bin/python verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_bench.py replay \
     --artifact "$RESULT_ROOT/artifact" --assert-gate
   ```
 
@@ -2186,7 +2186,7 @@ PY
   sequentially in fresh containers:
 
   ```bash
-  python bench/g4_ma1_nvfp4_accuracy_bench.py run \
+  python verification/l1/correctness/g4_ma1_nvfp4_correctness_bench.py run \
     --name dynamic-boundary \
     --profile /results/dynamic-boundary.json \
     --model-path /models/qwen3-235b-nvfp4 \
@@ -2196,7 +2196,7 @@ PY
     --container-inspect /results/kairyu-profile-inspect.json \
     --output /results/dynamic-boundary-report.json
 
-  python bench/g4_ma1_nvfp4_accuracy_bench.py curve \
+  python verification/l1/correctness/g4_ma1_nvfp4_correctness_bench.py curve \
     --report /results/baseline-report.json \
     --report /results/dynamic-boundary-report.json \
     --report /results/fp8-boundary-report.json \
@@ -2225,7 +2225,7 @@ PY
   GPTQ=/models/Qwen2.5-1.5B-Instruct-GPTQ-Int4
   RESULT_ROOT=bench/results/issue-356-qwen25-1.5b-quant-parity-sm120
 
-  CUDA_VISIBLE_DEVICES=0 .venv/bin/python bench/parity_hf.py \
+  CUDA_VISIBLE_DEVICES=0 .venv/bin/python verification/l1/correctness/parity_hf.py \
     --model-path "$INT8" --reference-model-path "$REFERENCE" \
     --tp 1 --num-prompts 64 --positions 16 --top-logprobs 64 \
     --reference "$RESULT_ROOT/reference.json" \
@@ -2237,7 +2237,7 @@ PY
 
   # Repeat the command for AWQ and GPTQ, changing --model-path, candidate
   # repo/revision, and --out to the pins declared by the assembler.
-  .venv/bin/python bench/quant_checkpoint_parity_bench.py \
+  .venv/bin/python verification/l1/correctness/quant_checkpoint_parity_bench.py \
     --reference "$RESULT_ROOT/reference.json" \
     --int8 "$RESULT_ROOT/int8.json" --awq "$RESULT_ROOT/awq.json" \
     --gptq "$RESULT_ROOT/gptq.json" --out "$RESULT_ROOT/summary.json"
@@ -2280,7 +2280,7 @@ PY
   done < <(
     cd "$SOURCE_ROOT"
     "$CHECKOUT/.venv/bin/python" - <<'PY'
-from bench.g4_ma2_qwen3_235b_ep_kv_bench import BOUND_SOURCE_FILES
+from verification.l1.correctness.g4_ma2_qwen3_235b_ep_kv_bench import BOUND_SOURCE_FILES
 
 print(*BOUND_SOURCE_FILES, sep="\n")
 PY
@@ -2333,17 +2333,17 @@ PY
   docker container inspect "$RUN_CONTAINER" \
     > "$RESULT_ROOT/kairyu-ep4-inspect.json"
   docker exec "$RUN_CONTAINER" /app/.venv/bin/python \
-    bench/g4_ma2_qwen3_235b_ep_kv_bench.py run \
+    verification/l1/correctness/g4_ma2_qwen3_235b_ep_kv_bench.py run \
     --model-path "$MODEL_PATH" \
     --container-inspect /results/kairyu-ep4-inspect.json \
     --image-repo-digest "$KAIRYU_REPO_DIGEST" \
     --image-config-id "$KAIRYU_CONFIG_ID" \
     --output-dir /results/artifact --assert-gate
   docker exec "$RUN_CONTAINER" /app/.venv/bin/python \
-    bench/g4_ma2_qwen3_235b_ep_kv_bench.py verify \
+    verification/l1/correctness/g4_ma2_qwen3_235b_ep_kv_bench.py verify \
     --artifact /results/artifact --assert-gate
   docker exec "$RUN_CONTAINER" /app/.venv/bin/python \
-    bench/g4_ma2_qwen3_235b_ep_kv_bench.py replay \
+    verification/l1/correctness/g4_ma2_qwen3_235b_ep_kv_bench.py replay \
     --artifact /results/artifact --assert-gate
   docker stop "$RUN_CONTAINER"
   docker rm "$RUN_CONTAINER"
@@ -2507,7 +2507,7 @@ PY
     -v "$RESULT_ROOT:/results" \
     -w /workspace --entrypoint /app/.venv/bin/python \
     "$KAIRYU_REPO_DIGEST" \
-    /workspace/bench/g4_ma3_sglang_bench.py prepare \
+    /workspace/verification/l1/performance/g4_ma3_sglang_bench.py prepare \
       --tokenizer "$MODEL_PATH" --dataset /inputs/sharegpt.json \
       --output /results/g4-ma3-trace.json
 
@@ -2522,7 +2522,7 @@ PY
       -w /workspace --entrypoint sleep "$KAIRYU_REPO_DIGEST" infinity
     docker start "$capture_container" >/dev/null
     PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
-      "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" capture-checkpoint \
+      "$SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py" capture-checkpoint \
         --phase "$phase" --container "$capture_container" \
         --source-root "$SOURCE_ROOT" \
         --output "$RESULT_ROOT/$output_name"
@@ -2536,7 +2536,7 @@ PY
   retained results; they are not mounted into the server. Binding source
   cleanliness is the detached `SOURCE_ROOT`, while both tracked and staged
   changes in `CHECKOUT` are rejected before it is cloned. Every operator
-  command below executes `SOURCE_ROOT/bench/g4_ma3_sglang_bench.py` (or its
+  command below executes `SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py` (or its
   `/workspace` read-only mount); `CHECKOUT` supplies only the already-created
   Python environment for host-side commands.
 
@@ -2584,7 +2584,7 @@ PY
     --mount "type=volume,source=$MODEL_VOLUME,destination=$MODEL_PATH,volume-subpath=$MODEL_VOLUME_SUBPATH,readonly" \
     -w /workspace --entrypoint /app/.venv/bin/python \
     "$KAIRYU_REPO_DIGEST" \
-    /workspace/bench/g4_ma3_kairyu_server.py \
+    /workspace/verification/l1/performance/g4_ma3_kairyu_server.py \
       --pipeline-depth 5 --host 0.0.0.0 --port 30000
   ```
 
@@ -2668,7 +2668,7 @@ PY
     SOURCE_ARGS=(--source-root "$SOURCE_ROOT")
   fi
   PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
-    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" capture-provenance \
+    "$SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py" capture-provenance \
       --arm "$ARM" --candidate "$CANDIDATE" --container "$CONTAINER" \
       --server-generation-id "$SERVER_GENERATION_ID" \
       --server-started-ns "$SERVER_STARTED_NS" \
@@ -2696,21 +2696,21 @@ PY
 
   ```bash
   PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
-    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" run \
+    "$SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py" run \
     --phase preflight --arm kairyu --candidate depth-5 \
     --endpoint http://127.0.0.1:30000 --trace-bundle "$TRACE" \
     --provenance "$RESULT_ROOT/provenance/preflight-kairyu.json" \
     --output "$RESULT_ROOT/preflight/kairyu.jsonl"
 
   PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
-    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" run \
+    "$SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py" run \
     --phase preflight --arm sglang --candidate default \
     --endpoint http://127.0.0.1:30000 --trace-bundle "$TRACE" \
     --provenance "$RESULT_ROOT/provenance/preflight-sglang.json" \
     --output "$RESULT_ROOT/preflight/sglang.jsonl"
 
   PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
-    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" assemble \
+    "$SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py" assemble \
     --preflight-only \
     --preflight-raw "$RESULT_ROOT/preflight/kairyu.jsonl" \
     --preflight-raw "$RESULT_ROOT/preflight/sglang.jsonl" \
@@ -2738,7 +2738,7 @@ PY
 
   ```bash
   PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
-    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" run \
+    "$SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py" run \
     --phase formal --arm '<kairyu-or-sglang>' --repeat '<0-through-3>' \
     --endpoint http://127.0.0.1:30000 --trace-bundle "$TRACE" \
     --selection "$SELECTION" --provenance '<scenario-provenance.json>' \
@@ -2765,7 +2765,7 @@ PY
   capture_checkpoint end checkpoint-end.json
 
   PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
-    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" assemble \
+    "$SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py" assemble \
     --preflight-raw "$RESULT_ROOT/preflight/kairyu.jsonl" \
     --preflight-raw "$RESULT_ROOT/preflight/sglang.jsonl" \
     --selection "$SELECTION" \
@@ -2782,10 +2782,10 @@ PY
     --output-dir "$ARTIFACT" --assert-gate
 
   PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
-    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" verify \
+    "$SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py" verify \
     --artifact "$ARTIFACT" --assert-gate
   PYTHONPATH="$SOURCE_ROOT" "$CHECKOUT/.venv/bin/python" \
-    "$SOURCE_ROOT/bench/g4_ma3_sglang_bench.py" replay \
+    "$SOURCE_ROOT/verification/l1/performance/g4_ma3_sglang_bench.py" replay \
     --artifact "$ARTIFACT" --assert-gate
   ```
 

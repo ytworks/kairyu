@@ -52,7 +52,7 @@ jobs:
       - name: Verify benchmark inventories and wheel boundary
         if: matrix.python-version == '3.12'
         run: |
-          uv run --frozen python scripts/verify_bench_entrypoints.py
+          uv run --frozen python scripts/verify_verification_registry.py
           uv run --frozen python scripts/verify_bench_results_index.py
           uv run --frozen python scripts/verify_bench_wheel.py
       - name: Lint

@@ -200,7 +200,7 @@ source_inputs=(
   pyproject.toml
   uv.lock
   kairyu
-  bench/fleet_gateway_bench.py
+  verification/fleet/resilience/fleet_gateway_bench.py
   scripts/kind_gateway_gate.sh
   deploy/kind/f1a/mock
   deploy/kind/f1c
@@ -230,7 +230,7 @@ SOURCE_ARCHIVE_DIR=$(mktemp -d /tmp/kairyu-f1c-source.XXXXXX)
 ARCHIVE_KIND_CONFIG="${SOURCE_ARCHIVE_DIR}/${KIND_CONFIG}"
 ARCHIVE_MANIFEST_DIR="${SOURCE_ARCHIVE_DIR}/${MANIFEST_DIR}"
 ARCHIVE_MOCK_DIR="${SOURCE_ARCHIVE_DIR}/deploy/kind/f1a/mock"
-ARCHIVE_DRIVER="${SOURCE_ARCHIVE_DIR}/bench/fleet_gateway_bench.py"
+ARCHIVE_DRIVER="${SOURCE_ARCHIVE_DIR}/verification/fleet/resilience/fleet_gateway_bench.py"
 if [[ ! -f "$ARCHIVE_KIND_CONFIG" ||
       ! -f "${ARCHIVE_MANIFEST_DIR}/kustomization.yaml" ||
       ! -f "${ARCHIVE_MOCK_DIR}/Dockerfile" ||

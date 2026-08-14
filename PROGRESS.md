@@ -83,11 +83,10 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 ### Open items / blockers
 
-- The accepted eval/verification migration is in progress: only the named
-  Accuracy suite will be removed; Core, Quantization, Structured Output, and
-  Long Context remain under checkout-only `evals/`, while Kairyu correctness
-  and performance gates move to `verification/`. Existing commands remain
-  authoritative until the migration PR lands.
+- The checkout-only verification split is implemented: 68 Kairyu correctness,
+  performance, resilience, and diagnostic gates live under `verification/` with
+  a strict registry and neutral `evidence/` contracts. The named Accuracy suite
+  still remains under `evals/` and is the only pending deletion in PR #486.
 - G2 A6 performance gap vs vLLM is the open hard gate; full TP4/8 HTTP matrix deferred until closed
 - Issue #333 verdict: process-split is not the A6 cause (`no_material_reduction`, ratio 0.92 vs ≤0.90 line)
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
@@ -102,6 +101,13 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-14 — [progress] Verification framework split implemented
+- What: moved 68 Kairyu gates into checkout-only `verification/` by scope and
+  kind, added a strict registry/runner and neutral `evidence/` contracts, and
+  kept all 205 tracked legacy result files byte-identical at `bench/results/`.
+- Refs: PR #486; `verification/registry.toml`;
+  `docs/design/verification-framework.md`
 
 ### 2026-08-14 — [design] Separate evals from verification and retire Accuracy
 - What: Accuracy will be removed after its external migration; the other evals

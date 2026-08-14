@@ -199,7 +199,7 @@ service seconds versus one in the control. This is the minimum one-service
 quantum interference bound; without admission, good p99 is 298 seconds and
 the shared queue high-watermark grows from 2 to 301. Raw admission, request,
 queue, scheduling, and latency evidence is published by
-`bench/noisy_neighbor_bench.py`.
+`verification/fleet/resilience/noisy_neighbor_bench.py`.
 
 The real Qwen3-32B TP8 gate uses good-only latency as a secondary lower-bound
 reference, not the primary isolation comparator. Its bracketed controls carry
@@ -343,7 +343,7 @@ is common to every waiting request. This preserves stable ties and starvation
 prevention without re-sorting the full queue on every schedule. Recompute
 preemption retains front-of-tie placement, and KV allocation still blocks at
 the selected head without skip-ahead. Reproduce the 100k A/B measurements with
-`uv run python bench/scheduler_queue_bench.py --requests 100000 --repeats 5`.
+`uv run python verification/l1/performance/scheduler_queue_bench.py --requests 100000 --repeats 5`.
 
 **Prefill cohort amendment (2026-08-07, issue #328).** This supersedes only the
 unbounded selected-head behavior above. Native schedulers default
@@ -398,7 +398,7 @@ batch consumes 300 residual service ticks, retains a 58-request overload
 backlog at the measurement boundary, and drains all work afterward. Raw
 request, scheduling, queue-depth, priority, latency, and accounting evidence is
 in `bench/results/f5a-priority-overload-cpu-2026-07-28.json`; reproduce it with
-`uv run python bench/priority_overload_bench.py --assert-gate`.
+`uv run python verification/fleet/resilience/priority_overload_bench.py --assert-gate`.
 
 The production-shaped Qwen3-32B TP8 gate calibrated 7.6304 requests/s and then
 offered 0.5x interactive plus 1.5x batch work through a one-replica gateway.
@@ -415,7 +415,7 @@ image digest, model revision, `/backends` topology, and GPU inventory. The raw
 environment, arrivals, TTFT samples, Batch API states, counters, and assertions
 are in
 `bench/results/f5a-priority-overload-qwen3-32b-tp8-2026-07-28.json`; reproduce
-them with `uv run python bench/priority_overload_gpu_bench.py --assert-gate`.
+them with `uv run python verification/fleet/resilience/priority_overload_gpu_bench.py --assert-gate`.
 
 **SLO-admission validation amendment (2026-07-28, issue #192).**
 `AdmissionController.begin()` now makes the prediction and reserves the
@@ -450,7 +450,7 @@ both saturation profiles and 4/800 and 6/800 false negatives (FNR 0.993% and
 0.997%); deferred queue high-watermarks are 3 and 2. All admitted/deferred work,
 leases, and queues drain. Raw evidence is in
 `bench/results/f5c-slo-admission-cpu-2026-07-28.json`; reproduce it with
-`uv run python bench/slo_admission_bench.py --assert-gate`.
+`uv run python verification/fleet/resilience/slo_admission_bench.py --assert-gate`.
 
 **Live direct-chat admission amendment (2026-08-07, issue #340).**
 `server.ttft_slo_s` now opt-in instantiates one gateway-visible controller and
@@ -528,7 +528,7 @@ CPU-only GitHub Actions. The clean `b8971cb` gate passed every binding check on
 8× RTX PRO 6000; the retained result is
 `bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.
 
-`bench/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
+`verification/product/performance/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/
 quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 

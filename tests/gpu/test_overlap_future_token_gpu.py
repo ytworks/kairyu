@@ -9,7 +9,7 @@ import math
 import pytest
 import torch
 
-from evals.profiling import profile_scope
+from verification.l1.performance.profiling import profile_scope
 
 transformers = pytest.importorskip("transformers")
 

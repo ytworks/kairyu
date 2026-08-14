@@ -58,7 +58,7 @@ class BenchmarkSpec:
 BENCHMARKS = (
     BenchmarkSpec(
         name="scheduler_queue",
-        script="bench/scheduler_queue_bench.py",
+        script="verification/l1/performance/scheduler_queue_bench.py",
         args=(
             "--requests",
             "30000",
@@ -70,7 +70,7 @@ BENCHMARKS = (
     ),
     BenchmarkSpec(
         name="radix_eviction",
-        script="bench/radix_eviction_bench.py",
+        script="verification/l1/performance/radix_eviction_bench.py",
         args=(
             "--leaves",
             "10000",
@@ -82,7 +82,7 @@ BENCHMARKS = (
     ),
     BenchmarkSpec(
         name="op_queue",
-        script="bench/op_queue_bench.py",
+        script="verification/l1/performance/op_queue_bench.py",
         args=(
             "--operations",
             "50000",
@@ -94,7 +94,7 @@ BENCHMARKS = (
     ),
     BenchmarkSpec(
         name="sampler_penalty_state",
-        script="bench/sampler_penalty_state_bench.py",
+        script="verification/l1/performance/sampler_penalty_state_bench.py",
         args=(
             "--device",
             "cpu",
@@ -114,7 +114,7 @@ BENCHMARKS = (
     ),
     BenchmarkSpec(
         name="proc_wire",
-        script="bench/proc_wire_bench.py",
+        script="verification/l1/performance/proc_wire_bench.py",
         args=(
             "--lengths",
             ",".join(str(length) for length in PROC_WIRE_LENGTHS),
@@ -123,7 +123,7 @@ BENCHMARKS = (
     ),
     BenchmarkSpec(
         name="router_latency",
-        script="bench/router_latency.py",
+        script="verification/orchestration/performance/router_latency.py",
         args=("--routes", "10000", "--json", "--assert-gate"),
     ),
 )

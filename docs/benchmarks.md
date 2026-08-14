@@ -49,7 +49,7 @@ Inspect the packaged inventory or validate a checkout with:
 kairyu bench entrypoints
 kairyu bench entrypoints --json
 kairyu bench entrypoints --check-repo .
-uv run --frozen python scripts/verify_bench_entrypoints.py
+uv run --frozen python scripts/verify_verification_registry.py
 uv run --frozen python scripts/verify_bench_results_index.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```

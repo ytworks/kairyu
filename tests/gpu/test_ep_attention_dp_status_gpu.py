@@ -5,11 +5,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from evals.profiling import profile_scope
 from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.engine.core.scheduler import ScheduledChunk
 from kairyu.engine.core.step_input import RequestSnapshot, StepDelta
+from verification.l1.performance.profiling import profile_scope
 
 pytestmark = pytest.mark.gpu
 

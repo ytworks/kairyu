@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/f2a-prefix-routing.yml"
-      - "bench/prefix_routing_f2a_bench.py"
+      - "verification/fleet/performance/prefix_routing_f2a_bench.py"
       - "kairyu/engine/backend.py"
       - "kairyu/orchestration/conductor.py"
       - "kairyu/orchestration/prefix_index.py"
@@ -52,12 +52,12 @@ jobs:
         run: uv sync --frozen --dev
       - name: Run a fresh 500-replica F2a measurement
         run: >-
-          uv run --frozen python bench/prefix_routing_f2a_bench.py
+          uv run --frozen python verification/fleet/performance/prefix_routing_f2a_bench.py
           --profile "${PROFILE}"
           --output-dir "${F2A_RESULTS_DIR}"
       - name: Replay the freshly emitted evidence
         run: >-
-          uv run --frozen python bench/prefix_routing_f2a_bench.py
+          uv run --frozen python verification/fleet/performance/prefix_routing_f2a_bench.py
           --verify-artifact "${F2A_RESULTS_DIR}"
       - name: Upload live raw and replayed evidence
         if: always()
