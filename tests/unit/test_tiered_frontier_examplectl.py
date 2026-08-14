@@ -13,6 +13,14 @@ from kairyu.engine.config_validation import validate_backend_options
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "examples/qwen3.6-deepseek-v4-8gpu"
+EMBEDDING_MODEL_REPOSITORY = "Qdrant/all-MiniLM-L6-v2-onnx"
+EMBEDDING_MODEL_REVISION = "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079"
+EMBEDDING_MODEL_SHA256 = (
+    "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5"
+)
+EMBEDDING_PROVENANCE_SHA256 = (
+    "57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c"
+)
 
 
 def _load(path: Path, name: str):
@@ -145,7 +153,28 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "cudagraph_mode": "FULL_AND_PIECEWISE",
         "custom_ops": ["all"],
     }
-    assert compose["services"]["kairyu"]["build"]["args"] == {"KAIRYU_VISION": "1"}
+    assert compose["services"]["kairyu"]["build"]["args"] == {
+        "KAIRYU_VISION": "1",
+        "KAIRYU_EMBEDDINGS": "1",
+        "KAIRYU_EMBEDDING_MODEL_REPOSITORY": EMBEDDING_MODEL_REPOSITORY,
+        "KAIRYU_EMBEDDING_MODEL_REVISION": EMBEDDING_MODEL_REVISION,
+        "KAIRYU_EMBEDDING_MODEL_SHA256": EMBEDDING_MODEL_SHA256,
+        "KAIRYU_EMBEDDING_PROVENANCE_SHA256": EMBEDDING_PROVENANCE_SHA256,
+    }
+    assert spec["embedding"] == {
+        "served_name": "embed-small",
+        "backend": "fastembed",
+        "model": "sentence-transformers/all-MiniLM-L6-v2",
+        "model_path": "/opt/kairyu/models/all-MiniLM-L6-v2",
+        "repository": EMBEDDING_MODEL_REPOSITORY,
+        "revision": EMBEDDING_MODEL_REVISION,
+        "model_sha256": EMBEDDING_MODEL_SHA256,
+        "provenance_sha256": EMBEDDING_PROVENANCE_SHA256,
+        "dimensions": 384,
+        "batch_size": 64,
+        "threads": 2,
+        "max_concurrency": 2,
+    }
     assert compose["services"]["kairyu"]["ports"] == [
         "${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8003}:8000"
     ]
@@ -185,7 +214,21 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert set(deployment.orchestrators) == {
         "kairyu-auto-max",
     }
-    assert deployment.public_models == frozenset({"kairyu-auto-max"})
+    assert list(deployment.embeddings) == ["embed-small"]
+    embedding = deployment.embeddings["embed-small"]
+    assert embedding.backend == "fastembed"
+    assert embedding.model == "sentence-transformers/all-MiniLM-L6-v2"
+    assert embedding.model_path == "/opt/kairyu/models/all-MiniLM-L6-v2"
+    assert embedding.revision == EMBEDDING_MODEL_REVISION
+    assert embedding.model_sha256 == EMBEDDING_MODEL_SHA256
+    assert embedding.provenance_sha256 == EMBEDDING_PROVENANCE_SHA256
+    assert embedding.dimensions == 384
+    assert embedding.batch_size == 64
+    assert embedding.threads == 2
+    assert embedding.max_concurrency == 2
+    assert deployment.public_models == frozenset(
+        {"kairyu-auto-max", "embed-small"}
+    )
     assert deployment.chat_templates == {
         "deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja",
         "deepseek-v4-flash-0731-thinking": "/etc/kairyu/deepseek-thinking.jinja",
@@ -256,6 +299,7 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
     }
     assert ui["environment"] | {
         "DEFAULT_MODELS": "kairyu-auto-max",
+        "OPENAI_API_CONFIGS": '{"0":{"model_ids":["kairyu-auto-max"]}}',
         "ENABLE_PERSISTENT_CONFIG": "false",
         "RESET_CONFIG_ON_START": "true",
         "ENABLE_SIGNUP": "false",
@@ -277,6 +321,118 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
         if isinstance(volume, str) and "/auto" in volume
     }
     assert policy_mounts == {"./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro"}
+
+
+def _embedding_response() -> dict:
+    return {
+        "object": "list",
+        "data": [
+            {"object": "embedding", "index": 0, "embedding": [0.0] * 384},
+            {"object": "embedding", "index": 1, "embedding": [1.0] * 384},
+        ],
+        "model": "embed-small",
+        "usage": {"prompt_tokens": 6, "total_tokens": 6},
+    }
+
+
+def test_tiered_embedding_smoke_accepts_two_finite_vectors() -> None:
+    control = _load(EXAMPLE / "control.py", "tiered_embedding_smoke_valid")
+
+    control._validate_embedding_smoke(_embedding_response())
+
+
+def test_tiered_readiness_posts_two_input_embedding_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _load(EXAMPLE / "control.py", "tiered_embedding_readiness")
+    posts: list[tuple[str, dict]] = []
+
+    def fake_json(url: str) -> dict:
+        if url.endswith("/readyz"):
+            return {"status": "ready"}
+        if url.endswith("/v1/models"):
+            return {"data": [{"id": "kairyu-auto-max"}, {"id": "embed-small"}]}
+        assert url.endswith("/routing")
+        return {
+            "models": {
+                "kairyu-auto-max": {
+                    "roles": [
+                        {"name": name}
+                        for name in (
+                            "planner",
+                            "proposal_a",
+                            "proposal_b",
+                            "proposal_c",
+                            "draft_synthesis",
+                            "verifier",
+                            "publisher",
+                        )
+                    ],
+                    "moa_samples": 0,
+                    "budget": {"max_steps": 11, "max_refine_depth": 2},
+                    "expose_intermediate_outputs": True,
+                    "configured_engines": {
+                        "tier1": {"model": "qwen3.6-27b"},
+                        "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
+                    },
+                }
+            }
+        }
+
+    def fake_post(url: str, payload: dict) -> dict:
+        posts.append((url, payload))
+        return _embedding_response() if url.endswith("/v1/embeddings") else {"count": 1}
+
+    monkeypatch.setattr(control, "_json_url", fake_json)
+    monkeypatch.setattr(control, "_post_json_url", fake_post)
+
+    control._validate_ready("http://api.test", "http://tokenizer.test/tokenize")
+
+    assert posts == [
+        (
+            "http://api.test/v1/embeddings",
+            {
+                "model": "embed-small",
+                "input": ["kairyu readiness probe", "two-input contract"],
+                "encoding_format": "float",
+            },
+        ),
+        (
+            "http://tokenizer.test/tokenize",
+            {"model": "deepseek-v4-flash-0731", "prompt": "kairyu"},
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("model", "model identity"),
+        ("indices", "indices"),
+        ("dimensions", "384 dimensions"),
+        ("finite", "finite numbers"),
+        ("usage", "positive exact usage"),
+    ],
+)
+def test_tiered_embedding_smoke_rejects_malformed_contract(
+    mutation: str,
+    message: str,
+) -> None:
+    control = _load(EXAMPLE / "control.py", f"tiered_embedding_smoke_{mutation}")
+    response = _embedding_response()
+    if mutation == "model":
+        response["model"] = "wrong-model"
+    elif mutation == "indices":
+        response["data"][1]["index"] = 2
+    elif mutation == "dimensions":
+        response["data"][1]["embedding"].pop()
+    elif mutation == "finite":
+        response["data"][0]["embedding"][0] = float("inf")
+    else:
+        response["usage"]["prompt_tokens"] = 0
+
+    with pytest.raises(SystemExit, match=message):
+        control._validate_embedding_smoke(response)
 
 
 def test_tiered_control_requires_exact_eight_gpu_inventory() -> None:

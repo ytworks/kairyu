@@ -98,13 +98,26 @@ pools:
     prefix_index: true
     probe_interval_s: 2.0
 
+embeddings:
+  embed-small:
+    backend: fastembed
+    model: sentence-transformers/all-MiniLM-L6-v2
+    model_path: /opt/kairyu/models/all-MiniLM-L6-v2
+    revision: 5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
+    model_sha256: bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5
+    provenance_sha256: 57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c
+    dimensions: 384
+    batch_size: 64
+    threads: 2
+    max_concurrency: 2
+
 orchestrators:
   kairyu-auto-max:
     spec: /etc/kairyu/auto-max.yaml
 
-# The Chat UI product surface is fail-closed. Its L1 pools remain
-# deployment-owned runtime resources but are not public model IDs.
-public_models: [kairyu-auto-max]
+# The public API exposes one chat model plus one embedding model. L1 pools
+# remain deployment-owned runtime resources and are not public model IDs.
+public_models: [kairyu-auto-max, embed-small]
 
 chat_templates:
   deepseek-v4-flash-0731: /etc/kairyu/deepseek-v4-0731.jinja

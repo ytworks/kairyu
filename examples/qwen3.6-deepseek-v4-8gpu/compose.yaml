@@ -232,6 +232,11 @@ services:
       dockerfile: Dockerfile
       args:
         KAIRYU_VISION: "1"
+        KAIRYU_EMBEDDINGS: "1"
+        KAIRYU_EMBEDDING_MODEL_REPOSITORY: Qdrant/all-MiniLM-L6-v2-onnx
+        KAIRYU_EMBEDDING_MODEL_REVISION: 5f1b8cd78bc4fb444dd171e59b18f3a3af89a079
+        KAIRYU_EMBEDDING_MODEL_SHA256: bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5
+        KAIRYU_EMBEDDING_PROVENANCE_SHA256: 57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c
     image: ${KAIRYU_IMAGE:-local/kairyu:tiered-frontier-example}
     command: [/etc/kairyu/kairyu.yaml]
     environment:
@@ -267,6 +272,7 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
+      OPENAI_API_CONFIGS: '{"0":{"model_ids":["kairyu-auto-max"]}}'
       DEFAULT_MODELS: kairyu-auto-max
       DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"stream_response":false}'
       ENABLE_PERSISTENT_CONFIG: "false"
