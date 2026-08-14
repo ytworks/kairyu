@@ -83,6 +83,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 ### Open items / blockers
 
+- The accepted eval/verification migration is in progress: only the named
+  Accuracy suite will be removed; Core, Quantization, Structured Output, and
+  Long Context remain under checkout-only `evals/`, while Kairyu correctness
+  and performance gates move to `verification/`. Existing commands remain
+  authoritative until the migration PR lands.
 - G2 A6 performance gap vs vLLM is the open hard gate; full TP4/8 HTTP matrix deferred until closed
 - Issue #333 verdict: process-split is not the A6 cause (`no_material_reduction`, ratio 0.92 vs ≤0.90 line)
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
@@ -97,6 +102,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-14 — [design] Separate evals from verification and retire Accuracy
+- What: Accuracy will be removed after its external migration; the other evals
+  remain checkout-only under `evals/`; correctness, performance, resilience,
+  and diagnostic gates move to `verification/` with neutral evidence contracts
+  and immutable legacy artifacts.
+- Why: `kairyu.bench` and `bench/` conflate model evaluation with L1/system
+  verification and allow performance evidence without an explicit correctness
+  link.
+- Refs: `docs/design/verification-framework.md`;
+  `docs/superpowers/plans/2026-08-14-verification-framework-accuracy-removal.md`
 
 ### 2026-08-14 — [amendment] Exact LiteLLM assistant history is reusable
 - What: Chat Completions now drops object-valued `provider_specific_fields` and nullable legacy `function_call` metadata from assistant history while retaining typed reasoning, content, and tool calls; invalid roles, value kinds, and unrelated extras remain fail-closed.
