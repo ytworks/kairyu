@@ -12,7 +12,7 @@ import yaml
 from kairyu.deploy.spec import load_deployment_spec
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE_DIR = REPO_ROOT / "bench" / "deploy" / "qwen3-32b-multi-gpu"
+EXAMPLE_DIR = REPO_ROOT / "deploy" / "verification" / "qwen3-32b-multi-gpu"
 COMPOSE_PATH = EXAMPLE_DIR / "a8-compose.yaml"
 REPLICA_PATH = EXAMPLE_DIR / "a8-replica.yaml"
 GATEWAY_PATH = EXAMPLE_DIR / "a8-gateway.yaml"

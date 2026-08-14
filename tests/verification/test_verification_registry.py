@@ -1,4 +1,4 @@
-"""Strict verification registry, boundary, and runner contracts."""
+"""Verification registry, boundary, and runner contracts."""
 
 from __future__ import annotations
 

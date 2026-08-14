@@ -345,7 +345,7 @@ class LocalExecutionRunner:
             memory_mb,
             files,
         )
-        with tempfile.TemporaryDirectory(prefix="kairyu-bench-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="kairyu-exec-") as tmp:
             workdir = Path(tmp)
             _stage_inputs(
                 workdir,
@@ -475,7 +475,7 @@ class DockerExecutionRunner:
         self._run_command = _run_command
         self._which = _which
         self._name_factory = _name_factory or (
-            lambda: f"kairyu-bench-{uuid.uuid4().hex}"
+            lambda: f"kairyu-exec-{uuid.uuid4().hex}"
         )
         self._sleep = _sleep
         self._create_timeout_s = float(_create_timeout_s)
@@ -731,7 +731,7 @@ class DockerExecutionRunner:
 
         helper = threading.Thread(
             target=create_to_completion,
-            name="kairyu-bench-docker-create",
+            name="kairyu-exec-docker-create",
             daemon=True,
         )
         helper.start()
@@ -818,7 +818,7 @@ class DockerExecutionRunner:
         available, detail = self.availability()
         if not available:
             raise RuntimeError(detail)
-        with tempfile.TemporaryDirectory(prefix="kairyu-bench-input-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="kairyu-exec-input-") as tmp:
             input_dir = Path(tmp)
             _stage_inputs(
                 input_dir,
@@ -827,7 +827,7 @@ class DockerExecutionRunner:
                 files=staged_files,
             )
             name = self._name_factory()
-            if not re.fullmatch(r"kairyu-bench-[a-z0-9][a-z0-9_.-]*", name):
+            if not re.fullmatch(r"kairyu-exec-[a-z0-9][a-z0-9_.-]*", name):
                 raise RuntimeError("Docker execution name factory returned an unsafe name")
             with self._created_container(
                 name=name,

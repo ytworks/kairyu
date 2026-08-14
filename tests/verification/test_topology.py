@@ -1,4 +1,4 @@
-"""Bench scripts must carry M5 topology flags into their emitted config (design m5 D6)."""
+"""Verification scripts carry M5 topology flags into emitted config (m5 D6)."""
 
 from __future__ import annotations
 
@@ -7,14 +7,20 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-_BENCH_DIR = Path(__file__).resolve().parents[2] / "bench"
+_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPTS = {
+    "serving_bench": _ROOT / "verification" / "l1" / "performance" / "serving_bench.py",
+    "multiturn_prefix": (
+        _ROOT / "verification" / "fleet" / "performance" / "multiturn_prefix.py"
+    ),
+}
 
 
-def _load_bench_module(name: str) -> ModuleType:
-    module_name = f"bench_{name}"
+def _load_verification_module(name: str) -> ModuleType:
+    module_name = f"verification_{name}"
     if module_name in sys.modules:
         return sys.modules[module_name]
-    spec = importlib.util.spec_from_file_location(module_name, _BENCH_DIR / f"{name}.py")
+    spec = importlib.util.spec_from_file_location(module_name, _SCRIPTS[name])
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module  # dataclass annotation resolution needs the registry
@@ -23,7 +29,7 @@ def _load_bench_module(name: str) -> ModuleType:
 
 
 def test_serving_bench_config_defaults_include_topology():
-    bench = _load_bench_module("serving_bench")
+    bench = _load_verification_module("serving_bench")
     args = bench.build_parser().parse_args([])
     config = bench.build_run_config(args)
     assert config["tensor_parallel"] == 1
@@ -32,7 +38,7 @@ def test_serving_bench_config_defaults_include_topology():
 
 
 def test_serving_bench_config_carries_topology_flags():
-    bench = _load_bench_module("serving_bench")
+    bench = _load_verification_module("serving_bench")
     args = bench.build_parser().parse_args(
         ["--tensor-parallel", "4", "--dp-replicas", "2", "--pd"]
     )
@@ -43,7 +49,7 @@ def test_serving_bench_config_carries_topology_flags():
 
 
 def test_multiturn_prefix_config_defaults_include_topology():
-    bench = _load_bench_module("multiturn_prefix")
+    bench = _load_verification_module("multiturn_prefix")
     args = bench.build_parser().parse_args([])
     config = bench.build_run_config(args)
     assert config["tensor_parallel"] == 1
@@ -52,7 +58,7 @@ def test_multiturn_prefix_config_defaults_include_topology():
 
 
 def test_multiturn_prefix_config_carries_topology_flags():
-    bench = _load_bench_module("multiturn_prefix")
+    bench = _load_verification_module("multiturn_prefix")
     args = bench.build_parser().parse_args(["--replicas", "2", "--tensor-parallel", "8", "--pd"])
     config = bench.build_run_config(args)
     assert config["replicas"] == 2
@@ -61,7 +67,7 @@ def test_multiturn_prefix_config_carries_topology_flags():
 
 
 def test_multiturn_prefix_fixed_workload_geometry_and_theoretical_hits():
-    bench = _load_bench_module("multiturn_prefix")
+    bench = _load_verification_module("multiturn_prefix")
     workload = bench.fixed_workload()
 
     assert bench.WORKLOAD_SEED == 42

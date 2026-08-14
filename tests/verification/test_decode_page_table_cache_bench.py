@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-_PATH = Path(__file__).parents[2] / "bench" / "decode_page_table_cache_qwen.py"
+_PATH = (
+    Path(__file__).parents[2]
+    / "verification"
+    / "l1"
+    / "performance"
+    / "decode_page_table_cache_qwen.py"
+)
 _SPEC = importlib.util.spec_from_file_location(
     "decode_page_table_cache_qwen",
     _PATH,
@@ -18,7 +24,7 @@ _SPEC.loader.exec_module(BENCH)
 
 
 def test_formal_source_contract_binds_transitive_shared_profiler():
-    assert "kairyu/bench/profiling.py" in BENCH.IMPLEMENTATION_FILES
+    assert "verification/l1/performance/profiling.py" in BENCH.IMPLEMENTATION_FILES
 
 _SOURCE = {"bound": "source"}
 _CHECKPOINT = {"bound": "checkpoint"}

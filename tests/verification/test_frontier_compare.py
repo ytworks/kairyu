@@ -8,7 +8,11 @@ from pathlib import Path
 
 _SPEC = importlib.util.spec_from_file_location(
     "frontier_compare",
-    Path(__file__).parents[2] / "bench" / "frontier_compare.py",
+    Path(__file__).parents[2]
+    / "verification"
+    / "product"
+    / "performance"
+    / "frontier_compare.py",
 )
 assert _SPEC is not None and _SPEC.loader is not None
 frontier_compare = importlib.util.module_from_spec(_SPEC)

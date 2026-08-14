@@ -6,7 +6,13 @@ import importlib.util
 import json
 from pathlib import Path
 
-_PATH = Path(__file__).parents[2] / "bench" / "batched_spec_verify_qwen.py"
+_PATH = (
+    Path(__file__).parents[2]
+    / "verification"
+    / "l1"
+    / "correctness"
+    / "batched_spec_verify_qwen.py"
+)
 _SPEC = importlib.util.spec_from_file_location("batched_spec_verify_qwen", _PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 bench = importlib.util.module_from_spec(_SPEC)
@@ -14,7 +20,7 @@ _SPEC.loader.exec_module(bench)
 
 
 def test_formal_source_contract_binds_transitive_shared_profiler():
-    assert "kairyu/bench/profiling.py" in bench.IMPLEMENTATION_FILES
+    assert "verification/l1/performance/profiling.py" in bench.IMPLEMENTATION_FILES
 
 
 class _FixtureTokenizer:

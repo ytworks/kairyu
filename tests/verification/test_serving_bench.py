@@ -12,7 +12,12 @@ import httpx
 import pytest
 
 _spec = importlib.util.spec_from_file_location(
-    "serving_bench", Path(__file__).parents[2] / "bench" / "serving_bench.py"
+    "serving_bench",
+    Path(__file__).parents[2]
+    / "verification"
+    / "l1"
+    / "performance"
+    / "serving_bench.py",
 )
 serving_bench = importlib.util.module_from_spec(_spec)
 sys.modules["serving_bench"] = serving_bench  # dataclass annotation resolution

@@ -44,7 +44,7 @@ MEASUREMENT_KIND = "qwen3-32b-tp-batched-prefill"
 # 512 -> 64 layer runs), so larger prompts add memory risk but no evidence.
 PROMPT_LENGTHS = (65, 81, 97, 113, 129, 145, 161, 177)
 IMPLEMENTATION_FILES = (
-    "evals/profiling.py",
+    "verification/l1/performance/profiling.py",
     "kairyu/engine/core/comm.py",
     "kairyu/engine/core/dist_comm.py",
     "kairyu/engine/core/prefill.py",

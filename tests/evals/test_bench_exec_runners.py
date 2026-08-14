@@ -181,7 +181,7 @@ def _docker_runner(
     process: FakeProcess | None = None,
     *,
     control: CommandRecorder | None = None,
-    name: str = "kairyu-bench-fixed",
+    name: str = "kairyu-exec-fixed",
 ) -> tuple[DockerExecutionRunner, PopenRecorder, CommandRecorder]:
     fake_process = process or FakeProcess()
     popen = PopenRecorder(fake_process)
@@ -398,7 +398,7 @@ def test_docker_runner_builds_hardened_argv_and_read_only_input_bundle():
     command = next(command for command in commands.commands if command[:2] == ["docker", "create"])
     assert hostile not in command
     assert "input; $(id)" not in command
-    assert command[command.index("--name") + 1] == "kairyu-bench-fixed"
+    assert command[command.index("--name") + 1] == "kairyu-exec-fixed"
     assert command[command.index("--pull") + 1] == "never"
     assert command[command.index("--log-driver") + 1] == "none"
     assert command[command.index("--restart") + 1] == "no"
@@ -528,7 +528,7 @@ def test_docker_start_failure_still_removes_the_created_container():
         _popen_factory=fail_to_start,
         _run_command=commands,
         _which=lambda _name: "/usr/bin/docker",
-        _name_factory=lambda: "kairyu-bench-fixed",
+        _name_factory=lambda: "kairyu-exec-fixed",
         _sleep=lambda _seconds: None,
     )
 
@@ -548,7 +548,7 @@ def test_slow_create_times_out_caller_and_helper_removes_late_container():
         _popen_factory=popen,
         _run_command=commands,
         _which=lambda _name: "/usr/bin/docker",
-        _name_factory=lambda: "kairyu-bench-fixed",
+        _name_factory=lambda: "kairyu-exec-fixed",
         _sleep=lambda _seconds: None,
         _create_timeout_s=0.02,
     )

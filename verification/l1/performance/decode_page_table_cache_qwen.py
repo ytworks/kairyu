@@ -72,7 +72,7 @@ EXPECTED_GRAPH_ROW_HITS = 225
 IMPLEMENTATION_FILES = (
     "verification/l1/performance/batched_prefill_qwen.py",
     "verification/l1/performance/decode_page_table_cache_qwen.py",
-    "evals/profiling.py",
+    "verification/l1/performance/profiling.py",
     "kairyu/engine/core/model_runner.py",
     "kairyu/engine/core/scheduler.py",
     "kairyu/engine/core/spec_runner.py",
