@@ -59,7 +59,7 @@ format.
 
 ## Evidence and gate contract
 
-`kairyu bench quant-sweep --run RUN` first validates the entire suite-local
+`python -m evals quant-sweep --run RUN` first validates the entire suite-local
 SHA-256-chained scoreboard index. It then reloads all 28 raw `PairResult` cells
 through the authoritative no-symlink indexed loader. The task tolerance map
 must name all four tasks exactly once. One margin per task applies to every
@@ -98,7 +98,7 @@ all 24 candidate/task gates, evidence hashes, and the FP8-KV support warning.
 The aggregate files and quantization scoreboard index are explicitly eligible
 for Git retention; raw routine pair data stays ignored.
 
-Accuracy and Core row orders and recorded target shape remain unchanged by the
+Core row order and recorded target shape remain unchanged by the
 quantization sweep. `BenchTarget.quantization` is optional, and absent values are
 omitted from durable configuration rather than adding `quantization: null` to
 older run identities. Ordinary configuration A/B now treats a declared

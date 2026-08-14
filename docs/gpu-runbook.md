@@ -15,16 +15,15 @@ Purpose: everything CPU-verifiable is done (M8–M19: the full engine/model/quan
 distributed/transport stack, ~647 tests on main). This is the ordered,
 command-level plan for the first GPU session. Est. scope: 2–4 focused days.
 
-> **Benchmark command provenance:** Every top-level `bench/*.py` command in this
-> runbook is a source-checkout-only compatibility entrypoint recorded in
-> `kairyu/bench/entrypoints.toml`; it is not installed in the wheel. Run formal
-> measurements from the exact clean commit whose wrapper and package-owned
-> `kairyu.bench` helpers are recorded by the artifact. Before a GPU session, run
-> `uv run --frozen kairyu bench entrypoints --check-repo .`. Result artifacts
-> remain under the checkout-only `bench/results/` path so G2/G4/G5/G6 provenance
-> and historical replay commands do not change. A PR that retains or removes a
-> top-level result artifact must update `bench/results/index.json` in the same
-> change and pass `scripts/verify_bench_results_index.py`.
+> **Verification command provenance:** Every active Kairyu correctness and
+> performance command in this runbook is a checkout-only entrypoint declared in
+> `verification/registry.toml`; it is not installed in the wheel. Run formal
+> measurements from the exact clean commit recorded by the artifact. Before a
+> GPU session, run `uv run --frozen python -m verification check`. Result
+> artifacts remain under the checkout-only `bench/results/` path so historical
+> provenance and replay commands do not change. A PR that retains or removes a
+> tracked result artifact must update `bench/results/index.json` and pass
+> `scripts/verify_bench_results_index.py`.
 
 > Note (2026-07-04): §1/§3 below predate M8/M12/M13 — the tokenizer seam,
 > `PagedModelRunner`, the `AttentionBackend`/`FlashInferBackend` seam, and quant
@@ -42,7 +41,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --group dev                    # the CPU suite must pass here first
 uv run pytest                          # gate 0: green before any GPU work
 uv sync --extra gpu --extra engine     # flashinfer/triton/nixl + torch/xgrammar
-uv sync --extra bench                  # baselines (vllm/sglang installed alongside)
+uv sync --extra evals --group dev      # eval data plus comparison baselines
 ```
 
 Record: GPU model, driver, CUDA, flashinfer/vllm/sglang versions → `bench/results/env-<date>.json`.

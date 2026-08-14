@@ -4,14 +4,14 @@ Status: implemented
 
 ## Decision
 
-`kairyu bench compare --baseline BASE --candidate CANDIDATE` compares one
+`python -m evals compare --baseline BASE --candidate CANDIDATE` compares one
 explicit target from each completed, source-attested scoreboard-history run.
 The two runs may have different full run fingerprints because target identity
 is the intended experimental variable.  The comparison instead requires an
 exact methodology fingerprint formed from the validated run identity with only
 `config.targets` removed.  The local harness commit, clean source-tree digest,
 Python and execution runtime, ordered adapter identities, datasets, evaluator
-protocols, judge, sample selection, and every other score-bearing run option
+protocols, evaluator policy, sample selection, and every other score-bearing run option
 must still agree.
 
 Each selected target must carry an operator-declared `served_config` label and
@@ -67,9 +67,8 @@ difference and a one-sided 95% lower confidence bound for non-inferiority.
 Fractional evidence from an adapter declared binary is an error; it is never
 silently reclassified.
 
-Bounded non-binomial scores such as MRCR use a paired percentile bootstrap over
-item differences.  SciCode is binary but its sequential sub-steps within one
-problem are dependent, so its versioned cluster key groups item IDs by problem
+Bounded non-binomial scores use a paired percentile bootstrap over
+item differences.  Binary evidence with dependent sub-items uses a versioned cluster key that groups item IDs by problem
 and resamples whole problems.  Each replicate remains weighted by the number of
 sub-steps in its sampled problems, preserving SciCode's published sub-problem
 pass-rate estimand rather than changing to an equal-problem mean.  A single

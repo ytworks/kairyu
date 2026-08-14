@@ -132,7 +132,7 @@ uses an unpredictable private bytecode-cache directory.  Loaded repository
 modules must be tracked and byte-identical to `HEAD`.
 
 `run-native` records one canonical JSONL raw stream and derives a manifest
-through `kairyu.bench.batch_invariance`.  The source snapshot and complete
+through `verification.l1.correctness.batch_invariance`.  The source snapshot and complete
 checkpoint are hashed before runtime construction and again after both
 runtimes shut down.  Hardware, CUDA/NCCL/Torch, backend selection, runtime
 nonces, request rows, schedules, cache probes, all-rank counters, native

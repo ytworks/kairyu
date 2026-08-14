@@ -30,7 +30,7 @@ backend seam.
 5. [Single-model setup & usage](#5-single-model-setup--usage)
 6. [Orchestration setup & usage](#6-orchestration-setup--usage)
 7. [Configuration reference](#7-configuration-reference)
-8. [Benchmarks](#8-benchmarks)
+8. [Evaluation and verification](#8-evaluation-and-verification)
 9. [Development](#9-development)
 10. [Documentation index](#10-documentation-index)
 11. [License](#11-license)
@@ -268,8 +268,7 @@ Everything heavier is opt-in:
 | `--extra otel` | opentelemetry-sdk | tracing spans (no-op without it) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU kernels/fabric (Linux-only markers; macOS `uv sync` skips them) |
 | `--extra flashattention4` | `flash-attn-4[cu13]==4.0.0b24` | opt-in FlashAttention-4 prefill kernels using the upstream-recommended CUDA 13 extra (Linux only; combine with `--extra gpu` for delegated FlashInfer decode; both are included by `Dockerfile.cuda`) |
-| `--extra bench` | datasets/HF Hub, benchmark formats, progress UI, pinned IFEval scorer dependencies | installed benchmark-suite download and scoring |
-| `--extra bench-agentic` | mini-swe-agent, swebench, harbor | docker-based agentic benchmarks |
+| `--extra evals` | datasets/HF Hub, evaluation formats, progress UI, pinned IFEval scorer dependencies | checkout-only Core, Quantization, Structured Output, and Long Context evaluation |
 | `--group dev` | pytest, ruff, transformers, openai, … | test suite + parity goldens |
 
 FlashAttention-3 is built from the official upstream source tree. The
@@ -306,7 +305,7 @@ environment).
 
 ```bash
 uv run pytest                                        # full suite, coverage gate 80%
-./examples/deepseek-v4-flash-0731-8gpu/bench.sh list  # inspect the benchmark surface
+uv run --frozen python -m verification list                  # inspect the verification registry
 ./examples/deepseek-v4-flash-0731-8gpu/run.sh         # Kairyu L3 + vLLM L1 + Chat UI
 ```
 
@@ -1001,66 +1000,50 @@ returns `invoice_ledger_invalid` instead of a partial invoice.
 | `scripts/gpu_gates/*.sh` | GPU-day gate scripts (runbook §0–§9); all support `--dry-run` |
 | `verification/l1/performance/serving_bench.py`, `verification/product/performance/frontier_compare.py`, `verification/l1/performance/kv_transfer_bench.py` | latency/goodput/transfer benches |
 
-## 8. Benchmarks
+## 8. Evaluation and verification
 
-`kairyu bench` runs answer-quality suites against any deployed gateway — single
-models and orchestration tiers become scoreboard columns. The default is the
-12-benchmark Accuracy suite; `--suite core` selects the deterministic
-GSM8K/MMLU/IFEval regression suite; and `--suite structured` selects the fixed
-five-case JSON-Schema conformance corpus:
+Repository model evaluations and Kairyu implementation gates are separate
+checkout-only surfaces. Neither is shipped in the wheel.
 
-```bash
-uv run kairyu serve examples/deploy_multi_orchestrator.yaml &
-uv run kairyu bench run --base-url http://localhost:8000/v1 \
-    --model m1 --model kairyu-auto --model kairyu-auto-max
-uv run kairyu bench run --suite core --smoke \
-    --base-url http://localhost:8000/v1 --model m1
-uv run kairyu bench run --config bench/configs/structured.yaml
-uv run kairyu bench run --config bench/configs/accuracy.yaml \
-    --only swe-bench-verified --attempts 1
-```
+| Surface | Owns |
+|---|---|
+| `evals/` | Core, Quantization, Structured Output, and Long Context model evaluations |
+| `verification/` | L1, orchestration, fleet, and product correctness, performance, resilience, and diagnostic gates |
+| `evidence/` | neutral strict JSON, hashing, catalog, and execution-record contracts |
+| `bench/results/` | immutable legacy artifacts whose existing paths and bytes remain unchanged |
 
-Structured conformance pairs the same prompt and seed with and without
-`response_format` across nested, recursive, enum, pattern, and union schemas.
-It separately reports strict JSON validity, Draft 2020-12 conformance, exact
-task accuracy, and malformed output. Acceptance/schema/task rates use all
-scheduled observations; JSON-valid/malformed rates use accepted HTTP 200
-completions. Endpoint token counts include explicit usage coverage, latency is
-diagnostic, and no currency cost is inferred. HTTP 200 safety refusals remain
-accepted non-JSON/task-failure evidence rather than execution failures.
+Install evaluation dependencies and run one explicit suite:
 
-The core MMLU row ranks the exact teacher-forced continuations `" A"` through
-`" D"` by raw token log-likelihood through Kairyu's native completions
-extension. It never substitutes generated top-k membership for a missing
-candidate score. The row remains a disclosed zero-shot variant; targets that
-cannot provide exact continuation evidence are skipped rather than scored, and
-a fixed MMLU token-boundary failure on the serialized probe stops dataset
-fan-out.
+~~~bash
+uv sync --extra evals --group dev
+uv run --frozen python -m evals list --suite core
+uv run --frozen python -m evals run --suite core --smoke \
+  --base-url http://localhost:8000/v1 --model m1
+uv run --frozen python -m evals run \
+  --config evals/configs/structured.yaml
+~~~
 
-Scoreboards also report target-only streamed TTFT p50/p95 and TPS p50 for direct
-generation rows. TPS is withheld without endpoint usage; MMLU is marked not
-applicable, and external agentic harness rows remain explicitly unavailable
-unless their own artifacts provide target-request timing. Accuracy comparison
-reports use a committed eight-model source catalog (Fugu, Fugu Ultra, Fable 5,
-GPT-5.6 Sol, DeepSeek-V4-Flash-0731, Qwen3.8 MAX, GLM-5.2, and Kimi K3) and never
-fill missing public values from another model or condition. SWE-bench Verified
-uses mini-SWE-agent followed by the official SWE-bench harness; it requires
-Docker on x86-64 Linux and `kairyu[bench-agentic]`. Its local one-trial score is
-not presented as a like-for-like delta against Fable 5's published five-trial
-mean.
+A suite or config is required. Core is the judge-free GSM8K, MMLU, and IFEval
+regression set; Quantization adds GPQA Diamond for the declared seven-arm
+quality sweep; Structured Output uses paired constrained and unconstrained
+requests; Long Context measures fixed RULER NIAH lengths. Dataset pins, scorer
+bytes, target identity, and sampling policy are bound into run evidence.
 
-Datasets download to `~/.cache/kairyu/benchmarks` (never committed); unmet preconditions
-(no docker, gated dataset, no judge) become annotated `skipped` cells, so the run always
-completes. Subcommands: `bench run`, `bench download`, `bench report <run>`, `bench list`,
-and `bench entrypoints`. Full guide: [`docs/benchmarks.md`](docs/benchmarks.md).
-The structured corpus is installed package data verified by its exact content
-SHA-256, rather than a remotely downloaded dataset identified by an HF Git pin.
+Kairyu engine and system claims use the verification registry:
 
-The wheel includes the reusable `kairyu.bench` library, public CLI, entrypoint
-manifest, 17 synthetic benchmark stand-ins, the structured conformance corpus,
-and the judge-calibration corpus (19 JSONL resources total). Top-level
-`bench/*.py` developer/formal wrappers, `bench/results/`, and `tests/` remain
-checkout-only; their stable inventory and compatibility policy are in
+~~~bash
+uv run --frozen python -m verification list
+uv run --frozen python -m verification check
+uv run --frozen python -m verification run \
+  orchestration.performance.router_latency -- --json --assert-gate
+~~~
+
+Formal performance execution requires an accepted correctness artifact and
+records its exact SHA-256. HF/TP parity, logprob agreement, batch invariance,
+quantization/KV equivalence, TTFT, TPOT/TPS, throughput, goodput, and vLLM
+comparisons therefore stay out of model-evaluation rows.
+
+Full guides: [`docs/benchmarks.md`](docs/benchmarks.md) and
 [`verification/README.md`](verification/README.md).
 
 ## 9. Development
@@ -1068,7 +1051,6 @@ checkout-only; their stable inventory and compatibility policy are in
 ```bash
 uv run --frozen pytest --fail-on-skip  # portable tests + coverage (gate: 80%)
 uv run --frozen ruff check .           # lint (E, F, I, UP, B; line length 100)
-uv run --frozen kairyu bench entrypoints --check-repo .
 uv run --frozen python scripts/verify_verification_registry.py
 uv run --frozen python scripts/verify_bench_wheel.py
 uv run --frozen python verification/orchestration/performance/router_latency.py

@@ -3,7 +3,7 @@
 # applied only to the constrained arm. Install the scorer dependency first:
 #
 #   uv sync --extra evals
-#   kairyu bench run --config bench/configs/structured.yaml
+#   python -m evals run --config evals/configs/structured.yaml
 suite: structured
 
 targets:

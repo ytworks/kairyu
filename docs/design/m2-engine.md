@@ -183,13 +183,13 @@ This machine (macOS/arm64) cannot run CUDA. Split:
 This ordering front-loads the algorithmically risky parts (KV manager, overlap loop) where
 unit tests are possible, and keeps the GPU session focused on integration + measurement.
 
-## 4. Bench plan (reproduction scripts in `bench/`)
+## 4. Bench plan (registered entrypoints in `verification/`)
 
 | Script | Workload | Metrics | Baselines |
 |---|---|---|---|
-| `bench/serving_sharegpt.py` | ShareGPT, 128/256 concurrent | TTFT p50/p99, TPOT, goodput | vLLM V1, SGLang |
+| `verification/l1/performance/serving_bench.py` | ShareGPT, 128/256 concurrent | TTFT p50/p99, TPOT, goodput | vLLM V1, SGLang |
 | `verification/fleet/performance/multiturn_prefix.py` | synthetic multi-turn, 50% shared prefix | KV hit rate, TTFT | vLLM (prefix caching on) |
-| `bench/orchestration_e2e.py` | M1 Conductor DAG on real engine | per-step TTFT vs cold | vLLM backend via M1 |
+| `verification/orchestration/correctness/orchestration_stream_bench.py` | M1 Conductor DAG on real engine | per-step TTFT vs cold | vLLM backend via M1 |
 
 Identical: model, dtype, max_num_batched_tokens, request trace, hardware, driver. Configs
 committed alongside results (`bench/results/<date>-<gpu>.json`).

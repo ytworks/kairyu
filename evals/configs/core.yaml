@@ -2,7 +2,7 @@
 # Install/download once, then run with:
 #
 #   uv sync --extra evals
-#   kairyu bench run --config bench/configs/core.yaml
+#   python -m evals run --config evals/configs/core.yaml
 #
 # A full run sends 58,028 target calls: MMLU scores four exact continuations
 # per item through a direct native Kairyu target. Add `--smoke` for the
@@ -19,7 +19,7 @@ targets:
     # temperature: 0.6
     # sampling_mode: recommended  # wire omission, not endpoint attestation
     # seed: 100                    # attempts=4 sends seeds 100..103
-    # Required only when this target participates in `kairyu bench compare`.
+    # Required only when this target participates in `python -m evals compare`.
     # Hash a canonical manifest covering checkpoint, build, and engine config.
     # served_config:
     #   label: qwen3-32b-bf16
