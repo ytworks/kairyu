@@ -49,10 +49,10 @@ jobs:
           --require-module jsonschema
           --require-module zmq
           --require-module yaml
-      - name: Verify benchmark inventories and wheel boundary
+      - name: Verify eval and verification inventories and wheel boundary
         if: matrix.python-version == '3.12'
         run: |
-          uv run --frozen python scripts/verify_bench_entrypoints.py
+          uv run --frozen python scripts/verify_verification_registry.py
           uv run --frozen python scripts/verify_bench_results_index.py
           uv run --frozen python scripts/verify_bench_wheel.py
       - name: Lint
@@ -61,10 +61,10 @@ jobs:
         run: |
           uv run --frozen coverage erase
           uv run --frozen pytest --fail-on-skip -ra \
-            -n 2 --dist loadfile tests/bench \
+            -n 2 --dist loadfile tests/evals \
             --cov=kairyu --cov-report= --cov-fail-under=0
           uv run --frozen pytest --fail-on-skip -ra \
-            tests --ignore=tests/bench \
+            tests --ignore=tests/evals \
             --cov=kairyu --cov-append --cov-report=term-missing \
             --cov-fail-under=80
 
@@ -132,7 +132,7 @@ jobs:
       - name: Open WebUI browser end-to-end test
         run: ./scripts/webui_smoke.sh
 
-  bench-exec-container:
+  verification-exec-container:
     # Issue #210: the real isolation/conformance gate is mandatory here. The
     # test fails (never skips) if Docker or the exact pinned image is absent.
     runs-on: ubuntu-latest
@@ -146,18 +146,18 @@ jobs:
         run: uv sync --frozen --dev
       - name: Build and pin execution image
         run: |
-          iidfile="$RUNNER_TEMP/kairyu-bench-exec-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.iid"
+          iidfile="$RUNNER_TEMP/kairyu-verification-exec-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.iid"
           docker build \
             --iidfile "$iidfile" \
-            -f deploy/bench/Dockerfile.exec \
-            deploy/bench
+            -f deploy/verification/Dockerfile.exec \
+            deploy/verification
           image_id="$(tr -d '\r\n' < "$iidfile")"
           test "${image_id#sha256:}" != "$image_id"
-          echo "KAIRYU_BENCH_EXEC_IMAGE=$image_id" >> "$GITHUB_ENV"
+          echo "KAIRYU_EXEC_IMAGE=$image_id" >> "$GITHUB_ENV"
       - name: Real Docker runner conformance
         run: >-
           uv run --frozen pytest --fail-on-skip
-          -m docker_exec tests/bench/test_bench_exec_docker.py -v --no-cov
+          -m docker_exec tests/evals/test_bench_exec_docker.py -v --no-cov
 
   kind-smoke:
     runs-on: ubuntu-latest

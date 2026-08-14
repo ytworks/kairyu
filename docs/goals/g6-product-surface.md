@@ -35,7 +35,7 @@ route decision, role DAG, verifier verdicts — Fugu is a black box). Sources in
 | P-A2 (chat templates) | HF Jinja `apply_chat_template` with per-model override in `DeploymentSpec` and tool schemas in-template; Llama/Qwen golden transcripts byte-match the HF reference | golden tests |
 | P-A3 (sampling surface) | `logprobs`/`top_logprobs` returned (plumbing exists in `sampling_params.py`/`outputs.py` — surface it); `/v1/completions` served; `n>1` verified incl. streaming indices; OpenAI SDK round-trips all of it | `tests/server/` |
 | P-A4 (structured outputs) | `response_format: json_schema` enforced through `engine/core/structured.py` (not `extra_args` passthrough): 100% schema-valid on a 50-schema suite | `tests/server/` |
-| P-A5 (bench honesty) | `bench/serving_bench.py` gains auth headers and token-granularity TPOT (tokens, not SSE chunks — providers coalesce differently); per-run JSON to `bench/results/` | bench run |
+| P-A5 (serving evidence) | `verification/l1/performance/serving_bench.py` records auth-aware token-granularity TTFT/TPOT and throughput; new per-run JSON defaults below `verification/results/` | verification run |
 
 ### Stage P-B — Fugu-class product (MUST)
 
@@ -44,7 +44,7 @@ route decision, role DAG, verifier verdicts — Fugu is a black box). Sources in
 | P-B1 (streaming orchestrator) | `Orchestrator.run_chat(messages, tools, stream=True)`: route decided fast, final synthesizer/worker stage streamed token-by-token, keep-alive status events on long Conductor runs; `kairyu-auto` TTFT ≤1.5× the underlying engine's TTFT on the direct-route path | bench + tests |
 | P-B2 (orchestration usage + trace) | `usage.orchestration_input/output_tokens` on every auto request (Fugu parity, billing necessity); opt-in `X-Kairyu-Trace` returns route/DAG/verifier verdicts (the transparency differentiator) | `tests/server/` |
 | P-B3 (chat UI — COMPLETE) | Open WebUI shipped as a compose service against the gateway; a fresh user chats with `kairyu-auto` and per-model endpoints, streaming, after one `docker compose up`. Custom UI work is limited to an orchestration-trace viewer | pinned Playwright compose smoke |
-| P-B4 (tiered auto models) | `kairyu-auto` (latency-biased routing) and `kairyu-auto-max` (Conductor/MoA depth) both in `/v1/models`; auto ≤1.5× direct-call latency, auto-max quality-wins on a fixed eval set | bench |
+| P-B4 (tiered auto models) | `kairyu-auto` and `kairyu-auto-max` are both discoverable; alternating direct/AUTO serving requests keep AUTO TTFT within 1.5x of the direct path | verification + tests |
 | P-B5 (tenancy v1) | Key→tenant map in `DeploymentSpec`; per-key token-bucket limits in-gateway; append-only usage ledger + `/admin/usage`; two keys get isolated 429s; ledger reconciles with Prometheus counters to <0.1% | `tests/server/` |
 
 **Tiered-example amendment (2026-08-13).** The quality-first Chat UI profile
@@ -82,18 +82,12 @@ then completed a plain request with healthy readiness. The reproducible raw
 artifact is
 `bench/results/auto-params-qwen3-32b-tp8-2026-07-28.json`.
 
-P-B4 was revalidated after request-intent propagation on 2026-07-28
-(issues #198/#208): one Qwen3-32B TP8
-DeploymentSpec lists direct, standard AUTO, and max AUTO. Twelve alternating
-direct/standard pairs measured 1.0123x p50 and 0.7666x p99 TTFT ratios. On the
-fixed, sandbox-scored eight-item LiveCodeBench multi-agent slice, max scored
-37.5% versus standard's 12.5% while using 32 versus 38 calls, 47,266 versus
-50,504 internal tokens, and 1,499.274 versus 2,567.389 allocated GPU-seconds.
-The private 1024-token policy completed the full gate; uncapped propagation
-exceeded an internal 60 s timeout and returned 502. The committed artifact
-contains the effective policy and per-item evidence without the former #208
-caveat:
-`bench/results/tiered-auto-qwen3-32b-tp8-2026-07-28.json`.
+P-B4 serving performance was revalidated after request-intent propagation on
+2026-07-28 (issues #198/#208). One Qwen3-32B TP8 deployment exposed direct,
+standard AUTO, and max AUTO endpoints. Twelve alternating direct/standard pairs
+measured 1.0123x p50 and 0.7666x p99 TTFT ratios. The retained runner now records
+only this direct-versus-AUTO serving envelope; model evaluation belongs outside
+the verification gate.
 
 P-B5 is CPU-green as of 2026-07-27 (issue #199): the supported
 `DeploymentSpec` path proves isolated two-key 429s and exact (0% error)
@@ -105,7 +99,7 @@ malformed-tail recovery and shutdown drain.
 
 | Gate | Target | Where proven |
 |---|---|---|
-| P-C1 (MUST — the headline artifact) | `bench/frontier_compare.py`: multi-target (Kairyu, Anthropic, OpenAI, DeepSeek), identical prompt sets, TTFT/TPOT/goodput/$-per-Mtok + small quality eval; nightly unattended run publishing a dated scoreboard + methodology (prompts, sampling, region, time-of-day, provider cache state) to `bench/results/` | scheduled run |
+| P-C1 (MUST — the headline artifact) | `verification/product/performance/frontier_compare.py`: multi-target (Kairyu, Anthropic, OpenAI, DeepSeek), identical prompt sets, TTFT/TPOT/goodput/$-per-Mtok + small quality eval; nightly unattended run publishing a dated scoreboard + methodology (prompts, sampling, region, time-of-day, provider cache state) to `bench/results/` | scheduled run |
 | P-C2 (Responses API — COMPLETE) | `/v1/responses` developer surface (`input`, canonical streaming events, flat/namespace tool calls, `previous_response_id` server-side state): OpenAI SDK sync/async clients and a Codex-class agent work unmodified (Fugu parity) | `tests/server/test_responses_api.py`, Qwen3-32B TP8 Codex smoke |
 | P-C3 (embeddings — COMPLETE) | `/v1/embeddings` (+optional rerank) as a new engine-backend kind; Open WebUI RAG works end-to-end against Kairyu alone | compose smoke |
 | P-C4 (vision) | Content-parts (`[{type:"text"|"image_url"}]`) through template + engine; image chat works in Open WebUI against a VLM replica | manual + tests |
@@ -170,7 +164,7 @@ retained result is
   internal token accounting reuses `budget.py`'s existing spend tracking.
 - Tenancy extends `server/settings.py` + `middleware.py`; the ledger reuses the
   `batch/store.py` atomic-file pattern; quota state feeds G5 F5 admission later.
-- `bench/frontier_compare.py` grows out of `bench/serving_bench.py` (P-A5 first).
+- `verification/product/performance/frontier_compare.py` grows out of `verification/l1/performance/serving_bench.py` (P-A5 first).
 
 ## 5. Evidence and reporting rules
 

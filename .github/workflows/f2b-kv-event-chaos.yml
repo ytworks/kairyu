@@ -4,9 +4,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/f2b-kv-event-chaos.yml"
-      - "bench/kv_event_f2b_bench.py"
-      - "tests/bench/test_kv_event_f2b_bench.py"
-      - "bench/fleet_churn_bench.py"
+      - "verification/fleet/correctness/kv_event_f2b_bench.py"
+      - "verification/fleet/resilience/fleet_churn_bench.py"
       - "bench/results/f2a-prefix-routing-500-2026-07-28/**"
       - "bench/results/f2b-kv-event-retained/**"
       - "kairyu/__init__.py"
@@ -74,21 +73,16 @@ jobs:
           python-version: "3.12"
       - name: Sync development dependencies
         run: uv sync --frozen --dev
-      - name: Run focused replay/verifier tests
-        run: >-
-          uv run --frozen pytest --fail-on-skip
-          tests/bench/test_kv_event_f2b_bench.py
-          -q --no-cov
       - name: Run a fresh F2b measurement
         if: github.event_name == 'pull_request' || inputs.mode == 'measure'
         run: >-
-          uv run --frozen python -m bench.kv_event_f2b_bench
+          uv run --frozen python -m verification.fleet.correctness.kv_event_f2b_bench
           --profile "${PROFILE}"
           --output-dir "${F2B_RESULTS_DIR}"
       - name: Replay freshly emitted evidence without remeasurement
         if: github.event_name == 'pull_request' || inputs.mode == 'measure'
         run: >-
-          uv run --frozen python -m bench.kv_event_f2b_bench
+          uv run --frozen python -m verification.fleet.correctness.kv_event_f2b_bench
           --verify-artifact "${F2B_RESULTS_DIR}"
           --required-profile "${PROFILE}"
           --require-current-source
@@ -96,7 +90,7 @@ jobs:
       - name: Replay a manually selected local artifact
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'replay'
         run: >-
-          uv run --frozen python -m bench.kv_event_f2b_bench
+          uv run --frozen python -m verification.fleet.correctness.kv_event_f2b_bench
           --verify-artifact "${REPLAY_DIR}"
           --required-profile formal
           --require-current-source

@@ -84,13 +84,13 @@ results are ever reported (goal acceptance criteria, carried from G1).
 
 | Gate | Target | Regime |
 |---|---|---|
-| A1 (correctness anchor) | Llama-3.1-8B TP=1/2 on the same 64 fixed prompts: retain full greedy continuations with overlap ON/OFF, require each overlap pair to be exact, and require TP1 and TP2 to pass the amended teacher-forced agreement and logprob criteria. `bench/gate_a1.py` assembles and enforces the self-contained gate | — |
-| A2 (correctness, 70B) | 70B TP=4 and TP=8 vs TP=2, teacher-forced next-token agreement on 64 prompts: (a) **zero substantive disagreements** — every disagreement inside the reference's own top-k and within the measured tie gap; (b) agreement rate **at or above the reference's self-agreement rate**, both measured by `bench/parity_hf.py`. See the 2026-07-25 amendment below | — |
+| A1 (correctness anchor) | Llama-3.1-8B TP=1/2 on the same 64 fixed prompts: retain full greedy continuations with overlap ON/OFF, require each overlap pair to be exact, and require TP1 and TP2 to pass the amended teacher-forced agreement and logprob criteria. `verification/l1/correctness/gate_a1.py` assembles and enforces the self-contained gate | — |
+| A2 (correctness, 70B) | 70B TP=4 and TP=8 vs TP=2, teacher-forced next-token agreement on 64 prompts: (a) **zero substantive disagreements** — every disagreement inside the reference's own top-k and within the measured tie gap; (b) agreement rate **at or above the reference's self-agreement rate**, both measured by `verification/l1/correctness/parity_hf.py`. See the 2026-07-25 amendment below | — |
 | A3 (TTFT scaling) | TTFT p50 at TP=8 ≤ ⅓ × TP=2 on 4k-token prompts (≥75% efficiency; prefill is compute-bound and parallelizes near-linearly over NVLink) | latency-bound |
 | A4 (TPOT scaling) | TPOT p50 at TP=8 ≤ ½ × TP=2 (≥50% efficiency; decode is bandwidth-bound and all-reduce latency does not shrink with N — linear TPOT scaling is not a defensible promise) | latency-bound |
 | A5 (throughput scaling) | Output tokens/s at TP=8 ≥ 2.8 × TP=2 (≥70% efficiency) | saturation |
-| A6 (vLLM comparison) | `bench/g2_a6_vllm_bench.py` independently verifies the complete TP=4/8 matched matrix against pinned stock vLLM. ShareGPT @128 conc: goodput ≥ 0.95× vLLM AND TTFT p99 ≤ vLLM. On the 50%-shared-prefix multi-turn trace: TTFT p50 ≥20% better than vLLM (radix-KV structural edge — the G1 claim, preserved where it is defensible) | saturation |
-| A7 (KV invariance) | On the fixed 50%-shared-prefix trace, the real native engine's prompt-token KV hit rate (`sum(cached_tokens) / sum(prompt_tokens)`, recomputed from engine-originated response usage) is strictly >80% independently at TP=4 and TP=8, both against the replica directly and through a single-replica gateway. `bench/tp_kv_hit_g2_a7_bench.py` verifies the committed raw trace, config, and physical topology; routing counters are diagnostic and never cache-hit truth | — |
+| A6 (vLLM comparison) | `verification/l1/performance/g2_a6_vllm_bench.py` independently verifies the complete TP=4/8 matched matrix against pinned stock vLLM. ShareGPT @128 conc: goodput ≥ 0.95× vLLM AND TTFT p99 ≤ vLLM. On the 50%-shared-prefix multi-turn trace: TTFT p50 ≥20% better than vLLM (radix-KV structural edge — the G1 claim, preserved where it is defensible) | saturation |
+| A7 (KV invariance) | On the fixed 50%-shared-prefix trace, the real native engine's prompt-token KV hit rate (`sum(cached_tokens) / sum(prompt_tokens)`, recomputed from engine-originated response usage) is strictly >80% independently at TP=4 and TP=8, both against the replica directly and through a single-replica gateway. `verification/l1/performance/tp_kv_hit_g2_a7_bench.py` verifies the committed raw trace, config, and physical topology; routing counters are diagnostic and never cache-hit truth | — |
 
 **A7 closure (2026-07-29):** the retained Qwen3-32B artifact records
 TP4 direct/gateway at 87.6725%/87.3531% and TP8 direct/gateway at
@@ -102,7 +102,7 @@ raw replay passes all eight binding checks:
 
 | Gate | Target | Regime |
 |---|---|---|
-| A8 (DP scaling) | `bench/dp_scaling_g2_a8_bench.py` compares DP=2 × TP=4 (same 8 GPUs) vs 1 × TP=4: goodput ≥1.9× (replicas are independent — near-linear is fair to demand); L2 Router added latency p99 <10 ms (m4 budget); session-affinity routing keeps multi-turn KV hit rate ≥90% of the single-replica value (naive round-robin destroys prefix locality — affinity is part of the acceptance contract) | saturation |
+| A8 (DP scaling) | `verification/l1/performance/dp_scaling_g2_a8_bench.py` compares DP=2 × TP=4 (same 8 GPUs) vs 1 × TP=4: goodput ≥1.9× (replicas are independent — near-linear is fair to demand); L2 Router added latency p99 <10 ms (m4 budget); session-affinity routing keeps multi-turn KV hit rate ≥90% of the single-replica value (naive round-robin destroys prefix locality — affinity is part of the acceptance contract) | saturation |
 | A9 (DP vs TP crossover) | Report DP=2×TP=4 vs TP=8 goodput and TPOT across the arrival sweep. No threshold — the crossover concurrency must appear in the results file | saturation |
 
 **A8 formal procedure:** run the pinned Qwen3-32B checkpoint
@@ -189,7 +189,7 @@ bigger-than-node models rather than a latency win for a model that fits one node
 
 | Gate | Target | Regime |
 |---|---|---|
-| B2 | Page-granular inter-node KV transfer, standalone microbench (`bench/kv_transfer_bench.py`): sustained effective ≥20 GB/s on 400 Gb/s IB (≥40% of line rate) for batches ≥64 contiguous pages — i.e. **≤8 µs/token amortized** at 160 KB/token | — |
+| B2 | Page-granular inter-node KV transfer, standalone microbench (`verification/l1/performance/kv_transfer_bench.py`): sustained effective ≥20 GB/s on 400 Gb/s IB (≥40% of line rate) for batches ≥64 contiguous pages — i.e. **≤8 µs/token amortized** at 160 KB/token | — |
 
 ### Stage 6.3 — P-D inter-node (blocked on 6.2)
 
@@ -327,7 +327,7 @@ A1/A2 are therefore restated against measured quantities:
    bf16 resolution floor);
 2. **agreement at or above the reference's self-agreement rate**.
 
-Both are computed and reported by `bench/parity_hf.py`, which records the noise
+Both are computed and reported by `verification/l1/correctness/parity_hf.py`, which records the noise
 floor next to every result — so the comparison travels with the number. A fixed
 percentage may return once a reference is available at a precision that supports
 it (an fp32 forward, which needs more memory than one card holds for a 32B).
@@ -335,7 +335,7 @@ it (an fp32 forward, which needs more memory than one card holds for a 32B).
 **Free-running greedy sequence equality is not a correctness gate.** A1 keeps its
 full-continuation, overlap-ON-and-OFF definition; what changes is that its
 verdict is the teacher-forced agreement above rather than sequence equality.
-At the time of this amendment, `bench/parity_hf.py` measured that agreement but
+At the time of this amendment, `verification/l1/correctness/parity_hf.py` measured that agreement but
 did not yet satisfy A1: it ran single-token requests through `EngineCore` only,
 so it covered neither full continuations nor Llama-3.1-8B. The overlap path was
 already unblocked by `PagedModelRunner`'s in-flight token buffer.
@@ -343,7 +343,7 @@ already unblocked by `PagedModelRunner`'s in-flight token buffer.
 **A1 closure (2026-07-26).** The self-contained
 `bench/results/g2-a1-llama31-8b-rtxpro6000-2026-07-26.json` now retains all
 Llama-3.1-8B TP1/2 overlap OFF/ON continuations over the same 64 BOS-free prompt
-token sequences and passes `bench/gate_a1.py`. Overlap ON reproduces OFF 64/64
+token sequences and passes `verification/l1/correctness/gate_a1.py`. Overlap ON reproduces OFF 64/64
 at both TP degrees. Against HF's 1010/1024 self-agreement, TP1 and TP2 each
 agree on 1014/1024 positions, with zero substantive disagreements, zero missing
 logprob samples, and agreeing-position max absolute deltas 0.10440 and 0.10331
@@ -353,7 +353,7 @@ provenance. The device-side half of m2 §2.2 stays open as a performance
 invariant, not as a gate. The same engine measured 0.786 free-running and 0.988
 teacher-forced: once one token differs, every later token is compared against a
 prefix the other side never produced, so a single moved near-tie is
-indistinguishable from a broken shard. `bench/parity_tp.py` still reports
+indistinguishable from a broken shard. `verification/l1/correctness/parity_tp.py` still reports
 free-running match rates for orientation; only the teacher-forced numbers gate.
 
 **A2 closure (2026-07-27).** The dense anchor is
@@ -367,7 +367,7 @@ disagreements and no missing raw positions/logprobs. Direct TP4/8-vs-TP2 each
 agree on 1004/1024 with zero substantive differences. The self-contained
 `bench/results/g2-a2-llama33-70b-fp8-rtxpro6000-2026-07-27.json` embeds all
 four source envelopes, 15 full safetensors SHA-256s, CUDA 13.0/NCCL 2.29.7
-and physical PCIe topology, and passes all ten `bench/gate_a2.py` checks.
+and physical PCIe topology, and passes all ten `verification/l1/correctness/gate_a2.py` checks.
 The result retains agreeing-position maximum logprob deltas
 0.56900/0.54147/0.25563 as diagnostics; they are not a third A2 criterion
 beyond the two binding amended criteria above.
@@ -407,7 +407,7 @@ CUDA Graphs are enabled on both arms, while the artifact must separately
 disclose Kairyu's decode-only capture envelope and vLLM's actual compile/capture
 mode and sizes rather than claiming identical full-graph strategies.
 
-The formal closure uses `bench/run_g2_a6_formal.py`, not an uncommitted
+The formal closure uses `verification/l1/performance/run_g2_a6_formal.py`, not an uncommitted
 operator. Before any server starts it regenerates the complete trace bundle
 from the pinned dataset and tokenizer and requires byte-equivalent descriptors,
 then full-hashes all 17 live weight shards, the safetensors index, model
@@ -456,13 +456,13 @@ G1 rules carried forward verbatim, plus:
 - **Scaling-efficiency claims must include the TP=2 base measurement in the same
   results file** (no cross-session bases).
 - Required bench additions (named here, designed in m5/m6): topology arguments for
-  `bench/serving_bench.py` (TP/PP/DP sweep), `bench/kv_transfer_bench.py` (B2), a P-D
-  mixed-workload trace. `bench/multiturn_prefix.py` remains the deterministic CPU
+  `verification/l1/performance/serving_bench.py` (TP/PP/DP sweep), `verification/l1/performance/kv_transfer_bench.py` (B2), a P-D
+  mixed-workload trace. `verification/fleet/performance/multiturn_prefix.py` remains the deterministic CPU
   workload-geometry source and KV-manager sanity check. Formal A7 real-engine
   evidence is collected and independently replayed by
-  `bench/tp_kv_hit_g2_a7_bench.py`; `bench/router_latency.py` remains reusable for
+  `verification/l1/performance/tp_kv_hit_g2_a7_bench.py`; `verification/orchestration/performance/router_latency.py` remains reusable for
   A8. Formal A6 evidence is collected as one fresh-server shard per scenario by
-  `bench/g2_a6_vllm_bench.py`; its assembler requires the exact 32-run binding
+  `verification/l1/performance/g2_a6_vllm_bench.py`; its assembler requires the exact 32-run binding
   matrix and its verifier replays raw nanosecond timings, failures, prompt
   identity, server generations, matched cache/batching configuration, and
   provenance before accepting any ratio.

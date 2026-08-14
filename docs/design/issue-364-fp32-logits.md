@@ -176,7 +176,7 @@ The narrow issue #364 matrix is:
 | A2 | `float32` | TP2/4/8, the same 64 x 16 rows and TP comparisons | **FAIL**; HF agreement 1008/1024, 1003/1024, and 1002/1024 against the same floor |
 
 The four formal arm artifacts are assembled by
-`bench/gate_logits_dtype.py`; it fails closed on mixed arm identity,
+`verification/l1/correctness/gate_logits_dtype.py`; it fails closed on mixed arm identity,
 provenance, references, checkpoints, prompts, commits, or incomplete raw rows.
 All A1 and A2 cells have zero substantive disagreements and zero missing
 observations. Direct A2 TP4/8-versus-TP2 comparisons likewise have zero

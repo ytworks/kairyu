@@ -134,32 +134,12 @@ the single `orchestrator=` kwarg): `kairyu-auto` (default tier) and
 `kairyu-auto-max` (deep tier: bigger budget, MoA enabled) are just two
 configured Orchestrator instances listed in /v1/models.
 
-**Production proof amendment (2026-07-27, issue #198).** `OrchestratorSpec`
-now exposes bounded `moa_samples`, so declarative YAML can actually select MoA
-instead of merely giving an identical Conductor a deeper budget. The
-Qwen3-32B TP8 DeploymentSpec serves direct, standard AUTO, and max AUTO
+**Production proof amendment (2026-07-27, issues #198/#208).**
+`OrchestratorSpec` exposes bounded `moa_samples`, so declarative YAML can select
+MoA. The Qwen3-32B TP8 deployment serves direct, standard AUTO, and max AUTO
 together. Twelve alternating direct/standard pairs measured standard/direct
-TTFT at 1.0207x p50 and 0.9674x p99. On a fixed seed-198 eight-item
-LiveCodeBench release-v6 slice restricted before execution to prompts routed
-to `multi_agent`, max scored 2/8 versus standard 0/8. Max also consumed 32
-internal calls, 33,573 input + 12,186 output tokens, and 1,549.6 allocated
-GPU-seconds versus standard's 44 calls, 47,152 + 13,217 tokens, and 2,602.8
-GPU-seconds. This small fixed subset closes the product gate but is not a
-full-suite accuracy claim; that dated raw artifact records the then-open issue
-#208 sampling caveat.
-
-**Request-intent revalidation (2026-07-28, issue #208).** The identical TP8
-deployment and fixed slice were rerun after request propagation. Twelve
-alternating pairs measured standard/direct TTFT at 1.0123x p50 and 0.7666x
-p99. With public `temperature=0` and final `max_tokens=8192`, max scored 3/8
-versus standard 1/8. Max used 32 calls, 34,038 input + 13,228 output tokens,
-and 1,499.274 allocated GPU-seconds; standard used 38 calls, 37,803 + 12,701
-tokens, and 2,567.389 GPU-seconds. The selected 1024-token private cap also
-outperformed the uncapped interpretation operationally: the latter exceeded
-an internal 60 s backend timeout and returned 502 on item `abc382_g`, while the
-bounded run completed that same Max item in 47.68 s and passed the full gate.
-The 0.25 quality delta is preserved with no effective-sampling caveat in
-`bench/results/tiered-auto-qwen3-32b-tp8-2026-07-28.json`.
+TTFT at 1.0123x p50 and 0.7666x p99 after request-intent propagation. This
+serving envelope remains a verification gate; product evaluation is separate.
 
 ### D3 — Tenancy v1
 
@@ -199,7 +179,7 @@ service seconds versus one in the control. This is the minimum one-service
 quantum interference bound; without admission, good p99 is 298 seconds and
 the shared queue high-watermark grows from 2 to 301. Raw admission, request,
 queue, scheduling, and latency evidence is published by
-`bench/noisy_neighbor_bench.py`.
+`verification/fleet/resilience/noisy_neighbor_bench.py`.
 
 The real Qwen3-32B TP8 gate uses good-only latency as a secondary lower-bound
 reference, not the primary isolation comparator. Its bracketed controls carry
@@ -343,7 +323,7 @@ is common to every waiting request. This preserves stable ties and starvation
 prevention without re-sorting the full queue on every schedule. Recompute
 preemption retains front-of-tie placement, and KV allocation still blocks at
 the selected head without skip-ahead. Reproduce the 100k A/B measurements with
-`uv run python bench/scheduler_queue_bench.py --requests 100000 --repeats 5`.
+`uv run python verification/l1/performance/scheduler_queue_bench.py --requests 100000 --repeats 5`.
 
 **Prefill cohort amendment (2026-08-07, issue #328).** This supersedes only the
 unbounded selected-head behavior above. Native schedulers default
@@ -398,7 +378,7 @@ batch consumes 300 residual service ticks, retains a 58-request overload
 backlog at the measurement boundary, and drains all work afterward. Raw
 request, scheduling, queue-depth, priority, latency, and accounting evidence is
 in `bench/results/f5a-priority-overload-cpu-2026-07-28.json`; reproduce it with
-`uv run python bench/priority_overload_bench.py --assert-gate`.
+`uv run python verification/fleet/resilience/priority_overload_bench.py --assert-gate`.
 
 The production-shaped Qwen3-32B TP8 gate calibrated 7.6304 requests/s and then
 offered 0.5x interactive plus 1.5x batch work through a one-replica gateway.
@@ -415,7 +395,7 @@ image digest, model revision, `/backends` topology, and GPU inventory. The raw
 environment, arrivals, TTFT samples, Batch API states, counters, and assertions
 are in
 `bench/results/f5a-priority-overload-qwen3-32b-tp8-2026-07-28.json`; reproduce
-them with `uv run python bench/priority_overload_gpu_bench.py --assert-gate`.
+them with `uv run python verification/fleet/resilience/priority_overload_gpu_bench.py --assert-gate`.
 
 **SLO-admission validation amendment (2026-07-28, issue #192).**
 `AdmissionController.begin()` now makes the prediction and reserves the
@@ -450,7 +430,7 @@ both saturation profiles and 4/800 and 6/800 false negatives (FNR 0.993% and
 0.997%); deferred queue high-watermarks are 3 and 2. All admitted/deferred work,
 leases, and queues drain. Raw evidence is in
 `bench/results/f5c-slo-admission-cpu-2026-07-28.json`; reproduce it with
-`uv run python bench/slo_admission_bench.py --assert-gate`.
+`uv run python verification/fleet/resilience/slo_admission_bench.py --assert-gate`.
 
 **Live direct-chat admission amendment (2026-08-07, issue #340).**
 `server.ttft_slo_s` now opt-in instantiates one gateway-visible controller and
@@ -528,7 +508,7 @@ CPU-only GitHub Actions. The clean `b8971cb` gate passed every binding check on
 8× RTX PRO 6000; the retained result is
 `bench/results/issue-203-vlm-image-chat-qwen3-vl-32b-tp8-2026-07-31.json`.
 
-`bench/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
+`verification/product/performance/frontier_compare.py`: multi-target harness (kairyu vs OpenAI vs
 Anthropic endpoints), method block (same prompts, N trials, TTFT/TPOT/
 quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
 

@@ -4,7 +4,7 @@ Status: implemented
 
 ## Decision
 
-Completed, source-attested `kairyu bench run` executions are recorded in a
+Completed, source-attested `python -m evals run` executions are recorded in a
 suite-local `scoreboards.jsonl`.  The stable key is
 `(git_commit, fingerprint)`, where `git_commit` identifies the **local Kairyu
 benchmark harness** and `fingerprint` binds the immutable run configuration,
@@ -45,25 +45,13 @@ Dirty or Git-less package executions still retain normal per-run artifacts but
 are not cross-commit baselines.  Synthetic offline fixtures are diagnostics,
 not measurements, and are not registered as quality history.
 
-Runtime eligibility is expressed per cell instead of disqualifying an otherwise
-valid full-suite record. SWE-Bench Pro, Terminal-Bench, and τ³ receive the
-structured `withheld_unresolved_runtime` policy while their external harnesses
-can consume unresolved remote datasets/images or mutable host data/binaries.
-Generated-code adapters receive `withheld_unpinned_execution` under the local
-runner and become `allowed` only when Docker is available and inspection binds
-the content-addressed configured image to its image ID, OS, architecture, and
-optional variant. Withheld cells remain visible but never produce a cross-run
-delta, even against an identically withheld cell; source-complete cells in the
-same indexed run can still be compared. Editable external distributions are
-treated as unverified rather than hashing only their loader metadata.
-
 Resuming a run requires both the fingerprint and stable environment/source
 identity to match the first `run.json`.  `created_at` and transient execution
 availability text are not identity. Any observed source drift writes a
 permanent taint marker before the run may resume; restoring the checkout does
 not make that run id eligible again. The stored metadata remains authoritative
 for a rebuilt scoreboard, preventing old pairs from being attributed to a new
-commit. Failed runs without a source taint may be resumed. `bench report` only
+commit. Failed runs without a source taint may be resumed. `python -m evals report` only
 rebuilds per-run display artifacts; it never backfills history using later
 renderer code.
 
@@ -79,7 +67,7 @@ snapshot is written.
 
 ## Run comparison
 
-`kairyu bench compare-runs BASE CANDIDATE` resolves both run IDs from the
+`python -m evals compare-runs BASE CANDIDATE` resolves both run IDs from the
 selected suite's validated index and renders `CANDIDATE - BASE` in percentage
 points.  It writes no run artifact and a negative delta alone does not change
 the exit status.

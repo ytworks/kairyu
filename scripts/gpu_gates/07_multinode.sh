@@ -4,4 +4,4 @@
 source "$(dirname "$0")/_lib.sh"
 preflight --require-module transformers
 pytest_no_skip tests/dist/test_pd_two_process.py -v
-run uv run --frozen python bench/kv_transfer_bench.py
+run uv run --frozen python verification/l1/performance/kv_transfer_bench.py

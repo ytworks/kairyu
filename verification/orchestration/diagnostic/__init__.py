@@ -1,0 +1,1 @@
+"""Orchestration diagnostic verification gates."""

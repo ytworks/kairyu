@@ -1,4 +1,3 @@
-import importlib.util
 import json
 from pathlib import Path
 
@@ -20,15 +19,6 @@ def _jsonl(path: Path, records: list[dict]) -> Path:
     return path
 
 
-def _load_replay_module():
-    path = Path("bench/fleet_usage_replay.py")
-    spec = importlib.util.spec_from_file_location("fleet_usage_replay", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_multi_gateway_ledger_aggregation_exports_cached_tokens(tmp_path):
     gateway_a = _jsonl(
         tmp_path / "a.jsonl",
@@ -43,7 +33,6 @@ def test_multi_gateway_ledger_aggregation_exports_cached_tokens(tmp_path):
                 "tenant": "tenant-b",
                 "prompt_tokens": 5,
                 "completion_tokens": 1,
-                # Old rows without cached_tokens remain readable.
             },
         ],
     )
@@ -161,7 +150,7 @@ def test_reconciliation_reports_any_metric_outside_point_one_percent(tmp_path):
     report = reconcile_usage(ledgers={"a": ledger}, request_logs=[requests])
 
     assert report["max_relative_error_percent"] == 0.1
-    assert not report["passed"]  # The gate is strictly less than 0.1%.
+    assert not report["passed"]
     assert (
         report["tenants"]["tenant-a"]["relative_error_percent"]["prompt_tokens"]
         == 0.1
@@ -188,25 +177,3 @@ def test_duplicate_gateway_events_and_shared_ledger_paths_fail_closed(tmp_path):
     )
     with pytest.raises(UsageReconciliationError, match="no metered usage"):
         reconcile_usage(ledgers={"a": ledger}, request_logs=[empty_requests])
-
-
-def test_fixed_replay_is_byte_reproducible_and_passes(tmp_path):
-    replay = _load_replay_module()
-    first = replay.generate_replay(tmp_path / "first", "2026-07-27")
-    second = replay.generate_replay(tmp_path / "second", "2026-07-27")
-
-    assert set(first) == set(second)
-    for key in first:
-        assert first[key].read_bytes() == second[key].read_bytes()
-    report = json.loads(first["report"].read_text(encoding="utf-8"))
-    assert report["passed"]
-    assert report["max_relative_error_percent"] == 0
-    assert report["gateway_count"] == 3
-    assert report["replay"]["metered_events"] == 7
-    assert report["tenants"]["tenant-a"]["ledger"]["cached_tokens"] == 96
-    assert report["tenants"]["tenant-b"]["ledger"]["cached_tokens"] == 176
-    assert report["tenants"]["tenant-c"]["ledger"]["cached_tokens"] == 192
-
-    committed = Path("bench/results")
-    for path in first.values():
-        assert path.read_bytes() == (committed / path.name).read_bytes()

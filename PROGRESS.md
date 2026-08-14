@@ -64,7 +64,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G5: F1a–F1d, F2a–F2d, F4a, F4b all closed; F4c decided (keep per-replica RadixKV + F2 routing, thresholded revisit)
 - F5a/b/c (priority, noisy-neighbor, SLO admission): closed
 - G6: P-A, P-B1–P-B4, P-C2/C3/C4 green (incl. Open WebUI P-B3 browser gate); remaining P-C gates continue
-- #150 LiveCodeBench TP8 gate: passed after deadlock fix; #364 `logits_dtype`: valid negative, withdrawn
+- #150 TP8 long-generation stability gate: passed after deadlock fix; #364 `logits_dtype`: valid negative, withdrawn
 
 ### What works today
 
@@ -76,8 +76,8 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: 12-slot Accuracy plus Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; SWE-bench Verified uses mini-SWE-agent's official 250-step `verified` flow plus the official harness with fail-closed denominators; Terminal-Bench keeps resumable raw Harbor jobs and bounds every agent phase to two effective hours
-- The tiered RTX PRO example has one public chat model, one public pinned offline embedding model, and one orchestration YAML: Open WebUI lists only the chat model, L2 borrows the Qwen/DeepSeek L1 pools directly, and launcher readiness proves a two-input 384-dimensional embedding response. Both this path and the single-Qwen example accept image chat and complete the fail-closed 10-item CharXiv smoke; its composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
+- The tiered RTX PRO example has one public chat model, one public pinned offline embedding model, and one orchestration YAML: Open WebUI lists only the chat model, L2 borrows the Qwen/DeepSeek L1 pools directly, and launcher readiness proves a two-input 384-dimensional embedding response. Both this path and the single-Qwen example accept image chat; the tiered example's composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -88,7 +88,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
 - Production stage-sharded pipeline parallelism is a separate roadmap dependency (current PP report is not it)
 - Learned-draft real-checkpoint acceptance/performance evidence remains open; FP8-E4M3 KV remains disabled after its calibrated re-bake failed exact-output and decode-envelope checks
-- Frontier full-checkpoint 262K/1M quality/performance evidence, DeepSeek EP4/EP8 topology lock, CUDA Graph pointer stability, MTP/DSpark selection, 30-minute soak, and failure recovery remain open
+- Frontier full-checkpoint 262K/1M correctness/performance evidence, DeepSeek EP4/EP8 topology lock, CUDA Graph pointer stability, MTP/DSpark selection, 30-minute soak, and failure recovery remain open
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Human sign-off pending on M2–M4 design reviews
@@ -97,6 +97,37 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-14 — [progress] Accuracy removal and verification migration completed
+- What: removed the named Accuracy suite and its code, fixtures, dependencies,
+  tests, examples, and active documentation; retained four explicit eval suites
+  and moved Kairyu serving/correctness gates to checkout-only verification.
+- Refs: PR #486; `evals/`; `verification/`; `evidence/`;
+  `docs/design/verification-framework.md`
+
+### 2026-08-14 — [progress] Accuracy implementation removed
+- What: removed the externally migrated Accuracy adapters, judge and published
+  comparison paths, fixtures, dependencies, and tests; retained eval tests now
+  live under `tests/evals/` and require an explicit retained suite.
+- Refs: PR #486; `evals/`; `tests/evals/`; `pyproject.toml`
+
+### 2026-08-14 — [progress] Verification framework split implemented
+- What: moved 68 Kairyu gates into checkout-only `verification/` by scope and
+  kind, added a strict registry/runner and neutral `evidence/` contracts, and
+  kept all 205 tracked legacy result files byte-identical at `bench/results/`.
+- Refs: PR #486; `verification/registry.toml`;
+  `docs/design/verification-framework.md`
+
+### 2026-08-14 — [design] Separate evals from verification and retire Accuracy
+- What: Accuracy will be removed after its external migration; the other evals
+  remain checkout-only under `evals/`; correctness, performance, resilience,
+  and diagnostic gates move to `verification/` with neutral evidence contracts
+  and immutable legacy artifacts.
+- Why: `kairyu.bench` and `bench/` conflate model evaluation with L1/system
+  verification and allow performance evidence without an explicit correctness
+  link.
+- Refs: `docs/design/verification-framework.md`;
+  `docs/superpowers/plans/2026-08-14-verification-framework-accuracy-removal.md`
 
 ### 2026-08-14 — [amendment] Exact LiteLLM assistant history is reusable
 - What: Chat Completions now drops object-valued `provider_specific_fields` and nullable legacy `function_call` metadata from assistant history while retaining typed reasoning, content, and tool calls; invalid roles, value kinds, and unrelated extras remain fail-closed.
@@ -121,24 +152,3 @@ in `.claude/rules/progress-log.md`).
 ### 2026-08-13 — [progress] Tiered Chat UI response repair closes GPU gates
 - What: Default Qwen L1 chat now returns non-empty public content with no hidden reasoning, L3 returns separate non-empty final and attributed reasoning output, the pinned tiered browser smoke passes, and the deterministic CharXiv rerun completes 10/10 scored requests with zero errors or unmeasured requests.
 - Refs: PR #478; commit `56c640a`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/20260813T055825Z/`
-
-### 2026-08-13 — [progress] Tiered Chat UI publication defaults to visible content
-- What: The tiered example's Qwen replicas now default upstream HF chat templating to nonthinking while preserving request-level overrides and vision handling, so proposal and publisher roles return public content instead of exhausting their budget in reasoning-only output; GPU validation is in progress.
-- Refs: PR #478; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,README.md}`; `tests/unit/test_tiered_frontier_examplectl.py`
-
-### 2026-08-13 — [progress] Example vision CharXiv validation closes
-- What: Both the single-Qwen and tiered Qwen/DeepSeek examples completed their deterministic 10-item CharXiv image runs with all 10 target requests measured and scored and zero target failures; the tiered DAG confines private DeepSeek reasoning to planning/synthesis/verification and uses its image-capable non-thinking Qwen pool for proposals and final publication.
-- Refs: PR #478; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/`; `bench/results/examples/qwen3.6-27b-1gpu/charxiv-10-gpu-validation-6/`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/charxiv-10-gpu-validation-4/`
-
-### 2026-08-13 — [verified] Single-Qwen CharXiv vision closes 10/10
-- What: The 1-GPU Qwen example completed its deterministic CharXiv run with `n=10`, `n_scored=10`, `requests=10`, `errors=0`, and `unmeasured_requests=0`; score was 60%. Tiered orchestration validation remains in progress.
-- Refs: `examples/qwen3.6-27b-1gpu/`; `bench/results/examples/qwen3.6-27b-1gpu/charxiv-10-gpu-validation-6/`
-
-### 2026-08-13 — [progress] Example vision orchestration enters GPU validation
-- What: L3 now preserves validated image inputs for L2, role DAGs pass media only to capable workers, both Qwen examples enable the pinned checkpoint's vision encoder, and each owns a fail-closed 10-item CharXiv command; real-GPU closure is in progress.
-- Refs: `kairyu/orchestration/`; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/`
-
-### 2026-08-13 — [amendment] Kind CI tool setup is shared and verified
-- What: All four kind gates now use one pinned installer with bounded nested retries, HTTPS-only downloads, SHA-256 verification, and executable version checks; a policy test bans the flaky action path from every workflow.
-- Why: Per-workflow fixes left the same dependency-acquisition failure in other gates, incorrectly surfacing CI infrastructure failures as product-quality failures.
-- Refs: PR #476; `scripts/install_kind_tools.sh`; `.github/workflows/{ci,f1a-churn,f1b-rollout,f1c-gateway}.yml`; `tests/unit/test_ci_workflow_policy.py`

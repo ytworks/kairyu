@@ -341,7 +341,7 @@ the existing non-fused EP execution path while observation is active. Mixed
 FP8 or dynamic routed experts likewise use that already-correct all-to-all
 path; untouched homogeneous layers retain FlashInfer fused MoE.
 
-The companion `bench/g4_ma1_nvfp4_accuracy_bench.py` reuses the pinned formal M-A1
+The companion `verification/l1/correctness/g4_ma1_nvfp4_correctness_bench.py` reuses the pinned formal M-A1
 reference teacher rollout without changing its retained schema. Each profile
 report includes all 1,024 teacher positions, free-running diagnostics, actual
 unique resident storage per rank, projection-format counts, and per-projection
@@ -358,7 +358,7 @@ path: Red Hat AI compressed-tensors dynamic INT8 W8A8, Qwen AWQ GEMM W4A16,
 and Qwen GPTQ-v1 W4A16. Repository revisions and complete safetensors digests
 are binding.
 
-`bench/parity_hf.py --reference-model-path` permits the HF reference checkpoint
+`verification/l1/correctness/parity_hf.py --reference-model-path` permits the HF reference checkpoint
 to differ from the Kairyu candidate only when architecture geometry, vocabulary,
 and the actual fixed prompt-token sequences match, the reference is unquantized,
 and the candidate declares quantization. Ordinary same-checkpoint A1/A2 behavior
@@ -370,7 +370,7 @@ agreement and agreeing-token logprob drift are diagnostics: format loss makes
 the A2 same-weight 0.25-nat distribution bound inapplicable. The binding gate
 requires all 1,024 positions, no missing candidate token, and zero disagreements
 outside the measured BF16 reference tie floor (never below 0.125 nat). The
-`bench/quant_checkpoint_parity_bench.py` assembler independently replays raw
+`verification/l1/correctness/quant_checkpoint_parity_bench.py` assembler independently replays raw
 positions, verifies the exact INT8/AWQ/GPTQ checkpoint ABI and revisions, and
 rejects dirty or mixed-source arms.
 

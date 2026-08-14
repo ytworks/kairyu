@@ -289,7 +289,7 @@ response-cache decision or its byte-identical-request trigger.
 
 ##### Measured duplicate-prefix and recomputation mass
 
-`bench/global_kv_pool_decision.py` independently hashes and replays the
+`verification/fleet/diagnostic/global_kv_pool_decision.py` independently hashes and replays the
 retained F2a and F2c evidence. It does not rerun either measurement and does
 not copy numbers out of their manifests:
 
@@ -321,7 +321,7 @@ The generated artifact is
 offline with:
 
 ```bash
-uv run --frozen python bench/global_kv_pool_decision.py \
+uv run --frozen python verification/fleet/diagnostic/global_kv_pool_decision.py \
   --verify-artifact \
   bench/results/f4c-global-kv-pool-decision-2026-07-31.json \
   --assert-gate

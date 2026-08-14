@@ -101,39 +101,19 @@ All persistent state is bind-backed below `/mnt/nvme`:
 checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 `./run.sh logs`, and `./run.sh down`.
 
-## Benchmarks
+## Serving verification
 
 ```sh
-./bench.sh list
-./bench.sh serving-auto-max
-./bench.sh charxiv
-./bench.sh terminalbench-pilot
-./bench.sh terminalbench
-./bench.sh all
+./verify.sh list
+./verify.sh serving-auto-max
 ```
 
-`serving-auto-max` records the verifier-gated product DAG's serving matrix.
-`charxiv` runs exactly 10 deterministic CharXiv Reasoning image questions
-through that DAG, uses the image-capable Qwen pool for proposals and final
-publication with upstream HF chat templating defaulted to nonthinking, and uses
-the loopback DeepSeek L1 endpoint as the text judge;
-`JUDGE_BASE_URL` and `JUDGE_MODEL` can override it. `terminalbench-pilot` runs
-its four-task pilot, and `terminalbench` runs the
-same product model over all 89 tasks with terminus-2 and the published 500-turn
-budget. Historical MoA results in `MEASUREMENTS.md` do not transfer to this DAG
-without a fresh run. ChatUI continues to call only Kairyu L3.
-
-The Harbor dataset is exported once to
-`/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-data/terminal-bench-2-1`;
-Harbor jobs use the adjacent `bench-tmp/` directory and are retained for raw
-per-task evidence and `harbor job resume`. The agent config caps every task at
-two effective hours (`max_timeout_sec=900` before the 8x multiplier). This
-avoids Harbor's home-directory cache and eight-hour outliers for example-owned
-runs.
-
-`all` continues through every benchmark after an individual failure and always
-finalizes `run.json`. Artifacts go to
-`/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/<UTC-run-id>/`.
+`serving-auto-max` records the verifier-gated product DAG serving matrix.
+Historical MoA performance results in `MEASUREMENTS.md` do not transfer to the
+current DAG without a fresh run. ChatUI continues to call only Kairyu L3. Raw
+artifacts go to the configured NVMe `verification-results/<UTC-run-id>/`
+directory. Model and product evaluations are invoked explicitly through
+`python -m evals`.
 
 ## Reproducibility pins
 
@@ -155,6 +135,4 @@ front of them when exposure beyond a trusted network is not intended. Set an
 explicit bind address when either endpoint must be restricted.
 
 See [MEASUREMENTS.md](MEASUREMENTS.md) for the historical runtime-selection
-analysis and
-[`terminalbench-result.json`](terminalbench-result.json) for the exact
-zero-inclusive historical full-task-set score ledger.
+and serving-performance analysis.

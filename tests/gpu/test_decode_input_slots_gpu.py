@@ -9,7 +9,7 @@ waited on. Device-sampled token IDs bypass H2D and patch the same slots D2D.
 import pytest
 import torch
 
-from kairyu.bench.profiling import profile_scope
+from verification.l1.performance.profiling import profile_scope
 
 transformers = pytest.importorskip("transformers")
 

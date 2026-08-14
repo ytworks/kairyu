@@ -59,7 +59,7 @@ proved miss to the feature's proved reuse path.
 
 ## 3. Native cold/warm contract
 
-`bench/kv_answer_equivalence_bench.py run-native` executes one fixed cell in one
+`verification/l1/correctness/kv_answer_equivalence_bench.py run-native` executes one fixed cell in one
 persistent native runtime.  The prompt and sampling contract are fixed before
 the first request.  Both requests use `temperature=0`, `seed=0`,
 `min_tokens=max_tokens=32`, and `ignore_eos=true`; early termination, a missing
@@ -261,21 +261,21 @@ permission to mix parents, TP degrees, or runtime profiles.
 
 ```bash
 python -I -B \
-  bench/kv_answer_equivalence_bench.py run-native \
+  verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
   --cell f2c-tp2 --model-path <model-path> \
   --parent-manifest <f2c-parent-manifest> \
   --parent-raw <f2c-parent-raw> \
   --output <run-root>/f2c-tp2.jsonl --assert-gate
 
 python -I -B \
-  bench/kv_answer_equivalence_bench.py run-native \
+  verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
   --cell f2d-tp2 --model-path <model-path> \
   --parent-manifest <f2d-parent-manifest> \
   --parent-raw <f2d-parent-raw> \
   --output <run-root>/f2d-tp2.jsonl --assert-gate
 
 python -I -B \
-  bench/kv_answer_equivalence_bench.py run-native \
+  verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
   --cell f4a-tp4 --model-path <model-path> \
   --parent-manifest <f4a-parent-manifest> \
   --parent-raw <f4a-tp4-parent-raw> \
@@ -283,7 +283,7 @@ python -I -B \
   --output <run-root>/f4a-tp4.jsonl --assert-gate
 
 python -I -B \
-  bench/kv_answer_equivalence_bench.py run-native \
+  verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
   --cell f4a-tp8 --model-path <model-path> \
   --parent-manifest <f4a-parent-manifest> \
   --parent-raw <f4a-tp8-parent-raw> \
@@ -291,7 +291,7 @@ python -I -B \
   --output <run-root>/f4a-tp8.jsonl --assert-gate
 
 python -I -B \
-  bench/kv_answer_equivalence_bench.py run-native \
+  verification/l1/correctness/kv_answer_equivalence_bench.py run-native \
   --cell f4b-tp4 --model-path <model-path> \
   --parent-manifest <f4b-parent-manifest> \
   --parent-raw <f4b-parent-raw> \
@@ -299,7 +299,7 @@ python -I -B \
   --output <run-root>/f4b-tp4.jsonl --assert-gate
 
 python -I -B \
-  bench/kv_answer_equivalence_bench.py assemble \
+  verification/l1/correctness/kv_answer_equivalence_bench.py assemble \
   --f2c-tp2 <run-root>/f2c-tp2.jsonl \
   --f2d-tp2 <run-root>/f2d-tp2.jsonl \
   --f4a-tp4 <run-root>/f4a-tp4.jsonl \
@@ -308,11 +308,11 @@ python -I -B \
   --output-dir bench/results/<b7-artifact> --assert-gate
 
 python -I -B \
-  bench/kv_answer_equivalence_bench.py verify \
+  verification/l1/correctness/kv_answer_equivalence_bench.py verify \
   --artifact bench/results/<b7-artifact> --assert-gate
 
 python -I -B \
-  bench/kv_answer_equivalence_bench.py replay \
+  verification/l1/correctness/kv_answer_equivalence_bench.py replay \
   --artifact bench/results/<b7-artifact> --assert-gate
 ```
 

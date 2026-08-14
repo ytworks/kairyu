@@ -3,25 +3,17 @@
 Status: **Implemented and merged** (2026-08-05); MMLU scoring amended by
 issue #368 as described below.
 
-Related contracts: M7 benchmark adapter/cache/result contracts and the Accuracy
-suite's existing reproducibility, degradation, resume, and reporting rules.
+Related contracts: the checkout-only eval adapter, cache, result, resume, and reporting contracts.
 
-## 1. Goal and non-goals
-
-The existing `accuracy` suite deliberately follows Sakana's 11-row Fugu release table.
-Most of those rows are expensive frontier, judge, vision, generated-code, or
-agentic evaluations. Issue #367 adds a separate `core` suite for frequent,
-deterministic quality regression checks:
+Issue #367 defines the separate `core` suite for frequent deterministic quality
+regression checks:
 
 1. GSM8K numerical exact match;
 2. MMLU ordered continuation-likelihood choice ranking;
 3. IFEval rule-based instruction following.
 
-`accuracy` remains the default and keeps its row order, result path, published-score
-comparison, and all 11 adapters. `core` is not inserted into the Accuracy table and
-is never compared with Fugu's published values. It reuses the same target,
-download/cache, request, retry, resume, pair evidence, scoreboard, fixture, and
-Wilson-confidence-interval contracts.
+Core reuses the shared target, download/cache, request, retry, resume, pair
+evidence, scoreboard, fixture, and Wilson-confidence-interval contracts.
 
 “Cheap” describes the absence of an LLM judge, Docker, vision, and agent loops.
 A full run sends 58,028 target calls: one per GSM8K/IFEval item and four exact
@@ -32,23 +24,19 @@ never presented as a full score.
 
 ## 2. Suite and artifact contract
 
-The canonical core row order is `gsm8k`, `mmlu`, `ifeval`. The supported suite
-names, display names, row order, and whether a published reference exists are
-defined once and consumed by registry selection, aggregation, rendering, CLI
+The canonical core row order is `gsm8k`, `mmlu`, `ifeval`. The supported suite names, display names, and row order are defined once and consumed by registry selection, aggregation, rendering, CLI
 listing, run progress, and reporting.
 
 ```bash
-kairyu bench run --suite core --base-url http://localhost:8000/v1 --model model
-kairyu bench run --suite core --base-url http://localhost:8000/v1 --model model --smoke
-kairyu bench download --suite core
-kairyu bench list --suite core
+python -m evals run --suite core --base-url http://localhost:8000/v1 --model model
+python -m evals run --suite core --base-url http://localhost:8000/v1 --model model --smoke
+python -m evals download --suite core
+python -m evals list --suite core
 ```
 
-When no result path is explicitly configured, a suite writes below
-`bench/results/<suite>`. Core runs write `run.json`, pair JSON, and
-`scoreboard.{json,md}` but no `comparison.{json,md}`. Accuracy runs retain their
-existing comparison files. A comparison builder rejects a non-Accuracy scoreboard
-instead of silently emitting a table full of missing reference values.
+When no result path is explicitly configured, Core writes below
+`bench/results/core` and produces `run.json`, pair JSON, and
+`scoreboard.{json,md}`.
 
 All three headline item outcomes are Bernoulli values, so a complete pair may
 use the existing 95% Wilson interval. For the generative rows, a non-empty

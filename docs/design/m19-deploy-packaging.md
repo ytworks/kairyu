@@ -17,10 +17,8 @@ Date: 2026-07-03
   (nvidia.com/gpu limits, runtimeClass, per-profile nodeSelector for the
   pcie-gddr / nvlink-hbm pools from the roadmap hardware matrix).
 - **D3 `scripts/gpu_gates/`**: runbook §0/§1/§2/§3/§6/§7/§9 + G4/G5 gates
-  as executable scripts. EVERY script supports `--dry-run`;
-  `tests/unit/test_gpu_gates_scripts.py` pins that (a) dry-run emits the
-  command plan, (b) every referenced tests/scripts/bench/deploy path EXISTS
-  today — deploy day cannot discover missing files.
+  as executable scripts. EVERY script supports `--dry-run`; normal execution
+  fails at the referenced command when an input path or executable is absent.
 - **D4 `[gpu]` extra**: flashinfer-python/triton/nixl with
   `sys_platform == 'linux'` markers — macOS `uv sync` ignores them.
 
@@ -32,7 +30,7 @@ response with valid `data` entries and exact equality between the requested mode
 ID and one served ID. It exits nonzero on any failure; an absent-ID error reports
 the requested and served IDs. Diagnostics never echo the request URL,
 credentials, or response body. Both the preflight and benchmark use the same
-`KAIRYU_BENCH_MODEL` value. Unit, source, and dry-run tests pin the response
+`KAIRYU_BENCH_MODEL` value. The preflight implementation pins the response
 contract, command ordering, real helper path, and default/override propagation.
 
 ### D3 amendment — truthful test prerequisites and outcomes (2026-07-30)

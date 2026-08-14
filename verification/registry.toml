@@ -1,0 +1,982 @@
+schema_version = 1
+
+# These are the only retained wrapper-to-wrapper composition edges. They are
+# frozen compatibility dependencies for formal/provenance paths, not a place
+# for new reusable helpers; shared behavior belongs under kairyu.bench.
+[compatibility_imports]
+"verification.l1.correctness.batched_spec_verify_qwen" = ["verification.l1.performance.batched_prefill_qwen"]
+"verification.l1.performance.decode_page_table_cache_qwen" = ["verification.l1.performance.batched_prefill_qwen"]
+"verification.fleet.resilience.fleet_rollout_bench" = ["verification.fleet.resilience.fleet_churn_bench"]
+"verification.l1.performance.g2_a6_vllm_bench" = ["verification.fleet.performance.multiturn_prefix", "verification.l1.performance.tp_kv_hit_g2_a7_bench"]
+"verification.l1.performance.g2_a9_dp_tp_crossover_bench" = ["verification.l1.performance.dp_scaling_g2_a8_bench"]
+"verification.l1.correctness.g4_ma1_nvfp4_correctness_bench" = ["verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_bench", "verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_capture"]
+"verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_bench" = ["verification.l1.correctness.parity_tp"]
+"verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_capture" = ["verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_bench"]
+"verification.l1.correctness.g4_ma2_qwen3_235b_ep_kv_bench" = ["verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_capture", "verification.l1.performance.tp_kv_hit_g2_a7_bench"]
+"verification.l1.performance.g4_ma3_sglang_bench" = ["verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_bench", "verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_capture", "verification.l1.performance.g2_a6_vllm_bench"]
+"verification.l1.correctness.gate_a1" = ["verification.l1.correctness.parity_tp"]
+"verification.l1.correctness.gate_a2" = ["verification.l1.correctness.parity_hf", "verification.l1.correctness.parity_tp"]
+"verification.l1.correctness.gate_logits_dtype" = ["verification.l1.correctness.gate_a1", "verification.l1.correctness.gate_a2", "verification.l1.correctness.parity_tp"]
+"verification.fleet.diagnostic.global_kv_pool_decision" = ["verification.fleet.performance.kv_aware_ttft_f2c_bench"]
+"verification.l1.performance.issue_333_proc_http_bench" = ["verification.l1.performance.g2_a6_vllm_bench", "verification.l1.performance.run_g2_a6_formal"]
+"verification.l1.correctness.kv_answer_equivalence_bench" = ["verification.fleet.correctness.agentic_kv_tier_f4b_bench", "verification.fleet.correctness.prefix_weight_f2d_bench", "verification.fleet.performance.dram_kv_tier_qwen", "verification.fleet.performance.kv_aware_ttft_f2c_bench"]
+"verification.fleet.correctness.kv_event_f2b_bench" = ["verification.fleet.resilience.fleet_churn_bench"]
+"verification.l1.correctness.parity_hf" = ["verification.l1.correctness.parity_tp"]
+"verification.l1.performance.pd_overlap_qwen" = ["verification.l1.correctness.parity_tp"]
+"verification.fleet.correctness.prefix_weight_f2d_bench" = ["verification.fleet.performance.prefix_routing_f2a_bench"]
+"verification.l1.correctness.quant_checkpoint_parity_bench" = ["verification.l1.correctness.parity_hf"]
+"verification.product.performance.tiered_auto_bench" = ["verification.orchestration.correctness.orchestration_stream_bench"]
+"verification.l1.performance.tp_kv_hit_g2_a7_bench" = ["verification.fleet.performance.multiturn_prefix"]
+"verification.l1.correctness.tp_sampling_owner_qwen" = ["verification.l1.correctness.parity_tp"]
+
+[[entrypoints]]
+path = "verification/fleet/correctness/agentic_kv_tier_f4b_bench.py"
+module = "verification.fleet.correctness.agentic_kv_tier_f4b_bench"
+id = "fleet.correctness.agentic_kv_tier_f4b_bench"
+scope = "fleet"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/attention_backend_profile_bench.py"
+module = "verification.l1.performance.attention_backend_profile_bench"
+id = "l1.performance.attention_backend_profile_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["engine", "gpu", "flashattention4"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/diagnostic/audit_io_bench.py"
+module = "verification.l1.diagnostic.audit_io_bench"
+id = "l1.diagnostic.audit_io_bench"
+scope = "l1"
+kind = "diagnostic"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/orchestration/performance/auto_params_bench.py"
+module = "verification.orchestration.performance.auto_params_bench"
+id = "orchestration.performance.auto_params_bench"
+scope = "orchestration"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/batch_invariance_bench.py"
+module = "verification.l1.correctness.batch_invariance_bench"
+id = "l1.correctness.batch_invariance_bench"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path"]
+
+[[entrypoints]]
+path = "verification/l1/performance/batched_prefill_qwen.py"
+module = "verification.l1.performance.batched_prefill_qwen"
+id = "l1.performance.batched_prefill_qwen"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/batched_spec_verify_qwen.py"
+module = "verification.l1.correctness.batched_spec_verify_qwen"
+id = "l1.correctness.batched_spec_verify_qwen"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/decode_page_table_cache_qwen.py"
+module = "verification.l1.performance.decode_page_table_cache_qwen"
+id = "l1.performance.decode_page_table_cache_qwen"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/dp_scaling_g2_a8_bench.py"
+module = "verification.l1.performance.dp_scaling_g2_a8_bench"
+id = "l1.performance.dp_scaling_g2_a8_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf", "service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/draft_quant_qwen.py"
+module = "verification.l1.correctness.draft_quant_qwen"
+id = "l1.correctness.draft_quant_qwen"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/performance/dram_kv_tier_qwen.py"
+module = "verification.fleet.performance.dram_kv_tier_qwen"
+id = "fleet.performance.dram_kv_tier_qwen"
+scope = "fleet"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/resilience/fleet_churn_bench.py"
+module = "verification.fleet.resilience.fleet_churn_bench"
+id = "fleet.resilience.fleet_churn_bench"
+scope = "fleet"
+kind = "resilience"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["kubernetes", "service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/resilience/fleet_gateway_bench.py"
+module = "verification.fleet.resilience.fleet_gateway_bench"
+id = "fleet.resilience.fleet_gateway_bench"
+scope = "fleet"
+kind = "resilience"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["kubernetes", "postgres", "service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/resilience/fleet_rollout_bench.py"
+module = "verification.fleet.resilience.fleet_rollout_bench"
+id = "fleet.resilience.fleet_rollout_bench"
+scope = "fleet"
+kind = "resilience"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["kubernetes", "service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/diagnostic/fleet_usage_replay.py"
+module = "verification.fleet.diagnostic.fleet_usage_replay"
+id = "fleet.diagnostic.fleet_usage_replay"
+scope = "fleet"
+kind = "diagnostic"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/fp8_kv_g4_ekv_bench.py"
+module = "verification.l1.correctness.fp8_kv_g4_ekv_bench"
+id = "l1.correctness.fp8_kv_g4_ekv_bench"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md", "docs/goals/g4-moe-engine.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/product/performance/frontier_compare.py"
+module = "verification.product.performance.frontier_compare"
+id = "product.performance.frontier_compare"
+scope = "product"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["openai", "service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/future_token_bench.py"
+module = "verification.l1.performance.future_token_bench"
+id = "l1.performance.future_token_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/g2_a6_vllm_bench.py"
+module = "verification.l1.performance.g2_a6_vllm_bench"
+id = "l1.performance.g2_a6_vllm_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["bench", "docker", "engine", "gpu", "hf", "service", "vllm"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/g2_a9_dp_tp_crossover_bench.py"
+module = "verification.l1.performance.g2_a9_dp_tp_crossover_bench"
+id = "l1.performance.g2_a9_dp_tp_crossover_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["docker", "engine", "gpu", "hf", "service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/g4_ma1_nvfp4_correctness_bench.py"
+module = "verification.l1.correctness.g4_ma1_nvfp4_correctness_bench"
+id = "l1.correctness.g4_ma1_nvfp4_correctness_bench"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["docs/design/m14-quant-compute.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_bench.py"
+module = "verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_bench"
+id = "l1.correctness.g4_ma1_qwen3_235b_nvfp4_bench"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["core"]
+documentation = ["verification/README.md", "docs/design/g4-mid-moe.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_capture.py"
+module = "verification.l1.correctness.g4_ma1_qwen3_235b_nvfp4_capture"
+id = "l1.correctness.g4_ma1_qwen3_235b_nvfp4_capture"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "external-runtime"
+formal = false
+requires = ["engine", "gpu", "hf", "tensorrt-llm"]
+documentation = ["verification/README.md", "docs/design/g4-mid-moe.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/g4_ma2_qwen3_235b_ep_kv_bench.py"
+module = "verification.l1.correctness.g4_ma2_qwen3_235b_ep_kv_bench"
+id = "l1.correctness.g4_ma2_qwen3_235b_ep_kv_bench"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md", "docs/design/g4-mid-moe.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/g4_ma3_kairyu_server.py"
+module = "verification.l1.performance.g4_ma3_kairyu_server"
+id = "l1.performance.g4_ma3_kairyu_server"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["engine", "gpu", "hf", "service"]
+documentation = ["verification/README.md", "docs/design/g4-mid-moe.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/g4_ma3_sglang_bench.py"
+module = "verification.l1.performance.g4_ma3_sglang_bench"
+id = "l1.performance.g4_ma3_sglang_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["bench", "docker", "engine", "gpu", "hf", "service", "sglang"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/gate_a1.py"
+module = "verification.l1.correctness.gate_a1"
+id = "l1.correctness.gate_a1"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/gate_a2.py"
+module = "verification.l1.correctness.gate_a2"
+id = "l1.correctness.gate_a2"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/gate_logits_dtype.py"
+module = "verification.l1.correctness.gate_logits_dtype"
+id = "l1.correctness.gate_logits_dtype"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["core"]
+documentation = ["docs/design/issue-364-fp32-logits.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/diagnostic/global_kv_pool_decision.py"
+module = "verification.fleet.diagnostic.global_kv_pool_decision"
+id = "fleet.diagnostic.global_kv_pool_decision"
+scope = "fleet"
+kind = "diagnostic"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/issue_333_proc_http_bench.py"
+module = "verification.l1.performance.issue_333_proc_http_bench"
+id = "l1.performance.issue_333_proc_http_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["bench", "docker", "engine", "gpu", "hf", "service"]
+documentation = ["docs/design/m8-engine-cpu.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/kv_answer_equivalence_bench.py"
+module = "verification.l1.correctness.kv_answer_equivalence_bench"
+id = "l1.correctness.kv_answer_equivalence_bench"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path"]
+
+[[entrypoints]]
+path = "verification/fleet/performance/kv_aware_ttft_f2c_bench.py"
+module = "verification.fleet.performance.kv_aware_ttft_f2c_bench"
+id = "fleet.performance.kv_aware_ttft_f2c_bench"
+scope = "fleet"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/correctness/kv_event_f2b_bench.py"
+module = "verification.fleet.correctness.kv_event_f2b_bench"
+id = "fleet.correctness.kv_event_f2b_bench"
+scope = "fleet"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/correctness/kv_event_hash_bench.py"
+module = "verification.fleet.correctness.kv_event_hash_bench"
+id = "fleet.correctness.kv_event_hash_bench"
+scope = "fleet"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/kv_transfer_bench.py"
+module = "verification.l1.performance.kv_transfer_bench"
+id = "l1.performance.kv_transfer_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/performance/multiturn_prefix.py"
+module = "verification.fleet.performance.multiturn_prefix"
+id = "fleet.performance.multiturn_prefix"
+scope = "fleet"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/resilience/noisy_neighbor_bench.py"
+module = "verification.fleet.resilience.noisy_neighbor_bench"
+id = "fleet.resilience.noisy_neighbor_bench"
+scope = "fleet"
+kind = "resilience"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/resilience/noisy_neighbor_gpu_bench.py"
+module = "verification.fleet.resilience.noisy_neighbor_gpu_bench"
+id = "fleet.resilience.noisy_neighbor_gpu_bench"
+scope = "fleet"
+kind = "resilience"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf", "service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/op_queue_bench.py"
+module = "verification.l1.performance.op_queue_bench"
+id = "l1.performance.op_queue_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/orchestration/performance/orchestration_mock_bench.py"
+module = "verification.orchestration.performance.orchestration_mock_bench"
+id = "orchestration.performance.orchestration_mock_bench"
+scope = "orchestration"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/orchestration/correctness/orchestration_stream_bench.py"
+module = "verification.orchestration.correctness.orchestration_stream_bench"
+id = "orchestration.correctness.orchestration_stream_bench"
+scope = "orchestration"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/parity_hf.py"
+module = "verification.l1.correctness.parity_hf"
+id = "l1.correctness.parity_hf"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/parity_tp.py"
+module = "verification.l1.correctness.parity_tp"
+id = "l1.correctness.parity_tp"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/pd_mixed.py"
+module = "verification.l1.performance.pd_mixed"
+id = "l1.performance.pd_mixed"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/pd_overlap_qwen.py"
+module = "verification.l1.performance.pd_overlap_qwen"
+id = "l1.performance.pd_overlap_qwen"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/performance/prefix_routing_f2a_bench.py"
+module = "verification.fleet.performance.prefix_routing_f2a_bench"
+id = "fleet.performance.prefix_routing_f2a_bench"
+scope = "fleet"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/correctness/prefix_weight_f2d_bench.py"
+module = "verification.fleet.correctness.prefix_weight_f2d_bench"
+id = "fleet.correctness.prefix_weight_f2d_bench"
+scope = "fleet"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/resilience/priority_overload_bench.py"
+module = "verification.fleet.resilience.priority_overload_bench"
+id = "fleet.resilience.priority_overload_bench"
+scope = "fleet"
+kind = "resilience"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/resilience/priority_overload_gpu_bench.py"
+module = "verification.fleet.resilience.priority_overload_gpu_bench"
+id = "fleet.resilience.priority_overload_gpu_bench"
+scope = "fleet"
+kind = "resilience"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf", "service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/proc_wire_bench.py"
+module = "verification.l1.performance.proc_wire_bench"
+id = "l1.performance.proc_wire_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["fleet"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/quant_checkpoint_parity_bench.py"
+module = "verification.l1.correctness.quant_checkpoint_parity_bench"
+id = "l1.correctness.quant_checkpoint_parity_bench"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md", "docs/design/m14-quant-compute.md", "docs/gpu-runbook.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/quant_gemm_bench.py"
+module = "verification.l1.performance.quant_gemm_bench"
+id = "l1.performance.quant_gemm_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["engine", "gpu"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/radix_eviction_bench.py"
+module = "verification.l1.performance.radix_eviction_bench"
+id = "l1.performance.radix_eviction_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/reduce_scatter_bench.py"
+module = "verification.l1.performance.reduce_scatter_bench"
+id = "l1.performance.reduce_scatter_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["engine", "gpu"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/orchestration/performance/router_latency.py"
+module = "verification.orchestration.performance.router_latency"
+id = "orchestration.performance.router_latency"
+scope = "orchestration"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/run_g2_a6_formal.py"
+module = "verification.l1.performance.run_g2_a6_formal"
+id = "l1.performance.run_g2_a6_formal"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["bench", "docker", "engine", "gpu", "hf", "service", "vllm"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/sampler_penalty_state_bench.py"
+module = "verification.l1.performance.sampler_penalty_state_bench"
+id = "l1.performance.sampler_penalty_state_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["engine"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/scheduler_queue_bench.py"
+module = "verification.l1.performance.scheduler_queue_bench"
+id = "l1.performance.scheduler_queue_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "microbench"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/serving_bench.py"
+module = "verification.l1.performance.serving_bench"
+id = "l1.performance.serving_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/fleet/resilience/slo_admission_bench.py"
+module = "verification.fleet.resilience.slo_admission_bench"
+id = "fleet.resilience.slo_admission_bench"
+scope = "fleet"
+kind = "resilience"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/product/performance/tiered_auto_bench.py"
+module = "verification.product.performance.tiered_auto_bench"
+id = "product.performance.tiered_auto_bench"
+scope = "product"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/tp_kv_hit_g2_a7_bench.py"
+module = "verification.l1.performance.tp_kv_hit_g2_a7_bench"
+id = "l1.performance.tp_kv_hit_g2_a7_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf", "service"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/tp_sampling_owner_bench.py"
+module = "verification.l1.correctness.tp_sampling_owner_bench"
+id = "l1.correctness.tp_sampling_owner_bench"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/tp_sampling_owner_qwen.py"
+module = "verification.l1.correctness.tp_sampling_owner_qwen"
+id = "l1.correctness.tp_sampling_owner_qwen"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/correctness/typed_prompt_qwen.py"
+module = "verification.l1.correctness.typed_prompt_qwen"
+id = "l1.correctness.typed_prompt_qwen"
+scope = "l1"
+kind = "correctness"
+output_schema = "entrypoint-defined"
+entrypoint_class = "formal-gate"
+formal = true
+requires = ["engine", "gpu", "hf"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/orchestration/diagnostic/usage_architecture_bench.py"
+module = "verification.orchestration.diagnostic.usage_architecture_bench"
+id = "orchestration.diagnostic.usage_architecture_bench"
+scope = "orchestration"
+kind = "diagnostic"
+output_schema = "entrypoint-defined"
+entrypoint_class = "operator"
+formal = false
+requires = ["core"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]
+
+[[entrypoints]]
+path = "verification/l1/performance/vllm_quant_kernel_bench.py"
+module = "verification.l1.performance.vllm_quant_kernel_bench"
+id = "l1.performance.vllm_quant_kernel_bench"
+scope = "l1"
+kind = "performance"
+output_schema = "entrypoint-defined"
+entrypoint_class = "external-runtime"
+formal = false
+requires = ["engine", "gpu", "vllm"]
+documentation = ["verification/README.md"]
+installed = false
+invocations = ["path", "module"]

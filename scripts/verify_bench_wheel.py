@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Build and verify the benchmark package boundary in an isolated directory."""
+"""Build a wheel and verify checkout-only tooling is excluded."""
 
 from __future__ import annotations
 
 import argparse
 import configparser
-import json
 import os
 import shutil
 import subprocess
@@ -15,39 +14,15 @@ import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
-FIXTURE_FILES = (
-    "charxiv-reasoning.jsonl",
-    "gpqa-diamond.jsonl",
-    "gsm8k.jsonl",
-    "hle.jsonl",
-    "ifeval.jsonl",
-    "judge-calibration.jsonl",
-    "livecodebench-pro.jsonl",
-    "livecodebench.jsonl",
-    "long-context-reasoning.jsonl",
-    "mmlu.jsonl",
-    "mrcr-v2.jsonl",
-    "ruler-niah-1024k.jsonl",
-    "ruler-niah-128k.jsonl",
-    "ruler-niah-16k.jsonl",
-    "ruler-niah-256k.jsonl",
-    "ruler-niah-32k.jsonl",
-    "ruler-niah-4k.jsonl",
-    "ruler-niah-512k.jsonl",
-    "ruler-niah-64k.jsonl",
-    "ruler-niah-8k.jsonl",
-    "scicode.jsonl",
-    "structured-output.jsonl",
-)
-FIXTURE_PREFIX = "kairyu/bench/fixtures/"
-LLMBAR_LICENSE = f"{FIXTURE_PREFIX}LLMBAR_LICENSE"
-IFEVAL_VENDOR_FILES = (
-    "kairyu/bench/_vendor/ifeval/LICENSE",
-    "kairyu/bench/_vendor/ifeval/NOTICE",
-)
-ENTRYPOINT_MANIFEST = "kairyu/bench/entrypoints.toml"
 CONSOLE_TARGET = "kairyu.entrypoints.cli:main"
-EXPECTED_ENTRYPOINTS = 68
+FORBIDDEN_PREFIXES = (
+    "bench/",
+    "evals/",
+    "evidence/",
+    "verification/",
+    "tests/",
+    "kairyu/bench/",
+)
 
 
 class VerificationError(RuntimeError):
@@ -82,33 +57,23 @@ def _inspect_wheel(wheel: Path) -> tuple[str, ...]:
             path = PurePosixPath(name)
             if path.is_absolute() or ".." in path.parts:
                 raise VerificationError(f"unsafe wheel member: {name}")
-
-        expected_fixtures = {f"{FIXTURE_PREFIX}{fixture}" for fixture in FIXTURE_FILES}
-        actual_fixtures = {
-            name for name in names if name.startswith(FIXTURE_PREFIX) and name.endswith(".jsonl")
-        }
-        if actual_fixtures != expected_fixtures:
-            raise VerificationError(
-                "packaged fixtures differ: "
-                f"expected={sorted(expected_fixtures)}, actual={sorted(actual_fixtures)}"
-            )
-        if LLMBAR_LICENSE not in names:
-            raise VerificationError(f"wheel omits {LLMBAR_LICENSE}")
-        missing_vendor_files = sorted(set(IFEVAL_VENDOR_FILES) - set(names))
-        if missing_vendor_files:
-            raise VerificationError(f"wheel omits IFEval attribution files: {missing_vendor_files}")
-        if ENTRYPOINT_MANIFEST not in names:
-            raise VerificationError(f"wheel omits {ENTRYPOINT_MANIFEST}")
-
+        if "kairyu/__init__.py" not in names:
+            raise VerificationError("wheel omits the kairyu package")
         forbidden = tuple(
-            name for name in names if name.startswith(("bench/", "bench/results/", "tests/"))
+            name for name in names if name.startswith(FORBIDDEN_PREFIXES)
         )
         if forbidden:
-            raise VerificationError(f"wheel contains checkout-only files: {list(forbidden)}")
+            raise VerificationError(
+                f"wheel contains checkout-only files: {list(forbidden)}"
+            )
 
-        metadata_files = [name for name in names if name.endswith(".dist-info/entry_points.txt")]
+        metadata_files = [
+            name for name in names if name.endswith(".dist-info/entry_points.txt")
+        ]
         if len(metadata_files) != 1:
-            raise VerificationError(f"expected one entry_points.txt, found {metadata_files}")
+            raise VerificationError(
+                f"expected one entry_points.txt, found {metadata_files}"
+            )
         parser = configparser.ConfigParser()
         parser.read_string(archive.read(metadata_files[0]).decode("utf-8"))
         try:
@@ -126,13 +91,10 @@ def _isolated_run(
     extracted: Path,
     dependency_site: Path,
     code: str,
-    *,
-    cache_dir: Path,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     for name in ("PYTHONHOME", "PYTHONPATH", "PYTHONSAFEPATH"):
         env.pop(name, None)
-    env["KAIRYU_BENCH_CACHE"] = str(cache_dir)
     bootstrap = f"import sys; sys.path.append({str(dependency_site)!r}); {code}"
     return subprocess.run(
         [sys.executable, "-S", "-c", bootstrap],
@@ -151,145 +113,47 @@ def _verify_isolated_runtime(wheel: Path, scratch: Path) -> None:
         archive.extractall(extracted)
 
     dependency_site = Path(sysconfig.get_paths()["purelib"]).resolve()
-    expected = json.dumps(list(FIXTURE_FILES))
-    fixture_code = (
-        "import json; "
-        "from importlib import resources; "
+    code = (
+        "import argparse, importlib.util; "
         "from pathlib import Path; "
         "import kairyu; "
-        "from kairyu.bench.structured import load_packaged_corpus; "
+        "from kairyu.entrypoints.cli import _build_parser; "
         "root=Path.cwd().resolve(); "
         "module=Path(kairyu.__file__).resolve(); "
         "assert module.is_relative_to(root), (module, root); "
-        "fixtures=resources.files('kairyu.bench.fixtures'); "
-        "assert 'Princeton Natural Language Processing' in "
-        "fixtures.joinpath('LLMBAR_LICENSE').read_text(encoding='utf-8'); "
-        "names=sorted(item.name for item in fixtures.iterdir() "
-        "if item.name.endswith('.jsonl')); "
-        f"assert names == {expected}, names; "
-        "[json.loads(line) for name in names "
-        "for line in fixtures.joinpath(name).read_text(encoding='utf-8').splitlines() "
-        "if line.strip()]; "
-        "structured=load_packaged_corpus(); "
-        "assert [row['category'] for row in structured] == "
-        "['nested', 'recursive', 'enum', 'pattern', 'union']; "
-        "vendor=resources.files('kairyu.bench._vendor.ifeval'); "
-        "assert 'Apache License' in vendor.joinpath('LICENSE').read_text(encoding='utf-8'); "
-        "assert 'Google Research' in vendor.joinpath('NOTICE').read_text(encoding='utf-8'); "
-        "manifest=resources.files('kairyu.bench').joinpath('entrypoints.toml'); "
-        "assert manifest.read_text(encoding='utf-8').strip(); "
+        "parser=_build_parser(); "
+        "actions=[action for action in parser._actions "
+        "if isinstance(action,argparse._SubParsersAction)]; "
+        "assert len(actions)==1; "
+        "assert set(actions[0].choices)=={'serve','validate'}; "
+        "assert 'bench' not in parser.format_help().lower(); "
+        "assert importlib.util.find_spec('evals') is None; "
+        "assert importlib.util.find_spec('evidence') is None; "
+        "assert importlib.util.find_spec('verification') is None; "
         "print(module)"
     )
-    fixture_result = _isolated_run(
-        extracted,
-        dependency_site,
-        fixture_code,
-        cache_dir=scratch / "cache",
-    )
-    module_path = Path(fixture_result.stdout.strip()).resolve()
+    result = _isolated_run(extracted, dependency_site, code)
+    module_path = Path(result.stdout.strip()).resolve()
     if not module_path.is_relative_to(extracted.resolve()):
-        raise VerificationError(f"isolated fixture check imported outside the wheel: {module_path}")
-
-    optional_profile_code = (
-        "import sys; "
-        "sys.modules['torch']=None; "
-        "from kairyu.bench.profiling import profile_scope; "
-        "scope=profile_scope(False); "
-        "value=scope.__enter__(); "
-        "assert value is None; "
-        "scope.__exit__(None,None,None); "
-        "print('torch-optional profile import ok')"
-    )
-    optional_profile_result = _isolated_run(
-        extracted,
-        dependency_site,
-        optional_profile_code,
-        cache_dir=scratch / "cache",
-    )
-    if optional_profile_result.stdout.strip() != "torch-optional profile import ok":
         raise VerificationError(
-            "isolated profiling helper did not preserve torch optionality: "
-            f"{optional_profile_result.stdout!r}"
+            f"isolated check imported outside the wheel: {module_path}"
         )
-
-    entrypoint_code = (
-        "from kairyu.entrypoints.cli import main; main(['bench', 'entrypoints', '--json'])"
-    )
-    entrypoint_result = _isolated_run(
-        extracted,
-        dependency_site,
-        entrypoint_code,
-        cache_dir=scratch / "cache",
-    )
-    try:
-        registry = json.loads(entrypoint_result.stdout)
-    except json.JSONDecodeError as error:
-        raise VerificationError(
-            f"`kairyu bench entrypoints --json` was not JSON: {entrypoint_result.stdout!r}"
-        ) from error
-    if len(registry.get("entrypoints", ())) != EXPECTED_ENTRYPOINTS:
-        raise VerificationError(
-            "packaged benchmark entrypoint registry does not contain all "
-            f"{EXPECTED_ENTRYPOINTS} wrappers"
-        )
-
-    for command in (
-        ("bench", "--help"),
-        ("bench", "run", "--help"),
-        ("bench", "download", "--help"),
-        ("bench", "report", "--help"),
-        ("bench", "compare-runs", "--help"),
-        ("bench", "calibrate-judge", "--help"),
-        ("bench", "list", "--help"),
-        ("bench", "entrypoints", "--help"),
-    ):
-        help_code = f"from kairyu.entrypoints.cli import main; main({list(command)!r})"
-        help_result = _isolated_run(
-            extracted,
-            dependency_site,
-            help_code,
-            cache_dir=scratch / "cache",
-        )
-        if "usage:" not in help_result.stdout.lower():
-            raise VerificationError(
-                f"`kairyu {' '.join(command)}` did not render CLI help: {help_result.stdout!r}"
-            )
-
-    for command, expected in (
-        (["bench", "list"], "suite accuracy (12 slots)"),
-        (["bench", "list", "--suite", "core"], "suite core (3 slots)"),
-        (
-            ["bench", "list", "--suite", "long-context"],
-            "suite long-context (9 slots)",
-        ),
-        (["bench", "list", "--suite", "structured"], "suite structured (1 slots)"),
-    ):
-        list_code = f"from kairyu.entrypoints.cli import main; main({command!r})"
-        list_result = _isolated_run(
-            extracted,
-            dependency_site,
-            list_code,
-            cache_dir=scratch / "cache",
-        )
-        if expected not in list_result.stdout:
-            raise VerificationError(
-                f"`kairyu {' '.join(command)}` did not dispatch the packaged suite: "
-                f"{list_result.stdout!r}"
-            )
 
 
 def verify(repo: Path, *, uv: str, wheel: Path | None = None) -> Path:
     repo = repo.resolve()
-    with tempfile.TemporaryDirectory(prefix="kairyu-bench-wheel-") as temp:
+    with tempfile.TemporaryDirectory(prefix="kairyu-wheel-") as temp:
         scratch = Path(temp)
         built_wheel = (
-            wheel.resolve() if wheel is not None else _build_wheel(repo, scratch / "dist", uv)
+            wheel.resolve()
+            if wheel is not None
+            else _build_wheel(repo, scratch / "dist", uv)
         )
         _inspect_wheel(built_wheel)
         _verify_isolated_runtime(built_wheel, scratch)
         print(
-            f"verified {built_wheel.name}: packaged CLI, entrypoint manifest, "
-            f"{len(FIXTURE_FILES)} fixtures; checkout-only bench/results/tests excluded"
+            f"verified {built_wheel.name}: product CLI only; "
+            "evals/evidence/verification/bench/tests excluded"
         )
         return built_wheel
 

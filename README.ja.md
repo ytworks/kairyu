@@ -30,7 +30,7 @@ Python API とひとつの OpenAI 互換エンドポイントの背後に統合�
 5. [単一モデル版 — セットアップと使い方](#5-単一モデル版--セットアップと使い方)
 6. [オーケストレーション版 — セットアップと使い方](#6-オーケストレーション版--セットアップと使い方)
 7. [設定リファレンス](#7-設定リファレンス)
-8. [ベンチマーク](#8-ベンチマーク)
+8. [評価と検証](#8-評価と検証)
 9. [開発](#9-開発)
 10. [ドキュメント索引](#10-ドキュメント索引)
 11. [ライセンス](#11-ライセンス)
@@ -275,8 +275,7 @@ uv sync --group dev           # + テスト/lint ツールチェーン
 | `--extra fleet` | pyzmq, msgpack, psycopg | プロセス分離エンジン、KV イベントトランスポート、PostgreSQL 共有 BatchStore |
 | `--extra otel` | opentelemetry-sdk | トレーシングスパン(なければ no-op) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU カーネル/ファブリック(Linux 限定マーカー。macOS の `uv sync` はスキップ) |
-| `--extra bench` | datasets/HF Hub、ベンチマーク形式、進捗 UI、固定 IFEval scorer 依存 | インストール済みベンチマークスイートの取得と採点 |
-| `--extra bench-agentic` | mini-swe-agent, swebench, harbor | docker ベースのエージェンティックベンチマーク |
+| `--extra evals` | datasets/HF Hub、評価形式、進捗 UI、固定 IFEval scorer 依存 | checkout 専用の Core、Quantization、Structured Output、Long Context 評価 |
 | `--group dev` | pytest, ruff, transformers, openai, … | テストスイート + パリティゴールデン |
 
 vLLM は Linux GPU ホストで `vllm` バックエンドを使う場合のみ必要です(同一環境に
@@ -286,7 +285,7 @@ vLLM は Linux GPU ホストで `vllm` バックエンドを使う場合のみ�
 
 ```bash
 uv run pytest                                        # フルスイート, カバレッジゲート 80%
-./examples/deepseek-v4-flash-0731-8gpu/bench.sh list  # ベンチマーク一覧
+uv run --frozen python -m verification list               # 検証 registry 一覧
 ./examples/deepseek-v4-flash-0731-8gpu/run.sh         # Kairyu L3 + vLLM L1 + Chat UI
 ```
 
@@ -827,59 +826,64 @@ tokens_per_minute=200_000)}))`。
 | `scripts/kind_smoke.sh` | kind クラスタのエンドツーエンドスモーク(CI ジョブ) |
 | `scripts/webui_smoke.sh` | Open WebUI 構成の Kairyu-only smoke。UI image は pull しない |
 | `scripts/gpu_gates/*.sh` | GPU デイのゲートスクリプト(runbook §0–§9)。すべて `--dry-run` 対応 |
-| `bench/serving_bench.py`, `bench/frontier_compare.py`, `bench/kv_transfer_bench.py` | レイテンシ/グッドプット/転送ベンチ |
+| `verification/l1/performance/serving_bench.py`, `verification/product/performance/frontier_compare.py`, `verification/l1/performance/kv_transfer_bench.py` | レイテンシ/グッドプット/転送の検証 |
 
-## 8. ベンチマーク
+## 8. 評価と検証
 
-`kairyu bench` は、デプロイ済みゲートウェイに対して回答品質スイートを実行します。
-既定は Sakana の Fugu リリース表に基づく 11 ベンチマークの Accuracy スイートで、`--suite core` は決定論的な
-GSM8K/MMLU/IFEval 回帰スイート、`--suite structured` は固定 5 ケースの
-JSON Schema 適合性コーパスを選択します。単一モデルとオーケストレーション
-ティアはスコアボードの列として並びます:
+モデル評価と Kairyu 実装の検証は、checkout 専用の別サーフェスです。どちらも
+wheel には含まれません。
 
-```bash
-uv run kairyu serve examples/deploy_multi_orchestrator.yaml &
-uv run kairyu bench run --base-url http://localhost:8000/v1 \
-    --model m1 --model kairyu-auto --model kairyu-auto-max
-uv run kairyu bench run --suite core --smoke \
-    --base-url http://localhost:8000/v1 --model m1
-uv run kairyu bench run --config bench/configs/structured.yaml
-```
+| サーフェス | 所有するもの |
+|---|---|
+| `evals/` | Core、Quantization、Structured Output、Long Context のモデル評価 |
+| `verification/` | L1、オーケストレーション、fleet、product の正当性・性能・耐障害性・診断ゲート |
+| `evidence/` | strict JSON、hash、catalog、実行 record の中立契約 |
+| `bench/results/` | 既存 path と bytes を保持する immutable legacy artifact |
 
-Structured 適合性スイートは nested、recursive、enum、pattern、union の各 schema
-について、同じプロンプトと seed を `response_format` あり／なしで対にします。
-厳密な JSON 妥当性、Draft 2020-12 適合性、期待値との完全一致、malformed 出力を
-別々に報告します。acceptance/schema/task の分母は予定した全 observation、
-JSON-valid/malformed の分母は受理された HTTP 200 completion です。endpoint が
-返した token 数には usage coverage を併記し、latency は診断値として扱い、通貨
-コストは推定しません。HTTP 200 の safety refusal は実行失敗にせず、受理された
-non-JSON/task-failure 証拠として保持します。
+評価依存を入れ、suite を明示して実行します:
 
-データセットは `~/.cache/kairyu/benchmarks` にダウンロードされます(コミットされま
-せん)。前提条件が満たせない場合(docker なし、ゲート付きデータセット、ジャッジなし)
-は注釈付きの `skipped` セルになるため、実行は常に完走します。サブコマンド:
-`bench run`、`bench download`、`bench report <run>`、`bench list`、
-`bench entrypoints`。詳細ガイド: [`docs/benchmarks.md`](docs/benchmarks.md)。
-structured コーパスは HF Git pin で識別するリモート dataset ではなく、内容の
-SHA-256 を厳密に検証するインストール済み package data です。
+~~~bash
+uv sync --extra evals --group dev
+uv run --frozen python -m evals list --suite core
+uv run --frozen python -m evals run --suite core --smoke \
+  --base-url http://localhost:8000/v1 --model m1
+uv run --frozen python -m evals run \
+  --config evals/configs/structured.yaml
+~~~
 
-wheel に含まれるのは、再利用可能な `kairyu.bench` ライブラリ、公開 CLI、
-エントリポイント台帳、17 個の合成ベンチマーク stand-in、structured 適合性
-コーパス、judge calibration コーパス（合計 19 個の JSONL）です。トップレベルの
-`bench/*.py` 開発／正式ゲート用ラッパー、
-`bench/results/`、`tests/` はソース checkout 専用です。安定した一覧と
-互換性ポリシーは [`bench/README.md`](bench/README.md) を参照してください。
+Core は judge 不要の GSM8K、MMLU、IFEval 回帰、Quantization は GPQA Diamond
+を加えた 7 arm 品質 sweep、Structured Output は constrained/unconstrained
+の対評価、Long Context は固定 RULER NIAH 長を扱います。suite または config
+は必須で、dataset pin、scorer bytes、target identity、sampling policy は run
+evidence に bind されます。
+
+Kairyu エンジンとシステムの claim は verification registry から実行します:
+
+~~~bash
+uv run --frozen python -m verification list
+uv run --frozen python -m verification check
+uv run --frozen python -m verification run \
+  orchestration.performance.router_latency -- --json --assert-gate
+~~~
+
+正式な performance 実行には accepted correctness artifact が必要で、その
+SHA-256 を記録します。HF/TP parity、logprob 一致、batch invariance、
+quantization/KV equivalence、TTFT、TPOT/TPS、throughput、goodput、vLLM 比較は
+モデル評価 row ではなく verification に残ります。
+
+詳細は [`docs/benchmarks.md`](docs/benchmarks.md) と
+[`verification/README.md`](verification/README.md) を参照してください。
 
 ## 9. 開発
 
 ```bash
 uv run pytest                        # テスト + カバレッジ (ゲート 80%, addopts で強制)
 uv run ruff check .                  # lint (E, F, I, UP, B; 行長 100)
-uv run kairyu bench entrypoints --check-repo .
-uv run python scripts/verify_bench_entrypoints.py
+uv run python -m verification check
+uv run python scripts/verify_verification_registry.py
 uv run python scripts/verify_bench_wheel.py
-uv run python bench/router_latency.py
-uv run python bench/orchestration_mock_bench.py
+uv run python -m verification run orchestration.performance.router_latency -- --help
+uv run python -m verification run orchestration.performance.orchestration_mock_bench -- --help
 ```
 
 | pytest の実行方法 | 範囲 |

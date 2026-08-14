@@ -4,7 +4,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-import pytest
 import yaml
 
 from kairyu.deploy.spec import load_deployment_spec
@@ -28,7 +27,7 @@ def test_examples_surface_contains_the_three_hardware_examples() -> None:
     environments = sorted(
         path.name
         for path in (ROOT / "examples").iterdir()
-        if path.is_dir() and not path.name.startswith("__")
+        if path.is_dir() and (path / "example.json").is_file()
     )
     assert environments == [
         "deepseek-v4-flash-0731-8gpu",
@@ -140,7 +139,7 @@ def test_qwen_kairyu_l3_declares_strict_multimodal_vllm_l1() -> None:
     assert spec.legacy_chat_models == frozenset({"qwen3.6-27b"})
 
 
-def test_qwen_template_defaults_chat_to_direct_and_benchmark_to_thinking() -> None:
+def test_qwen_template_defaults_chat_to_direct_and_allows_explicit_thinking() -> None:
     template = ChatTemplate.load(str(QWEN_EXAMPLE / "chat_template.jinja"))
     messages = [{"role": "user", "content": "Return OK."}]
     direct = template.render(messages)
@@ -285,140 +284,9 @@ def test_control_preflight_requires_exact_gpu_inventory() -> None:
     assert rows[-1]["index"] == 7
 
 
-def test_full_livecodebench_command_has_no_subset_escape_hatch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    benchmark = _load(EXAMPLE / "benchmark.py", "deepseek_example_benchmark")
-    observed: list[str] = []
-
-    def fake_run(command, *, log=None, check=True):
-        observed.extend(command)
-        return 0
-
-    monkeypatch.setattr(benchmark, "_run", fake_run)
-    monkeypatch.setattr(benchmark, "_execution_image", lambda: "sha256:" + "a" * 64)
-    monkeypatch.setattr(benchmark, "_validate_livecodebench", lambda _path: 0)
-    assert benchmark.livecodebench(tmp_path) == 0
-    assert observed[observed.index("--only") + 1] == "livecodebench"
-    assert observed[observed.index("--concurrency") + 1] == "16"
-    assert observed[observed.index("--reasoning-effort") + 1] == "max"
-    assert observed[observed.index("--temperature") + 1] == "1.0"
-    assert observed[observed.index("--top-p") + 1] == "0.95"
-    assert "--limit" not in observed
-    assert "--smoke" not in observed
-    assert observed[observed.index("--exec-runner") + 1] == "docker"
-
-
-def test_livecodebench_result_validation_requires_all_1055_rows(
-    tmp_path: Path,
-) -> None:
-    benchmark = _load(EXAMPLE / "benchmark.py", "deepseek_example_benchmark_validation")
-    output = tmp_path / "livecodebench-full"
-    output.mkdir()
-
-    def write_cell(**overrides) -> None:
-        cell = {
-            "status": "completed",
-            "n": 1055,
-            "n_scored": 1055,
-            "performance": {
-                "requests": 1055,
-                "errors": 0,
-                "unmeasured_requests": 0,
-            },
-        }
-        cell.update(overrides)
-        (output / "scoreboard.json").write_text(
-            json.dumps({"cells": {"livecodebench": {"deepseek-v4-flash-0731": cell}}})
-        )
-
-    write_cell()
-    assert benchmark._validate_livecodebench(tmp_path) == 0
-
-    write_cell(status="failed", n_scored=520)
-    assert benchmark._validate_livecodebench(tmp_path) == 1
-
-
-def test_qwen_livecodebench_command_is_the_fixed_twenty_item_run(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_example_benchmark")
-    observed: list[str] = []
-
-    def fake_run(command, *, log=None, check=True):
-        observed.extend(command)
-        return 0
-
-    monkeypatch.setattr(benchmark, "_run", fake_run)
-    monkeypatch.setattr(benchmark, "_execution_image", lambda: "sha256:" + "a" * 64)
-    monkeypatch.setattr(benchmark, "_validate_livecodebench", lambda _path: 0)
-    assert benchmark.livecodebench(tmp_path) == 0
-    assert observed[observed.index("--only") + 1] == "livecodebench"
-    assert observed[observed.index("--served-config-label") + 1].endswith("-no-mtp")
-    assert observed[observed.index("--limit") + 1] == "20"
-    assert observed[observed.index("--concurrency") + 1] == "16"
-    assert observed[observed.index("--reasoning-effort") + 1] == "max"
-    assert observed[observed.index("--temperature") + 1] == "1.0"
-    assert observed[observed.index("--top-p") + 1] == "0.95"
-    assert observed[observed.index("--exec-runner") + 1] == "docker"
-
-
-def test_qwen_livecodebench_validation_requires_all_twenty_rows(
-    tmp_path: Path,
-) -> None:
-    benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_example_benchmark_validation")
-    output = tmp_path / "livecodebench-20"
-    output.mkdir()
-
-    def write_cell(**overrides) -> None:
-        cell = {
-            "status": "completed",
-            "n": 20,
-            "n_scored": 20,
-            "performance": {
-                "requests": 20,
-                "errors": 0,
-                "unmeasured_requests": 0,
-            },
-        }
-        cell.update(overrides)
-        (output / "scoreboard.json").write_text(
-            json.dumps({"cells": {"livecodebench": {"qwen3.6-27b": cell}}})
-        )
-
-    write_cell()
-    assert benchmark._validate_livecodebench(tmp_path) == 0
-
-    write_cell(status="failed", n_scored=19)
-    assert benchmark._validate_livecodebench(tmp_path) == 1
-
-
-def test_qwen_charxiv_command_pins_ten_vision_items(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_charxiv_benchmark")
-    observed: list[str] = []
-
-    def fake_run(command, *, log=None, check=True):
-        observed.extend(command)
-        return 0
-
-    monkeypatch.setattr(benchmark, "_run", fake_run)
-    monkeypatch.setattr(benchmark, "_validate_charxiv", lambda _path, **_kwargs: 0)
-
-    assert benchmark.charxiv(tmp_path) == 0
-    assert observed[observed.index("--only") + 1] == "charxiv-reasoning"
-    assert observed[observed.index("--limit") + 1] == "10"
-    assert observed[observed.index("--concurrency") + 1] == "1"
-    assert json.loads(observed[observed.index("--extra-body") + 1]) == {
-        "chat_template_kwargs": {"enable_thinking": False}
-    }
-    assert "--no-vision" not in observed
-    assert observed[observed.index("--judge-model") + 1] == "qwen3.6-27b"
-
 
 def test_qwen_serving_prompts_do_not_share_the_first_prefix(tmp_path: Path) -> None:
-    benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_example_serving")
+    benchmark = _load(QWEN_EXAMPLE / "verification.py", "qwen_example_serving")
     dataset = tmp_path / "serving.json"
     benchmark._serving_dataset(dataset, requests=4, approximate_tokens=32)
     rows = json.loads(dataset.read_text())
@@ -433,7 +301,7 @@ def test_qwen_serving_prompts_do_not_share_the_first_prefix(tmp_path: Path) -> N
 
 
 def test_qwen_serving_validation_rejects_partial_streams(tmp_path: Path) -> None:
-    benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_example_serving_validation")
+    benchmark = _load(QWEN_EXAMPLE / "verification.py", "qwen_example_serving_validation")
     row_dir = tmp_path / "serving-c2"
     row_dir.mkdir()
     result = {
@@ -452,33 +320,3 @@ def test_qwen_serving_validation_rejects_partial_streams(tmp_path: Path) -> None
     result["samples"][1]["completion_tokens"] = 0
     output.write_text(json.dumps(result))
     assert benchmark._validate_serving_row(row_dir, requests=2, output_tokens=4) == 1
-
-
-def test_qwen_all_dispatches_every_benchmark(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    benchmark = _load(QWEN_EXAMPLE / "benchmark.py", "qwen_example_all")
-    observed: list[str] = []
-    monkeypatch.setattr(benchmark, "RESULTS_ROOT", tmp_path)
-    monkeypatch.setattr(benchmark, "_ensure_environment", lambda _no_start: None)
-    monkeypatch.setattr(benchmark, "serving", lambda _path: observed.append("serving") or 0)
-    monkeypatch.setattr(
-        benchmark,
-        "livecodebench",
-        lambda _path: observed.append("livecodebench") or 0,
-    )
-    monkeypatch.setattr(benchmark, "charxiv", lambda _path: observed.append("charxiv") or 0)
-    monkeypatch.setattr(
-        "sys.argv",
-        ["benchmark.py", "all", "--no-start", "--run-id", "all-start"],
-    )
-    with pytest.raises(SystemExit) as exit_info:
-        benchmark.main()
-    assert exit_info.value.code == 0
-    assert observed == ["serving", "livecodebench", "charxiv"]
-    manifest = json.loads((tmp_path / "all-start" / "run.json").read_text())
-    assert manifest["exit_codes"] == {
-        "serving": 0,
-        "livecodebench": 0,
-        "charxiv": 0,
-    }

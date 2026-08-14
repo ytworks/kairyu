@@ -1,4 +1,4 @@
-"""``kairyu`` console entrypoint: serve, validate, and benchmark commands."""
+"""``kairyu`` console entrypoint: serve and validate commands."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from kairyu.bench.cli import add_bench_parser
 from kairyu.models.generation import GENERATION_CONFIG_MODES
 
 
@@ -38,7 +37,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "starting a server.",
     )
     validate.add_argument("config", type=Path, help="Path to a DeploymentSpec YAML")
-    add_bench_parser(subparsers)
     return parser
 
 
@@ -80,10 +78,6 @@ def main(argv: list[str] | None = None) -> None:
         print(report.render_text())
         if not report.valid:
             sys.exit(1)
-    elif args.command == "bench":
-        from kairyu.bench.cli import handle
-
-        sys.exit(handle(args))
 
 
 if __name__ == "__main__":

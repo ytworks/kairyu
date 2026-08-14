@@ -228,7 +228,7 @@ error for malformed `response_format` payloads (400, not engine crash).
 
 ### D5 — Bench honesty
 
-`bench/serving_bench.py`: `--api-key` (Authorization header); token-granularity
+`verification/l1/performance/serving_bench.py`: `--api-key` (Authorization header); token-granularity
 TPOT — the bench SENDS `stream_options: {"include_usage": true}` and parses
 the empty-choices usage chunk (its current loop would drop it), falling back
 to chunk counts when the target 400s on `stream_options` — **the method is

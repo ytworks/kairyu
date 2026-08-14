@@ -1,0 +1,38 @@
+# Judge-free deterministic quality regressions: GSM8K, MMLU, and IFEval.
+# Install/download once, then run with:
+#
+#   uv sync --extra evals
+#   python -m evals run --config evals/configs/core.yaml
+#
+# A full run sends 58,028 target calls: MMLU scores four exact continuations
+# per item through a direct native Kairyu target. Add `--smoke` for the
+# 20-item-per-slot development preset; subset artifacts remain explicitly
+# non-comparable.
+suite: core
+
+targets:
+  - name: local-model
+    base_url: http://localhost:8000/v1
+    model: m1
+    # Default adapter mode keeps generated rows at temperature zero. For a
+    # sensitivity run choose exactly one of these alternatives:
+    # temperature: 0.6
+    # sampling_mode: recommended  # wire omission, not endpoint attestation
+    # seed: 100                    # attempts=4 sends seeds 100..103
+    # Required only when this target participates in `python -m evals compare`.
+    # Hash a canonical manifest covering checkpoint, build, and engine config.
+    # served_config:
+    #   label: qwen3-32b-bf16
+    #   sha256: 0000000000000000000000000000000000000000000000000000000000000000
+
+# The root seed controls deterministic item selection for --limit/--smoke; it is
+# not the target request seed above. `attempts` defaults to 1, preserving the
+# original request count and artifact shape. Set it above 1 for grouped
+# multi-seed generated-chat evidence. MMLU fixes its teacher-forced scoring
+# fields and does not apply target sampling overrides or chat attempts.
+seed: 0
+# attempts: 4
+concurrency: 16
+
+# results_dir: bench/results/core
+# cache_dir: ~/.cache/kairyu/benchmarks   # or $KAIRYU_BENCH_CACHE

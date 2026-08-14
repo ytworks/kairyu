@@ -240,7 +240,7 @@ and production-router SHA-256
 
 | Gate | Target | Where proven |
 |---|---|---|
-| F3a | Transport bake-off (NCCL-p2p-staging vs UCX/RDMA vs **NIXL**) on the real sharded fragment layout: winner sustains ≥70% of measured NIC line rate at ≥64-page batches (B2's ≤8 µs/token budget restated against measured, not nominal, rate) | `bench/kv_transfer_bench.py` |
+| F3a | Transport bake-off (NCCL-p2p-staging vs UCX/RDMA vs **NIXL**) on the real sharded fragment layout: winner sustains ≥70% of measured NIC line rate at ≥64-page batches (B2's ≤8 µs/token budget restated against measured, not nominal, rate) | `verification/l1/performance/kv_transfer_bench.py` |
 | F3b | Cross-node P-D through pool pairing: TTFT p50 inflation ≤20% vs colocated (B3 carried); rack-locality respected in pairing decisions (logged) | GPU bench |
 | F3c | Mixed long-prefill/decode workload on the 70B tier: goodput@SLO ≥ +25% vs best colocated config; P:D planner v0 re-splits pools from SLO telemetry without restarts | GPU bench |
 | F3d | ClusterSpec cap raised to 8; `kairyu.launch` brings up a multi-node coherence domain via k8s pod-group rendezvous; the group registers as ONE ReplicaPool endpoint and passes the C2 kill/recover drill | kind + GPU drill |
@@ -338,7 +338,7 @@ claimed.
 | F5b | Tenant isolation: a tenant at 10× its quota cannot degrade another tenant's p99 (token-bucket + admission, not just 429s) | CPU-mock test |
 | F5c | SLO-based early rejection: at saturation, predicted-violation requests are shed/deferred-to-batch; goodput@SLO ≥ queue-and-hope baseline | CPU-mock bench |
 | F5d | Autoscaler: 0→50 replicas of the 14B model in ≤5 min (weight pre-staging measured separately); scale decisions logged with their goodput/queue/KV-utilization inputs | GPU drill |
-| F5e | Usage metering reconciles with request logs to <0.1% on a replayed trace; per-tenant cached-token counts exported (feeds G6 pricing signals) | CPU test + `bench/fleet_usage_replay.py` |
+| F5e | Usage metering reconciles with request logs to <0.1% on a replayed trace; per-tenant cached-token counts exported (feeds G6 pricing signals) | CPU test + `verification/fleet/diagnostic/fleet_usage_replay.py` |
 
 ## 4. Non-goals
 

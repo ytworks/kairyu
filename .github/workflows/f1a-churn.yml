@@ -7,7 +7,7 @@ on:
       - "scripts/install_kind_tools.sh"
       - "scripts/kind_churn_gate.sh"
       - "deploy/kind/f1a/**"
-      - "bench/fleet_churn_bench.py"
+      - "verification/fleet/resilience/fleet_churn_bench.py"
       - "kairyu/**"
       - "Dockerfile"
       - "pyproject.toml"

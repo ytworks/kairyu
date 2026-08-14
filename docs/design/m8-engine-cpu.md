@@ -170,7 +170,7 @@ media bytes.
   producer work on a partial failure. Purge filters batches under the same lock,
   and close seals the queue before reclaiming active requests. Reproduce the
   burst throughput measurements with
-  `uv run python bench/op_queue_bench.py --operations 100000 --repeats 5`.
+  `uv run python verification/l1/performance/op_queue_bench.py --operations 100000 --repeats 5`.
 - **Presentation-lane amendment (2026-08-07, issue #327)**: production drivers
   split one core advance from detokenization/output completion. One serial
   `kairyu-output` future overlaps with at most one raw next step, including at
@@ -268,7 +268,7 @@ New `kairyu/engine/core/sampler.py`, pure torch functions (device-agnostic):
   helper — five consumer sites convert through the one helper, not hand-rolled).
   One-commit ripple (amended, full census): `engine_core.py`, `overlap.py`,
   `pipeline.py` (`StageWorker`), `pd.py`, `tp_runner.py`, `torch_runner.py`,
-  `kairyu_backend.py`, **`bench/parity_tp.py`, `bench/pd_mixed.py`**, and the
+  `kairyu_backend.py`, **`verification/l1/correctness/parity_tp.py`, `verification/l1/performance/pd_mixed.py`**, and the
   inline stub runners in tests. `pd.py`'s int-typed public seams
   (`KVHandoff.transfer(first_token: int)`, `resume_with_kv(first_token: int)`)
   keep their int signatures; the coordinator unwraps `[0].token_id` explicitly.
@@ -416,7 +416,7 @@ oracle outside the timer. Repetition-only short history (32 tokens) also wins:
 the win on both devices (1.10× CPU and 2.71× CUDA versus the alternative). The
 dense tensors cost 7 bytes per vocabulary entry (1,063,552 bytes at 151,936);
 CPU additionally owns sparse active-ID containers. Reproduce with
-`uv run python bench/sampler_penalty_state_bench.py --device cpu` and the same
+`uv run python verification/l1/performance/sampler_penalty_state_bench.py --device cpu` and the same
 command with `--device cuda:0`.
 
 XGrammar is intentionally excluded from the device path because its matcher is
@@ -659,7 +659,7 @@ Deps: `pyzmq`, `msgpack` (dev group + `[fleet]` extra).
 
 **Process-wire amendment (2026-07-29, issue #212):** the original D6 delta
 schema above is now the production protocol rather than a documented intent.
-`bench/proc_wire_bench.py` feeds cumulative production `StreamUpdate` values
+`verification/l1/performance/proc_wire_bench.py` feeds cumulative production `StreamUpdate` values
 through both msgpack encoders and retains every frame size. Its gate uses exact
 serialized byte counts, not timing: protocol v2 must grow approximately 2x
 when output length doubles, while the legacy cumulative control must expose
@@ -690,7 +690,7 @@ dedicated serving process; a generic embedding that also supervises unrelated
 child trees needs an external supervisor boundary.
 
 Issue #333's diagnostic is deliberately separate from the formal A6 verdict.
-`bench/issue_333_proc_http_bench.py` replays the exact TP4 ShareGPT c128 trace
+`verification/l1/performance/issue_333_proc_http_bench.py` replays the exact TP4 ShareGPT c128 trace
 with four fresh servers in
 `kairyu`, `kairyu-proc`, `kairyu-proc`, `kairyu` order, retaining raw strict-SSE
 rows plus clean source, actual imported module, immutable image, full
@@ -778,7 +778,7 @@ GIL attribution or formal A6 verdict. Complete evidence is retained under
   preemption paths untouched); xgrammar 50-schema validity through the full
   engine incl. termination → finish_reason="stop"; update() rejects non-int
   tokens; zmq backend parity incl. abort + service-death error propagation.
-- `bench/serving_bench.py` smoke against the zmq backend (manual, CPU).
+- `verification/l1/performance/serving_bench.py` smoke against the zmq backend (manual, CPU).
 
 ## 6. Review record
 

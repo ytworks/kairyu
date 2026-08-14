@@ -18,8 +18,7 @@ directly to L1.
 
 The selected no-MTP configuration measured **41.43 output tok/s with 190.82 ms
 median TTFT at c1** and **842.35 output tok/s with 1.247 s median TTFT at c32**
-for the fixed 8K-input/256-output workload. The completed LiveCodeBench subset
-scored **11/20 (55.0%)**. See [MEASUREMENTS.md](MEASUREMENTS.md) for the full
+for the fixed 8K-input/256-output workload. See [MEASUREMENTS.md](MEASUREMENTS.md) for the full
 matrix, MTP tradeoff, limitations, and reproducibility identity.
 
 ## Start
@@ -49,31 +48,21 @@ starts use its content attestation; `VERIFY_MODEL=1 ./run.sh` rehashes it.
 Lifecycle commands are `./run.sh up`, `./run.sh status`, `./run.sh logs`, and
 `./run.sh down`. Select another matching card with `GPU_ID=<index>`.
 
-## Benchmarks
+## Serving verification
 
 ```sh
-./bench.sh list
-./bench.sh serving
-./bench.sh livecodebench
-./bench.sh charxiv
-./bench.sh all
+./verify.sh list
+./verify.sh serving
 ```
 
 `serving` records TTFT, TPOT, requests/s, and output tokens/s for fixed
 approximately 8K-token inputs and exactly 256 generated tokens at concurrency
 1, 8, 16, and 32. Its deterministic prompts do not share a first prefix block,
-so prefix-cache reuse cannot inflate the matrix. `livecodebench` runs exactly
-20 deterministic `release_v6` problems at pass@1 in the content-addressed,
-networkless Docker executor. `charxiv` runs exactly 10 deterministic CharXiv
-Reasoning questions with their chart images and judge-grades every answer;
-the short-answer target disables Qwen thinking through its upstream HF chat
-template while leaving ordinary chat and LiveCodeBench unchanged.
-`JUDGE_BASE_URL` and `JUDGE_MODEL` can select a separate OpenAI-compatible
-judge, while the default uses this local Qwen endpoint. `all` continues after
-an individual benchmark failure and still finalizes its manifest.
+so prefix-cache reuse cannot inflate the matrix. Artifacts go to
+`verification/results/examples/qwen3.6-27b-1gpu/<UTC-run-id>/`.
 
-Artifacts go to
-`bench/results/examples/qwen3.6-27b-1gpu/<UTC-run-id>/`.
+Model and product evaluations are invoked explicitly through `python -m evals`;
+see the repository benchmark documentation for the retained evaluation suites.
 
 ## Public performance context
 

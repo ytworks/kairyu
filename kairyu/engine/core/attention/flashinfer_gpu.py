@@ -43,7 +43,7 @@ from kairyu.kernels.flashinfer_decode_plan_gpu import (
 
 # FlashInfer calls 128 MiB "recommended", but that is not a capacity guarantee:
 # Qwen3-32B's 1,024-token chunked prefill required 190,840,832 bytes once its
-# context grew during the 20-item LiveCodeBench gate. vLLM uses 394 MiB for the
+# context grew during the long-context stability gate. vLLM uses 394 MiB for the
 # same shared prefill/decode workspace. Sharing keeps the per-rank reservation
 # at 394 MiB rather than allocating one buffer per wrapper.
 _WORKSPACE_BYTES = 394 * 1024 * 1024

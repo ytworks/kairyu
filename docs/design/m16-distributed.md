@@ -44,7 +44,7 @@ call sites use all_reduce (+ local slice).
 > result). It is **not** a same-call-site optimization, and the earlier note
 > saying so was wrong.
 >
-> Method (`bench/reduce_scatter_bench.py`): per-trial **worst-rank** elapsed via
+> Method (`verification/l1/performance/reduce_scatter_bench.py`): per-trial **worst-rank** elapsed via
 > CUDA events, barrier-bounded so ranks start together, MAX-reduced across ranks
 > — a collective finishes when its slowest participant does, so a per-rank
 > minimum measures nothing about it. Buffers are prepared outside the timed
@@ -346,7 +346,7 @@ PP (D4), or the SPMD worker/`DistTPModelRunner` (D4) — those keep plain TP.
   a two-rank gloo gate
   holds a worker receive beyond the model timeout before delivering the next
   step. Hardware validation also uses the exact
-  Qwen3-32B TP=8 / Accuracy LiveCodeBench 20-item / concurrency-8 workload. The
+  Qwen3-32B TP=8 / concurrency-8 long-generation stability workload. The
   latter ran 654.53 s without a watchdog, kept `/readyz` at 200, and shut down
   with all eight GPUs returning to 0 MiB / 0% without a reset.
 - Full suite green; dist tests excluded from cov accounting by design.
