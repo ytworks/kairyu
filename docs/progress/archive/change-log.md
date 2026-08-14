@@ -11,6 +11,27 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-13 — [progress] Tiered Chat UI publication defaults to visible content
+- What: The tiered example's Qwen replicas now default upstream HF chat templating to nonthinking while preserving request-level overrides and vision handling, so proposal and publisher roles return public content instead of exhausting their budget in reasoning-only output; GPU validation is in progress.
+- Refs: PR #478; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,README.md}`; `tests/unit/test_tiered_frontier_examplectl.py`
+
+### 2026-08-13 — [progress] Example vision CharXiv validation closes
+- What: Both the single-Qwen and tiered Qwen/DeepSeek examples completed their deterministic 10-item CharXiv image runs with all 10 target requests measured and scored and zero target failures; the tiered DAG confines private DeepSeek reasoning to planning/synthesis/verification and uses its image-capable non-thinking Qwen pool for proposals and final publication.
+- Refs: PR #478; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/`; `bench/results/examples/qwen3.6-27b-1gpu/charxiv-10-gpu-validation-6/`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/charxiv-10-gpu-validation-4/`
+
+### 2026-08-13 — [verified] Single-Qwen CharXiv vision closes 10/10
+- What: The 1-GPU Qwen example completed its deterministic CharXiv run with `n=10`, `n_scored=10`, `requests=10`, `errors=0`, and `unmeasured_requests=0`; score was 60%. Tiered orchestration validation remains in progress.
+- Refs: `examples/qwen3.6-27b-1gpu/`; `bench/results/examples/qwen3.6-27b-1gpu/charxiv-10-gpu-validation-6/`
+
+### 2026-08-13 — [progress] Example vision orchestration enters GPU validation
+- What: L3 now preserves validated image inputs for L2, role DAGs pass media only to capable workers, both Qwen examples enable the pinned checkpoint's vision encoder, and each owns a fail-closed 10-item CharXiv command; real-GPU closure is in progress.
+- Refs: `kairyu/orchestration/`; `examples/qwen3.6-{27b-1gpu,deepseek-v4-8gpu}/`
+
+### 2026-08-13 — [amendment] Kind CI tool setup is shared and verified
+- What: All four kind gates now use one pinned installer with bounded nested retries, HTTPS-only downloads, SHA-256 verification, and executable version checks; a policy test bans the flaky action path from every workflow.
+- Why: Per-workflow fixes left the same dependency-acquisition failure in other gates, incorrectly surfacing CI infrastructure failures as product-quality failures.
+- Refs: PR #476; `scripts/install_kind_tools.sh`; `.github/workflows/{ci,f1a-churn,f1b-rollout,f1c-gateway}.yml`; `tests/unit/test_ci_workflow_policy.py`
+
 ### 2026-08-13 — [progress] Tiered PR infrastructure flakes are bounded
 - What: F1c now installs pinned kind/kubectl binaries with retried, checksum-verified downloads, and F1b retries one failed import of its already-frozen image archives. Product gate behavior is unchanged.
 - Refs: PR #476; `.github/workflows/f1c-gateway.yml`; `scripts/kind_rollout_gate.sh`
