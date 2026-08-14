@@ -12,8 +12,6 @@ from evals.targets import parse_target_spec
 from evals.types import (
     BenchConfig,
     BenchTarget,
-    JudgeConfig,
-    JudgeEndpointConfig,
     ServedConfigIdentity,
 )
 
@@ -90,23 +88,6 @@ def _split_csv(values: list[str] | None) -> tuple[str, ...]:
     return tuple(names)
 
 
-def parse_additional_judge_flag(spec: str) -> JudgeEndpointConfig:
-    """Parse ``base_url=model[=api_key_env]`` for a panel member."""
-    if not isinstance(spec, str):
-        raise ValueError(
-            "--judge-secondary: expected base_url=model[=api_key_env]"
-        )
-    parts = [part.strip() for part in spec.split("=")]
-    if len(parts) not in (2, 3) or any(not part for part in parts):
-        raise ValueError(
-            "--judge-secondary: expected base_url=model[=api_key_env]"
-        )
-    values = {"base_url": parts[0], "model": parts[1]}
-    if len(parts) == 3:
-        values["api_key_env"] = parts[2]
-    return JudgeEndpointConfig(**values)
-
-
 def _load_config_mapping(path: str | None) -> dict:
     if path is None:
         return {}
@@ -116,32 +97,6 @@ def _load_config_mapping(path: str | None) -> dict:
     if not isinstance(loaded, dict):
         raise ValueError("bench config YAML must be a mapping at the top level")
     return loaded
-
-
-def _judge_data(data: dict, args) -> dict:
-    judge = dict(data.get("judge") or {})
-    if getattr(args, "judge_base_url", None):
-        judge["base_url"] = args.judge_base_url
-    if getattr(args, "judge_model", None):
-        judge["model"] = args.judge_model
-    if getattr(args, "judge_api_key_env", None):
-        judge["api_key_env"] = args.judge_api_key_env
-    if getattr(args, "judge_reasoning_effort", None):
-        judge["reasoning_effort"] = args.judge_reasoning_effort
-    if getattr(args, "judge_extra_body", None):
-        judge["extra_body_json"] = args.judge_extra_body
-    secondary = getattr(args, "judge_secondary", None)
-    if secondary:
-        judge["additional_judges"] = [
-            parse_additional_judge_flag(spec).model_dump() for spec in secondary
-        ]
-    return judge
-
-
-def build_judge_config(args) -> JudgeConfig:
-    """Build just the judge block for the calibration subcommand."""
-    data = _load_config_mapping(getattr(args, "config", None))
-    return JudgeConfig(**_judge_data(data, args))
 
 
 def build_config(args) -> BenchConfig:
@@ -175,10 +130,6 @@ def build_config(args) -> BenchConfig:
             else target
             for target in data.get("targets") or []
         ]
-
-    judge = _judge_data(data, args)
-    if judge:
-        data["judge"] = JudgeConfig(**judge).model_dump()
 
     execution = dict(data.get("execution") or {})
     exec_runner = getattr(args, "exec_runner", None)

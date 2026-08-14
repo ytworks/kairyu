@@ -109,37 +109,6 @@ def test_seed_schedule_preserves_single_attempt_omission_and_sweeps_from_base():
     assert seed_schedule(7, 4) == (7, 8, 9, 10)
 
 
-async def test_legacy_unmarked_agentic_attempt_budget_does_not_rewrite_chat_pairs(
-    tmp_path,
-):
-    def handler(request: httpx.Request) -> httpx.Response:
-        del request
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": "pass"}}]},
-        )
-
-    target = BenchTarget(base_url="http://gateway", model="m")
-    pair = await _BinaryAdapter().run(
-        target,
-        _context(tmp_path, handler, attempts=1),
-    )
-    board = build_scoreboard(
-        run_id="legacy-agentic-attempts",
-        suite="core",
-        config={"attempts": 4},
-        environment={},
-        pairs=[pair],
-        targets=[target.label()],
-        target_configs=[target],
-    )
-
-    cell = board["cells"]["gsm8k"][target.label()]
-    assert cell["status"] == "completed"
-    assert cell["score"] == 1.0
-    assert "sampling_sensitivity" not in cell
-
-
 @pytest.mark.parametrize(
     ("successes", "k", "expected"),
     [(1, 1, 0.25), (1, 2, 0.5), (1, 4, 1.0)],
@@ -423,9 +392,9 @@ async def test_stored_sampling_summary_is_bound_to_binary_contract_and_counts(tm
     assert "Sampling sweeps show" not in render_markdown(board)
     cell["n"] = 2
 
-    board["benchmarks"] = ["mrcr-v2"]
-    board["display_names"] = {"mrcr-v2": "MRCRv2"}
-    board["cells"] = {"mrcr-v2": board["cells"].pop("gsm8k")}
+    board["benchmarks"] = ["custom-score"]
+    board["display_names"] = {"custom-score": "Custom Score"}
+    board["cells"] = {"custom-score": board["cells"].pop("gsm8k")}
     markdown = render_markdown(board)
     assert "Sampling sweeps show" not in markdown
     assert "pass@" not in markdown

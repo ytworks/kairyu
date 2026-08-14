@@ -136,7 +136,7 @@ def test_delta_is_candidate_minus_baseline_and_renderer_states_direction():
     assert _row(comparison)["deltas"]["model"] == -6.0
     assert _row(comparison)["delta_states"]["model"] == "comparable"
     markdown = render_run_comparison_markdown(comparison)
-    assert markdown.startswith("# Accuracy run comparison — base → candidate")
+    assert markdown.startswith("# Eval run comparison — base → candidate")
     assert "candidate minus baseline" in markdown
     assert "negative is a regression" in markdown
     row = next(line for line in markdown.splitlines() if line.startswith("| GSM8K"))
@@ -213,14 +213,14 @@ def _set_execution(entry: dict, execution: dict) -> None:
 
 
 def test_unavailable_docker_withholds_only_execution_dependent_cells():
-    benchmarks = ("gsm8k", "scicode")
+    benchmarks = ("gsm8k", "structured-output")
     baseline = _entry(
         "base",
         BASE_COMMIT,
         benchmarks=benchmarks,
         cells={
             "gsm8k": {"model": _cell(0.4)},
-            "scicode": {
+            "structured-output": {
                 "model": _cell(
                     0.4,
                     cross_run_policy="withheld_unpinned_execution",
@@ -237,7 +237,7 @@ def test_unavailable_docker_withholds_only_execution_dependent_cells():
         benchmarks=benchmarks,
         cells={
             "gsm8k": {"model": _cell(0.5)},
-            "scicode": {"model": _cell(0.5)},
+            "structured-output": {"model": _cell(0.5)},
         },
     )
     _set_execution(baseline, _docker_execution(available=False))
@@ -248,8 +248,8 @@ def test_unavailable_docker_withholds_only_execution_dependent_cells():
 
     assert rows["gsm8k"]["deltas"]["model"] == 10.0
     assert rows["gsm8k"]["delta_states"]["model"] == "comparable"
-    assert rows["scicode"]["deltas"]["model"] is None
-    assert rows["scicode"]["delta_states"]["model"] == "not_comparable"
+    assert rows["structured-output"]["deltas"]["model"] is None
+    assert rows["structured-output"]["delta_states"]["model"] == "not_comparable"
     assert "resolved_image_id" not in comparison["comparison_runtime"]["execution"]
 
 
@@ -501,7 +501,7 @@ def test_zero_is_a_measured_score_not_a_missing_value():
     assert "| GSM8K | 10.0 (n=10) | 0.0 (n=10) | +10.0 |" in markdown
 
 
-def test_one_is_a_valid_accuracy_boundary():
+def test_one_is_a_valid_score_boundary():
     baseline, candidate = _pair(_cell(0.9), _cell(1.0))
 
     comparison = build_run_comparison(baseline, candidate)
@@ -522,7 +522,7 @@ def test_one_is_a_valid_accuracy_boundary():
         pytest.param(1.01, id="above-one"),
     ],
 )
-def test_invalid_accuracy_scores_are_missing_and_never_get_a_delta(invalid_score):
+def test_invalid_scores_are_missing_and_never_get_a_delta(invalid_score):
     baseline, candidate = _pair(_cell(invalid_score), _cell(0.5))
 
     comparison = build_run_comparison(baseline, candidate)
@@ -624,9 +624,9 @@ def test_huge_integer_wilson_fields_are_not_labelled_or_rendered():
 def test_run_identity_and_structure_mismatches_fail_closed(mutation, message):
     baseline, candidate = _pair()
     if mutation == "suite":
-        candidate["suite"] = "accuracy"
-        candidate["scoreboard"]["suite"] = "accuracy"
-        candidate["run"]["config"]["suite"] = "accuracy"
+        candidate["suite"] = "quantization"
+        candidate["scoreboard"]["suite"] = "quantization"
+        candidate["run"]["config"]["suite"] = "quantization"
     elif mutation == "fingerprint":
         candidate["fingerprint"] = "e" * 64
         candidate["run"]["fingerprint"] = "e" * 64

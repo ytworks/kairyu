@@ -262,98 +262,6 @@ class BenchTarget(SamplingOptions):
         return self.name or self.model
 
 
-class JudgeEndpointConfig(SamplingOptions):
-    """One OpenAI-compatible endpoint participating in LLM grading."""
-
-    model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
-
-    base_url: str | None = None
-    model: str | None = None
-    api_key_env: str = "KAIRYU_JUDGE_API_KEY"
-    concurrency: int = Field(default=16, ge=1)
-    max_retries: int = Field(default=3, ge=0)
-
-    @field_validator("base_url")
-    @classmethod
-    def _normalize_optional_base_url(cls, value: str | None) -> str | None:
-        return normalize_base_url(value) if value is not None else None
-
-    @field_validator("model")
-    @classmethod
-    def _validate_optional_model(cls, value: str | None) -> str | None:
-        if value is not None and (not value.strip() or value != value.strip()):
-            raise ValueError("judge model must be non-empty and have no surrounding whitespace")
-        return value
-
-    @field_validator("api_key_env")
-    @classmethod
-    def _validate_api_key_env(cls, value: str) -> str:
-        validated = validate_api_key_env(value)
-        if validated is None:  # pragma: no cover - field type rejects None first
-            raise ValueError("api_key_env must be an environment-variable name")
-        return validated
-
-    @property
-    def enabled(self) -> bool:
-        return self.base_url is not None and self.model is not None
-
-    def resolved_identity(self) -> tuple[str, str] | None:
-        if self.base_url is None or self.model is None:
-            return None
-        return self.base_url, self.model
-
-
-class JudgeConfig(JudgeEndpointConfig):
-    """Primary judge plus optional independent grading-panel members.
-
-    The primary endpoint also serves as the τ-bench user simulator, which
-    remains a single-model role. ``additional_judges`` apply only to the
-    pointwise HLE/CharXiv grading path. With two total judges, strict majority
-    intentionally means unanimity; a disagreement is unjudged, never broken in
-    favour of the primary.
-    """
-
-    aggregation: Literal["strict-majority"] = "strict-majority"
-    additional_judges: tuple[JudgeEndpointConfig, ...] = ()
-
-    @model_validator(mode="after")
-    def _validate_panel(self) -> JudgeConfig:
-        if self.additional_judges and not self.enabled:
-            raise ValueError(
-                "judge.base_url and judge.model are required when additional_judges are configured"
-            )
-        identities: list[tuple[str, str]] = []
-        primary = self.resolved_identity()
-        if primary is not None:
-            identities.append(primary)
-        for member in self.additional_judges:
-            identity = member.resolved_identity()
-            if identity is None:
-                raise ValueError("each additional judge requires both base_url and model")
-            identities.append(identity)
-        if len(identities) != len(set(identities)):
-            raise ValueError(
-                "judge panel members must use distinct resolved endpoint/model identities"
-            )
-        return self
-
-    def grading_endpoints(self) -> tuple[JudgeEndpointConfig, ...]:
-        """Ordered primary-first endpoints used for pointwise grading."""
-        if not self.enabled:
-            return ()
-        primary = JudgeEndpointConfig(
-            base_url=self.base_url,
-            model=self.model,
-            api_key_env=self.api_key_env,
-            concurrency=self.concurrency,
-            max_retries=self.max_retries,
-            reasoning_effort=self.reasoning_effort,
-            top_p=self.top_p,
-            seed=self.seed,
-            extra_body_json=self.extra_body_json,
-        )
-        return (primary, *self.additional_judges)
-
 
 _IMMUTABLE_IMAGE_RE = re.compile(r"(?:sha256:[0-9a-f]{64}|[^\s@]+@sha256:[0-9a-f]{64})")
 
@@ -412,11 +320,8 @@ class ExecutionConfig(BaseModel):
 class BenchConfig(BaseModel):
     model_config = ConfigDict(frozen=True, hide_input_in_errors=True)
 
-    suite: Literal[
-        "accuracy", "core", "quantization", "structured", "long-context"
-    ] = "accuracy"
+    suite: Literal["core", "quantization", "structured", "long-context"]
     targets: tuple[BenchTarget, ...] = Field(min_length=1)
-    judge: JudgeConfig = JudgeConfig()
     execution: ExecutionConfig = ExecutionConfig()
     limit: int | None = Field(default=None, ge=1)  # None = full dataset
     smoke: bool = False  # preset: limit<=SMOKE_LIMIT
@@ -435,7 +340,7 @@ class BenchConfig(BaseModel):
     request_timeout_s: float = Field(default=600.0, gt=0)
     retries: int = Field(default=2, ge=0)
     cache_dir: str | None = None
-    results_dir: str = "bench/results/accuracy"
+    results_dir: str | None = None
     run_id: str | None = None  # reuse an id to resume
     rerun: bool = False  # ignore existing pair results
     download: bool = True  # auto-download missing datasets before running
@@ -456,10 +361,14 @@ class BenchConfig(BaseModel):
     @classmethod
     def _suite_results_dir_default(cls, value):
         """Keep explicit paths while defaulting new runs under their suite."""
-        if isinstance(value, dict) and value.get("results_dir") is None:
+        if (
+            isinstance(value, dict)
+            and value.get("results_dir") is None
+            and value.get("suite") is not None
+        ):
             value = {
                 **value,
-                "results_dir": f"bench/results/{value.get('suite', 'accuracy')}",
+                "results_dir": f"bench/results/{value['suite']}",
             }
         return value
 
@@ -925,11 +834,8 @@ class ItemResult(BaseModel):
     error: str | None = None
     # Deterministic scorer evidence (for example IFEval per-instruction booleans).
     details: dict | None = None
-    # Single: {model, correct, raw_excerpt}; panels add aggregation + ordered votes.
-    judge: dict | None = None
     latency_s: float | None = None
-    # Successful streamed target-call timing. Judge/user-simulator calls are not
-    # attached here, so the performance report cannot mix them with the target.
+    # Successful streamed target-call timing for the measured target.
     timing: GenerationTimingEvidence | None = None
     # Raw paired-arm evidence for the structured-output conformance adapter.
     structured_output: StructuredOutputEvidence | None = None
@@ -1122,7 +1028,7 @@ class PairResult(BaseModel):
     comparable: bool = True
     incomparable_reasons: tuple[str, ...] = ()
     # Separate from published-score comparability. An unresolved harness/data
-    # runtime may remain visible in a complete Accuracy scoreboard, but can never
+    # runtime may remain visible in a complete eval scoreboard, but can never
     # produce a cross-commit regression delta even when both runs share it.
     cross_run_policy: CrossRunPolicy = "allowed"
     cross_run_reason: str | None = None

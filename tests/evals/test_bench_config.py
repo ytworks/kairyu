@@ -6,14 +6,12 @@ from pathlib import Path
 import pytest
 
 from evals.cli import add_evals_parser
-from evals.config import build_config, build_judge_config, parse_target_flag
+from evals.config import build_config, parse_target_flag
 from evals.execution import build_execution_runner
 from evals.types import (
     BenchConfig,
     BenchTarget,
     ExecutionConfig,
-    JudgeConfig,
-    JudgeEndpointConfig,
     QuantizationProfile,
     ServedConfigIdentity,
 )
@@ -48,6 +46,7 @@ def test_target_sampling_identity_rejects_boolean_coercion(field, value, message
 def test_attempts_rejects_boolean_coercion():
     with pytest.raises(ValueError, match="attempts must be a positive JSON-safe integer"):
         BenchConfig(
+            suite="core",
             targets=(BenchTarget(base_url="http://gateway", model="m"),),
             attempts=True,
         )
@@ -61,6 +60,7 @@ def test_sampling_seed_must_be_json_safe_without_reinterpreting_agentic_attempts
     # unused by a teacher-forced-only selection; only chat execution expands a
     # target seed into a consecutive schedule.
     config = BenchConfig(
+        suite="core",
         targets=(BenchTarget(base_url="http://gateway", model="m", seed=maximum),),
         attempts=2,
     )
@@ -69,27 +69,33 @@ def test_sampling_seed_must_be_json_safe_without_reinterpreting_agentic_attempts
 
 def test_models_shorthand_builds_targets():
     args = _parse(
-        ["run", "--base-url", "http://gw:8000", "--model", "m", "--model", "kairyu-auto"]
+        [
+            "run",
+            "--suite",
+            "core",
+            "--base-url",
+            "http://gw:8000",
+            "--model",
+            "m",
+            "--model",
+            "kairyu-auto",
+        ]
     )
     config = build_config(args)
     assert [t.model for t in config.targets] == ["m", "kairyu-auto"]
     assert config.targets[0].label() == "m"
-    assert config.suite == "accuracy"
-    assert config.results_dir == "bench/results/accuracy"
+    assert config.suite == "core"
+    assert config.results_dir == "bench/results/core"
     assert config.limit is None  # full run is the default
     assert config.concurrency == 16
-    assert config.judge.concurrency == 16
 
 
-@pytest.mark.parametrize(
-    "name", ["accuracy", "core", "structured", "quantization"]
-)
+@pytest.mark.parametrize("name", ["core", "structured", "quantization"])
 def test_checked_in_configs_use_throughput_concurrency(name: str) -> None:
-    path = Path(__file__).parents[2] / "bench" / "configs" / f"{name}.yaml"
+    path = Path(__file__).parents[2] / "evals" / "configs" / f"{name}.yaml"
     config = build_config(_parse(["run", "--config", str(path)]))
 
     assert config.concurrency == 16
-    assert config.judge.concurrency == 16
 
 
 def test_long_context_cli_applies_declared_target_limit():
@@ -132,6 +138,8 @@ def test_max_output_tokens_cli_applies_target_generation_limit():
     args = _parse(
         [
             "run",
+            "--suite",
+            "core",
             "--base-url",
             "http://gw:8000",
             "--model",
@@ -164,6 +172,8 @@ def test_request_timeout_cli_applies_generation_read_timeout():
     args = _parse(
         [
             "run",
+            "--suite",
+            "core",
             "--base-url",
             "http://gw:8000",
             "--model",
@@ -213,6 +223,8 @@ def test_served_config_cli_flags_apply_to_every_cli_target():
     args = _parse(
         [
             "run",
+            "--suite",
+            "core",
             "--target",
             "first=http://first:8000/v1=first-model",
             "--base-url",
@@ -243,9 +255,7 @@ def test_served_config_cli_flags_apply_to_every_cli_target():
     ],
 )
 def test_served_config_cli_flags_must_be_provided_together(flag, value):
-    args = _parse(
-        ["run", "--base-url", "http://gw:8000", "--model", "m", flag, value]
-    )
+    args = _parse(["run", "--base-url", "http://gw:8000", "--model", "m", flag, value])
 
     with pytest.raises(ValueError, match="must be provided together"):
         build_config(args)
@@ -256,6 +266,7 @@ def test_yaml_targets_load_served_config_and_cli_flags_override_every_target(tmp
     cli_digest = "e" * 64
     path = tmp_path / "bench.yaml"
     path.write_text(
+        "suite: core\n"
         "targets:\n"
         "  - base_url: http://first:8000\n"
         "    model: first\n"
@@ -392,13 +403,7 @@ def test_recorded_non_quant_target_shape_remains_backward_compatible():
     # Pin the throughput defaults. The concurrency change must produce a
     # distinct identity instead of resuming an older mixed 8/4 run.
     assert _run_fingerprint(_run_identity(ordinary, [])) == (
-        "ee73ae00fd8d08e5af8b2042314b6f20d77e32bc3cf6ff83f8576966fff0a9dc"
-    )
-    legacy_parallel = ordinary.model_copy(
-        update={"judge": JudgeConfig(concurrency=4)}
-    )
-    assert _run_fingerprint(_run_identity(legacy_parallel, [])) == (
-        "6d19893955c3339d590fa6695e8fa0de09275e677e5174fead995c0b9c7baaaf"
+        "db994e150b073f618dbed8163c78849e5560c145fe721787cea50b86069cb41b"
     )
     assert _recordable_config(declared)["targets"][0]["quantization"] == {
         "weight_method": "none",
@@ -411,6 +416,8 @@ def test_cli_temperature_is_a_fingerprinted_target_override():
     args = _parse(
         [
             "run",
+            "--suite",
+            "core",
             "--base-url",
             "http://gw:8000",
             "--model",
@@ -432,6 +439,7 @@ def test_cli_temperature_is_a_fingerprinted_target_override():
 def test_recommended_sampling_omits_yaml_generation_overrides(tmp_path):
     path = tmp_path / "recommended.yaml"
     path.write_text(
+        "suite: core\n"
         "targets:\n"
         "  - base_url: http://gw:8000/v1\n"
         "    model: m\n"
@@ -460,7 +468,7 @@ def test_recommended_sampling_omits_yaml_generation_overrides(tmp_path):
 
 
 def test_recommended_sampling_conflicts_fail_before_a_run_is_built():
-    common = ["run", "--base-url", "http://gw:8000", "--model", "m"]
+    common = ["run", "--suite", "core", "--base-url", "http://gw:8000", "--model", "m"]
 
     with pytest.raises(SystemExit):
         _parse(
@@ -522,9 +530,7 @@ def test_suite_results_directory_preserves_an_explicit_path():
 def test_yaml_core_suite_defaults_to_its_own_results_directory(tmp_path):
     path = tmp_path / "bench.yaml"
     path.write_text(
-        "suite: core\n"
-        "targets:\n"
-        "  - {base_url: 'http://gw:8000', model: m}\n",
+        "suite: core\ntargets:\n  - {base_url: 'http://gw:8000', model: m}\n",
         encoding="utf-8",
     )
 
@@ -565,11 +571,11 @@ def test_model_without_base_url_rejected():
 def test_cli_overrides_yaml(tmp_path):
     (tmp_path / "bench.yaml").write_text(
         """
+suite: quantization
 targets:
   - { base_url: "http://yaml:8000", model: yaml-model }
 limit: 5
 seed: 7
-judge: { base_url: "http://judge:8000", model: judge-m }
 """,
         encoding="utf-8",
     )
@@ -582,7 +588,7 @@ judge: { base_url: "http://judge:8000", model: judge-m }
             "3",
             "--smoke",
             "--only",
-            "gpqa-diamond,mrcr-v2",
+            "gpqa-diamond",
         ]
     )
     config = build_config(args)
@@ -590,114 +596,13 @@ judge: { base_url: "http://judge:8000", model: judge-m }
     assert config.limit == 3  # CLI wins
     assert config.seed == 7  # YAML survives
     assert config.smoke is True
-    assert config.only == ("gpqa-diamond", "mrcr-v2")
-    assert config.judge.enabled
+    assert config.only == ("gpqa-diamond",)
 
 
 def test_no_targets_anywhere_rejected():
     args = _parse(["run"])
     with pytest.raises(ValueError):
         build_config(args)
-
-
-def test_judge_flags_enable_judge():
-    args = _parse(
-        [
-            "run",
-            "--base-url",
-            "http://gw:8000",
-            "--model",
-            "m",
-            "--judge-base-url",
-            "http://gw:8000",
-            "--judge-model",
-            "kairyu-auto",
-        ]
-    )
-    config = build_config(args)
-    assert config.judge.enabled
-    assert config.judge.model == "kairyu-auto"
-
-
-def test_repeated_secondary_judge_flags_build_an_ordered_panel():
-    args = _parse(
-        [
-            "run",
-            "--base-url",
-            "http://gw:8000",
-            "--model",
-            "m",
-            "--judge-base-url",
-            "http://judge:8000",
-            "--judge-model",
-            "primary",
-            "--judge-secondary",
-            "http://judge:8000=second=SECOND_KEY",
-            "--judge-secondary",
-            "http://other:9000/v1=third",
-        ]
-    )
-    config = build_config(args)
-    assert [member.model for member in config.judge.additional_judges] == [
-        "second",
-        "third",
-    ]
-    assert config.judge.additional_judges[0].api_key_env == "SECOND_KEY"
-    assert config.judge.additional_judges[1].base_url == "http://other:9000/v1"
-
-
-def test_judge_panel_rejects_missing_primary_partial_or_duplicate_members():
-    second = JudgeEndpointConfig(base_url="http://judge", model="second")
-    with pytest.raises(ValueError, match="required when additional"):
-        JudgeConfig(additional_judges=(second,))
-    with pytest.raises(ValueError, match="requires both"):
-        JudgeConfig(
-            base_url="http://judge",
-            model="primary",
-            additional_judges=(JudgeEndpointConfig(base_url="http://other"),),
-        )
-    with pytest.raises(ValueError, match="distinct"):
-        JudgeConfig(
-            base_url="http://judge/",
-            model="same",
-            additional_judges=(
-                JudgeEndpointConfig(base_url="http://judge/v1", model="same"),
-            ),
-        )
-    with pytest.raises(ValueError, match="model must be non-empty"):
-        JudgeConfig(base_url="http://judge", model=" ")
-
-
-def test_calibration_subcommand_loads_a_judge_block_without_targets(tmp_path):
-    path = tmp_path / "judge.yaml"
-    path.write_text(
-        "judge:\n"
-        "  base_url: http://primary\n"
-        "  model: primary\n"
-        "  additional_judges:\n"
-        "    - {base_url: http://secondary, model: secondary}\n",
-        encoding="utf-8",
-    )
-    args = _parse(["calibrate-judge", "--config", str(path)])
-    config = build_judge_config(args)
-    assert config.model == "primary"
-    assert config.additional_judges[0].model == "secondary"
-    assert args.min_agreement == 11 / 12
-    assert args.max_position_flip == 0.0
-
-
-def test_calibration_subcommand_accepts_a_bound_benchmark_run():
-    args = _parse(
-        [
-            "calibrate-judge",
-            "--run",
-            "headline-run",
-            "--results-dir",
-            "/results/accuracy",
-        ]
-    )
-    assert args.run == "headline-run"
-    assert args.results_dir == "/results/accuracy"
 
 
 def test_execution_config_requires_an_immutable_docker_image():
@@ -752,6 +657,7 @@ def test_execution_cli_is_explicit_and_overrides_yaml(tmp_path):
     config_path = tmp_path / "bench.yaml"
     config_path.write_text(
         f"""
+suite: core
 targets:
   - {{ base_url: "http://yaml:8000", model: yaml-model }}
 execution:
@@ -783,7 +689,5 @@ execution:
     assert config.execution.pids_limit == 48
     assert config.execution.disk_mb == 512
 
-    local = build_config(
-        _parse(["run", "--config", str(config_path), "--exec-runner", "local"])
-    )
+    local = build_config(_parse(["run", "--config", str(config_path), "--exec-runner", "local"]))
     assert local.execution == ExecutionConfig()

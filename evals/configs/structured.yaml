@@ -2,7 +2,7 @@
 # matched pair: the same prompt, sampling policy, and seed, with response_format
 # applied only to the constrained arm. Install the scorer dependency first:
 #
-#   uv sync --extra bench
+#   uv sync --extra evals
 #   kairyu bench run --config bench/configs/structured.yaml
 suite: structured
 

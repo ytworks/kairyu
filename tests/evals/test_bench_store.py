@@ -350,22 +350,16 @@ def test_no_tmp_files_left_behind(tmp_path):
     assert (store.run_dir / "scoreboard.md").read_text(encoding="utf-8") == "# table"
 
 
-def test_config_comparison_has_distinct_atomic_artifacts(tmp_path):
+def test_config_comparison_is_written_atomically(tmp_path):
     store = ResultStore(tmp_path, "candidate-run")
-    published = {"comparison_type": "published", "score": 0.5}
     config_ab = {"comparison_type": "config_ab", "overall_verdict": "pass"}
 
-    store.save_comparison(published, "# Published comparison")
-    published_json = (store.run_dir / "comparison.json").read_bytes()
-    published_markdown = (store.run_dir / "comparison.md").read_bytes()
 
     path = store.save_config_comparison(config_ab, "# Configuration A/B")
 
     assert path == store.run_dir / "config-comparison.md"
     assert json.loads((store.run_dir / "config-comparison.json").read_bytes()) == config_ab
     assert path.read_text(encoding="utf-8") == "# Configuration A/B"
-    assert (store.run_dir / "comparison.json").read_bytes() == published_json
-    assert (store.run_dir / "comparison.md").read_bytes() == published_markdown
 
     config_json = (store.run_dir / "config-comparison.json").read_bytes()
     config_markdown = path.read_bytes()
@@ -378,10 +372,8 @@ def test_config_comparison_has_distinct_atomic_artifacts(tmp_path):
 
 def test_quantization_sweep_has_distinct_atomic_artifacts(tmp_path):
     store = ResultStore(tmp_path, "quant-run")
-    published = {"comparison_type": "published", "score": 0.5}
     config_ab = {"comparison_type": "config_ab", "overall_verdict": "pass"}
     sweep = {"sweep_type": "quantization_task_accuracy", "overall_verdict": "pass"}
-    store.save_comparison(published, "# Published")
     store.save_config_comparison(config_ab, "# Config A/B")
     existing = {
         path.name: path.read_bytes()

@@ -36,7 +36,6 @@ from evals.types import (
     BenchTarget,
     GenerationTimingEvidence,
     ItemResult,
-    JudgeConfig,
     PairResult,
     pair_result_evidence_error,
 )
@@ -283,11 +282,7 @@ def _performance_summary(pair: PairResult, adapter: object | None) -> dict:
         errors += item_errors
         unmeasured += item_unmeasured
     if not timings:
-        reason = (
-            "external harness did not return target-request timing evidence"
-            if getattr(getattr(adapter, "info", None), "agentic", False)
-            else "endpoint returned no measurable streamed target completion"
-        )
+        reason = "endpoint returned no measurable streamed target completion"
         return {
             "status": "unavailable",
             "reason": reason,
@@ -325,8 +320,6 @@ def build_scoreboard(
     pairs: list[PairResult],
     targets: list[str],
     target_configs: Sequence[BenchTarget] | None = None,
-    judge: JudgeConfig | None = None,
-    judge_identity_incomplete: bool = False,
 ) -> dict:
     definition = suite_info(suite)
     adapters = all_adapters()
@@ -405,38 +398,9 @@ def build_scoreboard(
             footnotes.append(text)
         return footnotes.index(text) + 1
 
-    # Self-judging is an endpoint/model identity question, never a display-label
-    # comparison. Legacy artifacts without enough identity data fail closed as
-    # "independence unknown" instead of being declared independent.
-    judge_requested = judge_identity_incomplete or (
-        judge is not None and (judge.base_url is not None or judge.model is not None)
-    )
-    judge_identities = (
-        [
-            _resolved_identity(endpoint.base_url, endpoint.model)
-            for endpoint in judge.grading_endpoints()
-            if endpoint.base_url is not None and endpoint.model is not None
-        ]
-        if judge is not None and judge.enabled
-        else []
-    )
-    self_judged: list[str] = []
-    identity_unknown: list[str] = []
-    if judge_requested:
-        for label in targets:
-            target = configured_by_label.get(label)
-            if target is not None and (
-                _resolved_identity(target.base_url, target.model) in judge_identities
-            ):
-                self_judged.append(label)
-            if judge_identity_incomplete or not judge_identities or target is None:
-                identity_unknown.append(label)
 
     cells: dict[str, dict[str, dict]] = {}
     for benchmark in benchmarks:
-        uses_judge_template = (
-            benchmark in adapters and adapters[benchmark].info.judge_template_name is not None
-        )
         cells[benchmark] = {}
         for target in targets:
             pair = by_key.get((benchmark, target))
@@ -459,21 +423,7 @@ def build_scoreboard(
                 notes.append(footnote(f"{benchmark}/{target}: {pair.status} — {pair.reason}"))
             for reason in pair.incomparable_reasons:
                 notes.append(footnote(f"{benchmark}/{target}: NOT COMPARABLE — {reason}"))
-            if uses_judge_template and target in self_judged:
-                notes.append(
-                    footnote(
-                        f"{target}: self-judged "
-                        "(one or more resolved judge endpoint/model identities "
-                        "== target)"
-                    )
-                )
-            if uses_judge_template and target in identity_unknown:
-                notes.append(
-                    footnote(
-                        f"{target}: judge independence unknown "
-                        "(resolved target or judge identity unavailable)"
-                    )
-                )
+
             declared_binary = (
                 benchmark in adapters and adapters[benchmark].info.binary_outcomes
             )
@@ -550,8 +500,6 @@ def build_scoreboard(
         "benchmarks": benchmarks,
         "display_names": {name: display_names.get(name, name) for name in benchmarks},
         "targets": targets,
-        "self_judged_targets": self_judged,
-        "judge_independence_unknown_targets": identity_unknown,
         "cells": cells,
         "footnotes": footnotes,
     }
@@ -1013,7 +961,7 @@ def run_banner(scoreboard: dict) -> list[str]:
 
 def render_markdown(scoreboard: dict) -> str:
     targets = scoreboard["targets"]
-    definition = suite_info(scoreboard.get("suite", "accuracy"))
+    definition = suite_info(scoreboard["suite"])
     adapters = all_adapters()
     has_sampling = any(
         _stored_sampling_sensitivity(

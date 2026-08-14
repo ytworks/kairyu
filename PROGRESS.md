@@ -76,7 +76,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
-- Benchmark/eval tooling: 12-slot Accuracy plus Core/Quantization/Structured/Long Context suites, eight-model sourced Accuracy comparison with cell-level provenance, target-only streamed TTFT/TPS including exact public-vs-internal orchestration token rates, hash-chained quality history, config A/B and quant sweeps; SWE-bench Verified uses mini-SWE-agent's official 250-step `verified` flow plus the official harness with fail-closed denominators; Terminal-Bench keeps resumable raw Harbor jobs and bounds every agent phase to two effective hours
+- Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
 - The tiered RTX PRO example has one public chat model, one public pinned offline embedding model, and one orchestration YAML: Open WebUI lists only the chat model, L2 borrows the Qwen/DeepSeek L1 pools directly, and launcher readiness proves a two-input 384-dimensional embedding response. Both this path and the single-Qwen example accept image chat and complete the fail-closed 10-item CharXiv smoke; its composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
@@ -86,7 +86,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - The checkout-only verification split is implemented: 68 Kairyu correctness,
   performance, resilience, and diagnostic gates live under `verification/` with
   a strict registry and neutral `evidence/` contracts. The named Accuracy suite
-  still remains under `evals/` and is the only pending deletion in PR #486.
+  implementation and dependencies are removed; active docs/examples cleanup remains in PR #486.
 - G2 A6 performance gap vs vLLM is the open hard gate; full TP4/8 HTTP matrix deferred until closed
 - Issue #333 verdict: process-split is not the A6 cause (`no_material_reduction`, ratio 0.92 vs ≤0.90 line)
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
@@ -101,6 +101,12 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-14 — [progress] Accuracy implementation removed
+- What: removed the externally migrated Accuracy adapters, judge and published
+  comparison paths, fixtures, dependencies, and tests; retained eval tests now
+  live under `tests/evals/` and require an explicit retained suite.
+- Refs: PR #486; `evals/`; `tests/evals/`; `pyproject.toml`
 
 ### 2026-08-14 — [progress] Verification framework split implemented
 - What: moved 68 Kairyu gates into checkout-only `verification/` by scope and

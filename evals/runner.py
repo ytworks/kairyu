@@ -28,7 +28,7 @@ from pathlib import Path
 import httpx
 from pydantic import ValidationError
 
-from evals.adapters import suite_adapters, suite_info
+from evals.adapters import suite_adapters
 from evals.adapters.base import (
     DownloadContext,
     GenerativeAdapter,
@@ -40,7 +40,6 @@ from evals.adapters.base import (
 )
 from evals.aggregate import build_scoreboard, render_markdown
 from evals.cache import BenchCache, resolve_cache_root
-from evals.compare import build_comparison, render_comparison_markdown
 from evals.history import cross_run_policies
 from evals.sampling import PROTOCOL_ID as SAMPLING_PROTOCOL_ID
 from evals.store import ResultStore
@@ -281,19 +280,12 @@ def _adapter_identity(adapter, cache: BenchCache, *, offline_fixtures: bool) -> 
         "revision": info.hf_revision,
         "binary_outcomes": info.binary_outcomes,
         "paired_cluster_key": info.paired_cluster_key,
-        "uses_judge_template": info.judge_template_name is not None,
         "history_provenance": {
             "complete": info.history_provenance_complete,
             "reason": info.history_provenance_reason or None,
             "requires_content_addressed_execution": info.needs_execution,
         },
     }
-    if info.judge_template_name is not None:
-        from evals.judge import judge_protocol_identity
-        from evals.judge_prompts import judge_template_identity
-
-        identity["judge_template"] = judge_template_identity(info.judge_template_name)
-        identity["judge_protocol"] = judge_protocol_identity()
     identity["evaluation_protocol"] = evaluation_protocol_identity(adapter)
     pins = cache_pins(info)
     identity = {**identity, "sources": pins["sources"]}
@@ -350,10 +342,7 @@ def _recordable_config(config: BenchConfig) -> dict:
     recorded = sanitize(config.model_dump(mode="json"))
     assert isinstance(recorded, dict)
     if config.attempts > 1:
-        # ``attempts`` predates grouped chat sweeps and was already used by
-        # external agentic harnesses.  This durable marker lets history accept
-        # those legacy multi-trial records while still recognizing every new
-        # run whose evaluator surface includes the #371 protocol.
+        # Bind grouped chat seed sweeps to their evaluator protocol.
         recorded["sampling_protocol"] = SAMPLING_PROTOCOL_ID
     return recorded
 
@@ -510,15 +499,9 @@ class SuiteRunner:
             from evals.docker_probe import docker_available
 
             docker = docker_available()
-        judge = None
-        if config.judge.enabled:
-            from evals.judge import build_judge_client
-
-            judge = build_judge_client(config.judge, http_factory=self._http_factory)
         return RunContext(
             cache=cache,
             http_factory=self._http_factory,
-            judge=judge,
             limit=limit,
             seed=config.seed,
             attempts=config.attempts,
@@ -806,11 +789,7 @@ class SuiteRunner:
                             store.save_pair(stamped)
                         pairs.append(stamped)
                         continue
-                self._progress.pair_start(
-                    adapter.info.name,
-                    label,
-                    note="agentic harness" if adapter.info.agentic else "",
-                )
+                self._progress.pair_start(adapter.info.name, label)
                 if source_tainted:
                     result = PairResult(
                         benchmark=adapter.info.name,
@@ -925,9 +904,7 @@ class SuiteRunner:
                 store.save_pair(failed_pair)
                 pairs[index] = failed_pair
 
-        published_comparison = suite_info(config.suite).published_comparison
-
-        def render_reports() -> tuple[dict, str, dict | None, str | None]:
+        def render_reports() -> tuple[dict, str]:
             board = build_scoreboard(
                 run_id=run_id,
                 suite=config.suite,
@@ -937,26 +914,17 @@ class SuiteRunner:
                 pairs=pairs,
                 targets=targets,
                 target_configs=config.targets,
-                judge=config.judge,
             )
             board_markdown = render_markdown(board)
-            if not published_comparison:
-                return board, board_markdown, None, None
-            published = build_comparison(board)
-            return (
-                board,
-                board_markdown,
-                published,
-                render_comparison_markdown(published),
-            )
+            return board, board_markdown
 
-        scoreboard, markdown, comparison, comparison_markdown = render_reports()
+        scoreboard, markdown = render_reports()
 
         observe_source()
         if source_tainted and quarantine_source_pairs(
             "local benchmark source identity changed after scoreboard rendering"
         ):
-            scoreboard, markdown, comparison, comparison_markdown = render_reports()
+            scoreboard, markdown = render_reports()
         late_changed_adapters = {
             adapter.info.name
             for adapter in adapters
@@ -990,14 +958,11 @@ class SuiteRunner:
                 )
                 store.save_pair(failed_pair)
                 pairs[index] = failed_pair
-            scoreboard, markdown, comparison, comparison_markdown = render_reports()
+            scoreboard, markdown = render_reports()
 
         path = store.save_scoreboard(scoreboard, markdown)
         print()
         print(markdown)
-        if comparison is not None and comparison_markdown is not None:
-            store.save_comparison(comparison, comparison_markdown)
-            print(comparison_markdown)
 
         observe_source()
         source_pairs_quarantined = source_tainted and quarantine_source_pairs(
@@ -1046,13 +1011,10 @@ class SuiteRunner:
                 store.save_pair(failed_pair)
                 pairs[index] = failed_pair
         if source_pairs_quarantined or pre_append_changed_adapters:
-            scoreboard, markdown, comparison, comparison_markdown = render_reports()
+            scoreboard, markdown = render_reports()
             path = store.save_scoreboard(scoreboard, markdown)
             print()
             print(markdown)
-            if comparison is not None and comparison_markdown is not None:
-                store.save_comparison(comparison, comparison_markdown)
-                print(comparison_markdown)
 
         failed = (
             source_tainted or evaluator_tainted or any(pair.status == "failed" for pair in pairs)

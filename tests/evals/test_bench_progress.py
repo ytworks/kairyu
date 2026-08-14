@@ -120,7 +120,7 @@ def test_line_reporter_throttles_but_always_emits_the_last_item():
     stream = io.StringIO()
     reporter = LineProgress(stream, interval_s=3600.0)
     reporter.suite_start(1)
-    reporter.pair_start("hle", "m")
+    reporter.pair_start("mmlu", "m")
     reporter.items_total(50)
     for _ in range(50):
         reporter.item_done()
@@ -134,9 +134,9 @@ def test_line_reporter_handles_unknown_totals():
     stream = io.StringIO()
     reporter = LineProgress(stream, interval_s=0.0)
     reporter.suite_start(1)
-    reporter.pair_start("terminal-bench", "m", note="agentic harness")
+    reporter.pair_start("mmlu", "m", note="slow pair")
     reporter.item_done()
-    assert "agentic harness" in stream.getvalue()
+    assert "slow pair" in stream.getvalue()
     assert "1/? items" in stream.getvalue()
 
 
@@ -158,7 +158,7 @@ def test_tqdm_reporter_drives_suite_and_pair_bars():
     stream = io.StringIO()
     reporter = TqdmProgress(_FakeBar, stream)
     reporter.suite_start(2)
-    reporter.pair_start("scicode", "m")
+    reporter.pair_start("ifeval", "m")
     reporter.items_total(4)
     reporter.item_done()
     reporter.item_done()
@@ -168,7 +168,7 @@ def test_tqdm_reporter_drives_suite_and_pair_bars():
     suite, pair = _FakeBar.instances[0], _FakeBar.instances[1]
     assert suite.total == 2 and suite.updates == 1 and suite.closed
     assert suite.desc == "benchmark suite"
-    assert pair.desc == "scicode × m"
+    assert pair.desc == "ifeval × m"
     assert pair.total == 4 and pair.updates == 2 and pair.closed
     assert any("partial" in text for text, _ in _FakeBar.written)
 
@@ -193,7 +193,7 @@ def test_tqdm_heartbeat_refreshes_the_pair_bar():
     _FakeBar.instances.clear()
     reporter = TqdmProgress(_FakeBar, io.StringIO())
     reporter.suite_start(1)
-    reporter.pair_start("terminal-bench", "m", note="agentic harness")
+    reporter.pair_start("mmlu", "m", note="slow pair")
     reporter.pair_heartbeat()
     assert _FakeBar.instances[1].refreshed >= 1
     reporter.close()
@@ -214,7 +214,7 @@ def test_tqdm_reporter_closes_the_previous_pair_bar():
 
 async def test_runner_reports_every_slot_and_item(tmp_path, http_factory):
     stream = io.StringIO()
-    config = make_config(tmp_path, models=("m",), only=("gpqa-diamond", "mrcr-v2"))
+    config = make_config(tmp_path, models=("m",), only=("gpqa-diamond", "mmlu"))
     runner = SuiteRunner(
         config,
         http_factory=http_factory,
@@ -225,8 +225,8 @@ async def test_runner_reports_every_slot_and_item(tmp_path, http_factory):
     output = stream.getvalue()
 
     assert "2 benchmark×target pairs" in output
-    assert "[bench 1/2] gpqa-diamond × m" in output
-    assert "[bench 2/2] mrcr-v2 × m" in output
+    assert "[bench 1/2] mmlu × m" in output
+    assert "[bench 2/2] gpqa-diamond × m" in output
     # fixture sizes reported, and each item advanced the counter
     assert "gpqa-diamond × m: 3 items" in output
     assert "3/3 items" in output
@@ -270,7 +270,7 @@ async def test_pair_play_by_play_is_not_duplicated_on_stdout(tmp_path, http_fact
     await runner.run()
     out = capsys.readouterr().out
     assert "[run] gpqa-diamond" not in out
-    assert "# Accuracy benchmark scoreboard" in out  # the artifact still prints
+    assert "# Quantization benchmark scoreboard" in out  # the artifact still prints
 
 
 async def test_cached_pairs_are_reported_as_cached(tmp_path, http_factory):
@@ -379,56 +379,3 @@ async def test_reporter_is_closed_even_when_the_run_raises(tmp_path, http_factor
     with _pytest.raises(RuntimeError, match="probe failed"):
         await runner.run()
     assert closed == ["closed"]
-
-
-async def test_agentic_pairs_emit_a_heartbeat_while_they_run(tmp_path, monkeypatch):
-    """An 8-hour harness must not look identical to a hang in a log."""
-    import asyncio
-
-    import httpx
-
-    import evals.runner as runner_mod
-    from evals.adapters.base import AdapterInfo, DownloadContext
-    from evals.types import DownloadReport, PairResult
-
-    monkeypatch.setattr(runner_mod, "_HEARTBEAT_INTERVAL_S", 0.01)
-
-    class SlowHarness:
-        info = AdapterInfo(
-            name="terminal-bench",
-            display_name="Terminal-Bench 2.1",
-            metric="accuracy",
-            agentic=True,
-        )
-
-        def download(self, ctx: DownloadContext) -> DownloadReport:
-            return DownloadReport(adapter=self.info.name, status="ok")
-
-        async def run(self, target, ctx) -> PairResult:
-            await asyncio.sleep(0.1)  # stands in for the subprocess
-            now = "2026-07-25T00:00:00+00:00"
-            return PairResult(
-                benchmark=self.info.name,
-                target=target.label(),
-                status="completed",
-                metrics={"score": 1.0, "n_total": 1},
-                started_at=now,
-                finished_at=now,
-            )
-
-    monkeypatch.setattr(
-        runner_mod, "suite_adapters", lambda *a, **k: [SlowHarness()]
-    )
-    stream = io.StringIO()
-    config = make_config(tmp_path, models=("m",))
-    runner = SuiteRunner(
-        config,
-        http_factory=lambda: httpx.AsyncClient(),
-        probe_docker=lambda: (True, "docker available"),
-        progress=LineProgress(stream, interval_s=0.0),
-    )
-    assert await runner.run() == 0
-
-    heartbeats = [line for line in stream.getvalue().splitlines() if "items (" in line]
-    assert heartbeats, stream.getvalue()
-    assert "terminal-bench × m" in heartbeats[0]

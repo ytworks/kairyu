@@ -50,7 +50,6 @@ def _adapter_identity(name: str) -> dict:
         "name": name,
         "binary_outcomes": True,
         "paired_cluster_key": None,
-        "uses_judge_template": False,
         "dataset": f"fixture/{name}",
         "revision": "1" * 40,
         "sha256": _digest(f"dataset:{name}"),
@@ -198,7 +197,6 @@ def _make_sweep_evidence(
         pairs=pairs,
         targets=[target.label() for target in targets],
         target_configs=targets,
-        judge=config.judge,
     )
     entry = build_entry(
         board,

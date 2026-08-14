@@ -14,7 +14,6 @@ from uuid import uuid4
 
 import pytest
 
-from evals.adapters.livecodebench import grade_code
 from evals.execution import build_execution_runner
 from evals.types import ExecutionConfig
 
@@ -121,26 +120,6 @@ def test_local_and_container_have_identical_scoring_semantics(runners):
         assert _semantic(timed_out) == (False, True)
     for name in runners.container_names:
         assert _bench_containers(name) == set()
-
-
-def test_livecodebench_pass_and_wrong_answer_match_across_runners(runners):
-    tests = [{"input": "7\n", "output": "14\n"}]
-    verdicts = []
-    for runner in runners:
-        passing = grade_code(
-            "value = int(input()); print(value * 2)",
-            tests,
-            fn_name=None,
-            runner=runner,
-        )
-        wrong = grade_code(
-            "value = int(input()); print(value * 3)",
-            tests,
-            fn_name=None,
-            runner=runner,
-        )
-        verdicts.append((passing[0], wrong[0]))
-    assert verdicts == [(True, False), (True, False)]
 
 
 def test_container_enforces_network_rootfs_and_environment_boundaries(
@@ -319,11 +298,3 @@ print(len(children))
     )
     assert output.ok, output.stderr
     assert len(output.stdout.encode()) <= 64_000
-
-
-def test_supplied_image_has_scicode_runtime(runners):
-    _local, container = runners
-    assert container.has_module("json")
-    assert container.has_module("numpy")
-    assert container.has_module("h5py")
-    assert not container.has_module("definitely_not_a_module_xyz")

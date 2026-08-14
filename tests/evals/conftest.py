@@ -42,6 +42,7 @@ def make_target(model: str = "m", **kwargs) -> BenchTarget:
 
 def make_config(tmp_path, models=("m", "kairyu-auto"), **overrides) -> BenchConfig:
     defaults = dict(
+        suite="quantization",
         targets=tuple(make_target(model) for model in models),
         offline_fixtures=True,
         download=False,

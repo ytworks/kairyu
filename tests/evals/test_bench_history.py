@@ -155,8 +155,6 @@ def _scoreboard(
         "benchmarks": ["gsm8k"],
         "display_names": {"gsm8k": "GSM8K"},
         "targets": ["target-a"],
-        "self_judged_targets": [],
-        "judge_independence_unknown_targets": [],
         "cells": {
             "gsm8k": {
                 "target-a": {
@@ -422,29 +420,6 @@ def test_fresh_sampling_protocol_requires_sampling_evaluator_identity(tmp_path, 
     with pytest.raises(ValueError, match="sampling evaluator resource.*sampling.py"):
         ResultStore(tmp_path, "run-1").append_scoreboard_index(board, metadata, (pair,))
 
-
-def test_legacy_agentic_multi_trial_history_does_not_require_sampling_evaluator(tmp_path):
-    metadata = _metadata()
-    metadata["config"]["attempts"] = 4
-    metadata["config"]["only"] = ["mmlu"]
-    metadata["identity"]["adapters"][0]["name"] = "mmlu"
-    metadata["identity"]["adapters"][0]["dataset"] = "fixture/mmlu"
-    _refresh_metadata_identity(metadata)
-    pair = _pair(metadata).model_copy(update={"benchmark": "mmlu"})
-    board = _scoreboard(metadata)
-    board["benchmarks"] = ["mmlu"]
-    board["display_names"] = {"mmlu": "MMLU"}
-    board["cells"] = {"mmlu": board["cells"].pop("gsm8k")}
-
-    entry = history.build_entry(
-        board,
-        metadata,
-        pairs=(pair,),
-        previous_record_sha256=None,
-    )
-    _rewrite_entries(tmp_path / history.INDEX_NAME, [entry])
-
-    assert ResultStore(tmp_path, "reader").load_scoreboard_index() == (entry,)
 
 
 def test_legacy_unmarked_multi_trial_history_keeps_ordinary_generative_pairs(tmp_path):
@@ -1080,9 +1055,6 @@ def test_append_revalidates_model_copy_and_nested_item_schema(tmp_path):
         "item-details": base.model_copy(
             update={"items": (item.model_copy(update={"details": []}),)}
         ),
-        "item-judge": base.model_copy(
-            update={"items": (item.model_copy(update={"judge": []}),)}
-        ),
         "methodology": base.model_copy(update={"methodology": []}),
         "annotations": base.model_copy(update={"annotations": "not-a-list"}),
         "started-at": base.model_copy(update={"started_at": 1}),
@@ -1210,8 +1182,8 @@ def test_history_revalidates_complete_evaluator_methodology(tmp_path, mutation, 
 @pytest.mark.parametrize("status", ["completed", "partial"])
 @pytest.mark.parametrize(
     ("name", "complete"),
-    [("gsm8k", True), ("swe-bench-pro", False), ("swe-bench-verified", False)],
-    ids=["source-complete", "unresolved-pro-harness", "unresolved-verified-harness"],
+    [("gsm8k", True)],
+    ids=["source-complete"],
 )
 def test_scored_dataset_rows_require_content_bound_cache_identity(
     tmp_path, status, name, complete
@@ -1304,50 +1276,6 @@ def test_history_rejects_inconsistent_dataset_availability_identity(
         )
 
 
-@pytest.mark.parametrize("name", ["tau-bench-banking", "terminal-bench"])
-def test_completed_non_dataset_agentic_row_remains_structurally_withheld(tmp_path, name):
-    metadata = _metadata()
-    identity = metadata["identity"]["adapters"][0]
-    identity.update(
-        {
-            "name": name,
-            "dataset": None,
-            "revision": None,
-            "unavailable": True,
-        }
-    )
-    identity.pop("sha256")
-    identity.pop("assets")
-    identity["history_provenance"].update(
-        {
-            "complete": False,
-            "reason": "external runtime remains unresolved",
-        }
-    )
-    metadata["config"]["only"] = [name]
-    _refresh_metadata_identity(metadata)
-    board = _scoreboard(metadata)
-    board["benchmarks"] = [name]
-    board["display_names"] = {name: name}
-    board["cells"] = {name: board["cells"].pop("gsm8k")}
-    cell = board["cells"][name]["target-a"]
-    cell["cross_run_policy"] = "withheld_unresolved_runtime"
-    cell["cross_run_reason"] = "runtime dataset, image, or executable content is unresolved"
-    pair = _pair(metadata).model_copy(
-        update={
-            "benchmark": name,
-            "cross_run_policy": "withheld_unresolved_runtime",
-            "cross_run_reason": (
-                "runtime dataset, image, or executable content is unresolved"
-            ),
-        }
-    )
-
-    assert ResultStore(tmp_path, "run-1").append_scoreboard_index(
-        board, metadata, (pair,)
-    ).is_file()
-
-
 def test_history_rejects_path_shadowed_evaluator_executable(tmp_path):
     metadata = _metadata()
     protocol = metadata["identity"]["adapters"][0]["evaluation_protocol"]
@@ -1408,25 +1336,18 @@ def test_history_rejects_failed_run_evidence(tmp_path):
     ("name", "requires_execution", "policy", "reason"),
     [
         pytest.param(
-            "swe-bench-pro",
+            "custom-remote-eval",
             False,
             "withheld_unresolved_runtime",
             "runtime dataset, image, or executable content is unresolved",
-            id="mutable-agentic-data",
+            id="unresolved-runtime",
         ),
         pytest.param(
-            "swe-bench-verified",
-            False,
-            "withheld_unresolved_runtime",
-            "runtime dataset, image, or executable content is unresolved",
-            id="mutable-verified-agentic-data",
-        ),
-        pytest.param(
-            "scicode",
+            "custom-code-eval",
             True,
             "withheld_unpinned_execution",
             "code execution lacks a resolved immutable image and platform identity",
-            id="local-code-execution",
+            id="unbound-code-execution",
         ),
     ],
 )
@@ -1436,16 +1357,11 @@ def test_history_withholds_only_unresolved_runtime_cells(
     metadata = _metadata()
     identity = metadata["identity"]["adapters"][0]
     identity["name"] = name
-    if name in {"swe-bench-pro", "swe-bench-verified"}:
-        identity["dataset"] = {
-            "swe-bench-pro": "ScaleAI/SWE-bench_Pro",
-            "swe-bench-verified": "princeton-nlp/SWE-bench_Verified",
-        }[name]
-        identity["revision"] = None
+    if name == "custom-remote-eval":
         identity["history_provenance"].update(
             {
                 "complete": False,
-                "reason": "external harness runtime remains unresolved",
+                "reason": "runtime remains unresolved",
             }
         )
     identity["history_provenance"]["requires_content_addressed_execution"] = (
@@ -1480,9 +1396,9 @@ def test_history_withholds_only_unresolved_runtime_cells(
 def test_content_addressed_execution_policy_requires_config_environment_binding(tmp_path):
     metadata = _metadata()
     identity = metadata["identity"]["adapters"][0]
-    identity["name"] = "scicode"
+    identity["name"] = "custom-code-eval"
     identity["history_provenance"]["requires_content_addressed_execution"] = True
-    metadata["config"]["only"] = ["scicode"]
+    metadata["config"]["only"] = ["custom-code-eval"]
     metadata["environment"]["execution"] = {
         "runner": "docker",
         "image": "registry.example/bench@sha256:" + "1" * 64,
@@ -1499,10 +1415,10 @@ def test_content_addressed_execution_policy_requires_config_environment_binding(
     }
     _refresh_metadata_identity(metadata)
     board = _scoreboard(metadata)
-    board["benchmarks"] = ["scicode"]
-    board["display_names"] = {"scicode": "SciCode"}
-    board["cells"] = {"scicode": board["cells"].pop("gsm8k")}
-    pair = _pair(metadata).model_copy(update={"benchmark": "scicode"})
+    board["benchmarks"] = ["custom-code-eval"]
+    board["display_names"] = {"custom-code-eval": "Custom Code Eval"}
+    board["cells"] = {"custom-code-eval": board["cells"].pop("gsm8k")}
+    pair = _pair(metadata).model_copy(update={"benchmark": "custom-code-eval"})
 
     with pytest.raises(ValueError, match="runner disagrees"):
         ResultStore(tmp_path, "run-1").append_scoreboard_index(board, metadata, (pair,))
@@ -1517,10 +1433,10 @@ def test_content_addressed_execution_policy_requires_config_environment_binding(
     }
     _refresh_metadata_identity(metadata)
     board = _scoreboard(metadata)
-    board["benchmarks"] = ["scicode"]
-    board["display_names"] = {"scicode": "SciCode"}
-    board["cells"] = {"scicode": board["cells"].pop("gsm8k")}
-    pair = _pair(metadata).model_copy(update={"benchmark": "scicode"})
+    board["benchmarks"] = ["custom-code-eval"]
+    board["display_names"] = {"custom-code-eval": "Custom Code Eval"}
+    board["cells"] = {"custom-code-eval": board["cells"].pop("gsm8k")}
+    pair = _pair(metadata).model_copy(update={"benchmark": "custom-code-eval"})
 
     assert ResultStore(tmp_path, "run-1").append_scoreboard_index(
         board, metadata, (pair,)

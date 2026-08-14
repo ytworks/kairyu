@@ -18,7 +18,6 @@ from evals.cache import BenchCache
 from evals.runner import (
     SuiteRunner,
     _adapter_identity,
-    _methodology_history_ineligibility,
     _recordable_config,
     _run_fingerprint,
     _run_identity,
@@ -197,89 +196,6 @@ def test_served_config_identity_is_recorded_and_changes_fingerprint_without_secr
     ) == 3
 
 
-def test_selected_judge_templates_are_content_bound_to_adapter_identity(tmp_path, monkeypatch):
-    from evals import judge_prompts
-    from evals.adapters import all_adapters
-
-    cache = BenchCache(tmp_path / "cache")
-    adapters = all_adapters()
-    hle_identity = _adapter_identity(adapters["hle"], cache, offline_fixtures=True)
-    charxiv_identity = _adapter_identity(
-        adapters["charxiv-reasoning"], cache, offline_fixtures=True
-    )
-    assert hle_identity["judge_template"] == {
-        "name": "hle",
-        "variant": "production",
-        "sha256": "0befab1400eba0c4d4d4e16cc018b4d988d775bbf4ad554fed5fe5f76fede74d",
-    }
-    assert charxiv_identity["judge_template"] == {
-        "name": "charxiv-reasoning",
-        "variant": "production",
-        "sha256": "e8bf1acd527e025da041a43acd729924abc44610194cbf696f8e228c50b2319d",
-    }
-    assert "judge_template" not in _adapter_identity(
-        adapters["gpqa-diamond"], cache, offline_fixtures=True
-    )
-
-    config = make_config(tmp_path, models=("m",), only=("hle",))
-    before = _run_fingerprint(_run_identity(config, [hle_identity]))
-    monkeypatch.setattr(
-        judge_prompts,
-        "HLE_JUDGE_TEMPLATE",
-        judge_prompts.HLE_JUDGE_TEMPLATE + "\n",
-    )
-    changed_identity = _adapter_identity(adapters["hle"], cache, offline_fixtures=True)
-    assert changed_identity["judge_template"] != hle_identity["judge_template"]
-    assert _run_fingerprint(_run_identity(config, [changed_identity])) != before
-
-
-def test_config_ab_statistical_routing_is_recorded_in_adapter_identity(tmp_path):
-    from evals.adapters import all_adapters
-
-    adapters = all_adapters()
-    cache = BenchCache(tmp_path / "cache")
-    scicode = _adapter_identity(adapters["scicode"], cache, offline_fixtures=True)
-    gsm8k = _adapter_identity(adapters["gsm8k"], cache, offline_fixtures=True)
-    mrcr = _adapter_identity(adapters["mrcr-v2"], cache, offline_fixtures=True)
-    hle = _adapter_identity(adapters["hle"], cache, offline_fixtures=True)
-
-    assert (scicode["binary_outcomes"], scicode["paired_cluster_key"]) == (
-        True,
-        "item_id_before_final_dot_v1",
-    )
-    assert (gsm8k["binary_outcomes"], gsm8k["paired_cluster_key"]) == (True, None)
-    assert (mrcr["binary_outcomes"], mrcr["paired_cluster_key"]) == (False, None)
-    assert scicode["uses_judge_template"] is False
-    assert hle["uses_judge_template"] is True
-    assert isinstance(hle["judge_template"], dict)
-
-
-def test_referenced_cache_assets_are_content_bound_and_revalidated(tmp_path):
-    from evals.adapters import all_adapters
-
-    adapter = all_adapters()["charxiv-reasoning"]
-    cache = BenchCache(tmp_path / "cache")
-    assets = cache.assets_dir(adapter.info.name)
-    assets.mkdir(parents=True)
-    image = assets / "chart.png"
-    image.write_bytes(b"first-image")
-    cache.write_rows(
-        adapter.info.name,
-        [{"id": "chart", "image": "assets/chart.png"}],
-        {"dataset": adapter.info.hf_dataset, "revision": adapter.info.hf_revision},
-    )
-
-    first = _adapter_identity(adapter, cache, offline_fixtures=False)
-    assert first["assets"] == [
-        {"path": "assets/chart.png", "sha256": hashlib.sha256(b"first-image").hexdigest()}
-    ]
-
-    image.write_bytes(b"different-image")
-    changed = _adapter_identity(adapter, cache, offline_fixtures=False)
-
-    assert changed != first
-    assert changed["unavailable"] is True
-
 
 def test_core_evaluators_are_content_bound_to_adapter_identity(tmp_path, monkeypatch):
     from evals.adapters import all_adapters
@@ -369,41 +285,6 @@ def test_shared_score_bearing_runtime_changes_fingerprint(tmp_path, monkeypatch,
     )
 
 
-def test_external_harness_distribution_content_changes_run_fingerprint(tmp_path, monkeypatch):
-    from evals.adapters import all_adapters
-    from evals.adapters import base as adapter_base
-
-    cache = BenchCache(tmp_path / "cache")
-    adapter = all_adapters()["swe-bench-pro"]
-
-    def distribution_identity(name: str, digest: str) -> dict:
-        return {
-            "name": name,
-            "installed": True,
-            "version": "test",
-            "content_verified": True,
-            "file_count": 1,
-            "content_sha256": digest,
-        }
-
-    monkeypatch.setattr(
-        adapter_base,
-        "_evaluation_distribution_identity",
-        lambda name: distribution_identity(name, "a" * 64),
-    )
-    first = _adapter_identity(adapter, cache, offline_fixtures=True)
-    monkeypatch.setattr(
-        adapter_base,
-        "_evaluation_distribution_identity",
-        lambda name: distribution_identity(name, "b" * 64),
-    )
-    second = _adapter_identity(adapter, cache, offline_fixtures=True)
-
-    config = make_config(tmp_path, models=("m",), only=("swe-bench-pro",))
-    assert _run_fingerprint(_run_identity(config, [first])) != _run_fingerprint(
-        _run_identity(config, [second])
-    )
-
 
 def test_editable_external_harness_is_not_treated_as_content_verified(tmp_path, monkeypatch):
     from evals.adapters import base as adapter_base
@@ -445,46 +326,6 @@ def test_editable_external_harness_is_not_treated_as_content_verified(tmp_path, 
     assert identity["content_verified"] is False
 
 
-def test_path_shadowed_external_harness_is_not_history_eligible(tmp_path, monkeypatch):
-    from evals.adapters import all_adapters
-
-    shadow = tmp_path / "mini-extra"
-    shadow.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    shadow.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path))
-    adapter = all_adapters()["swe-bench-pro"]
-    identity = _adapter_identity(adapter, BenchCache(tmp_path / "cache"), offline_fixtures=True)
-    identity["history_provenance"] = {
-        "complete": True,
-        "reason": None,
-        "requires_content_addressed_execution": False,
-    }
-
-    assert "PATH-shadowed" in (_methodology_history_ineligibility([identity]) or "")
-
-
-def test_unresolved_runtime_is_a_cell_policy_not_whole_run_ineligibility(tmp_path):
-    from evals.adapters import all_adapters
-
-    cache = BenchCache(tmp_path / "cache")
-    adapters = all_adapters()
-    agentic = _adapter_identity(
-        adapters["terminal-bench"], cache, offline_fixtures=True
-    )
-    scicode = _adapter_identity(adapters["scicode"], cache, offline_fixtures=True)
-
-    assert _methodology_history_ineligibility([agentic, scicode]) is None
-    assert history.cross_run_policies([agentic, scicode], _clean_environment()) == {
-        "terminal-bench": (
-            "withheld_unresolved_runtime",
-            "runtime dataset, image, or executable content is unresolved",
-        ),
-        "scicode": (
-            "withheld_unpinned_execution",
-            "code execution lacks a resolved immutable image and platform identity",
-        ),
-    }
-
 
 def test_ifeval_score_time_distributions_are_content_bound(tmp_path):
     from evals.adapters import all_adapters
@@ -498,58 +339,6 @@ def test_ifeval_score_time_distributions_are_content_bound(tmp_path):
         for distribution in identity["evaluation_protocol"]["distributions"]
     } == {"immutabledict", "langdetect", "nltk"}
 
-
-def test_production_judge_template_registry_is_complete():
-    from evals import judge_prompts
-
-    declared = {
-        name: value
-        for name, value in vars(judge_prompts).items()
-        if name.endswith("_JUDGE_TEMPLATE") and isinstance(value, str)
-    }
-    registry = judge_prompts.judge_templates()
-    assert len(registry) == len(declared)
-    assert set(registry.values()) == set(declared.values())
-
-    from evals.adapters import all_adapters
-
-    selectors = {
-        adapter.info.judge_template_name
-        for adapter in all_adapters().values()
-        if adapter.info.judge_template_name is not None
-    }
-    assert set(registry) == selectors
-
-
-async def test_template_change_refuses_same_run_before_backend_or_artifact_write(
-    tmp_path, http_factory, monkeypatch
-):
-    from evals import judge_prompts
-
-    config = make_config(tmp_path, models=("m",), only=("hle",))
-    assert await _runner(config, http_factory).run() == 0
-    store = ResultStore(tmp_path / "results", "test-run")
-    run_path = store.run_dir / "run.json"
-    pair_path = next(store.run_dir.glob("hle*/*.json"))
-    run_before = run_path.read_bytes()
-    pair_before = pair_path.read_bytes()
-    monkeypatch.setattr(
-        judge_prompts,
-        "HLE_JUDGE_TEMPLATE",
-        judge_prompts.HLE_JUDGE_TEMPLATE + "\nchanged",
-    )
-    calls = 0
-
-    def tracked_factory():
-        nonlocal calls
-        calls += 1
-        return http_factory()
-
-    with pytest.raises(ValueError, match="run id 'test-run'.*fingerprint"):
-        await _runner(config, tracked_factory).run()
-    assert calls == 0
-    assert run_path.read_bytes() == run_before
-    assert pair_path.read_bytes() == pair_before
 
 
 def test_direct_run_context_gets_a_local_execution_runner(tmp_path):
@@ -926,120 +715,6 @@ async def test_clean_real_data_run_is_indexed_once_and_rerun_is_preflighted(
     assert index_path.read_bytes() == first_bytes
 
 
-async def test_full_accuracy_history_stamps_safe_and_withheld_cross_run_cells(
-    tmp_path, http_factory, monkeypatch
-):
-    from evals.adapters import ACCURACY_ROW_ORDER, suite_adapters
-    from evals.adapters.base import cache_pins, evaluation_protocol_identity
-
-    run_calls: dict[str, int] = {}
-
-    async def completed_pair(_runner, adapter, target, _ctx):
-        run_calls[adapter.info.name] = run_calls.get(adapter.info.name, 0) + 1
-        now = utc_now()
-        return PairResult(
-            benchmark=adapter.info.name,
-            target=target.label(),
-            status="completed",
-            metrics={"score": 1.0, "n_total": 1, "n_scored": 1},
-            started_at=now,
-            finished_at=now,
-        )
-
-    def installed_harnesses_absent(adapter):
-        protocol = evaluation_protocol_identity(adapter)
-        return {
-            **protocol,
-            "distributions": [
-                {"name": distribution["name"], "installed": False}
-                for distribution in protocol["distributions"]
-            ],
-            "executables": [
-                {"name": executable["name"], "found": False}
-                for executable in protocol["executables"]
-            ],
-        }
-
-    monkeypatch.setattr(SuiteRunner, "_run_pair", completed_pair)
-    monkeypatch.setattr(
-        "evals.runner.evaluation_protocol_identity", installed_harnesses_absent
-    )
-    monkeypatch.setattr(
-        "evals.runner._environment", lambda **_kwargs: _clean_environment()
-    )
-    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
-    config = make_config(
-        tmp_path,
-        models=("m",),
-        suite="accuracy",
-        offline_fixtures=False,
-        download=False,
-        smoke=False,
-        limit=None,
-    )
-    cache = BenchCache(Path(config.cache_dir))
-    for adapter in suite_adapters("accuracy"):
-        if adapter.info.hf_dataset is not None:
-            cache.write_rows(adapter.info.name, [], cache_pins(adapter.info))
-
-    assert await _runner(config, http_factory).run() == 0
-
-    store = ResultStore(tmp_path / "results", "test-run")
-    scoreboard = json.loads((store.run_dir / "scoreboard.json").read_text(encoding="utf-8"))
-    unresolved = {
-        "swe-bench-pro",
-        "swe-bench-verified",
-        "terminal-bench",
-        "tau-bench-banking",
-    }
-    unpinned_execution = {"livecodebench", "livecodebench-pro", "scicode"}
-    allowed = set(ACCURACY_ROW_ORDER) - unresolved - unpinned_execution
-    assert scoreboard["benchmarks"] == list(ACCURACY_ROW_ORDER)
-    assert set(run_calls) == set(ACCURACY_ROW_ORDER)
-    for benchmark in allowed:
-        cell = scoreboard["cells"][benchmark]["m"]
-        assert (cell["cross_run_policy"], cell["cross_run_reason"]) == ("allowed", None)
-    for benchmark in unresolved:
-        cell = scoreboard["cells"][benchmark]["m"]
-        assert cell["cross_run_policy"] == "withheld_unresolved_runtime"
-        assert cell["cross_run_reason"]
-    for benchmark in unpinned_execution:
-        cell = scoreboard["cells"][benchmark]["m"]
-        assert cell["cross_run_policy"] == "withheld_unpinned_execution"
-        assert cell["cross_run_reason"]
-    assert len(store.load_scoreboard_index()) == 1
-
-    allowed_pair = store.load_pair("gpqa-diamond", "m")
-    withheld_pair = store.load_pair("swe-bench-pro", "m")
-    assert allowed_pair is not None and withheld_pair is not None
-    store.save_pair(
-        allowed_pair.model_copy(
-            update={
-                "cross_run_policy": "withheld_unresolved_runtime",
-                "cross_run_reason": "stale stored policy",
-            }
-        )
-    )
-    store.save_pair(
-        withheld_pair.model_copy(
-            update={"cross_run_policy": "allowed", "cross_run_reason": None}
-        )
-    )
-    calls_before_resume = dict(run_calls)
-
-    assert await _runner(config, http_factory).run() == 0
-
-    assert run_calls == calls_before_resume
-    corrected_allowed = store.load_pair("gpqa-diamond", "m")
-    corrected_withheld = store.load_pair("swe-bench-pro", "m")
-    assert corrected_allowed is not None and corrected_withheld is not None
-    assert (corrected_allowed.cross_run_policy, corrected_allowed.cross_run_reason) == (
-        "allowed",
-        None,
-    )
-    assert corrected_withheld.cross_run_policy == "withheld_unresolved_runtime"
-    assert corrected_withheld.cross_run_reason
-
 
 async def test_tracked_history_hashes_opaque_extra_body_instead_of_retaining_secret(
     tmp_path, http_factory, monkeypatch
@@ -1407,10 +1082,6 @@ async def test_source_drift_during_scoreboard_save_is_caught_before_history_appe
     cell = scoreboard["cells"]["gpqa-diamond"]["m"]
     assert cell["status"] == "failed"
     assert cell["score"] is None
-    comparison = json.loads((store.run_dir / "comparison.json").read_text(encoding="utf-8"))
-    row = next(row for row in comparison["rows"] if row["benchmark"] == "gpqa-diamond")
-    assert row["measured"]["m"]["status"] == "failed"
-    assert row["measured"]["m"]["score"] is None
 
     monkeypatch.setattr("evals.runner._source_provenance", lambda: clean)
     with pytest.raises(ValueError, match="permanently source-tainted"):
@@ -1592,51 +1263,6 @@ async def test_evaluator_taint_forces_reexecution_after_crash_before_failed_pair
     assert not marker.exists()
     assert (tmp_path / "results" / "scoreboards.jsonl").is_file()
 
-
-async def test_evaluator_taint_forces_fresh_swebench_artifacts(
-    tmp_path, http_factory, monkeypatch
-):
-    from evals.adapters.swebench_verified import SweBenchVerifiedAdapter
-
-    fresh_artifact_flags = []
-
-    async def completed_pair(self, target, ctx):
-        fresh_artifact_flags.append(ctx.rerun)
-        now = utc_now()
-        return PairResult(
-            benchmark=self.info.name,
-            target=target.label(),
-            status="completed",
-            metrics={"score": 1.0, "n_total": 1, "n_scored": 1},
-            started_at=now,
-            finished_at=now,
-        )
-
-    monkeypatch.setattr(SweBenchVerifiedAdapter, "run", completed_pair)
-    monkeypatch.setattr(
-        "evals.runner._environment", lambda **_kwargs: _clean_environment()
-    )
-    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
-    config = make_config(
-        tmp_path,
-        models=("m",),
-        only=("swe-bench-verified",),
-        offline_fixtures=True,
-        download=False,
-    )
-    store = ResultStore(tmp_path / "results", "test-run")
-    assert await _runner(config, http_factory).run() == 0
-    assert fresh_artifact_flags == [False]
-    fresh_artifact_flags.clear()
-    marker = store.mark_evaluator_tainted(
-        reason="prior evaluator drift",
-        adapters=("swe-bench-verified",),
-    )
-
-    assert await _runner(config, http_factory).run() == 0
-
-    assert fresh_artifact_flags == [True]
-    assert not marker.exists()
 
 
 def test_download_missing_checks_adapter_dataset_and_revision_pins(tmp_path):

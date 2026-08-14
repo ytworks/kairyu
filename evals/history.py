@@ -54,18 +54,8 @@ _COMMON_EVALUATION_RESOURCES = frozenset(
         ("evals", "types.py"),
     }
 )
-_UNRESOLVED_RUNTIME_ADAPTERS = frozenset(
-    {
-        "swe-bench-pro",
-        "swe-bench-verified",
-        "terminal-bench",
-        "tau-bench-banking",
-    }
-)
-_NON_DATASET_ADAPTERS = frozenset({"terminal-bench", "tau-bench-banking"})
-_CONTENT_ADDRESSED_EXECUTION_ADAPTERS = frozenset(
-    {"livecodebench", "livecodebench-pro", "scicode"}
-)
+_NON_DATASET_ADAPTERS: frozenset[str] = frozenset()
+_CONTENT_ADDRESSED_EXECUTION_ADAPTERS: frozenset[str] = frozenset()
 _ENTRY_FIELDS = frozenset(
     {
         "index_schema_version",
@@ -687,7 +677,7 @@ def cross_run_policies(
         provenance = identity.get("history_provenance")
         if not isinstance(name, str) or not isinstance(provenance, Mapping):
             continue
-        if name in _UNRESOLVED_RUNTIME_ADAPTERS or provenance.get("complete") is not True:
+        if provenance.get("complete") is not True:
             policies[name] = (
                 "withheld_unresolved_runtime",
                 "runtime dataset, image, or executable content is unresolved",

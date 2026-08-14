@@ -1,10 +1,4 @@
-"""Endpoint sampling policy: reasoning effort, top_p, seed, vendor extra_body.
-
-Fugu reports every model at its maximum reasoning effort and ran the τ³ user
-simulator at `low`. Neither was reproducible before: the request body carried
-only model/messages/temperature/stream/max_tokens, so an effort setting could
-not reach the wire at all.
-"""
+"""Endpoint sampling policy for retained checkout-only eval suites."""
 
 import argparse
 import json
@@ -15,12 +9,9 @@ from conftest import make_target
 
 from evals.adapters.base import call_chat
 from evals.config import build_config, parse_target_flag
-from evals.judge import JudgeClient
 from evals.types import (
     BenchTarget,
     ChatRequestSpec,
-    JudgeConfig,
-    JudgeEndpointConfig,
 )
 
 
@@ -35,18 +26,13 @@ def _run_args(**overrides) -> argparse.Namespace:
         top_p=None,
         sampling_seed=None,
         extra_body=None,
-        suite=None,
+        suite="core",
         only=None,
         exclude=None,
         limit=None,
         smoke=False,
         offline_fixtures=False,
         seed=None,
-        judge_base_url=None,
-        judge_model=None,
-        judge_api_key_env=None,
-        judge_reasoning_effort=None,
-        judge_extra_body=None,
         concurrency=None,
         results_dir=None,
         run_id=None,
@@ -113,33 +99,6 @@ async def test_unset_sampling_leaves_the_body_untouched():
     assert list(seen[0]) == ["model", "messages", "temperature", "stream"]
 
 
-async def test_judge_sends_its_own_reasoning_effort():
-    """Fugu's τ³ user simulator ran at low effort, independent of the target."""
-    seen: list[dict] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(json.loads(request.content))
-        return httpx.Response(
-            200,
-            json={"choices": [{"index": 0, "message": {"role": "a", "content": "correct: yes"}}]},
-        )
-
-    judge = JudgeClient(
-        JudgeConfig(
-            base_url="http://gw/v1",
-            model="j",
-            reasoning_effort="low",
-            extra_body_json='{"service_tier": "flex"}',
-        ),
-        # grade() owns the client lifecycle, so the factory must yield a fresh one
-        http_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
-    )
-    verdict = await judge.grade(question="q", expected="e", response="r")
-    assert verdict.correct is True
-    assert seen[0]["reasoning_effort"] == "low"
-    assert seen[0]["service_tier"] == "flex"
-
-
 # -- validation ----------------------------------------------------------------
 
 
@@ -186,13 +145,6 @@ async def test_extra_body_cannot_silently_replace_the_adapter_request():
     assert body["temperature"] == 0.0
     assert body["reasoning_effort"] == "high"
     assert body["chat_template_kwargs"] == {"enable_thinking": False}
-
-
-def test_judge_extra_body_is_validated_too():
-    with pytest.raises(ValueError, match="may not override reasoning_effort"):
-        JudgeConfig(
-            base_url="http://gw", model="j", extra_body_json='{"reasoning_effort": "x"}'
-        )
 
 
 def test_top_p_bounds_are_enforced():
@@ -250,19 +202,6 @@ def test_cli_sampling_overrides_yaml_targets(tmp_path):
     assert kept.targets[0].reasoning_effort == "low"
 
 
-def test_judge_sampling_flags_are_wired():
-    config = build_config(
-        _run_args(
-            judge_base_url="http://gw/v1",
-            judge_model="j",
-            judge_reasoning_effort="low",
-            judge_extra_body='{"b": 2}',
-        )
-    )
-    assert config.judge.reasoning_effort == "low"
-    assert config.judge.extra_body() == {"b": 2}
-
-
 def test_sampling_is_part_of_the_run_fingerprint():
     """A different effort is a different experiment, not a resumable run."""
     from evals.runner import _run_fingerprint, _run_identity
@@ -271,28 +210,4 @@ def test_sampling_is_part_of_the_run_fingerprint():
     changed = build_config(_run_args(reasoning_effort="high"))
     assert _run_fingerprint(_run_identity(base, [])) != _run_fingerprint(
         _run_identity(changed, [])
-    )
-
-
-def test_judge_panel_is_part_of_the_run_fingerprint():
-    from evals.runner import _run_fingerprint, _run_identity
-
-    base = build_config(
-        _run_args(judge_base_url="http://judge/v1", judge_model="primary")
-    )
-    panel = base.model_copy(
-        update={
-            "judge": JudgeConfig(
-                base_url="http://judge/v1",
-                model="primary",
-                additional_judges=(
-                    JudgeEndpointConfig(
-                        base_url="http://judge/v1", model="secondary"
-                    ),
-                ),
-            )
-        }
-    )
-    assert _run_fingerprint(_run_identity(base, [])) != _run_fingerprint(
-        _run_identity(panel, [])
     )

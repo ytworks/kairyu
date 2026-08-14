@@ -100,7 +100,10 @@ def add_evals_parser(parser: argparse.ArgumentParser) -> None:
         ' {"enable_thinking": true}}\'',
     )
     run.add_argument(
-        "--suite", choices=suites, default=None, help="Benchmark suite (default: accuracy)"
+        "--suite",
+        choices=suites,
+        default=None,
+        help="Benchmark suite (required unless provided by --config)",
     )
     run.add_argument("--only", action="append", default=None, help="Comma-separated names")
     run.add_argument("--exclude", action="append", default=None, help="Comma-separated names")
@@ -117,27 +120,7 @@ def add_evals_parser(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=None,
         help=(
-            "Trials per source item: seed sweep for chat adapters and harness "
-            "trial count for agentic adapters"
-        ),
-    )
-    run.add_argument("--judge-base-url", default=None)
-    run.add_argument("--judge-model", default=None)
-    run.add_argument("--judge-api-key-env", default=None)
-    run.add_argument(
-        "--judge-reasoning-effort",
-        default=None,
-        help="reasoning_effort for the judge / tau user simulator (Fugu used low)",
-    )
-    run.add_argument("--judge-extra-body", default=None, help="JSON object for judge requests")
-    run.add_argument(
-        "--judge-secondary",
-        action="append",
-        default=None,
-        metavar="BASE_URL=MODEL[=API_KEY_ENV]",
-        help=(
-            "Additional pointwise judge (repeatable). Two total judges require "
-            "unanimity; configure per-member sampling in YAML."
+            "Deterministic chat trials per source item"
         ),
     )
     run.add_argument("--concurrency", type=int, default=None)
@@ -184,7 +167,7 @@ def add_evals_parser(parser: argparse.ArgumentParser) -> None:
     download = commands.add_parser(
         "download", help="Fetch and normalize the suite's datasets into the cache."
     )
-    download.add_argument("--suite", choices=suites, default="accuracy")
+    download.add_argument("--suite", choices=suites, required=True)
     download.add_argument("--only", action="append", default=None)
     download.add_argument("--exclude", action="append", default=None)
     download.add_argument("--cache-dir", default=None)
@@ -195,19 +178,14 @@ def add_evals_parser(parser: argparse.ArgumentParser) -> None:
 
     report = commands.add_parser(
         "report",
-        help="Rebuild a suite scoreboard and its published comparison when available.",
+        help="Rebuild a suite scoreboard from immutable pair artifacts.",
     )
     report.add_argument("run", help="Run id (under the suite results dir) or a run directory")
-    report.add_argument("--suite", choices=suites, default="accuracy")
+    report.add_argument("--suite", choices=suites, required=True)
     report.add_argument(
         "--results-dir",
         default=None,
         help="Results root (default: bench/results/<suite>)",
-    )
-    report.add_argument(
-        "--no-comparison",
-        action="store_true",
-        help="Print only the scoreboard, without the published-score comparison",
     )
 
     compare_runs = commands.add_parser(
@@ -216,7 +194,7 @@ def add_evals_parser(parser: argparse.ArgumentParser) -> None:
     )
     compare_runs.add_argument("baseline", help="Baseline run id")
     compare_runs.add_argument("candidate", help="Candidate run id")
-    compare_runs.add_argument("--suite", choices=suites, default="accuracy")
+    compare_runs.add_argument("--suite", choices=suites, required=True)
     compare_runs.add_argument(
         "--results-dir",
         default=None,
@@ -252,7 +230,7 @@ def add_evals_parser(parser: argparse.ArgumentParser) -> None:
             "(repeatable; every configured row must pass)"
         ),
     )
-    compare.add_argument("--suite", choices=suites, default="accuracy")
+    compare.add_argument("--suite", choices=suites, required=True)
     compare.add_argument(
         "--results-dir",
         default=None,
@@ -293,65 +271,8 @@ def add_evals_parser(parser: argparse.ArgumentParser) -> None:
         help="Print the machine-readable artifact instead of Markdown",
     )
 
-    calibrate = commands.add_parser(
-        "calibrate-judge",
-        help="Measure judge agreement on the committed published-gold set.",
-    )
-    calibrate.add_argument(
-        "--run",
-        default=None,
-        help=(
-            "Bind headline calibration to a benchmark run id (under --results-dir) or run directory"
-        ),
-    )
-    calibrate.add_argument("--results-dir", default="bench/results/accuracy")
-    calibrate.add_argument("--config", default=None, help="bench.yaml judge block")
-    calibrate.add_argument("--judge-base-url", default=None)
-    calibrate.add_argument("--judge-model", default=None)
-    calibrate.add_argument("--judge-api-key-env", default=None)
-    calibrate.add_argument("--judge-reasoning-effort", default=None)
-    calibrate.add_argument("--judge-extra-body", default=None)
-    calibrate.add_argument(
-        "--judge-secondary",
-        action="append",
-        default=None,
-        metavar="BASE_URL=MODEL[=API_KEY_ENV]",
-    )
-    calibrate.add_argument(
-        "--calibration-set",
-        default=None,
-        help="Custom labelled JSONL (default: committed published-gold set)",
-    )
-    calibrate.add_argument("--output", default=None, help="Write the JSON artifact here")
-    calibrate.add_argument("--min-agreement", type=float, default=11 / 12)
-    calibrate.add_argument("--min-coverage", type=float, default=1.0)
-    calibrate.add_argument("--max-position-flip", type=float, default=0.0)
-    calibrate.add_argument("--max-self-preference-gap", type=float, default=0.2)
-    calibrate.add_argument(
-        "--require-self-preference",
-        action="store_true",
-        help="Fail unless every judge has balanced, provenance-backed bias evidence",
-    )
-
     listing = commands.add_parser("list", help="List benchmarks, requirements, and cache status.")
-    listing.add_argument("--suite", choices=suites, default="accuracy")
-
-    entrypoints = commands.add_parser(
-        "entrypoints",
-        help="List installed and repository-only benchmark ownership.",
-    )
-    entrypoints.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit the package-owned entrypoint manifest as JSON.",
-    )
-    entrypoints.add_argument(
-        "--check-repo",
-        type=Path,
-        default=None,
-        metavar="PATH",
-        help="Validate a Kairyu source checkout against the ownership manifest.",
-    )
+    listing.add_argument("--suite", choices=suites, required=True)
 
 
 def handle(args: argparse.Namespace) -> int:
@@ -367,12 +288,8 @@ def handle(args: argparse.Namespace) -> int:
         return _handle_compare(args)
     if args.bench_command == "quant-sweep":
         return _handle_quant_sweep(args)
-    if args.bench_command == "calibrate-judge":
-        return _handle_calibrate_judge(args)
     if args.bench_command == "list":
         return _handle_list(args)
-    if args.bench_command == "entrypoints":
-        return _handle_entrypoints(args)
     raise ValueError(f"unknown bench command {args.bench_command!r}")
 
 
@@ -409,21 +326,17 @@ def _handle_download(args) -> int:
 
 
 def _handle_report(args) -> int:
-    from evals.adapters import suite_info
     from evals.aggregate import build_scoreboard, render_markdown
-    from evals.compare import build_comparison, render_comparison_markdown
     from evals.store import ResultStore
     from evals.types import (
         BenchTarget,
-        JudgeConfig,
-        JudgeEndpointConfig,
         PairResult,
     )
 
     run_dir = Path(args.run)
     if not run_dir.is_dir():
         results_dir = getattr(args, "results_dir", None) or (
-            f"bench/results/{getattr(args, 'suite', 'accuracy')}"
+            f"bench/results/{args.suite}"
         )
         run_dir = Path(results_dir) / args.run
     if not run_dir.is_dir():
@@ -451,99 +364,18 @@ def _handle_report(args) -> int:
         try:
             target_configs.append(BenchTarget.model_validate(raw_target))
         except ValueError:
-            # Durable run metadata hashes opaque request bodies. They are not
-            # executable config anymore, but removing only that sentinel keeps
-            # the endpoint/model identity available for self-judge disclosure.
+            # Durable metadata may hash opaque request bodies. Remove only that
+            # non-executable sentinel while retaining target identity for reports.
             without_opaque_body = {
                 key: value for key, value in raw_target.items() if key != "extra_body_json"
             }
             try:
                 target_configs.append(BenchTarget.model_validate(without_opaque_body))
             except ValueError:
-                # Legacy/incomplete target records remain displayable, but
-                # aggregate marks their judge-independence identity unknown.
                 continue
-    raw_judge = config.get("judge")
-    judge = None
-    judge_identity_incomplete = False
-    if isinstance(raw_judge, dict):
-        explicitly_disabled = (
-            "base_url" in raw_judge
-            and "model" in raw_judge
-            and raw_judge["base_url"] is None
-            and raw_judge["model"] is None
-            and not raw_judge.get("additional_judges")
-        )
-        if raw_judge and not explicitly_disabled:
 
-            def without_opaque_body(endpoint):
-                if not isinstance(endpoint, dict):
-                    return endpoint
-                marker = endpoint.get("extra_body_json")
-                if isinstance(marker, str) and marker.startswith("sha256:") and len(marker) == 71:
-                    return {
-                        key: value for key, value in endpoint.items() if key != "extra_body_json"
-                    }
-                return endpoint
 
-            judge_for_validation = dict(without_opaque_body(raw_judge))
-            if isinstance(raw_judge.get("additional_judges"), list | tuple):
-                judge_for_validation["additional_judges"] = [
-                    without_opaque_body(member) for member in raw_judge.get("additional_judges", [])
-                ]
-            try:
-                candidate = JudgeConfig.model_validate(judge_for_validation)
-            except ValueError:
-                judge_identity_incomplete = True
-                candidate = None
-
-                def salvage_endpoint(raw):
-                    if not isinstance(raw, dict):
-                        return None
-                    base_url = raw.get("base_url")
-                    model = raw.get("model")
-                    if (
-                        not isinstance(base_url, str)
-                        or not isinstance(model, str)
-                        or not model.strip()
-                    ):
-                        return None
-                    try:
-                        return JudgeEndpointConfig(base_url=base_url, model=model)
-                    except ValueError:
-                        return None
-
-                primary = salvage_endpoint(raw_judge)
-                if primary is not None:
-                    members: list[JudgeEndpointConfig] = []
-                    known = {primary.resolved_identity()}
-                    raw_members = raw_judge.get("additional_judges", [])
-                    if not isinstance(raw_members, list | tuple):
-                        raw_members = []
-                    for raw_member in raw_members:
-                        member = salvage_endpoint(raw_member)
-                        if member is None:
-                            continue
-                        identity = member.resolved_identity()
-                        if identity in known:
-                            continue
-                        known.add(identity)
-                        members.append(member)
-                    candidate = JudgeConfig(
-                        base_url=primary.base_url,
-                        model=primary.model,
-                        additional_judges=tuple(members),
-                    )
-                if candidate is None:
-                    candidate = JudgeConfig(model="identity-unavailable")
-            if not candidate.enabled:
-                judge_identity_incomplete = True
-                candidate = JudgeConfig(model="identity-unavailable")
-            judge = candidate
-    elif raw_judge is not None:
-        judge = JudgeConfig(model="identity-unavailable")
-        judge_identity_incomplete = True
-    suite = config.get("suite", getattr(args, "suite", "accuracy"))
+    suite = config.get("suite", args.suite)
     scoreboard = build_scoreboard(
         run_id=run_meta.get("run_id", run_dir.name),
         suite=suite,
@@ -553,19 +385,11 @@ def _handle_report(args) -> int:
         pairs=pairs,
         targets=configured or targets,
         target_configs=target_configs,
-        judge=judge,
-        judge_identity_incomplete=judge_identity_incomplete,
     )
     markdown = render_markdown(scoreboard)
     store = ResultStore(run_dir.parent, run_dir.name)
     store.save_scoreboard(scoreboard, markdown)
     print(markdown)
-
-    if suite_info(suite).published_comparison and not getattr(args, "no_comparison", False):
-        comparison = build_comparison(scoreboard)
-        comparison_markdown = render_comparison_markdown(comparison)
-        store.save_comparison(comparison, comparison_markdown)
-        print(comparison_markdown)
     return 0
 
 
@@ -578,7 +402,7 @@ def _handle_compare_runs(args) -> int:
 
     results_dir = Path(
         getattr(args, "results_dir", None)
-        or f"bench/results/{getattr(args, 'suite', 'accuracy')}"
+        or f"bench/results/{args.suite}"
     )
     try:
         store = ResultStore(results_dir, args.baseline)
@@ -663,7 +487,7 @@ def _handle_compare(args) -> int:
 
     results_dir = Path(
         getattr(args, "results_dir", None)
-        or f"bench/results/{getattr(args, 'suite', 'accuracy')}"
+        or f"bench/results/{args.suite}"
     )
     try:
         tolerances = _config_tolerances(args.tolerance)
@@ -781,12 +605,6 @@ def _handle_quant_sweep(args) -> int:
     return 0 if sweep["overall_verdict"] == "pass" else 1
 
 
-def _handle_calibrate_judge(args) -> int:
-    from evals.calibration import run_calibration_cli
-
-    return asyncio.run(run_calibration_cli(args))
-
-
 def _handle_list(args) -> int:
     from evals.adapters import all_adapters, suite_info
     from evals.adapters.base import adapter_cache_ready
@@ -794,7 +612,7 @@ def _handle_list(args) -> int:
 
     cache = BenchCache(resolve_cache_root())
     registry = all_adapters()
-    definition = suite_info(getattr(args, "suite", "accuracy"))
+    definition = suite_info(args.suite)
     print(f"suite {definition.name} ({len(definition.row_order)} slots), cache: {cache.root}")
     for name in definition.row_order:
         adapter = registry.get(name)
@@ -809,8 +627,6 @@ def _handle_list(args) -> int:
                 ("docker", info.needs_docker),
                 ("exec", info.needs_execution),
                 ("vision", info.needs_vision),
-                ("judge", info.judge_preferred),
-                ("agentic", info.agentic),
             )
             if flag
         ]
@@ -818,37 +634,3 @@ def _handle_list(args) -> int:
         extras = f" [{', '.join(needs)}]" if needs else ""
         print(f"  {name:24s} {info.display_name} — {info.metric}{extras} ({state})")
     return 0
-
-
-def _handle_entrypoints(args) -> int:
-    from evals.ownership import (
-        entrypoints_payload,
-        load_entrypoints,
-        validate_repository,
-    )
-
-    errors = validate_repository(args.check_repo) if args.check_repo is not None else ()
-    if args.json:
-        payload = entrypoints_payload()
-        if args.check_repo is not None:
-            payload["repository_check"] = {
-                "path": str(args.check_repo),
-                "valid": not errors,
-                "errors": list(errors),
-            }
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return 1 if errors else 0
-
-    print("installed: evals library, kairyu bench CLI, package fixtures")
-    print("repository-only: bench/*.py entrypoints and bench/results artifacts")
-    for entry in load_entrypoints():
-        requirements = ",".join(entry.requires)
-        print(f"  {entry.path:48s} {entry.kind:16s} [{requirements}]")
-    if args.check_repo is not None:
-        if errors:
-            print(f"repository check: FAILED ({args.check_repo})")
-            for error in errors:
-                print(f"  - {error}")
-        else:
-            print(f"repository check: OK ({args.check_repo})")
-    return 1 if errors else 0

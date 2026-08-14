@@ -9,6 +9,6 @@ Kairyu correctness and performance gates live separately under `verification/`.
 Reusable evidence-artifact mechanics live in the package-neutral `evidence/` tree.
 """
 
-from evals.types import BenchConfig, BenchTarget, JudgeConfig, PairResult
+from evals.types import BenchConfig, BenchTarget, PairResult
 
-__all__ = ["BenchConfig", "BenchTarget", "JudgeConfig", "PairResult"]
+__all__ = ["BenchConfig", "BenchTarget", "PairResult"]

@@ -85,7 +85,7 @@ def test_compare_runs_public_parser_dispatches_without_writing(tmp_path, monkeyp
     assert handle(args) == 0
 
     output = capsys.readouterr().out
-    assert "Accuracy run comparison — base → candidate" in output
+    assert "Eval run comparison — base → candidate" in output
     assert "-10.0" in output
     assert "local-harness-only" in output
     assert list(tmp_path.iterdir()) == []
@@ -98,6 +98,8 @@ def test_compare_runs_missing_indexed_run_is_a_clear_nonzero_error(tmp_path, mon
             "compare-runs",
             "missing-a",
             "missing-b",
+            "--suite",
+            "core",
             "--results-dir",
             str(tmp_path),
         ]
@@ -124,7 +126,7 @@ def test_compare_runs_rejects_a_results_root_from_another_suite(tmp_path, monkey
             "base",
             "candidate",
             "--suite",
-            "accuracy",
+            "quantization",
             "--results-dir",
             str(tmp_path),
         ]
@@ -132,7 +134,7 @@ def test_compare_runs_rejects_a_results_root_from_another_suite(tmp_path, monkey
 
     assert handle(args) == 1
     assert (
-        "belong to suite 'core', not selected suite 'accuracy'"
+        "belong to suite 'core', not selected suite 'quantization'"
         in capsys.readouterr().out
     )
     assert list(tmp_path.iterdir()) == []

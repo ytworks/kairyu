@@ -54,9 +54,8 @@ from evals.types import (
     SkipItem,
 )
 
-if TYPE_CHECKING:  # judge lands in its own module; adapters only see the protocol
+if TYPE_CHECKING:
     from evals.execution import ExecutionRunner
-    from evals.judge import JudgeClient, MajorityJudgeClient
     from evals.progress import ProgressReporter
 
 _EXCERPT_CHARS = 2000
@@ -80,8 +79,6 @@ class AdapterInfo:
     needs_docker: bool = False
     needs_execution: bool = False
     needs_vision: bool = False
-    judge_preferred: bool = False
-    agentic: bool = False
     annotations: tuple[str, ...] = ()  # permanent footnotes (substitute slots)
     # False for a slot that measures a different thing than the published row
     # (a substituted dataset). Run-time reasons are added per pair.
@@ -93,10 +90,6 @@ class AdapterInfo:
     # Optional versioned grouping rule for paired uncertainty. Items inside one
     # group may be dependent and must be resampled together for config A/B.
     paired_cluster_key: str | None = None
-    # Logical name in judge_prompts.judge_templates(). This binds the exact
-    # scoring prompt to runs selecting this adapter without invalidating
-    # unrelated benchmark runs.
-    judge_template_name: str | None = None
     # Package resources that implement score-bearing prompt/parser/checker
     # semantics. Their content digests enter the run fingerprint so a resumed
     # run can never reuse pair evidence produced by different evaluator code.
@@ -112,11 +105,6 @@ class AdapterInfo:
     # remain in history, but that cell is structurally withheld from deltas.
     history_provenance_complete: bool = True
     history_provenance_reason: str = ""
-
-    def required_judge_template_name(self) -> str:
-        if self.judge_template_name is None:
-            raise RuntimeError(f"adapter {self.name!r} has no judge template")
-        return self.judge_template_name
 
 
 @dataclass(frozen=True)
@@ -139,11 +127,9 @@ class RunContext:
 
     cache: BenchCache
     http_factory: Callable[[], httpx.AsyncClient]
-    judge: JudgeClient | MajorityJudgeClient | None = None
     limit: int | None = None
     seed: int = 0
-    # Trials per source item: chat adapters retain a seed sweep; external
-    # agentic adapters continue mapping this to their harness trial flag.
+    # Trials per source item for deterministic chat seed sweeps.
     attempts: int = 1
     run_id: str = ""  # provenance for artifacts the external harnesses name themselves
     # True means the suite requires fresh external-harness evidence, either for
@@ -348,13 +334,6 @@ def evaluation_protocol_identity(adapter: BenchmarkAdapter) -> dict:
             (
                 ("evals", "execution.py"),
                 ("evals", "sandbox.py"),
-            )
-        )
-    if info.judge_template_name is not None:
-        resources.extend(
-            (
-                ("evals", "judge.py"),
-                ("evals", "judge_prompts.py"),
             )
         )
     resources.extend(info.evaluation_resources)

@@ -122,16 +122,6 @@ def _stable_execution(environment: dict, role: str) -> dict:
     return stable
 
 
-def _self_judge_lists(board: dict, targets: Sequence[str], role: str) -> tuple[set[str], set[str]]:
-    values: list[set[str]] = []
-    for field in ("self_judged_targets", "judge_independence_unknown_targets"):
-        listed = _string_list(board.get(field), f"{role} {field}")
-        if not set(listed) <= set(targets):
-            raise ConfigComparisonError(f"{role} {field} contains an unknown target")
-        values.append(set(listed))
-    return values[0], values[1]
-
-
 def _snapshot(entry: object, role: str) -> dict:
     payload = _mapping(entry, role)
     run = validate_run_metadata(payload.get("run"), require_clean_source=True)
@@ -195,20 +185,7 @@ def _snapshot(entry: object, role: str) -> dict:
             raise ConfigComparisonError(
                 f"{role} adapter {adapter.get('name')!r} has a malformed cluster key"
             )
-        uses_judge = adapter.get("uses_judge_template")
-        if type(uses_judge) is not bool:
-            raise ConfigComparisonError(
-                f"{role} adapter {adapter.get('name')!r} lacks a judge-use declaration"
-            )
-        judge_template = adapter.get("judge_template")
-        if uses_judge and (not isinstance(judge_template, dict) or not judge_template):
-            raise ConfigComparisonError(
-                f"{role} adapter {adapter.get('name')!r} has no judge-template identity"
-            )
-        if not uses_judge and "judge_template" in adapter:
-            raise ConfigComparisonError(
-                f"{role} non-judge adapter {adapter.get('name')!r} has a judge template"
-            )
+
     display_names = _mapping(board.get("display_names"), f"{role} display names")
     if set(display_names) != set(benchmarks) or any(
         not isinstance(display_names[name], str) or not display_names[name]
@@ -229,7 +206,6 @@ def _snapshot(entry: object, role: str) -> dict:
     git_commit = run["environment"].get("git_commit")
     if not isinstance(git_commit, str) or _COMMIT_RE.fullmatch(git_commit) is None:
         raise ConfigComparisonError(f"{role} local harness commit is malformed")
-    self_judged, judge_unknown = _self_judge_lists(board, targets, role)
     return {
         "entry": payload,
         "run": run,
@@ -242,8 +218,6 @@ def _snapshot(entry: object, role: str) -> dict:
         "display_names": dict(display_names),
         "cells": cells,
         "record_sha256": record_sha256,
-        "self_judged": self_judged,
-        "judge_unknown": judge_unknown,
     }
 
 
@@ -478,23 +452,6 @@ def _paired_items(
     )
 
 
-def _judging_is_independent(snapshot: dict, benchmark: str, target: str, role: str) -> None:
-    adapter = snapshot["adapters_by_name"].get(benchmark)
-    if not isinstance(adapter, dict):
-        raise ConfigComparisonError(f"unknown benchmark adapter {benchmark!r}")
-    if adapter["uses_judge_template"] is False:
-        return
-    judge_template = adapter["judge_template"]
-    if not isinstance(judge_template, dict) or not judge_template:
-        raise ConfigComparisonError(f"{role} judge-template identity is malformed")
-    if target in snapshot["self_judged"]:
-        raise ConfigComparisonError(f"{role} target is self-judged for {benchmark!r}")
-    if target in snapshot["judge_unknown"]:
-        raise ConfigComparisonError(
-            f"{role} judge independence is unknown for {benchmark!r}"
-        )
-
-
 def _paired_cluster_ids(item_ids: Sequence[str], cluster_key: str) -> list[str]:
     if cluster_key != "item_id_before_final_dot_v1":
         raise ConfigComparisonError(f"unsupported paired cluster key {cluster_key!r}")
@@ -552,8 +509,6 @@ def build_config_comparison(
     for benchmark in base["benchmarks"]:
         if benchmark not in policy:
             continue
-        _judging_is_independent(base, benchmark, baseline_label, "baseline")
-        _judging_is_independent(candidate, benchmark, candidate_label, "candidate")
         baseline_pair = baseline_pairs[benchmark]
         candidate_pair = candidate_pairs[benchmark]
         adapter_identity = base["adapters_by_name"][benchmark]

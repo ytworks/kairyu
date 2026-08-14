@@ -1,6 +1,6 @@
 """Live progress for a suite run: which slot is running, and how far in.
 
-A full run can be thousands of judged items and take hours, so "no output for
+A full run can be thousands of model requests and take hours, so "no output for
 40 minutes" is indistinguishable from a hang. Three reporters cover the ways a
 run is watched:
 
@@ -170,13 +170,7 @@ class LineProgress:
         self._write_progress(now)
 
     def pair_heartbeat(self) -> None:
-        """Keep a log moving while an external harness runs.
-
-        The agentic slots never call `item_done()` and their subprocess output is
-        captured, so without this an 8-hour SWE or Terminal-Bench run prints one
-        line and then goes silent — exactly the "working vs hung" ambiguity the
-        reporter exists to remove.
-        """
+        """Keep a log moving while a long-running pair is active."""
         now = time.monotonic()
         if now - self._last_emit < self._interval_s:
             return

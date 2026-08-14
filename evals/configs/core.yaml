@@ -1,7 +1,7 @@
 # Judge-free deterministic quality regressions: GSM8K, MMLU, and IFEval.
 # Install/download once, then run with:
 #
-#   uv sync --extra bench
+#   uv sync --extra evals
 #   kairyu bench run --config bench/configs/core.yaml
 #
 # A full run sends 58,028 target calls: MMLU scores four exact continuations

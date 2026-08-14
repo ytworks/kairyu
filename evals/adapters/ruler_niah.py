@@ -82,7 +82,7 @@ def _encoder():
         import tiktoken
     except ImportError as error:  # pragma: no cover - exercised via monkeypatch
         raise DatasetUnavailable(
-            "the long-context sweep needs tiktoken: pip install 'kairyu[bench]'"
+            "the long-context sweep needs tiktoken: pip install 'kairyu[evals]'"
         ) from error
     return tiktoken.get_encoding(_ENCODING)
 

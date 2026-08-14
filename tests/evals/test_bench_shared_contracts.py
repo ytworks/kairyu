@@ -20,7 +20,7 @@ from evals.targets import (
     resolve_api_key_env,
     target_api_key,
 )
-from evals.types import BenchConfig, BenchTarget, JudgeConfig
+from evals.types import BenchConfig, BenchTarget
 from evidence.reporting import (
     atomic_write_json,
     atomic_write_text,
@@ -47,15 +47,9 @@ def test_direct_and_yaml_model_paths_share_target_semantics() -> None:
         model="model-a",
         api_key_env=" BENCH_API_KEY ",
     )
-    judge = JudgeConfig(
-        base_url="http://judge.test/",
-        model="judge",
-        api_key_env="JUDGE_API_KEY",
-    )
 
     assert target.base_url == "http://gateway.test:8000/v1"
     assert target.api_key_env == "BENCH_API_KEY"
-    assert judge.base_url == "http://judge.test/v1"
     with pytest.raises(ValueError, match="environment-variable name"):
         BenchTarget(
             base_url="http://gateway.test",
@@ -123,6 +117,7 @@ def test_configured_target_auth_fails_closed_and_redacts_model_errors() -> None:
     with pytest.raises(ValueError) as nested_exc_info:
         BenchConfig.model_validate(
             {
+                "suite": "core",
                 "targets": [
                     {
                         "base_url": "http://gateway.test",

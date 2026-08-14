@@ -14,26 +14,7 @@ class SuiteInfo:
     name: str
     display_name: str
     row_order: tuple[str, ...]
-    published_comparison: bool = False
 
-
-# Row order of the Accuracy suite, based on Sakana's Fugu release table. Slots
-# land phase by phase; the registry below holds the implemented ones and suites
-# are filtered to what exists, so the scoreboard grows without reordering.
-ACCURACY_ROW_ORDER: tuple[str, ...] = (
-    "swe-bench-pro",
-    "swe-bench-verified",
-    "terminal-bench",
-    "livecodebench",
-    "livecodebench-pro",
-    "hle",
-    "charxiv-reasoning",
-    "gpqa-diamond",
-    "scicode",
-    "tau-bench-banking",
-    "long-context-reasoning",
-    "mrcr-v2",
-)
 
 CORE_ROW_ORDER: tuple[str, ...] = (
     "gsm8k",
@@ -61,12 +42,6 @@ LONG_CONTEXT_ROW_ORDER: tuple[str, ...] = (
 )
 
 SUITES: dict[str, SuiteInfo] = {
-    "accuracy": SuiteInfo(
-        name="accuracy",
-        display_name="Accuracy",
-        row_order=ACCURACY_ROW_ORDER,
-        published_comparison=True,
-    ),
     "core": SuiteInfo(
         name="core",
         display_name="Core",
@@ -112,41 +87,19 @@ def all_adapters() -> dict[str, BenchmarkAdapter]:
     entry point the runner, downloader and CLI must use; constructing an adapter
     class directly yields an unpinned instance.
     """
-    from evals.adapters.charxiv import CharXivAdapter
     from evals.adapters.gpqa import GpqaDiamondAdapter
     from evals.adapters.gsm8k import Gsm8kAdapter
-    from evals.adapters.hle import HleAdapter
     from evals.adapters.ifeval import IfevalAdapter
-    from evals.adapters.livecodebench import LiveCodeBenchAdapter
-    from evals.adapters.livecodebench_pro import LiveCodeBenchProAdapter
-    from evals.adapters.longbench_v2 import LongBenchV2Adapter
     from evals.adapters.mmlu import MmluAdapter
-    from evals.adapters.mrcr import MrcrAdapter
     from evals.adapters.ruler_niah import ruler_niah_adapters
-    from evals.adapters.scicode import SciCodeAdapter
     from evals.adapters.structured_output import StructuredOutputAdapter
-    from evals.adapters.swebench_pro import SweBenchProAdapter
-    from evals.adapters.swebench_verified import SweBenchVerifiedAdapter
-    from evals.adapters.tau_bench import TauBenchBankingAdapter
-    from evals.adapters.terminal_bench import TerminalBenchAdapter
 
     adapters: list[BenchmarkAdapter] = [
-        CharXivAdapter(),
         Gsm8kAdapter(),
         GpqaDiamondAdapter(),
-        HleAdapter(),
         IfevalAdapter(),
-        LiveCodeBenchAdapter(),
-        LiveCodeBenchProAdapter(),
-        LongBenchV2Adapter(),
-        MrcrAdapter(),
         MmluAdapter(),
-        SciCodeAdapter(),
         StructuredOutputAdapter(),
-        SweBenchProAdapter(),
-        SweBenchVerifiedAdapter(),
-        TauBenchBankingAdapter(),
-        TerminalBenchAdapter(),
         *ruler_niah_adapters(),
     ]
     from evals.pins import apply_pins

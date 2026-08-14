@@ -1,4 +1,4 @@
-"""Docker availability probe for the agentic benchmarks (probed once per run)."""
+"""Docker availability probe for checkout-only execution (probed once per run)."""
 
 from __future__ import annotations
 

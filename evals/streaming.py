@@ -10,8 +10,7 @@ from evals.types import JSON_SAFE_INTEGER_MAX, GenerationTimingEvidence
 
 # A 32K-token completion can carry several MiB of SSE framing because every
 # token is wrapped in its own JSON event.  Keep a hard bound, but size it for
-# the maximum output used by the frontier accuracy suites rather than for a
-# short chat response.
+# the maximum output used by retained long-context evals.
 _MAX_STREAM_BYTES = 16_777_216
 _MAX_TEXT_CHARS = 1_048_576
 
