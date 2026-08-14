@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-14. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-15. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example has one public chat model, one public pinned offline embedding model, and one orchestration YAML: Open WebUI lists only the chat model, L2 borrows the Qwen/DeepSeek L1 pools directly, and launcher readiness proves a two-input 384-dimensional embedding response. Both this path and the single-Qwen example accept image chat; the tiered example's composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example has one public chat model, one public pinned offline embedding model, and one unchanged orchestration YAML: Open WebUI lists only the chat model, L2 borrows four Qwen3.8 TP1 workers on official vLLM v0.23.0 plus the measured DeepSeek TP4/EP4 DSpark worker, and launcher readiness proves a two-input 384-dimensional embedding response. Both this path and the single-Qwen example accept image chat; the tiered example's composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-15 — [progress] Frontier examples move to Qwen3.8
+- What: replaced both Qwen3.6 example surfaces with attested Qwen3.8-27B-FP8,
+  selected a measured 32K/no-MTP/piecewise-graph vLLM v0.23.0 L1 envelope,
+  ported it unchanged to four TP1 replicas, and passed an eight-GPU product
+  chat plus embedding smoke without changing the L2 role DAG or L3 contract.
+- Why: DeepSeek remains on the measured `aa0d513027` DSpark build because the
+  official v0.23.0 runtime cannot serve the 0731 checkpoint's draft path.
+- Refs: `examples/qwen3.8-{27b-1gpu,deepseek-v4-8gpu}/`;
+  `examples/qwen3.8-27b-1gpu/MEASUREMENTS.md`
 
 ### 2026-08-14 — [progress] Accuracy removal and verification migration completed
 - What: removed the named Accuracy suite and its code, fixtures, dependencies,

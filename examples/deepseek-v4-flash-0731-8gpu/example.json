@@ -17,7 +17,7 @@
     "quantization": "mixed-fp4-fp8"
   },
   "vllm": {
-    "image": "local/vllm-openai:ds4-sm120-aa0d513027",
+    "image": "local/vllm-openai:sm120-aa0d513027",
     "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
     "source_repository": "https://github.com/jasl/vllm.git",
     "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",

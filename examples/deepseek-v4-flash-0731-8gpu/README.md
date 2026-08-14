@@ -31,9 +31,10 @@ implementation supports it on SM100 datacenter Blackwell, not SM120.
 ./run.sh
 ```
 
-The command verifies exactly eight matching GPUs, builds the pinned vLLM source
-revision if its image is absent, downloads and hashes the exact model revision
-if its model volume is absent, builds Kairyu, waits for readiness, and prints:
+The command verifies exactly eight matching GPUs, reuses or builds the pinned
+SM120 vLLM source revision if its image is absent, downloads and hashes the
+exact model revision if its model volume is absent, builds Kairyu, waits for
+readiness, and prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8002/v1
@@ -86,10 +87,12 @@ non-comparable public context is:
 
 - Model revision: `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`
 - Model tree SHA-256: `90bd164d6f778d798eeaecd3517d83b87d49d300756a9217ada14a2b15203754`
-- vLLM SM120 source: `aa0d51302747ea80f282e26949708b3253409fe2`
+- vLLM source: `jasl/vllm@aa0d51302747ea80f282e26949708b3253409fe2`
+- vLLM image digest:
+  `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 
-Override ports with `API_PORT` and `CHAT_UI_PORT`. Override prebuilt images with
+Override ports with `API_PORT` and `CHAT_UI_PORT`. Override images with
 `VLLM_IMAGE` or `OPEN_WEBUI_IMAGE`; a non-default vLLM override must already
 exist locally. Dotenv files are intentionally ignored and credentials are not
 written into evidence.

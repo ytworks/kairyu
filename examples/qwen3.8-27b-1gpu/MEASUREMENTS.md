@@ -1,5 +1,67 @@
 # Measured performance
 
+## Qwen3.8 result (vLLM v0.23.0)
+
+The selected single-GPU configuration uses the attested
+`Qwen/Qwen3.8-27B-FP8` checkpoint, FP8 KV cache, FP16 Gated-DeltaNet state,
+FlashInfer attention, piecewise CUDA Graphs, 32 maximum sequences, a
+32,768-token chunked-prefill budget, and no speculative decoding.
+
+Run `qwen38-nomtp-piecewise-fp16-b32k-20260815` completed 32/32 requests and
+8,192/8,192 output tokens at every row through Kairyu L3. Inputs are
+approximately 8K tokens and each response contains exactly 256 output tokens.
+
+| Concurrency | TTFT p50 | TTFT p99 | Mean TPOT | Output throughput | Wall time |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 941.06 ms | 5,333.25 ms | 21.814 ms/token | 38.55 tok/s | 212.511 s |
+| 8 | 401.51 ms | 1,684.24 ms | 24.432 ms/token | 298.25 tok/s | 27.467 s |
+| 16 | 837.43 ms | 976.12 ms | 27.040 ms/token | 532.98 tok/s | 15.370 s |
+| 32 | 1,465.87 ms | 1,482.19 ms | 31.956 ms/token | **867.58 tok/s** | 9.442 s |
+
+### Tuning decision
+
+The same fixed dataset and generation contract were used for each candidate:
+
+| Candidate | c1 output | c8 output | c16 output | c32 output | c32 TTFT p50 | Result |
+|---|---:|---:|---:|---:|---:|---|
+| no MTP, 16K batch | 38.49 | 299.15 | 535.94 | 846.57 | 1,557.72 ms | stable baseline |
+| no MTP, 32K batch | 38.55 | 298.25 | 532.98 | **867.58** | **1,465.87 ms** | selected |
+| MTP-3, 16K batch | 53.16 | 279.02 | 405.18 | 654.25 | 6,300.13 ms | rejected |
+
+The 32K budget improves saturated c32 throughput by 2.5% and median TTFT by
+5.9% over 16K, while c8/c16 throughput changes by less than 1%. MTP-3 improves
+single-stream decode but loses 22.7% c32 throughput, greatly increases c32
+TTFT, consumes more graph memory, and disables sampling features including
+`min_p` and `logit_bias`; it is therefore not suitable for the general OpenAI
+API example.
+
+Two startup candidates were also rejected before serving measurement:
+
+- `FULL_AND_PIECEWISE` plus `custom_ops=["all"]` fails Qwen3.8 GDN tracing in
+  vLLM v0.23.0, so the selected graph mode is `PIECEWISE`.
+- A 65,536-token budget reaches Triton autotuning but fails with a CUDA illegal
+  memory access. The selected 32K budget is the largest fully validated value.
+
+The 32K configuration reserves capacity for 1,791,840 KV-cache tokens, or
+6.84 concurrent requests at the full 262,144-token context.
+
+### Reproducibility identity
+
+- Date: 2026-08-14 UTC (2026-08-15 JST)
+- GPU: GPU 0, NVIDIA RTX PRO 6000 Blackwell Server Edition, 97,887 MiB,
+  SM 12.0; driver 595.84, CUDA 13.2; CPU set `0-15,64-79`
+- Model revision: `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`
+- Model tree SHA-256:
+  `9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e`
+- vLLM release/source: `v0.23.0` /
+  `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`
+- vLLM image digest:
+  `sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`
+
+> Historical baseline: the measurements below are for the superseded
+> Qwen3.6/vLLM source-build example. They are retained for comparison and must
+> not be interpreted as Qwen3.8 evidence.
+
 ## Result
 
 The selected configuration uses FP8 weights and KV cache, FP16

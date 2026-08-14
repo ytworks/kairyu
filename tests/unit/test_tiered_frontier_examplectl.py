@@ -12,7 +12,7 @@ from kairyu.dsl.loader import load_spec
 from kairyu.engine.config_validation import validate_backend_options
 
 ROOT = Path(__file__).resolve().parents[2]
-EXAMPLE = ROOT / "examples/qwen3.6-deepseek-v4-8gpu"
+EXAMPLE = ROOT / "examples/qwen3.8-deepseek-v4-8gpu"
 EMBEDDING_MODEL_REPOSITORY = "Qdrant/all-MiniLM-L6-v2-onnx"
 EMBEDDING_MODEL_REVISION = "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079"
 EMBEDDING_MODEL_SHA256 = (
@@ -54,7 +54,7 @@ def test_tiered_browser_gate_requires_one_model_and_separate_reasoning_ui() -> N
         "Model:",
         "tier1",
         "tier2",
-        "qwen3.6-27b",
+        "qwen3.8-27b",
         "deepseek-v4-flash-0731-thinking",
     ):
         assert attribution in browser
@@ -74,7 +74,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     assert spec["verification"]["serving"]["auto_max_combined_max_tokens"] == 4096
     assert spec["allocation"] == {
         "tier1": {
-            "model": "qwen3.6-27b",
+            "model": "qwen3.8-27b",
             "gpu_ids": [0, 1, 2, 3],
             "replicas": 4,
             "tensor_parallel_size": 1,
@@ -96,6 +96,14 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "kairyu",
         "chat-ui",
     }
+    assert spec["vllm"]["qwen"]["release"] == "v0.23.0"
+    assert {
+        compose["services"][service]["image"]
+        for service in ("qwen-0", "qwen-1", "qwen-2", "qwen-3")
+    } == {f"${{QWEN_VLLM_IMAGE:-{spec['vllm']['qwen']['image']}}}"}
+    assert compose["services"]["deepseek"]["image"] == (
+        f"${{DEEPSEEK_VLLM_IMAGE:-{spec['vllm']['deepseek']['image']}}}"
+    )
     for index in range(4):
         service = compose["services"][f"qwen-{index}"]
         devices = service["deploy"]["resources"]["reservations"]["devices"][0]
@@ -112,7 +120,17 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
             _option(service["command"], "--default-chat-template-kwargs")
         ) == {"enable_thinking": False}
         assert _option(service["command"], "--max-num-seqs") == "32"
-        assert service["volumes"][-1]["target"] == "/root/.cache"
+        assert _option(service["command"], "--max-num-batched-tokens") == "32768"
+        assert _option(service["command"], "--kv-cache-dtype") == "fp8"
+        assert json.loads(
+            _option(service["command"], "--compilation-config")
+        ) == {"cudagraph_mode": "PIECEWISE"}
+        assert "--speculative-config" not in service["command"]
+        assert service["volumes"][-2]["target"] == "/root/.cache"
+        assert service["volumes"][-1] == (
+            "../qwen3.8-27b-1gpu/chat_template.jinja:"
+            "/etc/kairyu/qwen3.8-chat.jinja:ro"
+        )
         assert service["environment"] | {
             "XDG_CACHE_HOME": "/root/.cache",
             "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/torchinductor",
@@ -180,11 +198,11 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     deployment = load_deployment_spec(raw, resolve_credentials=False)
 
     assert set(deployment.pools) == {
-        "qwen3.6-27b",
+        "qwen3.8-27b",
         "deepseek-v4-flash-0731",
         "deepseek-v4-flash-0731-thinking",
     }
-    qwen = deployment.pools["qwen3.6-27b"]
+    qwen = deployment.pools["qwen3.8-27b"]
     assert len(qwen.replicas) == 4
     assert qwen.prefix_index is True
     assert qwen.queue_depth_threshold == 0
@@ -197,12 +215,18 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
             "allow_chat_template_kwargs": ["enable_thinking"],
         }
         assert replica.options["image_input_policy"]["max_images"] == 1
+        assert replica.options["container_image_digest"] == (
+            "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
+        )
     deepseek = deployment.pools["deepseek-v4-flash-0731"]
     assert len(deepseek.replicas) == 1
     validate_backend_options(deepseek.replicas[0].backend, deepseek.replicas[0].options)
     assert deepseek.replicas[0].options["tensor_parallel_size"] == 4
     assert deepseek.replicas[0].options["expert_parallel_size"] == 4
     assert deepseek.replicas[0].options["dspark_enabled"] is True
+    assert deepseek.replicas[0].options["container_image_digest"] == (
+        "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1"
+    )
     assert "completion_reasoning_end_tag" not in deepseek.replicas[0].options
     thinking = deployment.pools["deepseek-v4-flash-0731-thinking"]
     assert thinking.replicas[0].options["completion_reasoning_end_tag"] == "</think>"
@@ -228,7 +252,7 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         "deepseek-v4-flash-0731": "/etc/kairyu/deepseek-v4-0731.jinja",
         "deepseek-v4-flash-0731-thinking": "/etc/kairyu/deepseek-thinking.jinja",
     }
-    assert deployment.legacy_chat_models == frozenset({"qwen3.6-27b"})
+    assert deployment.legacy_chat_models == frozenset({"qwen3.8-27b"})
     assert deployment.server.max_chat_body_bytes == 16_777_216
 
 
@@ -251,9 +275,9 @@ def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
         "tier2",
         "publisher",
     ]
-    assert maximum.workers[0].engine_ref == "qwen3.6-27b"
+    assert maximum.workers[0].engine_ref == "qwen3.8-27b"
     assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
-    assert maximum.workers[2].engine_ref == "qwen3.6-27b"
+    assert maximum.workers[2].engine_ref == "qwen3.8-27b"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
@@ -367,7 +391,7 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                     "budget": {"max_steps": 11, "max_refine_depth": 2},
                     "expose_intermediate_outputs": True,
                     "configured_engines": {
-                        "tier1": {"model": "qwen3.6-27b"},
+                        "tier1": {"model": "qwen3.8-27b"},
                         "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
                     },
                 }

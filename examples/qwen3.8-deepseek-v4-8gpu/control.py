@@ -53,7 +53,7 @@ def _nvme_root() -> Path:
 def _storage_paths() -> dict[str, Path]:
     root = _nvme_root()
     environment = root / "model-volumes" / SPEC["environment"]
-    qwen_models = root / "model-volumes/qwen3.6-27b-1gpu/models"
+    qwen_models = root / "model-volumes/qwen3.8-27b-1gpu/models"
     paths = {
         "qwen_models": qwen_models,
         "deepseek_models": root / "model-volumes/deepseek-v4-flash-0731-8gpu",
@@ -95,7 +95,12 @@ def _compose_env() -> dict[str, str]:
             ),
             "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "DEEPSEEK_CACHE_PATH": str(paths["deepseek_cache"]),
-            "VLLM_IMAGE": os.environ.get("VLLM_IMAGE", SPEC["vllm"]["image"]),
+            "QWEN_VLLM_IMAGE": os.environ.get(
+                "QWEN_VLLM_IMAGE", SPEC["vllm"]["qwen"]["image"]
+            ),
+            "DEEPSEEK_VLLM_IMAGE": os.environ.get(
+                "DEEPSEEK_VLLM_IMAGE", SPEC["vllm"]["deepseek"]["image"]
+            ),
             "OPEN_WEBUI_IMAGE": os.environ.get("OPEN_WEBUI_IMAGE", SPEC["webui"]["image"]),
             "API_BIND_ADDRESS": os.environ.get("API_BIND_ADDRESS", "0.0.0.0"),
             "API_PORT": os.environ.get("API_PORT", str(SPEC["api_port"])),
@@ -207,13 +212,16 @@ def _image_exists(image: str) -> bool:
     return _run(["docker", "image", "inspect", image], capture=True, check=False).returncode == 0
 
 
-def _ensure_vllm_image(env: dict[str, str]) -> None:
-    image = env["VLLM_IMAGE"]
+def _ensure_vllm_image(env: dict[str, str], env_key: str, source: dict) -> None:
+    image = env[env_key]
     if _image_exists(image):
         return
-    source = SPEC["vllm"]
     if image != source["image"]:
-        raise SystemExit(f"VLLM_IMAGE does not exist locally: {image}")
+        raise SystemExit(f"{env_key} does not exist locally: {image}")
+    if source.get("distribution") == "upstream":
+        print("vLLM image is absent; pulling the pinned upstream release", flush=True)
+        _run(["docker", "pull", image])
+        return
     print("vLLM image is absent; building the pinned SM120 source revision", flush=True)
     _run(
         [
@@ -226,7 +234,7 @@ def _ensure_vllm_image(env: dict[str, str]) -> None:
             image,
             "--label",
             f"org.opencontainers.image.revision={source['source_revision']}",
-            f"{source['source_repository']}#{source['source_revision']}",
+            f"{source['source_repository']}#{source.get('source_ref', source['source_revision'])}",
         ]
     )
 
@@ -341,9 +349,13 @@ def _ensure_deepseek_volume(env: dict[str, str]) -> str:
 
 
 def _ensure_models(env: dict[str, str]) -> None:
-    _download_model(env["VLLM_IMAGE"], env["QWEN_MODEL_STORAGE_PATH"], SPEC["models"]["tier1"])
+    _download_model(
+        env["QWEN_VLLM_IMAGE"],
+        env["QWEN_MODEL_STORAGE_PATH"],
+        SPEC["models"]["tier1"],
+    )
     volume = _ensure_deepseek_volume(env)
-    _download_model(env["VLLM_IMAGE"], volume, SPEC["models"]["tier2"])
+    _download_model(env["DEEPSEEK_VLLM_IMAGE"], volume, SPEC["models"]["tier2"])
 
 
 def _json_url(url: str) -> dict:
@@ -450,7 +462,7 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
     if policy.get("expose_intermediate_outputs") is not True:
         raise SystemExit("Kairyu product policy must expose separate intermediate output")
     configured = policy.get("configured_engines", {})
-    if configured.get("tier1", {}).get("model") != "qwen3.6-27b":
+    if configured.get("tier1", {}).get("model") != "qwen3.8-27b":
         raise SystemExit("Kairyu Tier1 L2 worker is not bound to the Qwen L1 pool")
     if (
         configured.get("tier2", {}).get("model")
@@ -488,7 +500,8 @@ def up() -> None:
         "WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}"
     )
     _preflight(env)
-    _ensure_vllm_image(env)
+    _ensure_vllm_image(env, "QWEN_VLLM_IMAGE", SPEC["vllm"]["qwen"])
+    _ensure_vllm_image(env, "DEEPSEEK_VLLM_IMAGE", SPEC["vllm"]["deepseek"])
     _ensure_models(env)
     _run(
         [

@@ -12,7 +12,7 @@ from kairyu.entrypoints.chat_template import ChatTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "examples/deepseek-v4-flash-0731-8gpu"
-QWEN_EXAMPLE = ROOT / "examples/qwen3.6-27b-1gpu"
+QWEN_EXAMPLE = ROOT / "examples/qwen3.8-27b-1gpu"
 
 
 def _load(path: Path, name: str):
@@ -31,9 +31,15 @@ def test_examples_surface_contains_the_three_hardware_examples() -> None:
     )
     assert environments == [
         "deepseek-v4-flash-0731-8gpu",
-        "qwen3.6-27b-1gpu",
-        "qwen3.6-deepseek-v4-8gpu",
+        "qwen3.8-27b-1gpu",
+        "qwen3.8-deepseek-v4-8gpu",
     ]
+    qwen = json.loads((QWEN_EXAMPLE / "example.json").read_text())
+    deepseek = json.loads((EXAMPLE / "example.json").read_text())
+    assert qwen["vllm"]["release"] == "v0.23.0"
+    assert deepseek["vllm"]["source_revision"] == (
+        "aa0d51302747ea80f282e26949708b3253409fe2"
+    )
 
 
 def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
@@ -47,10 +53,21 @@ def test_qwen_example_is_one_gpu_kairyu_to_vllm_to_webui_on_nvme() -> None:
         "minimum_vram_mib": 90000,
     }
     assert spec["storage"]["root"].startswith("/mnt/nvme/")
+    assert {
+        key: spec["model"][key] for key in ("repo", "revision", "served_name")
+    } == {
+        "repo": "Qwen/Qwen3.8-27B-FP8",
+        "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+        "served_name": "qwen3.8-27b",
+    }
     assert spec["model"]["tree_sha256"] == (
-        "f108556571d80514a792b458de366221c9b910fe69cbd5d2525c207580cd51aa"
+        "9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e"
     )
     assert set(compose["services"]) == {"vllm", "kairyu", "chat-ui"}
+    assert spec["vllm"]["release"] == "v0.23.0"
+    assert compose["services"]["vllm"]["image"] == (
+        f"${{VLLM_IMAGE:-{spec['vllm']['image']}}}"
+    )
     webui = compose["services"]["chat-ui"]
     assert webui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
     assert json.loads(webui["environment"]["DEFAULT_MODEL_PARAMS"]) == {
@@ -82,7 +99,7 @@ def test_qwen_vllm_command_pins_the_sm120_latency_throughput_contract() -> None:
         "--mamba-cache-dtype": "float16",
         "--mamba-ssm-cache-dtype": "float16",
         "--mamba-cache-mode": "align",
-        "--max-num-batched-tokens": "16384",
+        "--max-num-batched-tokens": "32768",
         "--max-num-seqs": "32",
         "--attention-backend": "FLASHINFER",
     }
@@ -100,12 +117,15 @@ def test_qwen_vllm_command_pins_the_sm120_latency_throughput_contract() -> None:
     assert "--enable-flashinfer-autotune" in command
     assert "--enforce-eager" not in command
     assert "--speculative-config" not in command
+    assert command[command.index("--chat-template") + 1] == (
+        "/etc/kairyu/qwen3.8-chat.jinja"
+    )
     assert json.loads((QWEN_EXAMPLE / "example.json").read_text())["vllm"][
         "mtp_speculative_tokens"
     ] == 0
     assert (
         json.loads(command[command.index("--compilation-config") + 1])["cudagraph_mode"]
-        == "FULL_AND_PIECEWISE"
+        == "PIECEWISE"
     )
     assert "VLLM_USE_FASTOKENS" not in service["environment"]
 
@@ -113,8 +133,8 @@ def test_qwen_vllm_command_pins_the_sm120_latency_throughput_contract() -> None:
 def test_qwen_kairyu_l3_declares_strict_multimodal_vllm_l1() -> None:
     raw = (QWEN_EXAMPLE / "kairyu.yaml").read_text()
     spec = load_deployment_spec(raw)
-    assert set(spec.engines) == {"qwen3.6-27b"}
-    entry = spec.engines["qwen3.6-27b"]
+    assert set(spec.engines) == {"qwen3.8-27b"}
+    entry = spec.engines["qwen3.8-27b"]
     assert entry.backend == "openai"
     validate_backend_options(entry.backend, entry.options)
     assert entry.options["upstream"] == "vllm"
@@ -136,7 +156,7 @@ def test_qwen_kairyu_l3_declares_strict_multimodal_vllm_l1() -> None:
     assert entry.options["mtp_enabled"] is False
     assert spec.server.max_chat_body_bytes == 16_777_216
     assert spec.chat_templates == {}
-    assert spec.legacy_chat_models == frozenset({"qwen3.6-27b"})
+    assert spec.legacy_chat_models == frozenset({"qwen3.8-27b"})
 
 
 def test_qwen_template_defaults_chat_to_direct_and_allows_explicit_thinking() -> None:
@@ -170,6 +190,12 @@ def test_example_is_exact_eight_gpu_kairyu_to_vllm_to_webui() -> None:
         "minimum_vram_mib": 90000,
     }
     assert set(compose["services"]) == {"vllm", "kairyu", "chat-ui"}
+    assert spec["vllm"]["source_revision"] == (
+        "aa0d51302747ea80f282e26949708b3253409fe2"
+    )
+    assert compose["services"]["vllm"]["image"] == (
+        f"${{VLLM_IMAGE:-{spec['vllm']['image']}}}"
+    )
     webui = compose["services"]["chat-ui"]
     assert webui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
     assert json.loads(webui["environment"]["DEFAULT_MODEL_PARAMS"]) == {"max_tokens": 32768}
@@ -206,6 +232,10 @@ def test_vllm_command_pins_the_optimized_sm120_contract() -> None:
     assert (
         json.loads(command[command.index("--speculative-config") + 1])["num_speculative_tokens"]
         == 5
+    )
+    assert (
+        json.loads(command[command.index("--speculative-config") + 1])["method"]
+        == "dspark"
     )
     assert (
         json.loads(command[command.index("--compilation-config") + 1])["cudagraph_mode"]

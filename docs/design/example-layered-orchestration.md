@@ -1,7 +1,7 @@
 # Tiered Example Layered Orchestration
 
 Status: **Accepted; implementation in progress** (2026-08-13).
-Applies to: `examples/qwen3.6-deepseek-v4-8gpu/`.
+Applies to: `examples/qwen3.8-deepseek-v4-8gpu/`.
 
 ## Goal
 
