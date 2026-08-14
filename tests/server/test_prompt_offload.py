@@ -366,6 +366,8 @@ def test_chat_and_route_openapi_keep_typed_request_contracts():
         "ValidationError",
     ):
         assert name in schemas
+    assert "reasoning_content" in schemas["ChatMessage"]["properties"]
+    assert "provider_specific_fields" not in schemas["ChatMessage"]["properties"]
 
 
 async def test_completions_prepares_before_backend_admission_bound():

@@ -1237,6 +1237,34 @@ async def test_chat_message_alternate_prompt_carriers_are_rejected_before_dispat
     assert backend.prompts_seen == ()
 
 
+async def test_non_null_litellm_message_metadata_is_rejected_before_dispatch():
+    backend = MockBackend()
+    app = create_legacy_app(engines={"chat": backend})
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "chat",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "prior answer",
+                        "provider_specific_fields": {"reasoning_content": "work"},
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == {
+        "message": "messages[0] has unsupported fields: provider_specific_fields",
+        "type": "invalid_request_error",
+        "code": "invalid_request",
+    }
+    assert backend.prompts_seen == ()
+
+
 async def test_chat_tool_call_transcript_remains_supported():
     backend = MockBackend()
     app = create_legacy_app(engines={"chat": backend})

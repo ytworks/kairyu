@@ -106,6 +106,14 @@ v2 remains metadata-only. Other deployments retain hidden intermediates by
 default. The binding example contract is
 `docs/design/example-layered-orchestration.md`.
 
+**Assistant-history compatibility amendment (2026-08-14).** A Chat
+Completions assistant message may carry typed `reasoning_content`; Kairyu
+preserves the field for key-sensitive model templates and L2 conversation
+history so a response can be appended to the next request. Compatibility-only
+`provider_specific_fields` metadata is discarded only when null. A non-null
+value and every other unsupported message field still fail before backend
+dispatch.
+
 Typed final events retain cumulative `CompletionOutput` choices, so unary and
 SSE preserve every choice index, finish/stop reason, cumulative logprob, and
 token logprob exactly once. Tool-enabled streams buffer until every final

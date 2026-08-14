@@ -75,6 +75,31 @@ def test_public_render_prompt_rejects_unverified_special_tokens():
         render_prompt(request, {"m": template})
 
 
+def test_litellm_assistant_metadata_preserves_reasoning_only():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "prior answer",
+                    "reasoning_content": "visible work",
+                    "provider_specific_fields": None,
+                }
+            ],
+        }
+    )
+    template = ChatTemplate(
+        "{{ messages[0].reasoning_content }}|"
+        "{{ messages[0].content }}|"
+        "{{ 'provider_specific_fields' in messages[0] }}"
+    )
+
+    validated = validate_chat_input(request, {"m": template})
+
+    assert validated.prompt == "visible work|prior answer|False"
+
+
 def test_low_level_app_logs_missing_policy_at_construction(caplog):
     with caplog.at_level(logging.WARNING, logger="kairyu.entrypoints.server.app"):
         create_app({"m": MockBackend()})

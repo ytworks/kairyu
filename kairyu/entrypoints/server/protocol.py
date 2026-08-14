@@ -58,6 +58,7 @@ class ChatMessage(BaseModel):
     name: str | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, object]] | None = None
+    reasoning_content: str | None = None
 
 
 class RouteFeatures(BaseModel):
