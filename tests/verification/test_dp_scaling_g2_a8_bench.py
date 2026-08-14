@@ -941,13 +941,13 @@ def _container_provenance() -> dict[str, object]:
     source_path = "repo:kairyu"
     config_paths = {
         "replica0": (
-            "repo:bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml"
+            "repo:deploy/verification/qwen3-32b-multi-gpu/a8-replica.yaml"
         ),
         "replica1": (
-            "repo:bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml"
+            "repo:deploy/verification/qwen3-32b-multi-gpu/a8-replica.yaml"
         ),
         "gateway": (
-            "repo:bench/deploy/qwen3-32b-multi-gpu/a8-gateway.yaml"
+            "repo:deploy/verification/qwen3-32b-multi-gpu/a8-gateway.yaml"
         ),
     }
     services: dict[str, object] = {}
@@ -990,7 +990,7 @@ def _container_provenance() -> dict[str, object]:
     return {
         "project": "kairyu-qwen3-32b-a8",
         "compose_file": (
-            "repo:bench/deploy/qwen3-32b-multi-gpu/a8-compose.yaml"
+            "repo:deploy/verification/qwen3-32b-multi-gpu/a8-compose.yaml"
         ),
         "services": services,
     }
@@ -1604,7 +1604,7 @@ def test_semantic_raw_tampering_is_rejected_during_verification(
         (
             lambda rows: rows[0]["provenance"][
                 "config_file_sha256"
-            ].pop("bench/deploy/qwen3-32b-multi-gpu/a8-stack.sh"),
+            ].pop("deploy/verification/qwen3-32b-multi-gpu/a8-stack.sh"),
             "formal config source hashes are incomplete",
         ),
     ],

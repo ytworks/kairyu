@@ -619,12 +619,12 @@ def main() -> None:
     parser.add_argument(
         "--gateway-config",
         type=Path,
-        default=Path("bench/deploy/qwen3-32b-multi-gpu/auto-gateway.yaml"),
+        default=Path("deploy/verification/qwen3-32b-multi-gpu/auto-gateway.yaml"),
     )
     parser.add_argument(
         "--replica-config",
         type=Path,
-        default=Path("bench/deploy/qwen3-32b-multi-gpu/kairyu.template.yaml"),
+        default=Path("deploy/verification/qwen3-32b-multi-gpu/kairyu.template.yaml"),
     )
     parser.add_argument("--model-revision")
     parser.add_argument("--replica-image-digest")

@@ -547,7 +547,7 @@ GPU-only remainder (design m5 §4.2).
     --env-artifact \
       "$KAIRYU_ISSUE333_SOURCE/bench/results/env-2026-07-30.json" \
     --kairyu-template \
-      "$KAIRYU_ISSUE333_SOURCE/bench/deploy/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml" \
+      "$KAIRYU_ISSUE333_SOURCE/deploy/verification/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml" \
     --trace-bundle /tmp/issue-333-traces/g2-a6-traces.json \
     --work-dir /tmp/issue-333-proc-http \
     --assert-integrity
@@ -629,7 +629,7 @@ GPU-only remainder (design m5 §4.2).
   export KAIRYU_A8_IMAGE='<image-reference>'
   export KAIRYU_A8_IMAGE_ID='sha256:<64-lowercase-hex>'
   export KAIRYU_A8_RUN_DIR='bench/results/g2-a8-dp-qwen3-32b-<gpu>-<date>'
-  bench/deploy/qwen3-32b-multi-gpu/a8-stack.sh "$KAIRYU_A8_RUN_DIR" \
+  deploy/verification/qwen3-32b-multi-gpu/a8-stack.sh "$KAIRYU_A8_RUN_DIR" \
     up -d --force-recreate --wait
   curl -fsS http://127.0.0.1:8200/readyz
   curl -fsS http://127.0.0.1:8201/readyz
@@ -708,7 +708,7 @@ GPU-only remainder (design m5 §4.2).
   Stop only the scoped A8 project after evidence is safely retained:
 
   ```bash
-  bench/deploy/qwen3-32b-multi-gpu/a8-stack.sh "$KAIRYU_A8_RUN_DIR" down
+  deploy/verification/qwen3-32b-multi-gpu/a8-stack.sh "$KAIRYU_A8_RUN_DIR" down
   ```
 
 - Gate A9: retain the separate DP=2×TP4 vs TP8 goodput/TPOT crossover across
@@ -733,7 +733,7 @@ GPU-only remainder (design m5 §4.2).
   export KAIRYU_A9_IMAGE='sha256:2c73b577b5213264493c6aeba24c1f6318214d20bf6df7780158fd1ef2c70a50'
   export KAIRYU_A9_IMAGE_ID="$KAIRYU_A9_IMAGE"
   export KAIRYU_A9_RUN_DIR='bench/results/g2-a9-dp-tp-qwen3-32b-rtxpro6000-<date>'
-  bench/deploy/qwen3-32b-multi-gpu/a9-tp8-stack.sh "$KAIRYU_A9_RUN_DIR" \
+  deploy/verification/qwen3-32b-multi-gpu/a9-tp8-stack.sh "$KAIRYU_A9_RUN_DIR" \
     up -d --force-recreate --wait
   curl -fsS http://127.0.0.1:8300/readyz
   curl -fsS http://127.0.0.1:8301/readyz
@@ -805,7 +805,7 @@ GPU-only remainder (design m5 §4.2).
   Stop only this scoped project after retaining and replaying the artifact:
 
   ```bash
-  bench/deploy/qwen3-32b-multi-gpu/a9-tp8-stack.sh "$KAIRYU_A9_RUN_DIR" down
+  deploy/verification/qwen3-32b-multi-gpu/a9-tp8-stack.sh "$KAIRYU_A9_RUN_DIR" down
   ```
 
   The PCIe per-class DP×1/PP=2/TP=2 placement report is not fabricated by
@@ -921,8 +921,8 @@ image, and drill are unchanged.
   docker image inspect \
     --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
     "$KAIRYU_F2C_IMAGE"
-  bench/deploy/qwen3-32b-multi-gpu/f2c-stack.sh config
-  bench/deploy/qwen3-32b-multi-gpu/f2c-stack.sh up -d --wait
+  deploy/verification/qwen3-32b-multi-gpu/f2c-stack.sh config
+  deploy/verification/qwen3-32b-multi-gpu/f2c-stack.sh up -d --wait
   curl -fsS http://127.0.0.1:8100/readyz
   curl -fsS http://127.0.0.1:8101/readyz
   curl -fsS http://127.0.0.1:8102/readyz
@@ -956,7 +956,7 @@ image, and drill are unchanged.
     --verify-artifact bench/results/f2c-kv-aware-ttft-qwen3-32b-<date> \
     --assert-gate
 
-  bench/deploy/qwen3-32b-multi-gpu/f2c-stack.sh down
+  deploy/verification/qwen3-32b-multi-gpu/f2c-stack.sh down
   ```
 
   A trace namespace is single-use for a live cache set. Choose a new

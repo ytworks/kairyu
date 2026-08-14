@@ -16,7 +16,7 @@ official DeepSeek-V4 text prompt and sends the pre-rendered prompt to vLLM's
 text-only checkpoint template, so Open WebUI's built-in tool declarations do
 not block ordinary questions. Model-side function-tool execution is not
 provided by this example. Ordinary UI requests default to direct chat mode;
-an explicit `reasoning_effort` selects thinking mode for accuracy runs. Open
+an explicit `reasoning_effort` selects thinking mode for reasoning-intensive calls. Open
 WebUI defaults model output to 32,768 tokens so normal answers are not cut into
 manual **Continue Response** steps.
 The official MegaMoE recommendation is not used: the pinned implementation
@@ -44,32 +44,22 @@ The first build/download is large. Later starts use the content attestation.
 Set `VERIFY_MODEL=1` to rehash every checkpoint file. Lifecycle commands are
 `./run.sh up`, `./run.sh status`, `./run.sh logs`, and `./run.sh down`.
 
-## Benchmarks
+## Serving verification
 
 ```sh
-./bench.sh list
-./bench.sh serving
-./bench.sh livecodebench
-./bench.sh all
+./verify.sh list
+./verify.sh serving
 ```
 
-`serving` records measured TTFT, TPOT, requests/s, and output tokens/s for a
-fixed approximately 8K-token input and exactly 256 generated tokens at
-concurrency 1, 8, 16, and 32. `livecodebench` runs the pinned complete
-`release_v6`: all 1,055 problems, pass@1, with generated code isolated in a
-content-addressed Docker executor. It uses DeepSeek's agentic recommendation
-(`temperature=1.0`, `top_p=0.95`, `reasoning_effort=max`) and has no limit or
-smoke flag. `all` runs both and continues far enough to finalize evidence after
-an individual failure.
+`serving` records TTFT, TPOT, requests/s, and output tokens/s for a fixed
+approximately 8K-token input and exactly 256 generated tokens at concurrency
+1, 8, 16, and 32. Artifacts go to
+`verification/results/examples/deepseek-v4-flash-0731-8gpu/<UTC-run-id>/`.
 
-Artifacts go to
-`bench/results/examples/deepseek-v4-flash-0731-8gpu/<UTC-run-id>/`.
-
-The locked local results are in [MEASUREMENTS.md](MEASUREMENTS.md). The warm
-serving run reached 168.01 output tokens/s with 220.10 ms median TTFT at
-concurrency 1 and 972.93 output tokens/s at concurrency 32. The complete
-1,055-problem LiveCodeBench run scored 759/1,055 (71.9431% pass@1), with 1,055
-measured requests and no transport, retry, or measurement failures.
+The locked serving results are in [MEASUREMENTS.md](MEASUREMENTS.md). The warm
+run reached 168.01 output tokens/s with 220.10 ms median TTFT at concurrency 1
+and 972.93 output tokens/s at concurrency 32. Model and product evaluations are
+invoked explicitly through `python -m evals`.
 
 ## Public performance context
 

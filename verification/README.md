@@ -876,52 +876,19 @@ or GPU result. The complete contract is in
 `docs/design/issue-360-batch-invariance.md`; the exact capture commands are in
 `docs/gpu-runbook.md` §9.8d.
 
-## Fixtures, results, and wheel verification
+## Results and package boundary
 
-The 17 installed benchmark stand-ins are synthetic plumbing inputs, never
-substitutes for publishable benchmark measurements. The package also contains
-the fixed five-row structured-output conformance corpus and the separately
-licensed published-gold judge-calibration corpus, for 19 JSONL resources total:
+New verification runs write to ignored paths below `verification/results/`;
+retained formal evidence may instead bind an explicit legacy `bench/results/`
+path. Existing tracked files below `bench/results/` are immutable migration
+inputs and are not moved or rewritten. Neutral serialization, hashing, and
+reporting contracts live in `evidence/`.
 
-```text
-charxiv-reasoning.jsonl
-gsm8k.jsonl
-gpqa-diamond.jsonl
-hle.jsonl
-ifeval.jsonl
-judge-calibration.jsonl
-livecodebench-pro.jsonl
-livecodebench.jsonl
-long-context-reasoning.jsonl
-mmlu.jsonl
-mrcr-v2.jsonl
-ruler-niah-128k.jsonl
-ruler-niah-16k.jsonl
-ruler-niah-32k.jsonl
-ruler-niah-4k.jsonl
-ruler-niah-64k.jsonl
-ruler-niah-8k.jsonl
-scicode.jsonl
-structured-output.jsonl
-```
-
-The structured corpus is score-bearing package data rather than an offline
-stand-in. Its exact bytes are checked against its package SHA-256 before every
-load. That content digest is not an HF Git pin: downloaded benchmark datasets
-use immutable repository commit revisions to identify their upstream snapshot,
-while the package digest identifies the exact JSONL bytes installed in the
-wheel.
-
-Routine measurements go under `bench/results/` and remain ignored. Retain an
-artifact only when a goal or design decision explicitly requires reviewable
-evidence, and retain its complete config/provenance rather than an isolated
-summary number.
-
-The packaging gate builds a real wheel, inspects its contents, and imports it
-from an isolated temporary directory. It proves that the console dispatch,
-entrypoint manifest, all 19 fixtures, the LLMBar license, and the vendored
-IFEval `LICENSE`/`NOTICE` are present, while the top-level `bench/`,
-`bench/results/`, and `tests/` trees are absent:
+Evaluation fixtures and suite policy belong to checkout-only `evals/`, not to
+verification or the product wheel. The packaging gate builds a real wheel,
+inspects its contents, and imports it from an isolated temporary directory. It
+proves that the product CLI is present while the top-level `bench/`, `evals/`,
+`evidence/`, `verification/`, and `tests/` trees are absent:
 
 ```bash
 uv run --frozen python scripts/verify_verification_registry.py
@@ -929,7 +896,6 @@ uv run --frozen python scripts/verify_bench_results_index.py
 uv run --frozen python scripts/verify_bench_wheel.py
 ```
 
-The first command separately exercises all 66 registered wrappers through
-their 130 declared `--help` forms. It runs once in CI, on Python 3.12, after the
-declared development dependencies are synced, without duplicating those
-subprocesses in every portable test cell.
+The registry check exercises each declared wrapper through its registered
+`--help` forms. The results-index check preserves legacy discovery without
+mutating tracked artifacts.

@@ -134,32 +134,12 @@ the single `orchestrator=` kwarg): `kairyu-auto` (default tier) and
 `kairyu-auto-max` (deep tier: bigger budget, MoA enabled) are just two
 configured Orchestrator instances listed in /v1/models.
 
-**Production proof amendment (2026-07-27, issue #198).** `OrchestratorSpec`
-now exposes bounded `moa_samples`, so declarative YAML can actually select MoA
-instead of merely giving an identical Conductor a deeper budget. The
-Qwen3-32B TP8 DeploymentSpec serves direct, standard AUTO, and max AUTO
+**Production proof amendment (2026-07-27, issues #198/#208).**
+`OrchestratorSpec` exposes bounded `moa_samples`, so declarative YAML can select
+MoA. The Qwen3-32B TP8 deployment serves direct, standard AUTO, and max AUTO
 together. Twelve alternating direct/standard pairs measured standard/direct
-TTFT at 1.0207x p50 and 0.9674x p99. On a fixed seed-198 eight-item
-LiveCodeBench release-v6 slice restricted before execution to prompts routed
-to `multi_agent`, max scored 2/8 versus standard 0/8. Max also consumed 32
-internal calls, 33,573 input + 12,186 output tokens, and 1,549.6 allocated
-GPU-seconds versus standard's 44 calls, 47,152 + 13,217 tokens, and 2,602.8
-GPU-seconds. This small fixed subset closes the product gate but is not a
-full-suite accuracy claim; that dated raw artifact records the then-open issue
-#208 sampling caveat.
-
-**Request-intent revalidation (2026-07-28, issue #208).** The identical TP8
-deployment and fixed slice were rerun after request propagation. Twelve
-alternating pairs measured standard/direct TTFT at 1.0123x p50 and 0.7666x
-p99. With public `temperature=0` and final `max_tokens=8192`, max scored 3/8
-versus standard 1/8. Max used 32 calls, 34,038 input + 13,228 output tokens,
-and 1,499.274 allocated GPU-seconds; standard used 38 calls, 37,803 + 12,701
-tokens, and 2,567.389 GPU-seconds. The selected 1024-token private cap also
-outperformed the uncapped interpretation operationally: the latter exceeded
-an internal 60 s backend timeout and returned 502 on item `abc382_g`, while the
-bounded run completed that same Max item in 47.68 s and passed the full gate.
-The 0.25 quality delta is preserved with no effective-sampling caveat in
-`bench/results/tiered-auto-qwen3-32b-tp8-2026-07-28.json`.
+TTFT at 1.0123x p50 and 0.7666x p99 after request-intent propagation. This
+serving envelope remains a verification gate; product evaluation is separate.
 
 ### D3 — Tenancy v1
 

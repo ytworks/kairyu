@@ -56,16 +56,16 @@ DEFAULT_COHORT_B_ENDPOINTS = (
     "http://127.0.0.1:8103/v1",
 )
 DEFAULT_CONFIG_PATHS = (
-    "bench/deploy/qwen3-32b-multi-gpu/f2c-compose.yaml",
-    "bench/deploy/qwen3-32b-multi-gpu/f2c-replica.yaml",
-    "bench/deploy/qwen3-32b-multi-gpu/f2c-stack.sh",
+    "deploy/verification/qwen3-32b-multi-gpu/f2c-compose.yaml",
+    "deploy/verification/qwen3-32b-multi-gpu/f2c-replica.yaml",
+    "deploy/verification/qwen3-32b-multi-gpu/f2c-stack.sh",
 )
 _LEGACY_CONFIG_PATHS = tuple(
     path.replace(
         "verification/fleet/performance/kv_aware_ttft_f2c_bench.py",
         "bench/kv_aware_ttft_f2c_bench.py",
     ).replace(
-        "bench/deploy/qwen3-32b-multi-gpu/",
+        "deploy/verification/qwen3-32b-multi-gpu/",
         "examples/qwen3-32b-multi-gpu/",
     )
     for path in DEFAULT_CONFIG_PATHS
@@ -94,9 +94,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SOURCE_PATHS = (
     "verification/fleet/performance/kv_aware_ttft_f2c_bench.py",
     "Dockerfile.cuda",
-    "bench/deploy/qwen3-32b-multi-gpu/f2c-compose.yaml",
-    "bench/deploy/qwen3-32b-multi-gpu/f2c-replica.yaml",
-    "bench/deploy/qwen3-32b-multi-gpu/f2c-stack.sh",
+    "deploy/verification/qwen3-32b-multi-gpu/f2c-compose.yaml",
+    "deploy/verification/qwen3-32b-multi-gpu/f2c-replica.yaml",
+    "deploy/verification/qwen3-32b-multi-gpu/f2c-stack.sh",
     "bench/results/env-2026-07-25.json",
     "bench/results/parity-tp-qwen3-32b-2026-07-26.json",
     "bench/results/hf-reference-qwen3-32b.json",
@@ -114,7 +114,7 @@ _LEGACY_SOURCE_PATHS = tuple(
         "verification/fleet/performance/kv_aware_ttft_f2c_bench.py",
         "bench/kv_aware_ttft_f2c_bench.py",
     ).replace(
-        "bench/deploy/qwen3-32b-multi-gpu/",
+        "deploy/verification/qwen3-32b-multi-gpu/",
         "examples/qwen3-32b-multi-gpu/",
     )
     for path in _SOURCE_PATHS

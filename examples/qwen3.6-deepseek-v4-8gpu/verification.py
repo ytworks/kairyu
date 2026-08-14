@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent/all serving, L2 orchestration, and Terminal-Bench 2.1 runner."""
+"""Verifier-gated L2 product serving verification."""
 
 from __future__ import annotations
 
@@ -32,16 +32,9 @@ STORAGE_ROOT = _nvme_root()
 ENVIRONMENT_STORAGE = STORAGE_ROOT / "model-volumes" / SPEC["environment"]
 RESULTS_ROOT = Path(
     os.environ.get(
-        "BENCH_RESULTS_ROOT",
-        ENVIRONMENT_STORAGE / "bench-results",
+        "VERIFICATION_RESULTS_ROOT",
+        ENVIRONMENT_STORAGE / "verification-results",
     )
-)
-TERMINAL_BENCH_DATASET = ENVIRONMENT_STORAGE / "bench-data/terminal-bench-2-1"
-BENCHMARKS = (
-    "serving-auto-max",
-    "charxiv",
-    "terminalbench-pilot",
-    "terminalbench",
 )
 
 
@@ -79,43 +72,6 @@ def _ensure_environment(no_start: bool) -> None:
     if not no_start:
         _run([sys.executable, str(HERE / "control.py"), "up"])
 
-
-def _terminalbench_dataset(run_dir: Path) -> Path:
-    expected = int(SPEC["benchmarks"]["terminalbench"]["dataset_tasks"])
-
-    def task_count() -> int:
-        if not TERMINAL_BENCH_DATASET.is_dir():
-            return 0
-        return sum(
-            (path / "task.toml").is_file()
-            for path in TERMINAL_BENCH_DATASET.iterdir()
-            if path.is_dir()
-        )
-
-    if task_count() != expected:
-        TERMINAL_BENCH_DATASET.parent.mkdir(parents=True, exist_ok=True)
-        code = _run(
-            [
-                "harbor",
-                "dataset",
-                "download",
-                SPEC["benchmarks"]["terminalbench"]["dataset"],
-                "--output-dir",
-                str(TERMINAL_BENCH_DATASET.parent),
-                "--export",
-                "--overwrite",
-            ],
-            log=run_dir / "terminalbench-dataset-download.log",
-            check=False,
-        )
-        if code:
-            raise RuntimeError(f"Harbor dataset download failed with exit code {code}")
-    observed = task_count()
-    if observed != expected:
-        raise RuntimeError(
-            f"Terminal-Bench dataset has {observed} tasks; expected exactly {expected}"
-        )
-    return TERMINAL_BENCH_DATASET
 
 
 def _serving_dataset(
@@ -234,7 +190,7 @@ def _serving(
     warmup_requests: int | None = None,
     natural_completion: bool = False,
 ) -> int:
-    config = SPEC["benchmarks"]["serving"]
+    config = SPEC["verification"]["serving"]
     requests = int(config["requests_per_concurrency"])
     output_tokens = int(config["output_tokens"])
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -389,281 +345,6 @@ def serving_auto_max(run_dir: Path) -> int:
     )
 
 
-def charxiv(run_dir: Path) -> int:
-    config = SPEC["benchmarks"]["charxiv"]
-    base_url = f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1"
-    judge_base_url = os.environ.get(
-        "JUDGE_BASE_URL",
-        f"http://127.0.0.1:{os.environ.get('DEEPSEEK_L1_PORT', 8005)}/v1",
-    )
-    model = SPEC["orchestration"]["auto_max_model"]
-    command = [
-        str(ROOT / ".venv/bin/python"),
-        "-m",
-        "kairyu.entrypoints.cli",
-        "bench",
-        "run",
-        "--base-url",
-        base_url,
-        "--model",
-        model,
-        "--served-config-label",
-        "rtx-pro-6000-blackwell-8x-qwen-vlm-deepseek-auto-max",
-        "--served-config-sha256",
-        _served_config_sha256(),
-        "--max-context-tokens",
-        str(SPEC["models"]["tier1"]["max_context_tokens"]),
-        "--max-output-tokens",
-        str(config["max_output_tokens"]),
-        "--request-timeout-s",
-        "86400",
-        "--extra-body",
-        json.dumps(config["extra_body"], separators=(",", ":")),
-        "--judge-base-url",
-        judge_base_url,
-        "--judge-model",
-        os.environ.get("JUDGE_MODEL", SPEC["models"]["tier2"]["served_name"]),
-        "--suite",
-        "accuracy",
-        "--only",
-        "charxiv-reasoning",
-        "--limit",
-        str(config["problems"]),
-        "--seed",
-        str(config["seed"]),
-        "--attempts",
-        str(config["attempts"]),
-        "--concurrency",
-        str(config["concurrency"]),
-        "--results-dir",
-        str(run_dir),
-        "--run-id",
-        "charxiv-10",
-        "--no-progress",
-    ]
-    code = _run(command, log=run_dir / "charxiv.log", check=False)
-    if code:
-        return code
-    return _validate_charxiv(run_dir, model=model)
-
-
-def _validate_charxiv(run_dir: Path, *, model: str) -> int:
-    scoreboard_path = run_dir / "charxiv-10" / "scoreboard.json"
-    try:
-        scoreboard = json.loads(scoreboard_path.read_text(encoding="utf-8"))
-        cell = scoreboard["cells"]["charxiv-reasoning"][model]
-        performance = cell["performance"]
-    except (KeyError, OSError, TypeError, ValueError) as error:
-        print(f"invalid CharXiv scoreboard: {error}", file=sys.stderr)
-        return 1
-
-    expected = int(SPEC["benchmarks"]["charxiv"]["problems"])
-    complete = (
-        cell.get("status") == "completed"
-        and cell.get("n") == expected
-        and cell.get("n_scored") == expected
-        and performance.get("requests") == expected
-        and performance.get("errors") == 0
-        and performance.get("unmeasured_requests") == 0
-    )
-    if not complete:
-        print(
-            "CharXiv did not produce complete 10-item evidence: "
-            f"status={cell.get('status')!r}, n={cell.get('n')!r}, "
-            f"n_scored={cell.get('n_scored')!r}, "
-            f"requests={performance.get('requests')!r}, "
-            f"errors={performance.get('errors')!r}, "
-            f"unmeasured={performance.get('unmeasured_requests')!r}",
-            file=sys.stderr,
-        )
-        return 1
-    return 0
-
-
-def _terminalbench_run(
-    run_dir: Path,
-    *,
-    models: tuple[str, ...],
-    run_id: str,
-    served_label: str,
-    tasks: tuple[str, ...] = (),
-) -> int:
-    config = SPEC["benchmarks"]["terminalbench"]
-    dataset = _terminalbench_dataset(run_dir)
-    command = [
-        str(ROOT / ".venv/bin/python"),
-        "-m",
-        "kairyu.entrypoints.cli",
-        "bench",
-        "run",
-        "--base-url",
-        f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1",
-        *[part for model in models for part in ("--model", model)],
-        "--served-config-label",
-        served_label,
-        "--served-config-sha256",
-        _served_config_sha256(),
-        "--no-vision",
-        "--max-context-tokens",
-        str(SPEC["models"]["tier1"]["max_context_tokens"]),
-        "--max-output-tokens",
-        str(config["max_output_tokens"]),
-        "--request-timeout-s",
-        "86400",
-        "--suite",
-        "accuracy",
-        "--only",
-        "terminal-bench",
-        "--attempts",
-        str(config["attempts"]),
-        "--concurrency",
-        str(config["concurrency"]),
-        "--results-dir",
-        str(run_dir),
-        "--run-id",
-        run_id,
-        *(["--limit", str(len(tasks))] if tasks else []),
-        "--no-progress",
-    ]
-    env = dict(os.environ)
-    env["KAIRYU_TERMINAL_BENCH_PATH"] = str(dataset)
-    if tasks:
-        env["KAIRYU_TERMINAL_BENCH_TASKS"] = ",".join(tasks)
-    else:
-        env.pop("KAIRYU_TERMINAL_BENCH_TASKS", None)
-    code = _run(
-        command,
-        log=run_dir / "terminalbench.log",
-        check=False,
-        env=env,
-    )
-    if code:
-        return code
-    return _validate_terminalbench(
-        run_dir,
-        run_id=run_id,
-        models=models,
-        expected_tasks=(len(tasks) if tasks else int(config["dataset_tasks"])),
-    )
-
-
-def terminalbench_pilot(run_dir: Path) -> int:
-    config = SPEC["benchmarks"]["terminalbench"]
-    return _terminalbench_run(
-        run_dir,
-        models=tuple(config["pilot_models"]),
-        run_id="terminalbench-2.1-pilot",
-        served_label=(
-            "rtx-pro-6000-blackwell-8x-vllm-qwen-tp1x4-"
-            "deepseek-tp4-ep4-quality-pilot"
-        ),
-        tasks=tuple(config["pilot_tasks"]),
-    )
-
-
-def terminalbench(run_dir: Path) -> int:
-    # No task filter or limit: Harbor receives all 89 locally pinned tasks.
-    # Unsupported sampling knobs are deliberately omitted at this boundary.
-    return _terminalbench_run(
-        run_dir,
-        models=(SPEC["orchestration"]["auto_max_model"],),
-        run_id="terminalbench-2.1",
-        served_label=(
-            "rtx-pro-6000-blackwell-8x-vllm-qwen-tp1x4-"
-            "deepseek-tp4-ep4-auto-max-selected"
-        ),
-    )
-
-
-def _validate_terminalbench(
-    run_dir: Path,
-    *,
-    run_id: str,
-    models: tuple[str, ...],
-    expected_tasks: int,
-) -> int:
-    scoreboard_path = run_dir / run_id / "scoreboard.json"
-    try:
-        scoreboard = json.loads(scoreboard_path.read_text(encoding="utf-8"))
-    except (KeyError, OSError, TypeError, ValueError) as error:
-        print(f"invalid Terminal-Bench scoreboard: {error}", file=sys.stderr)
-        return 1
-    result_paths = tuple((run_dir / run_id).glob("terminal-bench--*/*.json"))
-    raw_results: dict[str, dict] = {}
-    try:
-        for path in result_paths:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            target = payload.get("target")
-            if isinstance(target, str):
-                if target in raw_results:
-                    raise ValueError(f"duplicate raw result for {target}")
-                raw_results[target] = payload
-    except (OSError, TypeError, ValueError) as error:
-        print(f"invalid Terminal-Bench raw result: {error}", file=sys.stderr)
-        return 1
-    for model in models:
-        try:
-            cell = scoreboard["cells"]["terminal-bench"][model]
-        except (KeyError, TypeError) as error:
-            print(f"Terminal-Bench has no cell for {model}: {error}", file=sys.stderr)
-            return 1
-        complete = (
-            cell.get("status") == "completed"
-            and isinstance(cell.get("score"), (int, float))
-            and cell.get("n") == expected_tasks
-            and cell.get("n_scored") == expected_tasks
-        )
-        if not complete:
-            print(
-                f"Terminal-Bench did not produce complete evidence for {model}: "
-                f"status={cell.get('status')!r}, n={cell.get('n')!r}, "
-                f"n_scored={cell.get('n_scored')!r}, score={cell.get('score')!r}",
-                file=sys.stderr,
-            )
-            return 1
-        result = raw_results.get(model)
-        if result is None:
-            print(f"Terminal-Bench has no raw result for {model}", file=sys.stderr)
-            return 1
-        metrics = result.get("metrics")
-        items = result.get("items")
-        source_identity = result.get("source_identity")
-        raw_complete = (
-            result.get("status") == "completed"
-            and isinstance(metrics, dict)
-            and metrics.get("n_total") == expected_tasks
-            and metrics.get("n_scored") == expected_tasks
-            and metrics.get("n_unjudged") == 0
-            and metrics.get("n_skipped") == 0
-            and metrics.get("n_failed") == 0
-            and isinstance(source_identity, dict)
-            and source_identity.get("source_tree_clean") is True
-            and isinstance(items, list)
-            and len(items) == expected_tasks
-            and all(
-                isinstance(item, dict)
-                and item.get("status") == "completed"
-                and isinstance(item.get("score"), (int, float))
-                and item.get("error") is None
-                for item in items
-            )
-        )
-        if not raw_complete:
-            clean_source = (
-                source_identity.get("source_tree_clean")
-                if isinstance(source_identity, dict)
-                else None
-            )
-            print(
-                f"Terminal-Bench raw evidence is incomplete for {model}: "
-                f"status={result.get('status')!r}, metrics={metrics!r}, "
-                f"items={len(items) if isinstance(items, list) else None!r}, "
-                f"clean={clean_source!r}",
-                file=sys.stderr,
-            )
-            return 1
-    return 0
-
 
 def _served_config_sha256() -> str:
     digest = hashlib.sha256()
@@ -685,49 +366,41 @@ def _served_config_sha256() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("benchmark", choices=(*BENCHMARKS, "all", "list"))
+    parser.add_argument("verification", choices=("serving-auto-max", "list"))
     parser.add_argument("--run-id")
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
-    if args.benchmark == "list":
+    if args.verification == "list":
         print("serving-auto-max  verifier-gated product DAG serving matrix")
-        print("charxiv          deterministic 10-item vision and judge run")
-        print("terminalbench-pilot  four-task product-model pilot")
-        print("terminalbench     complete Terminal-Bench 2.1, terminus-2, 500 turns")
-        print("all               every benchmark above, continuing after failures")
         return
 
     _ensure_environment(args.no_start)
     run_dir = RESULTS_ROOT / (args.run_id or _run_id())
     run_dir.mkdir(parents=True, exist_ok=True)
-    selected = BENCHMARKS if args.benchmark == "all" else (args.benchmark,)
+    target_dir = run_dir / "serving-auto-max"
     manifest = {
         "schema_version": 1,
         "run_id": run_dir.name,
         "started_at": datetime.now(UTC).isoformat(),
-        "requested": args.benchmark,
-        "selected": list(selected),
+        "requested": args.verification,
         "served_config_sha256": _served_config_sha256(),
         "spec": SPEC,
     }
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-    results: dict[str, int] = {}
-    for name in selected:
-        try:
-            function = globals()[name.replace("-", "_")]
-            results[name] = function(run_dir / name)
-        except Exception as error:
-            print(f"{name} failed: {error}", file=sys.stderr)
-            results[name] = 1
+    try:
+        code = serving_auto_max(target_dir)
+    except Exception as error:
+        print(f"serving-auto-max failed: {error}", file=sys.stderr)
+        code = 1
     manifest["completed_at"] = datetime.now(UTC).isoformat()
-    manifest["exit_codes"] = results
+    manifest["exit_codes"] = {"serving-auto-max": code}
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     print(f"artifacts: {run_dir}")
-    raise SystemExit(1 if any(results.values()) else 0)
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":

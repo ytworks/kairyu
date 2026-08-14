@@ -140,10 +140,10 @@ COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 SSE_PREFIX = "data: "
 CONFIG_PATHS = (
     Path("verification/l1/performance/dp_scaling_g2_a8_bench.py"),
-    Path("bench/deploy/qwen3-32b-multi-gpu/a8-compose.yaml"),
-    Path("bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml"),
-    Path("bench/deploy/qwen3-32b-multi-gpu/a8-gateway.yaml"),
-    Path("bench/deploy/qwen3-32b-multi-gpu/a8-stack.sh"),
+    Path("deploy/verification/qwen3-32b-multi-gpu/a8-compose.yaml"),
+    Path("deploy/verification/qwen3-32b-multi-gpu/a8-replica.yaml"),
+    Path("deploy/verification/qwen3-32b-multi-gpu/a8-gateway.yaml"),
+    Path("deploy/verification/qwen3-32b-multi-gpu/a8-stack.sh"),
 )
 CHECKPOINT_HASH_SCRIPT = r"""
 import concurrent.futures
@@ -700,7 +700,7 @@ def _validate_container_provenance(value: object, image_id: str) -> None:
     _require(value.get("project") == "kairyu-qwen3-32b-a8", "compose project mismatch")
     compose_file = value.get("compose_file")
     legacy_prefix = "repo:examples/qwen3-32b-multi-gpu"
-    current_prefix = "repo:bench/deploy/qwen3-32b-multi-gpu"
+    current_prefix = "repo:deploy/verification/qwen3-32b-multi-gpu"
     _require(
         compose_file
         in {
@@ -942,10 +942,10 @@ def _validate_provenance(value: object) -> dict[str, object]:
     config_hashes = provenance.get("config_file_sha256")
     current_config_paths = {
         "verification/l1/performance/dp_scaling_g2_a8_bench.py",
-        "bench/deploy/qwen3-32b-multi-gpu/a8-compose.yaml",
-        "bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml",
-        "bench/deploy/qwen3-32b-multi-gpu/a8-gateway.yaml",
-        "bench/deploy/qwen3-32b-multi-gpu/a8-stack.sh",
+        "deploy/verification/qwen3-32b-multi-gpu/a8-compose.yaml",
+        "deploy/verification/qwen3-32b-multi-gpu/a8-replica.yaml",
+        "deploy/verification/qwen3-32b-multi-gpu/a8-gateway.yaml",
+        "deploy/verification/qwen3-32b-multi-gpu/a8-stack.sh",
     }
     legacy_config_paths = {
         "bench/dp_scaling_g2_a8_bench.py",
@@ -2142,7 +2142,7 @@ def _docker_stack_provenance(
     evidence_dir: Path,
 ) -> dict[str, object]:
     compose_path = Path(
-        "bench/deploy/qwen3-32b-multi-gpu/a8-compose.yaml"
+        "deploy/verification/qwen3-32b-multi-gpu/a8-compose.yaml"
     ).resolve()
     compose_prefix = (
         "docker",
@@ -2170,13 +2170,13 @@ def _docker_stack_provenance(
     expected_source = str(Path("kairyu").resolve())
     expected_configs = {
         "replica0": str(
-            Path("bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml").resolve()
+            Path("deploy/verification/qwen3-32b-multi-gpu/a8-replica.yaml").resolve()
         ),
         "replica1": str(
-            Path("bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml").resolve()
+            Path("deploy/verification/qwen3-32b-multi-gpu/a8-replica.yaml").resolve()
         ),
         "gateway": str(
-            Path("bench/deploy/qwen3-32b-multi-gpu/a8-gateway.yaml").resolve()
+            Path("deploy/verification/qwen3-32b-multi-gpu/a8-gateway.yaml").resolve()
         ),
     }
     services: dict[str, object] = {}
@@ -2323,9 +2323,9 @@ def _docker_stack_provenance(
         normalized_sources = {
             "/app/kairyu": "repo:kairyu",
             "/etc/kairyu/config.yaml": (
-                "repo:bench/deploy/qwen3-32b-multi-gpu/a8-gateway.yaml"
+                "repo:deploy/verification/qwen3-32b-multi-gpu/a8-gateway.yaml"
                 if service == "gateway"
-                else "repo:bench/deploy/qwen3-32b-multi-gpu/a8-replica.yaml"
+                else "repo:deploy/verification/qwen3-32b-multi-gpu/a8-replica.yaml"
             ),
             "/models": "volume:kairyu-qwen3-32b_qwen3-32b",
             "/evidence": "artifact:run-dir",
@@ -2353,7 +2353,7 @@ def _docker_stack_provenance(
         }
     return {
         "project": "kairyu-qwen3-32b-a8",
-        "compose_file": "repo:bench/deploy/qwen3-32b-multi-gpu/a8-compose.yaml",
+        "compose_file": "repo:deploy/verification/qwen3-32b-multi-gpu/a8-compose.yaml",
         "services": services,
     }
 

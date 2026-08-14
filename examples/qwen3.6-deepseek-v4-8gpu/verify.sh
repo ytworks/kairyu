@@ -9,4 +9,4 @@ PATH="$venv_bin:$PATH"
 TMPDIR="$bench_tmp"
 export PATH
 export TMPDIR
-exec "$venv_bin/python" "$here/benchmark.py" "$@"
+exec "$venv_bin/python" "$here/verification.py" "$@"

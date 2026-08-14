@@ -10,7 +10,7 @@ engines:
     options:
       model_path: /models/qwen3-32b
       tensor_parallel_size: __TENSOR_PARALLEL_SIZE__
-      # Eight concurrent LiveCodeBench requests may each generate up to 8,192
+      # Eight concurrent long-generation requests may each generate up to 8,192
       # tokens. 1,024 pages held only 16,384 tokens in total, so decode exhausted
       # the KV pool and every running request waited forever for space none could
       # release. 8,192 pages cover that declared benchmark concurrency plus

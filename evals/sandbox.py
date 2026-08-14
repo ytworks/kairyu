@@ -32,5 +32,5 @@ def run_python(
 
 
 def has_module(name: str) -> bool:
-    """Can the sandbox interpreter import `name`? (numpy for SciCode, etc.)"""
+    """Can the sandbox interpreter import `name`? (for an explicitly required scorer dependency)"""
     return _LOCAL_RUNNER.has_module(name)

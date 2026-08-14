@@ -32,23 +32,12 @@
   },
   "api_port": 8002,
   "model_volume": "kairyu-models-deepseek-v4-flash-0731-8gpu",
-  "benchmarks": {
+  "verification": {
     "serving": {
       "prompt_tokens_approx": 8192,
       "output_tokens": 256,
       "concurrency": [1, 8, 16, 32],
       "requests_per_concurrency": 32
-    },
-    "livecodebench": {
-      "release": "release_v6",
-      "problems": 1055,
-      "reasoning_effort": "max",
-      "temperature": 1.0,
-      "top_p": 0.95,
-      "max_output_tokens": 32768,
-      "concurrency": 16,
-      "seed": 0,
-      "attempts": 1
     }
   }
 }

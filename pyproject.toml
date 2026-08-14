@@ -137,7 +137,7 @@ norecursedirs = [".git", ".tox", ".venv", "build"]
 markers = [
     "gpu: requires CUDA hardware (runs on deploy day via scripts/gpu_gates)",
     "hf_hub: downloads real weights from the HF Hub (opt-in, networked)",
-    "docker_exec: requires Docker and a pinned KAIRYU_BENCH_EXEC_IMAGE",
+    "docker_exec: requires Docker and a pinned KAIRYU_EXEC_IMAGE",
     "helm: requires the Helm executable (runs in the kind CI job)",
     "postgres: requires KAIRYU_TEST_POSTGRES_DSN for a real PostgreSQL server",
     "vllm: requires an installed real vLLM package",

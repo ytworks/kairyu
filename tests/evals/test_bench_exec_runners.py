@@ -21,7 +21,7 @@ from evals.execution import (
 )
 
 _DIGEST = "a" * 64
-_IMAGE = f"registry.example/kairyu/bench-exec@sha256:{_DIGEST}"
+_IMAGE = f"registry.example/kairyu/execution@sha256:{_DIGEST}"
 _CONTAINER_ID = "c" * 64
 
 

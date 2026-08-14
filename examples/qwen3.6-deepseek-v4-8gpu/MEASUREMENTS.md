@@ -81,97 +81,13 @@ to an explicit failure instead of a successful empty response, but a quality
 path must be reliable before scoring. Run ID:
 `l3-auto-max-moa3-public-v2-20260812`.
 
-MoA-2 was the performance winner, but it failed the fixed four-task
-Terminal-Bench 2.1 quality gate: direct DeepSeek completed all four tasks and
-scored 2/4, while MoA-2 scored 1/3 completed tasks and its fourth task failed
-with `BadGatewayError`. Counting the failed task as zero leaves MoA-2 at 1/4,
-so it is not eligible for the full benchmark. Run ID:
-`terminalbench-selection-moa2-vs-deepseek-20260812`.
-
-Ordinary-synthesis MoA-3 also failed the gate. It scored 0/3 completed tasks;
-the fourth task was stopped because even a success could leave it at only 1/4,
-below direct DeepSeek's 2/4. Run ID:
-`terminalbench-selection-moa3-vs-deepseek-20260812`.
-
-The next quality candidate is therefore **MoA-3 with private DeepSeek thinking
-synthesis**. Its prior c8 L3 run produced 31/32 public answers because one
-private generation exhausted the 1024-token internal allowance before its
-configured `</think>` boundary. The generic private-work allowance is raised
-to 2048 for this candidate. Natural EOS means normal requests retain their
-measured work, while the long-thinking tail gets room to produce a valid public
-answer.
-
-The 2048 candidate passed the full L3 matrix: all 128 requests returned
+The 2048-token private-thinking MoA-3 configuration passed the full L3 matrix: all 128 requests returned
 non-empty public answers with 128/128 valid traces, exactly three proposals,
 and zero request errors. At c1 its median TTFT/E2E are only 1.2%/0.8% above the
 old 1024 candidate. At c8 it trades 18.8% higher median TTFT than ordinary MoA-3
 for a 5.0% E2E increase and 8.0% higher public TPS, while eliminating the old
 hidden-thinking empty-answer failure. At c16 the TTFT increase is 27.4%, but
-median E2E increases only 3.9%. It is therefore the performance-qualified
-quality candidate and must now equal or exceed the clean direct-DeepSeek 2/4
-pilot before the all-89 run.
-
-## Terminal-Bench 2.1 quality selection
-
-The fixed four-task pilot selected the 2048-token private-thinking MoA-3
-policy. It scored **3/4 (75%)**, while direct DeepSeek scored **2/4 (50%)** on
-the same `write-compressor`, `fix-git`, `build-cython-ext`, and
-`db-wal-recovery` tasks. MoA passed the first three and failed only database WAL
-recovery; direct DeepSeek passed compressor and git. Both targets completed all
-four items with zero failed, unjudged, or skipped trials and `error: null` on
-every item. The benchmark harness source was clean at commit
-`e822f02997be7c1a6cb3f7025b9dbb11cf649092`.
-
-Run ID: `terminalbench-selection-thinking2048-vs-deepseek-20260812`.
-
-This is a selection subset, not a published-score comparison.
-
-## Terminal-Bench 2.1 full task-set result
-
-The selected `kairyu-auto-max` launched all 89 Terminal-Bench 2.1 tasks through
-Harbor 0.17.0 with terminus-2, `max_turns=500`, `max_output_tokens=32768`, one
-attempt, and concurrency four. Scoring follows Harbor's official Mean exactly:
-every trial has equal weight and a missing reward or exception contributes zero
-rather than leaving the denominator.
-
-| Outcome | Count |
-|---|---:|
-| Official task-verifier rewards | 86 |
-| Verifier reward 1 | 60 |
-| Verifier reward 0 | 26 |
-| No verifier reward (counted as 0) | 3 |
-| Total denominator | 89 |
-| **Harbor-Mean-equivalent score** | **60/89 = 67.42%** |
-
-Harbor recorded four exceptions: two `AgentTimeoutError` trials that also had a
-zero verifier reward (`path-tracing`, `make-doom-for-mips`) and two Docker image
-pull `RuntimeError` trials with no reward (`vulnerable-secret`,
-`circuit-fibsqrt`). The final `train-fasttext` trial was operator-terminated
-after 6:24:18 and contributes the third missing-reward zero. Thus the exact
-execution-event count is four Harbor exceptions plus one operator interruption;
-none is dropped or replaced by a diagnostic retry.
-
-The task-set run began at 2026-08-12 05:30:47 JST and was closed at 16:39:13
-JST, an elapsed 11:08:26. `train-fasttext` exposed a harness defect: its
-3600-second task budget was multiplied by eight, giving one task an eight-hour
-agent allowance. The generic adapter now sets `max_timeout_sec=900` before the
-8x multiplier, so all future tasks have a two-hour effective ceiling, and keeps
-the raw Harbor directory on NVMe so interrupted jobs remain resumable. This
-post-run correction does not alter the score above.
-
-Run ID: `terminalbench-2.1-auto-max-thinking2048-full-v1-20260812` (inner Kairyu
-run `terminalbench-2.1`). Source commit:
-`2a29705a3224800520a5e7858a6eff74da3f12cb`; clean source-tree SHA-256:
-`ab84667283da628491a94a17c4dd7721b32ab8142da5b871d48923f3e474b49f`;
-served-config SHA-256:
-`03ee92f08f0a16c1b0a4dd132852b818d0874ca8737c0549a9934435d551be31`.
-
-This one-attempt score is not a five-trial leaderboard submission. It is the
-requested single full-task-set measurement using official per-task verifiers
-and official zero-inclusive aggregation. The provider-published 82.7 DeepSeek
-reference is reported under different conditions and is not a local A/B; the
-like-for-like local quality evidence remains the fixed pilot's 3/4 auto-max
-versus 2/4 direct DeepSeek result above.
+median E2E increases only 3.9%. This establishes its serving envelope; product evaluation is owned by `evals/`.
 
 ## Tier1 topology selection
 

@@ -32,8 +32,8 @@ class _RunnerPair:
 
 @pytest.fixture(scope="module")
 def runners():
-    image = os.environ.get("KAIRYU_BENCH_EXEC_IMAGE")
-    assert image, "KAIRYU_BENCH_EXEC_IMAGE must name the pinned CI image"
+    image = os.environ.get("KAIRYU_EXEC_IMAGE")
+    assert image, "KAIRYU_EXEC_IMAGE must name the pinned CI image"
     local = build_execution_runner(ExecutionConfig())
     container = build_execution_runner(
         ExecutionConfig(
@@ -51,7 +51,7 @@ def runners():
     nonce = uuid4().hex
 
     def next_name() -> str:
-        name = f"kairyu-bench-test210-{nonce}-{len(container_names)}"
+        name = f"kairyu-exec-test210-{nonce}-{len(container_names)}"
         container_names.append(name)
         return name
 

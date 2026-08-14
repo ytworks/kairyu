@@ -91,18 +91,16 @@ images, CUDA bases, contexts, GPU counts, VRAM, disk, SM120 capability, and
 NUMA-local CPU sets are fail-closed. The first download hashes every model file
 and subsequent starts mount the same volume read-only with offline mode.
 
-Each environment exposes the same `run.sh` and `bench.sh` interface. Benchmark
-IDs can run alone or through `all`; reports and evidence are finalized after
-each attempted benchmark, and `compare` starts the two backends sequentially.
-CLI enumeration, shell syntax, Compose expansion, and report mechanics are
-CPU/static gates. Full benchmark completion is intentionally a later GPU gate.
+Each environment exposes `run.sh` for lifecycle management and `verify.sh` for
+serving verification. CLI enumeration, shell syntax, Compose expansion, and
+report mechanics are CPU/static gates; measured performance remains a GPU gate.
+Model and product evaluation is invoked separately through `python -m evals`.
 
 ## FN-D7 — Enablement gates
 
-- Qwen MTP stays off until greedy equality, sampling non-inferiority, the full
-  quality suite, and at least 5% SLO-goodput improvement pass.
+- Qwen MTP stays off until greedy equality, sampling-path invariants, and at
+  least 5% SLO-goodput improvement pass.
 - DeepSeek DSpark stays off under the checkpoint-declared 5-token gate.
-- Kairyu performance is not publishable when paired quality is inferior.
 - `PROGRESS.md` must not claim production frontier support until the real
   Qwen 262K and DeepSeek EP4/EP8 1M GPU runs, 30-minute soak, OOM/worker-failure
   recovery, and vLLM comparison all close.
@@ -117,10 +115,10 @@ one vLLM L1 using all eight GPUs. The checkpoint's exact prompt encoder remains
 owned by Kairyu and is preserved through an identity template at vLLM.
 
 The committed default is selected only after same-host topology and feature
-measurements. Its serving report must record TTFT and output throughput, while
-the accuracy report must finish all 1,055 pinned LiveCodeBench release-v6 rows
-with isolated code execution. Public heterogeneous figures are comparison
-context, not a substitute for those local measurements.
+measurements. Its verification report records TTFT and output throughput. Model
+and product evaluation is a separate checkout-only workflow and is not a
+prerequisite embedded in the serving-performance runner. Public heterogeneous
+figures are comparison context, not a substitute for local measurements.
 
 **Layered-product amendment (2026-08-13, EO-D2..EO-D5).** The measured vLLM
 services may remain transitional L1 workers while the tiered example proves

@@ -138,7 +138,7 @@ def _checkpoint_evidence() -> dict[str, object]:
 def _engine_config(tensor_parallel_size: int) -> str:
     return (
         a7._REPO_ROOT
-        / "bench/deploy/qwen3-32b-multi-gpu/kairyu.template.yaml"
+        / "deploy/verification/qwen3-32b-multi-gpu/kairyu.template.yaml"
     ).read_text(encoding="utf-8").replace(
         "__TENSOR_PARALLEL_SIZE__",
         str(tensor_parallel_size),
@@ -157,7 +157,7 @@ def _runtime_value(
         ),
         "template_mount": _mount(
             source=(
-                "repo:bench/deploy/qwen3-32b-multi-gpu/"
+                "repo:deploy/verification/qwen3-32b-multi-gpu/"
                 "kairyu.template.yaml"
             ),
             destination="/etc/kairyu/config.template.yaml",
@@ -215,12 +215,12 @@ def _runtime_value(
             "pid1_cmdline": [
                 "/app/.venv/bin/kairyu",
                 "serve",
-                "bench/deploy/qwen3-32b-multi-gpu/auto-gateway.yaml",
+                "deploy/verification/qwen3-32b-multi-gpu/auto-gateway.yaml",
             ],
             "effective_config": a7.hashed_descriptor(
                 (
                     a7._REPO_ROOT
-                    / "bench/deploy/qwen3-32b-multi-gpu/auto-gateway.yaml"
+                    / "deploy/verification/qwen3-32b-multi-gpu/auto-gateway.yaml"
                 ).read_text(encoding="utf-8")
             ),
         }
@@ -256,11 +256,11 @@ def _configuration_value(
         "tokenizer_sha256": _TOKENIZER_SHA256,
         "config_files": [
             {
-                "path": "bench/deploy/qwen3-32b-multi-gpu/compose.yaml",
+                "path": "deploy/verification/qwen3-32b-multi-gpu/compose.yaml",
                 "sha256": "d" * 64,
             },
             {
-                "path": "bench/deploy/qwen3-32b-multi-gpu/auto-gateway.yaml",
+                "path": "deploy/verification/qwen3-32b-multi-gpu/auto-gateway.yaml",
                 "sha256": "e" * 64,
             },
         ],

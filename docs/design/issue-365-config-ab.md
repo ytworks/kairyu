@@ -67,12 +67,11 @@ difference and a one-sided 95% lower confidence bound for non-inferiority.
 Fractional evidence from an adapter declared binary is an error; it is never
 silently reclassified.
 
-Bounded non-binomial scores use a paired percentile bootstrap over
-item differences.  Binary evidence with dependent sub-items uses a versioned cluster key that groups item IDs by problem
-and resamples whole problems.  Each replicate remains weighted by the number of
-sub-steps in its sampled problems, preserving SciCode's published sub-problem
-pass-rate estimand rather than changing to an equal-problem mean.  A single
-cluster cannot support an interval and is rejected.
+Bounded non-binomial scores use a paired percentile bootstrap over item
+differences. Binary evidence with dependent sub-items uses a versioned cluster
+key that groups item IDs and resamples whole clusters. Each replicate preserves
+the declared item-weighted estimand rather than silently changing to an
+equal-cluster mean. A single cluster cannot support an interval and is rejected.
 
 Both bootstrap variants fix 20,000 resamples, symmetric nearest-rank quantiles,
 the repository-owned `splitmix64_rejection_v1` sampler, and a

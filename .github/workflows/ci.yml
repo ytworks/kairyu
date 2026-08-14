@@ -132,7 +132,7 @@ jobs:
       - name: Open WebUI browser end-to-end test
         run: ./scripts/webui_smoke.sh
 
-  bench-exec-container:
+  verification-exec-container:
     # Issue #210: the real isolation/conformance gate is mandatory here. The
     # test fails (never skips) if Docker or the exact pinned image is absent.
     runs-on: ubuntu-latest
@@ -146,14 +146,14 @@ jobs:
         run: uv sync --frozen --dev
       - name: Build and pin execution image
         run: |
-          iidfile="$RUNNER_TEMP/kairyu-bench-exec-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.iid"
+          iidfile="$RUNNER_TEMP/kairyu-verification-exec-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.iid"
           docker build \
             --iidfile "$iidfile" \
-            -f deploy/bench/Dockerfile.exec \
-            deploy/bench
+            -f deploy/verification/Dockerfile.exec \
+            deploy/verification
           image_id="$(tr -d '\r\n' < "$iidfile")"
           test "${image_id#sha256:}" != "$image_id"
-          echo "KAIRYU_BENCH_EXEC_IMAGE=$image_id" >> "$GITHUB_ENV"
+          echo "KAIRYU_EXEC_IMAGE=$image_id" >> "$GITHUB_ENV"
       - name: Real Docker runner conformance
         run: >-
           uv run --frozen pytest --fail-on-skip

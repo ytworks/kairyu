@@ -370,9 +370,7 @@ output (DeepSeek convention).
   metadata improvement from graph capture. The graph run includes first-use
   warmup and capture. Evidence:
   `bench/results/decode-row-sync-qwen3-32b-tp8-2026-07-26.json`.
-- **Issue #150 gate:** the Qwen3-32B TP8 LiveCodeBench 20-item subset at
-  concurrency 8, 8,192 max output tokens, and a 600 s request timeout completed
-  20/20 with zero inference failures. Maximum request latency was 460.681 s;
-  total pair time was 1,049 s because twenty requests were served in waves of
-  eight. Evidence:
-  `bench/results/issue-150-qwen3-32b-tp8-livecodebench-2026-07-26.json`.
+- **Issue #150 stability gate:** the Qwen3-32B TP8 concurrency-8 long-generation
+  workload completed 20/20 requests with zero inference failures and a maximum
+  request latency of 460.681 s. This remains runtime-stability evidence; model
+  evaluation is outside the verification gate.

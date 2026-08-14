@@ -35,7 +35,7 @@ route decision, role DAG, verifier verdicts — Fugu is a black box). Sources in
 | P-A2 (chat templates) | HF Jinja `apply_chat_template` with per-model override in `DeploymentSpec` and tool schemas in-template; Llama/Qwen golden transcripts byte-match the HF reference | golden tests |
 | P-A3 (sampling surface) | `logprobs`/`top_logprobs` returned (plumbing exists in `sampling_params.py`/`outputs.py` — surface it); `/v1/completions` served; `n>1` verified incl. streaming indices; OpenAI SDK round-trips all of it | `tests/server/` |
 | P-A4 (structured outputs) | `response_format: json_schema` enforced through `engine/core/structured.py` (not `extra_args` passthrough): 100% schema-valid on a 50-schema suite | `tests/server/` |
-| P-A5 (bench honesty) | `verification/l1/performance/serving_bench.py` gains auth headers and token-granularity TPOT (tokens, not SSE chunks — providers coalesce differently); per-run JSON to `bench/results/` | bench run |
+| P-A5 (serving evidence) | `verification/l1/performance/serving_bench.py` records auth-aware token-granularity TTFT/TPOT and throughput; new per-run JSON defaults below `verification/results/` | verification run |
 
 ### Stage P-B — Fugu-class product (MUST)
 
@@ -44,7 +44,7 @@ route decision, role DAG, verifier verdicts — Fugu is a black box). Sources in
 | P-B1 (streaming orchestrator) | `Orchestrator.run_chat(messages, tools, stream=True)`: route decided fast, final synthesizer/worker stage streamed token-by-token, keep-alive status events on long Conductor runs; `kairyu-auto` TTFT ≤1.5× the underlying engine's TTFT on the direct-route path | bench + tests |
 | P-B2 (orchestration usage + trace) | `usage.orchestration_input/output_tokens` on every auto request (Fugu parity, billing necessity); opt-in `X-Kairyu-Trace` returns route/DAG/verifier verdicts (the transparency differentiator) | `tests/server/` |
 | P-B3 (chat UI — COMPLETE) | Open WebUI shipped as a compose service against the gateway; a fresh user chats with `kairyu-auto` and per-model endpoints, streaming, after one `docker compose up`. Custom UI work is limited to an orchestration-trace viewer | pinned Playwright compose smoke |
-| P-B4 (tiered auto models) | `kairyu-auto` (latency-biased routing) and `kairyu-auto-max` (Conductor/MoA depth) both in `/v1/models`; auto ≤1.5× direct-call latency, auto-max quality-wins on a fixed eval set | bench |
+| P-B4 (tiered auto models) | `kairyu-auto` and `kairyu-auto-max` are both discoverable; alternating direct/AUTO serving requests keep AUTO TTFT within 1.5x of the direct path | verification + tests |
 | P-B5 (tenancy v1) | Key→tenant map in `DeploymentSpec`; per-key token-bucket limits in-gateway; append-only usage ledger + `/admin/usage`; two keys get isolated 429s; ledger reconciles with Prometheus counters to <0.1% | `tests/server/` |
 
 **Tiered-example amendment (2026-08-13).** The quality-first Chat UI profile
@@ -82,18 +82,12 @@ then completed a plain request with healthy readiness. The reproducible raw
 artifact is
 `bench/results/auto-params-qwen3-32b-tp8-2026-07-28.json`.
 
-P-B4 was revalidated after request-intent propagation on 2026-07-28
-(issues #198/#208): one Qwen3-32B TP8
-DeploymentSpec lists direct, standard AUTO, and max AUTO. Twelve alternating
-direct/standard pairs measured 1.0123x p50 and 0.7666x p99 TTFT ratios. On the
-fixed, sandbox-scored eight-item LiveCodeBench multi-agent slice, max scored
-37.5% versus standard's 12.5% while using 32 versus 38 calls, 47,266 versus
-50,504 internal tokens, and 1,499.274 versus 2,567.389 allocated GPU-seconds.
-The private 1024-token policy completed the full gate; uncapped propagation
-exceeded an internal 60 s timeout and returned 502. The committed artifact
-contains the effective policy and per-item evidence without the former #208
-caveat:
-`bench/results/tiered-auto-qwen3-32b-tp8-2026-07-28.json`.
+P-B4 serving performance was revalidated after request-intent propagation on
+2026-07-28 (issues #198/#208). One Qwen3-32B TP8 deployment exposed direct,
+standard AUTO, and max AUTO endpoints. Twelve alternating direct/standard pairs
+measured 1.0123x p50 and 0.7666x p99 TTFT ratios. The retained runner now records
+only this direct-versus-AUTO serving envelope; model evaluation belongs outside
+the verification gate.
 
 P-B5 is CPU-green as of 2026-07-27 (issue #199): the supported
 `DeploymentSpec` path proves isolated two-key 429s and exact (0% error)

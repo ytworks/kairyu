@@ -90,7 +90,7 @@ DEFAULT_DATASET = Path("/tmp/ShareGPT_V3_unfiltered_cleaned_split.json")
 DEFAULT_TOKENIZER = Path("/tmp/kairyu-a7-qwen3-32b-tokenizer.json")
 DEFAULT_ENV_ARTIFACT = DEFAULT_REPO / "bench/results/env-2026-07-30.json"
 DEFAULT_KAIRYU_TEMPLATE = (
-    DEFAULT_REPO / "bench/deploy/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
+    DEFAULT_REPO / "deploy/verification/qwen3-32b-multi-gpu/g2-a6-kairyu.template.yaml"
 )
 DEFAULT_IMAGE = "kairyu-qwen3-32b-kairyu:latest"
 DEFAULT_MODEL_VOLUME = "kairyu-qwen3-32b_qwen3-32b"

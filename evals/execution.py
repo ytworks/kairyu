@@ -40,7 +40,7 @@ _IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _REPOSITORY_DIGEST_RE = re.compile(r"[^@\s]+@sha256:[0-9a-f]{64}\Z")
 _CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 _MODULE_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
-_DOCKER_READY_MARKER = "__KAIRYU_BENCH_EXEC_STARTED_8c5a60f4__\n"
+_DOCKER_READY_MARKER = "__KAIRYU_EXEC_STARTED_8c5a60f4__\n"
 _NUMERIC_THREAD_ENV = (
     ("OPENBLAS_NUM_THREADS", "1"),
     ("OMP_NUM_THREADS", "1"),
@@ -51,7 +51,7 @@ _NUMERIC_THREAD_ENV = (
 )
 
 # Constant code only.  User-controlled values live in the read-only /input
-# mount, never in this argument.  Large inputs such as SciCode's ~1 GiB HDF5
+# mount, never in this argument.  Large read-only fixture inputs
 # stay in that mount; symlinks expose them beside main.py without copying them
 # into the memory-backed /work quota.
 _DOCKER_BOOTSTRAP = """\
@@ -68,7 +68,7 @@ stdin_fd = os.open(source_root / "stdin", os.O_RDONLY)
 os.dup2(stdin_fd, 0)
 os.close(stdin_fd)
 os.chdir(work_root)
-os.write(2, b"__KAIRYU_BENCH_EXEC_STARTED_8c5a60f4__\\n")
+os.write(2, b"__KAIRYU_EXEC_STARTED_8c5a60f4__\\n")
 os.execv(sys.executable, [sys.executable, "-I", "main.py"])
 """
 

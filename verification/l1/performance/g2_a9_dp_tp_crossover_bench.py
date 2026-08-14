@@ -88,10 +88,10 @@ COMMIT_RE = a8.COMMIT_RE
 CONFIG_PATHS = (
     Path("verification/l1/performance/g2_a9_dp_tp_crossover_bench.py"),
     A8_HELPER_PATH,
-    Path("bench/deploy/qwen3-32b-multi-gpu/a9-tp8-compose.yaml"),
-    Path("bench/deploy/qwen3-32b-multi-gpu/a9-tp8-replica.yaml"),
-    Path("bench/deploy/qwen3-32b-multi-gpu/a9-tp8-gateway.yaml"),
-    Path("bench/deploy/qwen3-32b-multi-gpu/a9-tp8-stack.sh"),
+    Path("deploy/verification/qwen3-32b-multi-gpu/a9-tp8-compose.yaml"),
+    Path("deploy/verification/qwen3-32b-multi-gpu/a9-tp8-replica.yaml"),
+    Path("deploy/verification/qwen3-32b-multi-gpu/a9-tp8-gateway.yaml"),
+    Path("deploy/verification/qwen3-32b-multi-gpu/a9-tp8-stack.sh"),
 )
 RUNTIME_PACKAGE_HASH_SCRIPT = r"""
 import hashlib
@@ -621,7 +621,7 @@ def _expected_normalized_mounts(service: str) -> list[dict[str, object]]:
         {
             "type": "bind",
             "source": (
-                "repo:bench/deploy/qwen3-32b-multi-gpu/"
+                "repo:deploy/verification/qwen3-32b-multi-gpu/"
                 f"a9-tp8-{config_name}.yaml"
             ),
             "destination": "/etc/kairyu/config.yaml",
@@ -685,7 +685,7 @@ def _docker_stack_provenance(
     evidence_dir: Path,
 ) -> dict[str, object]:
     compose_path = Path(
-        "bench/deploy/qwen3-32b-multi-gpu/a9-tp8-compose.yaml"
+        "deploy/verification/qwen3-32b-multi-gpu/a9-tp8-compose.yaml"
     ).resolve()
     compose_prefix = (
         "docker",
@@ -709,12 +709,12 @@ def _docker_stack_provenance(
     expected_configs = {
         "tp8": str(
             Path(
-                "bench/deploy/qwen3-32b-multi-gpu/a9-tp8-replica.yaml"
+                "deploy/verification/qwen3-32b-multi-gpu/a9-tp8-replica.yaml"
             ).resolve()
         ),
         "gateway": str(
             Path(
-                "bench/deploy/qwen3-32b-multi-gpu/a9-tp8-gateway.yaml"
+                "deploy/verification/qwen3-32b-multi-gpu/a9-tp8-gateway.yaml"
             ).resolve()
         ),
     }
@@ -898,7 +898,7 @@ def _docker_stack_provenance(
         normalized_sources = {
             "/app/kairyu": f"git:{A8_SOURCE_COMMIT}:kairyu",
             "/etc/kairyu/config.yaml": (
-                "repo:bench/deploy/qwen3-32b-multi-gpu/"
+                "repo:deploy/verification/qwen3-32b-multi-gpu/"
                 f"a9-tp8-{'replica' if service == 'tp8' else 'gateway'}.yaml"
             ),
             "/models": "volume:kairyu-qwen3-32b_qwen3-32b",
@@ -933,7 +933,7 @@ def _docker_stack_provenance(
     return {
         "project": "kairyu-qwen3-32b-a9-tp8",
         "compose_file": (
-            "repo:bench/deploy/qwen3-32b-multi-gpu/a9-tp8-compose.yaml"
+            "repo:deploy/verification/qwen3-32b-multi-gpu/a9-tp8-compose.yaml"
         ),
         "services": services,
     }
@@ -947,7 +947,7 @@ def _validate_container_provenance(value: object) -> None:
     )
     _require(
         value.get("compose_file")
-        == "repo:bench/deploy/qwen3-32b-multi-gpu/a9-tp8-compose.yaml",
+        == "repo:deploy/verification/qwen3-32b-multi-gpu/a9-tp8-compose.yaml",
         "A9 Compose file identity mismatch",
     )
     services = value.get("services")

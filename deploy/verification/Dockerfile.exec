@@ -1,0 +1,10 @@
+# syntax=docker/dockerfile:1
+#
+# Minimal trusted Python runtime for checkout-only execution conformance.
+# Runners accept only an immutable digest at execution time; mutable tags are not valid configuration.
+FROM python@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
+
+# DockerExecutionRunner also sets this explicitly. Keeping the image non-root
+# makes an accidental invocation outside that runner fail closed as well.
+USER 65534:65534
+WORKDIR /work

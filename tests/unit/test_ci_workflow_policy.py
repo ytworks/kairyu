@@ -327,7 +327,7 @@ def test_ci_jobs_are_bounded_and_uv_uses_the_committed_lockfile() -> None:
     assert "--cov-append --cov-report=term-missing" in test_command
     assert "--cov-fail-under=80" in test_command
     docker_command = _named_step(
-        workflow["jobs"]["bench-exec-container"],
+        workflow["jobs"]["verification-exec-container"],
         "Real Docker runner conformance",
     )["run"]
     assert "--fail-on-skip" in docker_command
