@@ -9,7 +9,6 @@ on:
       - "deploy/kind/f1c/**"
       - "deploy/kind/f1a/mock/**"
       - "verification/fleet/resilience/fleet_gateway_bench.py"
-      - "tests/verification/test_fleet_gateway_bench.py"
       - "kairyu/**"
       - ".dockerignore"
       - "Dockerfile"
