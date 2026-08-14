@@ -3381,9 +3381,21 @@ async def test_cancelled_request_id_can_be_reused_after_queued_abort(wire_versio
 
         os.kill(process.pid, sigstop)
         stopped = True
-        waited_pid, status = await asyncio.to_thread(os.waitpid, process.pid, os.WUNTRACED)
-        assert waited_pid == process.pid
-        assert os.WIFSTOPPED(status)
+        proc_status = Path(f"/proc/{process.pid}/status")
+        for _ in range(500):
+            state_line = next(
+                (
+                    line
+                    for line in proc_status.read_text(encoding="utf-8").splitlines()
+                    if line.startswith("State:")
+                ),
+                "",
+            )
+            if state_line.split()[1:2] in (["T"], ["t"]):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("engine service did not enter a stopped process state")
         original.cancel()
         with pytest.raises(asyncio.CancelledError):
             await original
