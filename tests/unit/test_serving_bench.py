@@ -1056,7 +1056,7 @@ def test_profiled_run_writes_bound_client_trace_without_secrets(
                     {
                         "traceEvents": [
                             {
-                                "name": "kairyu.bench.serving.client-measurement",
+                                "name": "evals.serving.client-measurement",
                                 "ph": "X",
                             }
                         ]
@@ -1084,7 +1084,7 @@ def test_profiled_run_writes_bound_client_trace_without_secrets(
     @contextmanager
     def fake_record_function(enabled: bool, name: str):
         assert enabled is True
-        assert name == "kairyu.bench.serving.client-measurement"
+        assert name == "evals.serving.client-measurement"
         events.append("range-enter")
         try:
             yield
@@ -1190,7 +1190,7 @@ def test_profile_export_failure_does_not_publish_success_result(
     @contextmanager
     def fake_record_function(enabled: bool, name: str):
         assert enabled is True
-        assert name == "kairyu.bench.serving.client-measurement"
+        assert name == "evals.serving.client-measurement"
         yield
 
     class FakeClient:
@@ -1268,7 +1268,7 @@ def test_profiled_result_publish_race_preserves_winner_and_rolls_back_trace(
     @contextmanager
     def fake_record_function(enabled: bool, name: str):
         assert enabled is True
-        assert name == "kairyu.bench.serving.client-measurement"
+        assert name == "evals.serving.client-measurement"
         yield
 
     class FakeClient:

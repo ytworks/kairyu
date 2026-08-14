@@ -1,8 +1,8 @@
 """Public ``kairyu bench compare-runs`` dispatch and failure behavior."""
 
-from kairyu.bench.cli import handle
-from kairyu.bench.store import ResultStore
-from kairyu.entrypoints import cli
+from evals import __main__ as cli
+from evals.cli import handle
+from evals.store import ResultStore
 
 
 def _entry(run_id: str, commit: str, score: float) -> dict:
@@ -72,7 +72,6 @@ def test_compare_runs_public_parser_dispatches_without_writing(tmp_path, monkeyp
     monkeypatch.setattr(ResultStore, "load_scoreboard_index", lambda _self: entries)
     args = cli._build_parser().parse_args(
         [
-            "bench",
             "compare-runs",
             "base",
             "candidate",
@@ -96,7 +95,6 @@ def test_compare_runs_missing_indexed_run_is_a_clear_nonzero_error(tmp_path, mon
     monkeypatch.setattr(ResultStore, "load_scoreboard_index", lambda _self: ())
     args = cli._build_parser().parse_args(
         [
-            "bench",
             "compare-runs",
             "missing-a",
             "missing-b",
@@ -122,7 +120,6 @@ def test_compare_runs_rejects_a_results_root_from_another_suite(tmp_path, monkey
     monkeypatch.setattr(ResultStore, "load_scoreboard_index", lambda _self: entries)
     args = cli._build_parser().parse_args(
         [
-            "bench",
             "compare-runs",
             "base",
             "candidate",

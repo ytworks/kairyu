@@ -8,24 +8,24 @@ from pathlib import Path
 
 import pytest
 
-import kairyu.bench.reporting as reporting
-from kairyu.bench.adapters.base import (
+import evidence.reporting as reporting
+from evals.adapters.base import (
     normalize_base_url as legacy_normalize_base_url,
 )
-from kairyu.bench.adapters.base import target_api_key as legacy_target_api_key
-from kairyu.bench.config import parse_target_flag
-from kairyu.bench.reporting import (
-    atomic_write_json,
-    atomic_write_text,
-    nearest_rank_percentile,
-)
-from kairyu.bench.targets import (
+from evals.adapters.base import target_api_key as legacy_target_api_key
+from evals.config import parse_target_flag
+from evals.targets import (
     normalize_base_url,
     parse_target_spec,
     resolve_api_key_env,
     target_api_key,
 )
-from kairyu.bench.types import BenchConfig, BenchTarget, JudgeConfig
+from evals.types import BenchConfig, BenchTarget, JudgeConfig
+from evidence.reporting import (
+    atomic_write_json,
+    atomic_write_text,
+    nearest_rank_percentile,
+)
 
 
 def test_target_parser_normalizes_url_and_records_only_env_name() -> None:

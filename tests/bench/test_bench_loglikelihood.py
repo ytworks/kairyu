@@ -10,14 +10,14 @@ import pytest
 from conftest import make_target
 from pydantic import ValidationError
 
-from kairyu.bench.adapters.base import (
+from evals.adapters.base import (
     RequestFailed,
     RunContext,
     call_loglikelihood,
 )
-from kairyu.bench.adapters.mmlu import MmluAdapter
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.types import (
+from evals.adapters.mmlu import MmluAdapter
+from evals.cache import BenchCache
+from evals.types import (
     BenchItem,
     ContinuationLogLikelihood,
     LogLikelihoodRequestSpec,

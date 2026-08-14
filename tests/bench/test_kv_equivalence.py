@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kairyu.bench import kv_equivalence as gate
+from evals import kv_equivalence as gate
 
 
 def _prompt(cell_id: str, suffix: str = "main", *, token_count: int = 1024) -> dict[str, object]:

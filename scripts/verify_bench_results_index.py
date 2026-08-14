@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from kairyu.bench.results_index import ResultsIndexError, validate_results_repository
+from evidence.legacy_index import ResultsIndexError, validate_results_repository
 
 
 def main(argv: list[str] | None = None) -> int:

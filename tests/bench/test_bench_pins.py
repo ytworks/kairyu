@@ -9,8 +9,8 @@ import re
 
 import pytest
 
-from kairyu.bench.adapters import all_adapters, suite_adapters
-from kairyu.bench.pins import (
+from evals.adapters import all_adapters, suite_adapters
+from evals.pins import (
     DATASET_PINS,
     SECONDARY_PINS,
     apply_pins,
@@ -44,8 +44,8 @@ def test_registry_adapters_are_pinned():
 def test_list_checks_cache_readiness_against_all_declared_pins(monkeypatch, capsys):
     from argparse import Namespace
 
-    from kairyu.bench.cache import BenchCache
-    from kairyu.bench.cli import _handle_list
+    from evals.cache import BenchCache
+    from evals.cli import _handle_list
 
     seen: dict[str, dict] = {}
 
@@ -86,7 +86,7 @@ def test_every_pinned_slot_declares_a_source_appropriate_revision():
 
 def test_non_commit_declarations_are_replaced_by_the_pin():
     """`release_v6` is a config name; the Hub 404s on it as a revision."""
-    from kairyu.bench.adapters.base import AdapterInfo
+    from evals.adapters.base import AdapterInfo
 
     class Fake:
         info = AdapterInfo(
@@ -139,9 +139,9 @@ def test_normalize_passes_the_pinned_revision_to_the_hub(
     name, split_kwarg, tmp_path, monkeypatch
 ):
     """Recording a pin in the manifest while fetching `main` attests a lie."""
-    import kairyu.bench.hub as hub
-    from kairyu.bench.adapters.base import DownloadContext
-    from kairyu.bench.cache import BenchCache
+    import evals.hub as hub
+    from evals.adapters.base import DownloadContext
+    from evals.cache import BenchCache
 
     seen: list[dict] = []
 
@@ -165,10 +165,10 @@ def test_normalize_passes_the_pinned_revision_to_the_hub(
 
 def test_charxiv_passes_the_pin_on_both_split_attempts(tmp_path, monkeypatch):
     """The val/validation fallback must not drop the pin."""
-    import kairyu.bench.hub as hub
-    from kairyu.bench.adapters.base import DownloadContext
-    from kairyu.bench.cache import BenchCache
-    from kairyu.bench.types import DatasetUnavailable
+    import evals.hub as hub
+    from evals.adapters.base import DownloadContext
+    from evals.cache import BenchCache
+    from evals.types import DatasetUnavailable
 
     seen: list[tuple[str, str | None]] = []
 
@@ -186,10 +186,10 @@ def test_charxiv_passes_the_pin_on_both_split_attempts(tmp_path, monkeypatch):
 
 
 def test_scicode_golden_data_fetch_carries_the_pin(tmp_path, monkeypatch):
-    import kairyu.bench.hub as hub
-    from kairyu.bench.adapters.base import DownloadContext
-    from kairyu.bench.adapters.scicode import SciCodeAdapter
-    from kairyu.bench.cache import BenchCache
+    import evals.hub as hub
+    from evals.adapters.base import DownloadContext
+    from evals.adapters.scicode import SciCodeAdapter
+    from evals.cache import BenchCache
 
     seen: list[dict] = []
 
@@ -211,9 +211,9 @@ def test_scicode_golden_data_fetch_carries_the_pin(tmp_path, monkeypatch):
 
 
 def test_livecodebench_shard_fetch_carries_the_pin(tmp_path, monkeypatch):
-    import kairyu.bench.hub as hub
-    from kairyu.bench.adapters.base import DownloadContext
-    from kairyu.bench.cache import BenchCache
+    import evals.hub as hub
+    from evals.adapters.base import DownloadContext
+    from evals.cache import BenchCache
 
     seen: list[dict] = []
 
@@ -262,7 +262,7 @@ def test_adapter_declared_revisions_win():
 
 def test_pins_do_not_mutate_the_class_attribute():
     """apply_pins() shadows per instance; a fresh class stays untouched."""
-    from kairyu.bench.adapters.mrcr import MrcrAdapter
+    from evals.adapters.mrcr import MrcrAdapter
 
     assert all_adapters()["mrcr-v2"].info.hf_revision is not None
     assert MrcrAdapter.info.hf_revision is None
@@ -282,8 +282,8 @@ def test_pin_change_moves_the_run_fingerprint(tmp_path, monkeypatch):
     """Repinning must refuse resume rather than reinterpret stored evidence."""
     from conftest import make_config
 
-    from kairyu.bench.cache import BenchCache
-    from kairyu.bench.runner import _adapter_identity, _run_fingerprint, _run_identity
+    from evals.cache import BenchCache
+    from evals.runner import _adapter_identity, _run_fingerprint, _run_identity
 
     config = make_config(tmp_path, models=("m",), only=("mrcr-v2",))
     cache = BenchCache(tmp_path / "cache")

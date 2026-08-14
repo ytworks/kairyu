@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kairyu.bench import batch_invariance as gate
+from evals import batch_invariance as gate
 
 
 def _source_snapshot() -> dict[str, object]:

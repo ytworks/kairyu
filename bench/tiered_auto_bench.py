@@ -34,14 +34,14 @@ from pathlib import Path
 import httpx
 
 from bench.orchestration_stream_bench import measure_request, summarize_requests
-from kairyu.bench.adapters.base import (
+from evals.adapters.base import (
     RunContext,
     extract_code_block,
     normalize_base_url,
 )
-from kairyu.bench.adapters.livecodebench import LiveCodeBenchAdapter, grade_code
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.types import BenchItem, BenchTarget, ChatRequestSpec
+from evals.adapters.livecodebench import LiveCodeBenchAdapter, grade_code
+from evals.cache import BenchCache
+from evals.types import BenchItem, BenchTarget, ChatRequestSpec
 from kairyu.orchestration.router import RuleRouter
 
 SCHEMA_VERSION = 1

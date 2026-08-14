@@ -7,18 +7,18 @@ import json
 import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters import LONG_CONTEXT_ROW_ORDER, suite_adapters
-from kairyu.bench.adapters.base import DownloadContext, RunContext
-from kairyu.bench.adapters.ruler_niah import (
+from evals.adapters import LONG_CONTEXT_ROW_ORDER, suite_adapters
+from evals.adapters.base import DownloadContext, RunContext
+from evals.adapters.ruler_niah import (
     CONTEXT_LENGTHS,
     SAMPLES_PER_LENGTH,
     RulerNiahAdapter,
     ruler_niah_grade,
 )
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.runner import SuiteRunner
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import BenchItem, ChatRequestSpec, SkipItem
+from evals.cache import BenchCache
+from evals.runner import SuiteRunner
+from evals.store import ResultStore
+from evals.types import BenchItem, ChatRequestSpec, SkipItem
 
 
 class _WhitespaceEncoder:
@@ -70,7 +70,7 @@ def test_normalization_is_deterministic_exact_length_and_position_swept(
 ):
     encoder = _WhitespaceEncoder()
     monkeypatch.setattr(
-        "kairyu.bench.adapters.ruler_niah._encoder", lambda: encoder
+        "evals.adapters.ruler_niah._encoder", lambda: encoder
     )
     adapter = RulerNiahAdapter(4_096)
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from kairyu.bench.profiling import profile_scope
+from evals.profiling import profile_scope
 from kairyu.kernels.rms_norm_gpu import try_joint_qk_rms_norm
 from kairyu.models.layers import RMSNorm
 

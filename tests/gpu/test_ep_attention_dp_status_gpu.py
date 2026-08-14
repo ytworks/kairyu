@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from kairyu.bench.profiling import profile_scope
+from evals.profiling import profile_scope
 from kairyu.engine.core import worker as worker_module
 from kairyu.engine.core.sampling_types import EngineSampling
 from kairyu.engine.core.scheduler import ScheduledChunk

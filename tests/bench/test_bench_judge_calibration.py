@@ -7,17 +7,17 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from kairyu.bench.calibration import (
+from evals.calibration import (
     CalibrationCase,
     _calibration_inputs_from_args,
     load_calibration_cases,
     run_calibration_cli,
     run_judge_calibration,
 )
-from kairyu.bench.judge import judge_protocol_identity
-from kairyu.bench.judge_prompts import judge_template_identity
-from kairyu.bench.runner import _recordable_config, _run_fingerprint, _run_identity
-from kairyu.bench.types import (
+from evals.judge import judge_protocol_identity
+from evals.judge_prompts import judge_template_identity
+from evals.runner import _recordable_config, _run_fingerprint, _run_identity
+from evals.types import (
     BenchConfig,
     BenchTarget,
     JudgeConfig,

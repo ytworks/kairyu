@@ -46,7 +46,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from bench import g4_ma1_qwen3_235b_nvfp4_bench as gate  # noqa: E402
-from kairyu.bench.reporting import atomic_write_json, atomic_write_text  # noqa: E402
+from evidence.reporting import atomic_write_json, atomic_write_text  # noqa: E402
 
 CAPTURE_SCHEMA = f"{gate.SCHEMA_VERSION}.capture.v1"
 HOST_SNAPSHOT_TYPE = "host_start_snapshot"

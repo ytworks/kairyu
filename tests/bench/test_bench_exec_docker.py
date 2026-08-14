@@ -14,9 +14,9 @@ from uuid import uuid4
 
 import pytest
 
-from kairyu.bench.adapters.livecodebench import grade_code
-from kairyu.bench.execution import build_execution_runner
-from kairyu.bench.types import ExecutionConfig
+from evals.adapters.livecodebench import grade_code
+from evals.execution import build_execution_runner
+from evals.types import ExecutionConfig
 
 pytestmark = pytest.mark.docker_exec
 

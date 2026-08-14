@@ -8,22 +8,22 @@ import httpx
 import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters import swebench as swe_mod
-from kairyu.bench.adapters import terminal_bench as tb_mod
-from kairyu.bench.adapters.base import RunContext
-from kairyu.bench.adapters.swebench import (
+from evals.adapters import swebench as swe_mod
+from evals.adapters import terminal_bench as tb_mod
+from evals.adapters.base import RunContext
+from evals.adapters.swebench import (
     find_swebench_report,
     load_prediction_ids,
     load_selected_instance_ids,
     parse_swebench_report,
     unsupported_platform,
 )
-from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
-from kairyu.bench.adapters.swebench_verified import SweBenchVerifiedAdapter
-from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter, parse_harbor_results
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.runner import SuiteRunner
-from kairyu.bench.store import ResultStore
+from evals.adapters.swebench_pro import SweBenchProAdapter
+from evals.adapters.swebench_verified import SweBenchVerifiedAdapter
+from evals.adapters.terminal_bench import TerminalBenchAdapter, parse_harbor_results
+from evals.cache import BenchCache
+from evals.runner import SuiteRunner
+from evals.store import ResultStore
 
 SWEBENCH_REPORT = {
     "schema_version": 2,
@@ -762,7 +762,7 @@ async def test_harness_failure_reports_stderr(tmp_path, monkeypatch):
 
 async def test_full_suite_smoke_has_all_twelve_rows(tmp_path, http_factory):
     """Every Accuracy slot appears and unavailable agentic rows skip cleanly."""
-    from kairyu.bench.adapters import ACCURACY_ROW_ORDER
+    from evals.adapters import ACCURACY_ROW_ORDER
 
     config = make_config(tmp_path, models=("m", "kairyu-auto"))
     runner = SuiteRunner(

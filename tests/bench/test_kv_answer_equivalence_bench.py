@@ -14,7 +14,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from bench import kv_answer_equivalence_bench as wrapper
-from kairyu.bench import kv_equivalence as gate
+from evals import kv_equivalence as gate
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -1672,7 +1672,7 @@ def test_wrapper_import_rejects_a_preloaded_noncheckout_gate_module() -> None:
     program = f"""
 import runpy
 import sys
-from kairyu.bench import kv_equivalence
+from evals import kv_equivalence
 kv_equivalence.__file__ = sys.executable
 runpy.run_path(
     {str(ROOT / "bench/kv_answer_equivalence_bench.py")!r},
@@ -1688,7 +1688,7 @@ runpy.run_path(
     )
 
     assert completed.returncode != 0
-    assert "refusing non-checkout kairyu.bench.kv_equivalence origin" in completed.stderr
+    assert "refusing non-checkout evals.kv_equivalence origin" in completed.stderr
 
 
 def test_offline_cli_runs_import_artifact_preflight(

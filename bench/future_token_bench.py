@@ -29,7 +29,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-from kairyu.bench.profiling import profile_scope
+from evals.profiling import profile_scope
 
 
 def _git_value(*args: str) -> str | None:

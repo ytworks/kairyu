@@ -13,16 +13,16 @@ import httpx
 import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters.base import DownloadContext, RunContext
-from kairyu.bench.adapters.scicode import (
+from evals.adapters.base import DownloadContext, RunContext
+from evals.adapters.scicode import (
     SciCodeAdapter,
     group_by_problem,
     select_problem_groups,
 )
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.runner import SuiteRunner
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import BenchItem
+from evals.cache import BenchCache
+from evals.runner import SuiteRunner
+from evals.store import ResultStore
+from evals.types import BenchItem
 
 
 def _ctx(tmp_path, **overrides) -> RunContext:
@@ -265,7 +265,7 @@ async def test_sampling_seeds_keep_independent_problem_histories(tmp_path):
 
 def test_fetch_golden_rejects_non_hdf5_payloads(tmp_path, monkeypatch):
     """An LFS pointer or HTML error page must not be accepted as golden data."""
-    import kairyu.bench.hub as hub
+    import evals.hub as hub
 
     def fake_download(repo_id, filename, dest, *, repo_type="dataset", revision=None):
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -280,8 +280,8 @@ def test_fetch_golden_rejects_non_hdf5_payloads(tmp_path, monkeypatch):
 
 def test_fetch_golden_requires_the_pinned_content_hash(tmp_path, monkeypatch):
     """Magic bytes prove only the format; a different valid HDF5 must be rejected."""
-    import kairyu.bench.adapters.scicode as scicode_mod
-    import kairyu.bench.hub as hub
+    import evals.adapters.scicode as scicode_mod
+    import evals.hub as hub
 
     tried: list[tuple[str, str | None]] = []
     authentic = b"\x89HDF\r\n\x1a\n" + b"\x01" * 16
@@ -318,7 +318,7 @@ def test_fetch_golden_requires_the_pinned_content_hash(tmp_path, monkeypatch):
 
 
 def test_golden_data_pin_is_a_sha256_and_size(tmp_path):
-    from kairyu.bench.adapters.scicode import (
+    from evals.adapters.scicode import (
         _H5_BYTES,
         _H5_SHA256,
         golden_data_is_authentic,
@@ -366,8 +366,8 @@ def _official_shaped_rows() -> list[dict]:
 
 
 def _patch_scicode(monkeypatch, rows, *, provided=None):
-    import kairyu.bench.adapters.scicode as scicode_mod
-    import kairyu.bench.hub as hub
+    import evals.adapters.scicode as scicode_mod
+    import evals.hub as hub
 
     monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: rows)
     monkeypatch.setattr(SciCodeAdapter, "_fetch_golden", lambda self, ctx: None)
@@ -384,7 +384,7 @@ def _patch_scicode(monkeypatch, rows, *, provided=None):
 
 def test_normalize_marks_the_three_steps_the_evaluator_skips(tmp_path, monkeypatch):
     """Fugu's denominator is 288: the official evaluator `continue`s past 3 steps."""
-    from kairyu.bench.adapters.scicode import _EXCLUDED_STEPS
+    from evals.adapters.scicode import _EXCLUDED_STEPS
 
     _patch_scicode(monkeypatch, _official_shaped_rows())
     rows = SciCodeAdapter().normalize(DownloadContext(cache=BenchCache(tmp_path / "c")))

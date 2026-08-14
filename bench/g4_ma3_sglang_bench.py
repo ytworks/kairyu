@@ -50,32 +50,32 @@ import httpx  # noqa: E402
 from bench import g2_a6_vllm_bench as a6  # noqa: E402
 from bench import g4_ma1_qwen3_235b_nvfp4_bench as ma1  # noqa: E402
 from bench import g4_ma1_qwen3_235b_nvfp4_capture as ma1_capture  # noqa: E402
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     artifact_paths as evidence_artifact_paths,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     canonical_json,
     sha256_file,
     sha256_json,
     sha256_text,
     verify_replayed_manifest,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     read_json_object as evidence_read_json_object,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     read_jsonl as evidence_read_jsonl,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     replay_manifest as evidence_replay_manifest,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     strict_json_loads as evidence_strict_json_loads,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     write_jsonl as evidence_write_jsonl,
 )
-from kairyu.bench.reporting import atomic_write_json, atomic_write_text  # noqa: E402
+from evidence.reporting import atomic_write_json, atomic_write_text  # noqa: E402
 from kairyu.engine.tokenizer import HFTokenizer  # noqa: E402
 
 SCHEMA_VERSION = "kairyu.g4.ma3.sglang-comparison.v2"

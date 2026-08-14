@@ -10,15 +10,15 @@ import json
 
 from conftest import make_config
 
-from kairyu.bench.progress import (
+from evals.progress import (
     LineProgress,
     NullProgress,
     SafeReporter,
     TqdmProgress,
     make_reporter,
 )
-from kairyu.bench.runner import SuiteRunner
-from kairyu.bench.store import ResultStore
+from evals.runner import SuiteRunner
+from evals.store import ResultStore
 
 
 class _Tty(io.StringIO):
@@ -387,9 +387,9 @@ async def test_agentic_pairs_emit_a_heartbeat_while_they_run(tmp_path, monkeypat
 
     import httpx
 
-    import kairyu.bench.runner as runner_mod
-    from kairyu.bench.adapters.base import AdapterInfo, DownloadContext
-    from kairyu.bench.types import DownloadReport, PairResult
+    import evals.runner as runner_mod
+    from evals.adapters.base import AdapterInfo, DownloadContext
+    from evals.types import DownloadReport, PairResult
 
     monkeypatch.setattr(runner_mod, "_HEARTBEAT_INTERVAL_S", 0.01)
 

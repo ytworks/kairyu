@@ -6,17 +6,16 @@ import json
 
 import pytest
 
-from kairyu.bench import quant_sweep
-from kairyu.bench.adapters import QUANTIZATION_ROW_ORDER
-from kairyu.bench.cli import handle
-from kairyu.bench.store import ResultStore
-from kairyu.entrypoints import cli
+from evals import __main__ as cli
+from evals import quant_sweep
+from evals.adapters import QUANTIZATION_ROW_ORDER
+from evals.cli import handle
+from evals.store import ResultStore
 
 
 def _args(*extra: str):
     return cli._build_parser().parse_args(
         [
-            "bench",
             "quant-sweep",
             "--run",
             "quant-run",

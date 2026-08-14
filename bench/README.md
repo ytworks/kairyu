@@ -57,7 +57,7 @@ If two wrappers need the same config, type, statistics, result writer, or
 provenance rule, put that reusable contract in `kairyu.bench` and keep each
 top-level file as a thin composition layer.
 
-`kairyu.bench.evidence` owns canonical JSON encoding, SHA-256 helpers, atomic
+`evidence` owns canonical JSON encoding, SHA-256 helpers, atomic
 indexed JSONL publication, strict object/JSONL framing, artifact-pair path
 resolution, and exact retained-manifest comparison against raw-only replay.
 It hashes the exact raw bytes parsed from one open descriptor. Gate-specific

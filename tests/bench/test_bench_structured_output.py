@@ -9,18 +9,18 @@ from copy import deepcopy
 import httpx
 import pytest
 
-from kairyu.bench import history
-from kairyu.bench.adapters.base import DownloadContext, RunContext, cache_pins
-from kairyu.bench.adapters.structured_output import StructuredOutputAdapter
-from kairyu.bench.aggregate import build_scoreboard, render_markdown
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.runner import (
+from evals import history
+from evals.adapters.base import DownloadContext, RunContext, cache_pins
+from evals.adapters.structured_output import StructuredOutputAdapter
+from evals.aggregate import build_scoreboard, render_markdown
+from evals.cache import BenchCache
+from evals.runner import (
     _adapter_identity,
     _recordable_config,
     _run_fingerprint,
     _run_identity,
 )
-from kairyu.bench.structured import (
+from evals.structured import (
     CATEGORY_ORDER,
     CORPUS_ID,
     CORPUS_REVISION,
@@ -36,7 +36,7 @@ from kairyu.bench.structured import (
     structured_summary_error,
     validate_corpus_rows,
 )
-from kairyu.bench.types import (
+from evals.types import (
     JSON_SAFE_INTEGER_MAX,
     BenchConfig,
     BenchTarget,
@@ -194,7 +194,7 @@ def test_fixed_corpus_covers_each_required_schema_class_and_rejects_drift():
         "pattern-code",
         "union-value",
     ]
-    assert CORPUS_ID == "package:kairyu.bench.fixtures/structured-output.jsonl"
+    assert CORPUS_ID == "package:evals.fixtures/structured-output.jsonl"
     assert CORPUS_REVISION.startswith("sha256:")
     assert len(CORPUS_REVISION.removeprefix("sha256:")) == 64
     assert rows[1]["schema"]["$defs"]["node"]["properties"]["children"]["items"] == {
@@ -1290,7 +1290,7 @@ async def test_scoreboard_and_schema1_history_bind_then_strip_structured_claim(t
         resource
         for resource in resources
         if (resource["package"], resource["resource"])
-        != ("kairyu.bench", "structured.py")
+        != ("evals", "structured.py")
     ]
     missing_resource["fingerprint"] = _run_fingerprint(missing_resource["identity"])
     missing_board = deepcopy(board)

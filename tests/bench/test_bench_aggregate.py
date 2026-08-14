@@ -5,7 +5,7 @@ from argparse import Namespace
 
 import pytest
 
-from kairyu.bench.adapters import (
+from evals.adapters import (
     CORE_ROW_ORDER,
     LONG_CONTEXT_ROW_ORDER,
     QUANTIZATION_ROW_ORDER,
@@ -13,9 +13,9 @@ from kairyu.bench.adapters import (
     all_adapters,
     suite_adapters,
 )
-from kairyu.bench.aggregate import _wilson_bounds, build_scoreboard, render_markdown
-from kairyu.bench.cli import _handle_report
-from kairyu.bench.types import (
+from evals.aggregate import _wilson_bounds, build_scoreboard, render_markdown
+from evals.cli import _handle_report
+from evals.types import (
     BenchTarget,
     ItemResult,
     JudgeConfig,

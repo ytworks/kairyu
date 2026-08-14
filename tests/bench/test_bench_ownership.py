@@ -8,10 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from kairyu.bench import cli as bench_cli
-from kairyu.bench.adapters import all_adapters
-from kairyu.bench.adapters.base import DatasetAdapter
-from kairyu.bench.ownership import (
+from evals import __main__ as cli
+from evals import cli as bench_cli
+from evals.adapters import all_adapters
+from evals.adapters.base import DatasetAdapter
+from evals.ownership import (
     MANIFEST_NAME,
     BenchmarkEntrypoint,
     _top_level_bench_import_names,
@@ -21,7 +22,6 @@ from kairyu.bench.ownership import (
     load_entrypoints,
     validate_repository,
 )
-from kairyu.entrypoints import cli
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -54,7 +54,7 @@ def test_entrypoint_invocations_require_path_first(
 
 
 def test_package_manifest_is_complete_and_sorted() -> None:
-    manifest = resources.files("kairyu.bench").joinpath(MANIFEST_NAME)
+    manifest = resources.files("evals").joinpath(MANIFEST_NAME)
     assert manifest.is_file()
     entries = load_entrypoints()
     assert len(entries) == 68
@@ -80,7 +80,7 @@ def test_package_manifest_is_complete_and_sorted() -> None:
 
 
 def test_packaged_fixtures_exactly_cover_dataset_adapters() -> None:
-    fixture_root = resources.files("kairyu.bench.fixtures")
+    fixture_root = resources.files("evals.fixtures")
     packaged = {
         item.name
         for item in fixture_root.iterdir()
@@ -183,10 +183,10 @@ def test_entrypoints_json_is_stable_and_explicit() -> None:
     assert payload["schema_version"] == 1
     assert payload["ownership"] == {
         "installed_cli": "kairyu bench",
-        "installed_fixtures": "kairyu.bench.fixtures",
+        "installed_fixtures": "evals.fixtures",
         "repository_entrypoints": "bench",
         "repository_results": "bench/results",
-        "reusable_code": "kairyu.bench",
+        "reusable_code": "evals",
     }
     assert payload["compatibility_imports"] == {
         source: list(targets)
@@ -196,8 +196,7 @@ def test_entrypoints_json_is_stable_and_explicit() -> None:
 
 
 def test_bench_entrypoints_parser_dispatches(capsys) -> None:
-    args = cli._build_parser().parse_args(["bench", "entrypoints", "--json"])
-    assert args.command == "bench"
+    args = cli._build_parser().parse_args(["entrypoints", "--json"])
     assert args.bench_command == "entrypoints"
     assert bench_cli.handle(args) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -209,11 +208,11 @@ def test_bench_entrypoints_check_failure_is_nonzero(
     capsys,
 ) -> None:
     monkeypatch.setattr(
-        "kairyu.bench.ownership.validate_repository",
+        "evals.ownership.validate_repository",
         lambda root: ("unregistered benchmark entrypoint: bench/new.py",),
     )
     args = cli._build_parser().parse_args(
-        ["bench", "entrypoints", "--check-repo", str(ROOT)]
+        ["entrypoints", "--check-repo", str(ROOT)]
     )
     assert bench_cli.handle(args) == 1
     output = capsys.readouterr().out

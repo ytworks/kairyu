@@ -13,11 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from kairyu.bench import history
-from kairyu.bench.aggregate import build_scoreboard
-from kairyu.bench.sampling import combine_attempts, sampling_metrics, sampling_summary
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import ItemResult, PairResult, SamplingAttemptResult
+from evals import history
+from evals.aggregate import build_scoreboard
+from evals.sampling import combine_attempts, sampling_metrics, sampling_summary
+from evals.store import ResultStore
+from evals.types import ItemResult, PairResult, SamplingAttemptResult
 
 
 def _canonical(value: object) -> bytes:
@@ -100,13 +100,13 @@ def _metadata(
                             ).hexdigest(),
                         }
                         for package, resource in (
-                            ("kairyu.bench.adapters", "gsm8k.py"),
-                            ("kairyu.bench.adapters", "base.py"),
-                            ("kairyu.bench", "aggregate.py"),
-                            ("kairyu.bench", "cache.py"),
-                            ("kairyu.bench", "runner.py"),
-                            ("kairyu.bench", "types.py"),
-                            ("kairyu.bench", "targets.py"),
+                            ("evals.adapters", "gsm8k.py"),
+                            ("evals.adapters", "base.py"),
+                            ("evals", "aggregate.py"),
+                            ("evals", "cache.py"),
+                            ("evals", "runner.py"),
+                            ("evals", "types.py"),
+                            ("evals", "targets.py"),
                         )
                     ],
                     "distributions": [],
@@ -194,9 +194,9 @@ def _sampling_metadata() -> dict:
     metadata["identity"]["adapters"][0]["binary_outcomes"] = True
     metadata["identity"]["adapters"][0]["evaluation_protocol"]["resources"].append(
         {
-            "package": "kairyu.bench",
+            "package": "evals",
             "resource": "sampling.py",
-            "sha256": hashlib.sha256(b"kairyu.bench/sampling.py").hexdigest(),
+            "sha256": hashlib.sha256(b"evals/sampling.py").hexdigest(),
         }
     )
     _refresh_metadata_identity(metadata)

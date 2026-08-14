@@ -7,24 +7,24 @@ import json
 import httpx
 import pytest
 
-from kairyu.bench.adapters.base import (
+from evals.adapters.base import (
     AdapterInfo,
     DownloadContext,
     GenerativeAdapter,
     RunContext,
     call_chat,
 )
-from kairyu.bench.aggregate import build_scoreboard, render_markdown
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.sampling import (
+from evals.aggregate import build_scoreboard, render_markdown
+from evals.cache import BenchCache
+from evals.sampling import (
     PROTOCOL_ID as SAMPLING_PROTOCOL_ID,
 )
-from kairyu.bench.sampling import (
+from evals.sampling import (
     pass_at_k,
     sampling_summary,
     seed_schedule,
 )
-from kairyu.bench.types import (
+from evals.types import (
     BenchItem,
     BenchTarget,
     ChatRequestSpec,
@@ -357,7 +357,7 @@ async def test_incomplete_seed_matrix_withholds_sampling_statistics(tmp_path):
 
 
 def test_sampling_parent_status_is_derived_from_child_outcomes():
-    from kairyu.bench.types import SamplingAttemptResult
+    from evals.types import SamplingAttemptResult
 
     complete = SamplingAttemptResult(
         attempt=1,
@@ -509,8 +509,8 @@ async def test_grouped_pair_counts_and_source_ids_are_bound_to_raw_items(tmp_pat
 
 def test_sampling_summary_rejects_nonbinary_evidence_for_binary_adapter():
     child = ItemResult(item_id="x", status="completed", score=0.5)
-    from kairyu.bench.sampling import combine_attempts
-    from kairyu.bench.types import SamplingAttemptResult
+    from evals.sampling import combine_attempts
+    from evals.types import SamplingAttemptResult
 
     parent = combine_attempts(
         "x",
@@ -553,7 +553,7 @@ def test_sampling_helpers_reject_json_unsafe_seed_schedule():
     ],
 )
 def test_sampling_attempt_identity_rejects_lossy_integer_coercion(field, value, message):
-    from kairyu.bench.types import SamplingAttemptResult
+    from evals.types import SamplingAttemptResult
 
     data = {
         "attempt": 1,

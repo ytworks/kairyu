@@ -44,8 +44,8 @@ from urllib.parse import quote
 
 import httpx
 
+from evidence import sha256_file as _sha256_file
 from kairyu.audit_io import AuditQueueFull, BoundedJsonlWriter
-from kairyu.bench.evidence import sha256_file as _sha256_file
 
 SCHEMA_VERSION = 1
 GATE = "G5-F1a"

@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from kairyu.bench.ownership import load_entrypoints, validate_repository
+from evals.ownership import load_entrypoints, validate_repository
 
 
 @dataclass(frozen=True, slots=True)

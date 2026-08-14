@@ -6,17 +6,17 @@ import httpx
 import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters import tau_bench
-from kairyu.bench.adapters.base import RunContext
-from kairyu.bench.adapters.tau_bench import (
+from evals.adapters import tau_bench
+from evals.adapters.base import RunContext
+from evals.adapters.tau_bench import (
     TauBenchBankingAdapter,
     parse_tau_results,
 )
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.judge import JudgeClient, build_judge_client
-from kairyu.bench.runner import SuiteRunner
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import JudgeConfig, JudgeEndpointConfig
+from evals.cache import BenchCache
+from evals.judge import JudgeClient, build_judge_client
+from evals.runner import SuiteRunner
+from evals.store import ResultStore
+from evals.types import JudgeConfig, JudgeEndpointConfig
 
 SAMPLE_RESULTS = {
     "simulations": [

@@ -45,26 +45,26 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     artifact_paths as evidence_artifact_paths,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     canonical_json,
     sha256_bytes,
     sha256_file,
     sha256_json,
     verify_replayed_manifest,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     read_jsonl as evidence_read_jsonl,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     read_jsonl_with_sha256 as evidence_read_jsonl_with_sha256,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     replay_manifest as evidence_replay_manifest,
 )
-from kairyu.bench.evidence import (  # noqa: E402
+from evidence import (  # noqa: E402
     write_jsonl as evidence_write_jsonl,
 )
 

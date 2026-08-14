@@ -12,18 +12,18 @@ import zipfile
 
 import pytest
 
-from kairyu.bench.adapters.base import DownloadContext
-from kairyu.bench.adapters.livecodebench import (
+from evals.adapters.base import DownloadContext
+from evals.adapters.livecodebench import (
     LiveCodeBenchAdapter,
     grade_code,
     normalize_output,
 )
-from kairyu.bench.adapters.livecodebench_pro import (
+from evals.adapters.livecodebench_pro import (
     LiveCodeBenchProAdapter,
     parse_testcase_zip,
 )
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.types import DatasetGated, DatasetUnavailable
+from evals.cache import BenchCache
+from evals.types import DatasetGated, DatasetUnavailable
 
 
 def _ctx(tmp_path) -> DownloadContext:
@@ -75,8 +75,8 @@ def test_grade_code_accepts_trailing_whitespace_in_output():
 
 
 def test_livecodebench_normalize_reads_pinned_release_files(tmp_path, monkeypatch):
-    import kairyu.bench.hub as hub
-    from kairyu.bench.adapters import livecodebench
+    import evals.hub as hub
+    from evals.adapters import livecodebench
 
     seen: dict = {}
 
@@ -106,7 +106,7 @@ def test_livecodebench_normalize_reads_pinned_release_files(tmp_path, monkeypatc
 
 
 def test_livecodebench_normalize_rejects_row_count_drift(tmp_path, monkeypatch):
-    import kairyu.bench.hub as hub
+    import evals.hub as hub
 
     monkeypatch.setattr(
         hub, "load_jsonl_files", lambda *a, **k: [_lcb_row("only-one")]
@@ -117,7 +117,7 @@ def test_livecodebench_normalize_rejects_row_count_drift(tmp_path, monkeypatch):
 
 def test_livecodebench_download_degrades_on_count_drift(tmp_path, monkeypatch):
     """A count mismatch is data (a skipped cell), never a crashed suite run."""
-    import kairyu.bench.hub as hub
+    import evals.hub as hub
 
     monkeypatch.setattr(hub, "load_jsonl_files", lambda *a, **k: [])
     report = LiveCodeBenchAdapter().download(_ctx(tmp_path))
@@ -193,7 +193,7 @@ def _complete_archive(cases: int = 1) -> bytes:
 
 
 def _patch_pro_hub(monkeypatch, rows, archives: dict[str, bytes]):
-    import kairyu.bench.hub as hub
+    import evals.hub as hub
 
     seen: dict = {}
 
@@ -300,7 +300,7 @@ def test_livecodebench_pro_normalize_reports_schema_drift(tmp_path, monkeypatch)
 
 
 def test_read_testcase_archive_reports_declared_cases():
-    from kairyu.bench.adapters.livecodebench_pro import read_testcase_archive
+    from evals.adapters.livecodebench_pro import read_testcase_archive
 
     parsed = read_testcase_archive(_complete_archive(cases=3))
     assert parsed.declared_cases == 3
@@ -325,7 +325,7 @@ def test_archive_without_a_declared_count_is_never_complete(config):
     Treating "as many cases as arrived" as complete would let a truncated or
     schema-drifted archive pass as a valid benchmark.
     """
-    from kairyu.bench.adapters.livecodebench_pro import read_testcase_archive
+    from evals.adapters.livecodebench_pro import read_testcase_archive
 
     data = _zip_bytes({"testdata/1.in": "a\n", "testdata/1.ans": "A\n"}, config=config)
     parsed = read_testcase_archive(data)
@@ -336,7 +336,7 @@ def test_archive_without_a_declared_count_is_never_complete(config):
 
 def test_output_without_an_input_is_unpaired_too():
     """A case that exists but can never be run is drift in the other direction."""
-    from kairyu.bench.adapters.livecodebench_pro import read_testcase_archive
+    from evals.adapters.livecodebench_pro import read_testcase_archive
 
     parsed = read_testcase_archive(
         _zip_bytes(
@@ -364,8 +364,8 @@ def test_livecodebench_pro_fails_closed_on_an_undeclared_archive(tmp_path, monke
 
 def test_livecodebench_pro_records_the_testcase_pin_in_cache_identity():
     """Repinning the archives must invalidate the cache, not just the docs."""
-    from kairyu.bench.adapters.base import cache_pins
-    from kairyu.bench.adapters.livecodebench_pro import _TESTCASE_REVISION
+    from evals.adapters.base import cache_pins
+    from evals.adapters.livecodebench_pro import _TESTCASE_REVISION
 
     info = LiveCodeBenchProAdapter().info
     pins = cache_pins(info)
@@ -381,7 +381,7 @@ def test_livecodebench_pro_is_declared_gated(tmp_path, monkeypatch):
     adapter = LiveCodeBenchProAdapter()
     assert adapter.info.gated is True
 
-    import kairyu.bench.hub as hub
+    import evals.hub as hub
 
     def refuse(dataset, *, name=None, split, revision=None, gated=False):
         if gated:

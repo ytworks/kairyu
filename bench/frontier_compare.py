@@ -19,19 +19,19 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kairyu.bench.reporting import (
+from evidence.reporting import (
     PERCENTILE_METHOD,
     atomic_write_json,
     atomic_write_text,
     nearest_rank_percentile,
 )
-from kairyu.bench.targets import (
+from evals.targets import (
     TARGET_SPEC_FORMAT,
     normalize_base_url,
     parse_target_spec,
     target_api_key,
 )
-from kairyu.bench.types import BenchTarget
+from evals.types import BenchTarget
 
 DEFAULT_PROMPTS = (
     "Explain the difference between processes and threads in one paragraph.",

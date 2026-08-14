@@ -6,10 +6,10 @@ import json
 
 import pytest
 
-from kairyu.bench import config_ab
-from kairyu.bench.cli import handle
-from kairyu.bench.store import ResultStore
-from kairyu.entrypoints import cli
+from evals import __main__ as cli
+from evals import config_ab
+from evals.cli import handle
+from evals.store import ResultStore
 
 
 def _entry(run_id: str, targets: tuple[str, ...] = ("arm",)) -> dict:
@@ -23,7 +23,6 @@ def _entry(run_id: str, targets: tuple[str, ...] = ("arm",)) -> dict:
 def _args(*extra: str):
     return cli._build_parser().parse_args(
         [
-            "bench",
             "compare",
             "--baseline",
             "base",
@@ -177,7 +176,6 @@ def test_explicit_targets_support_two_arms_from_the_same_run(monkeypatch, capsys
     )
     args = cli._build_parser().parse_args(
         [
-            "bench",
             "compare",
             "--baseline",
             "base",

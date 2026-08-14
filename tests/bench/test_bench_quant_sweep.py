@@ -8,20 +8,21 @@ from copy import deepcopy
 
 import pytest
 
-from kairyu.bench import history
-from kairyu.bench.adapters import QUANTIZATION_ROW_ORDER
-from kairyu.bench.aggregate import build_scoreboard
-from kairyu.bench.cli import handle
-from kairyu.bench.history import build_entry
-from kairyu.bench.quant_sweep import (
+from evals import __main__ as cli
+from evals import history
+from evals.adapters import QUANTIZATION_ROW_ORDER
+from evals.aggregate import build_scoreboard
+from evals.cli import handle
+from evals.history import build_entry
+from evals.quant_sweep import (
     QuantizationSweepError,
     build_quantization_sweep,
     render_quantization_sweep_markdown,
     required_quantization_profiles,
 )
-from kairyu.bench.runner import _recordable_config, _run_fingerprint, _run_identity
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import (
+from evals.runner import _recordable_config, _run_fingerprint, _run_identity
+from evals.store import ResultStore
+from evals.types import (
     BenchConfig,
     BenchTarget,
     ItemResult,
@@ -29,7 +30,6 @@ from kairyu.bench.types import (
     QuantizationProfile,
     ServedConfigIdentity,
 )
-from kairyu.entrypoints import cli
 
 
 def _digest(value: str) -> str:
@@ -38,13 +38,13 @@ def _digest(value: str) -> str:
 
 def _adapter_identity(name: str) -> dict:
     resources = [
-        ("kairyu.bench.adapters", f"{name.replace('-', '_')}.py"),
-        ("kairyu.bench.adapters", "base.py"),
-        ("kairyu.bench", "aggregate.py"),
-        ("kairyu.bench", "cache.py"),
-        ("kairyu.bench", "runner.py"),
-        ("kairyu.bench", "targets.py"),
-        ("kairyu.bench", "types.py"),
+        ("evals.adapters", f"{name.replace('-', '_')}.py"),
+        ("evals.adapters", "base.py"),
+        ("evals", "aggregate.py"),
+        ("evals", "cache.py"),
+        ("evals", "runner.py"),
+        ("evals", "targets.py"),
+        ("evals", "types.py"),
     ]
     return {
         "name": name,
@@ -248,8 +248,8 @@ def test_complete_sweep_reuses_six_exact_config_comparisons():
     assert {
         resource["resource"] for resource in sweep["sweep_protocol"]["resources"]
     } >= {
-        "kairyu/bench/quant_sweep.py",
-        "kairyu/bench/config_ab.py",
+        "evals/quant_sweep.py",
+        "evals/config_ab.py",
         "kairyu/engine/core/quant_config.py",
         "kairyu/engine/core/kv_cache_dtype.py",
     }
@@ -379,7 +379,6 @@ def test_real_index_raw_pair_reload_and_cli_artifact_round_trip(tmp_path, capsys
     store.append_scoreboard_index(entry["scoreboard"], entry["run"], all_pairs)
     args = cli._build_parser().parse_args(
         [
-            "bench",
             "quant-sweep",
             "--run",
             "quant-run",

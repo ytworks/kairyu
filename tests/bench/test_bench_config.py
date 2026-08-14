@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from kairyu.bench.cli import add_bench_parser
-from kairyu.bench.config import build_config, build_judge_config, parse_target_flag
-from kairyu.bench.execution import build_execution_runner
-from kairyu.bench.types import (
+from evals.cli import add_evals_parser
+from evals.config import build_config, build_judge_config, parse_target_flag
+from evals.execution import build_execution_runner
+from evals.types import (
     BenchConfig,
     BenchTarget,
     ExecutionConfig,
@@ -21,8 +21,8 @@ from kairyu.bench.types import (
 
 def _parse(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    add_bench_parser(parser.add_subparsers(dest="command"))
-    return parser.parse_args(["bench", *argv])
+    add_evals_parser(parser)
+    return parser.parse_args(argv)
 
 
 def test_parse_target_flag():
@@ -359,7 +359,7 @@ def test_quantization_profile_rejects_conflated_or_unresolved_identity(profile):
 
 
 def test_recorded_non_quant_target_shape_remains_backward_compatible():
-    from kairyu.bench.runner import (
+    from evals.runner import (
         _recordable_config,
         _run_fingerprint,
         _run_identity,

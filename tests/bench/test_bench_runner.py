@@ -7,15 +7,15 @@ from pathlib import Path
 import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench import history
-from kairyu.bench.adapters.base import (
+from evals import history
+from evals.adapters.base import (
     AdapterInfo,
     DownloadContext,
     RunContext,
     utc_now,
 )
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.runner import (
+from evals.cache import BenchCache
+from evals.runner import (
     SuiteRunner,
     _adapter_identity,
     _methodology_history_ineligibility,
@@ -24,8 +24,8 @@ from kairyu.bench.runner import (
     _run_identity,
     _source_provenance,
 )
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import (
+from evals.store import ResultStore
+from evals.types import (
     DownloadReport,
     ExecutionConfig,
     ItemResult,
@@ -115,8 +115,8 @@ def _clean_environment(commit: str = "a" * 40, created_at: str = "t1") -> dict:
 
 
 def _seed_content_bound_cache(config, benchmark: str) -> None:
-    from kairyu.bench.adapters import suite_adapters
-    from kairyu.bench.adapters.base import cache_pins
+    from evals.adapters import suite_adapters
+    from evals.adapters.base import cache_pins
 
     adapter = suite_adapters(config.suite, only=(benchmark,))[0]
     BenchCache(Path(config.cache_dir)).write_rows(
@@ -128,7 +128,7 @@ def _seed_content_bound_cache(config, benchmark: str) -> None:
 
 def _disable_history_for_in_memory_adapter(monkeypatch) -> None:
     monkeypatch.setattr(
-        "kairyu.bench.runner._source_provenance",
+        "evals.runner._source_provenance",
         lambda: {
             "git_commit": None,
             "git_commit_role": "local_benchmark_harness",
@@ -198,8 +198,8 @@ def test_served_config_identity_is_recorded_and_changes_fingerprint_without_secr
 
 
 def test_selected_judge_templates_are_content_bound_to_adapter_identity(tmp_path, monkeypatch):
-    from kairyu.bench import judge_prompts
-    from kairyu.bench.adapters import all_adapters
+    from evals import judge_prompts
+    from evals.adapters import all_adapters
 
     cache = BenchCache(tmp_path / "cache")
     adapters = all_adapters()
@@ -234,7 +234,7 @@ def test_selected_judge_templates_are_content_bound_to_adapter_identity(tmp_path
 
 
 def test_config_ab_statistical_routing_is_recorded_in_adapter_identity(tmp_path):
-    from kairyu.bench.adapters import all_adapters
+    from evals.adapters import all_adapters
 
     adapters = all_adapters()
     cache = BenchCache(tmp_path / "cache")
@@ -255,7 +255,7 @@ def test_config_ab_statistical_routing_is_recorded_in_adapter_identity(tmp_path)
 
 
 def test_referenced_cache_assets_are_content_bound_and_revalidated(tmp_path):
-    from kairyu.bench.adapters import all_adapters
+    from evals.adapters import all_adapters
 
     adapter = all_adapters()["charxiv-reasoning"]
     cache = BenchCache(tmp_path / "cache")
@@ -282,8 +282,8 @@ def test_referenced_cache_assets_are_content_bound_and_revalidated(tmp_path):
 
 
 def test_core_evaluators_are_content_bound_to_adapter_identity(tmp_path, monkeypatch):
-    from kairyu.bench.adapters import all_adapters
-    from kairyu.bench.adapters import base as adapter_base
+    from evals.adapters import all_adapters
+    from evals.adapters import base as adapter_base
 
     cache = BenchCache(tmp_path / "cache")
     adapters = all_adapters()
@@ -301,15 +301,15 @@ def test_core_evaluators_are_content_bound_to_adapter_identity(tmp_path, monkeyp
         (entry["package"], entry["resource"])
         for entry in identities[1]["evaluation_protocol"]["resources"]
     } == {
-        ("kairyu.bench.adapters", "mmlu.py"),
-        ("kairyu.bench.adapters", "base.py"),
-        ("kairyu.bench", "aggregate.py"),
-        ("kairyu.bench", "cache.py"),
-        ("kairyu.bench", "runner.py"),
-            ("kairyu.bench", "sampling.py"),
-            ("kairyu.bench", "streaming.py"),
-            ("kairyu.bench", "types.py"),
-        ("kairyu.bench", "targets.py"),
+        ("evals.adapters", "mmlu.py"),
+        ("evals.adapters", "base.py"),
+        ("evals", "aggregate.py"),
+        ("evals", "cache.py"),
+        ("evals", "runner.py"),
+            ("evals", "sampling.py"),
+            ("evals", "streaming.py"),
+            ("evals", "types.py"),
+        ("evals", "targets.py"),
     }
 
     config = make_config(tmp_path, models=("m",), suite="core")
@@ -329,7 +329,7 @@ def test_core_evaluators_are_content_bound_to_adapter_identity(tmp_path, monkeyp
 
 
 def test_every_builtin_adapter_binds_its_implementation_and_shared_aggregator(tmp_path):
-    from kairyu.bench.adapters import all_adapters
+    from evals.adapters import all_adapters
 
     cache = BenchCache(tmp_path / "cache")
     for adapter in all_adapters().values():
@@ -339,15 +339,15 @@ def test_every_builtin_adapter_binds_its_implementation_and_shared_aggregator(tm
             for entry in identity["evaluation_protocol"]["resources"]
         }
         module_name = type(adapter).__module__.rsplit(".", 1)[-1] + ".py"
-        assert ("kairyu.bench.adapters", module_name) in resources
-        assert ("kairyu.bench", "aggregate.py") in resources
-        assert ("kairyu.bench.adapters", "base.py") in resources
+        assert ("evals.adapters", module_name) in resources
+        assert ("evals", "aggregate.py") in resources
+        assert ("evals.adapters", "base.py") in resources
 
 
 @pytest.mark.parametrize("resource", ["runner.py", "cache.py", "sampling.py"])
 def test_shared_score_bearing_runtime_changes_fingerprint(tmp_path, monkeypatch, resource):
-    from kairyu.bench.adapters import all_adapters
-    from kairyu.bench.adapters import base as adapter_base
+    from evals.adapters import all_adapters
+    from evals.adapters import base as adapter_base
 
     cache = BenchCache(tmp_path / "cache")
     adapter = all_adapters()["gpqa-diamond"]
@@ -356,7 +356,7 @@ def test_shared_score_bearing_runtime_changes_fingerprint(tmp_path, monkeypatch,
 
     def changed_read(package: str, resource_name: str) -> bytes:
         payload = original_read(package, resource_name)
-        if package == "kairyu.bench" and resource_name == resource:
+        if package == "evals" and resource_name == resource:
             return payload + b"\n# changed score-bearing runtime\n"
         return payload
 
@@ -370,8 +370,8 @@ def test_shared_score_bearing_runtime_changes_fingerprint(tmp_path, monkeypatch,
 
 
 def test_external_harness_distribution_content_changes_run_fingerprint(tmp_path, monkeypatch):
-    from kairyu.bench.adapters import all_adapters
-    from kairyu.bench.adapters import base as adapter_base
+    from evals.adapters import all_adapters
+    from evals.adapters import base as adapter_base
 
     cache = BenchCache(tmp_path / "cache")
     adapter = all_adapters()["swe-bench-pro"]
@@ -406,7 +406,7 @@ def test_external_harness_distribution_content_changes_run_fingerprint(tmp_path,
 
 
 def test_editable_external_harness_is_not_treated_as_content_verified(tmp_path, monkeypatch):
-    from kairyu.bench.adapters import base as adapter_base
+    from evals.adapters import base as adapter_base
 
     direct_url = tmp_path / "harness-1.0.dist-info" / "direct_url.json"
     direct_url.parent.mkdir()
@@ -446,7 +446,7 @@ def test_editable_external_harness_is_not_treated_as_content_verified(tmp_path, 
 
 
 def test_path_shadowed_external_harness_is_not_history_eligible(tmp_path, monkeypatch):
-    from kairyu.bench.adapters import all_adapters
+    from evals.adapters import all_adapters
 
     shadow = tmp_path / "mini-extra"
     shadow.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -464,7 +464,7 @@ def test_path_shadowed_external_harness_is_not_history_eligible(tmp_path, monkey
 
 
 def test_unresolved_runtime_is_a_cell_policy_not_whole_run_ineligibility(tmp_path):
-    from kairyu.bench.adapters import all_adapters
+    from evals.adapters import all_adapters
 
     cache = BenchCache(tmp_path / "cache")
     adapters = all_adapters()
@@ -487,7 +487,7 @@ def test_unresolved_runtime_is_a_cell_policy_not_whole_run_ineligibility(tmp_pat
 
 
 def test_ifeval_score_time_distributions_are_content_bound(tmp_path):
-    from kairyu.bench.adapters import all_adapters
+    from evals.adapters import all_adapters
 
     identity = _adapter_identity(
         all_adapters()["ifeval"], BenchCache(tmp_path / "cache"), offline_fixtures=True
@@ -500,7 +500,7 @@ def test_ifeval_score_time_distributions_are_content_bound(tmp_path):
 
 
 def test_production_judge_template_registry_is_complete():
-    from kairyu.bench import judge_prompts
+    from evals import judge_prompts
 
     declared = {
         name: value
@@ -511,7 +511,7 @@ def test_production_judge_template_registry_is_complete():
     assert len(registry) == len(declared)
     assert set(registry.values()) == set(declared.values())
 
-    from kairyu.bench.adapters import all_adapters
+    from evals.adapters import all_adapters
 
     selectors = {
         adapter.info.judge_template_name
@@ -524,7 +524,7 @@ def test_production_judge_template_registry_is_complete():
 async def test_template_change_refuses_same_run_before_backend_or_artifact_write(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench import judge_prompts
+    from evals import judge_prompts
 
     config = make_config(tmp_path, models=("m",), only=("hle",))
     assert await _runner(config, http_factory).run() == 0
@@ -598,7 +598,7 @@ async def test_selected_execution_runner_is_built_once_and_recorded(
         built_with.append(config)
         return selected
 
-    monkeypatch.setattr("kairyu.bench.execution.build_execution_runner", build)
+    monkeypatch.setattr("evals.execution.build_execution_runner", build)
     execution = ExecutionConfig(
         runner="docker",
         image="sha256:" + "c" * 64,
@@ -666,7 +666,7 @@ async def test_resume_refuses_a_different_source_before_target_io(
             {**common, "git_commit": "b" * 40, "created_at": "t2"},
         )
     )
-    monkeypatch.setattr("kairyu.bench.runner._environment", lambda **_kwargs: next(environments))
+    monkeypatch.setattr("evals.runner._environment", lambda **_kwargs: next(environments))
 
     assert await _runner(config, http_factory).run() == 0
     calls = 0
@@ -693,7 +693,7 @@ async def test_core_offline_runner_completes_all_three_pairs(tmp_path, http_fact
 
 
 async def test_quantization_offline_runner_executes_core_plus_gpqa(tmp_path, http_factory):
-    from kairyu.bench.adapters import QUANTIZATION_ROW_ORDER
+    from evals.adapters import QUANTIZATION_ROW_ORDER
 
     config = make_config(tmp_path, models=("m",), suite="quantization")
 
@@ -841,7 +841,7 @@ async def test_resume_quarantines_huge_stored_score_before_retry(
 
 
 async def test_adapter_crash_becomes_failed_pair_and_exit_1(tmp_path, http_factory, monkeypatch):
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     async def boom(self, target, ctx):
         raise RuntimeError("kaboom")
@@ -860,7 +860,7 @@ async def test_adapter_crash_becomes_failed_pair_and_exit_1(tmp_path, http_facto
 
 
 async def test_failed_pair_is_retried_on_resume(tmp_path, http_factory, monkeypatch):
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     async def boom(self, target, ctx):
         raise RuntimeError("kaboom")
@@ -898,8 +898,8 @@ async def test_clean_real_data_run_is_indexed_once_and_rerun_is_preflighted(
     tmp_path, http_factory, monkeypatch
 ):
     environment = _clean_environment()
-    monkeypatch.setattr("kairyu.bench.runner._environment", lambda **_kwargs: dict(environment))
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    monkeypatch.setattr("evals.runner._environment", lambda **_kwargs: dict(environment))
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
     config = make_config(
         tmp_path,
         models=("m",),
@@ -929,8 +929,8 @@ async def test_clean_real_data_run_is_indexed_once_and_rerun_is_preflighted(
 async def test_full_accuracy_history_stamps_safe_and_withheld_cross_run_cells(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters import ACCURACY_ROW_ORDER, suite_adapters
-    from kairyu.bench.adapters.base import cache_pins, evaluation_protocol_identity
+    from evals.adapters import ACCURACY_ROW_ORDER, suite_adapters
+    from evals.adapters.base import cache_pins, evaluation_protocol_identity
 
     run_calls: dict[str, int] = {}
 
@@ -962,12 +962,12 @@ async def test_full_accuracy_history_stamps_safe_and_withheld_cross_run_cells(
 
     monkeypatch.setattr(SuiteRunner, "_run_pair", completed_pair)
     monkeypatch.setattr(
-        "kairyu.bench.runner.evaluation_protocol_identity", installed_harnesses_absent
+        "evals.runner.evaluation_protocol_identity", installed_harnesses_absent
     )
     monkeypatch.setattr(
-        "kairyu.bench.runner._environment", lambda **_kwargs: _clean_environment()
+        "evals.runner._environment", lambda **_kwargs: _clean_environment()
     )
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
     config = make_config(
         tmp_path,
         models=("m",),
@@ -1045,8 +1045,8 @@ async def test_tracked_history_hashes_opaque_extra_body_instead_of_retaining_sec
     tmp_path, http_factory, monkeypatch
 ):
     environment = _clean_environment()
-    monkeypatch.setattr("kairyu.bench.runner._environment", lambda **_kwargs: dict(environment))
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    monkeypatch.setattr("evals.runner._environment", lambda **_kwargs: dict(environment))
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
     secret = "dummy-body-token-must-not-persist"
     config = make_config(
         tmp_path,
@@ -1075,7 +1075,7 @@ async def test_tracked_history_hashes_opaque_extra_body_instead_of_retaining_sec
 async def test_source_drift_permanently_taints_run_and_blocks_clean_resume(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     run_calls = 0
 
@@ -1094,7 +1094,7 @@ async def test_source_drift_permanently_taints_run_and_blocks_clean_resume(
 
     monkeypatch.setattr(GpqaDiamondAdapter, "run", completed_pair)
     environment = _clean_environment()
-    monkeypatch.setattr("kairyu.bench.runner._environment", lambda **_kwargs: dict(environment))
+    monkeypatch.setattr("evals.runner._environment", lambda **_kwargs: dict(environment))
     clean = _clean_source()
     dirty = {**clean, "source_tree_clean": False, "source_tree_sha256": "d" * 64}
     source_observations = 0
@@ -1107,7 +1107,7 @@ async def test_source_drift_permanently_taints_run_and_blocks_clean_resume(
         # render and pre-append checks, rather than depending on iterator size.
         return clean if source_observations <= 2 else dirty
 
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", drift_after_pair_starts)
+    monkeypatch.setattr("evals.runner._source_provenance", drift_after_pair_starts)
     config = make_config(
         tmp_path,
         models=("m",),
@@ -1124,7 +1124,7 @@ async def test_source_drift_permanently_taints_run_and_blocks_clean_resume(
     assert run_calls == 1
     assert source_observations >= 5
 
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: clean)
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: clean)
     with pytest.raises(ValueError, match="permanently source-tainted"):
         await _runner(config, http_factory).run()
     assert run_calls == 1
@@ -1133,7 +1133,7 @@ async def test_source_drift_permanently_taints_run_and_blocks_clean_resume(
 async def test_post_pair_evaluator_drift_fails_evidence_and_skips_history(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     run_calls = 0
 
@@ -1152,8 +1152,8 @@ async def test_post_pair_evaluator_drift_fails_evidence_and_skips_history(
 
     monkeypatch.setattr(GpqaDiamondAdapter, "run", completed_pair)
     environment = _clean_environment()
-    monkeypatch.setattr("kairyu.bench.runner._environment", lambda **_kwargs: dict(environment))
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    monkeypatch.setattr("evals.runner._environment", lambda **_kwargs: dict(environment))
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
 
     real_adapter_identity = _adapter_identity
     identity_calls = 0
@@ -1168,7 +1168,7 @@ async def test_post_pair_evaluator_drift_fails_evidence_and_skips_history(
         changed["evaluation_protocol"]["resources"][0]["sha256"] = "f" * 64
         return changed
 
-    monkeypatch.setattr("kairyu.bench.runner._adapter_identity", drift_after_pair)
+    monkeypatch.setattr("evals.runner._adapter_identity", drift_after_pair)
     config = make_config(
         tmp_path,
         models=("m",),
@@ -1193,8 +1193,8 @@ async def test_post_pair_evaluator_drift_fails_evidence_and_skips_history(
 async def test_evaluator_drift_after_render_skips_history_and_returns_nonzero(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench import runner as runner_module
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals import runner as runner_module
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     run_calls = 0
 
@@ -1213,8 +1213,8 @@ async def test_evaluator_drift_after_render_skips_history_and_returns_nonzero(
 
     monkeypatch.setattr(GpqaDiamondAdapter, "run", completed_pair)
     environment = _clean_environment()
-    monkeypatch.setattr("kairyu.bench.runner._environment", lambda **_kwargs: dict(environment))
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    monkeypatch.setattr("evals.runner._environment", lambda **_kwargs: dict(environment))
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
 
     rendered = False
     drift_enabled = True
@@ -1226,7 +1226,7 @@ async def test_evaluator_drift_after_render_skips_history_and_returns_nonzero(
         rendered = True
         return markdown
 
-    monkeypatch.setattr("kairyu.bench.runner.render_markdown", render_then_drift)
+    monkeypatch.setattr("evals.runner.render_markdown", render_then_drift)
     real_adapter_identity = _adapter_identity
 
     def identity_with_render_drift(*args, **kwargs):
@@ -1237,7 +1237,7 @@ async def test_evaluator_drift_after_render_skips_history_and_returns_nonzero(
         changed["evaluation_protocol"]["resources"][0]["sha256"] = "f" * 64
         return changed
 
-    monkeypatch.setattr("kairyu.bench.runner._adapter_identity", identity_with_render_drift)
+    monkeypatch.setattr("evals.runner._adapter_identity", identity_with_render_drift)
     config = make_config(
         tmp_path,
         models=("m",),
@@ -1270,7 +1270,7 @@ async def test_evaluator_drift_after_render_skips_history_and_returns_nonzero(
 async def test_evaluator_drift_during_scoreboard_save_is_caught_before_history_append(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     run_calls = 0
 
@@ -1289,9 +1289,9 @@ async def test_evaluator_drift_during_scoreboard_save_is_caught_before_history_a
 
     monkeypatch.setattr(GpqaDiamondAdapter, "run", completed_pair)
     monkeypatch.setattr(
-        "kairyu.bench.runner._environment", lambda **_kwargs: _clean_environment()
+        "evals.runner._environment", lambda **_kwargs: _clean_environment()
     )
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
     saved_scoreboard = False
     drift_enabled = True
     real_save_scoreboard = ResultStore.save_scoreboard
@@ -1313,7 +1313,7 @@ async def test_evaluator_drift_during_scoreboard_save_is_caught_before_history_a
         changed["evaluation_protocol"]["resources"][0]["sha256"] = "f" * 64
         return changed
 
-    monkeypatch.setattr("kairyu.bench.runner._adapter_identity", identity_with_save_drift)
+    monkeypatch.setattr("evals.runner._adapter_identity", identity_with_save_drift)
     config = make_config(
         tmp_path,
         models=("m",),
@@ -1349,7 +1349,7 @@ async def test_evaluator_drift_during_scoreboard_save_is_caught_before_history_a
 async def test_source_drift_during_scoreboard_save_is_caught_before_history_append(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     run_calls = 0
 
@@ -1368,13 +1368,13 @@ async def test_source_drift_during_scoreboard_save_is_caught_before_history_appe
 
     monkeypatch.setattr(GpqaDiamondAdapter, "run", completed_pair)
     monkeypatch.setattr(
-        "kairyu.bench.runner._environment", lambda **_kwargs: _clean_environment()
+        "evals.runner._environment", lambda **_kwargs: _clean_environment()
     )
     saved_scoreboard = False
     clean = _clean_source()
     dirty = {**clean, "source_tree_clean": False, "source_tree_sha256": "d" * 64}
     monkeypatch.setattr(
-        "kairyu.bench.runner._source_provenance",
+        "evals.runner._source_provenance",
         lambda: dirty if saved_scoreboard else clean,
     )
     real_save_scoreboard = ResultStore.save_scoreboard
@@ -1412,7 +1412,7 @@ async def test_source_drift_during_scoreboard_save_is_caught_before_history_appe
     assert row["measured"]["m"]["status"] == "failed"
     assert row["measured"]["m"]["score"] is None
 
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: clean)
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: clean)
     with pytest.raises(ValueError, match="permanently source-tainted"):
         await _runner(config, http_factory).run()
     assert run_calls == 1
@@ -1421,9 +1421,9 @@ async def test_source_drift_during_scoreboard_save_is_caught_before_history_appe
 async def test_source_drift_during_final_adapter_scan_is_quarantined(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters import suite_adapters
-    from kairyu.bench.adapters.base import cache_pins
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals.adapters import suite_adapters
+    from evals.adapters.base import cache_pins
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     async def completed_pair(self, target, ctx):
         now = utc_now()
@@ -1438,14 +1438,14 @@ async def test_source_drift_during_final_adapter_scan_is_quarantined(
 
     monkeypatch.setattr(GpqaDiamondAdapter, "run", completed_pair)
     monkeypatch.setattr(
-        "kairyu.bench.runner._environment", lambda **_kwargs: _clean_environment()
+        "evals.runner._environment", lambda **_kwargs: _clean_environment()
     )
     clean = _clean_source()
     dirty = {**clean, "source_tree_clean": False, "source_tree_sha256": "d" * 64}
     source_dirty = False
     saved_scoreboard = False
     monkeypatch.setattr(
-        "kairyu.bench.runner._source_provenance",
+        "evals.runner._source_provenance",
         lambda: dirty if source_dirty else clean,
     )
     config = make_config(
@@ -1484,7 +1484,7 @@ async def test_source_drift_during_final_adapter_scan_is_quarantined(
         return identity
 
     monkeypatch.setattr(ResultStore, "save_scoreboard", save_then_enable_drift)
-    monkeypatch.setattr("kairyu.bench.runner._adapter_identity", drift_during_final_scan)
+    monkeypatch.setattr("evals.runner._adapter_identity", drift_during_final_scan)
 
     assert await _runner(config, http_factory).run() == 1
 
@@ -1503,7 +1503,7 @@ async def test_source_drift_during_final_adapter_scan_is_quarantined(
 async def test_evaluator_taint_forces_reexecution_after_crash_before_failed_pair_save(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     run_calls = 0
 
@@ -1522,9 +1522,9 @@ async def test_evaluator_taint_forces_reexecution_after_crash_before_failed_pair
 
     monkeypatch.setattr(GpqaDiamondAdapter, "run", completed_pair)
     monkeypatch.setattr(
-        "kairyu.bench.runner._environment", lambda **_kwargs: _clean_environment()
+        "evals.runner._environment", lambda **_kwargs: _clean_environment()
     )
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
     config = make_config(
         tmp_path,
         models=("m",),
@@ -1564,7 +1564,7 @@ async def test_evaluator_taint_forces_reexecution_after_crash_before_failed_pair
         return changed
 
     monkeypatch.setattr(
-        "kairyu.bench.runner._adapter_identity", drift_after_resume_initialization
+        "evals.runner._adapter_identity", drift_after_resume_initialization
     )
     real_save_pair = ResultStore.save_pair
 
@@ -1596,7 +1596,7 @@ async def test_evaluator_taint_forces_reexecution_after_crash_before_failed_pair
 async def test_evaluator_taint_forces_fresh_swebench_artifacts(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters.swebench_verified import SweBenchVerifiedAdapter
+    from evals.adapters.swebench_verified import SweBenchVerifiedAdapter
 
     fresh_artifact_flags = []
 
@@ -1614,9 +1614,9 @@ async def test_evaluator_taint_forces_fresh_swebench_artifacts(
 
     monkeypatch.setattr(SweBenchVerifiedAdapter, "run", completed_pair)
     monkeypatch.setattr(
-        "kairyu.bench.runner._environment", lambda **_kwargs: _clean_environment()
+        "evals.runner._environment", lambda **_kwargs: _clean_environment()
     )
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
     config = make_config(
         tmp_path,
         models=("m",),
@@ -1707,7 +1707,7 @@ async def test_run_initializes_canonical_identity_and_stamps_pairs(
 
     assert identity["config"] == expected_config
     assert set(config.model_dump(mode="json")) - set(identity["config"]) == _FINGERPRINT_EXCLUSIONS
-    from kairyu.bench.pins import DATASET_PINS
+    from evals.pins import DATASET_PINS
 
     adapter_identity = identity["adapters"][0]
     assert adapter_identity["name"] == "gpqa-diamond"
@@ -1721,8 +1721,8 @@ async def test_run_initializes_canonical_identity_and_stamps_pairs(
         (entry["package"], entry["resource"])
         for entry in adapter_identity["evaluation_protocol"]["resources"]
     }
-    assert ("kairyu.bench.adapters", "gpqa.py") in bound_resources
-    assert ("kairyu.bench", "aggregate.py") in bound_resources
+    assert ("evals.adapters", "gpqa.py") in bound_resources
+    assert ("evals", "aggregate.py") in bound_resources
     assert metadata["config"] == config.model_dump(mode="json")
     assert metadata["run_id"] == "test-run"
     assert metadata["fingerprint"] == hashlib.sha256(canonical).hexdigest()
@@ -1781,7 +1781,7 @@ async def test_dataset_revision_change_refuses_without_running_or_rewriting(
     _disable_history_for_in_memory_adapter(monkeypatch)
     adapter_v1 = _CacheBackedAdapter(revision="rev-1")
     monkeypatch.setattr(
-        "kairyu.bench.runner.suite_adapters",
+        "evals.runner.suite_adapters",
         lambda *args, **kwargs: [adapter_v1],
     )
     config = make_config(
@@ -1799,7 +1799,7 @@ async def test_dataset_revision_change_refuses_without_running_or_rewriting(
 
     adapter_v2 = _CacheBackedAdapter(revision="rev-2")
     monkeypatch.setattr(
-        "kairyu.bench.runner.suite_adapters",
+        "evals.runner.suite_adapters",
         lambda *args, **kwargs: [adapter_v2],
     )
 
@@ -1818,7 +1818,7 @@ async def test_dataset_digest_change_refuses_without_running_or_rewriting(
     _disable_history_for_in_memory_adapter(monkeypatch)
     adapter = _CacheBackedAdapter()
     monkeypatch.setattr(
-        "kairyu.bench.runner.suite_adapters",
+        "evals.runner.suite_adapters",
         lambda *args, **kwargs: [adapter],
     )
     config = make_config(
@@ -1855,9 +1855,9 @@ async def test_dataset_digest_change_refuses_without_running_or_rewriting(
 async def test_late_cache_identity_change_is_failed_then_clean_resume_reexecutes(
     tmp_path, http_factory, monkeypatch
 ):
-    from kairyu.bench.adapters import suite_adapters
-    from kairyu.bench.adapters.base import cache_pins
-    from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
+    from evals.adapters import suite_adapters
+    from evals.adapters.base import cache_pins
+    from evals.adapters.gpqa import GpqaDiamondAdapter
 
     run_calls = 0
 
@@ -1876,9 +1876,9 @@ async def test_late_cache_identity_change_is_failed_then_clean_resume_reexecutes
 
     monkeypatch.setattr(GpqaDiamondAdapter, "run", completed_pair)
     monkeypatch.setattr(
-        "kairyu.bench.runner._environment", lambda **_kwargs: _clean_environment()
+        "evals.runner._environment", lambda **_kwargs: _clean_environment()
     )
-    monkeypatch.setattr("kairyu.bench.runner._source_provenance", lambda: _clean_source())
+    monkeypatch.setattr("evals.runner._source_provenance", lambda: _clean_source())
     config = make_config(
         tmp_path,
         models=("m",),

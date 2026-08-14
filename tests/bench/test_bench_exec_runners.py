@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import kairyu.bench.execution as execution
-from kairyu.bench.execution import (
+import evals.execution as execution
+from evals.execution import (
     DockerExecutionRunner,
     ExecResult,
     ExecutionRunner,
@@ -302,7 +302,7 @@ def test_build_execution_runner_uses_exact_config_and_rejects_ambiguity():
         "pull_policy": "never",
         "log_driver": "none",
         "restart_policy": "no",
-        "cleanup_label": "io.kairyu.bench-exec=true",
+        "cleanup_label": "io.evals-exec=true",
         "network": "none",
         "rootfs": "read-only",
         "user": "65534:65534",
@@ -402,7 +402,7 @@ def test_docker_runner_builds_hardened_argv_and_read_only_input_bundle():
     assert command[command.index("--pull") + 1] == "never"
     assert command[command.index("--log-driver") + 1] == "none"
     assert command[command.index("--restart") + 1] == "no"
-    assert command[command.index("--label") + 1] == "io.kairyu.bench-exec=true"
+    assert command[command.index("--label") + 1] == "io.evals-exec=true"
     for flag, expected in (
         ("--network", "none"),
         ("--cap-drop", "ALL"),

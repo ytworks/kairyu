@@ -6,14 +6,14 @@ from pathlib import Path
 import httpx
 import pytest
 
-from kairyu.bench.adapters.base import (
+from evals.adapters.base import (
     AdapterInfo,
     DownloadContext,
     GenerativeAdapter,
     RunContext,
 )
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.types import (
+from evals.cache import BenchCache
+from evals.types import (
     BenchTarget,
     ChatRequestSpec,
     ItemResult,

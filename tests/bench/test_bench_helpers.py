@@ -2,7 +2,7 @@
 
 import pytest
 
-from kairyu.bench.adapters.base import (
+from evals.adapters.base import (
     estimate_tokens,
     extract_choice_letter,
     extract_code_block,
@@ -11,7 +11,7 @@ from kairyu.bench.adapters.base import (
     select_items,
     shuffle_choices,
 )
-from kairyu.bench.types import BenchItem
+from evals.types import BenchItem
 
 
 def test_shuffle_choices_deterministic_per_seed_and_item():

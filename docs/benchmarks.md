@@ -64,7 +64,7 @@ scripts, results, or tests. Gate-specific code stays in its stable wrapper;
 semantics shared by the installed CLI and gate scripts belong in
 `kairyu.bench`.
 
-The package-owned `kairyu.bench.evidence` module provides the narrow common
+The package-owned `evidence` module provides the narrow common
 artifact substrate used by repository-only formal gates: canonical JSON and
 SHA-256, atomic indexed JSONL, strict fail-closed framing, artifact path
 resolution, raw-only replay, and exact retained-manifest verification. It does

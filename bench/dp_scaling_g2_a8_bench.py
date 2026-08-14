@@ -31,7 +31,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from kairyu.bench.reporting import nearest_rank_percentile
+from evidence.reporting import nearest_rank_percentile
 
 SCHEMA_VERSION = "kairyu.g2.a8.dp-scaling.v1"
 GATE = "G2-A8"

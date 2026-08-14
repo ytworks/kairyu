@@ -23,7 +23,7 @@ if __package__ in {None, ""}:
 
 from bench import g4_ma1_qwen3_235b_nvfp4_bench as gate  # noqa: E402
 from bench import g4_ma1_qwen3_235b_nvfp4_capture as capture  # noqa: E402
-from kairyu.bench.reporting import atomic_write_json  # noqa: E402
+from evidence.reporting import atomic_write_json  # noqa: E402
 from kairyu.engine.core.nvfp4_accuracy import NvFp4AccuracyProfile  # noqa: E402
 
 REPORT_SCHEMA = "kairyu.g4.ma1.nvfp4-accuracy-profile.v1"

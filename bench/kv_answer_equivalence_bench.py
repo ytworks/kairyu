@@ -162,12 +162,13 @@ if _FORMAL_DIRECT_EXECUTION:
 sys.path[:] = [entry for entry in sys.path if entry != _REPO_ROOT_TEXT]
 sys.path.insert(0, _REPO_ROOT_TEXT)
 
-from kairyu.bench import kv_equivalence as gate  # noqa: E402
+import kairyu  # noqa: E402,F401
+from evals import kv_equivalence as gate  # noqa: E402
 
 for _module_name, _relative_origin in (
     ("kairyu", "kairyu/__init__.py"),
-    ("kairyu.bench", "kairyu/bench/__init__.py"),
-    ("kairyu.bench.kv_equivalence", "kairyu/bench/kv_equivalence.py"),
+    ("evals", "evals/__init__.py"),
+    ("evals.kv_equivalence", "evals/kv_equivalence.py"),
 ):
     _module = sys.modules.get(_module_name)
     _origin = getattr(_module, "__file__", None)
@@ -197,7 +198,7 @@ _RUNTIME_SOURCE_PATHS = gate.REQUIRED_SOURCE_PATHS
 _CELL_SPECS = gate.CELL_SPECS
 _CELL_IDS = gate.CELL_IDS
 
-_CHECKOUT_MODULE_PREFIXES = ("bench", "kairyu")
+_CHECKOUT_MODULE_PREFIXES = ("bench", "evals", "kairyu")
 
 
 def _same_json_value(left: object, right: object) -> bool:

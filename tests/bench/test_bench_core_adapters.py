@@ -12,25 +12,25 @@ import httpx
 import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench._vendor.ifeval import IFEvalInput, evaluate_response
-from kairyu.bench._vendor.ifeval.instructions_registry import INSTRUCTION_DICT
-from kairyu.bench.adapters import all_adapters
-from kairyu.bench.adapters import ifeval as ifeval_module
-from kairyu.bench.adapters.base import (
+from evals._vendor.ifeval import IFEvalInput, evaluate_response
+from evals._vendor.ifeval.instructions_registry import INSTRUCTION_DICT
+from evals.adapters import all_adapters
+from evals.adapters import ifeval as ifeval_module
+from evals.adapters.base import (
     DownloadContext,
     RunContext,
     adapter_cache_ready,
     cache_pins,
 )
-from kairyu.bench.adapters.gsm8k import Gsm8kAdapter, extract_gsm8k_answer
-from kairyu.bench.adapters.ifeval import IfevalAdapter
-from kairyu.bench.adapters.mmlu import (
+from evals.adapters.gsm8k import Gsm8kAdapter, extract_gsm8k_answer
+from evals.adapters.ifeval import IfevalAdapter
+from evals.adapters.mmlu import (
     _CANONICAL_SUBJECTS,
     MmluAdapter,
 )
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.runner import SuiteRunner, _adapter_identity
-from kairyu.bench.types import (
+from evals.cache import BenchCache
+from evals.runner import SuiteRunner, _adapter_identity
+from evals.types import (
     BenchItem,
     ContinuationLogLikelihood,
     DatasetUnavailable,
@@ -102,7 +102,7 @@ def test_gsm8k_normalize_pins_schema_count_and_nonempty_question(
         seen.update(dataset=dataset, name=name, split=split, revision=revision)
         return rows
 
-    monkeypatch.setattr("kairyu.bench.hub.load_hf_rows", fake_rows)
+    monkeypatch.setattr("evals.hub.load_hf_rows", fake_rows)
     adapter = all_adapters()["gsm8k"]
     normalized = adapter.normalize(DownloadContext(BenchCache(tmp_path)))
     assert len(normalized) == 1_319
@@ -152,7 +152,7 @@ def test_mmlu_normalize_requires_canonical_subjects_and_preserves_choices(
         seen.update(dataset=dataset, name=name, split=split, revision=revision)
         return rows
 
-    monkeypatch.setattr("kairyu.bench.hub.load_hf_rows", fake_rows)
+    monkeypatch.setattr("evals.hub.load_hf_rows", fake_rows)
     adapter = all_adapters()["mmlu"]
     normalized = adapter.normalize(DownloadContext(BenchCache(tmp_path)))
     assert len(normalized) == 14_042
@@ -173,7 +173,7 @@ def test_mmlu_normalize_requires_canonical_subjects_and_preserves_choices(
 def test_mmlu_rejects_empty_question_and_choice(tmp_path, monkeypatch) -> None:
     rows = _mmlu_rows()
     rows[0] = {**rows[0], "question": "", "choices": ["first", "", "third", "fourth"]}
-    monkeypatch.setattr("kairyu.bench.hub.load_hf_rows", lambda *a, **k: rows)
+    monkeypatch.setattr("evals.hub.load_hf_rows", lambda *a, **k: rows)
     with pytest.raises(DatasetUnavailable, match="four string choices"):
         all_adapters()["mmlu"].normalize(DownloadContext(BenchCache(tmp_path)))
 
@@ -312,7 +312,7 @@ def test_ifeval_normalize_validates_full_shape_and_strips_dense_nulls(
         seen.update(dataset=dataset, name=name, split=split, revision=revision)
         return rows
 
-    monkeypatch.setattr("kairyu.bench.hub.load_hf_rows", fake_rows)
+    monkeypatch.setattr("evals.hub.load_hf_rows", fake_rows)
     monkeypatch.setattr(ifeval_module, "_download_punkt", lambda cache: None)
     normalized = all_adapters()["ifeval"].normalize(DownloadContext(BenchCache(tmp_path)))
     assert len(normalized) == 541
@@ -346,7 +346,7 @@ def test_ifeval_normalize_rejects_random_fallback_kwargs(tmp_path, monkeypatch) 
         row["kwargs"][0][required_key] = None
     else:
         rows[0]["kwargs"][0][required_key] = None
-    monkeypatch.setattr("kairyu.bench.hub.load_hf_rows", lambda *a, **k: rows)
+    monkeypatch.setattr("evals.hub.load_hf_rows", lambda *a, **k: rows)
     monkeypatch.setattr(ifeval_module, "_download_punkt", lambda cache: None)
     with pytest.raises(DatasetUnavailable, match="checker arguments"):
         all_adapters()["ifeval"].normalize(DownloadContext(BenchCache(tmp_path)))
@@ -372,7 +372,7 @@ def test_ifeval_normalize_rejects_values_that_trigger_or_bypass_checker_contract
     )
     position = row["instruction_id_list"].index(instruction_id)
     row["kwargs"][position][argument] = bad_value
-    monkeypatch.setattr("kairyu.bench.hub.load_hf_rows", lambda *args, **kwargs: rows)
+    monkeypatch.setattr("evals.hub.load_hf_rows", lambda *args, **kwargs: rows)
     monkeypatch.setattr(ifeval_module, "_download_punkt", lambda cache: None)
     with pytest.raises(DatasetUnavailable, match="checker arguments"):
         all_adapters()["ifeval"].normalize(DownloadContext(BenchCache(tmp_path)))
@@ -389,7 +389,7 @@ def test_ifeval_normalize_rejects_nth_paragraph_beyond_paragraph_count(
     position = row["instruction_id_list"].index(instruction_id)
     row["kwargs"][position]["num_paragraphs"] = 1
     row["kwargs"][position]["nth_paragraph"] = 2
-    monkeypatch.setattr("kairyu.bench.hub.load_hf_rows", lambda *args, **kwargs: rows)
+    monkeypatch.setattr("evals.hub.load_hf_rows", lambda *args, **kwargs: rows)
     monkeypatch.setattr(ifeval_module, "_download_punkt", lambda cache: None)
     with pytest.raises(DatasetUnavailable, match="checker arguments"):
         all_adapters()["ifeval"].normalize(DownloadContext(BenchCache(tmp_path)))
@@ -410,7 +410,7 @@ def test_ifeval_official_loose_transform_can_remove_first_line() -> None:
 def test_ifeval_letter_frequency_scores_pinned_punctuation_without_random_fallback(
     monkeypatch, letter
 ) -> None:
-    from kairyu.bench._vendor.ifeval import instructions, instructions_util
+    from evals._vendor.ifeval import instructions, instructions_util
 
     def unexpected_random(*args, **kwargs):
         raise AssertionError("valid pinned checker arguments must never use random fallback")
@@ -438,7 +438,7 @@ def test_ifeval_letter_frequency_scores_pinned_punctuation_without_random_fallba
 def test_ifeval_all_normalized_checker_args_construct_without_random_fallback(
     monkeypatch,
 ) -> None:
-    from kairyu.bench._vendor.ifeval import checker, instructions, instructions_util
+    from evals._vendor.ifeval import checker, instructions, instructions_util
 
     def unexpected_random(*args, **kwargs):
         raise AssertionError("normalized checker arguments must never use random fallback")
@@ -607,7 +607,7 @@ def test_configure_punkt_clears_ambient_vendor_and_nltk_tokenizer_caches(
 ) -> None:
     import nltk
 
-    from kairyu.bench._vendor.ifeval import instructions_util
+    from evals._vendor.ifeval import instructions_util
 
     ambient_root = tmp_path / "ambient"
     ambient_dir = ambient_root / "tokenizers" / "punkt_tab" / "english"

@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import kairyu.bench.profiling as profiling
+import evals.profiling as profiling
 
 
 class _FakeNativeProfiler:
@@ -137,9 +137,9 @@ def test_module_import_and_disabled_scope_work_when_torch_is_absent(monkeypatch)
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", reject_torch)
-    monkeypatch.delitem(sys.modules, "kairyu.bench.profiling", raising=False)
+    monkeypatch.delitem(sys.modules, "evals.profiling", raising=False)
 
-    imported = __import__("kairyu.bench.profiling", fromlist=["profiling"])
+    imported = __import__("evals.profiling", fromlist=["profiling"])
     with imported.profile_scope(False) as native:
         assert native is None
 

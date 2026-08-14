@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from kairyu.bench.aggregate import build_scoreboard, render_markdown
-from kairyu.bench.streaming import ChatSSEAccumulator, StreamingProtocolError
-from kairyu.bench.types import GenerationTimingEvidence, ItemResult, PairResult
+from evals.aggregate import build_scoreboard, render_markdown
+from evals.streaming import ChatSSEAccumulator, StreamingProtocolError
+from evals.types import GenerationTimingEvidence, ItemResult, PairResult
 
 
 def _line(payload: dict) -> str:

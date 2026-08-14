@@ -31,7 +31,12 @@ from pathlib import Path
 
 import httpx
 
-from kairyu.bench.profiling import (
+from evidence.reporting import (
+    PERCENTILE_METHOD,
+    atomic_write_json,
+    nearest_rank_percentile,
+)
+from evals.profiling import (
     profile_scope,
     profile_trace_path,
     record_function_scope,
@@ -39,18 +44,13 @@ from kairyu.bench.profiling import (
     validate_trace_artifact_path,
     write_trace_artifact,
 )
-from kairyu.bench.reporting import (
-    PERCENTILE_METHOD,
-    atomic_write_json,
-    nearest_rank_percentile,
-)
-from kairyu.bench.targets import (
+from evals.targets import (
     TARGET_SPEC_FORMAT,
     normalize_base_url,
     parse_target_spec,
     target_api_key,
 )
-from kairyu.bench.types import BenchTarget
+from evals.types import BenchTarget
 
 _SSE_PREFIX = "data: "
 _DEFAULT_BASE_URL = "http://localhost:8000"
@@ -88,7 +88,7 @@ _TRACE_DURATION_NAMES = (
     "total_ms",
 )
 _CLIENT_PROFILE_SCOPE = "client"
-_CLIENT_PROFILE_RANGE = "kairyu.bench.serving.client-measurement"
+_CLIENT_PROFILE_RANGE = "evals.serving.client-measurement"
 
 
 @dataclass(frozen=True)

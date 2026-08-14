@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from kairyu.bench.profiling import profile_scope
+from evals.profiling import profile_scope
 from kairyu.models.config import parse_model_config
 from kairyu.models.llama import DenseDecoder
 

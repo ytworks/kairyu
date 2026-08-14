@@ -13,10 +13,10 @@ import httpx
 import pytest
 from conftest import make_target
 
-from kairyu.bench.adapters.base import call_chat
-from kairyu.bench.config import build_config, parse_target_flag
-from kairyu.bench.judge import JudgeClient
-from kairyu.bench.types import (
+from evals.adapters.base import call_chat
+from evals.config import build_config, parse_target_flag
+from evals.judge import JudgeClient
+from evals.types import (
     BenchTarget,
     ChatRequestSpec,
     JudgeConfig,
@@ -265,7 +265,7 @@ def test_judge_sampling_flags_are_wired():
 
 def test_sampling_is_part_of_the_run_fingerprint():
     """A different effort is a different experiment, not a resumable run."""
-    from kairyu.bench.runner import _run_fingerprint, _run_identity
+    from evals.runner import _run_fingerprint, _run_identity
 
     base = build_config(_run_args())
     changed = build_config(_run_args(reasoning_effort="high"))
@@ -275,7 +275,7 @@ def test_sampling_is_part_of_the_run_fingerprint():
 
 
 def test_judge_panel_is_part_of_the_run_fingerprint():
-    from kairyu.bench.runner import _run_fingerprint, _run_identity
+    from evals.runner import _run_fingerprint, _run_identity
 
     base = build_config(
         _run_args(judge_base_url="http://judge/v1", judge_model="primary")

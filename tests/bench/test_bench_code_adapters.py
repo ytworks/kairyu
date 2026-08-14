@@ -8,19 +8,19 @@ import zlib
 import httpx
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters import livecodebench as livecodebench_module
-from kairyu.bench.adapters.base import RunContext
-from kairyu.bench.adapters.livecodebench import (
+from evals.adapters import livecodebench as livecodebench_module
+from evals.adapters.base import RunContext
+from evals.adapters.livecodebench import (
     LiveCodeBenchAdapter,
     decode_private_tests,
     grade_code,
 )
-from kairyu.bench.adapters.scicode import SciCodeAdapter
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.runner import SuiteRunner
-from kairyu.bench.sandbox import ExecResult
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import BenchItem
+from evals.adapters.scicode import SciCodeAdapter
+from evals.cache import BenchCache
+from evals.runner import SuiteRunner
+from evals.sandbox import ExecResult
+from evals.store import ResultStore
+from evals.types import BenchItem
 
 STDIN_TESTS = [
     {"input": "2 3\n", "output": "5\n", "testtype": "stdin"},
@@ -159,7 +159,7 @@ def test_decode_private_tests_blocks_arbitrary_code(tmp_path):
 def test_compose_solution_hoists_future_imports():
     # M8: a model solution starting with `from __future__ import ...` must keep
     # it as the first statement even after the import header is prepended.
-    from kairyu.bench.adapters.livecodebench import _compose_solution
+    from evals.adapters.livecodebench import _compose_solution
 
     composed = _compose_solution("from __future__ import annotations\nx = 1\n")
     assert composed.startswith("from __future__ import annotations\n")

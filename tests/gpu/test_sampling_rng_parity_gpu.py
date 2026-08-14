@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from kairyu.bench.profiling import profile_scope
+from evals.profiling import profile_scope
 from kairyu.engine.core.sampler import Sampler
 from kairyu.engine.core.sampling_types import EngineSampling, mix_seed
 from kairyu.kernels.sampling_gpu import (

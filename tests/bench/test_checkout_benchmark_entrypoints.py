@@ -28,7 +28,7 @@ EXPECTED_FIELDS = {
 
 
 def test_package_manifest_exactly_inventories_checkout_entrypoints() -> None:
-    manifest = resources.files("kairyu.bench").joinpath("entrypoints.toml")
+    manifest = resources.files("evals").joinpath("entrypoints.toml")
     payload = tomllib.loads(manifest.read_text(encoding="utf-8"))
     entries = payload["entrypoints"]
 

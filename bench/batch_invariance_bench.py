@@ -160,12 +160,13 @@ if _FORMAL_DIRECT_EXECUTION:
 sys.path[:] = [entry for entry in sys.path if entry != _REPO_ROOT_TEXT]
 sys.path.insert(0, _REPO_ROOT_TEXT)
 
-from kairyu.bench import batch_invariance as gate  # noqa: E402
+import kairyu  # noqa: E402,F401
+from evals import batch_invariance as gate  # noqa: E402
 
 for _module_name, _relative_origin in (
     ("kairyu", "kairyu/__init__.py"),
-    ("kairyu.bench", "kairyu/bench/__init__.py"),
-    ("kairyu.bench.batch_invariance", "kairyu/bench/batch_invariance.py"),
+    ("evals", "evals/__init__.py"),
+    ("evals.batch_invariance", "evals/batch_invariance.py"),
 ):
     _module = sys.modules.get(_module_name)
     _origin = getattr(_module, "__file__", None)
@@ -181,7 +182,7 @@ for _module_name, _relative_origin in (
             f"refusing non-checkout {_module_name} origin: {_resolved_origin}"
         )
 
-_CHECKOUT_MODULE_PREFIXES = ("bench", "kairyu")
+_CHECKOUT_MODULE_PREFIXES = ("bench", "evals", "kairyu")
 _WEIGHT_INDEX = "model.safetensors.index.json"
 
 

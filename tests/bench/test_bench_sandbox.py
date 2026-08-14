@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kairyu.bench.sandbox import has_module, run_python
+from evals.sandbox import has_module, run_python
 
 
 def test_success_captures_stdout():

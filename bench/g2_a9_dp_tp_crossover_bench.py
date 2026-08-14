@@ -34,7 +34,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from bench import dp_scaling_g2_a8_bench as a8
-from kairyu.bench.reporting import nearest_rank_percentile
+from evidence.reporting import nearest_rank_percentile
 
 SCHEMA_VERSION = "kairyu.g2.a9.dp-tp-crossover.v1"
 GATE = "G2-A9"

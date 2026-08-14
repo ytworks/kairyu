@@ -62,7 +62,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from bench.parity_tp import _TEXT_PROMPTS  # noqa: E402
-from kairyu.bench.reporting import atomic_write_json, atomic_write_text  # noqa: E402
+from evidence.reporting import atomic_write_json, atomic_write_text  # noqa: E402
 
 SCHEMA_VERSION = "kairyu.g4.ma1.qwen3-235b-nvfp4.v1"
 GATE = "G4-M-A1"

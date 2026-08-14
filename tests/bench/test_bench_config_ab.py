@@ -9,19 +9,20 @@ from copy import deepcopy
 
 import pytest
 
-from kairyu.bench import history
-from kairyu.bench.aggregate import build_scoreboard
-from kairyu.bench.cli import handle
-from kairyu.bench.config_ab import (
+from evals import __main__ as cli
+from evals import history
+from evals.aggregate import build_scoreboard
+from evals.cli import handle
+from evals.config_ab import (
     ConfigComparisonError,
     _paired_cluster_ids,
     build_config_comparison,
     render_config_comparison_markdown,
 )
-from kairyu.bench.history import build_entry
-from kairyu.bench.runner import _recordable_config, _run_fingerprint, _run_identity
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import (
+from evals.history import build_entry
+from evals.runner import _recordable_config, _run_fingerprint, _run_identity
+from evals.store import ResultStore
+from evals.types import (
     BenchConfig,
     BenchTarget,
     ExecutionConfig,
@@ -29,7 +30,6 @@ from kairyu.bench.types import (
     PairResult,
     ServedConfigIdentity,
 )
-from kairyu.entrypoints import cli
 
 
 def _digest(text: str) -> str:
@@ -39,14 +39,14 @@ def _digest(text: str) -> str:
 def _adapter_identity(name: str) -> dict:
     requires_execution = name == "scicode"
     resources = [
-        ("kairyu.bench.adapters", f"{name.replace('-', '_')}.py"),
-        ("kairyu.bench.adapters", "base.py"),
-        ("kairyu.bench", "aggregate.py"),
-        ("kairyu.bench", "cache.py"),
-        ("kairyu.bench", "runner.py"),
-        ("kairyu.bench", "sampling.py"),
-        ("kairyu.bench", "targets.py"),
-        ("kairyu.bench", "types.py"),
+        ("evals.adapters", f"{name.replace('-', '_')}.py"),
+        ("evals.adapters", "base.py"),
+        ("evals", "aggregate.py"),
+        ("evals", "cache.py"),
+        ("evals", "runner.py"),
+        ("evals", "sampling.py"),
+        ("evals", "targets.py"),
+        ("evals", "types.py"),
     ]
     return {
         "name": name,
@@ -317,7 +317,6 @@ def test_real_index_pair_reload_cli_and_candidate_artifact_round_trip(tmp_path, 
         )
     args = cli._build_parser().parse_args(
         [
-            "bench",
             "compare",
             "--baseline",
             "base",
@@ -657,7 +656,7 @@ def test_comparison_does_not_consult_later_adapter_registry(monkeypatch):
     values = _binary_pair()
 
     monkeypatch.setattr(
-        "kairyu.bench.adapters.all_adapters",
+        "evals.adapters.all_adapters",
         lambda: (_ for _ in ()).throw(AssertionError("current registry consulted")),
     )
 

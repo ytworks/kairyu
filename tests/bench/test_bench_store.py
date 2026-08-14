@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import ItemResult, PairResult
+from evals.store import ResultStore
+from evals.types import ItemResult, PairResult
 
 
 def _pair(

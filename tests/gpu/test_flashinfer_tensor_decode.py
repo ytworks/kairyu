@@ -14,7 +14,7 @@ whose replay picks up an in-place page-table change once the step is re-planned.
 import pytest
 import torch
 
-from kairyu.bench.profiling import profile_scope
+from evals.profiling import profile_scope
 
 pytestmark = pytest.mark.gpu
 

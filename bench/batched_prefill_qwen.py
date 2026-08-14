@@ -35,7 +35,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from kairyu.bench.profiling import profile_scope
+from evals.profiling import profile_scope
 
 SCHEMA_VERSION = 1
 MEASUREMENT_KIND = "qwen3-32b-tp-batched-prefill"
@@ -44,7 +44,7 @@ MEASUREMENT_KIND = "qwen3-32b-tp-batched-prefill"
 # 512 -> 64 layer runs), so larger prompts add memory risk but no evidence.
 PROMPT_LENGTHS = (65, 81, 97, 113, 129, 145, 161, 177)
 IMPLEMENTATION_FILES = (
-    "kairyu/bench/profiling.py",
+    "evals/profiling.py",
     "kairyu/engine/core/comm.py",
     "kairyu/engine/core/dist_comm.py",
     "kairyu/engine/core/prefill.py",

@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from kairyu.bench.config_compare import (
+from evals.config_compare import (
     _lower_nearest_rank,
     _SplitMix64,
     _symmetric_nearest_rank_interval,

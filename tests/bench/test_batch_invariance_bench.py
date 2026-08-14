@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from bench import batch_invariance_bench as operator
-from kairyu.bench import batch_invariance as gate
+from evals import batch_invariance as gate
 
 SCRIPT = Path(operator.__file__).resolve()
 REPO_ROOT = SCRIPT.parents[1]

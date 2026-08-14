@@ -13,18 +13,18 @@ from pathlib import Path
 import httpx
 import pytest
 
-from kairyu.bench.adapters.base import RunContext
-from kairyu.bench.adapters.swebench_pro import SweBenchProAdapter
-from kairyu.bench.adapters.swebench_verified import SweBenchVerifiedAdapter
-from kairyu.bench.adapters.tau_bench import (
+from evals.adapters.base import RunContext
+from evals.adapters.swebench_pro import SweBenchProAdapter
+from evals.adapters.swebench_verified import SweBenchVerifiedAdapter
+from evals.adapters.tau_bench import (
     TauBenchBankingAdapter,
     data_dir_candidates,
     find_results,
 )
-from kairyu.bench.adapters.terminal_bench import TerminalBenchAdapter
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.judge import JudgeClient
-from kairyu.bench.types import BenchTarget, JudgeConfig
+from evals.adapters.terminal_bench import TerminalBenchAdapter
+from evals.cache import BenchCache
+from evals.judge import JudgeClient
+from evals.types import BenchTarget, JudgeConfig
 
 
 def _ctx(tmp_path, **overrides) -> RunContext:
@@ -186,7 +186,7 @@ def test_terminal_bench_can_use_pinned_local_dataset_and_task_filter(
     dataset.mkdir()
     monkeypatch.setenv("KAIRYU_TERMINAL_BENCH_PATH", str(dataset))
     monkeypatch.setenv("KAIRYU_TERMINAL_BENCH_TASKS", "write-compressor, fix-git")
-    monkeypatch.setattr("kairyu.bench.adapters.terminal_bench.shutil.which", lambda _: "harbor")
+    monkeypatch.setattr("evals.adapters.terminal_bench.shutil.which", lambda _: "harbor")
 
     adapter = TerminalBenchAdapter()
     command = adapter._command(_target(), _ctx(tmp_path), tmp_path / "jobs")
@@ -205,7 +205,7 @@ def test_terminal_bench_rejects_missing_local_dataset(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "KAIRYU_TERMINAL_BENCH_PATH", str(tmp_path / "missing-terminal-bench")
     )
-    monkeypatch.setattr("kairyu.bench.adapters.terminal_bench.shutil.which", lambda _: "harbor")
+    monkeypatch.setattr("evals.adapters.terminal_bench.shutil.which", lambda _: "harbor")
 
     reason = TerminalBenchAdapter()._preconditions(_target(), _ctx(tmp_path))
 
@@ -271,7 +271,7 @@ HARBOR_JOB_RESULT = {
 
 
 def test_parse_harbor_job_result_schema():
-    from kairyu.bench.adapters.terminal_bench import parse_harbor_results
+    from evals.adapters.terminal_bench import parse_harbor_results
 
     items = {item.item_id: item for item in parse_harbor_results(HARBOR_JOB_RESULT)}
     assert items["build-tool.1"].score == 1.0
@@ -282,7 +282,7 @@ def test_parse_harbor_job_result_schema():
 
 
 def test_ambiguous_reward_dict_is_failed_not_guessed():
-    from kairyu.bench.adapters.terminal_bench import parse_harbor_results, trial_reward
+    from evals.adapters.terminal_bench import parse_harbor_results, trial_reward
 
     assert trial_reward({"tests_passed": 3, "tests_total": 4}) is None
     assert trial_reward({"anything": 1}) == 1.0  # a single key is unambiguous
@@ -303,7 +303,7 @@ def test_ambiguous_reward_dict_is_failed_not_guessed():
 
 
 def test_parse_harbor_results_rejects_string_entries_without_crashing():
-    from kairyu.bench.adapters.terminal_bench import parse_harbor_results
+    from evals.adapters.terminal_bench import parse_harbor_results
 
     items = parse_harbor_results({"results": ["not-a-trial"]})
 
@@ -313,7 +313,7 @@ def test_parse_harbor_results_rejects_string_entries_without_crashing():
 
 
 def test_parse_harbor_results_counts_declared_but_missing_trials():
-    from kairyu.bench.adapters.terminal_bench import parse_harbor_results
+    from evals.adapters.terminal_bench import parse_harbor_results
 
     items = parse_harbor_results(
         {
@@ -332,7 +332,7 @@ async def test_terminal_bench_reads_the_real_harbor_output(tmp_path, monkeypatch
     """A successful `harbor run` must not report 'no harbor results file found'."""
     import json as _json
 
-    import kairyu.bench.adapters.terminal_bench as tb
+    import evals.adapters.terminal_bench as tb
 
     monkeypatch.setattr(tb.shutil, "which", lambda name: "/usr/bin/harbor")
 
@@ -368,7 +368,7 @@ async def test_terminal_bench_reads_harbor_017_per_trial_results(tmp_path, monke
     """Harbor 0.17 omits trial_results from the final job-level result."""
     import json as _json
 
-    import kairyu.bench.adapters.terminal_bench as tb
+    import evals.adapters.terminal_bench as tb
 
     monkeypatch.setattr(tb.shutil, "which", lambda name: "/usr/bin/harbor")
 
@@ -412,8 +412,8 @@ async def test_terminal_bench_reads_harbor_017_per_trial_results(tmp_path, monke
 
 
 def test_harbor_mean_counts_every_trial():
-    from kairyu.bench.adapters.terminal_bench import harbor_mean
-    from kairyu.bench.types import ItemResult
+    from evals.adapters.terminal_bench import harbor_mean
+    from evals.types import ItemResult
 
     items = [
         ItemResult(item_id="a", status="completed", score=1.0),
@@ -513,7 +513,7 @@ def test_tau_save_to_is_unique_per_invocation(tmp_path):
 
 def test_tau_data_dir_prefers_the_harness_resolution(tmp_path, monkeypatch):
     """The harness computes DATA_DIR beside site-packages, not inside it."""
-    import kairyu.bench.adapters.tau_bench as tau
+    import evals.adapters.tau_bench as tau
 
     monkeypatch.setenv("TAU2_DATA_DIR", str(tmp_path / "from-env"))
     monkeypatch.setattr(tau, "harness_data_dir", lambda flavor: tmp_path / "from-harness")
@@ -523,7 +523,7 @@ def test_tau_data_dir_prefers_the_harness_resolution(tmp_path, monkeypatch):
 
 
 def test_tau_data_dir_falls_back_when_harness_import_fails(tmp_path, monkeypatch):
-    import kairyu.bench.adapters.tau_bench as tau
+    import evals.adapters.tau_bench as tau
 
     monkeypatch.delenv("TAU2_DATA_DIR", raising=False)
     monkeypatch.setattr(tau, "harness_data_dir", lambda flavor: None)
@@ -536,7 +536,7 @@ def test_harness_data_dir_reads_the_module_attribute(monkeypatch, tmp_path):
     import sys
     import types
 
-    import kairyu.bench.adapters.tau_bench as tau
+    import evals.adapters.tau_bench as tau
 
     module = types.ModuleType("tau2.utils.utils")
     module.DATA_DIR = tmp_path / "installed" / "data"

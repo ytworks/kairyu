@@ -12,8 +12,8 @@ import json
 import pytest
 from conftest import make_config
 
-from kairyu.bench.compare import build_comparison, render_comparison_markdown
-from kairyu.bench.reference import (
+from evals.compare import build_comparison, render_comparison_markdown
+from evals.reference import (
     COMPARISON_MODELS,
     FRONTIER_SCORE_RECORDS,
     FRONTIER_SCORE_VARIANTS,
@@ -25,7 +25,7 @@ from kairyu.bench.reference import (
     catalog_sha256,
     published_models,
 )
-from kairyu.bench.runner import SuiteRunner
+from evals.runner import SuiteRunner
 
 
 def _scoreboard(**cells) -> dict:
@@ -47,7 +47,7 @@ def _scoreboard(**cells) -> dict:
 
 
 def test_every_suite_row_has_published_scores():
-    from kairyu.bench.adapters import ACCURACY_ROW_ORDER
+    from evals.adapters import ACCURACY_ROW_ORDER
 
     assert set(PUBLISHED_SCORES) == set(ACCURACY_ROW_ORDER)
 
@@ -434,7 +434,7 @@ async def test_run_writes_the_comparison_next_to_the_scoreboard(tmp_path, http_f
 async def test_core_run_writes_three_rows_without_a_published_comparison(
     tmp_path, http_factory, capsys
 ):
-    from kairyu.bench.adapters import CORE_ROW_ORDER
+    from evals.adapters import CORE_ROW_ORDER
 
     config = make_config(tmp_path, models=("m",), suite="core")
     runner = SuiteRunner(
@@ -472,8 +472,8 @@ async def test_comparison_is_printed_after_the_scoreboard(tmp_path, http_factory
 
 async def test_smoke_run_cells_get_no_unmarked_delta(tmp_path, http_factory):
     """A 20-item smoke cell is legitimately `completed`; it is still not the set."""
-    from kairyu.bench.runner import SuiteRunner
-    from kairyu.bench.store import ResultStore
+    from evals.runner import SuiteRunner
+    from evals.store import ResultStore
 
     config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",), smoke=True)
     runner = SuiteRunner(config, http_factory=http_factory, probe_docker=lambda: (False, "t"))
@@ -504,7 +504,7 @@ async def test_smoke_run_cells_get_no_unmarked_delta(tmp_path, http_factory):
 
 
 async def test_fixture_run_says_its_scores_are_not_measurements(tmp_path, http_factory):
-    from kairyu.bench.runner import SuiteRunner
+    from evals.runner import SuiteRunner
 
     config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",))
     assert config.offline_fixtures  # the shared helper uses fixtures
@@ -519,7 +519,7 @@ async def test_fixture_run_says_its_scores_are_not_measurements(tmp_path, http_f
 
 
 def test_run_level_reasons_cover_limit_and_fixtures(tmp_path):
-    from kairyu.bench.runner import run_level_incomparable_reasons
+    from evals.runner import run_level_incomparable_reasons
 
     config = make_config(tmp_path, models=("m",))
     reasons = run_level_incomparable_reasons(config, 20)
@@ -611,8 +611,8 @@ async def test_resumed_legacy_pair_gets_this_runs_comparability(tmp_path, http_f
     without re-stamping a resumed subset/fixture run would report a numeric
     published delta with no banner.
     """
-    from kairyu.bench.runner import SuiteRunner
-    from kairyu.bench.store import ResultStore
+    from evals.runner import SuiteRunner
+    from evals.store import ResultStore
 
     config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",), smoke=True)
     runner = SuiteRunner(config, http_factory=http_factory, probe_docker=lambda: (False, "t"))
@@ -646,8 +646,8 @@ async def test_resumed_legacy_pair_gets_this_runs_comparability(tmp_path, http_f
 
 
 async def test_resumed_pair_reasons_are_not_duplicated(tmp_path, http_factory):
-    from kairyu.bench.runner import SuiteRunner
-    from kairyu.bench.store import ResultStore
+    from evals.runner import SuiteRunner
+    from evals.store import ResultStore
 
     config = make_config(tmp_path, models=("m",), only=("gpqa-diamond",), smoke=True)
     for _ in range(3):

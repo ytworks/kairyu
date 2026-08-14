@@ -48,7 +48,7 @@ if __package__ in {None, ""}:
 
 from bench import g4_ma1_qwen3_235b_nvfp4_capture as ma1_capture  # noqa: E402
 from bench import tp_kv_hit_g2_a7_bench as a7  # noqa: E402
-from kairyu.bench.reporting import atomic_write_json, atomic_write_text  # noqa: E402
+from evidence.reporting import atomic_write_json, atomic_write_text  # noqa: E402
 
 ma1 = ma1_capture.gate
 

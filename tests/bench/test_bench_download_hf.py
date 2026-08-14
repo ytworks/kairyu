@@ -7,10 +7,10 @@ normalizes into the cache, and re-download is an idempotent no-op.
 
 import pytest
 
-from kairyu.bench.adapters.base import DownloadContext
-from kairyu.bench.adapters.gpqa import GpqaDiamondAdapter
-from kairyu.bench.adapters.scicode import SciCodeAdapter
-from kairyu.bench.cache import BenchCache
+from evals.adapters.base import DownloadContext
+from evals.adapters.gpqa import GpqaDiamondAdapter
+from evals.adapters.scicode import SciCodeAdapter
+from evals.cache import BenchCache
 
 pytestmark = pytest.mark.hf_hub
 
@@ -50,7 +50,7 @@ def test_mrcr_selects_exactly_the_official_bins(tmp_path):
     defined by exact `o200k_base` counts over prompt + answer, so only real data
     plus the real tokenizer can confirm the population matches Fugu's.
     """
-    from kairyu.bench.adapters.mrcr import MrcrAdapter, expected_rows, selected_bins
+    from evals.adapters.mrcr import MrcrAdapter, expected_rows, selected_bins
 
     cache = BenchCache(tmp_path / "cache")
     adapter = MrcrAdapter()

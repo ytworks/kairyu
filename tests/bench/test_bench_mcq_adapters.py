@@ -5,14 +5,14 @@ import json
 import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters.base import DownloadContext, RunContext
-from kairyu.bench.adapters.hle import HleAdapter
-from kairyu.bench.adapters.longbench_v2 import LongBenchV2Adapter
-from kairyu.bench.adapters.mrcr import MrcrAdapter, mrcr_grade
-from kairyu.bench.cache import BenchCache
-from kairyu.bench.runner import SuiteRunner
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import (
+from evals.adapters.base import DownloadContext, RunContext
+from evals.adapters.hle import HleAdapter
+from evals.adapters.longbench_v2 import LongBenchV2Adapter
+from evals.adapters.mrcr import MrcrAdapter, mrcr_grade
+from evals.cache import BenchCache
+from evals.runner import SuiteRunner
+from evals.store import ResultStore
+from evals.types import (
     BenchItem,
     ChatRequestSpec,
     DatasetUnavailable,
@@ -171,8 +171,8 @@ def _mrcr_row(needles: int, *, tokens: int = 5000, answer_tokens: int = 96) -> d
 
 
 def _patch_mrcr(monkeypatch, rows):
-    import kairyu.bench.adapters.mrcr as mrcr_mod
-    import kairyu.bench.hub as hub
+    import evals.adapters.mrcr as mrcr_mod
+    import evals.hub as hub
 
     monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: rows)
     monkeypatch.setattr(mrcr_mod, "_encoder", _FakeEncoder)
@@ -180,7 +180,7 @@ def _patch_mrcr(monkeypatch, rows):
 
 def _official_slice() -> list[dict]:
     """100 8-needle rows in each official bin at or below 128K."""
-    from kairyu.bench.adapters.mrcr import selected_bins
+    from evals.adapters.mrcr import selected_bins
 
     rows = []
     for bound in selected_bins():
@@ -190,7 +190,7 @@ def _official_slice() -> list[dict]:
 
 
 def test_token_bin_matches_the_published_boundaries():
-    from kairyu.bench.adapters.mrcr import expected_rows, selected_bins, token_bin
+    from evals.adapters.mrcr import expected_rows, selected_bins, token_bin
 
     assert token_bin(4095) is None  # below the first bin
     assert token_bin(4096) == 8192
@@ -204,7 +204,7 @@ def test_token_bin_matches_the_published_boundaries():
 
 
 def test_count_tokens_includes_the_answer():
-    from kairyu.bench.adapters.mrcr import count_tokens
+    from evals.adapters.mrcr import count_tokens
 
     messages = [{"role": "user", "content": "abc"}, {"role": "assistant", "content": "de"}]
     assert count_tokens(_FakeEncoder(), messages) == 5
@@ -238,7 +238,7 @@ def test_mrcr_normalize_fails_closed_when_the_bins_do_not_match(tmp_path, monkey
 
 def test_mrcr_requires_100_rows_in_every_selected_bin(tmp_path, monkeypatch):
     """500 rows weighted 99/101/100/100/100 is a different population."""
-    from kairyu.bench.adapters.mrcr import selected_bins
+    from evals.adapters.mrcr import selected_bins
 
     bins = selected_bins()
     rows = []
@@ -293,8 +293,8 @@ def test_mrcr_context_gate_falls_back_for_legacy_rows(tmp_path):
 
 def test_mrcr_normalize_requires_the_official_tokenizer(tmp_path, monkeypatch):
     """Approximating would select a different population than the bins define."""
-    import kairyu.bench.adapters.mrcr as mrcr_mod
-    import kairyu.bench.hub as hub
+    import evals.adapters.mrcr as mrcr_mod
+    import evals.hub as hub
 
     monkeypatch.setattr(hub, "load_hf_rows", lambda *a, **k: _official_slice())
     monkeypatch.setattr(

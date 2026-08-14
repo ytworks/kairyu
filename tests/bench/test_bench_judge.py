@@ -8,18 +8,18 @@ import httpx
 import pytest
 from conftest import make_config, make_target
 
-from kairyu.bench.adapters.charxiv import CharXivAdapter
-from kairyu.bench.adapters.hle import HleAdapter
-from kairyu.bench.judge import (
+from evals.adapters.charxiv import CharXivAdapter
+from evals.adapters.hle import HleAdapter
+from evals.judge import (
     JudgeClient,
     MajorityJudgeClient,
     build_judge_client,
     parse_verdict,
 )
-from kairyu.bench.judge_prompts import judge_template
-from kairyu.bench.runner import SuiteRunner
-from kairyu.bench.store import ResultStore
-from kairyu.bench.types import BenchItem, JudgeConfig, JudgeEndpointConfig
+from evals.judge_prompts import judge_template
+from evals.runner import SuiteRunner
+from evals.store import ResultStore
+from evals.types import BenchItem, JudgeConfig, JudgeEndpointConfig
 
 
 def test_parse_verdict():
@@ -236,7 +236,7 @@ async def test_judged_adapters_pass_their_fingerprinted_template_selector():
     class RecordingJudge:
         async def grade(self, **kwargs):
             seen.append(kwargs["template_name"])
-            from kairyu.bench.judge import JudgeVerdict
+            from evals.judge import JudgeVerdict
 
             return JudgeVerdict(correct=True, raw_excerpt="correct: yes", model="j")
 

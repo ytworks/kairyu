@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from kairyu.bench.types import BenchConfig, BenchTarget
+from evals.types import BenchConfig, BenchTarget
 from kairyu.dsl.loader import build_orchestrator, load_spec
 from kairyu.engine.mock import MockBackend
 from kairyu.entrypoints.server.app import create_app

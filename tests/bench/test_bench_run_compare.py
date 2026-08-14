@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 
-from kairyu.bench.compare import (
+from evals.compare import (
     build_run_comparison,
     render_run_comparison_markdown,
 )
@@ -537,7 +537,7 @@ def test_invalid_accuracy_scores_are_missing_and_never_get_a_delta(invalid_score
 
 
 def test_valid_wilson_intervals_render_for_both_runs():
-    from kairyu.bench.aggregate import _wilson_bounds
+    from evals.aggregate import _wilson_bounds
 
     def interval(successes: int) -> dict:
         lower, upper = _wilson_bounds(successes, 10)
@@ -564,7 +564,7 @@ def test_valid_wilson_intervals_render_for_both_runs():
 
 
 def test_malformed_wilson_interval_is_not_labelled_or_rendered():
-    from kairyu.bench.aggregate import _wilson_bounds
+    from evals.aggregate import _wilson_bounds
 
     lower, upper = _wilson_bounds(5, 10)
     malformed = {
