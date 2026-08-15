@@ -59,6 +59,7 @@ _TRACE_VERSION = "2.0"
 _TRACE_HEADER = {"X-Kairyu-Trace": "1"}
 _STAGE_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _TRACE_ID_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:-]{0,63}\Z")
+_EXECUTION_STATUS_RE = re.compile(r"[a-z_]+(?:,[a-z_]+){0,15}\Z")
 _RFC3339_MILLISECONDS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z"
 )
@@ -112,6 +113,7 @@ class TraceStageMetrics:
     output_tokens: int | None = None
     cached_tokens: int | None = None
     proposals: int | None = None
+    execution_status: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -132,6 +134,7 @@ class TraceStageMetrics:
             "output_tokens": self.output_tokens,
             "cached_tokens": self.cached_tokens,
             "proposals": self.proposals,
+            "execution_status": self.execution_status,
         }
 
 
@@ -362,11 +365,24 @@ def _parse_trace(
 
         input_tokens, output_tokens, cached_tokens = _trace_usage(event)
         proposals = None
+        execution_status = None
         if node == "moa" and role == "moa" and kind == "synthesis" and status == "success":
             detail = event.get("detail")
             proposals = detail.get("proposals") if isinstance(detail, dict) else None
             if type(proposals) is not int or not 1 <= proposals <= 16:
                 raise ValueError("successful MoA trace must report 1..16 proposals")
+
+        if kind == "execution":
+            detail = event.get("detail")
+            execution_status = (
+                detail.get("execution_status") if isinstance(detail, dict) else None
+            )
+            if (
+                type(execution_status) is not str
+                or len(execution_status) > 128
+                or _EXECUTION_STATUS_RE.fullmatch(execution_status) is None
+            ):
+                raise ValueError("execution trace must report a safe execution_status")
 
         stage = "/".join((node, role or "-", kind))
         stages.append(
@@ -392,6 +408,7 @@ def _parse_trace(
                 output_tokens=output_tokens,
                 cached_tokens=cached_tokens,
                 proposals=proposals,
+                execution_status=execution_status,
             )
         )
     return _TRACE_VERSION, tuple(stages)
