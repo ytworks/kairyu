@@ -1178,6 +1178,10 @@ async def _stream_orchestrator(
                             ),
                         )
                         completion_length += len(event.text)
+                        # Keep the per-choice offset in step so the final
+                        # result's cumulative completion emits only a genuine
+                        # tail, never the whole already-streamed text again.
+                        sent[0] = completion_length
                         owner.observe(None, completions)
                         is_first = 0 not in started_choices
                         started_choices.add(0)

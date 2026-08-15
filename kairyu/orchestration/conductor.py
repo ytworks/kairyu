@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 
 from kairyu.async_thread import run_prompt_work
@@ -31,6 +31,18 @@ from kairyu.engine.prompt import (
     prompt_text,
 )
 from kairyu.orchestration.budget import Budget, BudgetState
+from kairyu.orchestration.execution import (
+    NOT_APPLICABLE_SENTINEL,
+    ExecutionBackend,
+    ExecutionLimits,
+    ExecutionReport,
+    ExecutionRequest,
+    extract_python_block,
+    render_matrix_report,
+    render_single_report,
+    skipped_report,
+    unavailable_report,
+)
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
 from kairyu.orchestration.trace import (
     TraceBudget,
@@ -68,6 +80,43 @@ def chars_cost_model(usd_per_1k_chars: float) -> CostModel:
 
 
 @dataclass(frozen=True)
+class RoleSamplingOverrides:
+    """Static per-role sampling policy (EO-D9).
+
+    Internal roles stay capped by the orchestration-wide internal ceiling; the
+    selected final unit carries the caller's public intent and rejects
+    overrides at construction.
+    """
+
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    seed_offset: int | None = None
+    stop: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "stop", tuple(self.stop))
+
+
+@dataclass(frozen=True)
+class ExecutorRoleConfig:
+    """Inputs and limits for a sandbox execution role (ECO-D3)."""
+
+    code_from: tuple[str, ...]
+    tests_from: tuple[str, ...]
+    mode: str = "single"  # "single" | "matrix"
+    limits: ExecutionLimits = ExecutionLimits()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "code_from", tuple(self.code_from))
+        object.__setattr__(self, "tests_from", tuple(self.tests_from))
+        if not self.code_from or not self.tests_from:
+            raise ValueError("executor roles require code_from and tests_from")
+        if self.mode not in {"single", "matrix"}:
+            raise ValueError("executor mode must be 'single' or 'matrix'")
+
+
+@dataclass(frozen=True)
 class RoleSpec:
     name: str
     worker: str
@@ -75,6 +124,13 @@ class RoleSpec:
     role_type: str = "worker"
     depends_on: tuple[str, ...] = ()
     verifies: str | None = None
+    sampling: RoleSamplingOverrides | None = None
+    executor: ExecutorRoleConfig | None = None
+    # Rendered after the prompt body on EVERY attempt, including verifier
+    # refinements (which append their feedback to the body first). Used for
+    # worker-native scaffolding such as a chat-format assistant marker that
+    # must terminate the prompt.
+    prompt_suffix: str = ""
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, TemplatedPrompt):
@@ -83,6 +139,13 @@ class RoleSpec:
                 "chat prompts; provide a plain derivation template"
             )
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
+        if (self.role_type == "executor") != (self.executor is not None):
+            raise ValueError(
+                f"role {self.name!r}: role_type 'executor' and executor config "
+                "must be declared together"
+            )
+        if self.executor is not None and self.sampling is not None:
+            raise ValueError(f"executor role {self.name!r} cannot declare sampling")
 
 
 @dataclass(frozen=True)
@@ -160,6 +223,53 @@ class _SafeDict(dict):
         return ""
 
 
+class _ContinuationDeduper:
+    """Drop only an exact verbatim repetition of the committed head prefix.
+
+    While the continuation's opening bytes (leading whitespace ignored) still
+    match the committed text they are buffered; a full match is dropped once,
+    and the first divergence (or end of stream) flushes the buffer verbatim.
+    This is byte-identical prefix dedup, never rewriting (EO-D7).
+    """
+
+    def __init__(self, committed: str) -> None:
+        self._committed = committed
+        self._buffer = ""
+        self._matching = bool(committed)
+
+    def feed(self, delta: str) -> str:
+        if not self._matching:
+            return delta
+        candidate = self._buffer + delta
+        stripped = candidate.lstrip()
+        if stripped.startswith(self._committed):
+            self._matching = False
+            self._buffer = ""
+            return stripped[len(self._committed) :]
+        if self._committed.startswith(stripped):
+            self._buffer = candidate
+            return ""
+        self._matching = False
+        self._buffer = ""
+        return candidate
+
+    def flush(self) -> str:
+        buffered, self._buffer = self._buffer, ""
+        self._matching = False
+        return buffered
+
+
+def dedup_public_continuation(committed: str, continuation: str) -> str:
+    """Whole-text equivalent of streaming ``_ContinuationDeduper`` semantics."""
+
+    if not committed:
+        return continuation
+    stripped = continuation.lstrip()
+    if stripped.startswith(committed):
+        return stripped[len(committed) :]
+    return continuation
+
+
 @dataclass
 class _RunState:
     """Mutable accumulator local to one run(); public results are frozen."""
@@ -218,6 +328,7 @@ class Conductor:
         expose_intermediate_outputs: bool = False,
         multimodal_prompt: MultimodalPrompt | None = None,
         chat_template_kwargs: Mapping[str, object] | None = None,
+        execution_workers: Mapping[str, ExecutionBackend] | None = None,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -245,28 +356,135 @@ class Conductor:
         self._chat_template_kwargs = (
             None if chat_template_kwargs is None else dict(chat_template_kwargs)
         )
+        self._execution_workers = dict(execution_workers or {})
         supplied_trace = dict(worker_trace or {})
         self._worker_trace = {
             worker: supplied_trace.get(
                 worker,
                 WorkerTraceIdentity(engine=worker),
             )
-            for worker in self._workers
+            for worker in (*self._workers, *self._execution_workers)
         }
         self._by_name = {role.name: role for role in self._roles}
         self._verifier_for = {
             role.verifies: role for role in self._roles if role.role_type == "verifier"
         }
-        self._units = tuple(role for role in self._roles if role.role_type != "verifier")
+        self._head = next(
+            (role for role in self._roles if role.role_type == "head"),
+            None,
+        )
+        # An executor role named in a verifier's depends_on runs INLINE inside
+        # the verify/refine loop (fresh execution evidence for every attempt)
+        # instead of as an independent DAG unit.
+        self._inline_executors: dict[str, tuple[RoleSpec, ...]] = {}
+        self._inline_executor_target: dict[str, str] = {}
+        for verifier in self._verifier_for.values():
+            bound = tuple(
+                self._by_name[dep]
+                for dep in verifier.depends_on
+                if dep in self._by_name and self._by_name[dep].role_type == "executor"
+            )
+            if bound and verifier.verifies:
+                self._inline_executors[verifier.verifies] = bound
+                for spec in bound:
+                    self._inline_executor_target[spec.name] = verifier.verifies
+        self._units = tuple(
+            role
+            for role in self._roles
+            if role.role_type != "verifier"
+            and role.name not in self._inline_executor_target
+        )
         self._unit_deps = {unit.name: self._remapped_deps(unit) for unit in self._units}
         self._validate()
 
     def _selected_final_unit(self) -> RoleSpec:
-        terminal = self._terminal_units()
+        terminal = [
+            unit
+            for unit in self._terminal_units()
+            if unit.role_type not in {"head", "executor"}
+        ]
         if not terminal:
             raise ValueError("orchestration requires at least one generation role")
         synthesizers = [unit for unit in terminal if unit.role_type == "synthesizer"]
         return (synthesizers + terminal)[0]
+
+    def _head_enabled(self) -> bool:
+        """A caller intent incompatible with a split public stream disables the
+        head for this call instead of rejecting the request (EO-D7)."""
+
+        if self._head is None:
+            return False
+        if self._final_tools or self._final_tools_in_prompt:
+            return False
+        params = self._final_sampling_params
+        if params.n != 1 or params.best_of not in (None, 1):
+            return False
+        if params.logprobs is not None:
+            return False
+        if params.extra_args.get("response_format") is not None:
+            return False
+        return True
+
+    def _head_sampling_params(self) -> SamplingParams:
+        """The head derives from the caller's PUBLIC sampling so its style
+        matches the answer, with caller intent carriers stripped (#208)."""
+
+        assert self._head is not None
+        extra_args = dict(self._final_sampling_params.extra_args)
+        extra_args.pop("response_format", None)
+        extra_args.pop(PARALLEL_TOOL_CALLS_EXTRA_ARG, None)
+        params = self._final_sampling_params.clone(
+            n=1,
+            best_of=None,
+            logprobs=None,
+            max_tokens=self._sampling_params.max_tokens,
+            extra_args=extra_args,
+        )
+        return self._apply_overrides(params, self._head.sampling, cap=None)
+
+    def _role_sampling_params(self, spec: RoleSpec) -> SamplingParams:
+        return self._apply_overrides(
+            self._sampling_params,
+            spec.sampling,
+            cap=self._sampling_params.max_tokens,
+        )
+
+    @staticmethod
+    def _apply_overrides(
+        params: SamplingParams,
+        overrides: RoleSamplingOverrides | None,
+        *,
+        cap: int | None,
+    ) -> SamplingParams:
+        if overrides is None:
+            return params
+        updates: dict[str, object] = {}
+        if overrides.temperature is not None:
+            updates["temperature"] = overrides.temperature
+        if overrides.top_p is not None:
+            updates["top_p"] = overrides.top_p
+        if overrides.max_tokens is not None:
+            updates["max_tokens"] = (
+                overrides.max_tokens if cap is None else min(overrides.max_tokens, cap)
+            )
+        if overrides.seed_offset is not None:
+            # Mirrors MoA proposal seed derivation for diversity under a fixed
+            # caller seed.
+            updates["seed"] = (
+                overrides.seed_offset
+                if params.seed is None
+                else params.seed + overrides.seed_offset
+            )
+        if overrides.stop:
+            base_stop = params.stop
+            if base_stop is None:
+                combined: tuple[str, ...] = overrides.stop
+            elif isinstance(base_stop, str):
+                combined = (base_stop, *overrides.stop)
+            else:
+                combined = (*base_stop, *overrides.stop)
+            updates["stop"] = combined
+        return params.clone(**updates) if updates else params
 
     def _request_intent(
         self,
@@ -279,6 +497,8 @@ class Conductor:
         bool | None,
         str,
     ]:
+        if self._head is not None and spec.name == self._head.name:
+            return (self._head_sampling_params(), (), None, False, None, "generic")
         if spec.name == self._selected_final_unit().name:
             return (
                 self._final_sampling_params,
@@ -288,7 +508,7 @@ class Conductor:
                 self._final_parallel_tool_calls,
                 self._final_tool_call_protocol,
             )
-        return self._sampling_params, (), None, False, None, "generic"
+        return self._role_sampling_params(spec), (), None, False, None, "generic"
 
     def _observe_usage(
         self,
@@ -308,25 +528,63 @@ class Conductor:
         )
 
     def _remapped_deps(self, unit: RoleSpec) -> frozenset[str]:
-        """Dependencies at unit granularity: a dep on a verifier maps to its target."""
+        """Dependencies at unit granularity: a dep on a verifier (or on an
+        executor bound inline to a verifier) maps to the verifier's target."""
         deps = set()
         for dep in unit.depends_on:
             dep_role = self._by_name.get(dep)
             if dep_role is not None and dep_role.role_type == "verifier" and dep_role.verifies:
                 deps.add(dep_role.verifies)
+            elif dep in self._inline_executor_target:
+                deps.add(self._inline_executor_target[dep])
             else:
                 deps.add(dep)
         return frozenset(deps - {unit.name})
+
+    def _transitive_unit_closure(self, name: str) -> set[str]:
+        """Unit names guaranteed complete before unit ``name`` generates."""
+
+        closure: set[str] = set()
+        frontier = set(self._unit_deps.get(name, frozenset()))
+        while frontier:
+            dep = frontier.pop()
+            if dep in closure:
+                continue
+            closure.add(dep)
+            frontier.update(self._unit_deps.get(dep, frozenset()))
+        return closure
 
     def _validate(self) -> None:
         if len(self._by_name) != len(self._roles):
             raise ValueError("duplicate role names")
         for role in self._roles:
-            if role.worker not in self._workers:
+            if role.role_type == "executor":
+                if role.worker not in self._execution_workers:
+                    raise ValueError(
+                        f"executor role {role.name!r} references unknown execution "
+                        f"worker {role.worker!r}"
+                    )
+            elif role.worker not in self._workers:
                 raise ValueError(f"role {role.name!r} references unknown worker {role.worker!r}")
             for dep in role.depends_on:
                 if dep not in self._by_name:
                     raise ValueError(f"role {role.name!r} has unknown dependency {dep!r}")
+            if role.executor is not None:
+                for source in (*role.executor.code_from, *role.executor.tests_from):
+                    source_role = self._by_name.get(source)
+                    if source_role is None or source_role.role_type in {
+                        "executor",
+                        "verifier",
+                    }:
+                        raise ValueError(
+                            f"executor role {role.name!r} input {source!r} must be "
+                            "an existing generation role"
+                        )
+                    if source not in role.depends_on:
+                        raise ValueError(
+                            f"executor role {role.name!r} must depend on its input "
+                            f"{source!r}"
+                        )
             if role.role_type == "verifier":
                 if role.verifies is None or role.verifies not in self._by_name:
                     raise ValueError(f"verifier {role.name!r} must set verifies=<existing role>")
@@ -338,16 +596,66 @@ class Conductor:
                 # dependency must also be the target's dependency (else it may not
                 # have run yet and _SafeDict would render it as "" → a silent
                 # wrong PASS/FAIL). Catch the misconfiguration loudly (M1).
+                # An executor dependency is re-run inline before each verdict;
+                # its own inputs must be complete before the target generates.
                 target = self._by_name[role.verifies]
                 available = set(target.depends_on) | {role.verifies}
                 for dep in role.depends_on:
+                    dep_role = self._by_name[dep]
+                    if dep_role.role_type == "executor":
+                        continue
                     if dep != role.verifies and dep not in available:
                         raise ValueError(
                             f"verifier {role.name!r} depends on {dep!r}, which is not "
                             f"available when it runs inline after {role.verifies!r}; "
                             f"add {dep!r} to {role.verifies!r}'s depends_on"
                         )
+        self._validate_head()
         self._check_acyclic()
+        self._validate_inline_executors()
+        if self._units:
+            final = self._selected_final_unit()
+            if final.sampling is not None:
+                raise ValueError(
+                    f"the final unit {final.name!r} carries the caller's public "
+                    "intent and cannot declare sampling overrides"
+                )
+
+    def _validate_head(self) -> None:
+        heads = [role for role in self._roles if role.role_type == "head"]
+        if len(heads) > 1:
+            raise ValueError("at most one role may declare role_type 'head'")
+        if not heads:
+            return
+        head = heads[0]
+        if head.depends_on:
+            raise ValueError(f"head role {head.name!r} cannot declare dependencies")
+        if head.name in self._verifier_for:
+            raise ValueError(f"head role {head.name!r} cannot have a verifier")
+        if len(self._units) < 2:
+            raise ValueError("a head role requires at least one downstream unit")
+
+    def _validate_inline_executors(self) -> None:
+        # After _check_acyclic so the closure walk terminates.
+        for target_name, executors in self._inline_executors.items():
+            available = self._transitive_unit_closure(target_name) | {target_name}
+            for spec in executors:
+                assert spec.executor is not None
+                for source in (*spec.executor.code_from, *spec.executor.tests_from):
+                    resolved = self._inline_executor_target.get(source, source)
+                    if resolved != target_name and resolved not in available:
+                        raise ValueError(
+                            f"inline executor {spec.name!r} input {source!r} is not "
+                            f"complete before its verifier target {target_name!r}"
+                        )
+        if self._head is not None and self._units:
+            final = self._selected_final_unit()
+            if self._head.name not in self._transitive_unit_closure(final.name):
+                raise ValueError(
+                    f"the final unit {final.name!r} must (transitively) depend on "
+                    f"the head role {self._head.name!r} to continue its committed "
+                    "public prefix"
+                )
 
     def _check_acyclic(self) -> None:
         remaining = {name: set(deps) for name, deps in self._unit_deps.items()}
@@ -363,6 +671,22 @@ class Conductor:
     def _render(self, template: str, query: str, outputs: Mapping[str, str]) -> str:
         body = template.format_map(_SafeDict(query=query, **outputs))
         return f"{self._shared_prefix}{body}"
+
+    def _rendered_role_prompt(
+        self,
+        spec: RoleSpec,
+        query: str,
+        outputs: Mapping[str, str],
+    ) -> str:
+        return f"{self._render(spec.prompt, query, outputs)}{spec.prompt_suffix}"
+
+    @staticmethod
+    def _prompt_body(spec: RoleSpec, rendered: str) -> str:
+        """Strip the role suffix so refinements append before it."""
+
+        if spec.prompt_suffix and rendered.endswith(spec.prompt_suffix):
+            return rendered[: len(rendered) - len(spec.prompt_suffix)]
+        return rendered
 
     def _worker_prompt(self, spec: RoleSpec, text: str):
         if self._multimodal_prompt is None or not backend_supports_prompt_kind(
@@ -421,8 +745,13 @@ class Conductor:
             )
         session = self.preflight_session(request_id_suffix)
         requests: list[tuple[RoleSpec, GenerationRequest]] = []
+        head_enabled = self._head_enabled()
         for spec in self._units:
             if self._unit_deps[spec.name]:
+                continue
+            if spec.role_type == "executor":
+                continue
+            if spec.role_type == "head" and not head_enabled:
                 continue
             (
                 sampling_params,
@@ -442,7 +771,7 @@ class Conductor:
                         prompt=(
                             role_prompt := self._worker_prompt(
                                 spec,
-                                self._render(spec.prompt, query, {}),
+                                self._rendered_role_prompt(spec, query, {}),
                             )
                         ),
                         sampling_params=sampling_params,
@@ -596,23 +925,42 @@ class Conductor:
         spec: RoleSpec,
         attempt: int,
         observed: _GenerationObservation,
-    ) -> None:
+    ) -> IntermediateOutput | None:
         if (
             not self._expose_intermediate_outputs
             or spec.name == self._selected_final_unit().name
+            # The head is committed public content; duplicating it into the
+            # reasoning sections would repeat the answer opening (EO-D7).
+            or spec.role_type == "head"
         ):
-            return
+            return None
         identity = self._worker_trace[spec.worker]
-        run.intermediate_outputs.append(
-            IntermediateOutput(
-                node=spec.name,
-                role=spec.role_type,
-                attempt=attempt,
-                worker=spec.worker,
-                engine=identity.engine,
-                model=identity.model,
-                text=observed.text,
-                model_reasoning=self._model_reasoning(observed.completions),
+        output = IntermediateOutput(
+            node=spec.name,
+            role=spec.role_type,
+            attempt=attempt,
+            worker=spec.worker,
+            engine=identity.engine,
+            model=identity.model,
+            text=observed.text,
+            model_reasoning=self._model_reasoning(observed.completions),
+        )
+        run.intermediate_outputs.append(output)
+        return output
+
+    @staticmethod
+    async def _emit_intermediate(
+        event_sink: Callable[[ConductorEvent], Awaitable[None]] | None,
+        output: IntermediateOutput | None,
+    ) -> None:
+        """Stream one completed pre-final stage as it finishes (EO-D8)."""
+
+        if event_sink is None or output is None:
+            return
+        await event_sink(
+            ConductorEvent(
+                kind="reasoning",
+                text=f"{output.as_markdown()}\n\n---\n\n",
             )
         )
 
@@ -751,7 +1099,391 @@ class Conductor:
             ),
         )
 
-    async def _run_unit(self, run: _RunState, session: str, query: str, spec: RoleSpec) -> None:
+    async def _run_executor_unit(
+        self,
+        run: _RunState,
+        session: str,
+        spec: RoleSpec,
+        *,
+        depth: int = 0,
+        event_sink: Callable[[ConductorEvent], Awaitable[None]] | None = None,
+    ) -> None:
+        """Run one sandbox execution stage (ECO-D3).
+
+        A stage with nothing runnable skips locally without reserving a step
+        (the everyday non-coding path); a sandbox failure degrades to an
+        ``unavailable`` report instead of failing the request. Steps are
+        reserved strictly before the await (M1 D4); token usage is untouched.
+        """
+
+        assert spec.executor is not None
+        config = spec.executor
+        queued_at = utc_now_iso()
+        codes: dict[str, str] = {}
+        for name in config.code_from:
+            code = await run_prompt_work(extract_python_block, run.outputs.get(name, ""))
+            if code:
+                codes[name] = code
+        tests: str | None = None
+        for name in config.tests_from:
+            raw = run.outputs.get(name, "")
+            if raw.strip() == NOT_APPLICABLE_SENTINEL:
+                continue
+            block = await run_prompt_work(extract_python_block, raw)
+            if block:
+                tests = block
+                break
+
+        def finish(
+            report_text: str,
+            *,
+            status: str,
+            attempt: int,
+            timing: TraceTiming | None,
+            budget: TraceBudget,
+            metadata: dict,
+            record: bool = True,
+        ) -> IntermediateOutput | None:
+            run.outputs[spec.name] = report_text
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "execution",
+                    operation="execution",
+                    status=status,
+                    attempt=attempt,
+                    detail=f"attempt={attempt} execution={metadata.get('execution_status')}",
+                    timing=timing,
+                    budget=budget,
+                    metadata=metadata,
+                )
+            )
+            output = None
+            if record:
+                output = self._record_intermediate(
+                    run,
+                    spec,
+                    attempt,
+                    _GenerationObservation(
+                        text=report_text,
+                        completions=(),
+                        timing=timing or TraceTiming(),
+                        usage=None,
+                        budget=budget,
+                    ),
+                )
+            if depth == 0 and spec.name not in run.completion_order:
+                run.completion_order.append(spec.name)
+            return output
+
+        if not codes or tests is None:
+            output = finish(
+                render_single_report(skipped_report("no_runnable_code")),
+                status="skipped",
+                attempt=depth,
+                # started_at mirrors queued_at: trace consumers require a
+                # complete timing envelope on retained execution events.
+                timing=TraceTiming(
+                    queued_at=queued_at,
+                    started_at=queued_at,
+                    completed_at=utc_now_iso(),
+                ),
+                budget=TraceBudget.between(run.budget, run.budget),
+                metadata={"execution_status": "skipped", "mode": config.mode},
+                record=False,
+            )
+            await self._emit_intermediate(event_sink, output)
+            return
+        budget_before = run.budget
+        reserved = run.budget.try_reserve()
+        if reserved is None:
+            output = finish(
+                render_single_report(skipped_report("budget")),
+                status="skipped",
+                attempt=depth,
+                timing=TraceTiming(
+                    queued_at=queued_at,
+                    started_at=queued_at,
+                    completed_at=utc_now_iso(),
+                ),
+                budget=TraceBudget.between(run.budget, run.budget),
+                metadata={"execution_status": "skipped", "reason": "budget"},
+                record=False,
+            )
+            await self._emit_intermediate(event_sink, output)
+            return
+        run.budget = reserved
+        started_at = utc_now_iso()
+        backend = self._execution_workers[spec.worker]
+
+        def execution_request(name: str, code: str) -> ExecutionRequest:
+            return ExecutionRequest(
+                request_id=f"{session}-{spec.name}-{depth}-{name}",
+                language="python",
+                files={"solution.py": code, "test_solution.py": tests},
+                entry="pytest",
+                limits=config.limits,
+            )
+
+        try:
+            names = tuple(codes)
+            results = await asyncio.gather(
+                *(backend.execute(execution_request(name, codes[name])) for name in names),
+                return_exceptions=True,
+            )
+            reports: dict[str, ExecutionReport] = {}
+            for name, outcome in zip(names, results, strict=True):
+                if isinstance(outcome, BaseException):
+                    if not isinstance(outcome, Exception):
+                        raise outcome
+                    reports[name] = unavailable_report(type(outcome).__name__)
+                else:
+                    reports[name] = outcome
+        except BaseException:
+            run.budget = run.budget.release()
+            raise
+        run.budget = run.budget.reconcile_success(cost=0.0)
+        if config.mode == "matrix":
+            report_text = render_matrix_report(reports)
+        else:
+            report_text = render_single_report(next(iter(reports.values())))
+        statuses = {report.status for report in reports.values()}
+        overall = "ok" if statuses == {"ok"} else ",".join(sorted(statuses))
+        metadata = {
+            "execution_status": overall,
+            "mode": config.mode,
+            "candidates": len(reports),
+            "passed": sum(report.passed for report in reports.values()),
+            "failed": sum(report.failed for report in reports.values()),
+            "errors": sum(report.errors for report in reports.values()),
+            "duration_ms": sum(report.duration_ms for report in reports.values()),
+        }
+        output = finish(
+            report_text,
+            status="success",
+            attempt=depth,
+            timing=TraceTiming(
+                queued_at=queued_at,
+                started_at=started_at,
+                completed_at=utc_now_iso(),
+            ),
+            budget=TraceBudget.between(
+                budget_before,
+                run.budget,
+                steps_consumed=1,
+                cost_consumed_usd=0.0,
+            ),
+            metadata=metadata,
+        )
+        await self._emit_intermediate(event_sink, output)
+
+    async def _stream_head_unit(
+        self,
+        run: _RunState,
+        session: str,
+        query: str,
+        spec: RoleSpec,
+        event_sink: Callable[[ConductorEvent], Awaitable[None]],
+    ) -> None:
+        """Stream the head role's PUBLIC deltas from t=0 (EO-D7).
+
+        The head's committed bytes can never be retracted, so failure degrades
+        instead of raising: with zero bytes emitted the continuation becomes
+        the sole public stream; after bytes were emitted the partial prefix is
+        committed and downstream roles continue from it.
+        """
+
+        if run.budget.is_exhausted:
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "skipped:budget",
+                    operation="generation",
+                    status="skipped",
+                    attempt=0,
+                    budget=TraceBudget.between(run.budget, run.budget),
+                    metadata={"reason": "budget", "head": True},
+                )
+            )
+            return
+        prompt = self._prepared_initial_prompt(run, spec)
+        if prompt is None:
+            prompt = await run_prompt_work(
+                self._rendered_role_prompt,
+                spec,
+                query,
+                dict(run.outputs),
+            )
+        backend = self._workers[spec.worker]
+        request = self._generation_request(run, session, spec, prompt, 0)
+        queued_at = utc_now_iso()
+        budget_before = run.budget
+        unknown_cost = run.budget.budget.max_cost_usd is not None
+        reserved = run.budget.try_reserve(unknown_cost=unknown_cost)
+        if reserved is None:
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "skipped:budget",
+                    operation="generation",
+                    status="skipped",
+                    attempt=0,
+                    budget=TraceBudget.between(run.budget, run.budget),
+                    metadata={"reason": "budget", "head": True},
+                )
+            )
+            return
+        run.budget = reserved
+        started_at = utc_now_iso()
+        emitted = 0
+        last_result: GenerationResult | None = None
+        latest_usage = None
+        first_token_at = None
+        text_parts: list[str] = []
+        legacy_text = ""
+        from kairyu.telemetry import traced_span
+
+        def head_trace_usage() -> TraceUsage | None:
+            if latest_usage is None:
+                return None
+            run.usage[0] += latest_usage.prompt_tokens
+            run.usage[1] += latest_usage.completion_tokens
+            run.cached_tokens += latest_usage.cached_tokens
+            self._observe_usage(run)
+            return TraceUsage(
+                prompt_tokens=latest_usage.prompt_tokens,
+                completion_tokens=latest_usage.completion_tokens,
+                cached_tokens=latest_usage.cached_tokens,
+            )
+
+        try:
+            with traced_span(
+                "kairyu.conductor.stage",
+                {
+                    "kairyu.request_id": request.request_id,
+                    "kairyu.stage.name": spec.name,
+                    "kairyu.stage.role": spec.role_type,
+                    "kairyu.stage.worker": spec.worker,
+                    "kairyu.stage.operation": "generation",
+                    "kairyu.stage.attempt": 0,
+                    "kairyu.stream": True,
+                },
+            ) as span:
+                async for partial in backend.stream(request):
+                    last_result = partial
+                    if partial.usage is not None:
+                        latest_usage = partial.usage
+                        self._observe_usage(run, latest_usage)
+                    completion = partial.completions[0] if partial.completions else None
+                    if (
+                        completion is not None
+                        and completion.text_delta is None
+                        and completion.text_offset is None
+                    ):
+                        text = completion.text
+                        if not text.startswith(legacy_text):
+                            raise RuntimeError(
+                                "head worker stream must emit cumulative, "
+                                "prefix-stable text"
+                            )
+                        delta = text[len(legacy_text) :]
+                        legacy_text = text
+                        emitted = len(text)
+                    else:
+                        delta, emitted = (
+                            completion.delta_after(emitted)
+                            if completion is not None
+                            else ("", emitted)
+                        )
+                    text_parts.append(delta)
+                    if first_token_at is None and partial.completions:
+                        first_token_at = utc_now_iso()
+                    if delta:
+                        await event_sink(ConductorEvent(kind="delta", text=delta))
+                if last_result is None:
+                    raise RuntimeError("head worker stream produced no result")
+                run.outputs[spec.name] = last_result.text or "".join(text_parts)
+                actual_cost = self._cost_model(request, last_result)
+                run.budget = run.budget.reconcile_success(
+                    cost=actual_cost,
+                    unknown_cost=unknown_cost,
+                )
+                if span is not None:
+                    span.set_attribute("kairyu.stage.status", "success")
+        except Exception as error:
+            partial_text = "".join(text_parts)
+            if partial_text:
+                run.outputs[spec.name] = partial_text
+            run.budget = run.budget.release(unknown_cost=unknown_cost)
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "failed",
+                    operation="generation",
+                    status="failed",
+                    attempt=0,
+                    detail=type(error).__name__,
+                    timing=TraceTiming(
+                        queued_at=queued_at,
+                        started_at=started_at,
+                        first_token_at=first_token_at,
+                        completed_at=utc_now_iso(),
+                    ),
+                    usage=head_trace_usage(),
+                    budget=TraceBudget.between(budget_before, run.budget),
+                    metadata={
+                        "streamed": True,
+                        "head": True,
+                        "partial": bool(partial_text),
+                    },
+                    error=TraceError(type=type(error).__name__),
+                )
+            )
+            return
+        except BaseException:
+            run.budget = run.budget.release(unknown_cost=unknown_cost)
+            raise
+        run.trace.append(
+            self._trace_event(
+                spec,
+                "generated",
+                operation="generation",
+                status="success",
+                attempt=0,
+                detail="attempt=0 streamed=true head=true",
+                timing=TraceTiming(
+                    queued_at=queued_at,
+                    started_at=started_at,
+                    first_token_at=first_token_at,
+                    completed_at=utc_now_iso(),
+                ),
+                usage=head_trace_usage(),
+                budget=TraceBudget.between(
+                    budget_before,
+                    run.budget,
+                    steps_consumed=1,
+                    cost_consumed_usd=actual_cost,
+                ),
+                metadata={"streamed": True, "head": True},
+            )
+        )
+        run.completion_order.append(spec.name)
+
+    async def _run_unit(
+        self,
+        run: _RunState,
+        session: str,
+        query: str,
+        spec: RoleSpec,
+        *,
+        event_sink: Callable[[ConductorEvent], Awaitable[None]] | None = None,
+    ) -> None:
+        if spec.role_type == "executor":
+            await self._run_executor_unit(run, session, spec, event_sink=event_sink)
+            return
+        if spec.role_type == "head" and event_sink is not None:
+            await self._stream_head_unit(run, session, query, spec, event_sink)
+            return
         if run.budget.is_exhausted:
             run.trace.append(
                 self._trace_event(
@@ -765,16 +1497,17 @@ class Conductor:
                 )
             )
             return
-        base_prompt = self._prepared_initial_prompt(run, spec)
-        if base_prompt is None:
-            base_prompt = await run_prompt_work(
-                self._render,
-                spec.prompt,
+        rendered = self._prepared_initial_prompt(run, spec)
+        if rendered is None:
+            rendered = await run_prompt_work(
+                self._rendered_role_prompt,
+                spec,
                 query,
                 dict(run.outputs),
             )
+        base_prompt = self._prompt_body(spec, rendered)
         verifier = self._verifier_for.get(spec.name)
-        prompt = base_prompt
+        prompt = rendered
         depth = 0
         while True:
             try:
@@ -805,7 +1538,7 @@ class Conductor:
                 break
             text = observed.text
             run.outputs[spec.name] = text
-            self._record_intermediate(run, spec, depth, observed)
+            intermediate = self._record_intermediate(run, spec, depth, observed)
             if spec.name == self._selected_final_unit().name:
                 run.final_completions = observed.completions
             run.trace.append(
@@ -821,11 +1554,22 @@ class Conductor:
                     budget=observed.budget,
                 )
             )
+            await self._emit_intermediate(event_sink, intermediate)
             if verifier is None:
                 break
+            # Inline-bound executors re-run against the fresh attempt so the
+            # verifier never judges stale execution evidence (ECO-D3).
+            for exec_spec in self._inline_executors.get(spec.name, ()):
+                await self._run_executor_unit(
+                    run,
+                    session,
+                    exec_spec,
+                    depth=depth,
+                    event_sink=event_sink,
+                )
             verifier_prompt = await run_prompt_work(
-                self._render,
-                verifier.prompt,
+                self._rendered_role_prompt,
+                verifier,
                 query,
                 dict(run.outputs),
             )
@@ -857,7 +1601,12 @@ class Conductor:
             run.outputs[verifier.name] = verdict
             passed = _is_pass(verdict)
             can_refine = run.budget.can_refine(depth)
-            self._record_intermediate(run, verifier, depth, verifier_observed)
+            verifier_intermediate = self._record_intermediate(
+                run,
+                verifier,
+                depth,
+                verifier_observed,
+            )
             run.trace.append(
                 self._trace_event(
                     verifier,
@@ -875,25 +1624,33 @@ class Conductor:
                     },
                 )
             )
+            await self._emit_intermediate(event_sink, verifier_intermediate)
             if passed or not can_refine:
                 break
             depth += 1
-            prompt = await run_prompt_work(
+            refined = await run_prompt_work(
                 self._refinement_prompt,
                 base_prompt,
                 text,
                 verdict,
             )
+            prompt = f"{refined}{spec.prompt_suffix}"
         run.completion_order.append(spec.name)
 
     async def _run_unit_safe(
-        self, run: _RunState, session: str, query: str, spec: RoleSpec
+        self,
+        run: _RunState,
+        session: str,
+        query: str,
+        spec: RoleSpec,
+        *,
+        event_sink: Callable[[ConductorEvent], Awaitable[None]] | None = None,
     ) -> None:
         # A transient backend failure on one unit must not destroy the whole
         # multi-agent run: record it and let the Conductor return the best
         # result produced so far (O4). Sibling units keep their completed work.
         try:
-            await self._run_unit(run, session, query, spec)
+            await self._run_unit(run, session, query, spec, event_sink=event_sink)
         except _ObservedGenerationError:
             pass
         except Exception as error:
@@ -912,6 +1669,60 @@ class Conductor:
     def _final_text(self, run: _RunState) -> str:
         unit = self._final_output_unit(run)
         return run.outputs[unit.name] if unit is not None else ""
+
+    def _public_text(self, run: _RunState) -> str:
+        """The complete public answer: committed head prefix + continuation.
+
+        With an enabled head the committed prefix cannot be retracted, so a
+        missing continuation returns the head text alone (best-so-far); only
+        an exact verbatim head repetition is deduplicated (EO-D7).
+        """
+
+        if self._head is None or not self._head_enabled():
+            return self._final_text(run)
+        head_text = run.outputs.get(self._head.name, "")
+        continuation = run.outputs.get(self._selected_final_unit().name)
+        if continuation is None:
+            return head_text
+        return head_text + dedup_public_continuation(head_text, continuation)
+
+    def _public_completions(
+        self,
+        run: _RunState,
+        public_text: str,
+    ) -> tuple[CompletionOutput, ...]:
+        """Merged public completion for the split head+continuation stream."""
+
+        if self._head is None or not self._head_enabled():
+            return run.final_completions
+        finish_reason = (
+            run.final_completions[0].finish_reason if run.final_completions else None
+        )
+        return (
+            CompletionOutput(
+                index=0,
+                text=public_text,
+                token_ids=(),
+                finish_reason=finish_reason or "stop",
+            ),
+        )
+
+    def _head_exclusions(self, run: _RunState) -> frozenset[str]:
+        """Skip a head whose caller intent is incompatible (EO-D7)."""
+
+        if self._head is None or self._head_enabled():
+            return frozenset()
+        run.trace.append(
+            self._trace_event(
+                self._head,
+                "skipped:intent",
+                operation="generation",
+                status="skipped",
+                attempt=0,
+                metadata={"reason": "intent", "head": True},
+            )
+        )
+        return frozenset({self._head.name})
 
     def _final_output_unit(self, run: _RunState) -> RoleSpec | None:
         terminal = self._terminal_units()
@@ -945,12 +1756,24 @@ class Conductor:
         query: str,
         *,
         exclude: frozenset[str] = frozenset(),
+        event_sink: Callable[[ConductorEvent], Awaitable[None]] | None = None,
     ) -> None:
         pending = {name: set(deps) for name, deps in self._unit_deps.items() if name not in exclude}
+        for deps in pending.values():
+            deps.difference_update(exclude)
         while pending:
             ready = [name for name, deps in pending.items() if not deps]
             await asyncio.gather(
-                *(self._run_unit_safe(run, session, query, self._by_name[name]) for name in ready)
+                *(
+                    self._run_unit_safe(
+                        run,
+                        session,
+                        query,
+                        self._by_name[name],
+                        event_sink=event_sink,
+                    )
+                    for name in ready
+                )
             )
             for name in ready:
                 del pending[name]
@@ -963,6 +1786,9 @@ class Conductor:
         session: str,
         query: str,
         spec: RoleSpec,
+        *,
+        dedupe_against: str = "",
+        bare_deltas: bool = False,
     ) -> AsyncIterator[ConductorEvent]:
         if run.budget.is_exhausted:
             run.trace.append(
@@ -981,8 +1807,8 @@ class Conductor:
         prompt = self._prepared_initial_prompt(run, spec)
         if prompt is None:
             prompt = await run_prompt_work(
-                self._render,
-                spec.prompt,
+                self._rendered_role_prompt,
+                spec,
                 query,
                 dict(run.outputs),
             )
@@ -1014,6 +1840,7 @@ class Conductor:
         first_token_at = None
         text_parts: list[str] = []
         legacy_text = ""
+        deduper = _ContinuationDeduper(dedupe_against if bare_deltas else "")
         from kairyu.telemetry import traced_span
 
         try:
@@ -1058,11 +1885,22 @@ class Conductor:
                     text_parts.append(delta)
                     if first_token_at is None and partial.completions:
                         first_token_at = utc_now_iso()
-                    yield ConductorEvent(
-                        kind="delta",
-                        text=delta,
-                        completions=partial.completions,
-                    )
+                    if bare_deltas:
+                        # Bare deltas let the server own public offsets across
+                        # the head/continuation seam; only n=1 reaches here.
+                        deduped = deduper.feed(delta)
+                        if deduped:
+                            yield ConductorEvent(kind="delta", text=deduped)
+                    else:
+                        yield ConductorEvent(
+                            kind="delta",
+                            text=delta,
+                            completions=partial.completions,
+                        )
+                if bare_deltas:
+                    tail = deduper.flush()
+                    if tail:
+                        yield ConductorEvent(kind="delta", text=tail)
                 if last_result is None:
                     raise RuntimeError("final worker stream produced no result")
                 run.outputs[spec.name] = last_result.text or "".join(text_parts)
@@ -1171,10 +2009,11 @@ class Conductor:
             prepared_initial_requests=dict(prepared_initial_requests or {}),
         )
         session = session or uuid.uuid4().hex[:12]
-        await self._run_pending(run, session, query)
+        await self._run_pending(run, session, query, exclude=self._head_exclusions(run))
+        public_text = self._public_text(run)
         return ConductorResult(
-            final_text=self._final_text(run),
-            completions=run.final_completions,
+            final_text=public_text,
+            completions=self._public_completions(run, public_text),
             outputs=dict(run.outputs),
             budget_state=run.budget,
             trace=tuple(run.trace),
@@ -1212,27 +2051,15 @@ class Conductor:
         )
         session = session or uuid.uuid4().hex[:12]
         final = self._stream_final_unit()
-        await self._run_pending(
-            run,
-            session,
-            query,
-            exclude=frozenset({final.name}),
-        )
-        for output in run.intermediate_outputs:
-            yield ConductorEvent(
-                kind="reasoning",
-                text=f"{output.as_markdown()}\n\n---\n\n",
-            )
-        emitted_text = ""
-        try:
-            async for event in self._stream_unit(run, session, query, final):
-                if event.kind == "delta":
-                    emitted_text += event.text
-                yield event
-        except Exception as error:
-            result = ConductorResult(
-                final_text=self._final_text(run),
-                completions=run.final_completions,
+        head_active = self._head is not None and self._head_enabled()
+        exclude = frozenset({final.name}) | self._head_exclusions(run)
+
+        def partial_result(final_text: str) -> ConductorResult:
+            return ConductorResult(
+                final_text=final_text,
+                completions=self._public_completions(run, final_text)
+                if head_active
+                else run.final_completions,
                 outputs=dict(run.outputs),
                 budget_state=run.budget,
                 trace=tuple(run.trace),
@@ -1243,8 +2070,87 @@ class Conductor:
                     include_final_attribution=False,
                 ),
             )
-            raise ConductorStreamError(error, result) from error
-        final_text = self._final_text(run)
+
+        # Phase A (EO-D7/EO-D8): one producer task runs the pre-final DAG.  The
+        # head unit streams committed public deltas and every completed stage
+        # streams its reasoning section as it finishes, merged through one
+        # bounded queue.  Per-event overhead is microseconds against a
+        # multi-millisecond token cadence; the single-producer continuation
+        # tail below stays pull-through (m11 D1).
+        emitted_text = ""
+        queue: asyncio.Queue[ConductorEvent | None] = asyncio.Queue(maxsize=256)
+
+        async def sink(event: ConductorEvent) -> None:
+            await queue.put(event)
+
+        async def pump() -> None:
+            try:
+                await self._run_pending(
+                    run,
+                    session,
+                    query,
+                    exclude=exclude,
+                    event_sink=sink,
+                )
+            except asyncio.CancelledError:
+                try:
+                    queue.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+                raise
+            except BaseException:
+                await queue.put(None)
+                raise
+            else:
+                await queue.put(None)
+
+        producer = asyncio.create_task(pump())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if item.kind == "delta":
+                    emitted_text += item.text
+                yield item
+            await producer
+        except BaseException as error:
+            if not producer.done():
+                producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
+            if isinstance(error, Exception):
+                raise ConductorStreamError(
+                    error,
+                    partial_result(
+                        emitted_text if head_active else self._final_text(run)
+                    ),
+                ) from error
+            raise
+
+        # Phase B: pull the continuation directly from its backend iterator.
+        head_text = (
+            run.outputs.get(self._head.name, "")
+            if head_active and self._head is not None
+            else ""
+        )
+        try:
+            async for event in self._stream_unit(
+                run,
+                session,
+                query,
+                final,
+                dedupe_against=head_text,
+                bare_deltas=head_active,
+            ):
+                if event.kind == "delta":
+                    emitted_text += event.text
+                yield event
+        except Exception as error:
+            raise ConductorStreamError(
+                error,
+                partial_result(emitted_text if head_active else self._final_text(run)),
+            ) from error
+        final_text = self._public_text(run)
         if final_text != emitted_text:
             if not final_text.startswith(emitted_text):
                 raise RuntimeError("final Conductor result does not extend its streamed deltas")
@@ -1256,7 +2162,7 @@ class Conductor:
             kind="result",
             result=ConductorResult(
                 final_text=final_text,
-                completions=run.final_completions,
+                completions=self._public_completions(run, final_text),
                 outputs=dict(run.outputs),
                 budget_state=run.budget,
                 trace=tuple(run.trace),

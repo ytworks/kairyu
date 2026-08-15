@@ -1,5 +1,85 @@
 # Measurements
 
+> **Scope note:** the "Coding DAG serving matrix" section below is the only
+> section measured on the current head-streamed, execution-gated nine-role
+> coding DAG. Every other section predates that DAG (they informed the
+> unchanged L1 topology selection: TP1×4 Qwen, DSpark-5/16K DeepSeek) and
+> must not be attributed to the current deployment.
+
+## Coding DAG serving matrix (current deployment)
+
+Run ID: `20260815T145039Z` (`./verify.sh serving-auto-max-coding`); artifacts
+under the NVMe `verification-results/20260815T145039Z/serving-auto-max-coding/`
+directory, including per-row `ttft-gate.json`. This run includes every PR
+#488 review amendment: the networkless UDS sandbox transport, capped
+subprocess output draining, abnormal-pytest-exit rejection, the strict
+`execution_status`-based gate, the burst-queueing executor (8 slots), the
+subreaper-based escaped-descendant sweep, and the queue-inclusive deadline
+budget with runner-side admission control.
+Dataset: 32 deterministic self-contained Python implementation tasks per row
+(8 templates × 4 namespaced variants, ~1.5K prompt tokens), temperature 0,
+natural completion, `max_tokens 4096`, public tokens counted by the DeepSeek
+loopback tokenizer oracle. Semantic TTFT is the first public `content` SSE
+token at L3. The paired DeepSeek-direct rows run the same dataset at the
+same concurrency against the loopback L1 endpoint (`:8005/v1`), so the
+committed `TTFT ≤ 2.0×` gate compares like against like. "Sandbox-executed"
+uses the strict definition: BOTH `exec_matrix` and `exec_draft` reported an
+`execution_status` containing `ok` (degraded `unavailable` stages never
+count).
+
+| Concurrency | product semantic TTFT p50/p99 (ms) | DeepSeek-direct TTFT p50/p99 (ms) | gate (≤2.0×) | E2E p50/p99 (ms) | sandbox-executed (strict) | success |
+|---:|---:|---:|---|---:|---:|---:|
+| 1 | 417.49 / 427.06 | 2,389.41 / 2,692.13 | **PASS** (0.17×) | 65,112 / 166,570 | 31/32 | 32/32 |
+| 8 | 875.63 / 7,157.94 | 7,311.59 / 10,667.32 | **PASS** (0.12×) | 81,176 / 256,435 | 31/32 | 32/32 |
+| 16 | 1,103.88 / 15,680.15 | 10,212.32 / 17,840.83 | **PASS** (0.11×) | 101,172 / 297,471 | 30/32 | 32/32 |
+| 32 | 24,396.26 / 26,835.78 | 13,698.05 / 18,843.40 | **PASS** (1.78×) | 170,126 / 293,582 | 32/32 | 32/32 |
+
+Every sample carried a valid trace with a successful `head` and
+`continuation` stage; zero execution stages degraded to `unavailable` (the
+pre-amendment c32 run had measured three slot-contention degrades, fixed by
+the queueing executor). The few non-executed samples are drafts that never
+produced a runnable fenced block across their attempts — honest gaps, above
+the ≥90% floor. E2E is deliberately unconstrained: it covers the full
+proposal/test fan-out, sandbox runs, synthesis, execution-evidence
+verification, and bounded refinement behind the committed opening (the head
+keeps the user reading from ~0.4 s at c1). The c32 row passes only against
+its paired direct denominator (1.78×), not against the historical 8K-prompt
+pinned fallback — the paired same-dataset comparison is the committed gate.
+
+Superseded coding-matrix runs: `20260815T042353Z` (pre-review-amendment
+deployment, pre-strict gate), `20260815T111017Z` (post-UDS, failed the
+strict gate at c32 with 25/32 — the measured evidence behind the gate and
+executor amendments), and `20260815T121447Z` (all rows green, pre-sweep/
+deadline-budget amendments).
+
+## Generic serving matrix (current deployment, executor skip path)
+
+Run ID: `20260815T052328Z` (`./verify.sh serving-auto-max`); this run
+predates the PR #488 review amendments, which change only the sandbox
+transport and execution path — the skip path measured here makes no sandbox
+call, so the rows remain attributable. ~8K-token
+generic prompts, natural completion, temperature 0. Every sample skipped
+both executor stages locally (the everyday non-coding degrade path), carried
+a valid trace with successful `head` and `continuation` stages, and
+returned a non-empty public answer.
+
+| Concurrency | semantic TTFT p50/p99 (ms) | E2E p50/p99 (ms) | public output tok/s | success |
+|---:|---:|---:|---:|---:|
+| 1 | 2,075.60 / 2,135.56 | 83,905 / 145,842 | 8.94 | 32/32 |
+| 8 | 5,887.12 / 31,759.73 | 181,969 / 291,920 | 30.23 | 32/32 |
+| 16 | 24,096.11 / 77,862.65 | 312,040 / 405,169 | 36.65 | 32/32 |
+| 32 | 96,189.86 / 162,889.23 | 525,900 / 548,632 | 39.63 | 32/32 |
+
+Generic TTFT is dominated by the Qwen head's ~8K-token prefill (compare the
+historical Tier1 TP1 c1 TTFT of 2,620.97 ms at the same prompt length); the
+committed TTFT gate is the coding matrix above. Against the historical
+MoA-3 auto-max rows on comparable 8K prompts (semantic TTFT p50
+15,559.95 ms at c1), the head-streamed DAG improves first-public-token
+latency by 7.5× while additionally running the full verification pipeline.
+
+> **Historical evidence for all sections below:** these rows predate the
+> current coding DAG.
+
 ## Current deployment validation
 
 On 2026-08-14 UTC (2026-08-15 JST), the complete eight-GPU deployment reached

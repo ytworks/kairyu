@@ -77,6 +77,37 @@ x-qwen: &qwen
   restart: unless-stopped
 
 services:
+  executor:
+    build:
+      context: ./sandbox
+    image: ${EXECUTOR_IMAGE:-local/kairyu-executor:coding-v1}
+    network_mode: none
+    environment:
+      RUNNER_SOCKET_PATH: /run/kairyu-executor/executor.sock
+      # Sized for the c32 serving row's fan-out burst; runs are sub-second
+      # CPU-bound pytest invocations, so 8 slots on 4 CPUs queue briefly
+      # instead of degrading to `unavailable`.
+      RUNNER_MAX_CONCURRENCY: "8"
+    read_only: true
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 4.0
+    volumes:
+      - executor-socket:/run/kairyu-executor
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+      - /run/exec:size=256m,uid=65534,noexec,nosuid,nodev
+    healthcheck:
+      test: [CMD, python3, -c, 'import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect("/run/kairyu-executor/executor.sock"); s.sendall(b"GET /healthz HTTP/1.0\r\nHost: executor\r\n\r\n"); assert b" 200 " in s.recv(64)']
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+    restart: unless-stopped
+
   qwen-0:
     <<: *qwen
     cpuset: ${QWEN_0_CPUSET}
@@ -258,12 +289,16 @@ services:
       - ./router.json:/etc/kairyu/router.json:ro
       - ./deepseek-thinking.jinja:/etc/kairyu/deepseek-thinking.jinja:ro
       - ../deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
+      - executor-socket:/run/kairyu-executor:ro
     depends_on:
       qwen-0: {condition: service_healthy}
       qwen-1: {condition: service_healthy}
       qwen-2: {condition: service_healthy}
       qwen-3: {condition: service_healthy}
       deepseek: {condition: service_healthy}
+      # Startup-strict so a broken sandbox is caught at launch; a runtime
+      # outage degrades executor stages instead of failing requests.
+      executor: {condition: service_healthy}
     ports:
       - ${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8003}:8000
     healthcheck:
@@ -304,6 +339,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  executor-socket:
   deepseek-models:
     external: true
     name: ${DEEPSEEK_MODEL_VOLUME:-kairyu-models-deepseek-v4-flash-0731-8gpu}

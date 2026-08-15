@@ -271,6 +271,21 @@ class OrchestratorSection(BaseModel):
     spec: str = Field(description="Path to an OrchestratorSpec YAML (kairyu.dsl).")
 
 
+class ExecutorSection(BaseModel):
+    """One deployment-owned sandbox execution service (ECO-D1).
+
+    Executors are internal orchestration resources, never served models; an
+    orchestration worker borrows one by ``executor_ref``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    base_url: str = Field(min_length=1)
+    uds_path: str | None = Field(default=None, min_length=1, pattern=r"^/")
+    timeout_s: float = Field(default=25.0, gt=0, le=300)
+    queue_wait_s: float = Field(default=0.0, ge=0, le=300)
+
+
 class MockEmbeddingSection(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -389,6 +404,9 @@ class DeploymentSpec(BaseModel):
     # orchestrations (e.g. kairyu-auto + kairyu-auto-max) from one YAML. The
     # legacy single `orchestrator:` key stays and is served as "kairyu-auto".
     orchestrators: dict[str, OrchestratorSection] = Field(default_factory=dict)
+    # deployment-owned sandbox execution services borrowed by orchestration
+    # executor workers via executor_ref (ECO-D1); not served models.
+    executors: dict[str, ExecutorSection] = Field(default_factory=dict)
     embeddings: dict[str, EmbeddingSection] = Field(default_factory=dict)
     # Omission preserves the generic all-model server. An explicit allowlist
     # separates public dispatch from deployment-owned internal resources.
@@ -451,6 +469,16 @@ class DeploymentSpec(BaseModel):
                 'both orchestrator: and orchestrators["kairyu-auto"] are set; '
                 "declare kairyu-auto once (the legacy orchestrator: key is "
                 'served as "kairyu-auto")'
+            )
+        if any(not name.strip() for name in self.executors):
+            raise ValueError("executors: names must be non-empty strings")
+        executor_overlap = self.executors.keys() & (
+            self.engines.keys() | self.pools.keys() | orchestration_names
+        )
+        if executor_overlap:
+            raise ValueError(
+                f"executor names {sorted(executor_overlap)} collide with "
+                "engines:/pools:/orchestrators: names"
             )
         if any(not name.strip() for name in self.embeddings):
             raise ValueError("embeddings: names must be non-empty strings")

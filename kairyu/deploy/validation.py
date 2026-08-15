@@ -25,6 +25,12 @@ from kairyu.deploy.spec import (
     _UniqueKeySafeLoader,
     load_deployment_spec,
 )
+from kairyu.dsl.loader import (
+    _role_executor as _loader_role_executor,
+)
+from kairyu.dsl.loader import (
+    _role_sampling as _loader_role_sampling,
+)
 from kairyu.dsl.loader import load_spec
 from kairyu.dsl.spec import OrchestratorSpec
 from kairyu.engine.config_validation import validate_backend_options
@@ -886,11 +892,24 @@ def _validate_orchestrator_topology(
             role_type=role.role_type,
             depends_on=role.depends_on,
             verifies=role.verifies,
+            sampling=_loader_role_sampling(role),
+            executor=_loader_role_executor(role),
+            prompt_suffix=role.prompt_suffix,
         )
         for role in spec.roles
     )
+    generation_workers = {
+        worker.name for worker in spec.workers if worker.executor_ref is None
+    }
+    execution_workers = {
+        worker.name for worker in spec.workers if worker.executor_ref is not None
+    }
     try:
-        Conductor(roles, {name: object() for name in worker_names})
+        Conductor(
+            roles,
+            {name: object() for name in generation_workers},
+            execution_workers={name: object() for name in execution_workers},
+        )
     except ValueError as error:
         message = (
             "orchestrator role graph contains a cycle"
@@ -915,6 +934,7 @@ def _validate_orchestrator(
     reference_field: str,
     checked_models: set[tuple[str, str, str, str]],
     deployment_engine_refs: frozenset[str],
+    deployment_executor_refs: frozenset[str] = frozenset(),
 ) -> list[ValidationFinding]:
     if not path.is_file():
         return [
@@ -955,6 +975,18 @@ def _validate_orchestrator(
                         check="schema",
                         code="schema.unknown_engine_ref",
                         message="engine_ref does not match an engines: or pools: name",
+                    )
+                )
+            continue
+        if worker.executor_ref is not None:
+            if worker.executor_ref not in deployment_executor_refs:
+                findings.append(
+                    _finding(
+                        artifact=path,
+                        field=f"{worker_field}.executor_ref",
+                        check="schema",
+                        code="schema.unknown_executor_ref",
+                        message="executor_ref does not match an executors: name",
                     )
                 )
             continue
@@ -1197,6 +1229,9 @@ def validate_deployment(config: str | Path) -> ValidationReport:
             *(name for name in _mapping(raw.get("pools")) if isinstance(name, str)),
         }
     )
+    deployment_executor_refs = frozenset(
+        name for name in _mapping(raw.get("executors")) if isinstance(name, str)
+    )
     for field, reference in _iter_orchestrator_references(raw):
         path = Path(reference)
         if not path.is_absolute():
@@ -1212,6 +1247,7 @@ def validate_deployment(config: str | Path) -> ValidationReport:
                 reference_field=field,
                 checked_models=checked_models,
                 deployment_engine_refs=deployment_engine_refs,
+                deployment_executor_refs=deployment_executor_refs,
             )
         )
     template_findings = _validate_chat_templates(raw, config_path=config_path)

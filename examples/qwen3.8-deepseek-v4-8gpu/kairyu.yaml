@@ -111,6 +111,16 @@ embeddings:
     threads: 2
     max_concurrency: 2
 
+# The sandbox has no network interface. Kairyu reaches its HTTP protocol over
+# this shared Unix socket only (ECO-D1); a runtime outage still degrades to an
+# `unavailable` report instead of failing requests.
+executors:
+  sandbox-python:
+    base_url: http://executor
+    uds_path: /run/kairyu-executor/executor.sock
+    timeout_s: 25
+    queue_wait_s: 8
+
 orchestrators:
   kairyu-auto-max:
     spec: /etc/kairyu/auto-max.yaml

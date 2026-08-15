@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example has one public chat model, one public pinned offline embedding model, and one unchanged orchestration YAML: Open WebUI lists only the chat model, L2 borrows four Qwen3.8 TP1 workers on official vLLM v0.23.0 plus the measured DeepSeek TP4/EP4 DSpark worker, and launcher readiness proves a two-input 384-dimensional embedding response. Both this path and the single-Qwen example accept image chat; the tiered example's composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example is a coding-first product: an unchanged L1 fleet (four Qwen3.8 TP1 vLLM workers + the measured DeepSeek TP4/EP4 DSpark worker) under a nine-role L2 DAG where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds a networkless CPU sandbox over a Unix-socket transport, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,49 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+<<<<<<< HEAD
+### 2026-08-15 — [amendment] Sandbox reaps escaped submission descendants
+- What: the coding executor now acts as a child subreaper and sweeps/reaps
+  same-UID runner descendants not owned by another live submission on every
+  completion path.
+- Why: timeout-only process-group cleanup allowed `setsid()` children to retain
+  resources and mutate later execution evidence after an accepted result.
+- Refs: ECO-D1; `examples/qwen3.8-deepseek-v4-8gpu/sandbox/runner.py`
+=======
+### 2026-08-15 — [amendment] Executor deadline includes queue admission
+- What: deployment executor config now declares queue allowance; the client
+  shares one wall-plus-queue deadline across retries and the runner rejects
+  admission when the residual budget cannot cover the declared wall limit.
+- Why: the previous 8s queue plus 10s execution exceeded the 15s client
+  deadline, discarding valid work as `unavailable` under contention.
+- Refs: ECO-D1; `kairyu/orchestration/execution.py`; PR #488 review
+>>>>>>> origin/codex/executor-deadline-budget
+
+### 2026-08-15 — [amendment] Sandbox transport removes the reverse network path
+- What: replaced the bidirectional internal Docker bridge with a shared Unix
+  domain socket and `network_mode: none` on the executor; Kairyu mounts the
+  socket volume read-only and the deployment executor client supports UDS.
+- Why: an internal bridge blocks external routing but still lets hostile
+  submitted code connect back to Kairyu, violating ECO-D1's no-egress
+  boundary.
+- Refs: PR #488 review; ECO-D1; `kairyu/orchestration/execution.py`;
+  `examples/qwen3.8-deepseek-v4-8gpu/{compose.yaml,sandbox/runner.py}`
+
+### 2026-08-15 — [design] Coding orchestration with head streaming and sandbox execution
+- What: replaced the tiered example's seven-role DAG with a nine-role coding
+  DAG on the unchanged L1 fleet; added L2 mechanisms for a t=0 public head
+  stream + verified continuation, incremental reasoning streaming, per-role
+  sampling/prompt suffixes, and deployment-owned sandbox executors run as
+  untrusted-data DAG stages; TTFT gate: public p50 ≤2× DeepSeek-direct per
+  concurrency (live c1 smoke ~0.3 s vs the 1.56 s budget).
+- Why: frontier-level coding accuracy needs ensemble + execution-grounded
+  verification, but the old collect-then-synthesize DAG left first public
+  tokens ~10× over the agreed 2×-DeepSeek TTFT budget; only E2E is
+  unconstrained, so the answer opening streams while the ensemble runs.
+- Refs: ECO-D1..D5 in `docs/design/example-coding-orchestration.md`;
+  `kairyu/orchestration/{conductor,execution}.py`;
+  `examples/qwen3.8-deepseek-v4-8gpu/`
 
 ### 2026-08-15 — [progress] Frontier examples move to Qwen3.8
 - What: replaced both Qwen3.6 example surfaces with attested Qwen3.8-27B-FP8,
@@ -128,37 +171,3 @@ in `.claude/rules/progress-log.md`).
 - Refs: PR #486; `verification/registry.toml`;
   `docs/design/verification-framework.md`
 
-### 2026-08-14 — [design] Separate evals from verification and retire Accuracy
-- What: Accuracy will be removed after its external migration; the other evals
-  remain checkout-only under `evals/`; correctness, performance, resilience,
-  and diagnostic gates move to `verification/` with neutral evidence contracts
-  and immutable legacy artifacts.
-- Why: `kairyu.bench` and `bench/` conflate model evaluation with L1/system
-  verification and allow performance evidence without an explicit correctness
-  link.
-- Refs: `docs/design/verification-framework.md`;
-  `docs/superpowers/plans/2026-08-14-verification-framework-accuracy-removal.md`
-
-### 2026-08-14 — [amendment] Exact LiteLLM assistant history is reusable
-- What: Chat Completions now drops object-valued `provider_specific_fields` and nullable legacy `function_call` metadata from assistant history while retaining typed reasoning, content, and tool calls; invalid roles, value kinds, and unrelated extras remain fail-closed.
-- Why: LiteLLM 1.96.2 emits both compatibility fields in a normal assistant `model_dump()`, so the nullable-only #480 policy still rejected an unmodified second-turn request.
-- Refs: issue #482; `kairyu/entrypoints/server/chat_service.py`; `tests/server/test_{chat_template_policy,openai_api,orchestration_usage_trace}.py`
-
-### 2026-08-14 — [amendment] Assistant reasoning history round-trips
-- What: Chat Completions now accepts its typed `reasoning_content` response field in assistant history and drops only nullable LiteLLM `provider_specific_fields` metadata before rendering; non-null and unknown extras remain fail-closed.
-- Why: The tiered product emitted visible intermediate work that normal LiteLLM serialization returned on the next agent turn, but the input schema rejected both its own field and nullable client metadata before dispatch.
-- Refs: issue #480; `kairyu/entrypoints/server/{protocol,chat_service}.py`; `tests/server/test_{chat_template_policy,openai_api,orchestration_usage_trace,prompt_offload}.py`
-
-### 2026-08-14 — [amendment] Tiered frontier API gains offline embeddings
-- What: The eight-GPU example now builds the pinned FastEmbed MiniLM bundle, publishes truthful `embed-small` beside its chat product, keeps routing and Chat UI chat-only, and fails readiness unless a two-input 384-dimensional embedding smoke returns ordered finite vectors with exact usage.
-- Why: tau2 banking requires embeddings before task 1, but the example exposed no embedding route; a truthful local ID avoids claiming that MiniLM is OpenAI's `text-embedding-3-large`.
-- Refs: issue #479; kairyu-bench issue #5; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,kairyu.yaml,control.py,example.json,README.md}`
-
-### 2026-08-13 — [amendment] Tiered L3 endpoints stay locally and externally reachable
-- What: The example now binds both its Chat UI and public L3 API to all host interfaces by default while advertising the real host address, so both endpoints remain reachable through localhost and the external address; explicit bind overrides remain available.
-- Why: Binding the API only to the external interface made its normal host-local URL unavailable, while publishing `0.0.0.0` as a client URL confused the listen address with the address clients should use.
-- Refs: PR #478; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,control.py,README.md}`
-
-### 2026-08-13 — [progress] Tiered Chat UI response repair closes GPU gates
-- What: Default Qwen L1 chat now returns non-empty public content with no hidden reasoning, L3 returns separate non-empty final and attributed reasoning output, the pinned tiered browser smoke passes, and the deterministic CharXiv rerun completes 10/10 scored requests with zero errors or unmeasured requests.
-- Refs: PR #478; commit `56c640a`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/20260813T055825Z/`

@@ -92,12 +92,36 @@
   },
   "orchestration": {
     "auto_max_model": "kairyu-auto-max",
-    "internal_max_output_tokens": 2048,
-    "product_policy": "verifier-gated-role-dag",
-    "product_normal_calls": 7,
-    "product_max_calls": 11,
+    "internal_max_output_tokens": 4096,
+    "product_policy": "head-streamed-execution-gated-coding-dag",
+    "roles": [
+      "head",
+      "testgen",
+      "proposal_impl",
+      "proposal_edge",
+      "exec_matrix",
+      "draft_synthesis",
+      "exec_draft",
+      "verifier",
+      "continuation"
+    ],
+    "stream_head": "head",
+    "executor_worker": "sandbox",
+    "max_steps": 15,
+    "product_normal_calls": 9,
+    "product_max_calls": 15,
     "product_max_refinements": 2,
     "product_exposes_intermediate_outputs": true
+  },
+  "executor": {
+    "image": "local/kairyu-executor:coding-v1",
+    "base_image": "python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65",
+    "pytest_version": "9.1.1",
+    "languages": ["python"],
+    "transport": "unix",
+    "socket_path": "/run/kairyu-executor/executor.sock",
+    "max_concurrency": 8,
+    "queue_wait_s": 8
   },
   "webui": {
     "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
@@ -112,6 +136,19 @@
       "auto_max_combined_max_tokens": 4096,
       "concurrency": [1, 8, 16, 32],
       "requests_per_concurrency": 32
+    },
+    "coding": {
+      "prompt_tokens_approx": 1536,
+      "auto_max_combined_max_tokens": 4096,
+      "concurrency": [1, 8, 16, 32],
+      "requests_per_concurrency": 32,
+      "ttft_multiplier_vs_deepseek_direct": 2.0,
+      "deepseek_direct_ttft_p50_ms_fallback": {
+        "1": 779.22,
+        "8": 833.16,
+        "16": 2710.53,
+        "32": 12399.45
+      }
     }
   }
 }
