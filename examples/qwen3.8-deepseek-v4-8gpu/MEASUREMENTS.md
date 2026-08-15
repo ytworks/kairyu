@@ -8,37 +8,53 @@
 
 ## Coding DAG serving matrix (current deployment)
 
-Run ID: `20260815T042353Z` (`./verify.sh serving-auto-max-coding`); artifacts
-under the NVMe `verification-results/20260815T042353Z/serving-auto-max-coding/`
-directory, including per-row `ttft-gate.json`. Dataset: 32 deterministic
-self-contained Python implementation tasks per row (8 templates × 4
-namespaced variants, ~1.5K prompt tokens), temperature 0, natural completion,
-`max_tokens 4096`, public tokens counted by the DeepSeek loopback tokenizer
-oracle. Semantic TTFT is the first public `content` SSE token at L3. The
-paired DeepSeek-direct rows run the same dataset at the same concurrency
-against the loopback L1 endpoint (`:8005/v1`), so the committed
-`TTFT ≤ 2.0×` gate compares like against like.
+Run ID: `20260815T121447Z` (`./verify.sh serving-auto-max-coding`); artifacts
+under the NVMe `verification-results/20260815T121447Z/serving-auto-max-coding/`
+directory, including per-row `ttft-gate.json`. This run includes the PR #488
+review amendments: the networkless UDS sandbox transport, capped subprocess
+output draining, abnormal-pytest-exit rejection, the strict
+`execution_status`-based gate, and the burst-queueing executor (8 slots).
+Dataset: 32 deterministic self-contained Python implementation tasks per row
+(8 templates × 4 namespaced variants, ~1.5K prompt tokens), temperature 0,
+natural completion, `max_tokens 4096`, public tokens counted by the DeepSeek
+loopback tokenizer oracle. Semantic TTFT is the first public `content` SSE
+token at L3. The paired DeepSeek-direct rows run the same dataset at the
+same concurrency against the loopback L1 endpoint (`:8005/v1`), so the
+committed `TTFT ≤ 2.0×` gate compares like against like. "Sandbox-executed"
+uses the strict definition: BOTH `exec_matrix` and `exec_draft` reported an
+`execution_status` containing `ok` (degraded `unavailable` stages never
+count).
 
-| Concurrency | product semantic TTFT p50/p99 (ms) | DeepSeek-direct TTFT p50/p99 (ms) | gate (≤2.0×) | E2E p50/p99 (ms) | sandbox-executed samples | refined samples | success |
-|---:|---:|---:|---|---:|---:|---:|---:|
-| 1 | 413.57 / 426.58 | 2,338.97 / 3,205.35 | **PASS** (0.18×) | 50,528 / 209,934 | 32/32 | 14/32 | 32/32 |
-| 8 | 1,085.46 / 7,240.94 | 7,298.58 / 11,351.11 | **PASS** (0.15×) | 68,809 / 183,173 | 32/32 | 11/32 | 32/32 |
-| 16 | 3,537.60 / 15,495.86 | 10,983.82 / 21,664.21 | **PASS** (0.32×) | 92,625 / 284,092 | 32/32 | 14/32 | 32/32 |
-| 32 | 28,703.11 / 29,687.63 | 17,349.13 / 21,936.82 | **PASS** (1.65×) | 152,398 / 344,686 | 32/32 | 11/32 | 32/32 |
+| Concurrency | product semantic TTFT p50/p99 (ms) | DeepSeek-direct TTFT p50/p99 (ms) | gate (≤2.0×) | E2E p50/p99 (ms) | sandbox-executed (strict) | success |
+|---:|---:|---:|---|---:|---:|---:|
+| 1 | 418.39 / 431.15 | 2,370.40 / 2,705.96 | **PASS** (0.18×) | 46,869 / 126,534 | 32/32 | 32/32 |
+| 8 | 1,065.89 / 6,964.32 | 7,225.10 / 11,288.96 | **PASS** (0.15×) | 87,892 / 319,007 | 31/32 | 32/32 |
+| 16 | 4,415.06 / 15,483.51 | 10,258.73 / 14,348.70 | **PASS** (0.43×) | 121,709 / 267,784 | 30/32 | 32/32 |
+| 32 | 28,248.55 / 29,302.08 | 16,239.32 / 21,148.78 | **PASS** (1.74×) | 162,096 / 345,174 | 31/32 | 32/32 |
 
 Every sample carried a valid trace with a successful `head` and
-`continuation` stage, and every sample ran real (non-skipped) sandbox
-execution — well above the ≥90% per-row floor. E2E is deliberately
-unconstrained: it covers the full proposal/test fan-out, sandbox runs,
-synthesis, execution-evidence verification, and bounded refinement behind
-the committed opening (the head keeps the user reading from ~0.4 s at c1).
-The c32 row passes only against its paired direct denominator (1.65×), not
-against the historical 8K-prompt pinned fallback — the paired same-dataset
-comparison is the committed gate.
+`continuation` stage; zero execution stages degraded to `unavailable` (the
+pre-amendment c32 run had measured three slot-contention degrades, fixed by
+the queueing executor). The few non-executed samples are drafts that never
+produced a runnable fenced block across their attempts — honest gaps, above
+the ≥90% floor. E2E is deliberately unconstrained: it covers the full
+proposal/test fan-out, sandbox runs, synthesis, execution-evidence
+verification, and bounded refinement behind the committed opening (the head
+keeps the user reading from ~0.4 s at c1). The c32 row passes only against
+its paired direct denominator (1.74×), not against the historical 8K-prompt
+pinned fallback — the paired same-dataset comparison is the committed gate.
+
+Superseded coding-matrix runs: `20260815T042353Z` (pre-review-amendment
+deployment, pre-strict gate) and `20260815T111017Z` (post-UDS, failed the
+strict gate at c32 with 25/32 — the measured evidence behind the gate and
+executor amendments).
 
 ## Generic serving matrix (current deployment, executor skip path)
 
-Run ID: `20260815T052328Z` (`./verify.sh serving-auto-max`); ~8K-token
+Run ID: `20260815T052328Z` (`./verify.sh serving-auto-max`); this run
+predates the PR #488 review amendments, which change only the sandbox
+transport and execution path — the skip path measured here makes no sandbox
+call, so the rows remain attributable. ~8K-token
 generic prompts, natural completion, temperature 0. Every sample skipped
 both executor stages locally (the everyday non-coding degrade path), carried
 a valid trace with successful `head` and `continuation` stages, and
