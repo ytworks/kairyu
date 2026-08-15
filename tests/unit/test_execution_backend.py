@@ -114,3 +114,21 @@ def test_extract_python_block_boundaries():
     assert extract_python_block("NOT_APPLICABLE") is None
     # Bare Python without a fence still counts iff it parses.
     assert extract_python_block("def g():\n    return 2") == "def g():\n    return 2"
+
+
+def test_extract_python_block_salvages_truncated_fence():
+    # A token-cap cutoff leaves an unclosed fence ending mid-statement; the
+    # complete leading statements are salvaged as advisory evidence.
+    truncated = (
+        "```python\n"
+        "def test_a():\n"
+        "    assert f(1) == 2\n\n"
+        "def test_b():\n"
+        "    with pytest.raises(ValueError):\n"
+    )
+    salvaged = extract_python_block(truncated)
+    assert salvaged is not None
+    assert "def test_a" in salvaged
+    assert "with pytest.raises" not in salvaged
+    # An unclosed fence with no parseable prefix stays unextractable.
+    assert extract_python_block("```python\ndef broken(:\n") is None

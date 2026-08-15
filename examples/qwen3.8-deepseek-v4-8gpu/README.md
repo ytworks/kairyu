@@ -9,7 +9,7 @@ Open WebUI
             -> head (Qwen): streams the public answer opening from t=0
             -> testgen + 2 diverse proposals (Qwen TP1 pool, parallel)
             -> sandbox executor: runs proposals against generated pytest
-            -> DeepSeek draft synthesis -> executor -> verifier (<=2 refines)
+            -> Qwen draft synthesis -> executor -> DeepSeek verifier (<=2 refines)
             -> continuation (DeepSeek): streams the verified remainder
         -> deployment-owned L1 pools: 4 x Qwen3.8-27B-FP8 TP1 (GPU 0-3),
            DeepSeek-V4-Flash-0731 TP4+EP4 (GPU 4-7), CPU sandbox executor
@@ -53,10 +53,11 @@ the deployment-owned L1 pools through `engine_ref` and the sandbox execution
 service through `executor_ref`: the Qwen head streams the committed public
 opening immediately while a Qwen test generator and two temperature/seed
 diversified Qwen proposals run in parallel; the sandbox runs each proposal
-against the generated pytest file (with a per-test consensus signal); DeepSeek
+against the generated pytest file (with a per-test consensus signal); Qwen
 synthesizes a private draft from the committed opening, both candidates, and
-the execution matrix; the draft is re-executed and verified before the
-continuation streams the remainder after the committed opening. A failed
+the execution matrix; the draft is re-executed and verified by the thinking
+DeepSeek verifier before the DeepSeek continuation streams the remainder
+after the committed opening. A failed
 verifier repeats synthesis, execution, and verification at most twice
 (`moa_samples: 0`, `max_refine_depth: 2`, `max_steps: 15`); L2 never calls the
 public L3 endpoint recursively.

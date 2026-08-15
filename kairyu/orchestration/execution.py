@@ -116,9 +116,32 @@ class ExecutorDescriptor:
         return {"backend_type": self.backend_type, "base_url": self.base_url}
 
 
+def _salvage_truncated(code: str) -> str | None:
+    """Trim trailing lines until the fragment parses (bounded).
+
+    A generation cut off at its token cap leaves an unclosed fence whose tail
+    is mid-statement; the leading complete statements are still worth
+    executing as advisory evidence.
+    """
+
+    lines = code.rstrip().splitlines()
+    for _ in range(min(len(lines), 50)):
+        candidate = "\n".join(lines).rstrip()
+        if not candidate:
+            return None
+        try:
+            ast.parse(candidate)
+        except SyntaxError:
+            lines.pop()
+            continue
+        return candidate
+    return None
+
+
 def extract_python_block(text: str) -> str | None:
-    """Return the first complete ```python fenced block, else the whole text
-    iff it parses as Python. Prose and non-Python fences return ``None``."""
+    """Return the first complete ```python fenced block; salvage an unclosed
+    trailing fence by trimming to the last parseable statement; else the whole
+    text iff it parses as Python. Prose and non-Python fences return ``None``."""
 
     if not text:
         return None
@@ -126,6 +149,10 @@ def extract_python_block(text: str) -> str | None:
     if match is not None:
         code = match.group(1).strip("\n")
         return code or None
+    marker = text.find("```python")
+    if marker != -1:
+        tail = text[marker + len("```python") :].lstrip("\n")
+        return _salvage_truncated(tail)
     stripped = text.strip()
     if not stripped or stripped == NOT_APPLICABLE_SENTINEL:
         return None

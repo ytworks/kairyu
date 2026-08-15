@@ -45,13 +45,13 @@ other languages are rejected as `unsupported` and take the LLM-only path.
 graph with:
 
 ```text
-head (Tier2, streams public opening from t=0)
+head (Tier1, streams public opening from t=0)
   ∥ testgen / proposal_impl / proposal_edge (Tier1, parallel)
   -> exec_matrix (sandbox: each proposal × generated tests + consensus)
-  -> draft_synthesis (Tier2, conditioned on committed head + candidates + matrix)
-  -> exec_draft (sandbox, inline) -> verifier (Tier2)
+  -> draft_synthesis (Tier1, conditioned on committed head + candidates + matrix)
+  -> exec_draft (sandbox, inline) -> verifier (Tier2 max-thinking)
        FAIL -> regenerate -> re-execute -> re-verify (≤2 refinements)
-  -> continuation (Tier2, streams the verified remainder after the head)
+  -> continuation (Tier2-direct, streams the verified remainder after the head)
 ```
 
 `max_steps: 15` (9 base + 2×3 refinement), `max_refine_depth: 2`,
@@ -61,17 +61,19 @@ sandbox calls), and the pipeline degrades to plan/propose/synthesize/verify.
 Worker/policy selection was driven by live measurement of the DeepSeek
 identity-template contract (see ECO-D4a below):
 
-- **head → Qwen (tier1).** The Qwen vLLM service applies a real server-side
-  chat template with thinking disabled, so the public opening starts
-  deterministically at a small-prompt Qwen TTFT (~0.3 s measured at c1).
-  Every DeepSeek policy paid a nondeterministic `<think>` tax that consumed
-  the head's entire token budget before the first visible byte — fatal for
-  the TTFT gate.
-- **continuation and synthesizer → ordinary DeepSeek (tier2-direct)** with
-  the inline `<｜Assistant｜></think>` scaffold: an occasional short think is
-  harmless mid-stream, and the max-thinking policy was measured spending its
-  full private cap (2048 and 4096 alike) inside `<think>` on the composite
-  synthesis prompt, leaving an empty public draft.
+- **head and synthesizer → Qwen (tier1).** The Qwen vLLM service applies a
+  real server-side chat template with thinking disabled, so both stages emit
+  deterministically — the head at a small-prompt Qwen TTFT (~0.3 s measured
+  at c1). Every DeepSeek policy paid a nondeterministic `<think>` tax on
+  deliberative prompts: fatal for the head's TTFT gate, and the composite
+  synthesis prompt was measured leaving an empty public draft on both the
+  max-thinking (2048 and 4096 caps alike) and the ordinary policy.
+  Synthesis quality is gated by the execution evidence and the thinking
+  verifier rather than by DeepSeek drafting.
+- **continuation → ordinary DeepSeek (tier2-direct)** with the inline
+  `<｜Assistant｜></think>` scaffold: its restating task converges after at
+  most a short think, which is harmless mid-stream (measured 32/32 non-empty
+  under the gate workload).
 - **verifier → max-thinking DeepSeek (tier2)** with an inline
   `<｜Assistant｜><think>` scaffold: deliberate-then-verdict converges
   reliably and the verdict rides the parser's content channel.
