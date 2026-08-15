@@ -38,13 +38,24 @@ tmpfs workdirs, `user 65534`, `cap_drop: ALL`, `no-new-privileges`,
 pids/memory/cpu limits, and no published ports. Inside,
 each submission runs in a fresh workdir under a dedicated process group with
 `setrlimit` (CPU/AS/NPROC/FSIZE/CORE), a cleared environment, an in-process
-wall-clock SIGKILL, and capped output pipes. Model-generated code is hostile
-input; both enforcement layers are required. v1 executes Python/pytest only;
-other languages are rejected as `unsupported` and take the LLM-only path.
+wall-clock SIGKILL, capped output pipes, and supervisor-owned descendant
+cleanup. The runner is a child subreaper and tracks every live submission root;
+as soon as a root exits, it repeatedly scans `/proc`, kills same-UID processes
+in the runner tree that do not belong to another live submission, and reaps the
+targeted PIDs. A child-created session/process group therefore cannot survive
+normal completion or keep inherited pipes open past the wall timer.
+Model-generated code is hostile input; both enforcement layers are required.
+v1 executes Python/pytest only; other languages are rejected as `unsupported`
+and take the LLM-only path.
 
 Review amendment (2026-08-15): the original internal Docker bridge was
 rejected because bridge membership is bidirectional; `internal: true`
 prevents external routing but does not prevent executor-to-Kairyu callbacks.
+
+Review amendment (2026-08-15): timeout-only process-group cleanup was rejected
+because submitted code can call `setsid()` and survive a normally completed
+shim. The subreaper plus `/proc` sweep is mandatory; active-root ancestry keeps
+concurrent submissions out of another submission's cleanup set.
 
 ### ECO-D2 — One generalized coding DAG replaces the seven-role DAG
 

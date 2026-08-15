@@ -98,6 +98,14 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-15 — [amendment] Sandbox reaps escaped submission descendants
+- What: the coding executor now acts as a child subreaper and sweeps/reaps
+  same-UID runner descendants not owned by another live submission on every
+  completion path.
+- Why: timeout-only process-group cleanup allowed `setsid()` children to retain
+  resources and mutate later execution evidence after an accepted result.
+- Refs: ECO-D1; `examples/qwen3.8-deepseek-v4-8gpu/sandbox/runner.py`
+
 ### 2026-08-15 — [amendment] Sandbox transport removes the reverse network path
 - What: replaced the bidirectional internal Docker bridge with a shared Unix
   domain socket and `network_mode: none` on the executor; Kairyu mounts the

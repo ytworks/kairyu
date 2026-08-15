@@ -5,11 +5,13 @@ to the synthesis/verifier stages, so the summarization contract is pinned.
 """
 
 import importlib.util
+import os
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -51,16 +53,12 @@ def test_parse_rejects_non_python_language_as_422():
 
 def test_parse_rejects_path_escapes_and_requires_one_test_file():
     with pytest.raises(runner.SubmissionError):
-        runner.parse_submission(
-            _submission(files={"../evil.py": "x", "test_a.py": "y"})
-        )
+        runner.parse_submission(_submission(files={"../evil.py": "x", "test_a.py": "y"}))
     with pytest.raises(runner.SubmissionError):
         runner.parse_submission(_submission(files={"solution.py": "x"}))
     with pytest.raises(runner.SubmissionError):
         runner.parse_submission(
-            _submission(
-                files={"test_a.py": "x", "test_b.py": "y", "solution.py": "z"}
-            )
+            _submission(files={"test_a.py": "x", "test_b.py": "y", "solution.py": "z"})
         )
     parsed = runner.parse_submission(_submission())
     assert parsed["test_file"] == "test_solution.py"
@@ -184,9 +182,7 @@ def test_unix_socket_server_healthcheck():
             with socket.socket(socket.AF_UNIX) as client:
                 client.settimeout(2)
                 client.connect(str(socket_path))
-                client.sendall(
-                    b"GET /healthz HTTP/1.0\r\nHost: executor\r\n\r\n"
-                )
+                client.sendall(b"GET /healthz HTTP/1.0\r\nHost: executor\r\n\r\n")
                 chunks = []
                 while True:
                     chunk = client.recv(4096)
@@ -235,3 +231,116 @@ def test_communicate_capped_drains_both_pipes_without_retaining_full_output():
         duration_ms=1,
     )
     assert report["resource"]["output_truncated"] is True
+
+
+def test_sweep_kills_and_reaps_setsid_descendant_after_submission_exit():
+    was_subreaper = runner._child_subreaper_enabled()
+    child_pid = None
+    runner._set_child_subreaper(True)
+    try:
+        parent = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import subprocess, sys; "
+                    "child = subprocess.Popen("
+                    "[sys.executable, '-c', 'import time; time.sleep(30)'], "
+                    "start_new_session=True, stdout=subprocess.DEVNULL, "
+                    "stderr=subprocess.DEVNULL); "
+                    "print(child.pid, flush=True)"
+                ),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = parent.communicate(timeout=5)
+        assert parent.returncode == 0, stderr
+        child_pid = int(stdout.strip())
+
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            parents = runner._same_uid_process_parents(os.getuid())
+            if parents.get(child_pid) == os.getpid():
+                break
+            time.sleep(0.01)
+        assert parents.get(child_pid) == os.getpid()
+
+        killed = runner._sweep_unowned_submission_processes(
+            supervisor_pid=os.getpid(),
+            target_uid=os.getuid(),
+            active_roots=set(),
+        )
+
+        assert child_pid in killed
+        assert not os.path.exists(f"/proc/{child_pid}")
+        with pytest.raises(ChildProcessError):
+            os.waitpid(child_pid, os.WNOHANG)
+        child_pid = None
+    finally:
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, 9)
+                os.waitpid(child_pid, 0)
+            except (ChildProcessError, ProcessLookupError):
+                pass
+        runner._set_child_subreaper(was_subreaper)
+
+
+def test_run_submission_removes_setsid_child_before_return(monkeypatch):
+    was_subreaper = runner._child_subreaper_enabled()
+    child_pid = None
+    runner._set_child_subreaper(True)
+    try:
+        with tempfile.TemporaryDirectory(dir="/dev/shm") as temp_dir:
+            root = Path(temp_dir)
+            work_root = root / "work"
+            work_root.mkdir()
+            pid_path = root / "child.pid"
+            marker_path = root / "escaped"
+            child_code = (
+                "import os, pathlib, time; "
+                f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
+                "time.sleep(0.5); "
+                f"pathlib.Path({str(marker_path)!r}).write_text('escaped')"
+            )
+            test_code = (
+                "import pathlib, subprocess, sys, time\n"
+                "def test_spawn():\n"
+                "    subprocess.Popen(\n"
+                f"        [sys.executable, '-c', {child_code!r}],\n"
+                "        start_new_session=True,\n"
+                "        stdout=subprocess.DEVNULL,\n"
+                "        stderr=subprocess.DEVNULL,\n"
+                "    )\n"
+                f"    path = pathlib.Path({str(pid_path)!r})\n"
+                "    deadline = time.monotonic() + 2\n"
+                "    while not path.exists() and time.monotonic() < deadline:\n"
+                "        time.sleep(0.01)\n"
+                "    assert path.exists()\n"
+            )
+            monkeypatch.setattr(runner, "WORK_ROOT", str(work_root))
+            submission = runner.parse_submission(
+                _submission(
+                    files={"solution.py": "", "test_solution.py": test_code},
+                    limits={"wall_time_s": 5, "processes": 1024},
+                )
+            )
+
+            report = runner.run_submission(submission)
+            child_pid = int(pid_path.read_text())
+
+            assert report["status"] == "ok"
+            assert not os.path.exists(f"/proc/{child_pid}")
+            time.sleep(0.6)
+            assert not marker_path.exists()
+            child_pid = None
+    finally:
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, 9)
+                os.waitpid(child_pid, 0)
+            except (ChildProcessError, ProcessLookupError):
+                pass
+        runner._set_child_subreaper(was_subreaper)

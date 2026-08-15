@@ -15,6 +15,7 @@ pytest plugin shim, never parsed from free text.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
@@ -27,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_CONCURRENCY = int(os.environ.get("RUNNER_MAX_CONCURRENCY", "4"))
@@ -39,10 +41,13 @@ QUEUE_WAIT_S = float(os.environ.get("RUNNER_QUEUE_WAIT_S", "8"))
 WORK_ROOT = os.environ.get("RUNNER_WORK_ROOT", "/run/exec")
 PORT = int(os.environ.get("RUNNER_PORT", "8080"))
 SOCKET_PATH = os.environ.get("RUNNER_SOCKET_PATH")
+PROCESS_SWEEP_GRACE_S = float(os.environ.get("RUNNER_PROCESS_SWEEP_GRACE_S", "1"))
 
 _FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _REPORT_NAME = "__kairyu_report__.json"
 _SHIM_NAME = "__kairyu_shim__.py"
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
 
 # Runs inside the sandboxed interpreter; per-test outcomes come from pytest's
 # structured hook reports, written as JSON for the supervisor to read back.
@@ -222,7 +227,109 @@ def _preexec(limits: dict):
     return apply
 
 
-def _communicate_capped(process: subprocess.Popen[bytes], output_bytes: int) -> tuple[bytes, bytes]:
+def _child_subreaper_enabled() -> bool:
+    value = ctypes.c_int()
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(value), 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return bool(value.value)
+
+
+def _set_child_subreaper(enabled: bool) -> None:
+    """Adopt orphaned submission descendants so the supervisor can reap them."""
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def _same_uid_process_parents(uid: int) -> dict[int, int]:
+    """Return pid -> ppid for visible processes owned by ``uid``."""
+
+    parents = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return parents
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            with open(f"/proc/{pid}/status", encoding="utf-8") as handle:
+                status = handle.read().splitlines()
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+        real_uid = None
+        parent_pid = None
+        for line in status:
+            if line.startswith("Uid:"):
+                real_uid = int(line.split()[1])
+            elif line.startswith("PPid:"):
+                parent_pid = int(line.split()[1])
+        if real_uid == uid and parent_pid is not None:
+            parents[pid] = parent_pid
+    return parents
+
+
+def _descends_from(pid: int, roots: set[int], parents: dict[int, int]) -> bool:
+    seen = set()
+    while pid > 0 and pid not in seen:
+        if pid in roots:
+            return True
+        seen.add(pid)
+        pid = parents.get(pid, 0)
+    return False
+
+
+def _sweep_unowned_submission_processes(
+    *,
+    supervisor_pid: int,
+    target_uid: int,
+    active_roots: set[int],
+) -> set[int]:
+    """Kill/reap escaped descendants without touching other active submissions."""
+
+    killed = set()
+    deadline = time.monotonic() + PROCESS_SWEEP_GRACE_S
+    while True:
+        parents = _same_uid_process_parents(target_uid)
+        candidates = {
+            pid
+            for pid in parents
+            if pid != supervisor_pid
+            and _descends_from(pid, {supervisor_pid}, parents)
+            and not _descends_from(pid, active_roots, parents)
+        }
+        if not candidates:
+            return killed
+        for pid in candidates:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                continue
+            killed.add(pid)
+        for pid in candidates:
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except (ChildProcessError, ProcessLookupError):
+                pass
+        if time.monotonic() >= deadline:
+            remaining = _same_uid_process_parents(target_uid)
+            survivors = candidates.intersection(remaining)
+            if survivors:
+                raise RuntimeError(f"submission processes survived SIGKILL: {sorted(survivors)}")
+            return killed
+        time.sleep(0.01)
+
+
+def _communicate_capped(
+    process: subprocess.Popen[bytes],
+    output_bytes: int,
+    after_process_exit: Callable[[], None] | None = None,
+) -> tuple[bytes, bytes]:
     """Drain both pipes concurrently while retaining only cap + 1 bytes."""
 
     assert process.stdout is not None
@@ -243,9 +350,29 @@ def _communicate_capped(process: subprocess.Popen[bytes], output_bytes: int) -> 
     for reader in readers:
         reader.start()
     process.wait()
-    for reader in readers:
-        reader.join()
+    try:
+        if after_process_exit is not None:
+            after_process_exit()
+    finally:
+        for reader in readers:
+            reader.join()
     return bytes(retained[0]), bytes(retained[1])
+
+
+_process_registry_lock = threading.Lock()
+_active_submission_roots: set[int] = set()
+
+
+def _finish_submission_processes(root_pid: int) -> set[int]:
+    """Remove one active root, then clean every now-unowned descendant."""
+
+    with _process_registry_lock:
+        _active_submission_roots.discard(root_pid)
+        return _sweep_unowned_submission_processes(
+            supervisor_pid=os.getpid(),
+            target_uid=os.getuid(),
+            active_roots=set(_active_submission_roots),
+        )
 
 
 def run_submission(submission: dict) -> dict:
@@ -254,6 +381,7 @@ def run_submission(submission: dict) -> dict:
     limits = submission["limits"]
     started = time.monotonic()
     workdir = tempfile.mkdtemp(prefix="exec-", dir=WORK_ROOT)
+    registered_process_pid = None
     try:
         for name, content in submission["files"].items():
             with open(os.path.join(workdir, name), "w", encoding="utf-8") as handle:
@@ -269,16 +397,27 @@ def run_submission(submission: dict) -> dict:
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONHASHSEED": "0",
         }
-        process = subprocess.Popen(
-            [sys.executable, shim_path],
-            cwd=workdir,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            preexec_fn=_preexec(limits),
-            start_new_session=False,  # _preexec owns setsid
-        )
+        with _process_registry_lock:
+            process = subprocess.Popen(
+                [sys.executable, shim_path],
+                cwd=workdir,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=_preexec(limits),
+                start_new_session=False,  # _preexec owns setsid
+            )
+            _active_submission_roots.add(process.pid)
+            registered_process_pid = process.pid
         timed_out = False
+
+        def finish_processes() -> None:
+            nonlocal registered_process_pid
+            timer.cancel()
+            timer.join()
+            if registered_process_pid is not None:
+                root_pid, registered_process_pid = registered_process_pid, None
+                _finish_submission_processes(root_pid)
 
         def kill_group() -> None:
             nonlocal timed_out
@@ -291,9 +430,14 @@ def run_submission(submission: dict) -> dict:
         timer = threading.Timer(limits["wall_time_s"], kill_group)
         timer.start()
         try:
-            stdout, stderr = _communicate_capped(process, limits["output_bytes"])
+            stdout, stderr = _communicate_capped(
+                process,
+                limits["output_bytes"],
+                after_process_exit=finish_processes,
+            )
         finally:
             timer.cancel()
+            timer.join()
         report_payload = None
         if not timed_out and os.path.exists(report_path):
             try:
@@ -311,7 +455,11 @@ def run_submission(submission: dict) -> dict:
             duration_ms=int((time.monotonic() - started) * 1000),
         )
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        try:
+            if registered_process_pid is not None:
+                _finish_submission_processes(registered_process_pid)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 _slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
@@ -371,6 +519,7 @@ class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStre
 
 
 def main() -> None:
+    _set_child_subreaper(True)
     os.makedirs(WORK_ROOT, exist_ok=True)
     socket_path = SOCKET_PATH
     if socket_path:
