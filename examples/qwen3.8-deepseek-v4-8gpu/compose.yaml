@@ -1,7 +1,7 @@
-name: kairyu-qwen36-deepseekv4-8gpu
+name: kairyu-qwen38-deepseekv4-8gpu
 
 x-qwen: &qwen
-  image: ${VLLM_IMAGE:-local/vllm-openai:sm120-aa0d513027}
+  image: ${QWEN_VLLM_IMAGE:-vllm/vllm-openai:v0.23.0@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f}
   ipc: host
   environment:
     HF_HOME: /models/.cache
@@ -22,9 +22,9 @@ x-qwen: &qwen
       target: /models
       read_only: true
   command: &qwen-command
-    - /models/qwen3.6-27b-fp8
+    - /models/qwen3.8-27b-fp8
     - --served-model-name
-    - qwen3.6-27b
+    - qwen3.8-27b
     - --max-model-len
     - "262144"
     - --mm-processor-kwargs
@@ -46,7 +46,7 @@ x-qwen: &qwen
     - --enable-prefix-caching
     - --enable-chunked-prefill
     - --max-num-batched-tokens
-    - "16384"
+    - "32768"
     - --max-num-seqs
     - "32"
     - --gpu-memory-utilization
@@ -55,9 +55,11 @@ x-qwen: &qwen
     - FLASHINFER
     - --enable-flashinfer-autotune
     - --compilation-config
-    - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+    - '{"cudagraph_mode":"PIECEWISE"}'
     - --generation-config
     - vllm
+    - --chat-template
+    - /etc/kairyu/qwen3.8-chat.jinja
     - --default-chat-template-kwargs
     - '{"enable_thinking":false}'
     - --reasoning-parser
@@ -86,6 +88,7 @@ services:
       - type: bind
         source: ${QWEN_CACHE_0_PATH}
         target: /root/.cache
+      - ../qwen3.8-27b-1gpu/chat_template.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
     deploy:
       resources:
         reservations:
@@ -105,6 +108,7 @@ services:
       - type: bind
         source: ${QWEN_CACHE_1_PATH}
         target: /root/.cache
+      - ../qwen3.8-27b-1gpu/chat_template.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
     deploy:
       resources:
         reservations:
@@ -124,6 +128,7 @@ services:
       - type: bind
         source: ${QWEN_CACHE_2_PATH}
         target: /root/.cache
+      - ../qwen3.8-27b-1gpu/chat_template.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
     deploy:
       resources:
         reservations:
@@ -143,6 +148,7 @@ services:
       - type: bind
         source: ${QWEN_CACHE_3_PATH}
         target: /root/.cache
+      - ../qwen3.8-27b-1gpu/chat_template.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
     deploy:
       resources:
         reservations:
@@ -152,7 +158,7 @@ services:
               capabilities: [gpu]
 
   deepseek:
-    image: ${VLLM_IMAGE:-local/vllm-openai:sm120-aa0d513027}
+    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:sm120-aa0d513027}
     ipc: host
     cpuset: ${DEEPSEEK_CPUSET}
     environment:

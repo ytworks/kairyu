@@ -221,6 +221,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Verification runtime artifacts are local-only evidence scratch space.
+verification/results/
+
 # Benchmark artifacts (kairyu bench): routine per-run results are noise and data
 # is downloaded to the cache dir — neither belongs in the repo.
 #

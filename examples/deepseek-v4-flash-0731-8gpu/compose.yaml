@@ -2,7 +2,7 @@ name: kairyu-deepseek-v4-flash-0731-8gpu
 
 services:
   vllm:
-    image: ${VLLM_IMAGE:-local/vllm-openai:ds4-sm120-aa0d513027}
+    image: ${VLLM_IMAGE:-local/vllm-openai:sm120-aa0d513027}
     ipc: host
     environment:
       HF_HOME: /models/.cache

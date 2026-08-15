@@ -1,8 +1,8 @@
-name: kairyu-qwen36-27b-1gpu
+name: kairyu-qwen38-27b-1gpu
 
 services:
   vllm:
-    image: ${VLLM_IMAGE:-local/vllm-openai:sm120-aa0d513027}
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.23.0@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f}
     ipc: host
     cpuset: ${GPU_CPUSET}
     environment:
@@ -21,10 +21,11 @@ services:
       - type: bind
         source: ${VLLM_CACHE_PATH}
         target: /root/.cache/vllm
+      - ./chat_template.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
     command:
-      - /models/qwen3.6-27b-fp8
+      - /models/qwen3.8-27b-fp8
       - --served-model-name
-      - qwen3.6-27b
+      - qwen3.8-27b
       - --max-model-len
       - "262144"
       - --mm-processor-kwargs
@@ -46,7 +47,7 @@ services:
       - --enable-prefix-caching
       - --enable-chunked-prefill
       - --max-num-batched-tokens
-      - "16384"
+      - "32768"
       - --max-num-seqs
       - "32"
       - --gpu-memory-utilization
@@ -55,9 +56,11 @@ services:
       - FLASHINFER
       - --enable-flashinfer-autotune
       - --compilation-config
-      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+      - '{"cudagraph_mode":"PIECEWISE"}'
       - --generation-config
       - vllm
+      - --chat-template
+      - /etc/kairyu/qwen3.8-chat.jinja
       - --reasoning-parser
       - qwen3
       - --enable-auto-tool-choice
@@ -85,7 +88,7 @@ services:
       dockerfile: Dockerfile
       args:
         KAIRYU_VISION: "1"
-    image: ${KAIRYU_IMAGE:-local/kairyu:qwen36-vllm-example}
+    image: ${KAIRYU_IMAGE:-local/kairyu:qwen38-vllm-example}
     command: [/etc/kairyu/kairyu.yaml]
     environment:
       KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
@@ -111,7 +114,7 @@ services:
     environment:
       OPENAI_API_BASE_URL: http://kairyu:8000/v1
       OPENAI_API_KEY: sk-local-kairyu
-      DEFAULT_MODELS: qwen3.6-27b
+      DEFAULT_MODELS: qwen3.8-27b
       DEFAULT_MODEL_PARAMS: '{"max_tokens":32768,"temperature":1.0,"top_p":0.95}'
       ENABLE_SIGNUP: ${ENABLE_SIGNUP:-true}
       WEBUI_AUTH: "true"

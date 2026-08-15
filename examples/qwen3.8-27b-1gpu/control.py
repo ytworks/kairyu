@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command lifecycle for Qwen3.6-27B on one RTX PRO 6000."""
+"""One-command lifecycle for Qwen3.8-27B on one RTX PRO 6000."""
 
 from __future__ import annotations
 
@@ -188,6 +188,10 @@ def _ensure_vllm_image(env: dict[str, str]) -> None:
     source = SPEC["vllm"]
     if image != source["image"]:
         raise SystemExit(f"VLLM_IMAGE does not exist locally: {image}")
+    if source.get("distribution") == "upstream":
+        print("vLLM image is absent; pulling the pinned upstream release", flush=True)
+        _run(["docker", "pull", image])
+        return
     print("vLLM image is absent; building the pinned SM120 source revision", flush=True)
     _run(
         [
@@ -200,7 +204,7 @@ def _ensure_vllm_image(env: dict[str, str]) -> None:
             image,
             "--label",
             f"org.opencontainers.image.revision={source['source_revision']}",
-            f"{source['source_repository']}#{source['source_revision']}",
+            f"{source['source_repository']}#{source.get('source_ref', source['source_revision'])}",
         ]
     )
 

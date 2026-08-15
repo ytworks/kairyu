@@ -3,11 +3,11 @@
 # work is carried separately as model-attributed reasoning_content.
 workers:
   - name: tier1
-    engine_ref: qwen3.6-27b
+    engine_ref: qwen3.8-27b
   - name: tier2
     engine_ref: deepseek-v4-flash-0731-thinking
   - name: publisher
-    engine_ref: qwen3.6-27b
+    engine_ref: qwen3.8-27b
 
 router:
   kind: calibrated

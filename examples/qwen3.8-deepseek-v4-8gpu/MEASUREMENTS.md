@@ -1,8 +1,25 @@
 # Measurements
 
-> **Historical evidence:** these measurements predate the current verifier-gated
-> `kairyu-auto-max` role DAG. They must not be attributed to the current policy;
-> a fresh layered-path run is required.
+## Current deployment validation
+
+On 2026-08-14 UTC (2026-08-15 JST), the complete eight-GPU deployment reached
+healthy status with four Qwen3.8 TP1 replicas on official vLLM v0.23.0 and one
+DeepSeek TP4+EP4 replica on the measured `aa0d513027` DSpark build. The Qwen
+replicas all reported the ported 32K/32-sequence/FP8-KV/piecewise-graph/no-MTP
+configuration.
+
+The launcher validated the unchanged seven-role verifier-gated DAG and exposed
+exactly `kairyu-auto-max` plus `embed-small`. A 384-dimensional embedding
+request completed, followed by an end-to-end product chat that returned a
+non-empty final answer and 3,750 characters of model-attributed
+`reasoning_content`. The stack was stopped after validation to release all
+eight GPUs. This is a deployment/correctness smoke, not a new layered-path
+performance matrix.
+
+> **Historical evidence:** these measurements predate both the current
+> verifier-gated `kairyu-auto-max` role DAG and the Qwen3.8 replacement. They
+> must not be attributed to the current deployment; a fresh layered-path run
+> is required.
 
 Runtime validation was complete for the measured policy. All performance values
 in this document were measured at the Kairyu L3 OpenAI-compatible endpoint used

@@ -1,4 +1,4 @@
-# Qwen3.6 + DeepSeek V4 tiered orchestration on 8 x RTX PRO 6000
+# Qwen3.8 + DeepSeek V4 tiered orchestration on 8 x RTX PRO 6000
 
 This example starts one layered product path with one command:
 
@@ -6,7 +6,7 @@ This example starts one layered product path with one command:
 Open WebUI
     -> Kairyu L3 product API (:8003; model kairyu-auto-max)
         -> Kairyu L2 role DAG
-            -> deployment-owned L1 pool: 4 x Qwen3.6-27B-FP8 TP1 (GPU 0-3)
+            -> deployment-owned L1 pool: 4 x Qwen3.8-27B-FP8 TP1 (GPU 0-3)
             -> deployment-owned L1 pool: DeepSeek-V4-Flash-0731 TP4+EP4 (GPU 4-7)
         -> Kairyu L2 verified synthesis and bounded refinement
     -> Kairyu L3 final answer
@@ -25,6 +25,13 @@ the text-only DeepSeek roles the same role-tagged conversation with explicit
 image placeholders. DeepSeek is sharded TP4+EP4 for capacity and retains the
 measured eight-GPU example's FP8 KV, DSpark-5, SM120 fallbacks, prefix caching,
 chunked batching, and full/piecewise CUDA Graphs.
+
+The Qwen replicas carry the single-GPU winner unchanged:
+`max_num_batched_tokens=32768`, `max_num_seqs=32`, FP8 KV, FP16
+Gated-DeltaNet state, piecewise CUDA Graphs, and no MTP. Qwen runs on official
+vLLM v0.23.0. DeepSeek intentionally stays on the measured
+`aa0d513027` SM120 build because v0.23.0 does not support this checkpoint's
+DSpark path and its generic MTP loader cannot load the 0731 MTP weights.
 
 Kairyu exposes one public chat model, `kairyu-auto-max`, and one public
 embedding model, `embed-small`. A chat request enters L3 once, then L2 borrows
@@ -53,11 +60,11 @@ remain open. See
 ./run.sh
 ```
 
-The command validates the exact eight-card inventory and NUMA affinity, builds
-the pinned vLLM source image if absent, verifies or downloads both exact model
-revisions, builds Kairyu with the pinned offline MiniLM bundle, waits for all
-seven services, verifies `/routing`, sends a two-input embedding smoke, and
-prints:
+The command validates the exact eight-card inventory and NUMA affinity, pulls
+the pinned Qwen vLLM release, reuses or builds the pinned DeepSeek SM120 image,
+verifies or downloads both exact model revisions, builds Kairyu with the
+pinned offline MiniLM bundle, waits for all seven services, verifies
+`/routing`, sends a two-input embedding smoke, and prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8003/v1
@@ -89,12 +96,12 @@ mislabel MiniLM to satisfy tau2's historical OpenAI model default.
 
 All persistent state is bind-backed below `/mnt/nvme`:
 
-- Qwen weights reuse `/mnt/nvme/kairyu/model-volumes/qwen3.6-27b-1gpu/models`.
+- Qwen weights reuse `/mnt/nvme/kairyu/model-volumes/qwen3.8-27b-1gpu/models`.
 - DeepSeek's external Docker volume is verified to bind
   `/mnt/nvme/kairyu/model-volumes/deepseek-v4-flash-0731-8gpu`.
 - Four independent Qwen compilation caches, the DeepSeek compilation cache,
   and Open WebUI data live below
-  `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/`.
+  `/mnt/nvme/kairyu/model-volumes/qwen3.8-deepseek-v4-8gpu/`.
 
 `NVME_STORAGE_ROOT` may select a different root only when it is still under
 `/mnt/nvme`; non-NVMe roots fail closed. `VERIFY_MODEL=1 ./run.sh` rehashes both
@@ -117,11 +124,17 @@ directory. Model and product evaluations are invoked explicitly through
 
 ## Reproducibility pins
 
-- Qwen revision: `e89b16ebf1988b3d6befa7de50abc2d76f26eb09`
-- Qwen tree SHA-256: `f108556571d80514a792b458de366221c9b910fe69cbd5d2525c207580cd51aa`
+- Qwen revision: `017b9c7af6b5689d5dd426a76e0bc077eb5ca20a`
+- Qwen tree SHA-256: `9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e`
 - DeepSeek revision: `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`
 - DeepSeek tree SHA-256: `90bd164d6f778d798eeaecd3517d83b87d49d300756a9217ada14a2b15203754`
-- vLLM SM120 source: `aa0d51302747ea80f282e26949708b3253409fe2`
+- Qwen vLLM release/source: `v0.23.0` /
+  `0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665`
+- Qwen vLLM image digest:
+  `sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`
+- DeepSeek vLLM source: `jasl/vllm@aa0d51302747ea80f282e26949708b3253409fe2`
+- DeepSeek vLLM image digest:
+  `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 
 Override API/UI/tokenizer-oracle ports with `API_PORT`, `CHAT_UI_PORT`, and
@@ -132,7 +145,9 @@ host address. The launcher discovers that address for its printed URLs; set
 proxy. Kairyu's L3 API and the UI are intentionally unauthenticated, so restrict
 ports 8003 and 3000 at the firewall or place appropriate TLS/access controls in
 front of them when exposure beyond a trusted network is not intended. Set an
-explicit bind address when either endpoint must be restricted.
+explicit bind address when either endpoint must be restricted. Override the
+two L1 images independently with `QWEN_VLLM_IMAGE` and
+`DEEPSEEK_VLLM_IMAGE`; non-default overrides must already exist locally.
 
 See [MEASUREMENTS.md](MEASUREMENTS.md) for the historical runtime-selection
 and serving-performance analysis.

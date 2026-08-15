@@ -7,13 +7,13 @@ server:
   max_chat_body_bytes: 16777216
 
 pools:
-  qwen3.6-27b:
+  qwen3.8-27b:
     replicas:
       - backend: openai
         health_url: http://qwen-0:8000/health
         options: &qwen
           base_url: http://qwen-0:8000/v1
-          model: qwen3.6-27b
+          model: qwen3.8-27b
           api_key_env: null
           timeout_s: 86400
           upstream: vllm
@@ -29,14 +29,14 @@ pools:
             max_image_dimension: 4096
             max_image_aspect_ratio: 200
             max_processed_prompt_tokens: 262144
-          model_revision: e89b16ebf1988b3d6befa7de50abc2d76f26eb09
+          model_revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
           max_model_len: 262144
           quantization_format: fp8
           cache_descriptor:
-            family: qwen3.6-hybrid-deltanet-paged-kv
+            family: qwen3.8-hybrid-mamba-paged-kv
           tensor_parallel_size: 1
           mtp_enabled: false
-          container_image_digest: sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1
+          container_image_digest: sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f
       - backend: openai
         health_url: http://qwen-1:8000/health
         options: {<<: *qwen, base_url: http://qwen-1:8000/v1}
@@ -123,4 +123,4 @@ chat_templates:
   deepseek-v4-flash-0731: /etc/kairyu/deepseek-v4-0731.jinja
   deepseek-v4-flash-0731-thinking: /etc/kairyu/deepseek-thinking.jinja
 
-legacy_chat_models: [qwen3.6-27b]
+legacy_chat_models: [qwen3.8-27b]
