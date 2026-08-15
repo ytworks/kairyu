@@ -169,8 +169,9 @@ execution harness (never the product sandbox, so the serving path cannot game
 the benchmark) against the L3 endpoint and the frontier APIs. The declared
 acceptance target is pass@1 ≥ 0.95× the best frontier baseline per suite;
 results are recorded with run IDs in the example's `MEASUREMENTS.md`. The
-removed Accuracy suite is not resurrected; `verification/` continues to gate
-serving behavior only.
+benchmark is requested as `ytworks/kairyu-bench#10`; no kairyu-bench
+implementation work is part of this change. The removed Accuracy suite is
+not resurrected; `verification/` continues to gate serving behavior only.
 
 ## Acceptance
 
