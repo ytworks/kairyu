@@ -1181,7 +1181,13 @@ class Conductor:
                 render_single_report(skipped_report("no_runnable_code")),
                 status="skipped",
                 attempt=depth,
-                timing=TraceTiming(queued_at=queued_at, completed_at=utc_now_iso()),
+                # started_at mirrors queued_at: trace consumers require a
+                # complete timing envelope on retained execution events.
+                timing=TraceTiming(
+                    queued_at=queued_at,
+                    started_at=queued_at,
+                    completed_at=utc_now_iso(),
+                ),
                 budget=TraceBudget.between(run.budget, run.budget),
                 metadata={"execution_status": "skipped", "mode": config.mode},
                 record=False,
@@ -1195,7 +1201,11 @@ class Conductor:
                 render_single_report(skipped_report("budget")),
                 status="skipped",
                 attempt=depth,
-                timing=TraceTiming(queued_at=queued_at, completed_at=utc_now_iso()),
+                timing=TraceTiming(
+                    queued_at=queued_at,
+                    started_at=queued_at,
+                    completed_at=utc_now_iso(),
+                ),
                 budget=TraceBudget.between(run.budget, run.budget),
                 metadata={"execution_status": "skipped", "reason": "budget"},
                 record=False,

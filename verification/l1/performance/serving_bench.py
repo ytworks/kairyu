@@ -63,7 +63,7 @@ _RFC3339_MILLISECONDS_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z"
 )
 _ORCHESTRATION_KINDS = frozenset(
-    {"routing", "generation", "verification", "synthesis"}
+    {"routing", "generation", "verification", "synthesis", "execution"}
 )
 _TRACE_STATUSES = frozenset({"success", "skipped", "failed"})
 _NATIVE_STAGE_NAMES = (
