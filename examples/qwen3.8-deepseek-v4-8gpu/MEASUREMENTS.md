@@ -1,16 +1,43 @@
 # Measurements
 
-> **Historical evidence for the whole document:** every measurement below
-> predates the head-streamed, execution-gated nine-role coding DAG that now
-> defines `kairyu-auto-max` (head → testgen/proposals → sandbox execution →
-> synthesis → execution → verifier → continuation). None of these rows may be
-> attributed to the current deployment. The current path's serving evidence is
-> owned by `./verify.sh serving-auto-max` (generic/skip path) and
-> `./verify.sh serving-auto-max-coding` (coding path with the semantic-TTFT
-> ≤ 2× DeepSeek-direct gate); fresh runs land under the NVMe
-> `verification-results/` directory. The Tier1/Tier2 L1 selection evidence
-> below (TP1×4 Qwen, DSpark-5/16K DeepSeek) remains the basis of the
-> unchanged L1 topology.
+> **Scope note:** the "Coding DAG serving matrix" section below is the only
+> section measured on the current head-streamed, execution-gated nine-role
+> coding DAG. Every other section predates that DAG (they informed the
+> unchanged L1 topology selection: TP1×4 Qwen, DSpark-5/16K DeepSeek) and
+> must not be attributed to the current deployment.
+
+## Coding DAG serving matrix (current deployment)
+
+Run ID: `20260815T042353Z` (`./verify.sh serving-auto-max-coding`); artifacts
+under the NVMe `verification-results/20260815T042353Z/serving-auto-max-coding/`
+directory, including per-row `ttft-gate.json`. Dataset: 32 deterministic
+self-contained Python implementation tasks per row (8 templates × 4
+namespaced variants, ~1.5K prompt tokens), temperature 0, natural completion,
+`max_tokens 4096`, public tokens counted by the DeepSeek loopback tokenizer
+oracle. Semantic TTFT is the first public `content` SSE token at L3. The
+paired DeepSeek-direct rows run the same dataset at the same concurrency
+against the loopback L1 endpoint (`:8005/v1`), so the committed
+`TTFT ≤ 2.0×` gate compares like against like.
+
+| Concurrency | product semantic TTFT p50/p99 (ms) | DeepSeek-direct TTFT p50/p99 (ms) | gate (≤2.0×) | E2E p50/p99 (ms) | sandbox-executed samples | refined samples | success |
+|---:|---:|---:|---|---:|---:|---:|---:|
+| 1 | 413.57 / 426.58 | 2,338.97 / 3,205.35 | **PASS** (0.18×) | 50,528 / 209,934 | 32/32 | 14/32 | 32/32 |
+| 8 | 1,085.46 / 7,240.94 | 7,298.58 / 11,351.11 | **PASS** (0.15×) | 68,809 / 183,173 | 32/32 | 11/32 | 32/32 |
+| 16 | 3,537.60 / 15,495.86 | 10,983.82 / 21,664.21 | **PASS** (0.32×) | 92,625 / 284,092 | 32/32 | 14/32 | 32/32 |
+| 32 | 28,703.11 / 29,687.63 | 17,349.13 / 21,936.82 | **PASS** (1.65×) | 152,398 / 344,686 | 32/32 | 11/32 | 32/32 |
+
+Every sample carried a valid trace with a successful `head` and
+`continuation` stage, and every sample ran real (non-skipped) sandbox
+execution — well above the ≥90% per-row floor. E2E is deliberately
+unconstrained: it covers the full proposal/test fan-out, sandbox runs,
+synthesis, execution-evidence verification, and bounded refinement behind
+the committed opening (the head keeps the user reading from ~0.4 s at c1).
+The c32 row passes only against its paired direct denominator (1.65×), not
+against the historical 8K-prompt pinned fallback — the paired same-dataset
+comparison is the committed gate.
+
+> **Historical evidence for all sections below:** these rows predate the
+> current coding DAG.
 
 ## Current deployment validation
 
