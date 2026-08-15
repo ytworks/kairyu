@@ -600,9 +600,108 @@ def test_tiered_product_serving_requires_head_and_continuation_trace(
                 "warmup_requests": 4,
                 "natural_completion": True,
                 "require_head": True,
+                "expected_execution_nodes": ("exec_matrix", "exec_draft"),
+                "expected_execution_status": "skipped",
             },
         )
     ]
+
+
+def _write_execution_serving_result(
+    row_dir: Path,
+    statuses: dict[str, str],
+) -> None:
+    stages = [
+        {
+            "node": "continuation",
+            "role": "publisher",
+            "kind": "generation",
+            "status": "success",
+        },
+        {
+            "node": "head",
+            "role": "publisher",
+            "kind": "generation",
+            "status": "success",
+        },
+    ]
+    stages.extend(
+        {
+            "node": node,
+            "role": "executor",
+            "kind": "execution",
+            "status": "skipped" if status == "skipped" else "success",
+            "execution_status": status,
+        }
+        for node, status in statuses.items()
+    )
+    row_dir.mkdir(parents=True, exist_ok=True)
+    (row_dir / "result-serving.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "requests": 1,
+                    "completion_tokens_total": 8,
+                    "output_tokens_per_s": 1.0,
+                },
+                "samples": [
+                    {
+                        "completion_tokens": 8,
+                        "trace": {"status": "valid", "stages": stages},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("failure_status", ["unavailable", "timeout", "setup_error"])
+def test_tiered_coding_gate_counts_only_both_ok_execution_stages(
+    tmp_path: Path,
+    failure_status: str,
+) -> None:
+    benchmark = _load(EXAMPLE / "verification.py", f"tiered_gate_{failure_status}")
+    common = {
+        "expected_route": "continuation",
+        "expected_role": "publisher",
+        "expected_kind": "generation",
+        "require_head": True,
+        "require_execution_success": True,
+        "expected_execution_nodes": ("exec_matrix", "exec_draft"),
+    }
+    _write_execution_serving_result(
+        tmp_path,
+        {"exec_matrix": "ok", "exec_draft": "ok"},
+    )
+    assert benchmark._validate_serving_row(tmp_path, 1, 8, **common) == 0
+
+    _write_execution_serving_result(
+        tmp_path,
+        {"exec_matrix": "ok", "exec_draft": failure_status},
+    )
+    assert benchmark._validate_serving_row(tmp_path, 1, 8, **common) == 1
+
+
+def test_tiered_generic_gate_requires_both_execution_stages_to_skip(
+    tmp_path: Path,
+) -> None:
+    benchmark = _load(EXAMPLE / "verification.py", "tiered_generic_execution_gate")
+    _write_execution_serving_result(
+        tmp_path,
+        {"exec_matrix": "skipped", "exec_draft": "skipped"},
+    )
+    assert benchmark._validate_serving_row(
+        tmp_path,
+        1,
+        8,
+        expected_route="continuation",
+        expected_role="publisher",
+        expected_kind="generation",
+        require_head=True,
+        expected_execution_nodes=("exec_matrix", "exec_draft"),
+        expected_execution_status="skipped",
+    ) == 0
 
 
 def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
@@ -610,11 +709,14 @@ def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
 ) -> None:
     benchmark = _load(EXAMPLE / "verification.py", "tiered_example_coding_gate")
     summaries: dict[str, dict] = {}
+    validations: list[dict] = []
+
+    def validate(*_args, **kwargs):
+        validations.append(kwargs)
+        return 0
 
     monkeypatch.setattr(benchmark, "_bench_row", lambda **kwargs: 0)
-    monkeypatch.setattr(
-        benchmark, "_validate_serving_row", lambda *args, **kwargs: 0
-    )
+    monkeypatch.setattr(benchmark, "_validate_serving_row", validate)
     monkeypatch.setattr(
         benchmark,
         "_row_summary",
@@ -642,3 +744,8 @@ def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
     assert benchmark.serving_auto_max_coding(tmp_path / "fallback") == 0
     gate = json.loads((tmp_path / "fallback" / "ttft-gate.json").read_text())
     assert gate["gates"]["1"]["denominator_source"] == "pinned_fallback"
+    assert validations
+    assert all(
+        row["expected_execution_nodes"] == ("exec_matrix", "exec_draft")
+        for row in validations
+    )

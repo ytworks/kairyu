@@ -15,6 +15,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
+_EXECUTION_NODES = ("exec_matrix", "exec_draft")
 
 
 def _nvme_root() -> Path:
@@ -138,6 +139,8 @@ def _validate_serving_row(
     public_tokens: bool = False,
     require_head: bool = False,
     require_execution_success: bool = False,
+    expected_execution_nodes: tuple[str, ...] = (),
+    expected_execution_status: str | None = None,
 ) -> int:
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -175,6 +178,34 @@ def _validate_serving_row(
             and all(sample.get("completion_tokens") == output_tokens for sample in samples)
         )
     if complete and expected_route is not None:
+        def execution_stages_match(
+            sample: dict,
+            expected_status: str | None,
+        ) -> bool:
+            stages = sample.get("trace", {}).get("stages", [])
+
+            def matches(stage: dict, node: str | None) -> bool:
+                if stage.get("kind") != "execution":
+                    return False
+                if node is not None and stage.get("node") != node:
+                    return False
+                if expected_status is None:
+                    return True
+                expected_trace_status = (
+                    "skipped" if expected_status == "skipped" else "success"
+                )
+                return (
+                    stage.get("status") == expected_trace_status
+                    and stage.get("execution_status") == expected_status
+                )
+
+            if expected_execution_nodes:
+                return all(
+                    any(matches(stage, node) for stage in stages)
+                    for node in expected_execution_nodes
+                )
+            return any(matches(stage, None) for stage in stages)
+
         def stage_ok(sample: dict) -> bool:
             stages = sample.get("trace", {}).get("stages", [])
             if sample.get("trace", {}).get("status") != "valid":
@@ -194,15 +225,10 @@ def _validate_serving_row(
                 for stage in stages
             ):
                 return False
-            return bool(
-                [stage for stage in stages if stage.get("kind") == "execution"]
-            )
+            return execution_stages_match(sample, expected_execution_status)
 
         def executed(sample: dict) -> bool:
-            return any(
-                stage.get("kind") == "execution" and stage.get("status") == "success"
-                for stage in sample.get("trace", {}).get("stages", [])
-            )
+            return execution_stages_match(sample, "ok")
 
         complete = all(stage_ok(sample) for sample in samples)
         if complete and require_execution_success:
@@ -212,8 +238,8 @@ def _validate_serving_row(
             executed_count = sum(1 for sample in samples if executed(sample))
             if executed_count * 10 < len(samples) * 9:
                 print(
-                    f"only {executed_count}/{len(samples)} samples ran sandbox "
-                    "execution (>=90% required)",
+                    f"only {executed_count}/{len(samples)} samples completed all "
+                    "required sandbox stages with execution_status=ok (>=90% required)",
                     file=sys.stderr,
                 )
                 return 1
@@ -236,6 +262,8 @@ def _serving(
     natural_completion: bool = False,
     require_head: bool = False,
     require_execution_success: bool = False,
+    expected_execution_nodes: tuple[str, ...] = (),
+    expected_execution_status: str | None = None,
 ) -> int:
     config = SPEC["verification"]["serving"]
     requests = int(config["requests_per_concurrency"])
@@ -374,6 +402,8 @@ def _serving(
                 public_tokens=natural_completion,
                 require_head=require_head,
                 require_execution_success=require_execution_success,
+                expected_execution_nodes=expected_execution_nodes,
+                expected_execution_status=expected_execution_status,
             )
         if code:
             return code
@@ -395,8 +425,9 @@ def serving_auto_max(run_dir: Path) -> int:
         warmup_requests=4,
         natural_completion=True,
         require_head=True,
+        expected_execution_nodes=_EXECUTION_NODES,
+        expected_execution_status="skipped",
     )
-
 
 _CODING_TASKS = (
     "Implement `parse_duration(text: str) -> int` converting strings such as "
@@ -611,6 +642,7 @@ def serving_auto_max_coding(run_dir: Path) -> int:
                 public_tokens=True,
                 require_head=True,
                 require_execution_success=True,
+                expected_execution_nodes=_EXECUTION_NODES,
             )
         if code:
             return code
