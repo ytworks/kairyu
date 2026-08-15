@@ -154,18 +154,8 @@ def summarize(
             "output_truncated": stdout_truncated or stderr_truncated,
         },
     }
-    if timed_out:
-        return {**base, "status": "timeout", "tests": [], "passed": 0, "failed": 0, "errors": 0}
-    tests = []
-    if isinstance(report_payload, dict):
-        for entry in report_payload.get("tests", ()):
-            if (
-                isinstance(entry, dict)
-                and isinstance(entry.get("id"), str)
-                and entry.get("outcome") in {"passed", "failed", "error"}
-            ):
-                tests.append({"id": entry["id"], "outcome": entry["outcome"]})
-    if report_payload is None or not isinstance(report_payload, dict):
+
+    def setup_error(detail: str) -> dict:
         return {
             **base,
             "status": "setup_error",
@@ -173,11 +163,34 @@ def summarize(
             "passed": 0,
             "failed": 0,
             "errors": 0,
-            "detail": f"returncode={returncode}",
+            "detail": detail,
         }
+
+    if timed_out:
+        return {**base, "status": "timeout", "tests": [], "passed": 0, "failed": 0, "errors": 0}
+    if not isinstance(report_payload, dict):
+        return setup_error(f"returncode={returncode}; missing_report")
+    pytest_exit_code = report_payload.get("exit_code")
+    if returncode != 0 or type(pytest_exit_code) is not int or pytest_exit_code not in {0, 1}:
+        return setup_error(f"returncode={returncode}; pytest_exit_code={pytest_exit_code!r}")
+    raw_tests = report_payload.get("tests")
+    if not isinstance(raw_tests, list):
+        return setup_error("invalid_tests_report")
+    tests = []
+    for entry in raw_tests:
+        if (
+            isinstance(entry, dict)
+            and isinstance(entry.get("id"), str)
+            and entry.get("outcome") in {"passed", "failed", "error"}
+        ):
+            tests.append({"id": entry["id"], "outcome": entry["outcome"]})
+    if not tests:
+        return setup_error("no_tests_collected")
     passed = sum(1 for entry in tests if entry["outcome"] == "passed")
     failed = sum(1 for entry in tests if entry["outcome"] == "failed")
     errors = sum(1 for entry in tests if entry["outcome"] == "error")
+    if (pytest_exit_code == 0) != (failed == 0 and errors == 0):
+        return setup_error("pytest_exit_code_mismatches_outcomes")
     return {
         **base,
         "status": "ok",

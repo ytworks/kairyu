@@ -79,7 +79,7 @@ def test_summarize_folds_pytest_report_counts():
             ],
         },
         timed_out=False,
-        returncode=1,
+        returncode=0,
         stdout=b"out",
         stderr=b"",
         output_bytes=1024,
@@ -102,6 +102,58 @@ def test_summarize_missing_report_is_setup_error_never_ok():
     )
     assert report["status"] == "setup_error"
     assert report["passed"] == 0
+
+
+@pytest.mark.parametrize("exit_code", [2, 3, 4, 5])
+def test_summarize_pytest_abnormal_exit_is_setup_error(exit_code):
+    report = runner.summarize(
+        {
+            "exit_code": exit_code,
+            "tests": [{"id": "test_solution.py::test_a", "outcome": "passed"}],
+        },
+        timed_out=False,
+        returncode=0,
+        stdout=b"",
+        stderr=b"",
+        output_bytes=1024,
+        duration_ms=5,
+    )
+
+    assert report["status"] == "setup_error"
+    assert report["detail"] == f"returncode=0; pytest_exit_code={exit_code}"
+
+
+def test_summarize_shim_failure_with_report_is_setup_error():
+    report = runner.summarize(
+        {
+            "exit_code": 0,
+            "tests": [{"id": "test_solution.py::test_a", "outcome": "passed"}],
+        },
+        timed_out=False,
+        returncode=-9,
+        stdout=b"",
+        stderr=b"",
+        output_bytes=1024,
+        duration_ms=5,
+    )
+
+    assert report["status"] == "setup_error"
+    assert report["detail"] == "returncode=-9; pytest_exit_code=0"
+
+
+def test_summarize_empty_test_report_is_setup_error():
+    report = runner.summarize(
+        {"exit_code": 0, "tests": []},
+        timed_out=False,
+        returncode=0,
+        stdout=b"",
+        stderr=b"",
+        output_bytes=1024,
+        duration_ms=5,
+    )
+
+    assert report["status"] == "setup_error"
+    assert report["detail"] == "no_tests_collected"
 
 
 def test_summarize_timeout_and_output_truncation():
