@@ -283,6 +283,7 @@ class ExecutorSection(BaseModel):
     base_url: str = Field(min_length=1)
     uds_path: str | None = Field(default=None, min_length=1, pattern=r"^/")
     timeout_s: float = Field(default=25.0, gt=0, le=300)
+    queue_wait_s: float = Field(default=0.0, ge=0, le=300)
 
 
 class MockEmbeddingSection(BaseModel):

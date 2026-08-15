@@ -258,6 +258,7 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     executor = deployment.executors["sandbox-python"]
     assert executor.base_url == "http://executor"
     assert executor.uds_path == "/run/kairyu-executor/executor.sock"
+    assert executor.queue_wait_s == 8
     assert list(deployment.embeddings) == ["embed-small"]
     embedding = deployment.embeddings["embed-small"]
     assert embedding.backend == "fastembed"

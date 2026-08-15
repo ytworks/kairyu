@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ import httpx
 _DEFAULT_TIMEOUT_MARGIN_S = 5.0
 _DEFAULT_EXCERPT_BYTES = 4096
 _RETRYABLE_STATUS = 429
+_TIMEOUT_HEADER = "X-Kairyu-Timeout-Ms"
 
 NOT_APPLICABLE_SENTINEL = "NOT_APPLICABLE"
 
@@ -217,10 +219,15 @@ class HttpExecutionBackend:
 
     base_url: str
     timeout_s: float = 25.0
+    queue_wait_s: float = 0.0
     excerpt_bytes: int = _DEFAULT_EXCERPT_BYTES
     uds_path: str | None = None
     transport: httpx.AsyncBaseTransport | None = None
     _client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.queue_wait_s < 0:
+            raise ValueError("queue_wait_s must be non-negative")
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -248,9 +255,12 @@ class HttpExecutionBackend:
                 "output_bytes": request.limits.output_bytes,
             },
         }
-        deadline = request.limits.wall_time_s + _DEFAULT_TIMEOUT_MARGIN_S
+        request_timeout = min(
+            self.timeout_s,
+            request.limits.wall_time_s + self.queue_wait_s + _DEFAULT_TIMEOUT_MARGIN_S,
+        )
         try:
-            response = await self._post_with_one_retry(payload, deadline)
+            response = await self._post_with_one_retry(payload, request_timeout)
         except (TimeoutError, httpx.HTTPError, OSError) as error:
             return unavailable_report(type(error).__name__)
         if response.status_code == 422:
@@ -266,19 +276,32 @@ class HttpExecutionBackend:
     async def _post_with_one_retry(
         self,
         payload: Mapping[str, object],
-        deadline: float,
+        timeout: float,
     ) -> httpx.Response:
         client = self._get_client()
-        response = await asyncio.wait_for(
-            client.post("/v1/execute", json=payload),
-            timeout=deadline,
-        )
-        if response.status_code == _RETRYABLE_STATUS:
-            await asyncio.sleep(0.5)
-            response = await asyncio.wait_for(
-                client.post("/v1/execute", json=payload),
-                timeout=deadline,
+        deadline = asyncio.get_running_loop().time() + timeout
+
+        async def post() -> httpx.Response:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError
+            headers = {_TIMEOUT_HEADER: str(max(1, math.ceil(remaining * 1000)))}
+            return await asyncio.wait_for(
+                client.post(
+                    "/v1/execute",
+                    json=payload,
+                    headers=headers,
+                    timeout=remaining,
+                ),
+                timeout=remaining,
             )
+
+        response = await post()
+        if response.status_code == _RETRYABLE_STATUS:
+            if deadline - asyncio.get_running_loop().time() <= 0.5:
+                raise TimeoutError
+            await asyncio.sleep(0.5)
+            response = await post()
         return response
 
     def _parse_report(self, body: object) -> ExecutionReport:
@@ -297,6 +320,7 @@ class HttpExecutionBackend:
                     and entry.get("outcome") in {"passed", "failed", "error"}
                 ):
                     tests.append(CaseOutcome(id=entry["id"], outcome=entry["outcome"]))
+
         def _count(key: str) -> int:
             value = body.get(key)
             return value if isinstance(value, int) and value >= 0 else 0

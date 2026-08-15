@@ -623,6 +623,7 @@ def build_app_from_spec(
             base_url=section.base_url,
             uds_path=section.uds_path,
             timeout_s=section.timeout_s,
+            queue_wait_s=section.queue_wait_s,
         )
         for name, section in spec.executors.items()
     }

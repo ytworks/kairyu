@@ -344,3 +344,20 @@ def test_run_submission_removes_setsid_child_before_return(monkeypatch):
             except (ChildProcessError, ProcessLookupError):
                 pass
         runner._set_child_subreaper(was_subreaper)
+
+
+def test_request_budget_caps_queue_wait_inside_client_deadline():
+    assert runner._request_budget_s(None, 10) == 23
+    assert runner._request_budget_s("14500", 10) == 14.5
+    assert runner._request_budget_s("999999", 10) == 23
+    assert runner._queue_admission_timeout(10, 23) == 8
+    assert runner._queue_admission_timeout(10, 14.5) == 4.5
+    assert runner._queue_admission_timeout(10, 9) == 0
+
+
+@pytest.mark.parametrize("header", ["invalid", "0", "-1", "nan", "inf"])
+def test_request_budget_rejects_invalid_timeout_header(header):
+    with pytest.raises(runner.SubmissionError) as excinfo:
+        runner._request_budget_s(header, 10)
+
+    assert excinfo.value.status_code == 400

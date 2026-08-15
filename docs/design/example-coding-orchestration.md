@@ -180,8 +180,12 @@ counts while a matrix with no ok candidate does not. Trace `status:
 sandbox call also traces as success. The executed fraction must be ≥90% per
 row (review amendment 2026-08-15: the measured c32 row exposed both a
 false-positive gate reading degraded stages as executed and executor slot
-contention — the runner now queues bursts up to a bounded wait below the
-client deadline instead of bouncing 429s). The gate also measures the paired
+contention — the executor queue allowance is now explicit in deployment
+configuration. The client budgets `wall_time + queue_wait + 5s`, shares one
+absolute deadline across the initial call and retry, and sends the remaining
+budget to the runner. The runner caps admission wait to that residual budget
+and returns 429 instead of starting a job without enough time left for its
+declared wall limit). The gate also measures the paired
 DeepSeek-direct row on the same dataset via the loopback L1 endpoint and
 fails unless `product semantic TTFT p50 ≤ 2.0 × direct p50` (pinned
 `example.json` denominators are the fallback when the paired row is
