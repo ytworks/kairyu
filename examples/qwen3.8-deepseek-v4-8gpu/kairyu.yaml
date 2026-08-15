@@ -119,6 +119,7 @@ executors:
     base_url: http://executor
     uds_path: /run/kairyu-executor/executor.sock
     timeout_s: 25
+    queue_wait_s: 8
 
 orchestrators:
   kairyu-auto-max:

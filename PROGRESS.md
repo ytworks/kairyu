@@ -98,6 +98,14 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-15 — [amendment] Executor deadline includes queue admission
+- What: deployment executor config now declares queue allowance; the client
+  shares one wall-plus-queue deadline across retries and the runner rejects
+  admission when the residual budget cannot cover the declared wall limit.
+- Why: the previous 8s queue plus 10s execution exceeded the 15s client
+  deadline, discarding valid work as `unavailable` under contention.
+- Refs: ECO-D1; `kairyu/orchestration/execution.py`; PR #488 review
+
 ### 2026-08-15 — [amendment] Sandbox transport removes the reverse network path
 - What: replaced the bidirectional internal Docker bridge with a shared Unix
   domain socket and `network_mode: none` on the executor; Kairyu mounts the

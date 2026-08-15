@@ -3,6 +3,7 @@
 import json
 
 import httpx
+import pytest
 
 from kairyu.orchestration.execution import (
     ExecutionLimits,
@@ -137,6 +138,46 @@ async def test_unix_socket_transport_is_selected(monkeypatch):
 
     assert report.status == "ok"
     assert captured == {"uds": "/run/kairyu-executor/executor.sock"}
+
+
+async def test_queue_allowance_is_budgeted_and_retry_uses_remaining_deadline():
+    timeout_headers = []
+
+    def handler(request):
+        timeout_headers.append(int(request.headers["X-Kairyu-Timeout-Ms"]))
+        if len(timeout_headers) == 1:
+            return httpx.Response(429)
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "tests": [],
+                "passed": 0,
+                "failed": 0,
+                "errors": 0,
+                "duration_ms": 1,
+            },
+        )
+
+    backend = HttpExecutionBackend(
+        base_url="http://executor",
+        timeout_s=30,
+        queue_wait_s=8,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        report = await backend.execute(_request())
+    finally:
+        await backend.shutdown()
+
+    assert report.status == "ok"
+    assert 14_500 <= timeout_headers[0] <= 15_000
+    assert timeout_headers[1] <= timeout_headers[0] - 400
+
+
+def test_negative_queue_allowance_is_rejected():
+    with pytest.raises(ValueError, match="queue_wait_s"):
+        HttpExecutionBackend(base_url="http://executor", queue_wait_s=-0.1)
 
 
 def test_extract_python_block_boundaries():

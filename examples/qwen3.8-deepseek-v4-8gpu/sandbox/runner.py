@@ -16,6 +16,7 @@ pytest plugin shim, never parsed from free text.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import resource
@@ -32,10 +33,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MAX_CONCURRENCY = int(os.environ.get("RUNNER_MAX_CONCURRENCY", "4"))
 # A fan-out burst (32 product requests × concurrent execution stages) must
 # queue briefly instead of bouncing off 429s: the c32 serving row measured
-# `unavailable` degrades purely from slot contention. The wait is bounded
-# below the client's per-attempt deadline (wall_time_s + 5 s) so a wedged
-# runner still degrades on the client side.
+# `unavailable` degrades purely from slot contention. The client budgets this
+# wait in addition to wall time and sends its remaining absolute timeout.
 QUEUE_WAIT_S = float(os.environ.get("RUNNER_QUEUE_WAIT_S", "8"))
+CLIENT_MARGIN_S = 5.0
 WORK_ROOT = os.environ.get("RUNNER_WORK_ROOT", "/run/exec")
 PORT = int(os.environ.get("RUNNER_PORT", "8080"))
 SOCKET_PATH = os.environ.get("RUNNER_SOCKET_PATH")
@@ -43,6 +44,7 @@ SOCKET_PATH = os.environ.get("RUNNER_SOCKET_PATH")
 _FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _REPORT_NAME = "__kairyu_report__.json"
 _SHIM_NAME = "__kairyu_shim__.py"
+_TIMEOUT_HEADER = "X-Kairyu-Timeout-Ms"
 
 # Runs inside the sandboxed interpreter; per-test outcomes come from pytest's
 # structured hook reports, written as JSON for the supervisor to read back.
@@ -314,6 +316,23 @@ def run_submission(submission: dict) -> dict:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _request_budget_s(raw_header: str | None, wall_time_s: float) -> float:
+    maximum = wall_time_s + QUEUE_WAIT_S + CLIENT_MARGIN_S
+    if raw_header is None:
+        return maximum
+    try:
+        budget = float(raw_header) / 1000
+    except ValueError as error:
+        raise SubmissionError(400, "invalid_timeout") from error
+    if not math.isfinite(budget) or budget <= 0:
+        raise SubmissionError(400, "invalid_timeout")
+    return min(budget, maximum)
+
+
+def _queue_admission_timeout(wall_time_s: float, request_budget_s: float) -> float:
+    return max(0.0, min(QUEUE_WAIT_S, request_budget_s - wall_time_s))
+
+
 _slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
 
@@ -350,11 +369,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             submission = parse_submission(body)
+            wall_time_s = submission["limits"]["wall_time_s"]
+            request_budget_s = _request_budget_s(
+                self.headers.get(_TIMEOUT_HEADER),
+                wall_time_s,
+            )
         except SubmissionError as error:
             self._send_json(error.status_code, {"error": str(error)})
             return
-        if not _slots.acquire(timeout=QUEUE_WAIT_S):
+        queued_at = time.monotonic()
+        admission_timeout = _queue_admission_timeout(wall_time_s, request_budget_s)
+        if not _slots.acquire(timeout=admission_timeout):
             self._send_json(429, {"error": "busy"})
+            return
+        if request_budget_s - (time.monotonic() - queued_at) < wall_time_s:
+            _slots.release()
+            self._send_json(429, {"error": "insufficient_deadline"})
             return
         try:
             report = run_submission(submission)
