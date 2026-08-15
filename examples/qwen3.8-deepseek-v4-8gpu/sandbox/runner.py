@@ -30,6 +30,12 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_CONCURRENCY = int(os.environ.get("RUNNER_MAX_CONCURRENCY", "4"))
+# A fan-out burst (32 product requests × concurrent execution stages) must
+# queue briefly instead of bouncing off 429s: the c32 serving row measured
+# `unavailable` degrades purely from slot contention. The wait is bounded
+# below the client's per-attempt deadline (wall_time_s + 5 s) so a wedged
+# runner still degrades on the client side.
+QUEUE_WAIT_S = float(os.environ.get("RUNNER_QUEUE_WAIT_S", "8"))
 WORK_ROOT = os.environ.get("RUNNER_WORK_ROOT", "/run/exec")
 PORT = int(os.environ.get("RUNNER_PORT", "8080"))
 SOCKET_PATH = os.environ.get("RUNNER_SOCKET_PATH")
@@ -347,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
         except SubmissionError as error:
             self._send_json(error.status_code, {"error": str(error)})
             return
-        if not _slots.acquire(blocking=False):
+        if not _slots.acquire(timeout=QUEUE_WAIT_S):
             self._send_json(429, {"error": "busy"})
             return
         try:

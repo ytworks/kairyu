@@ -682,6 +682,21 @@ def test_tiered_coding_gate_counts_only_both_ok_execution_stages(
     )
     assert benchmark._validate_serving_row(tmp_path, 1, 8, **common) == 1
 
+    # The matrix joins per-candidate statuses; one broken candidate is a model
+    # formatting slip the DAG absorbs (consensus + verifier override), so the
+    # sandbox path still counts as executed when any candidate ran ok.
+    _write_execution_serving_result(
+        tmp_path,
+        {"exec_matrix": f"ok,{failure_status}", "exec_draft": "ok"},
+    )
+    assert benchmark._validate_serving_row(tmp_path, 1, 8, **common) == 0
+    # But a matrix with no ok candidate at all is not execution evidence.
+    _write_execution_serving_result(
+        tmp_path,
+        {"exec_matrix": failure_status, "exec_draft": "ok"},
+    )
+    assert benchmark._validate_serving_row(tmp_path, 1, 8, **common) == 1
+
 
 def test_tiered_generic_gate_requires_both_execution_stages_to_skip(
     tmp_path: Path,

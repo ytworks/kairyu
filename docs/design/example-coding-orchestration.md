@@ -159,10 +159,19 @@ Mechanism, owned by `kairyu/orchestration/conductor.py`:
 
 The example gate: `./verify.sh serving-auto-max-coding` runs a deterministic
 self-contained Python-task matrix (c1/8/16/32), requires a valid trace with a
-successful head and continuation in every sample and real (non-skipped)
-sandbox execution in ≥90% of a row's samples (occasional model formatting
-slips can leave a run without a fenced candidate), measures the paired
-DeepSeek-direct row on the same dataset via the loopback L1 endpoint, and
+successful head and continuation in every sample, and counts a sample as
+sandbox-executed only when **both** `exec_matrix` and `exec_draft` report
+`execution_status` containing `ok` — the matrix joins per-candidate statuses
+with commas, and one broken candidate is a model formatting slip the DAG
+absorbs by design (consensus + verifier override), so `ok,setup_error` still
+counts while a matrix with no ok candidate does not. Trace `status:
+"success"` alone is NOT execution evidence: a degraded (`unavailable`)
+sandbox call also traces as success. The executed fraction must be ≥90% per
+row (review amendment 2026-08-15: the measured c32 row exposed both a
+false-positive gate reading degraded stages as executed and executor slot
+contention — the runner now queues bursts up to a bounded wait below the
+client deadline instead of bouncing 429s). The gate also measures the paired
+DeepSeek-direct row on the same dataset via the loopback L1 endpoint and
 fails unless `product semantic TTFT p50 ≤ 2.0 × direct p50` (pinned
 `example.json` denominators are the fallback when the paired row is
 unavailable).
