@@ -8,14 +8,18 @@
 
 ## Coding DAG serving matrix (current deployment)
 
-Run ID: `20260815T145039Z` (`./verify.sh serving-auto-max-coding`); artifacts
-under the NVMe `verification-results/20260815T145039Z/serving-auto-max-coding/`
+Run ID: `20260815T213146Z` (`./verify.sh serving-auto-max-coding`); artifacts
+under the NVMe `verification-results/20260815T213146Z/serving-auto-max-coding/`
 directory, including per-row `ttft-gate.json`. This run includes every PR
-#488 review amendment: the networkless UDS sandbox transport, capped
-subprocess output draining, abnormal-pytest-exit rejection, the strict
-`execution_status`-based gate, the burst-queueing executor (8 slots), the
+#488 review amendment (networkless UDS sandbox transport, capped subprocess
+output draining, abnormal-pytest-exit rejection, the strict
+`execution_status`-based gate, the burst-queueing executor with 8 slots, the
 subreaper-based escaped-descendant sweep, and the queue-inclusive deadline
-budget with runner-side admission control.
+budget with runner-side admission control) plus the issue #496 output-contract
+amendments: caller-limit budgeting across the head/continuation seam, the
+`reasoning_closed`/`prompt_headless` continuation contract, and the amended
+head/continuation prompts (exact-answer branch; "output nothing further"
+clause).
 Dataset: 32 deterministic self-contained Python implementation tasks per row
 (8 templates × 4 namespaced variants, ~1.5K prompt tokens), temperature 0,
 natural completion, `max_tokens 4096`, public tokens counted by the DeepSeek
@@ -29,35 +33,41 @@ count).
 
 | Concurrency | product semantic TTFT p50/p99 (ms) | DeepSeek-direct TTFT p50/p99 (ms) | gate (≤2.0×) | E2E p50/p99 (ms) | sandbox-executed (strict) | success |
 |---:|---:|---:|---|---:|---:|---:|
-| 1 | 417.49 / 427.06 | 2,389.41 / 2,692.13 | **PASS** (0.17×) | 65,112 / 166,570 | 31/32 | 32/32 |
-| 8 | 875.63 / 7,157.94 | 7,311.59 / 10,667.32 | **PASS** (0.12×) | 81,176 / 256,435 | 31/32 | 32/32 |
-| 16 | 1,103.88 / 15,680.15 | 10,212.32 / 17,840.83 | **PASS** (0.11×) | 101,172 / 297,471 | 30/32 | 32/32 |
-| 32 | 24,396.26 / 26,835.78 | 13,698.05 / 18,843.40 | **PASS** (1.78×) | 170,126 / 293,582 | 32/32 | 32/32 |
+| 1 | 417.39 / 427.56 | 2,348.66 / 2,661.04 | **PASS** (0.18×) | 58,533 / 131,746 | 29/32 | 32/32 |
+| 8 | 921.44 / 7,071.53 | 6,459.02 / 9,350.11 | **PASS** (0.14×) | 109,914 / 300,794 | 29/32 | 32/32 |
+| 16 | 1,310.88 / 11,930.31 | 9,564.01 / 19,139.84 | **PASS** (0.14×) | 114,722 / 282,043 | 30/32 | 32/32 |
+| 32 | 32,434.50 / 32,921.68 | 17,341.50 / 23,111.54 | **PASS** (1.87×) | 164,597 / 271,452 | 30/32 | 32/32 |
 
 Every sample carried a valid trace with a successful `head` and
-`continuation` stage; zero execution stages degraded to `unavailable` (the
-pre-amendment c32 run had measured three slot-contention degrades, fixed by
-the queueing executor). The few non-executed samples are drafts that never
-produced a runnable fenced block across their attempts — honest gaps, above
-the ≥90% floor. E2E is deliberately unconstrained: it covers the full
-proposal/test fan-out, sandbox runs, synthesis, execution-evidence
-verification, and bounded refinement behind the committed opening (the head
-keeps the user reading from ~0.4 s at c1). The c32 row passes only against
-its paired direct denominator (1.78×), not against the historical 8K-prompt
-pinned fallback — the paired same-dataset comparison is the committed gate.
+`continuation` stage; zero execution stages degraded to `unavailable`. The
+few non-executed samples are drafts that never produced a runnable fenced
+block across their attempts — honest gaps, above the ≥90% floor. E2E is
+deliberately unconstrained: it covers the full proposal/test fan-out, sandbox
+runs, synthesis, execution-evidence verification, and bounded refinement
+behind the committed opening (the head keeps the user reading from ~0.4 s at
+c1). The c32 row passes only against its paired direct denominator (1.87×),
+not against the historical 8K-prompt pinned fallback — the paired
+same-dataset comparison is the committed gate, and it is marginal at c32:
+both sides of the ratio are saturation-dominated and swing run to run.
 
 Superseded coding-matrix runs: `20260815T042353Z` (pre-review-amendment
 deployment, pre-strict gate), `20260815T111017Z` (post-UDS, failed the
 strict gate at c32 with 25/32 — the measured evidence behind the gate and
-executor amendments), and `20260815T121447Z` (all rows green, pre-sweep/
-deadline-budget amendments).
+executor amendments), `20260815T121447Z` (all rows green, pre-sweep/
+deadline-budget amendments), `20260815T145039Z` (all rows green, pre-#496
+output-contract amendments), and `20260815T203129Z` (first post-#496 run:
+c1/8/16 green, c32 2.086× — product 31,456.78 ms vs direct 15,079.38 ms.
+No #496 code path fired in its traces — zero `retry:empty_output` or
+`skipped:public_budget` events — and the failing margin came from a
+run-variance swing: the direct denominator measured 13,698–17,342 ms and
+refinement load 48–60 `draft_synthesis` attempts across the last four runs;
+the immediate same-deployment re-run above passes at 1.87×).
 
 ## Generic serving matrix (current deployment, executor skip path)
 
-Run ID: `20260815T052328Z` (`./verify.sh serving-auto-max`); this run
-predates the PR #488 review amendments, which change only the sandbox
-transport and execution path — the skip path measured here makes no sandbox
-call, so the rows remain attributable. ~8K-token
+Run ID: `20260815T191509Z` (`./verify.sh serving-auto-max`), measured on the
+issue #496 output-contract deployment (amended head/continuation prompts and
+caller-limit budgeting). ~8K-token
 generic prompts, natural completion, temperature 0. Every sample skipped
 both executor stages locally (the everyday non-coding degrade path), carried
 a valid trace with successful `head` and `continuation` stages, and
@@ -65,10 +75,13 @@ returned a non-empty public answer.
 
 | Concurrency | semantic TTFT p50/p99 (ms) | E2E p50/p99 (ms) | public output tok/s | success |
 |---:|---:|---:|---:|---:|
-| 1 | 2,075.60 / 2,135.56 | 83,905 / 145,842 | 8.94 | 32/32 |
-| 8 | 5,887.12 / 31,759.73 | 181,969 / 291,920 | 30.23 | 32/32 |
-| 16 | 24,096.11 / 77,862.65 | 312,040 / 405,169 | 36.65 | 32/32 |
-| 32 | 96,189.86 / 162,889.23 | 525,900 / 548,632 | 39.63 | 32/32 |
+| 1 | 2,056.04 / 2,105.55 | 73,245 / 120,134 | 8.55 | 32/32 |
+| 8 | 8,119.83 / 38,291.13 | 186,487 / 253,495 | 29.38 | 32/32 |
+| 16 | 24,013.28 / 77,483.64 | 279,399 / 378,427 | 33.35 | 32/32 |
+| 32 | 89,987.95 / 150,280.31 | 510,497 / 560,453 | 40.82 | 32/32 |
+
+Superseded generic run: `20260815T052328Z` (pre-#488-review and pre-#496
+amendments; its rows are within run-to-run variance of the table above).
 
 Generic TTFT is dominated by the Qwen head's ~8K-token prefill (compare the
 historical Tier1 TP1 c1 TTFT of 2,620.97 ms at the same prompt length); the
