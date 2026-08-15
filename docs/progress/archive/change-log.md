@@ -11,6 +11,41 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-14 — [design] Separate evals from verification and retire Accuracy
+- What: Accuracy will be removed after its external migration; the other evals
+  remain checkout-only under `evals/`; correctness, performance, resilience,
+  and diagnostic gates move to `verification/` with neutral evidence contracts
+  and immutable legacy artifacts.
+- Why: `kairyu.bench` and `bench/` conflate model evaluation with L1/system
+  verification and allow performance evidence without an explicit correctness
+  link.
+- Refs: `docs/design/verification-framework.md`;
+  `docs/superpowers/plans/2026-08-14-verification-framework-accuracy-removal.md`
+
+### 2026-08-14 — [amendment] Exact LiteLLM assistant history is reusable
+- What: Chat Completions now drops object-valued `provider_specific_fields` and nullable legacy `function_call` metadata from assistant history while retaining typed reasoning, content, and tool calls; invalid roles, value kinds, and unrelated extras remain fail-closed.
+- Why: LiteLLM 1.96.2 emits both compatibility fields in a normal assistant `model_dump()`, so the nullable-only #480 policy still rejected an unmodified second-turn request.
+- Refs: issue #482; `kairyu/entrypoints/server/chat_service.py`; `tests/server/test_{chat_template_policy,openai_api,orchestration_usage_trace}.py`
+
+### 2026-08-14 — [amendment] Assistant reasoning history round-trips
+- What: Chat Completions now accepts its typed `reasoning_content` response field in assistant history and drops only nullable LiteLLM `provider_specific_fields` metadata before rendering; non-null and unknown extras remain fail-closed.
+- Why: The tiered product emitted visible intermediate work that normal LiteLLM serialization returned on the next agent turn, but the input schema rejected both its own field and nullable client metadata before dispatch.
+- Refs: issue #480; `kairyu/entrypoints/server/{protocol,chat_service}.py`; `tests/server/test_{chat_template_policy,openai_api,orchestration_usage_trace,prompt_offload}.py`
+
+### 2026-08-14 — [amendment] Tiered frontier API gains offline embeddings
+- What: The eight-GPU example now builds the pinned FastEmbed MiniLM bundle, publishes truthful `embed-small` beside its chat product, keeps routing and Chat UI chat-only, and fails readiness unless a two-input 384-dimensional embedding smoke returns ordered finite vectors with exact usage.
+- Why: tau2 banking requires embeddings before task 1, but the example exposed no embedding route; a truthful local ID avoids claiming that MiniLM is OpenAI's `text-embedding-3-large`.
+- Refs: issue #479; kairyu-bench issue #5; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,kairyu.yaml,control.py,example.json,README.md}`
+
+### 2026-08-13 — [amendment] Tiered L3 endpoints stay locally and externally reachable
+- What: The example now binds both its Chat UI and public L3 API to all host interfaces by default while advertising the real host address, so both endpoints remain reachable through localhost and the external address; explicit bind overrides remain available.
+- Why: Binding the API only to the external interface made its normal host-local URL unavailable, while publishing `0.0.0.0` as a client URL confused the listen address with the address clients should use.
+- Refs: PR #478; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,control.py,README.md}`
+
+### 2026-08-13 — [progress] Tiered Chat UI response repair closes GPU gates
+- What: Default Qwen L1 chat now returns non-empty public content with no hidden reasoning, L3 returns separate non-empty final and attributed reasoning output, the pinned tiered browser smoke passes, and the deterministic CharXiv rerun completes 10/10 scored requests with zero errors or unmeasured requests.
+- Refs: PR #478; commit `56c640a`; `/mnt/nvme/kairyu/model-volumes/qwen3.6-deepseek-v4-8gpu/bench-results/20260813T055825Z/`
+
 ### 2026-08-13 — [progress] Tiered Chat UI publication defaults to visible content
 - What: The tiered example's Qwen replicas now default upstream HF chat templating to nonthinking while preserving request-level overrides and vision handling, so proposal and publisher roles return public content instead of exhausting their budget in reasoning-only output; GPU validation is in progress.
 - Refs: PR #478; `examples/qwen3.6-deepseek-v4-8gpu/{compose.yaml,README.md}`; `tests/unit/test_tiered_frontier_examplectl.py`
