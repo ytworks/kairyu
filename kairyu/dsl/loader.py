@@ -7,11 +7,22 @@ from pathlib import Path
 
 import yaml
 
-from kairyu.dsl.spec import OrchestratorSpec, WorkerSpec
+from kairyu.dsl.spec import OrchestratorSpec, RoleNodeSpec, WorkerSpec
 from kairyu.engine.backend import EngineBackend
 from kairyu.engine.registry import create_backend
 from kairyu.orchestration.budget import Budget
-from kairyu.orchestration.conductor import RoleSpec, chars_cost_model, zero_cost
+from kairyu.orchestration.conductor import (
+    ExecutorRoleConfig,
+    RoleSamplingOverrides,
+    RoleSpec,
+    chars_cost_model,
+    zero_cost,
+)
+from kairyu.orchestration.execution import (
+    ExecutionBackend,
+    ExecutionLimits,
+    ExecutorDescriptor,
+)
 from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
 from kairyu.orchestration.router import RouteThresholds, RuleRouter, load_calibrated_router
 from kairyu.sampling_params import SamplingParams
@@ -30,9 +41,41 @@ def load_spec(source: str | Path) -> OrchestratorSpec:
     return OrchestratorSpec.model_validate(data)
 
 
+def _role_sampling(role: RoleNodeSpec) -> RoleSamplingOverrides | None:
+    if role.sampling is None:
+        return None
+    return RoleSamplingOverrides(
+        temperature=role.sampling.temperature,
+        top_p=role.sampling.top_p,
+        max_tokens=role.sampling.max_tokens,
+        seed_offset=role.sampling.seed_offset,
+        stop=role.sampling.stop,
+    )
+
+
+def _role_executor(role: RoleNodeSpec) -> ExecutorRoleConfig | None:
+    if role.executor is None:
+        return None
+    limits = role.executor.limits
+    return ExecutorRoleConfig(
+        code_from=role.executor.code_from,
+        tests_from=role.executor.tests_from,
+        mode=role.executor.mode,
+        limits=ExecutionLimits(
+            wall_time_s=limits.wall_time_s,
+            cpu_time_s=limits.cpu_time_s,
+            memory_mb=limits.memory_mb,
+            processes=limits.processes,
+            output_bytes=limits.output_bytes,
+        ),
+    )
+
+
 def _build_worker(worker: WorkerSpec) -> EngineBackend:
     if worker.engine_ref is not None:
         raise ValueError("engine_ref workers require deployment engine resolution")
+    if worker.executor_ref is not None:
+        raise ValueError("executor_ref workers require deployment executor resolution")
     options = dict(worker.options)
     if worker.model is not None:
         options.setdefault("model", worker.model)
@@ -50,9 +93,13 @@ def build_orchestrator(
     spec: OrchestratorSpec,
     *,
     engine_refs: Mapping[str, EngineBackend] | None = None,
+    executor_refs: Mapping[str, ExecutionBackend] | None = None,
 ) -> Orchestrator:
     available_refs = dict(engine_refs or {})
+    available_executor_refs = dict(executor_refs or {})
     engines: dict[str, EngineBackend] = {}
+    execution_workers: dict[str, ExecutionBackend] = {}
+    executor_descriptors: dict[str, ExecutorDescriptor] = {}
     owned_engines: list[EngineBackend] = []
     for worker in spec.workers:
         if worker.engine_ref is not None:
@@ -63,6 +110,19 @@ def build_orchestrator(
                     f"worker {worker.name!r} references unknown deployment engine "
                     f"{worker.engine_ref!r}"
                 ) from error
+        elif worker.executor_ref is not None:
+            try:
+                backend = available_executor_refs[worker.executor_ref]
+            except KeyError as error:
+                raise ValueError(
+                    f"worker {worker.name!r} references unknown deployment executor "
+                    f"{worker.executor_ref!r}"
+                ) from error
+            execution_workers[worker.name] = backend
+            executor_descriptors[worker.name] = ExecutorDescriptor(
+                backend_type=type(backend).__name__,
+                base_url=getattr(backend, "base_url", None),
+            )
         else:
             engine = _build_worker(worker)
             engines[worker.name] = engine
@@ -89,6 +149,7 @@ def build_orchestrator(
             ),
         )
         for worker in spec.workers
+        if worker.executor_ref is None
     }
     roles = (
         tuple(
@@ -99,6 +160,9 @@ def build_orchestrator(
                 role_type=role.role_type,
                 depends_on=role.depends_on,
                 verifies=role.verifies,
+                sampling=_role_sampling(role),
+                executor=_role_executor(role),
+                prompt_suffix=role.prompt_suffix,
             )
             for role in spec.roles
         )
@@ -136,4 +200,6 @@ def build_orchestrator(
         engine_descriptors=engine_descriptors,
         owned_engines=owned_engines,
         expose_intermediate_outputs=spec.expose_intermediate_outputs,
+        execution_workers=execution_workers,
+        executor_descriptors=executor_descriptors,
     )

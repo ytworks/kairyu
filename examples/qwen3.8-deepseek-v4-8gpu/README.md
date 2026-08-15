@@ -1,20 +1,34 @@
-# Qwen3.8 + DeepSeek V4 tiered orchestration on 8 x RTX PRO 6000
+# Qwen3.8 + DeepSeek V4 tiered coding orchestration on 8 x RTX PRO 6000
 
-This example starts one layered product path with one command:
+This example starts one layered coding-first product path with one command:
 
 ```text
 Open WebUI
     -> Kairyu L3 product API (:8003; model kairyu-auto-max)
-        -> Kairyu L2 role DAG
-            -> deployment-owned L1 pool: 4 x Qwen3.8-27B-FP8 TP1 (GPU 0-3)
-            -> deployment-owned L1 pool: DeepSeek-V4-Flash-0731 TP4+EP4 (GPU 4-7)
-        -> Kairyu L2 verified synthesis and bounded refinement
+        -> Kairyu L2 coding role DAG
+            -> head (Qwen): streams the public answer opening from t=0
+            -> testgen + 2 diverse proposals (Qwen TP1 pool, parallel)
+            -> sandbox executor: runs proposals against generated pytest
+            -> DeepSeek draft synthesis -> executor -> verifier (<=2 refines)
+            -> continuation (DeepSeek): streams the verified remainder
+        -> deployment-owned L1 pools: 4 x Qwen3.8-27B-FP8 TP1 (GPU 0-3),
+           DeepSeek-V4-Flash-0731 TP4+EP4 (GPU 4-7), CPU sandbox executor
     -> Kairyu L3 final answer
 
 Embedding clients
     -> Kairyu L3 embeddings API (:8003; model embed-small)
         -> pinned offline FastEmbed MiniLM bundle (384 dimensions)
 ```
+
+The head role commits the public answer opening within a small-prompt Qwen
+TTFT (~0.3 s measured at c1), so the product's semantic TTFT (first public
+`content` token) is gated at **<= 2x the DeepSeek L1 direct row at the same
+concurrency** while the
+ensemble, sandbox execution, and verification run behind the committed
+opening. Non-coding requests take the same DAG: the test generator answers
+`NOT_APPLICABLE`, both executor stages skip locally with zero sandbox latency
+and zero budget steps, and the pipeline degrades to the plan/propose/
+synthesize/verify quality path.
 
 Qwen fits one 96 GB card, so four independent TP1 replicas provide more
 aggregate memory bandwidth and lower queueing TTFT than spreading one dense
@@ -35,12 +49,25 @@ DSpark path and its generic MTP loader cannot load the 0731 MTP weights.
 
 Kairyu exposes one public chat model, `kairyu-auto-max`, and one public
 embedding model, `embed-small`. A chat request enters L3 once, then L2 borrows
-the deployment-owned L1 pools through
-`engine_ref`: DeepSeek planning, three parallel Qwen proposals, DeepSeek draft
-synthesis, verification, and DeepSeek publishing. A failed verifier can repeat
-synthesis and verification at most twice (`moa_samples: 0`,
-`max_refine_depth: 2`, `max_steps: 11`); L2 never calls the public L3 endpoint
-recursively.
+the deployment-owned L1 pools through `engine_ref` and the sandbox execution
+service through `executor_ref`: the Qwen head streams the committed public
+opening immediately while a Qwen test generator and two temperature/seed
+diversified Qwen proposals run in parallel; the sandbox runs each proposal
+against the generated pytest file (with a per-test consensus signal); DeepSeek
+synthesizes a private draft from the committed opening, both candidates, and
+the execution matrix; the draft is re-executed and verified before the
+continuation streams the remainder after the committed opening. A failed
+verifier repeats synthesis, execution, and verification at most twice
+(`moa_samples: 0`, `max_refine_depth: 2`, `max_steps: 15`); L2 never calls the
+public L3 endpoint recursively.
+
+The executor is a CPU-only container on an internal-only compose network (no
+egress, read-only rootfs, noexec tmpfs, non-root, no capabilities, pids/memory
+limits) that runs model-generated code as hostile input under per-submission
+rlimits and a wall-clock process-group killer; only the Kairyu service can
+reach it. Executor results enter role prompts as untrusted machine JSON, and a
+sandbox outage degrades executor stages to an `unavailable` report instead of
+failing requests.
 
 In the same assistant response, completed L2/L1 stages are sent as
 model-attributed `reasoning_content` and rendered by pinned Open WebUI in a
@@ -63,7 +90,7 @@ remain open. See
 The command validates the exact eight-card inventory and NUMA affinity, pulls
 the pinned Qwen vLLM release, reuses or builds the pinned DeepSeek SM120 image,
 verifies or downloads both exact model revisions, builds Kairyu with the
-pinned offline MiniLM bundle, waits for all seven services, verifies
+pinned offline MiniLM bundle, waits for all eight services, verifies
 `/routing`, sends a two-input embedding smoke, and prints:
 
 ```text
@@ -77,7 +104,8 @@ Open WebUI listens on all host interfaces, requires no login, calls only
 Kairyu L3, and is explicitly limited to `kairyu-auto-max`. The public
 `/v1/models` endpoint additionally returns `embed-small`; the L1 pools are not
 public IDs or Chat UI choices. The launcher validates that exact public
-inventory, the explicit seven-role DAG, and two ordered finite 384-dimensional
+inventory, the explicit nine-role coding DAG (including the streamed head and
+the sandbox executor binding), and two ordered finite 384-dimensional
 embedding vectors with positive usage before printing the URL.
 
 The embedding model is the truthfully named
@@ -113,14 +141,23 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ```sh
 ./verify.sh list
 ./verify.sh serving-auto-max
+./verify.sh serving-auto-max-coding
 ```
 
-`serving-auto-max` records the verifier-gated product DAG serving matrix.
-Historical MoA performance results in `MEASUREMENTS.md` do not transfer to the
-current DAG without a fresh run. ChatUI continues to call only Kairyu L3. Raw
+`serving-auto-max` records the generic-workload product serving matrix and
+proves the executor skip path end-to-end. `serving-auto-max-coding` runs a
+deterministic self-contained Python-task dataset at c1/8/16/32, requires real
+(non-skipped) sandbox execution in at least 90% of each row's traces,
+measures the paired DeepSeek-direct row on the same dataset through the
+loopback L1 endpoint, and
+**fails unless the product's semantic TTFT p50 stays within 2x the direct
+row** (pinned `example.json` denominators are the fallback ceiling). All
+historical performance rows in `MEASUREMENTS.md` predate the coding DAG and do
+not transfer without a fresh run. ChatUI continues to call only Kairyu L3. Raw
 artifacts go to the configured NVMe `verification-results/<UTC-run-id>/`
 directory. Model and product evaluations are invoked explicitly through
-`python -m evals`.
+`python -m evals`; coding accuracy versus frontier APIs is owned by the
+external `kairyu-bench` repository.
 
 ## Reproducibility pins
 

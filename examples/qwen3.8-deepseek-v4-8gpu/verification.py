@@ -115,6 +115,18 @@ def _serving_dataset(
     path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
 
 
+def _row_summary(row_dir: Path) -> dict | None:
+    artifacts = list(row_dir.glob("*-serving.json"))
+    if len(artifacts) != 1:
+        return None
+    try:
+        result = json.loads(artifacts[0].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    summary = result.get("summary")
+    return summary if isinstance(summary, dict) else None
+
+
 def _validate_serving_row(
     row_dir: Path,
     requests: int,
@@ -124,6 +136,8 @@ def _validate_serving_row(
     expected_role: str = "direct",
     expected_kind: str = "generation",
     public_tokens: bool = False,
+    require_head: bool = False,
+    require_execution_success: bool = False,
 ) -> int:
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -161,17 +175,48 @@ def _validate_serving_row(
             and all(sample.get("completion_tokens") == output_tokens for sample in samples)
         )
     if complete and expected_route is not None:
-        complete = all(
-            sample.get("trace", {}).get("status") == "valid"
-            and any(
+        def stage_ok(sample: dict) -> bool:
+            stages = sample.get("trace", {}).get("stages", [])
+            if sample.get("trace", {}).get("status") != "valid":
+                return False
+            if not any(
                 stage.get("node") == expected_route
                 and stage.get("role") == expected_role
                 and stage.get("kind") == expected_kind
                 and stage.get("status") == "success"
+                for stage in stages
+            ):
+                return False
+            if require_head and not any(
+                stage.get("node") == "head"
+                and stage.get("kind") == "generation"
+                and stage.get("status") == "success"
+                for stage in stages
+            ):
+                return False
+            return bool(
+                [stage for stage in stages if stage.get("kind") == "execution"]
+            )
+
+        def executed(sample: dict) -> bool:
+            return any(
+                stage.get("kind") == "execution" and stage.get("status") == "success"
                 for stage in sample.get("trace", {}).get("stages", [])
             )
-            for sample in samples
-        )
+
+        complete = all(stage_ok(sample) for sample in samples)
+        if complete and require_execution_success:
+            # Model formatting slips occasionally leave a run without a fenced
+            # candidate, so the sandbox gate is a >=90% floor per row, not a
+            # per-sample requirement.
+            executed_count = sum(1 for sample in samples if executed(sample))
+            if executed_count * 10 < len(samples) * 9:
+                print(
+                    f"only {executed_count}/{len(samples)} samples ran sandbox "
+                    "execution (>=90% required)",
+                    file=sys.stderr,
+                )
+                return 1
     if not complete:
         print("serving row did not produce complete fixed-token evidence", file=sys.stderr)
         return 1
@@ -189,6 +234,8 @@ def _serving(
     expected_kind: str = "generation",
     warmup_requests: int | None = None,
     natural_completion: bool = False,
+    require_head: bool = False,
+    require_execution_success: bool = False,
 ) -> int:
     config = SPEC["verification"]["serving"]
     requests = int(config["requests_per_concurrency"])
@@ -325,6 +372,8 @@ def _serving(
                 expected_role=expected_role,
                 expected_kind=expected_kind,
                 public_tokens=natural_completion,
+                require_head=require_head,
+                require_execution_success=require_execution_success,
             )
         if code:
             return code
@@ -332,17 +381,297 @@ def _serving(
 
 
 def serving_auto_max(run_dir: Path) -> int:
+    """Generic-workload regression envelope: the executor stages skip locally
+    while the head/continuation split public stream stays intact."""
+
     return _serving(
         SPEC["orchestration"]["auto_max_model"],
         run_dir,
         tensor_parallel=4,
         replicas=1,
-        expected_route="publisher",
+        expected_route="continuation",
         expected_role="publisher",
         expected_kind="generation",
         warmup_requests=4,
         natural_completion=True,
+        require_head=True,
     )
+
+
+_CODING_TASKS = (
+    "Implement `parse_duration(text: str) -> int` converting strings such as "
+    "'2h30m15s' (any subset and order of h/m/s units, each at most once) to "
+    "total seconds. Reject empty input, unknown units, repeated units, and "
+    "negative or non-integer amounts with ValueError.",
+    "Implement `rle_encode(text: str) -> str` and `rle_decode(data: str) -> str` "
+    "run-length coding using digits+character pairs (e.g. 'aaab' -> '3a1b'). "
+    "Round-trips must be exact for any printable ASCII input without digits; "
+    "rle_decode must raise ValueError on malformed input.",
+    "Implement `is_balanced(text: str, pairs: dict[str, str]) -> bool` checking "
+    "whether every opener in `pairs` closes with its matching closer in the "
+    "correct nesting order; characters outside `pairs` are ignored.",
+    "Implement class `LRUCache` with `__init__(self, capacity: int)`, "
+    "`get(self, key)` returning None on miss, and `put(self, key, value)` "
+    "evicting the least recently used entry beyond capacity; `get` counts as "
+    "a use. Reject capacity < 1 with ValueError.",
+    "Implement `to_roman(value: int) -> str` and `from_roman(text: str) -> int` "
+    "for 1..3999 using standard subtractive notation; raise ValueError on "
+    "out-of-range values and invalid numerals.",
+    "Implement `merge_intervals(intervals: list[tuple[int, int]]) -> "
+    "list[tuple[int, int]]` merging overlapping or touching [start, end] "
+    "intervals and returning them sorted by start; raise ValueError when any "
+    "interval has end < start.",
+    "Implement `top_k_words(text: str, k: int) -> list[str]` returning the k "
+    "most frequent lowercase words (split on non-letters), ties broken "
+    "alphabetically; raise ValueError when k < 1.",
+    "Implement `evaluate_rpn(tokens: list[str]) -> float` evaluating reverse "
+    "Polish notation with + - * / and raising ValueError on malformed "
+    "expressions or ZeroDivisionError on division by zero.",
+)
+
+
+def _coding_dataset(path: Path, requests: int, *, namespace: str) -> None:
+    """Deterministic self-contained Python tasks (~1.5K prompt tokens).
+
+    A namespaced context paragraph precedes each task so a later concurrency
+    row cannot become a full-prefix-cache benchmark, mirroring
+    ``_serving_dataset``.
+    """
+
+    config = SPEC["verification"]["coding"]
+    approximate_tokens = int(config["prompt_tokens_approx"])
+    vocabulary = (
+        "service",
+        "module",
+        "pipeline",
+        "review",
+        "constraint",
+        "interface",
+        "contract",
+        "release",
+        "quality",
+        "coverage",
+        "boundary",
+        "failure",
+        "latency",
+        "budget",
+        "design",
+        "ticket",
+    )
+    filler_words = max(0, approximate_tokens - 220)
+    rows = []
+    for request in range(requests):
+        context = " ".join(
+            vocabulary[(request * 5 + position * 13) % len(vocabulary)]
+            for position in range(filler_words)
+        )
+        task = _CODING_TASKS[request % len(_CODING_TASKS)]
+        prompt = (
+            f"Run {namespace}, case {request}. Project context (background "
+            f"only, no action needed): {context}\n\n"
+            f"Task: {task}\n\n"
+            "Write a self-contained Python module named `solution` and return "
+            "it in one fenced ```python code block with a brief explanation."
+        )
+        rows.append({"conversations": [{"from": "human", "value": prompt}]})
+    path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+
+def _bench_row(
+    *,
+    base_url: str,
+    model: str,
+    dataset: Path,
+    requests: int,
+    concurrency: int,
+    max_tokens: int,
+    results_dir: Path,
+    log: Path,
+    tensor_parallel: int,
+    replicas: int,
+    stage_trace: bool,
+    public_tokenizer: bool,
+) -> int:
+    public_tokenizer_args = (
+        [
+            "--public-tokenizer-url",
+            f"http://127.0.0.1:{os.environ.get('DEEPSEEK_L1_PORT', 8005)}/tokenize",
+            "--public-tokenizer-model",
+            "deepseek-v4-flash-0731",
+        ]
+        if public_tokenizer
+        else []
+    )
+    return _run(
+        [
+            str(ROOT / ".venv/bin/python"),
+            str(ROOT / "verification/l1/performance/serving_bench.py"),
+            "--base-url",
+            base_url,
+            "--model",
+            model,
+            "--dataset",
+            str(dataset),
+            "--num-requests",
+            str(requests),
+            "--concurrency",
+            str(concurrency),
+            "--max-tokens",
+            str(max_tokens),
+            "--temperature",
+            "0.0",
+            "--seed",
+            "0",
+            "--timeout",
+            "86400",
+            "--results-dir",
+            str(results_dir),
+            "--tensor-parallel",
+            str(tensor_parallel),
+            "--dp-replicas",
+            str(replicas),
+            *public_tokenizer_args,
+            *(["--stage-trace"] if stage_trace else []),
+        ],
+        log=log,
+        check=False,
+    )
+
+
+def serving_auto_max_coding(run_dir: Path) -> int:
+    """Coding-workload matrix with the hard public-TTFT gate (ECO-D4).
+
+    Every concurrency row runs the same deterministic coding dataset through
+    the L3 product path AND directly against the DeepSeek L1 loopback
+    endpoint; the row passes only when the product's semantic TTFT p50 stays
+    within ``ttft_multiplier_vs_deepseek_direct`` times the paired direct row
+    (pinned example.json denominators are the fallback when the paired row
+    fails to produce a summary).
+    """
+
+    config = SPEC["verification"]["coding"]
+    requests = int(config["requests_per_concurrency"])
+    multiplier = float(config["ttft_multiplier_vs_deepseek_direct"])
+    fallback = config["deepseek_direct_ttft_p50_ms_fallback"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    api_url = f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}/v1"
+    deepseek_url = (
+        f"http://127.0.0.1:{os.environ.get('DEEPSEEK_L1_PORT', 8005)}/v1"
+    )
+    model = SPEC["orchestration"]["auto_max_model"]
+    warmup_dataset = run_dir / "warmup-coding.json"
+    _coding_dataset(warmup_dataset, 4, namespace=f"{run_dir.name}-warmup")
+    warmup_code = _bench_row(
+        base_url=api_url,
+        model=model,
+        dataset=warmup_dataset,
+        requests=4,
+        concurrency=4,
+        max_tokens=int(config["auto_max_combined_max_tokens"]),
+        results_dir=run_dir / "warmup",
+        log=run_dir / "warmup.log",
+        tensor_parallel=4,
+        replicas=1,
+        stage_trace=True,
+        public_tokenizer=True,
+    )
+    if warmup_code:
+        return warmup_code
+    gates = {}
+    for concurrency in config["concurrency"]:
+        dataset = run_dir / f"coding-c{concurrency}.json"
+        _coding_dataset(
+            dataset,
+            requests,
+            namespace=f"{run_dir.parent.name}-{run_dir.name}-c{concurrency}",
+        )
+        row_dir = run_dir / f"coding-c{concurrency}"
+        code = _bench_row(
+            base_url=api_url,
+            model=model,
+            dataset=dataset,
+            requests=requests,
+            concurrency=concurrency,
+            max_tokens=int(config["auto_max_combined_max_tokens"]),
+            results_dir=row_dir,
+            log=run_dir / f"coding-c{concurrency}.log",
+            tensor_parallel=4,
+            replicas=1,
+            stage_trace=True,
+            public_tokenizer=True,
+        )
+        if code == 0:
+            code = _validate_serving_row(
+                row_dir,
+                requests,
+                0,
+                expected_route="continuation",
+                expected_role="publisher",
+                expected_kind="generation",
+                public_tokens=True,
+                require_head=True,
+                require_execution_success=True,
+            )
+        if code:
+            return code
+        direct_dir = run_dir / f"deepseek-direct-c{concurrency}"
+        direct_code = _bench_row(
+            base_url=deepseek_url,
+            model="deepseek-v4-flash-0731",
+            dataset=dataset,
+            requests=requests,
+            concurrency=concurrency,
+            max_tokens=512,
+            results_dir=direct_dir,
+            log=run_dir / f"deepseek-direct-c{concurrency}.log",
+            tensor_parallel=4,
+            replicas=1,
+            stage_trace=False,
+            public_tokenizer=False,
+        )
+        product = _row_summary(row_dir)
+        direct = _row_summary(direct_dir) if direct_code == 0 else None
+        product_ttft = (
+            product.get("ttft_p50_ms") if isinstance(product, dict) else None
+        )
+        direct_ttft = direct.get("ttft_p50_ms") if isinstance(direct, dict) else None
+        denominator_source = "paired_direct"
+        if not isinstance(direct_ttft, (int, float)):
+            direct_ttft = fallback.get(str(concurrency))
+            denominator_source = "pinned_fallback"
+        if not isinstance(product_ttft, (int, float)) or not isinstance(
+            direct_ttft, (int, float)
+        ):
+            print(
+                f"c{concurrency}: TTFT gate is missing measurements", file=sys.stderr
+            )
+            return 1
+        passed = product_ttft <= multiplier * direct_ttft
+        gates[str(concurrency)] = {
+            "product_semantic_ttft_p50_ms": product_ttft,
+            "deepseek_direct_ttft_p50_ms": direct_ttft,
+            "denominator_source": denominator_source,
+            "multiplier": multiplier,
+            "passed": passed,
+        }
+        print(
+            f"c{concurrency}: product TTFT p50 {product_ttft:.2f} ms vs "
+            f"{multiplier:.1f}x direct {direct_ttft:.2f} ms -> "
+            f"{'PASS' if passed else 'FAIL'}",
+            flush=True,
+        )
+        (run_dir / "ttft-gate.json").write_text(
+            json.dumps(
+                {"schema_version": 1, "gates": gates},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        if not passed:
+            return 1
+    return 0
 
 
 
@@ -355,6 +684,8 @@ def _served_config_sha256() -> str:
         "auto-max.yaml",
         "router.json",
         "deepseek-thinking.jinja",
+        "sandbox/Dockerfile",
+        "sandbox/runner.py",
     ):
         path = HERE / name
         digest.update(name.encode())
@@ -364,20 +695,34 @@ def _served_config_sha256() -> str:
     return digest.hexdigest()
 
 
+_VERIFICATIONS = {
+    "serving-auto-max": (
+        serving_auto_max,
+        "generic-workload product DAG serving matrix (executor skip path)",
+    ),
+    "serving-auto-max-coding": (
+        serving_auto_max_coding,
+        "coding-workload matrix with the public-TTFT <= 2x DeepSeek-direct gate",
+    ),
+}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("verification", choices=("serving-auto-max", "list"))
+    parser.add_argument("verification", choices=(*_VERIFICATIONS, "list"))
     parser.add_argument("--run-id")
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
     if args.verification == "list":
-        print("serving-auto-max  verifier-gated product DAG serving matrix")
+        for name, (_, description) in _VERIFICATIONS.items():
+            print(f"{name}  {description}")
         return
 
     _ensure_environment(args.no_start)
     run_dir = RESULTS_ROOT / (args.run_id or _run_id())
     run_dir.mkdir(parents=True, exist_ok=True)
-    target_dir = run_dir / "serving-auto-max"
+    target, _ = _VERIFICATIONS[args.verification]
+    target_dir = run_dir / args.verification
     manifest = {
         "schema_version": 1,
         "run_id": run_dir.name,
@@ -390,12 +735,12 @@ def main() -> None:
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     try:
-        code = serving_auto_max(target_dir)
+        code = target(target_dir)
     except Exception as error:
-        print(f"serving-auto-max failed: {error}", file=sys.stderr)
+        print(f"{args.verification} failed: {error}", file=sys.stderr)
         code = 1
     manifest["completed_at"] = datetime.now(UTC).isoformat()
-    manifest["exit_codes"] = {"serving-auto-max": code}
+    manifest["exit_codes"] = {args.verification: code}
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

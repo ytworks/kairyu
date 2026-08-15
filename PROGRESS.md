@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example has one public chat model, one public pinned offline embedding model, and one unchanged orchestration YAML: Open WebUI lists only the chat model, L2 borrows four Qwen3.8 TP1 workers on official vLLM v0.23.0 plus the measured DeepSeek TP4/EP4 DSpark worker, and launcher readiness proves a two-input 384-dimensional embedding response. Both this path and the single-Qwen example accept image chat; the tiered example's composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example is a coding-first product: an unchanged L1 fleet (four Qwen3.8 TP1 vLLM workers + the measured DeepSeek TP4/EP4 DSpark worker) under a nine-role L2 DAG where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds an egress-free CPU sandbox executor, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,21 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-15 — [design] Coding orchestration with head streaming and sandbox execution
+- What: replaced the tiered example's seven-role DAG with a nine-role coding
+  DAG on the unchanged L1 fleet; added L2 mechanisms for a t=0 public head
+  stream + verified continuation, incremental reasoning streaming, per-role
+  sampling/prompt suffixes, and deployment-owned sandbox executors run as
+  untrusted-data DAG stages; TTFT gate: public p50 ≤2× DeepSeek-direct per
+  concurrency (live c1 smoke ~0.3 s vs the 1.56 s budget).
+- Why: frontier-level coding accuracy needs ensemble + execution-grounded
+  verification, but the old collect-then-synthesize DAG left first public
+  tokens ~10× over the agreed 2×-DeepSeek TTFT budget; only E2E is
+  unconstrained, so the answer opening streams while the ensemble runs.
+- Refs: ECO-D1..D5 in `docs/design/example-coding-orchestration.md`;
+  `kairyu/orchestration/{conductor,execution}.py`;
+  `examples/qwen3.8-deepseek-v4-8gpu/`
 
 ### 2026-08-15 — [progress] Frontier examples move to Qwen3.8
 - What: replaced both Qwen3.6 example surfaces with attested Qwen3.8-27B-FP8,
@@ -127,3 +142,4 @@ in `.claude/rules/progress-log.md`).
   kept all 205 tracked legacy result files byte-identical at `bench/results/`.
 - Refs: PR #486; `verification/registry.toml`;
   `docs/design/verification-framework.md`
+

@@ -38,6 +38,7 @@ from kairyu.orchestration.conductor import (
     RoleSpec,
     zero_cost,
 )
+from kairyu.orchestration.execution import ExecutionBackend, ExecutorDescriptor
 from kairyu.orchestration.moa import _build_moa_setup, _MoASetup
 from kairyu.orchestration.request import (
     OrchestrationRequest,
@@ -238,6 +239,8 @@ class Orchestrator:
         engine_descriptors: Mapping[str, EngineDescriptor] | None = None,
         owned_engines: Iterable[EngineBackend] | None = None,
         expose_intermediate_outputs: bool = False,
+        execution_workers: Mapping[str, ExecutionBackend] | None = None,
+        executor_descriptors: Mapping[str, ExecutorDescriptor] | None = None,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
@@ -270,6 +273,25 @@ class Orchestrator:
         # m11 A4: >0 routes multi_agent through MoA (the deep kairyu-auto-max tier)
         self._moa_samples = moa_samples
         self._expose_intermediate_outputs = expose_intermediate_outputs
+        self._execution_workers = dict(execution_workers or {})
+        supplied_executor_descriptors = dict(executor_descriptors or {})
+        self._executor_descriptors = {
+            name: supplied_executor_descriptors.get(
+                name,
+                ExecutorDescriptor(backend_type=type(backend).__name__),
+            )
+            for name, backend in self._execution_workers.items()
+        }
+        if self._moa_samples == 0:
+            # Fail fast on an invalid role DAG (head shape, executor bindings,
+            # final-unit overrides) at construction instead of per request.
+            Conductor(
+                roles=self._roles,
+                workers=self._conductor_workers([]),
+                shared_prefix=self._shared_prefix,
+                sampling_params=self._sampling_params,
+                execution_workers=self._execution_workers,
+            )
 
     def generation_defaults_snapshot(
         self,
@@ -335,18 +357,48 @@ class Orchestrator:
         router = (
             describe() if describe is not None else {"router_type": type(self._router).__name__}
         )
-        role_workers = tuple(dict.fromkeys(role.worker for role in self._roles))
+        role_workers = tuple(
+            dict.fromkeys(role.worker for role in self._generation_roles())
+        )
         if self._moa_samples > 0:
             multi_engines = [self._resolved_engine_descriptor(key) for key in ("tier1", "tier2")]
             multi_mode = "moa"
         else:
             multi_engines = [self._resolved_engine_descriptor(key) for key in role_workers]
             multi_mode = "roles"
+
+        def role_payload(role: RoleSpec) -> dict[str, object]:
+            payload: dict[str, object] = {
+                "name": role.name,
+                "worker": role.worker,
+                "role_type": role.role_type,
+                "depends_on": list(role.depends_on),
+                "verifies": role.verifies,
+            }
+            if role.sampling is not None:
+                payload["sampling"] = {
+                    key: value
+                    for key, value in asdict(role.sampling).items()
+                    if value not in (None, ())
+                }
+            if role.executor is not None:
+                payload["executor"] = {
+                    "code_from": list(role.executor.code_from),
+                    "tests_from": list(role.executor.tests_from),
+                    "mode": role.executor.mode,
+                }
+            return payload
+
+        head = self._conductor_head_role()
         return {
             "router": router,
             "targets": ["tier1", "tier2", "multi_agent"],
             "configured_engines": {
                 name: descriptor.as_dict() for name, descriptor in self._engine_descriptors.items()
+            },
+            "configured_executors": {
+                name: descriptor.as_dict()
+                for name, descriptor in self._executor_descriptors.items()
             },
             "target_resolution": {
                 "tier1": self._resolved_engine_descriptor("tier1"),
@@ -356,16 +408,8 @@ class Orchestrator:
                     "engines": multi_engines,
                 },
             },
-            "roles": [
-                {
-                    "name": role.name,
-                    "worker": role.worker,
-                    "role_type": role.role_type,
-                    "depends_on": list(role.depends_on),
-                    "verifies": role.verifies,
-                }
-                for role in self._roles
-            ],
+            "roles": [role_payload(role) for role in self._roles],
+            "stream_head": head.name if head is not None else None,
             "budget": asdict(self._budget),
             "moa_samples": self._moa_samples,
             "internal_max_tokens": self._sampling_params.max_tokens,
@@ -422,11 +466,18 @@ class Orchestrator:
     def _conductor_final_role(self) -> RoleSpec:
         units = [role for role in self._roles if role.role_type != "verifier"]
         dependents = {dependency for role in units for dependency in role.depends_on}
-        terminal = [role for role in units if role.name not in dependents]
+        terminal = [
+            role
+            for role in units
+            if role.name not in dependents and role.role_type not in {"head", "executor"}
+        ]
         synthesizers = [role for role in terminal if role.role_type == "synthesizer"]
         if not terminal:
             raise ValueError("orchestration requires at least one terminal role")
         return (synthesizers + terminal)[0]
+
+    def _conductor_head_role(self) -> RoleSpec | None:
+        return next((role for role in self._roles if role.role_type == "head"), None)
 
     def _final_engine_keys(self, decision: RouteDecision | None) -> tuple[str, ...]:
         if decision is None:
@@ -450,7 +501,11 @@ class Orchestrator:
             keys = {"tier1"}
         else:
             final_role = self._conductor_final_role()
-            keys = {role.worker for role in self._roles if role.name != final_role.name}
+            keys = {
+                role.worker
+                for role in self._generation_roles()
+                if role.name != final_role.name
+            }
         fallback = next(iter(self._engines))
         return tuple(
             dict.fromkeys(key if key in self._engines else fallback for key in sorted(keys))
@@ -480,7 +535,7 @@ class Orchestrator:
                 fallback = next(iter(self._engines))
                 role_keys = {
                     role.worker if role.worker in self._engines else fallback
-                    for role in self._roles
+                    for role in self._generation_roles()
                 }
                 if not any(
                     backend_supports_prompt_kind(self._engines[key], "multimodal")
@@ -1065,6 +1120,11 @@ class Orchestrator:
         supplied_bytes = len(f"{self._shared_prefix}{call.prompt}".encode())
         stage_prompt = max(1, supplied_bytes + role_bytes + 256)
         internal_output = internal.max_tokens
+        head = self._conductor_head_role()
+        if head is not None and head.sampling is not None and head.sampling.max_tokens:
+            # The head streams public output whose role cap may exceed the
+            # internal ceiling; keep the bound conservative.
+            internal_output = max(internal_output, head.sampling.max_tokens)
         private_steps = max(0, steps - 1)
         private_work = (
             private_steps * (stage_prompt + internal_output)
@@ -1117,8 +1177,11 @@ class Orchestrator:
 
         return await run_prompt_work(self.admission_upper_bound, request)
 
+    def _generation_roles(self) -> tuple[RoleSpec, ...]:
+        return tuple(role for role in self._roles if role.role_type != "executor")
+
     def _conductor_workers(self, notes: list[str]) -> dict[str, EngineBackend]:
-        needed = {role.worker for role in self._roles}
+        needed = {role.worker for role in self._generation_roles()}
         return {name: self._resolve_engine(name, notes) for name in needed}
 
     def _new_conductor(
@@ -1147,11 +1210,12 @@ class Orchestrator:
             expose_intermediate_outputs=self._expose_intermediate_outputs,
             multimodal_prompt=call.multimodal_prompt,
             chat_template_kwargs=call.chat_template_kwargs,
+            execution_workers=self._execution_workers,
         )
 
     def _conductor_worker_trace(self) -> dict[str, WorkerTraceIdentity]:
         fallback_name = next(iter(self._engines))
-        needed = {role.worker for role in self._roles}
+        needed = {role.worker for role in self._generation_roles()}
         identities = {}
         for worker in needed:
             engine = worker if worker in self._engines else fallback_name
@@ -1160,6 +1224,9 @@ class Orchestrator:
                 engine=engine,
                 model=descriptor.model,
             )
+        for role in self._roles:
+            if role.role_type == "executor" and role.worker not in identities:
+                identities[role.worker] = WorkerTraceIdentity(engine=role.worker)
         return identities
 
     def _route_trace_event(
@@ -1697,6 +1764,41 @@ class Orchestrator:
             if not first.done():
                 first.cancel()
                 await asyncio.gather(first, return_exceptions=True)
+            close = getattr(iterator, "aclose", None)
+            if close is not None:
+                await close()
+
+    async def _with_keepalives(self, stream) -> AsyncIterator[object | None]:
+        """Emit timer sentinels whenever the next event is slow to arrive.
+
+        The head/incremental-reasoning Conductor stream produces events
+        throughout the DAG's lifetime with potentially long gaps between
+        stages, so every ``anext`` is task-backed (EO-D8).  The per-event task
+        cost is microseconds against a multi-millisecond token cadence; the
+        latency-critical direct route keeps its pull-through loop.
+        """
+
+        iterator = stream.__aiter__()
+        try:
+            while True:
+                upcoming = asyncio.ensure_future(anext(iterator))
+                try:
+                    while not upcoming.done():
+                        done, _ = await asyncio.wait(
+                            {upcoming},
+                            timeout=_KEEPALIVE_INTERVAL_S,
+                        )
+                        if not done:
+                            yield None
+                    try:
+                        yield upcoming.result()
+                    except StopAsyncIteration:
+                        return
+                finally:
+                    if not upcoming.done():
+                        upcoming.cancel()
+                        await asyncio.gather(upcoming, return_exceptions=True)
+        finally:
             close = getattr(iterator, "aclose", None)
             if close is not None:
                 await close()
@@ -2356,7 +2458,7 @@ class Orchestrator:
         )
         conductor_result = None
         try:
-            async for event in self._with_initial_keepalives(
+            async for event in self._with_keepalives(
                 conductor.stream(
                     prompt,
                     budget=self._budget,

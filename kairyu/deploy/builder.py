@@ -46,6 +46,7 @@ from kairyu.entrypoints.server.app import create_app
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
 from kairyu.models.generation import validate_generation_config_mode
+from kairyu.orchestration.execution import HttpExecutionBackend
 from kairyu.orchestration.orchestrator import Orchestrator
 from kairyu.orchestration.prefix_index import PrefixIndex
 from kairyu.orchestration.replica import ReplicaPool
@@ -617,6 +618,13 @@ def build_app_from_spec(
     engines: dict[str, EngineBackend] = {
         name: create_backend(entry.backend, **entry.options) for name, entry in spec.engines.items()
     }
+    execution_backends = {
+        name: HttpExecutionBackend(
+            base_url=section.base_url,
+            timeout_s=section.timeout_s,
+        )
+        for name, section in spec.executors.items()
+    }
     # The builder owns these concrete engines and must finish any failure-prone
     # startup before FastAPI's lifespan yields (and uvicorn begins serving).
     # Pools own their replicas for shutdown, but keep the concrete replicas here
@@ -789,7 +797,11 @@ def build_app_from_spec(
             orchestrator_spec = orchestrator_spec.model_copy(
                 update={"workers": tuple(workers)}
             )
-        return build_orchestrator(orchestrator_spec, engine_refs=engines)
+        return build_orchestrator(
+            orchestrator_spec,
+            engine_refs=engines,
+            executor_refs=execution_backends,
+        )
 
     orchestrator: Orchestrator | None = None
     if spec.orchestrator is not None:
@@ -875,6 +887,7 @@ def build_app_from_spec(
                     except Exception as error:
                         shutdown_errors.append(error)
             resources = list(engines.values())
+            resources.extend(execution_backends.values())
             resources.extend(embedding_backends.values())
             if orchestrator is not None:
                 resources.append(orchestrator)

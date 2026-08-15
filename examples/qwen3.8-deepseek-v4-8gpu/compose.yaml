@@ -76,7 +76,37 @@ x-qwen: &qwen
     start_period: 30s
   restart: unless-stopped
 
+networks:
+  default:
+  # No default gateway and no host services: the executor can reach nothing,
+  # and only kairyu can reach the executor (ECO-D1).
+  sandbox:
+    internal: true
+
 services:
+  executor:
+    build:
+      context: ./sandbox
+    image: ${EXECUTOR_IMAGE:-local/kairyu-executor:coding-v1}
+    networks: [sandbox]
+    read_only: true
+    user: "65534:65534"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 4.0
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+      - /run/exec:size=256m,uid=65534,noexec,nosuid,nodev
+    healthcheck:
+      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2)']
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+    restart: unless-stopped
+
   qwen-0:
     <<: *qwen
     cpuset: ${QWEN_0_CPUSET}
@@ -258,12 +288,16 @@ services:
       - ./router.json:/etc/kairyu/router.json:ro
       - ./deepseek-thinking.jinja:/etc/kairyu/deepseek-thinking.jinja:ro
       - ../deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
+    networks: [default, sandbox]
     depends_on:
       qwen-0: {condition: service_healthy}
       qwen-1: {condition: service_healthy}
       qwen-2: {condition: service_healthy}
       qwen-3: {condition: service_healthy}
       deepseek: {condition: service_healthy}
+      # Startup-strict so a broken sandbox is caught at launch; a runtime
+      # outage degrades executor stages instead of failing requests.
+      executor: {condition: service_healthy}
     ports:
       - ${API_BIND_ADDRESS:-0.0.0.0}:${API_PORT:-8003}:8000
     healthcheck:

@@ -1848,3 +1848,102 @@ async def test_frontier_missing_usage_never_substitutes_chunk_count(monkeypatch)
     assert result.completion_tokens is None
     assert result.tpot_s is None
     assert report.summary()["tpot_missing_usage_trials"] == 1
+
+
+def test_auto_head_stream_emits_public_text_exactly_once(tmp_path):
+    """EO-D7 regression: the split head/continuation stream synthesizes its
+    delta completions server-side; the terminal result chunk must emit only a
+    genuine tail, never the whole already-streamed public text again."""
+
+    from kairyu.orchestration.conductor import RoleSpec
+    from kairyu.orchestration.features import extract_features
+    from kairyu.orchestration.router import RouteDecision
+
+    class ForceMultiRouter:
+        def route(self, prompt):
+            return RouteDecision(
+                target="multi_agent",
+                confidence=1.0,
+                features=extract_features(prompt),
+                reason="test",
+            )
+
+    class StreamBackend(MockBackend):
+        def __init__(self, text):
+            super().__init__()
+            self._text = text
+
+        async def generate(self, request):
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(index=0, text=self._text, token_ids=(1,)),
+                ),
+                usage=GenerationUsage(prompt_tokens=2, completion_tokens=2),
+            )
+
+        async def stream(self, request):
+            for end in range(1, len(self._text) + 1):
+                yield GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(
+                        CompletionOutput(
+                            index=0,
+                            text=self._text[:end],
+                            token_ids=(1,),
+                            finish_reason="stop" if end == len(self._text) else None,
+                        ),
+                    ),
+                    finished=end == len(self._text),
+                )
+
+    roles = (
+        RoleSpec(name="head", worker="hw", role_type="head", prompt="[h] {query}"),
+        RoleSpec(name="draft", worker="dw", prompt="[d] {query} {head}",
+                 depends_on=("head",)),
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[c] {head} {draft}",
+            depends_on=("head", "draft"),
+        ),
+    )
+    orchestrator = Orchestrator(
+        {
+            "hw": StreamBackend("Intro. "),
+            "dw": StreamBackend("draft"),
+            "cw": StreamBackend("Body."),
+        },
+        router=ForceMultiRouter(),
+        roles=roles,
+    )
+    app = create_legacy_app(
+        {},
+        orchestrators={"kairyu-auto": orchestrator},
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+    )
+    with TestClient(app) as client:
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={
+                "model": "kairyu-auto",
+                "stream": True,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        ) as response:
+            body = "".join(response.iter_text())
+    assert "data: [DONE]" in body
+    contents = []
+    for line in body.splitlines():
+        if not line.startswith("data: ") or "[DONE]" in line:
+            continue
+        chunk = json.loads(line[len("data: ") :])
+        for choice in chunk.get("choices", []):
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                contents.append(delta["content"])
+    assert "".join(contents) == "Intro. Body."

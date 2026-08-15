@@ -131,12 +131,33 @@ class TargetResolutionPayload(BaseModel):
     engines: list[EngineResolutionPayload] = Field(default_factory=list)
 
 
+class RoleSamplingPayload(BaseModel):
+    temperature: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    seed_offset: int | None = None
+    stop: list[str] = Field(default_factory=list)
+
+
+class RoleExecutorPayload(BaseModel):
+    code_from: list[str]
+    tests_from: list[str]
+    mode: str
+
+
 class RoleDescriptorPayload(BaseModel):
     name: str
     worker: str
     role_type: str
     depends_on: list[str]
     verifies: str | None = None
+    sampling: RoleSamplingPayload | None = None
+    executor: RoleExecutorPayload | None = None
+
+
+class ExecutorDescriptorPayload(BaseModel):
+    backend_type: str
+    base_url: str | None = None
 
 
 class BudgetDescriptorPayload(BaseModel):
@@ -149,8 +170,12 @@ class RoutingModelDescriptorPayload(BaseModel):
     router: RouterDescriptorPayload
     targets: list[str]
     configured_engines: dict[str, EngineDescriptorPayload]
+    configured_executors: dict[str, ExecutorDescriptorPayload] = Field(
+        default_factory=dict
+    )
     target_resolution: dict[str, TargetResolutionPayload]
     roles: list[RoleDescriptorPayload]
+    stream_head: str | None = None
     budget: BudgetDescriptorPayload
     moa_samples: int
     internal_max_tokens: int | None

@@ -88,6 +88,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         },
     }
     assert set(compose["services"]) == {
+        "executor",
         "qwen-0",
         "qwen-1",
         "qwen-2",
@@ -96,6 +97,17 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "kairyu",
         "chat-ui",
     }
+    executor = compose["services"]["executor"]
+    assert executor["networks"] == ["sandbox"]
+    assert compose["networks"]["sandbox"] == {"internal": True}
+    assert executor["read_only"] is True
+    assert executor["user"] == "65534:65534"
+    assert executor["cap_drop"] == ["ALL"]
+    assert executor["security_opt"] == ["no-new-privileges:true"]
+    assert executor["pids_limit"] == 256
+    assert all("noexec" in mount for mount in executor["tmpfs"])
+    assert "deploy" not in executor  # CPU-only: no GPU reservation
+    assert compose["services"]["kairyu"]["networks"] == ["default", "sandbox"]
     assert spec["vllm"]["qwen"]["release"] == "v0.23.0"
     assert {
         compose["services"][service]["image"]
@@ -233,6 +245,8 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert set(deployment.orchestrators) == {
         "kairyu-auto-max",
     }
+    assert set(deployment.executors) == {"sandbox-python"}
+    assert deployment.executors["sandbox-python"].base_url == "http://executor:8080"
     assert list(deployment.embeddings) == ["embed-small"]
     embedding = deployment.embeddings["embed-small"]
     assert embedding.backend == "fastembed"
@@ -266,44 +280,79 @@ def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcri
     assert "Do not stop reasoning" not in template
 
 
-def test_tiered_l2_pins_only_the_explicit_product_dag() -> None:
+def test_tiered_l2_pins_only_the_explicit_coding_dag() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
 
     assert [worker.name for worker in maximum.workers] == [
         "tier1",
         "tier2",
-        "publisher",
+        "tier2-direct",
+        "sandbox",
     ]
     assert maximum.workers[0].engine_ref == "qwen3.8-27b"
     assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
-    assert maximum.workers[2].engine_ref == "qwen3.8-27b"
+    # The public head/continuation stream must use the NON-thinking DeepSeek
+    # policy: <think> deliberation was measured consuming the entire public
+    # token budget before the first visible byte.
+    assert maximum.workers[2].engine_ref == "deepseek-v4-flash-0731"
+    assert maximum.workers[3].executor_ref == "sandbox-python"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
-    assert maximum.internal_max_tokens == 2048
+    assert maximum.internal_max_tokens == 4096
     assert maximum.expose_intermediate_outputs is True
-    assert config["orchestration"]["internal_max_output_tokens"] == 2048
-    assert config["orchestration"]["product_policy"] == "verifier-gated-role-dag"
-    assert config["orchestration"]["product_normal_calls"] == 7
-    assert config["orchestration"]["product_max_calls"] == 11
+    assert config["orchestration"]["internal_max_output_tokens"] == 4096
+    assert (
+        config["orchestration"]["product_policy"]
+        == "head-streamed-execution-gated-coding-dag"
+    )
+    assert config["orchestration"]["product_normal_calls"] == 9
+    assert config["orchestration"]["product_max_calls"] == 15
     assert config["orchestration"]["product_max_refinements"] == 2
-    assert maximum.budget.max_steps == 11
+    assert maximum.budget.max_steps == 15
     assert maximum.budget.max_refine_depth == 2
-    assert [role.name for role in maximum.roles] == [
-        "planner",
-        "proposal_a",
-        "proposal_b",
-        "proposal_c",
+    expected_roles = list(config["orchestration"]["roles"])
+    assert [role.name for role in maximum.roles] == expected_roles == [
+        "head",
+        "testgen",
+        "proposal_impl",
+        "proposal_edge",
+        "exec_matrix",
         "draft_synthesis",
+        "exec_draft",
         "verifier",
-        "publisher",
+        "continuation",
     ]
-    verifier = next(role for role in maximum.roles if role.name == "verifier")
-    publisher = next(role for role in maximum.roles if role.name == "publisher")
+    by_name = {role.name: role for role in maximum.roles}
+    # The head streams the public opening from t=0 on the DeepSeek worker (the
+    # measured TTFT-budget row); the continuation resumes the public stream.
+    head = by_name["head"]
+    # Qwen: server-side template + thinking disabled makes the public opening
+    # deterministic; DeepSeek public roles pay a nondeterministic <think> tax.
+    assert head.role_type == "head" and head.worker == "tier1"
+    assert head.depends_on == ()
+    assert config["orchestration"]["stream_head"] == "head"
+    continuation = by_name["continuation"]
+    assert continuation.worker == "tier2-direct"
+    assert continuation.depends_on == ("head", "draft_synthesis", "verifier")
+    # The verifier judges execution evidence that is re-run inline per attempt.
+    verifier = by_name["verifier"]
     assert verifier.verifies == "draft_synthesis"
-    assert publisher.worker == "publisher"
-    assert publisher.depends_on == ("draft_synthesis", "verifier")
+    assert verifier.depends_on == ("draft_synthesis", "exec_draft")
+    exec_matrix = by_name["exec_matrix"]
+    assert exec_matrix.role_type == "executor" and exec_matrix.worker == "sandbox"
+    assert exec_matrix.executor is not None
+    assert exec_matrix.executor.mode == "matrix"
+    assert exec_matrix.executor.code_from == ("proposal_impl", "proposal_edge")
+    assert exec_matrix.executor.tests_from == ("testgen",)
+    exec_draft = by_name["exec_draft"]
+    assert exec_draft.executor is not None
+    assert exec_draft.executor.mode == "single"
+    assert exec_draft.executor.code_from == ("draft_synthesis",)
+    # Untrusted-data delimiters (MoA pattern) guard every cross-role payload.
+    for role_name in ("draft_synthesis", "verifier"):
+        assert "UNTRUSTED" in by_name[role_name].prompt
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 
@@ -334,6 +383,7 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
         "qwen-2": {"condition": "service_healthy"},
         "qwen-3": {"condition": "service_healthy"},
         "deepseek": {"condition": "service_healthy"},
+        "executor": {"condition": "service_healthy"},
     }
     policy_mounts = {
         volume for volume in compose["services"]["kairyu"]["volumes"]
@@ -378,21 +428,27 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                     "roles": [
                         {"name": name}
                         for name in (
-                            "planner",
-                            "proposal_a",
-                            "proposal_b",
-                            "proposal_c",
+                            "head",
+                            "testgen",
+                            "proposal_impl",
+                            "proposal_edge",
+                            "exec_matrix",
                             "draft_synthesis",
+                            "exec_draft",
                             "verifier",
-                            "publisher",
+                            "continuation",
                         )
                     ],
+                    "stream_head": "head",
                     "moa_samples": 0,
-                    "budget": {"max_steps": 11, "max_refine_depth": 2},
+                    "budget": {"max_steps": 15, "max_refine_depth": 2},
                     "expose_intermediate_outputs": True,
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
                         "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
+                    },
+                    "configured_executors": {
+                        "sandbox": {"backend_type": "HttpExecutionBackend"}
                     },
                 }
             }
@@ -508,7 +564,7 @@ def test_tiered_verification_rejects_storage_outside_nvme(
 
 
 
-def test_tiered_product_serving_requires_publisher_trace(
+def test_tiered_product_serving_requires_head_and_continuation_trace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     benchmark = _load(EXAMPLE / "verification.py", "tiered_example_product_verification")
@@ -527,11 +583,51 @@ def test_tiered_product_serving_requires_publisher_trace(
             {
                 "tensor_parallel": 4,
                 "replicas": 1,
-                "expected_route": "publisher",
+                "expected_route": "continuation",
                 "expected_role": "publisher",
                 "expected_kind": "generation",
                 "warmup_requests": 4,
                 "natural_completion": True,
+                "require_head": True,
             },
         )
     ]
+
+
+def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    benchmark = _load(EXAMPLE / "verification.py", "tiered_example_coding_gate")
+    summaries: dict[str, dict] = {}
+
+    monkeypatch.setattr(benchmark, "_bench_row", lambda **kwargs: 0)
+    monkeypatch.setattr(
+        benchmark, "_validate_serving_row", lambda *args, **kwargs: 0
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "_row_summary",
+        lambda row_dir: summaries.get(row_dir.name),
+    )
+    monkeypatch.setitem(
+        benchmark.SPEC["verification"]["coding"], "concurrency", [1]
+    )
+
+    # Within 2x the paired DeepSeek-direct row: PASS.
+    summaries["coding-c1"] = {"ttft_p50_ms": 1500.0}
+    summaries["deepseek-direct-c1"] = {"ttft_p50_ms": 800.0}
+    assert benchmark.serving_auto_max_coding(tmp_path / "pass") == 0
+    gate = json.loads((tmp_path / "pass" / "ttft-gate.json").read_text())
+    assert gate["gates"]["1"]["passed"] is True
+    assert gate["gates"]["1"]["denominator_source"] == "paired_direct"
+
+    # Beyond 2x: the row fails the run.
+    summaries["coding-c1"] = {"ttft_p50_ms": 1700.0}
+    assert benchmark.serving_auto_max_coding(tmp_path / "fail") == 1
+
+    # A missing paired row falls back to the pinned example.json denominator.
+    summaries["coding-c1"] = {"ttft_p50_ms": 1500.0}
+    del summaries["deepseek-direct-c1"]
+    assert benchmark.serving_auto_max_coding(tmp_path / "fallback") == 0
+    gate = json.loads((tmp_path / "fallback" / "ttft-gate.json").read_text())
+    assert gate["gates"]["1"]["denominator_source"] == "pinned_fallback"

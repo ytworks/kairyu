@@ -34,6 +34,13 @@ absent from `/routing`.
 
 ### EO-D3 — The quality path is an explicit bounded DAG
 
+> **Superseded (2026-08-15):** the role graph below was replaced by the
+> head-streamed, execution-gated nine-role coding DAG of
+> `example-coding-orchestration.md` (ECO-D2). The bounded-DAG principle and
+> the "verify a draft before publishing" rule survive there; the
+> pre-verified public stream is now split into a committed head prefix plus
+> a verified continuation (ECO-D4). EO-D1/D2/D4/D5/D6 remain in force.
+
 The UI-visible model uses this role graph instead of the single-pass MoA
 shortcut:
 

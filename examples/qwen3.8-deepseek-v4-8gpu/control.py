@@ -442,21 +442,21 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
     if set(routing) != {product_model}:
         raise SystemExit(f"Kairyu product routing inventory is not isolated: {sorted(routing)}")
     policy = routing[product_model]
-    expected_roles = [
-        "planner",
-        "proposal_a",
-        "proposal_b",
-        "proposal_c",
-        "draft_synthesis",
-        "verifier",
-        "publisher",
-    ]
+    orchestration = SPEC["orchestration"]
+    expected_roles = list(orchestration["roles"])
     if [role.get("name") for role in policy.get("roles", ())] != expected_roles:
-        raise SystemExit("Kairyu L2 does not report the required seven-role product DAG")
+        raise SystemExit(
+            "Kairyu L2 does not report the required "
+            f"{len(expected_roles)}-role coding product DAG"
+        )
+    if policy.get("stream_head") != orchestration["stream_head"]:
+        raise SystemExit("Kairyu product policy must stream the head role publicly")
     if policy.get("moa_samples") != 0:
         raise SystemExit("Kairyu product policy must use the explicit DAG, not MoA")
-    if policy.get("budget", {}).get("max_steps") != 11:
-        raise SystemExit("Kairyu product policy max_steps must be 11")
+    if policy.get("budget", {}).get("max_steps") != orchestration["max_steps"]:
+        raise SystemExit(
+            f"Kairyu product policy max_steps must be {orchestration['max_steps']}"
+        )
     if policy.get("budget", {}).get("max_refine_depth") != 2:
         raise SystemExit("Kairyu product policy max_refine_depth must be 2")
     if policy.get("expose_intermediate_outputs") is not True:
@@ -469,6 +469,11 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         != "deepseek-v4-flash-0731-thinking"
     ):
         raise SystemExit("Kairyu Tier2 L2 worker is not bound to the DeepSeek L1 pool")
+    executors = policy.get("configured_executors", {})
+    if orchestration["executor_worker"] not in executors:
+        raise SystemExit(
+            "Kairyu executor worker is not bound to the sandbox execution service"
+        )
 
 
 def _public_ui_host() -> str:

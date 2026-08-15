@@ -1,5 +1,17 @@
 # Measurements
 
+> **Historical evidence for the whole document:** every measurement below
+> predates the head-streamed, execution-gated nine-role coding DAG that now
+> defines `kairyu-auto-max` (head → testgen/proposals → sandbox execution →
+> synthesis → execution → verifier → continuation). None of these rows may be
+> attributed to the current deployment. The current path's serving evidence is
+> owned by `./verify.sh serving-auto-max` (generic/skip path) and
+> `./verify.sh serving-auto-max-coding` (coding path with the semantic-TTFT
+> ≤ 2× DeepSeek-direct gate); fresh runs land under the NVMe
+> `verification-results/` directory. The Tier1/Tier2 L1 selection evidence
+> below (TP1×4 Qwen, DSpark-5/16K DeepSeek) remains the basis of the
+> unchanged L1 topology.
+
 ## Current deployment validation
 
 On 2026-08-14 UTC (2026-08-15 JST), the complete eight-GPU deployment reached
