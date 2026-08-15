@@ -1,10 +1,12 @@
-"""Sandbox runner report/validation logic (no Docker, no subprocess).
+"""Sandbox runner report/validation logic (no Docker).
 
 Silent mis-parsing here would convert failing tests into "passed" evidence fed
 to the synthesis/verifier stages, so the summarization contract is pinned.
 """
 
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -113,3 +115,37 @@ def test_summarize_timeout_and_output_truncation():
     assert report["resource"]["timed_out"] is True
     assert report["resource"]["output_truncated"] is True
     assert report["stdout_excerpt"].endswith("[truncated]")
+
+
+def test_communicate_capped_drains_both_pipes_without_retaining_full_output():
+    output_bytes = 1024
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "sys.stdout.buffer.write(b'x' * 262144); "
+                "sys.stdout.buffer.flush(); "
+                "sys.stderr.buffer.write(b'y' * 262144)"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    stdout, stderr = runner._communicate_capped(process, output_bytes)
+
+    assert process.returncode == 0
+    assert stdout == b"x" * (output_bytes + 1)
+    assert stderr == b"y" * (output_bytes + 1)
+    report = runner.summarize(
+        {"exit_code": 0, "tests": []},
+        timed_out=False,
+        returncode=0,
+        stdout=stdout,
+        stderr=stderr,
+        output_bytes=output_bytes,
+        duration_ms=1,
+    )
+    assert report["resource"]["output_truncated"] is True

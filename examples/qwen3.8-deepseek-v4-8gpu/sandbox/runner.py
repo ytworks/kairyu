@@ -201,6 +201,32 @@ def _preexec(limits: dict):
     return apply
 
 
+def _communicate_capped(process: subprocess.Popen[bytes], output_bytes: int) -> tuple[bytes, bytes]:
+    """Drain both pipes concurrently while retaining only cap + 1 bytes."""
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    retained = [bytearray(), bytearray()]
+    retain_bytes = output_bytes + 1
+
+    def drain(index: int, stream) -> None:
+        while chunk := stream.read(64 * 1024):
+            remaining = retain_bytes - len(retained[index])
+            if remaining > 0:
+                retained[index].extend(chunk[:remaining])
+
+    readers = [
+        threading.Thread(target=drain, args=(0, process.stdout)),
+        threading.Thread(target=drain, args=(1, process.stderr)),
+    ]
+    for reader in readers:
+        reader.start()
+    process.wait()
+    for reader in readers:
+        reader.join()
+    return bytes(retained[0]), bytes(retained[1])
+
+
 def run_submission(submission: dict) -> dict:
     """Execute one validated submission and return the wire report."""
 
@@ -248,7 +274,7 @@ def run_submission(submission: dict) -> dict:
         timer = threading.Timer(limits["wall_time_s"], kill_group)
         timer.start()
         try:
-            stdout, stderr = process.communicate()
+            stdout, stderr = _communicate_capped(process, limits["output_bytes"])
         finally:
             timer.cancel()
         report_payload = None
