@@ -62,13 +62,16 @@ verifier repeats synthesis, execution, and verification at most twice
 (`moa_samples: 0`, `max_refine_depth: 2`, `max_steps: 15`); L2 never calls the
 public L3 endpoint recursively.
 
-The executor is a CPU-only container on an internal-only compose network (no
-egress, read-only rootfs, noexec tmpfs, non-root, no capabilities, pids/memory
-limits) that runs model-generated code as hostile input under per-submission
-rlimits and a wall-clock process-group killer; only the Kairyu service can
-reach it. Executor results enter role prompts as untrusted machine JSON, and a
-sandbox outage degrades executor stages to an `unavailable` report instead of
-failing requests.
+The executor is a CPU-only container with `network_mode: none` — it has no IP
+interface at all, so hostile code has no callback path to the gateway or
+anywhere else. Kairyu reaches its HTTP protocol only through a shared Unix
+domain socket volume (mounted read-only on the Kairyu side). The container
+also has a read-only rootfs, noexec tmpfs, non-root user, no capabilities,
+and pids/memory limits, and runs model-generated code as hostile input under
+per-submission rlimits with a wall-clock process-group killer. Executor
+results enter role prompts as untrusted machine JSON, and a sandbox outage
+degrades executor stages to an `unavailable` report instead of failing
+requests.
 
 In the same assistant response, completed L2/L1 stages are sent as
 model-attributed `reasoning_content` and rendered by pinned Open WebUI in a
