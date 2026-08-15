@@ -36,6 +36,28 @@ The c32 row passes only against its paired direct denominator (1.65×), not
 against the historical 8K-prompt pinned fallback — the paired same-dataset
 comparison is the committed gate.
 
+## Generic serving matrix (current deployment, executor skip path)
+
+Run ID: `20260815T052328Z` (`./verify.sh serving-auto-max`); ~8K-token
+generic prompts, natural completion, temperature 0. Every sample skipped
+both executor stages locally (the everyday non-coding degrade path), carried
+a valid trace with successful `head` and `continuation` stages, and
+returned a non-empty public answer.
+
+| Concurrency | semantic TTFT p50/p99 (ms) | E2E p50/p99 (ms) | public output tok/s | success |
+|---:|---:|---:|---:|---:|
+| 1 | 2,075.60 / 2,135.56 | 83,905 / 145,842 | 8.94 | 32/32 |
+| 8 | 5,887.12 / 31,759.73 | 181,969 / 291,920 | 30.23 | 32/32 |
+| 16 | 24,096.11 / 77,862.65 | 312,040 / 405,169 | 36.65 | 32/32 |
+| 32 | 96,189.86 / 162,889.23 | 525,900 / 548,632 | 39.63 | 32/32 |
+
+Generic TTFT is dominated by the Qwen head's ~8K-token prefill (compare the
+historical Tier1 TP1 c1 TTFT of 2,620.97 ms at the same prompt length); the
+committed TTFT gate is the coding matrix above. Against the historical
+MoA-3 auto-max rows on comparable 8K prompts (semantic TTFT p50
+15,559.95 ms at c1), the head-streamed DAG improves first-public-token
+latency by 7.5× while additionally running the full verification pipeline.
+
 > **Historical evidence for all sections below:** these rows predate the
 > current coding DAG.
 
