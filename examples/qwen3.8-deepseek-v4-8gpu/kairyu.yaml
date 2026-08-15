@@ -111,12 +111,13 @@ embeddings:
     threads: 2
     max_concurrency: 2
 
-# The sandbox execution service reachable only over the compose-internal
-# sandbox network (ECO-D1). A runtime outage degrades executor stages to an
+# The sandbox has no network interface. Kairyu reaches its HTTP protocol over
+# this shared Unix socket only (ECO-D1); a runtime outage still degrades to an
 # `unavailable` report instead of failing requests.
 executors:
   sandbox-python:
-    base_url: http://executor:8080
+    base_url: http://executor
+    uds_path: /run/kairyu-executor/executor.sock
     timeout_s: 25
 
 orchestrators:

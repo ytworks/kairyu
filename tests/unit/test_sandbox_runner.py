@@ -5,6 +5,9 @@ to the synthesis/verifier stages, so the summarization contract is pinned.
 """
 
 import importlib.util
+import socket
+import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -113,3 +116,34 @@ def test_summarize_timeout_and_output_truncation():
     assert report["resource"]["timed_out"] is True
     assert report["resource"]["output_truncated"] is True
     assert report["stdout_excerpt"].endswith("[truncated]")
+
+
+def test_unix_socket_server_healthcheck():
+    # AF_UNIX paths are limited to 108 bytes on Linux; pytest's configured
+    # temporary root can exceed that on WSL hosts.
+    with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+        socket_path = Path(temp_dir) / "executor.sock"
+        server = runner.ThreadingUnixHTTPServer(str(socket_path), runner.Handler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            with socket.socket(socket.AF_UNIX) as client:
+                client.settimeout(2)
+                client.connect(str(socket_path))
+                client.sendall(
+                    b"GET /healthz HTTP/1.0\r\nHost: executor\r\n\r\n"
+                )
+                chunks = []
+                while True:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        response = b"".join(chunks)
+        assert response.startswith(b"HTTP/1.0 200")
+        assert b'{"status": "ok"}' in response

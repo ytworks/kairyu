@@ -218,15 +218,19 @@ class HttpExecutionBackend:
     base_url: str
     timeout_s: float = 25.0
     excerpt_bytes: int = _DEFAULT_EXCERPT_BYTES
+    uds_path: str | None = None
     transport: httpx.AsyncBaseTransport | None = None
     _client: httpx.AsyncClient | None = field(default=None, init=False, repr=False)
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            transport = self.transport
+            if transport is None and self.uds_path is not None:
+                transport = httpx.AsyncHTTPTransport(uds=self.uds_path)
             self._client = httpx.AsyncClient(
                 base_url=self.base_url.rstrip("/"),
                 timeout=self.timeout_s,
-                transport=self.transport,
+                transport=transport,
             )
         return self._client
 

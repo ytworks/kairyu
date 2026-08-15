@@ -621,6 +621,7 @@ def build_app_from_spec(
     execution_backends = {
         name: HttpExecutionBackend(
             base_url=section.base_url,
+            uds_path=section.uds_path,
             timeout_s=section.timeout_s,
         )
         for name, section in spec.executors.items()

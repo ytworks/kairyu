@@ -106,6 +106,39 @@ async def test_invalid_report_body_degrades():
     assert report.status == "unavailable"
 
 
+async def test_unix_socket_transport_is_selected(monkeypatch):
+    captured = {}
+
+    def transport_factory(**kwargs):
+        captured.update(kwargs)
+        return httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "tests": [],
+                    "passed": 0,
+                    "failed": 0,
+                    "errors": 0,
+                    "duration_ms": 1,
+                },
+            )
+        )
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", transport_factory)
+    backend = HttpExecutionBackend(
+        base_url="http://executor",
+        uds_path="/run/kairyu-executor/executor.sock",
+    )
+    try:
+        report = await backend.execute(_request())
+    finally:
+        await backend.shutdown()
+
+    assert report.status == "ok"
+    assert captured == {"uds": "/run/kairyu-executor/executor.sock"}
+
+
 def test_extract_python_block_boundaries():
     fenced = "intro\n```python\ndef f():\n    return 1\n```\ntail"
     assert extract_python_block(fenced) == "def f():\n    return 1"

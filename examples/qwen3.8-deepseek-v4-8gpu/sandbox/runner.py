@@ -2,8 +2,8 @@
 """Sandbox execution runner for the tiered coding example (ECO-D1/ECO-D3).
 
 A single-file stdlib HTTP service that runs model-generated Python against
-model-generated pytest files inside this already-isolated container (internal
-network only, read-only rootfs, non-root, no capabilities). The code under
+model-generated pytest files inside this already-isolated container
+(networkless, read-only rootfs, non-root, no capabilities). The code under
 execution is hostile by assumption: every submission runs in a fresh workdir
 under a dedicated process group with rlimits, a cleared environment, an
 in-process wall-clock killer, and capped output pipes — in addition to the
@@ -21,6 +21,7 @@ import re
 import resource
 import shutil
 import signal
+import socketserver
 import subprocess
 import sys
 import tempfile
@@ -31,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 MAX_CONCURRENCY = int(os.environ.get("RUNNER_MAX_CONCURRENCY", "4"))
 WORK_ROOT = os.environ.get("RUNNER_WORK_ROOT", "/run/exec")
 PORT = int(os.environ.get("RUNNER_PORT", "8080"))
+SOCKET_PATH = os.environ.get("RUNNER_SOCKET_PATH")
 
 _FILENAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _REPORT_NAME = "__kairyu_report__.json"
@@ -212,11 +214,7 @@ def run_submission(submission: dict) -> dict:
             with open(os.path.join(workdir, name), "w", encoding="utf-8") as handle:
                 handle.write(content)
         report_path = os.path.join(workdir, _REPORT_NAME)
-        shim = (
-            f"TEST_FILE = {submission['test_file']!r}\n"
-            f"REPORT_FILE = {report_path!r}\n"
-            f"{_SHIM}"
-        )
+        shim = f"TEST_FILE = {submission['test_file']!r}\nREPORT_FILE = {report_path!r}\n{_SHIM}"
         shim_path = os.path.join(workdir, _SHIM_NAME)
         with open(shim_path, "w", encoding="utf-8") as handle:
             handle.write(shim)
@@ -323,10 +321,32 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, report)
 
 
+class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+
 def main() -> None:
     os.makedirs(WORK_ROOT, exist_ok=True)
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    server.serve_forever()
+    socket_path = SOCKET_PATH
+    if socket_path:
+        os.makedirs(os.path.dirname(socket_path), exist_ok=True)
+        try:
+            os.unlink(socket_path)
+        except FileNotFoundError:
+            pass
+        server = ThreadingUnixHTTPServer(socket_path, Handler)
+        os.chmod(socket_path, 0o660)
+    else:
+        server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        if socket_path:
+            try:
+                os.unlink(socket_path)
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":

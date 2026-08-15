@@ -21,22 +21,30 @@ the ensemble/execution/verification work behind it.
 
 ### ECO-D1 — Deployment-owned sandbox executors, borrowed by `executor_ref`
 
-A deployment declares `executors:` (name → base_url/timeout), parallel to the
+A deployment declares `executors:` (name → base_url/timeout/optional UDS),
+parallel to the
 `engines:`/`pools:` registry of EO-D1. An orchestration worker with
 `executor_ref` borrows the deployment-constructed `HttpExecutionBackend`; the
 deployment owns its lifecycle. Executors are internal orchestration
 resources, never served models. `kairyu validate` reports
 `schema.unknown_executor_ref` for dangling references.
 
-The example's executor is a CPU-only compose service on an **internal-only**
-network (no egress; only the Kairyu service joins it), with read-only rootfs,
-noexec/nosuid tmpfs workdirs, `user 65534`, `cap_drop: ALL`,
-`no-new-privileges`, pids/memory/cpu limits, and no published ports. Inside,
+The example's executor is a CPU-only compose service with
+`network_mode: none`: it has no IP interface and Kairyu reaches its HTTP
+protocol only through a shared Unix domain socket. The socket volume is
+read-only in Kairyu; with no IP interface, hostile code has no callback path
+back to the gateway. The container also has a read-only rootfs, noexec/nosuid
+tmpfs workdirs, `user 65534`, `cap_drop: ALL`, `no-new-privileges`,
+pids/memory/cpu limits, and no published ports. Inside,
 each submission runs in a fresh workdir under a dedicated process group with
 `setrlimit` (CPU/AS/NPROC/FSIZE/CORE), a cleared environment, an in-process
 wall-clock SIGKILL, and capped output pipes. Model-generated code is hostile
 input; both enforcement layers are required. v1 executes Python/pytest only;
 other languages are rejected as `unsupported` and take the LLM-only path.
+
+Review amendment (2026-08-15): the original internal Docker bridge was
+rejected because bridge membership is bidirectional; `internal: true`
+prevents external routing but does not prevent executor-to-Kairyu callbacks.
 
 ### ECO-D2 — One generalized coding DAG replaces the seven-role DAG
 

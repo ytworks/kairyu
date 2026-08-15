@@ -98,16 +98,25 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "chat-ui",
     }
     executor = compose["services"]["executor"]
-    assert executor["networks"] == ["sandbox"]
-    assert compose["networks"]["sandbox"] == {"internal": True}
+    assert executor["network_mode"] == "none"
+    assert "networks" not in executor
+    assert "networks" not in compose
+    assert executor["environment"]["RUNNER_SOCKET_PATH"] == (
+        "/run/kairyu-executor/executor.sock"
+    )
+    assert executor["volumes"] == ["executor-socket:/run/kairyu-executor"]
     assert executor["read_only"] is True
     assert executor["user"] == "65534:65534"
     assert executor["cap_drop"] == ["ALL"]
     assert executor["security_opt"] == ["no-new-privileges:true"]
     assert executor["pids_limit"] == 256
     assert all("noexec" in mount for mount in executor["tmpfs"])
+    assert "socket.AF_UNIX" in executor["healthcheck"]["test"][-1]
     assert "deploy" not in executor  # CPU-only: no GPU reservation
-    assert compose["services"]["kairyu"]["networks"] == ["default", "sandbox"]
+    assert "networks" not in compose["services"]["kairyu"]
+    assert "executor-socket:/run/kairyu-executor:ro" in (
+        compose["services"]["kairyu"]["volumes"]
+    )
     assert spec["vllm"]["qwen"]["release"] == "v0.23.0"
     assert {
         compose["services"][service]["image"]
@@ -246,7 +255,9 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
         "kairyu-auto-max",
     }
     assert set(deployment.executors) == {"sandbox-python"}
-    assert deployment.executors["sandbox-python"].base_url == "http://executor:8080"
+    executor = deployment.executors["sandbox-python"]
+    assert executor.base_url == "http://executor"
+    assert executor.uds_path == "/run/kairyu-executor/executor.sock"
     assert list(deployment.embeddings) == ["embed-small"]
     embedding = deployment.embeddings["embed-small"]
     assert embedding.backend == "fastembed"

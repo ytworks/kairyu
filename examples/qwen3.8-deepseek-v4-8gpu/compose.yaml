@@ -76,19 +76,14 @@ x-qwen: &qwen
     start_period: 30s
   restart: unless-stopped
 
-networks:
-  default:
-  # No default gateway and no host services: the executor can reach nothing,
-  # and only kairyu can reach the executor (ECO-D1).
-  sandbox:
-    internal: true
-
 services:
   executor:
     build:
       context: ./sandbox
     image: ${EXECUTOR_IMAGE:-local/kairyu-executor:coding-v1}
-    networks: [sandbox]
+    network_mode: none
+    environment:
+      RUNNER_SOCKET_PATH: /run/kairyu-executor/executor.sock
     read_only: true
     user: "65534:65534"
     cap_drop: [ALL]
@@ -96,11 +91,13 @@ services:
     pids_limit: 256
     mem_limit: 2g
     cpus: 4.0
+    volumes:
+      - executor-socket:/run/kairyu-executor
     tmpfs:
       - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
       - /run/exec:size=256m,uid=65534,noexec,nosuid,nodev
     healthcheck:
-      test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2)']
+      test: [CMD, python3, -c, 'import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(2); s.connect("/run/kairyu-executor/executor.sock"); s.sendall(b"GET /healthz HTTP/1.0\r\nHost: executor\r\n\r\n"); assert b" 200 " in s.recv(64)']
       interval: 5s
       timeout: 3s
       retries: 60
@@ -288,7 +285,7 @@ services:
       - ./router.json:/etc/kairyu/router.json:ro
       - ./deepseek-thinking.jinja:/etc/kairyu/deepseek-thinking.jinja:ro
       - ../deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
-    networks: [default, sandbox]
+      - executor-socket:/run/kairyu-executor:ro
     depends_on:
       qwen-0: {condition: service_healthy}
       qwen-1: {condition: service_healthy}
@@ -338,6 +335,7 @@ services:
     restart: unless-stopped
 
 volumes:
+  executor-socket:
   deepseek-models:
     external: true
     name: ${DEEPSEEK_MODEL_VOLUME:-kairyu-models-deepseek-v4-flash-0731-8gpu}

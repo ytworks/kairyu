@@ -281,6 +281,7 @@ class ExecutorSection(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     base_url: str = Field(min_length=1)
+    uds_path: str | None = Field(default=None, min_length=1, pattern=r"^/")
     timeout_s: float = Field(default=25.0, gt=0, le=300)
 
 

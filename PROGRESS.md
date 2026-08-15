@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example is a coding-first product: an unchanged L1 fleet (four Qwen3.8 TP1 vLLM workers + the measured DeepSeek TP4/EP4 DSpark worker) under a nine-role L2 DAG where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds an egress-free CPU sandbox executor, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example is a coding-first product: an unchanged L1 fleet (four Qwen3.8 TP1 vLLM workers + the measured DeepSeek TP4/EP4 DSpark worker) under a nine-role L2 DAG where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds a networkless CPU sandbox over a Unix-socket transport, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-15 — [amendment] Sandbox transport removes the reverse network path
+- What: replaced the bidirectional internal Docker bridge with a shared Unix
+  domain socket and `network_mode: none` on the executor; Kairyu mounts the
+  socket volume read-only and the deployment executor client supports UDS.
+- Why: an internal bridge blocks external routing but still lets hostile
+  submitted code connect back to Kairyu, violating ECO-D1's no-egress
+  boundary.
+- Refs: PR #488 review; ECO-D1; `kairyu/orchestration/execution.py`;
+  `examples/qwen3.8-deepseek-v4-8gpu/{compose.yaml,sandbox/runner.py}`
 
 ### 2026-08-15 — [design] Coding orchestration with head streaming and sandbox execution
 - What: replaced the tiered example's seven-role DAG with a nine-role coding
