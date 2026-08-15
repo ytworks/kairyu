@@ -131,6 +131,14 @@ class RoleSpec:
     # worker-native scaffolding such as a chat-format assistant marker that
     # must terminate the prompt.
     prompt_suffix: str = ""
+    # Alternate body for the selected final unit when the head is absent or
+    # disabled for the call: write the complete answer, not a continuation
+    # of a committed opening that does not exist (issue #496).
+    prompt_headless: str = ""
+    # The rendered scaffold already closed the model's private-reasoning
+    # span: reasoning-classified output alongside empty public text is the
+    # answer itself and is reclaimed as the role's output (issue #496).
+    reasoning_closed: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, TemplatedPrompt):
@@ -146,6 +154,11 @@ class RoleSpec:
             )
         if self.executor is not None and self.sampling is not None:
             raise ValueError(f"executor role {self.name!r} cannot declare sampling")
+        if self.executor is not None and (self.prompt_headless or self.reasoning_closed):
+            raise ValueError(
+                f"executor role {self.name!r} cannot declare prompt_headless "
+                "or reasoning_closed"
+            )
 
 
 @dataclass(frozen=True)
@@ -158,6 +171,14 @@ class ConductorResult:
     usage: tuple[int, int] = (0, 0)  # (prompt, completion) summed over units (m11 A1)
     cached_tokens: int = 0
     reasoning_content: str | None = None
+    # Backend-reported tokens of the public answer (head + selected final
+    # unit); None when any active public stage lacked backend usage. Standard
+    # OpenAI usage derives from this, never from the cumulative sums above.
+    public_completion_tokens: int | None = None
+    # False when the selected final unit failed or produced no public text
+    # (issue #496): the caller must see an explicit error, never an internal
+    # stage's text or an empty "stop".
+    final_unit_ok: bool = True
 
 
 @dataclass(frozen=True)
@@ -270,6 +291,21 @@ def dedup_public_continuation(committed: str, continuation: str) -> str:
     return continuation
 
 
+def _observed_completion_tokens(
+    observed: _GenerationObservation,
+    text: str,
+) -> int:
+    """Head budget accounting: backend truth, else a whitespace approximation.
+
+    The approximation only sizes the continuation's remaining public budget
+    (issue #496); billing always uses backend-reported usage (m9).
+    """
+
+    if observed.usage is not None:
+        return observed.usage.completion_tokens
+    return len(text.split())
+
+
 @dataclass
 class _RunState:
     """Mutable accumulator local to one run(); public results are frozen."""
@@ -285,6 +321,14 @@ class _RunState:
         default_factory=dict
     )
     intermediate_outputs: list[IntermediateOutput] = field(default_factory=list)
+    # Public-answer accounting (issue #496): backend-reported completion
+    # tokens of the head and the selected final unit, and whether the
+    # caller's public limit was consumed before the final unit could run.
+    head_completion_tokens: int | None = None
+    head_usage_reported: bool = False
+    final_unit_completion_tokens: int | None = None
+    public_budget_exhausted: bool = False
+    final_unit_unusable: bool = False
 
 
 class _BudgetRefused(Exception):
@@ -433,14 +477,21 @@ class Conductor:
         extra_args = dict(self._final_sampling_params.extra_args)
         extra_args.pop("response_format", None)
         extra_args.pop(PARALLEL_TOOL_CALLS_EXTRA_ARG, None)
+        # The head opens the public answer, so the caller's public limit caps
+        # it exactly like the continuation (issue #496): the role override may
+        # only shrink below that cap, never exceed it.
+        public_cap = self._final_sampling_params.max_tokens
+        base_max = self._sampling_params.max_tokens
+        if public_cap is not None:
+            base_max = public_cap if base_max is None else min(base_max, public_cap)
         params = self._final_sampling_params.clone(
             n=1,
             best_of=None,
             logprobs=None,
-            max_tokens=self._sampling_params.max_tokens,
+            max_tokens=base_max,
             extra_args=extra_args,
         )
-        return self._apply_overrides(params, self._head.sampling, cap=None)
+        return self._apply_overrides(params, self._head.sampling, cap=public_cap)
 
     def _role_sampling_params(self, spec: RoleSpec) -> SamplingParams:
         return self._apply_overrides(
@@ -489,6 +540,7 @@ class Conductor:
     def _request_intent(
         self,
         spec: RoleSpec,
+        run: _RunState | None = None,
     ) -> tuple[
         SamplingParams,
         tuple[Mapping[str, object], ...],
@@ -501,7 +553,7 @@ class Conductor:
             return (self._head_sampling_params(), (), None, False, None, "generic")
         if spec.name == self._selected_final_unit().name:
             return (
-                self._final_sampling_params,
+                self._final_unit_sampling_params(run),
                 self._final_tools,
                 self._final_tool_choice,
                 self._final_tools_in_prompt,
@@ -509,6 +561,31 @@ class Conductor:
                 self._final_tool_call_protocol,
             )
         return self._role_sampling_params(spec), (), None, False, None, "generic"
+
+    def _final_unit_sampling_params(self, run: _RunState | None) -> SamplingParams:
+        """The caller's public intent, minus tokens the head already spent.
+
+        The public answer is head + continuation, so a finite caller limit is
+        one budget across the seam (issue #496). The head's completed usage is
+        known before the final unit dispatches because the final unit depends
+        on the head (EO-D7).
+        """
+
+        params = self._final_sampling_params
+        if run is None or params.max_tokens is None:
+            return params
+        spent = run.head_completion_tokens
+        if not spent:
+            return params
+        return params.clone(max_tokens=max(1, params.max_tokens - spent))
+
+    def _public_budget_remaining(self, run: _RunState) -> int | None:
+        """Tokens the final unit may still generate; ``None`` when unlimited."""
+
+        limit = self._final_sampling_params.max_tokens
+        if limit is None:
+            return None
+        return limit - (run.head_completion_tokens or 0)
 
     def _observe_usage(
         self,
@@ -678,7 +755,16 @@ class Conductor:
         query: str,
         outputs: Mapping[str, str],
     ) -> str:
-        return f"{self._render(spec.prompt, query, outputs)}{spec.prompt_suffix}"
+        body = spec.prompt
+        if (
+            spec.prompt_headless
+            and spec.name == self._selected_final_unit().name
+            and (self._head is None or not self._head_enabled())
+        ):
+            # No committed opening exists on this call: the publisher writes
+            # the complete answer instead of continuing one (issue #496).
+            body = spec.prompt_headless
+        return f"{self._render(body, query, outputs)}{spec.prompt_suffix}"
 
     @staticmethod
     def _prompt_body(spec: RoleSpec, rendered: str) -> str:
@@ -811,7 +897,7 @@ class Conductor:
             parallel_tool_calls,
             tool_call_protocol,
         ) = (
-            self._request_intent(spec)
+            self._request_intent(spec, run)
         )
         request_prompt = self._worker_prompt(spec, prompt)
         candidate = GenerationRequest(
@@ -908,6 +994,38 @@ class Conductor:
             budget=budget,
             metadata=dict(metadata or {}),
             error=error,
+        )
+
+    @staticmethod
+    def _unit_public_output(
+        spec: RoleSpec,
+        text: str,
+        completions: tuple[CompletionOutput, ...],
+    ) -> tuple[str, tuple[CompletionOutput, ...]]:
+        """Reclaim reasoning-classified output on a closed-reasoning role.
+
+        A ``reasoning_closed`` role's scaffold already terminated the model's
+        private-reasoning span in the prompt, so an upstream reasoning parser
+        that classified the whole generation as reasoning has misrouted the
+        public answer (issue #496). Empty public text + non-empty reasoning
+        is therefore the answer itself; a genuinely public text passes
+        through untouched.
+        """
+
+        if not spec.reasoning_closed or text.strip():
+            return text, completions
+        reclaimed = "\n\n".join(
+            completion.reasoning_content
+            for completion in completions
+            if completion.reasoning_content
+        )
+        if not reclaimed:
+            return text, completions
+        return reclaimed, tuple(
+            replace(completion, text=completion.reasoning_content, reasoning_content=None)
+            if completion.reasoning_content and not completion.text.strip()
+            else completion
+            for completion in completions
         )
 
     @staticmethod
@@ -1402,7 +1520,14 @@ class Conductor:
                         await event_sink(ConductorEvent(kind="delta", text=delta))
                 if last_result is None:
                     raise RuntimeError("head worker stream produced no result")
-                run.outputs[spec.name] = last_result.text or "".join(text_parts)
+                committed = last_result.text or "".join(text_parts)
+                run.outputs[spec.name] = committed
+                run.head_completion_tokens = (
+                    latest_usage.completion_tokens
+                    if latest_usage is not None
+                    else len(committed.split())
+                )
+                run.head_usage_reported = latest_usage is not None
                 actual_cost = self._cost_model(request, last_result)
                 run.budget = run.budget.reconcile_success(
                     cost=actual_cost,
@@ -1414,6 +1539,12 @@ class Conductor:
             partial_text = "".join(text_parts)
             if partial_text:
                 run.outputs[spec.name] = partial_text
+                run.head_completion_tokens = (
+                    latest_usage.completion_tokens
+                    if latest_usage is not None
+                    else len(partial_text.split())
+                )
+                run.head_usage_reported = latest_usage is not None
             run.budget = run.budget.release(unknown_cost=unknown_cost)
             run.trace.append(
                 self._trace_event(
@@ -1484,6 +1615,25 @@ class Conductor:
         if spec.role_type == "head" and event_sink is not None:
             await self._stream_head_unit(run, session, query, spec, event_sink)
             return
+        if spec.name == self._selected_final_unit().name:
+            remaining = self._public_budget_remaining(run)
+            if remaining is not None and remaining < 1:
+                # The head consumed the caller's whole public limit; the
+                # committed prefix stands alone (EO-D7) and the response
+                # reports the truncation as "length" (issue #496).
+                run.public_budget_exhausted = True
+                run.trace.append(
+                    self._trace_event(
+                        spec,
+                        "skipped:public_budget",
+                        operation="generation",
+                        status="skipped",
+                        attempt=0,
+                        budget=TraceBudget.between(run.budget, run.budget),
+                        metadata={"reason": "public_budget"},
+                    )
+                )
+                return
         if run.budget.is_exhausted:
             run.trace.append(
                 self._trace_event(
@@ -1509,6 +1659,8 @@ class Conductor:
         verifier = self._verifier_for.get(spec.name)
         prompt = rendered
         depth = 0
+        is_final_unit = spec.name == self._selected_final_unit().name
+        empty_retry_used = False
         while True:
             try:
                 observed = await self._generate(
@@ -1517,7 +1669,7 @@ class Conductor:
                     spec.name,
                     spec.worker,
                     prompt,
-                    depth,
+                    depth + (1 if empty_retry_used else 0),
                     spec=spec,
                     operation="generation",
                 )
@@ -1536,11 +1688,50 @@ class Conductor:
                 if spec.name not in run.outputs:
                     return
                 break
-            text = observed.text
+            text, completions = self._unit_public_output(
+                spec,
+                observed.text,
+                observed.completions,
+            )
+            if (
+                is_final_unit
+                and verifier is None
+                and not empty_retry_used
+                and not text.strip()
+                and not self._head_committed_text(run)
+            ):
+                # One bounded re-dispatch before the run is declared unusable
+                # (issue #496): an empty public answer must never surface as
+                # a silent successful "stop".
+                empty_retry_used = True
+                run.trace.append(
+                    self._trace_event(
+                        spec,
+                        "retry:empty_output",
+                        operation="generation",
+                        status="retried",
+                        attempt=depth,
+                        detail="empty public output",
+                        budget=TraceBudget.between(run.budget, run.budget),
+                        metadata={"reason": "empty_output"},
+                    )
+                )
+                continue
             run.outputs[spec.name] = text
             intermediate = self._record_intermediate(run, spec, depth, observed)
-            if spec.name == self._selected_final_unit().name:
-                run.final_completions = observed.completions
+            if spec.role_type == "head":
+                run.head_completion_tokens = _observed_completion_tokens(
+                    observed,
+                    text,
+                )
+                run.head_usage_reported = observed.usage is not None
+            if is_final_unit:
+                run.final_completions = completions
+                run.final_unit_completion_tokens = (
+                    observed.usage.completion_tokens
+                    if observed.usage is not None
+                    else None
+                )
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -1635,6 +1826,27 @@ class Conductor:
                 verdict,
             )
             prompt = f"{refined}{spec.prompt_suffix}"
+        if (
+            is_final_unit
+            and not run.outputs.get(spec.name, "").strip()
+            and not self._head_committed_text(run)
+        ):
+            # An empty public answer after the bounded retry is a failure the
+            # caller must see, never a silent stop with empty content or a
+            # substituted internal stage (issue #496). A committed head is
+            # exempt: EO-D7 already defines the head-only best-so-far answer.
+            run.final_unit_unusable = True
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "failed",
+                    operation="generation",
+                    status="failed",
+                    attempt=depth,
+                    detail="empty_output",
+                    error=TraceError(type="EmptyFinalOutput"),
+                )
+            )
         run.completion_order.append(spec.name)
 
     async def _run_unit_safe(
@@ -1652,8 +1864,9 @@ class Conductor:
         try:
             await self._run_unit(run, session, query, spec, event_sink=event_sink)
         except _ObservedGenerationError:
-            pass
+            self._mark_failed_final_unit(run, spec)
         except Exception as error:
+            self._mark_failed_final_unit(run, spec)
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -1665,6 +1878,21 @@ class Conductor:
                     error=TraceError(type=type(error).__name__),
                 )
             )
+
+    def _mark_failed_final_unit(self, run: _RunState, spec: RoleSpec) -> None:
+        """A failed selected final unit must not fall back to internal stages.
+
+        Without this the last completed internal stage would be published as
+        the answer with finish_reason "stop" (issue #496). A committed head
+        keeps its best-so-far contract (EO-D7).
+        """
+
+        if (
+            spec.name == self._selected_final_unit().name
+            and spec.name not in run.outputs
+            and not self._head_committed_text(run)
+        ):
+            run.final_unit_unusable = True
 
     def _final_text(self, run: _RunState) -> str:
         unit = self._final_output_unit(run)
@@ -1695,9 +1923,17 @@ class Conductor:
 
         if self._head is None or not self._head_enabled():
             return run.final_completions
-        finish_reason = (
-            run.final_completions[0].finish_reason if run.final_completions else None
-        )
+        if run.public_budget_exhausted:
+            # The caller's public limit was consumed before the continuation
+            # could run: the committed head is the whole answer and the
+            # truncation is reported honestly (issue #496).
+            finish_reason = "length"
+        else:
+            finish_reason = (
+                run.final_completions[0].finish_reason
+                if run.final_completions
+                else None
+            )
         return (
             CompletionOutput(
                 index=0,
@@ -1724,14 +1960,55 @@ class Conductor:
         )
         return frozenset({self._head.name})
 
+    def _head_committed_text(self, run: _RunState) -> str:
+        """Committed head bytes for this run; empty when absent or disabled."""
+
+        if self._head is None or not self._head_enabled():
+            return ""
+        return run.outputs.get(self._head.name, "")
+
+    def _public_completion_tokens(self, run: _RunState) -> int | None:
+        """Backend-reported tokens of the public answer, ``None`` if unknown.
+
+        The public answer is head + selected final unit; either stage missing
+        its backend usage makes the total unknowable, and the wire layer then
+        falls back to the m9 approximation over the public completion.
+        """
+
+        final_tokens = run.final_unit_completion_tokens
+        if self._head is None or not self._head_enabled():
+            return final_tokens
+        if self._head.name not in run.outputs:
+            # Zero-byte head failure: the continuation is the whole answer.
+            return final_tokens
+        if not run.head_usage_reported:
+            return None
+        head_tokens = run.head_completion_tokens or 0
+        if self._selected_final_unit().name not in run.outputs:
+            # Continuation skipped or failed: the committed head stands alone.
+            return head_tokens
+        if final_tokens is None:
+            return None
+        return head_tokens + final_tokens
+
     def _final_output_unit(self, run: _RunState) -> RoleSpec | None:
         terminal = self._terminal_units()
         synthesizers = [unit for unit in terminal if unit.role_type == "synthesizer"]
         for unit in synthesizers + terminal:
             if unit.name in run.outputs:
                 return unit
-        if run.completion_order:
-            return self._by_name[run.completion_order[-1]]
+        if run.final_unit_unusable:
+            # A failed/empty final unit surfaces as an explicit error at the
+            # Orchestrator boundary; internal stage text never substitutes
+            # for the public answer (issue #496).
+            return None
+        # Budget exhaustion best-so-far (EO-D7/O4): the last completed
+        # generation stage stands in — never an executor's machine output or
+        # the head, whose committed text _public_text already carries.
+        for name in reversed(run.completion_order):
+            candidate = self._by_name[name]
+            if candidate.role_type not in {"executor", "head"}:
+                return candidate
         return None
 
     def _terminal_units(self) -> list[RoleSpec]:
@@ -1789,7 +2066,23 @@ class Conductor:
         *,
         dedupe_against: str = "",
         bare_deltas: bool = False,
+        attempt: int = 0,
     ) -> AsyncIterator[ConductorEvent]:
+        remaining = self._public_budget_remaining(run)
+        if remaining is not None and remaining < 1:
+            run.public_budget_exhausted = True
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "skipped:public_budget",
+                    operation="generation",
+                    status="skipped",
+                    attempt=0,
+                    budget=TraceBudget.between(run.budget, run.budget),
+                    metadata={"reason": "public_budget"},
+                )
+            )
+            return
         if run.budget.is_exhausted:
             run.trace.append(
                 self._trace_event(
@@ -1813,7 +2106,7 @@ class Conductor:
                 dict(run.outputs),
             )
         backend = self._workers[spec.worker]
-        request = self._generation_request(run, session, spec, prompt, 0)
+        request = self._generation_request(run, session, spec, prompt, attempt)
         queued_at = utc_now_iso()
         budget_before = run.budget
         unknown_cost = run.budget.budget.max_cost_usd is not None
@@ -1825,7 +2118,7 @@ class Conductor:
                     "skipped:budget",
                     operation="generation",
                     status="skipped",
-                    attempt=0,
+                    attempt=attempt,
                     budget=TraceBudget.between(run.budget, run.budget),
                     metadata={"reason": "budget"},
                 )
@@ -1903,7 +2196,12 @@ class Conductor:
                         yield ConductorEvent(kind="delta", text=tail)
                 if last_result is None:
                     raise RuntimeError("final worker stream produced no result")
-                run.outputs[spec.name] = last_result.text or "".join(text_parts)
+                unit_text, unit_completions = self._unit_public_output(
+                    spec,
+                    last_result.text or "".join(text_parts),
+                    last_result.completions,
+                )
+                run.outputs[spec.name] = unit_text
                 actual_cost = self._cost_model(request, last_result)
                 reconciled = run.budget.reconcile_success(
                     cost=actual_cost,
@@ -1987,7 +2285,10 @@ class Conductor:
             )
         )
         run.completion_order.append(spec.name)
-        run.final_completions = last_result.completions
+        run.final_completions = unit_completions
+        run.final_unit_completion_tokens = (
+            latest_usage.completion_tokens if latest_usage is not None else None
+        )
 
     async def run(
         self,
@@ -2020,6 +2321,8 @@ class Conductor:
             usage=tuple(run.usage),
             cached_tokens=run.cached_tokens,
             reasoning_content=self._reasoning_content(run),
+            public_completion_tokens=self._public_completion_tokens(run),
+            final_unit_ok=not run.final_unit_unusable,
         )
 
     async def stream(
@@ -2069,6 +2372,8 @@ class Conductor:
                     run,
                     include_final_attribution=False,
                 ),
+                public_completion_tokens=self._public_completion_tokens(run),
+                final_unit_ok=not run.final_unit_unusable,
             )
 
         # Phase A (EO-D7/EO-D8): one producer task runs the pre-final DAG.  The
@@ -2134,22 +2439,62 @@ class Conductor:
             else ""
         )
         try:
-            async for event in self._stream_unit(
-                run,
-                session,
-                query,
-                final,
-                dedupe_against=head_text,
-                bare_deltas=head_active,
-            ):
-                if event.kind == "delta":
-                    emitted_text += event.text
-                yield event
+            for final_attempt in range(2):
+                async for event in self._stream_unit(
+                    run,
+                    session,
+                    query,
+                    final,
+                    dedupe_against=head_text,
+                    bare_deltas=head_active,
+                    attempt=final_attempt,
+                ):
+                    if event.kind == "delta":
+                        emitted_text += event.text
+                    yield event
+                if (
+                    run.outputs.get(final.name, "").strip()
+                    or final.name not in run.outputs
+                    or self._head_committed_text(run)
+                ):
+                    # Non-empty answer, budget-skip (no dispatch), or a
+                    # committed head-only answer: no empty-output retry.
+                    break
+                if final_attempt == 0:
+                    run.trace.append(
+                        self._trace_event(
+                            final,
+                            "retry:empty_output",
+                            operation="generation",
+                            status="retried",
+                            attempt=0,
+                            detail="empty public output",
+                            budget=TraceBudget.between(run.budget, run.budget),
+                            metadata={"reason": "empty_output"},
+                        )
+                    )
         except Exception as error:
             raise ConductorStreamError(
                 error,
                 partial_result(emitted_text if head_active else self._final_text(run)),
             ) from error
+        if (
+            not run.outputs.get(final.name, "").strip()
+            and final.name in run.outputs
+            and not self._head_committed_text(run)
+        ):
+            run.final_unit_unusable = True
+            run.trace.append(
+                self._trace_event(
+                    final,
+                    "failed",
+                    operation="generation",
+                    status="failed",
+                    attempt=1,
+                    detail="empty_output",
+                    error=TraceError(type="EmptyFinalOutput"),
+                )
+            )
         final_text = self._public_text(run)
         if final_text != emitted_text:
             if not final_text.startswith(emitted_text):
@@ -2172,5 +2517,7 @@ class Conductor:
                     run,
                     include_final_attribution=False,
                 ),
+                public_completion_tokens=self._public_completion_tokens(run),
+                final_unit_ok=not run.final_unit_unusable,
             ),
         )

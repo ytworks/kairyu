@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, replace
 
 from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
 from kairyu.engine.backend import (
+    UNLIMITED_OUTPUT_ADMISSION_TOKENS,
     AdmissionUpperBound,
     EngineBackend,
     GenerationRequest,
@@ -126,6 +127,15 @@ class OrchestratorResult:
     cached_tokens: int = 0
     structured_trace: StructuredTrace | None = None
     reasoning_content: str | None = None
+    # Backend-reported tokens of the client-visible request/completion
+    # (issue #496). ``prompt_tokens``/``completion_tokens`` above stay the
+    # cumulative internal-call totals (m11 #196); the wire layer maps THESE
+    # onto standard OpenAI usage and falls back to the m9 approximation when
+    # None. Direct routes report both (one public call); multi-stage routes
+    # leave the prompt None because no backend call tokenizes exactly the
+    # caller's request.
+    public_prompt_tokens: int | None = None
+    public_completion_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1103,8 +1113,21 @@ class Orchestrator:
 
         call = self._request(request)
         internal = self._internal_sampling_params(call)
-        if internal.max_tokens is None or call.sampling_params.max_tokens is None:
-            raise ValueError("AUTO tenant admission requires finite token limits")
+        if internal.max_tokens is None:
+            raise ValueError("AUTO tenant admission requires a finite internal limit")
+        # An omitted public limit follows the OpenAI chat contract (bounded by
+        # the serving model's context); reserve the largest engine context —
+        # or the documented constant — instead of rejecting the request.
+        public_output_fallback = (
+            max(
+                (
+                    getattr(engine, "max_model_len", None) or 0
+                    for engine in self._engines.values()
+                ),
+                default=0,
+            )
+            or UNLIMITED_OUTPUT_ADMISSION_TOKENS
+        )
         steps = max(1, self._budget.max_steps, self._moa_samples + 1)
         candidates = max(
             call.sampling_params.n,
@@ -1141,7 +1164,8 @@ class Orchestrator:
                 parallel_tool_calls=call.parallel_tool_calls,
                 tool_call_protocol=call.tool_call_protocol,
                 reasoning_effort=call.reasoning_effort,
-            )
+            ),
+            fallback_output_tokens=public_output_fallback,
         )
         media_stage_bounds = [
             backend_admission_upper_bound(
@@ -1378,6 +1402,8 @@ class Orchestrator:
             completion_tokens: int = 0,
             cached_tokens: int = 0,
             reasoning_content: str | None = None,
+            public_prompt_tokens: int | None = None,
+            public_completion_tokens: int | None = None,
         ) -> OrchestratorResult:
             return OrchestratorResult(
                 text=text,
@@ -1388,6 +1414,8 @@ class Orchestrator:
                 completion_tokens=completion_tokens,
                 cached_tokens=cached_tokens,
                 reasoning_content=reasoning_content,
+                public_prompt_tokens=public_prompt_tokens,
+                public_completion_tokens=public_completion_tokens,
                 structured_trace=StructuredTrace(
                     request_id=request_id,
                     started_at=trace_started_at,
@@ -1646,6 +1674,20 @@ class Orchestrator:
             )
             notes.extend(f"{event.node}: {event.kind} {event.detail}" for event in result.trace)
             trace_events.extend(result.trace)
+            if not result.final_unit_ok and not result.final_text:
+                # The selected final unit failed or produced no public text
+                # after its retry; publishing an internal stage or an empty
+                # "stop" would be a silent lie to the caller (issue #496).
+                raise OrchestratorExecutionError(
+                    RuntimeError("orchestration final unit produced no public output"),
+                    result_with_trace(
+                        text="",
+                        prompt_tokens=result.usage[0],
+                        completion_tokens=result.usage[1],
+                        cached_tokens=result.cached_tokens,
+                        reasoning_content=result.reasoning_content,
+                    ),
+                )
             return result_with_trace(
                 text=result.final_text,
                 completions=_public_multistage_completions(
@@ -1656,6 +1698,7 @@ class Orchestrator:
                 completion_tokens=result.usage[1],
                 cached_tokens=result.cached_tokens,
                 reasoning_content=result.reasoning_content,
+                public_completion_tokens=result.public_completion_tokens,
             )
         try:
             engine_name = (
@@ -1710,6 +1753,10 @@ class Orchestrator:
             prompt_tokens=usage[0],
             completion_tokens=usage[1],
             cached_tokens=usage[2],
+            # A direct route is one public call: its reported usage IS the
+            # client-visible view (0 = unreported → m9 fallback).
+            public_prompt_tokens=usage[0] or None,
+            public_completion_tokens=usage[1] or None,
         )
 
     async def run_chat(
@@ -1845,6 +1892,8 @@ class Orchestrator:
             completion_tokens: int = 0,
             cached_tokens: int = 0,
             reasoning_content: str | None = None,
+            public_prompt_tokens: int | None = None,
+            public_completion_tokens: int | None = None,
         ) -> OrchestratorResult:
             return OrchestratorResult(
                 text=text,
@@ -1855,6 +1904,8 @@ class Orchestrator:
                 completion_tokens=completion_tokens,
                 cached_tokens=cached_tokens,
                 reasoning_content=reasoning_content,
+                public_prompt_tokens=public_prompt_tokens,
+                public_completion_tokens=public_completion_tokens,
                 structured_trace=StructuredTrace(
                     request_id=request_id,
                     started_at=trace_started_at,
@@ -2079,6 +2130,8 @@ class Orchestrator:
                             prompt_tokens=usage.prompt_tokens,
                             completion_tokens=usage.completion_tokens,
                             cached_tokens=usage.cached_tokens,
+                            public_prompt_tokens=usage.prompt_tokens or None,
+                            public_completion_tokens=usage.completion_tokens or None,
                         ),
                     )
                     return
@@ -2145,6 +2198,8 @@ class Orchestrator:
                     prompt_tokens=usage[0],
                     completion_tokens=usage[1],
                     cached_tokens=usage[2],
+                    public_prompt_tokens=usage[0] or None,
+                    public_completion_tokens=usage[1] or None,
                 ),
             )
             return
@@ -2511,6 +2566,21 @@ class Orchestrator:
             f"{event.node}: {event.kind} {event.detail}" for event in conductor_result.trace
         )
         trace_events.extend(conductor_result.trace)
+        if not conductor_result.final_unit_ok and not conductor_result.final_text:
+            # Same contract as the unary route (issue #496): an empty final
+            # unit becomes an explicit error event, never a silent empty stop.
+            yield OrchestratorEvent(
+                kind="error",
+                result=result_with_trace(
+                    text="",
+                    prompt_tokens=conductor_result.usage[0],
+                    completion_tokens=conductor_result.usage[1],
+                    cached_tokens=conductor_result.cached_tokens,
+                    reasoning_content=conductor_result.reasoning_content,
+                ),
+                error_type="EmptyFinalOutput",
+            )
+            return
         yield OrchestratorEvent(
             kind="result",
             result=result_with_trace(
@@ -2523,6 +2593,7 @@ class Orchestrator:
                 completion_tokens=conductor_result.usage[1],
                 cached_tokens=conductor_result.cached_tokens,
                 reasoning_content=conductor_result.reasoning_content,
+                public_completion_tokens=conductor_result.public_completion_tokens,
             ),
         )
 

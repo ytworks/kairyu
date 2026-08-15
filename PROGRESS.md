@@ -98,6 +98,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-16 — [amendment] OpenAI Chat Completions output contract (issue #496)
+- What: omitted output limits are context-bound (16-token fallback removed,
+  admission reserves max_model_len); a caller limit is one budget across
+  head+continuation with honest finish_reason; standard usage now means the
+  public request/completion (orchestration_* keep #196 cumulative totals,
+  metering still bills them); empty final output retries once then 502;
+  `reasoning_closed`/`prompt_headless` role contracts; GET /v1/models/{id}.
+- Why: issue #496 — orchestrated responses ignored caller limits, reported
+  deterministic "length", and lost post-tool answers to `reasoning_content`.
+- Refs: #496, #458, m11 2026-08-16 amendment, ECO-D4 2026-08-16 amendment
+
 ### 2026-08-15 — [amendment] Sandbox reaps escaped submission descendants
 - What: the coding executor now acts as a child subreaper and sweeps/reaps
   same-UID runner descendants not owned by another live submission on every

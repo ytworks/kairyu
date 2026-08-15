@@ -4140,3 +4140,151 @@ async def test_auto_best_of_is_forwarded_only_to_the_final_engine(
     assert len(transport_payloads) > 1
     assert all("best_of" not in payload for payload in transport_payloads[:-1])
     assert transport_payloads[-1]["best_of"] == 2
+
+
+# --- Issue #496: OpenAI compatibility for output limits, model retrieve, ---
+# --- tool-result continuations, and empty-answer honesty.                 ---
+
+_ADD_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "add",
+        "description": "Add two integers",
+        "parameters": {
+            "type": "object",
+            "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+            "required": ["a", "b"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+async def test_chat_omitted_output_limit_is_context_bound_and_stops():
+    engine = StubBackend(text="OK", finish_reason="stop")
+    app = create_legacy_app(engines={"stub": engine})
+    body = {"model": "stub", "messages": [{"role": "user", "content": "hi"}]}
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    # The OpenAI chat contract: an omitted limit means "bounded by the model's
+    # remaining context", not a server-materialized 16 (issue #496 / #458), so
+    # a short answer finishes with "stop", never a deterministic "length".
+    assert engine.requests[0].sampling_params.max_tokens is None
+    assert response.json()["choices"][0]["finish_reason"] == "stop"
+
+
+async def test_models_retrieve_returns_model_object_and_standard_404(app):
+    async with _client(app) as client:
+        engine_model = await client.get("/v1/models/kairyu-mock")
+        auto_model = await client.get("/v1/models/kairyu-auto")
+        missing = await client.get("/v1/models/definitely-not-a-real-model")
+
+    assert engine_model.status_code == 200
+    assert engine_model.json() == {
+        "id": "kairyu-mock",
+        "object": "model",
+        "created": 0,
+        "owned_by": "kairyu",
+    }
+    assert auto_model.status_code == 200
+    assert auto_model.json()["id"] == "kairyu-auto"
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "model_not_found"
+    assert missing.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_auto_tool_result_continuation_publishes_content(app, stream):
+    body = {
+        "model": "kairyu-auto",
+        "messages": [
+            {"role": "user", "content": "Use the add tool on 2 and 3."},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "add", "arguments": '{"a":2,"b":3}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "5"},
+            {"role": "user", "content": "Report only the tool result."},
+        ],
+        "tools": [_ADD_TOOL],
+        "stream": stream,
+    }
+
+    async with _client(app) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    assert response.status_code == 200
+    if stream:
+        payloads = _sse_json_payloads(response)
+        content = "".join(
+            choice["delta"].get("content") or ""
+            for payload in payloads
+            for choice in payload.get("choices", ())
+        )
+        finish_reasons = [
+            choice["finish_reason"]
+            for payload in payloads
+            for choice in payload.get("choices", ())
+            if choice.get("finish_reason")
+        ]
+        assert finish_reasons == ["stop"]
+    else:
+        choice = response.json()["choices"][0]
+        content = choice["message"]["content"]
+        assert choice["finish_reason"] == "stop"
+    # The standard field carries the answer; a client must never need the
+    # reasoning_content extension to recover it (issue #496 item 4).
+    assert content.strip()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_auto_empty_final_output_is_an_explicit_error(stream):
+    empty = StubBackend(text="", finish_reason="stop")
+    app = create_legacy_app(
+        engines={},
+        orchestrators={"auto": Orchestrator({"tier1": empty, "tier2": empty})},
+    )
+    body = {
+        "model": "auto",
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "First research. Then plan. After that implement. "
+                    "Finally verify."
+                ),
+            }
+        ],
+        "stream": stream,
+    }
+
+    async with _client(app, raise_app_exceptions=False) as client:
+        response = await client.post("/v1/chat/completions", json=body)
+
+    # A run whose final unit produced no public text is an explicit upstream
+    # error, never a silent finish_reason="stop" with empty content and the
+    # answer hidden in an extension field (issue #496 items 3/4).
+    if stream:
+        assert response.status_code == 200  # SSE transport already open
+        assert '"error"' in response.text
+        payloads = _sse_json_payloads(response)
+        assert not any(
+            choice.get("finish_reason") == "stop"
+            for payload in payloads
+            for choice in payload.get("choices", ())
+        )
+    else:
+        assert response.status_code == 502
+        payload = response.json()
+        assert payload["error"]
+        assert "usage" in payload

@@ -416,6 +416,10 @@ async def test_unit_backend_failure_does_not_destroy_the_run():
     assert result.outputs["planner"] == "a plan"  # completed work survives
     assert "worker" not in result.outputs  # the failed unit produced nothing
     assert any(event.kind == "failed" for event in result.trace)
+    # A failed selected final unit never publishes an internal stage's text as
+    # the answer (issue #496); the Orchestrator surfaces it as an error.
+    assert result.final_text == ""
+    assert not result.final_unit_ok
 
 
 async def test_diamond_dag_runs_middle_wave_concurrently():

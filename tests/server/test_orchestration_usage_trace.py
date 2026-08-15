@@ -138,8 +138,13 @@ def test_auto_usage_reconciles_every_success_route(
     assert len(backend.calls) == expected_calls
     assert usage["orchestration_input_tokens"] == expected_calls * 10
     assert usage["orchestration_output_tokens"] == expected_calls * 2
-    assert usage["prompt_tokens"] == expected_calls * 10
-    assert usage["completion_tokens"] == expected_calls * 2
+    # Standard usage keeps the documented OpenAI meaning (issue #496): the
+    # client-visible completion, never the sum over internal calls. The
+    # cumulative totals stay on the orchestration_* extension fields above.
+    assert usage["completion_tokens"] == 2
+    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+    if expected_calls > 1:
+        assert usage["completion_tokens"] < usage["orchestration_output_tokens"]
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
