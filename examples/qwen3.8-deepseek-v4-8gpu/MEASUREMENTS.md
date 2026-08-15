@@ -8,12 +8,14 @@
 
 ## Coding DAG serving matrix (current deployment)
 
-Run ID: `20260815T121447Z` (`./verify.sh serving-auto-max-coding`); artifacts
-under the NVMe `verification-results/20260815T121447Z/serving-auto-max-coding/`
-directory, including per-row `ttft-gate.json`. This run includes the PR #488
-review amendments: the networkless UDS sandbox transport, capped subprocess
-output draining, abnormal-pytest-exit rejection, the strict
-`execution_status`-based gate, and the burst-queueing executor (8 slots).
+Run ID: `20260815T145039Z` (`./verify.sh serving-auto-max-coding`); artifacts
+under the NVMe `verification-results/20260815T145039Z/serving-auto-max-coding/`
+directory, including per-row `ttft-gate.json`. This run includes every PR
+#488 review amendment: the networkless UDS sandbox transport, capped
+subprocess output draining, abnormal-pytest-exit rejection, the strict
+`execution_status`-based gate, the burst-queueing executor (8 slots), the
+subreaper-based escaped-descendant sweep, and the queue-inclusive deadline
+budget with runner-side admission control.
 Dataset: 32 deterministic self-contained Python implementation tasks per row
 (8 templates × 4 namespaced variants, ~1.5K prompt tokens), temperature 0,
 natural completion, `max_tokens 4096`, public tokens counted by the DeepSeek
@@ -27,10 +29,10 @@ count).
 
 | Concurrency | product semantic TTFT p50/p99 (ms) | DeepSeek-direct TTFT p50/p99 (ms) | gate (≤2.0×) | E2E p50/p99 (ms) | sandbox-executed (strict) | success |
 |---:|---:|---:|---|---:|---:|---:|
-| 1 | 418.39 / 431.15 | 2,370.40 / 2,705.96 | **PASS** (0.18×) | 46,869 / 126,534 | 32/32 | 32/32 |
-| 8 | 1,065.89 / 6,964.32 | 7,225.10 / 11,288.96 | **PASS** (0.15×) | 87,892 / 319,007 | 31/32 | 32/32 |
-| 16 | 4,415.06 / 15,483.51 | 10,258.73 / 14,348.70 | **PASS** (0.43×) | 121,709 / 267,784 | 30/32 | 32/32 |
-| 32 | 28,248.55 / 29,302.08 | 16,239.32 / 21,148.78 | **PASS** (1.74×) | 162,096 / 345,174 | 31/32 | 32/32 |
+| 1 | 417.49 / 427.06 | 2,389.41 / 2,692.13 | **PASS** (0.17×) | 65,112 / 166,570 | 31/32 | 32/32 |
+| 8 | 875.63 / 7,157.94 | 7,311.59 / 10,667.32 | **PASS** (0.12×) | 81,176 / 256,435 | 31/32 | 32/32 |
+| 16 | 1,103.88 / 15,680.15 | 10,212.32 / 17,840.83 | **PASS** (0.11×) | 101,172 / 297,471 | 30/32 | 32/32 |
+| 32 | 24,396.26 / 26,835.78 | 13,698.05 / 18,843.40 | **PASS** (1.78×) | 170,126 / 293,582 | 32/32 | 32/32 |
 
 Every sample carried a valid trace with a successful `head` and
 `continuation` stage; zero execution stages degraded to `unavailable` (the
@@ -41,13 +43,14 @@ the ≥90% floor. E2E is deliberately unconstrained: it covers the full
 proposal/test fan-out, sandbox runs, synthesis, execution-evidence
 verification, and bounded refinement behind the committed opening (the head
 keeps the user reading from ~0.4 s at c1). The c32 row passes only against
-its paired direct denominator (1.74×), not against the historical 8K-prompt
+its paired direct denominator (1.78×), not against the historical 8K-prompt
 pinned fallback — the paired same-dataset comparison is the committed gate.
 
 Superseded coding-matrix runs: `20260815T042353Z` (pre-review-amendment
-deployment, pre-strict gate) and `20260815T111017Z` (post-UDS, failed the
+deployment, pre-strict gate), `20260815T111017Z` (post-UDS, failed the
 strict gate at c32 with 25/32 — the measured evidence behind the gate and
-executor amendments).
+executor amendments), and `20260815T121447Z` (all rows green, pre-sweep/
+deadline-budget amendments).
 
 ## Generic serving matrix (current deployment, executor skip path)
 
