@@ -1903,6 +1903,9 @@ class Conductor:
                 break
             verdict = verifier_observed.text
             verdict_trace_spec = verifier
+            verdict_trace_observed: _GenerationObservation | None = (
+                verifier_observed
+            )
             if _verdict_is_inconclusive(verdict):
                 # A truncated or empty verdict is not evidence of a draft
                 # defect, and counting it as FAIL burns a full refinement
@@ -1921,7 +1924,7 @@ class Conductor:
                         verifier,
                         "verified:inconclusive",
                         operation="verification",
-                        status="inconclusive",
+                        status="success",
                         attempt=depth,
                         detail=f"attempt={depth} inconclusive=true",
                         timing=verifier_observed.timing,
@@ -1934,7 +1937,14 @@ class Conductor:
                         },
                     )
                 )
-                verdict_trace_spec = None
+                retry_spec = replace(
+                    verifier, name=f"{verifier.name}:reverify"
+                )
+                # The first observation has already been emitted. If the
+                # retry cannot dispatch or fails, the final round outcome
+                # remains attributable to the original verifier without
+                # counting that stage timing twice.
+                verdict_trace_observed = None
                 try:
                     retry_observed = await self._generate(
                         run,
@@ -1943,43 +1953,77 @@ class Conductor:
                         verifier.worker,
                         retry_prompt,
                         depth,
-                        spec=replace(verifier, name=f"{verifier.name}:reverify"),
+                        spec=retry_spec,
                         operation="verification",
                     )
                     verifier_observed = retry_observed
                     verdict = verifier_observed.text
-                    verdict_trace_spec = replace(
-                        verifier, name=f"{verifier.name}:reverify"
+                    verdict_trace_spec = retry_spec
+                    verdict_trace_observed = retry_observed
+                except _BudgetRefused:
+                    run.trace.append(
+                        self._trace_event(
+                            retry_spec,
+                            "skipped:budget",
+                            operation="verification",
+                            status="skipped",
+                            attempt=depth,
+                            budget=TraceBudget.between(run.budget, run.budget),
+                            metadata={"reason": "budget"},
+                        )
                     )
-                except (_BudgetRefused, _ObservedGenerationError):
+                except _ObservedGenerationError:
                     pass
             run.outputs[verifier.name] = verdict
             passed = _is_pass(verdict)
-            can_refine = run.budget.can_refine(depth)
+            verdict_inconclusive = _verdict_is_inconclusive(verdict)
+            # One immediate re-verification is the bounded recovery for a
+            # missing verdict. If that attempt is also inconclusive, retain
+            # the best draft instead of converting missing control output
+            # into a synthetic FAIL and paying a full refinement round.
+            can_refine = (
+                run.budget.can_refine(depth) and not verdict_inconclusive
+            )
             verifier_intermediate = self._record_intermediate(
                 run,
                 verifier,
                 depth,
                 verifier_observed,
             )
-            if verdict_trace_spec is not None:
-                run.trace.append(
-                    self._trace_event(
-                        verdict_trace_spec,
-                        "verified",
-                        operation="verification",
-                        status="success",
-                        attempt=depth,
-                        detail=f"attempt={depth} pass={passed}",
-                        timing=verifier_observed.timing,
-                        usage=verifier_observed.usage,
-                        budget=verifier_observed.budget,
-                        metadata={
-                            "pass": passed,
-                            "refinement_exhausted": not passed and not can_refine,
-                        },
-                    )
+            run.trace.append(
+                self._trace_event(
+                    verdict_trace_spec,
+                    "verified",
+                    operation="verification",
+                    status="success",
+                    attempt=depth,
+                    detail=f"attempt={depth} pass={passed}",
+                    timing=(
+                        verdict_trace_observed.timing
+                        if verdict_trace_observed is not None
+                        else None
+                    ),
+                    usage=(
+                        verdict_trace_observed.usage
+                        if verdict_trace_observed is not None
+                        else None
+                    ),
+                    budget=(
+                        verdict_trace_observed.budget
+                        if verdict_trace_observed is not None
+                        else TraceBudget.between(run.budget, run.budget)
+                    ),
+                    metadata={
+                        "pass": passed,
+                        "inconclusive": verdict_inconclusive,
+                        "refinement_exhausted": (
+                            not passed
+                            and not can_refine
+                            and not verdict_inconclusive
+                        ),
+                    },
                 )
+            )
             await self._emit_intermediate(event_sink, verifier_intermediate)
             if passed or not can_refine:
                 break
