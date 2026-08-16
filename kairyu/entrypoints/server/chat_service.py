@@ -815,7 +815,30 @@ async def validate_chat_input_async(
     )
 
 
-_STRUCTURED_FORMAT_PATTERN = re.compile(r"\b(json|jsonl|yaml|xml)\b", re.IGNORECASE)
+_STRUCTURED_FORMAT_NAME = r"(?:json|jsonl|yaml|xml)"
+_STRUCTURED_FORMAT_PATTERNS = (
+    re.compile(
+        rf"\bformat\s+(?:your\s+|the\s+)?"
+        rf"(?:response|answer|output)\s+(?:as|in)\s+"
+        rf"(?:valid\s+|strict\s+)?{_STRUCTURED_FORMAT_NAME}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:return|output|emit|produce)\s+"
+        rf"(?:only\s+|valid\s+|strict\s+)*"
+        rf"{_STRUCTURED_FORMAT_NAME}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:respond|reply|answer)\s+(?:strictly\s+)?"
+        rf"(?:as|in)\s+(?:valid\s+)?{_STRUCTURED_FORMAT_NAME}\b",
+        re.IGNORECASE,
+    ),
+)
+_NEGATED_FORMAT_COMMAND = re.compile(
+    r"(?:\bdo\s+not|\bdon't|\bnever|\bnot\s+to)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _structured_format_demanded(text: str) -> bool:
@@ -831,7 +854,12 @@ def _structured_format_demanded(text: str) -> bool:
     bytes for one turn, while a false negative breaks the reply format.
     """
 
-    return bool(_STRUCTURED_FORMAT_PATTERN.search(text))
+    for pattern in _STRUCTURED_FORMAT_PATTERNS:
+        for match in pattern.finditer(text):
+            prefix = text[max(0, match.start() - 24) : match.start()]
+            if not _NEGATED_FORMAT_COMMAND.search(prefix):
+                return True
+    return False
 
 
 def validate_orchestration_chat_input(

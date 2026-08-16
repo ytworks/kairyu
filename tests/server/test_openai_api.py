@@ -4218,7 +4218,14 @@ def test_orchestration_input_flags_structured_format_demand():
 
     json_demand = validated("Format your response as JSON with this structure.")
     assert json_demand.structured_format_in_prompt
+    assert validated("Return valid JSON only.").structured_format_in_prompt
+    assert validated("Respond in YAML.").structured_format_in_prompt
     assert not validated("Explain how tides work.").structured_format_in_prompt
+    assert not validated(
+        "In one sentence, explain what JSON is. Use ordinary prose, not JSON output."
+    ).structured_format_in_prompt
+    assert not validated("Compare JSON and XML.").structured_format_in_prompt
+    assert not validated("Do not return JSON.").structured_format_in_prompt
     # The demand binds later turns whose latest message is just command
     # output (agent loops state the format once, in the first message).
     later_turn = validated(
