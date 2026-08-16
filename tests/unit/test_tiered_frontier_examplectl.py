@@ -365,6 +365,28 @@ def test_tiered_l2_pins_only_the_explicit_coding_dag() -> None:
     # Untrusted-data delimiters (MoA pattern) guard every cross-role payload.
     for role_name in ("draft_synthesis", "verifier"):
         assert "UNTRUSTED" in by_name[role_name].prompt
+    # Issue #509: the general ensemble profile serves agent/format-constrained
+    # and non-code turns under the same model — full DAG, no sandbox stages,
+    # every deployment model participating, publisher on non-thinking DeepSeek.
+    expected_general = list(config["orchestration"]["general_roles"])
+    assert [role.name for role in maximum.general_roles] == expected_general == [
+        "head_general",
+        "proposal_direct",
+        "proposal_alt",
+        "proposal_deep",
+        "synthesis_general",
+        "verifier_general",
+        "continuation_general",
+    ]
+    general_by_name = {role.name: role for role in maximum.general_roles}
+    assert general_by_name["proposal_deep"].worker == "tier2"
+    assert general_by_name["verifier_general"].verifies == "synthesis_general"
+    assert general_by_name["continuation_general"].worker == "tier2-direct"
+    assert general_by_name["continuation_general"].reasoning_closed is True
+    assert general_by_name["continuation_general"].prompt_headless
+    assert not any(
+        role.role_type == "executor" for role in maximum.general_roles
+    )
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 
@@ -449,6 +471,18 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                             "exec_draft",
                             "verifier",
                             "continuation",
+                        )
+                    ],
+                    "general_roles": [
+                        {"name": name}
+                        for name in (
+                            "head_general",
+                            "proposal_direct",
+                            "proposal_alt",
+                            "proposal_deep",
+                            "synthesis_general",
+                            "verifier_general",
+                            "continuation_general",
                         )
                     ],
                     "stream_head": "head",

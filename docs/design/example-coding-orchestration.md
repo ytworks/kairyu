@@ -253,6 +253,25 @@ inside the budget with reward 1.0 each. Prompt/policy edits again
 invalidate the measured artifact until `./verify.sh serving-auto-max` and
 `serving-auto-max-coding` are re-run.
 
+Review amendment (2026-08-17, issue #509 — Terminal-Bench timeout root
+causes): the interim run (89 trials) produced 12 `AgentTimeoutError`s
+against the 900 s Terminus budget with public-request p50 63.9 s / p90
+203.8 s and zero transport errors — pure per-turn cost. Two defects are
+fixed without touching any contract: (1) the verifier ran greedy
+(`temperature: 0.0`) on a thinking model, a documented cause of looping
+deliberation (DeepSeek reasoning guidance: 0.5–0.7); 186/357 verdicts (52%)
+burned the full 4096-token cap inside `<think>` before PASS/FAIL, each
+triggering the bounded re-verification — the verifier (both profiles) now
+samples at `temperature: 0.6, top_p: 0.95`, keeping caller-seeded runs
+reproducible via the seed pass-through. (2) Qwen role prompts placed the
+role instruction before the conversation, so the growing agent conversation
+could never share prefill across roles or turns (measured 37.9% prefix-hit
+rate on the Qwen pool vs 70.2% on DeepSeek); every Qwen role now leads with
+a byte-identical `--- REQUEST ---` framing and puts its instruction after
+the conversation, letting the prefix-indexed replicas reuse the
+conversation KV. Both edits invalidate the measured artifact until the
+`verify.sh` gates are re-run.
+
 The example gate: `./verify.sh serving-auto-max-coding` runs a deterministic
 self-contained Python-task matrix (c1/8/16/32), requires a valid trace with a
 successful head and continuation in every sample, and counts a sample as
@@ -291,6 +310,34 @@ results are recorded with run IDs in the example's `MEASUREMENTS.md`. The
 benchmark is requested as `ytworks/kairyu-bench#10`; no kairyu-bench
 implementation work is part of this change. The removed Accuracy suite is
 not resurrected; `verification/` continues to gate serving behavior only.
+
+### ECO-D6 — General ensemble profile with automatic per-request selection (issue #509)
+
+The coding DAG's role contracts are Python-module/pytest-specialized by
+design (ECO-D2). The Terminal-Bench window showed those contracts idling on
+agent-loop turns: Terminus demands shell-command batches in a JSON envelope,
+testgen answered NOT_APPLICABLE 311/311 (so the sandbox never grounded a
+draft), proposals stayed bound to a `solution` module the task never asked
+for, and reply-format drift contributed to score-0 completions. Decision:
+one served model (`kairyu-auto-max`) carries a second, equally full ensemble
+DAG — `OrchestratorSpec.general_roles` — selected per request by a
+deterministic rule computed identically at preview/preflight and execution
+time (a pure function of the call, so the prepared-request contract cannot
+diverge): tools, tools-in-prompt, or a plain-text structured-format demand
+(the EO-D7 head-disable signals) select the general profile; otherwise a
+code-task signal in the latest user turn (code fence or code vocabulary,
+scanned on the caller's words, not the L2 envelope) keeps the coding
+profile; otherwise general. Constraints, per the product's purpose: the
+coding profile is unchanged; both profiles are full Conductor ensembles
+under the same TTFT gate; there is no single-engine route in auto-max, and
+no role is skipped inside either profile. The example's general profile uses
+every deployment model — Qwen head + two Qwen proposals + a thinking
+DeepSeek deep proposal, Qwen synthesis, thinking DeepSeek verification
+(format deviation is a FAIL), and the direct DeepSeek publisher with the
+same `prompt_headless`/`reasoning_closed`/NO_CONTINUATION contracts as the
+coding continuation. The chosen profile is recorded in the result trace
+(`role profile: …`) and `/v1/route` reports both role sets; launcher
+readiness (`control.py`) asserts the general role list like the coding one.
 
 ## Acceptance
 

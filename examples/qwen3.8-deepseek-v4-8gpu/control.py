@@ -449,6 +449,14 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
             "Kairyu L2 does not report the required "
             f"{len(expected_roles)}-role coding product DAG"
         )
+    expected_general = list(orchestration.get("general_roles", ()))
+    if expected_general and [
+        role.get("name") for role in policy.get("general_roles", ())
+    ] != expected_general:
+        raise SystemExit(
+            "Kairyu L2 does not report the required "
+            f"{len(expected_general)}-role general ensemble profile"
+        )
     if policy.get("stream_head") != orchestration["stream_head"]:
         raise SystemExit("Kairyu product policy must stream the head role publicly")
     if policy.get("moa_samples") != 0:

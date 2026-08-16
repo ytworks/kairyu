@@ -184,6 +184,11 @@ class OrchestratorSpec(BaseModel):
 
     workers: tuple[WorkerSpec, ...] = Field(min_length=1)
     roles: tuple[RoleNodeSpec, ...] = ()
+    # Optional second role DAG for requests outside the primary DAG's task
+    # specialization (issue #509). Both profiles are full ensembles served
+    # under the same model name; the orchestrator selects per request and no
+    # profile ever routes to a single engine directly.
+    general_roles: tuple[RoleNodeSpec, ...] = ()
     budget: BudgetSpec = BudgetSpec()
     router: RouterSpec = RouterSpec()
     shared_prefix: str = ""
@@ -207,28 +212,34 @@ class OrchestratorSpec(BaseModel):
         executor_workers = {
             worker.name for worker in self.workers if worker.executor_ref is not None
         }
-        for role in self.roles:
-            if role.worker not in known:
-                raise ValueError(
-                    f"role {role.name!r} references unknown worker {role.worker!r}; "
-                    f"known workers: {sorted(known)}"
-                )
-            if (role.role_type == "executor") != (role.worker in executor_workers):
-                raise ValueError(
-                    f"role {role.name!r}: executor roles must use an executor_ref "
-                    "worker and generation roles must not"
-                )
-        heads = [role for role in self.roles if role.role_type == "head"]
-        if len(heads) > 1:
-            raise ValueError("at most one role may declare role_type 'head'")
-        if heads:
-            head = heads[0]
-            if head.depends_on:
-                raise ValueError(f"head role {head.name!r} cannot declare dependencies")
-            if any(role.verifies == head.name for role in self.roles):
-                raise ValueError(f"head role {head.name!r} cannot be verified")
-            if not any(head.name in role.depends_on for role in self.roles):
-                raise ValueError(
-                    f"head role {head.name!r} must feed at least one downstream role"
-                )
+        if self.general_roles and not self.roles:
+            raise ValueError("general_roles requires a primary roles DAG")
+        for profile, roles in (("roles", self.roles), ("general_roles", self.general_roles)):
+            for role in roles:
+                if role.worker not in known:
+                    raise ValueError(
+                        f"{profile}: role {role.name!r} references unknown worker "
+                        f"{role.worker!r}; known workers: {sorted(known)}"
+                    )
+                if (role.role_type == "executor") != (role.worker in executor_workers):
+                    raise ValueError(
+                        f"{profile}: role {role.name!r}: executor roles must use an "
+                        "executor_ref worker and generation roles must not"
+                    )
+            heads = [role for role in roles if role.role_type == "head"]
+            if len(heads) > 1:
+                raise ValueError(f"{profile}: at most one role may declare role_type 'head'")
+            if heads:
+                head = heads[0]
+                if head.depends_on:
+                    raise ValueError(
+                        f"{profile}: head role {head.name!r} cannot declare dependencies"
+                    )
+                if any(role.verifies == head.name for role in roles):
+                    raise ValueError(f"{profile}: head role {head.name!r} cannot be verified")
+                if not any(head.name in role.depends_on for role in roles):
+                    raise ValueError(
+                        f"{profile}: head role {head.name!r} must feed at least one "
+                        "downstream role"
+                    )
         return self

@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example is a coding-first product: an unchanged L1 fleet (four Qwen3.8 TP1 vLLM workers + the measured DeepSeek TP4/EP4 DSpark worker) under a nine-role L2 DAG where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds a networkless CPU sandbox over a Unix-socket transport, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example is a coding-first product: an L1 fleet of four Qwen3.8 TP1 vLLM workers (measured MTP-3 spec decode) + the measured DeepSeek TP4/EP4 DSpark worker, under a nine-role coding L2 DAG plus a seven-role general ensemble profile auto-selected for agent/format-constrained and non-code turns (never a direct single-engine route) where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds a networkless CPU sandbox over a Unix-socket transport, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,19 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-17 — [design] General ensemble profile and Terminal-Bench latency fixes
+- What: `general_roles` — a second full-ensemble DAG under one served model,
+  deterministically selected (tools/format-demand/non-code → general; code
+  authoring keeps the coding DAG; never a single-engine route); example gains a
+  7-role all-model general profile; verifier T 0.0→0.6/top_p 0.95 (greedy
+  thinking looped: 52% of verdicts burned the 4096 cap → reverify); Qwen
+  prompts lead with a shared REQUEST block (prefix reuse); measured MTP-3
+  adopted on Qwen workers (c1 +43.9%, c4/c8 +26%, lossless).
+- Why: issue #509 — 12/27 Terminal-Bench trials hit the 900 s agent timeout at
+  p50 63.9 s/request; coding contracts idled on agent JSON turns.
+- Refs: #509; ECO-D6 + ECO-D4 2026-08-17 amendment; `kairyu/orchestration/`;
+  `examples/qwen3.8-deepseek-v4-8gpu/`; its MEASUREMENTS.md
 
 ### 2026-08-16 — [amendment] Agent tool-turn latency and cancellation (issue #495)
 - What: tool-turn FAIL/refine loop removed (verifier/synthesis prompts declare

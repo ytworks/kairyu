@@ -151,25 +151,23 @@ def build_orchestrator(
         for worker in spec.workers
         if worker.executor_ref is None
     }
-    roles = (
-        tuple(
-            RoleSpec(
-                name=role.name,
-                worker=role.worker,
-                prompt=role.prompt,
-                role_type=role.role_type,
-                depends_on=role.depends_on,
-                verifies=role.verifies,
-                sampling=_role_sampling(role),
-                executor=_role_executor(role),
-                prompt_suffix=role.prompt_suffix,
-                prompt_headless=role.prompt_headless,
-                reasoning_closed=role.reasoning_closed,
-            )
-            for role in spec.roles
+    def _role_spec(role: RoleNodeSpec) -> RoleSpec:
+        return RoleSpec(
+            name=role.name,
+            worker=role.worker,
+            prompt=role.prompt,
+            role_type=role.role_type,
+            depends_on=role.depends_on,
+            verifies=role.verifies,
+            sampling=_role_sampling(role),
+            executor=_role_executor(role),
+            prompt_suffix=role.prompt_suffix,
+            prompt_headless=role.prompt_headless,
+            reasoning_closed=role.reasoning_closed,
         )
-        or None
-    )
+
+    roles = tuple(_role_spec(role) for role in spec.roles) or None
+    general_roles = tuple(_role_spec(role) for role in spec.general_roles) or None
     budget = Budget(
         max_steps=spec.budget.max_steps,
         max_refine_depth=spec.budget.max_refine_depth,
@@ -194,6 +192,7 @@ def build_orchestrator(
         engines=engines,
         router=router,
         roles=roles,
+        general_roles=general_roles,
         budget=budget,
         shared_prefix=spec.shared_prefix,
         sampling_params=SamplingParams(max_tokens=spec.internal_max_tokens),

@@ -251,6 +251,32 @@ started and completed the matrix. TP4's first cache build reported 201.41 s for
 engine initialization, including 109.54 s compilation. These candidate-only
 transport settings are not present in the selected TP1 deployment.
 
+## Tier1 speculative decoding selection (issue #509)
+
+Measured 2026-08-16 UTC on GPU 3 (one TP1 replica slot of the deployed
+topology) with the deployed Qwen3.8-27B-FP8 worker configuration, comparing
+the no-speculation baseline against `{"method":"mtp","num_speculative_tokens":3}`
+on a role-shaped workload: ~5,077-token prefix-cache-friendly prompts with
+unique tails, 512 generated tokens per request at temperature 0.7 (the
+proposal-role regime), via the worker's OpenAI endpoint. Speculative decoding
+is lossless (vLLM rejection sampling preserves the output distribution), so
+this is a pure latency/throughput decision.
+
+| Candidate | c1 per-request tok/s p50 | c4 aggregate tok/s | c8 aggregate tok/s |
+|---|---:|---:|---:|
+| no speculation (baseline) | 45.63 | 166.78 | 334.42 |
+| MTP-3 | **65.64 (+43.9%)** | **210.66 (+26.3%)** | **421.11 (+25.9%)** |
+
+MTP-3 is adopted for all four Qwen workers: it exceeds the +30% single-stream
+adoption bar and does not regress aggregate throughput anywhere in the
+per-replica concurrency band this DAG produces (roles fan out across four
+replicas, so per-replica overlap stays at or below the measured c8 row). The
+1-GPU general API example keeps its no-MTP envelope: its selection criterion
+includes c16/c32 saturation rows, where MTP-3 was measured regressing, and
+MTP disables `min_p`/`logit_bias`, which a general OpenAI surface must keep —
+this deployment's Qwen workers serve L2 role sampling that never uses those
+features.
+
 ## Tier2 speculation, batch-budget, and CUDA Graph selection
 
 The Tier2 comparison keeps DeepSeek TP4+EP4, FP8 KV, max sequences 32, prefix

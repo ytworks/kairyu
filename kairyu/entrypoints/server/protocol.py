@@ -175,6 +175,10 @@ class RoutingModelDescriptorPayload(BaseModel):
     )
     target_resolution: dict[str, TargetResolutionPayload]
     roles: list[RoleDescriptorPayload]
+    # Second ensemble DAG selected per request (issue #509); empty when the
+    # orchestrator serves a single profile.
+    general_roles: list[RoleDescriptorPayload] = Field(default_factory=list)
+    profile_selector: str | None = None
     stream_head: str | None = None
     budget: BudgetDescriptorPayload
     moa_samples: int

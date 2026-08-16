@@ -298,3 +298,58 @@ workers:
     options: {upstream: inferred}
 """
         )
+
+
+GENERAL_PROFILE_SPEC = """
+workers:
+  - name: tier1
+    backend: mock
+  - name: tier2
+    backend: mock
+roles:
+  - name: draft
+    worker: tier1
+    role_type: synthesizer
+    prompt: "code draft: {query}"
+general_roles:
+  - name: g_prop
+    worker: tier1
+    prompt: "general proposal: {query}"
+  - name: g_final
+    worker: tier2
+    role_type: synthesizer
+    depends_on: [g_prop]
+    prompt: "general final: {query} {g_prop}"
+"""
+
+
+def test_general_roles_profile_loads_and_builds():
+    spec = load_spec(GENERAL_PROFILE_SPEC)
+    assert [role.name for role in spec.general_roles] == ["g_prop", "g_final"]
+    descriptor = build_orchestrator(spec).describe_routing()
+    assert [role["name"] for role in descriptor["general_roles"]] == [
+        "g_prop",
+        "g_final",
+    ]
+    assert "profile_selector" in descriptor
+
+
+def test_general_roles_are_validated_like_primary_roles():
+    with pytest.raises(ValidationError, match="general_roles.*unknown worker"):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+roles:
+  - {name: draft, worker: tier1, prompt: "d: {query}"}
+general_roles:
+  - {name: g_final, worker: missing, prompt: "g: {query}"}
+"""
+        )
+    with pytest.raises(ValidationError, match="general_roles requires a primary"):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+general_roles:
+  - {name: g_final, worker: tier1, prompt: "g: {query}"}
+"""
+        )

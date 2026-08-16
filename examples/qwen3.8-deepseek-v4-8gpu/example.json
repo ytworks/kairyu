@@ -105,6 +105,15 @@
       "verifier",
       "continuation"
     ],
+    "general_roles": [
+      "head_general",
+      "proposal_direct",
+      "proposal_alt",
+      "proposal_deep",
+      "synthesis_general",
+      "verifier_general",
+      "continuation_general"
+    ],
     "stream_head": "head",
     "executor_worker": "sandbox",
     "max_steps": 12,

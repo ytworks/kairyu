@@ -42,6 +42,7 @@ from kairyu.orchestration.conductor import (
     zero_cost,
 )
 from kairyu.orchestration.execution import ExecutionBackend, ExecutorDescriptor
+from kairyu.orchestration.features import code_task_signal, latest_user_view
 from kairyu.orchestration.moa import _build_moa_setup, _MoASetup
 from kairyu.orchestration.request import (
     OrchestrationRequest,
@@ -243,6 +244,7 @@ class Orchestrator:
         engines: Mapping[str, EngineBackend],
         router: Router | None = None,
         roles: tuple[RoleSpec, ...] | None = None,
+        general_roles: tuple[RoleSpec, ...] | None = None,
         budget: Budget | None = None,
         shared_prefix: str = "",
         sampling_params: SamplingParams | None = None,
@@ -278,6 +280,10 @@ class Orchestrator:
         self._router = router or RuleRouter()
         self._router_gate = asyncio.Lock()
         self._roles = roles or _DEFAULT_ROLES
+        # Optional second ensemble DAG (issue #509): selected per request for
+        # calls outside the primary DAG's task specialization. Never a direct
+        # single-engine route — both profiles run the full Conductor.
+        self._general_roles = general_roles
         self._budget = budget or Budget()
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
@@ -300,14 +306,16 @@ class Orchestrator:
         }
         if self._moa_samples == 0:
             # Fail fast on an invalid role DAG (head shape, executor bindings,
-            # final-unit overrides) at construction instead of per request.
-            Conductor(
-                roles=self._roles,
-                workers=self._conductor_workers([]),
-                shared_prefix=self._shared_prefix,
-                sampling_params=self._sampling_params,
-                execution_workers=self._execution_workers,
-            )
+            # final-unit overrides) at construction instead of per request —
+            # for every configured profile.
+            for profile_roles in filter(None, (self._roles, self._general_roles)):
+                Conductor(
+                    roles=profile_roles,
+                    workers=self._conductor_workers(profile_roles, []),
+                    shared_prefix=self._shared_prefix,
+                    sampling_params=self._sampling_params,
+                    execution_workers=self._execution_workers,
+                )
 
     def generation_defaults_snapshot(
         self,
@@ -374,7 +382,11 @@ class Orchestrator:
             describe() if describe is not None else {"router_type": type(self._router).__name__}
         )
         role_workers = tuple(
-            dict.fromkeys(role.worker for role in self._generation_roles())
+            dict.fromkeys(
+                role.worker
+                for roles in filter(None, (self._roles, self._general_roles))
+                for role in self._generation_roles(roles)
+            )
         )
         if self._moa_samples > 0:
             multi_engines = [self._resolved_engine_descriptor(key) for key in ("tier1", "tier2")]
@@ -405,10 +417,23 @@ class Orchestrator:
                 }
             return payload
 
-        head = self._conductor_head_role()
+        head = self._conductor_head_role(self._roles)
+        general_payload = (
+            {
+                "general_roles": [role_payload(role) for role in self._general_roles],
+                "profile_selector": (
+                    "general on tools/tools_in_prompt/structured_format_in_prompt "
+                    "or when the latest user turn carries no code-task signal; "
+                    "both profiles are Conductor ensembles (issue #509)"
+                ),
+            }
+            if self._general_roles is not None
+            else {}
+        )
         return {
             "router": router,
             "targets": ["tier1", "tier2", "multi_agent"],
+            **general_payload,
             "configured_engines": {
                 name: descriptor.as_dict() for name, descriptor in self._engine_descriptors.items()
             },
@@ -479,8 +504,33 @@ class Orchestrator:
             max_tokens_cap=self._sampling_params.max_tokens,
         )
 
-    def _conductor_final_role(self) -> RoleSpec:
-        units = [role for role in self._roles if role.role_type != "verifier"]
+    def _role_profile(self, call: OrchestrationRequest) -> str:
+        """Deterministic per-request DAG profile (issue #509).
+
+        Pure function of the call so preflight, admission, and execution
+        always agree. Agent/format-constrained turns (the head-disable
+        signals) and non-code requests take the general ensemble; plain code
+        authoring keeps the specialized coding ensemble. Both profiles are
+        full Conductor DAGs — never a direct single-engine route.
+        """
+
+        if self._general_roles is None:
+            return "primary"
+        if call.tools or call.tools_in_prompt or call.structured_format_in_prompt:
+            return "general"
+        prompt = call.prompt
+        if isinstance(prompt, str) and code_task_signal(latest_user_view(prompt)):
+            return "primary"
+        return "general"
+
+    def _roles_for(self, call: OrchestrationRequest) -> tuple[RoleSpec, ...]:
+        if self._role_profile(call) == "general":
+            assert self._general_roles is not None
+            return self._general_roles
+        return self._roles
+
+    def _conductor_final_role(self, roles: tuple[RoleSpec, ...]) -> RoleSpec:
+        units = [role for role in roles if role.role_type != "verifier"]
         dependents = {dependency for role in units for dependency in role.depends_on}
         terminal = [
             role
@@ -492,14 +542,21 @@ class Orchestrator:
             raise ValueError("orchestration requires at least one terminal role")
         return (synthesizers + terminal)[0]
 
-    def _conductor_head_role(self) -> RoleSpec | None:
-        return next((role for role in self._roles if role.role_type == "head"), None)
+    def _conductor_head_role(self, roles: tuple[RoleSpec, ...]) -> RoleSpec | None:
+        return next((role for role in roles if role.role_type == "head"), None)
 
-    def _final_engine_keys(self, decision: RouteDecision | None) -> tuple[str, ...]:
+    def _final_engine_keys(
+        self,
+        call: OrchestrationRequest,
+        decision: RouteDecision | None,
+    ) -> tuple[str, ...]:
+        roles = self._roles_for(call)
         if decision is None:
-            keys = {"tier1", "tier2", self._conductor_final_role().worker}
+            keys = {"tier1", "tier2", self._conductor_final_role(roles).worker}
         elif decision.target == "multi_agent":
-            keys = {"tier2" if self._moa_samples > 0 else self._conductor_final_role().worker}
+            keys = {
+                "tier2" if self._moa_samples > 0 else self._conductor_final_role(roles).worker
+            }
         else:
             keys = {decision.target}
         fallback = next(iter(self._engines))
@@ -509,6 +566,7 @@ class Orchestrator:
 
     def _internal_engine_keys(
         self,
+        call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> tuple[str, ...]:
         if decision is not None and decision.target != "multi_agent":
@@ -516,10 +574,11 @@ class Orchestrator:
         if self._moa_samples > 0:
             keys = {"tier1"}
         else:
-            final_role = self._conductor_final_role()
+            roles = self._roles_for(call)
+            final_role = self._conductor_final_role(roles)
             keys = {
                 role.worker
-                for role in self._generation_roles()
+                for role in self._generation_roles(roles)
                 if role.name != final_role.name
             }
         fallback = next(iter(self._engines))
@@ -538,7 +597,7 @@ class Orchestrator:
             ):
                 raise ValueError("multimodal orchestration does not support MoA sampling")
             if decision is not None and decision.target != "multi_agent":
-                keys = self._final_engine_keys(decision)
+                keys = self._final_engine_keys(call, decision)
                 if not all(
                     backend_supports_prompt_kind(self._engines[key], "multimodal")
                     for key in keys
@@ -551,7 +610,7 @@ class Orchestrator:
                 fallback = next(iter(self._engines))
                 role_keys = {
                     role.worker if role.worker in self._engines else fallback
-                    for role in self._generation_roles()
+                    for role in self._generation_roles(self._roles_for(call))
                 }
                 if not any(
                     backend_supports_prompt_kind(self._engines[key], "multimodal")
@@ -581,13 +640,14 @@ class Orchestrator:
                 )
         if call.sampling_params.n <= 1:
             return
-        final_role = self._conductor_final_role()
+        roles = self._roles_for(call)
+        final_role = self._conductor_final_role(roles)
         if (
             (decision is None or decision.target == "multi_agent")
             and self._moa_samples == 0
             and any(
                 role.role_type == "verifier" and role.verifies == final_role.name
-                for role in self._roles
+                for role in roles
             )
         ):
             raise ValueError(
@@ -596,7 +656,7 @@ class Orchestrator:
             )
         unsupported = [
             key
-            for key in self._final_engine_keys(decision)
+            for key in self._final_engine_keys(call, decision)
             if getattr(self._engines[key], "supports_n", True) is False
         ]
         if unsupported:
@@ -610,7 +670,7 @@ class Orchestrator:
         decision: RouteDecision | None,
     ) -> tuple[_IntentRequest, ...]:
         requests: list[_IntentRequest] = []
-        for key in self._final_engine_keys(decision):
+        for key in self._final_engine_keys(call, decision):
             prompt = self._engine_prompt(
                 key,
                 call,
@@ -699,10 +759,10 @@ class Orchestrator:
                 self._shared_prefix,
                 session="validation-moa",
             )
-            key = self._internal_engine_keys(decision)[0]
+            key = self._internal_engine_keys(call, decision)[0]
             return tuple(_IntentRequest(key, request) for request in setup.proposal_requests)
         requests: list[_IntentRequest] = []
-        for key in self._internal_engine_keys(decision):
+        for key in self._internal_engine_keys(call, decision):
             prompt = self._engine_prompt(
                 key,
                 call,
@@ -882,7 +942,7 @@ class Orchestrator:
                 self._shared_prefix,
                 session=f"preflight-moa-{suffix}",
             )
-            proposal_key = self._internal_engine_keys(decision)[0]
+            proposal_key = self._internal_engine_keys(call, decision)[0]
             internal_requests = tuple(
                 _IntentRequest(proposal_key, request) for request in moa_setup.proposal_requests
             )
@@ -1164,8 +1224,9 @@ class Orchestrator:
             call.sampling_params.n,
             call.sampling_params.best_of or call.sampling_params.n,
         )
+        call_roles = self._roles_for(call)
         largest_role_prompt = max(
-            self._roles,
+            call_roles,
             key=lambda role: len(role.prompt.encode("utf-8")),
             default=None,
         )
@@ -1174,7 +1235,7 @@ class Orchestrator:
         supplied_bytes = len(f"{self._shared_prefix}{call.prompt}".encode())
         stage_prompt = max(1, supplied_bytes + role_bytes + 256)
         internal_output = internal.max_tokens
-        head = self._conductor_head_role()
+        head = self._conductor_head_role(call_roles)
         if head is not None and head.sampling is not None and head.sampling.max_tokens:
             # The head streams public output whose role cap may exceed the
             # internal ceiling; keep the bound conservative.
@@ -1232,11 +1293,16 @@ class Orchestrator:
 
         return await run_prompt_work(self.admission_upper_bound, request)
 
-    def _generation_roles(self) -> tuple[RoleSpec, ...]:
-        return tuple(role for role in self._roles if role.role_type != "executor")
+    @staticmethod
+    def _generation_roles(roles: tuple[RoleSpec, ...]) -> tuple[RoleSpec, ...]:
+        return tuple(role for role in roles if role.role_type != "executor")
 
-    def _conductor_workers(self, notes: list[str]) -> dict[str, EngineBackend]:
-        needed = {role.worker for role in self._generation_roles()}
+    def _conductor_workers(
+        self,
+        roles: tuple[RoleSpec, ...],
+        notes: list[str],
+    ) -> dict[str, EngineBackend]:
+        needed = {role.worker for role in self._generation_roles(roles)}
         return {name: self._resolve_engine(name, notes) for name in needed}
 
     @staticmethod
@@ -1266,9 +1332,10 @@ class Orchestrator:
     ) -> Conductor:
         """Construct the one exact role execution contract used by preflight/run."""
 
+        roles = self._roles_for(call)
         return Conductor(
-            roles=self._roles,
-            workers=self._conductor_workers(notes),
+            roles=roles,
+            workers=self._conductor_workers(roles, notes),
             shared_prefix=self._shared_prefix,
             sampling_params=self._internal_sampling_params(call),
             final_sampling_params=call.sampling_params,
@@ -1279,7 +1346,7 @@ class Orchestrator:
             final_parallel_tool_calls=call.parallel_tool_calls,
             final_tool_call_protocol=call.tool_call_protocol,
             cost_model=self._cost_model,
-            worker_trace=self._conductor_worker_trace(),
+            worker_trace=self._conductor_worker_trace(roles),
             usage_observer=usage_observer,
             stage_observer=self._stage_observer,
             affinity_key=self._conversation_affinity_key(call),
@@ -1289,9 +1356,12 @@ class Orchestrator:
             execution_workers=self._execution_workers,
         )
 
-    def _conductor_worker_trace(self) -> dict[str, WorkerTraceIdentity]:
+    def _conductor_worker_trace(
+        self,
+        roles: tuple[RoleSpec, ...],
+    ) -> dict[str, WorkerTraceIdentity]:
         fallback_name = next(iter(self._engines))
-        needed = {role.worker for role in self._generation_roles()}
+        needed = {role.worker for role in self._generation_roles(roles)}
         identities = {}
         for worker in needed:
             engine = worker if worker in self._engines else fallback_name
@@ -1300,7 +1370,7 @@ class Orchestrator:
                 engine=engine,
                 model=descriptor.model,
             )
-        for role in self._roles:
+        for role in roles:
             if role.role_type == "executor" and role.worker not in identities:
                 identities[role.worker] = WorkerTraceIdentity(engine=role.worker)
         return identities
@@ -1438,6 +1508,8 @@ class Orchestrator:
                 route_span.set_attribute("kairyu.route.confidence", decision.confidence)
         route_completed_at = utc_now_iso()
         notes: list[str] = [f"route: {decision.target} ({decision.reason})"]
+        if self._general_roles is not None and decision.target == "multi_agent":
+            notes.append(f"role profile: {self._role_profile(call)}")
         trace_events = [
             self._route_trace_event(
                 decision,
@@ -1928,6 +2000,8 @@ class Orchestrator:
                 route_span.set_attribute("kairyu.route.confidence", decision.confidence)
         route_completed_at = utc_now_iso()
         notes = [f"route: {decision.target} ({decision.reason})"]
+        if self._general_roles is not None and decision.target == "multi_agent":
+            notes.append(f"role profile: {self._role_profile(call)}")
         trace_events = [
             self._route_trace_event(
                 decision,

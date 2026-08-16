@@ -1493,3 +1493,94 @@ def test_run_sync_wrapper():
 def test_requires_at_least_one_engine():
     with pytest.raises(ValueError, match="engine"):
         Orchestrator(engines={})
+
+
+def _profiled_orchestrator(tier1, tier2):
+    # Issue #509: one served model, two ensemble DAGs. The coding profile is
+    # a single synthesizer; the general profile fans out before its final.
+    from kairyu.orchestration.conductor import RoleSpec
+
+    class MultiAgentRouter:
+        def preview(self, query, context=None):
+            return RuleRouter().route(COMPLEX)
+
+        def route(self, query, context=None):
+            return RuleRouter().route(COMPLEX)
+
+    coding_roles = (
+        RoleSpec(
+            name="c_final",
+            worker="tier1",
+            role_type="synthesizer",
+            prompt="[c_final] {query}",
+            prompt_headless="[c_final_headless] {query}",
+        ),
+    )
+    general_roles = (
+        RoleSpec(name="g_prop", worker="tier1", prompt="[g_prop] {query}"),
+        RoleSpec(
+            name="g_final",
+            worker="tier2",
+            role_type="synthesizer",
+            depends_on=("g_prop",),
+            prompt="[g_final] {query} {g_prop}",
+            prompt_headless="[g_final_headless] {query} {g_prop}",
+        ),
+    )
+    return Orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+        router=MultiAgentRouter(),
+        roles=coding_roles,
+        general_roles=general_roles,
+    )
+
+
+async def test_structured_format_turn_runs_general_profile():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    orchestrator = _profiled_orchestrator(tier1, tier2)
+    call = OrchestrationRequest(
+        prompt="Summarize the latest terminal output. Format your reply as JSON.",
+        sampling_params=SamplingParams(max_tokens=64),
+        structured_format_in_prompt=True,
+    )
+    result = await orchestrator.run(call)
+    assert "role profile: general" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert any("[g_final" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)
+
+
+async def test_code_task_turn_keeps_primary_profile():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    orchestrator = _profiled_orchestrator(tier1, tier2)
+    call = OrchestrationRequest(
+        prompt="Implement a python function that reverses a list.",
+        sampling_params=SamplingParams(max_tokens=64),
+    )
+    result = await orchestrator.run(call)
+    assert "role profile: primary" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[c_final" in prompt for prompt in prompts)
+    assert not any("[g_" in prompt for prompt in prompts)
+
+
+async def test_general_profile_preflight_matches_execution():
+    # The prepared-request contract must pre-render the same profile the run
+    # executes, or the exact-request identity check rejects the dispatch.
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    orchestrator = _profiled_orchestrator(tier1, tier2)
+    call = OrchestrationRequest(
+        prompt="What should I cook tonight with rice and eggs?",
+        sampling_params=SamplingParams(max_tokens=64),
+    )
+    prepared = await orchestrator.prepare_request(call)
+    result = await orchestrator.run(call, prepared=prepared)
+    assert "role profile: general" in result.trace
+    assert result.completions
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)
