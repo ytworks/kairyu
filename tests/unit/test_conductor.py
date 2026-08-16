@@ -533,11 +533,30 @@ async def test_inconclusive_verdict_reverifies_once_instead_of_refining():
             depends_on=("worker",),
         ),
     )
-    conductor = Conductor(roles=roles, workers={"w": backend})
+    observed_events = []
+    conductor = Conductor(
+        roles=roles,
+        workers={"w": backend},
+        stage_observer=observed_events.append,
+    )
     result = await conductor.run("task", budget=Budget(max_refine_depth=2))
     assert result.outputs["worker"] == "draft v1"  # no refinement round ran
     assert result.outputs["check"] == "PASS: fine"
     assert "ran out of output budget" in backend.prompts_seen[2]
+    verifier_events = [
+        event for event in result.trace if event.role == "verifier"
+    ]
+    assert [event.node for event in verifier_events] == [
+        "check",
+        "check:reverify",
+    ]
+    assert [event.status for event in verifier_events] == [
+        "inconclusive",
+        "success",
+    ]
+    assert [
+        event.node for event in observed_events if event.role == "verifier"
+    ] == ["check", "check:reverify"]
 
 
 async def test_refinement_depth_is_bounded():

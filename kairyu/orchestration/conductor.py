@@ -1902,6 +1902,7 @@ class Conductor:
                 )
                 break
             verdict = verifier_observed.text
+            verdict_trace_spec = verifier
             if _verdict_is_inconclusive(verdict):
                 # A truncated or empty verdict is not evidence of a draft
                 # defect, and counting it as FAIL burns a full refinement
@@ -1915,8 +1916,27 @@ class Conductor:
                     "points."
                     + verifier.prompt_suffix
                 )
+                run.trace.append(
+                    self._trace_event(
+                        verifier,
+                        "verified:inconclusive",
+                        operation="verification",
+                        status="inconclusive",
+                        attempt=depth,
+                        detail=f"attempt={depth} inconclusive=true",
+                        timing=verifier_observed.timing,
+                        usage=verifier_observed.usage,
+                        budget=verifier_observed.budget,
+                        metadata={
+                            "pass": False,
+                            "inconclusive": True,
+                            "reverification": False,
+                        },
+                    )
+                )
+                verdict_trace_spec = None
                 try:
-                    verifier_observed = await self._generate(
+                    retry_observed = await self._generate(
                         run,
                         session,
                         verifier.name,
@@ -1926,7 +1946,11 @@ class Conductor:
                         spec=replace(verifier, name=f"{verifier.name}:reverify"),
                         operation="verification",
                     )
+                    verifier_observed = retry_observed
                     verdict = verifier_observed.text
+                    verdict_trace_spec = replace(
+                        verifier, name=f"{verifier.name}:reverify"
+                    )
                 except (_BudgetRefused, _ObservedGenerationError):
                     pass
             run.outputs[verifier.name] = verdict
@@ -1938,23 +1962,24 @@ class Conductor:
                 depth,
                 verifier_observed,
             )
-            run.trace.append(
-                self._trace_event(
-                    verifier,
-                    "verified",
-                    operation="verification",
-                    status="success",
-                    attempt=depth,
-                    detail=f"attempt={depth} pass={passed}",
-                    timing=verifier_observed.timing,
-                    usage=verifier_observed.usage,
-                    budget=verifier_observed.budget,
-                    metadata={
-                        "pass": passed,
-                        "refinement_exhausted": not passed and not can_refine,
-                    },
+            if verdict_trace_spec is not None:
+                run.trace.append(
+                    self._trace_event(
+                        verdict_trace_spec,
+                        "verified",
+                        operation="verification",
+                        status="success",
+                        attempt=depth,
+                        detail=f"attempt={depth} pass={passed}",
+                        timing=verifier_observed.timing,
+                        usage=verifier_observed.usage,
+                        budget=verifier_observed.budget,
+                        metadata={
+                            "pass": passed,
+                            "refinement_exhausted": not passed and not can_refine,
+                        },
+                    )
                 )
-            )
             await self._emit_intermediate(event_sink, verifier_intermediate)
             if passed or not can_refine:
                 break
