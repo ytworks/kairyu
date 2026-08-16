@@ -39,6 +39,8 @@ class OrchestrationRequest:
     reasoning_effort: str | None = None
     multimodal_prompt: MultimodalPrompt | None = None
     chat_template_kwargs: Mapping[str, object] | None = None
+    # Appended to preserve the positional constructor contract above.
+    conversation_affinity_key: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -55,6 +57,11 @@ class OrchestrationRequest:
             )
         if self.reasoning_effort not in {None, "low", "high", "max"}:
             raise ValueError("reasoning_effort must be low, high, max, or null")
+        if self.conversation_affinity_key is not None and (
+            not isinstance(self.conversation_affinity_key, str)
+            or not self.conversation_affinity_key
+        ):
+            raise ValueError("conversation_affinity_key must be a non-empty string or null")
         if self.multimodal_prompt is not None and not isinstance(
             self.multimodal_prompt,
             MultimodalPrompt,

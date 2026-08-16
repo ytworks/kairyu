@@ -4248,6 +4248,35 @@ def test_orchestration_input_flags_structured_format_demand():
     assert later_turn.structured_format_in_prompt
 
 
+def test_orchestration_affinity_distinguishes_long_common_agent_preambles():
+    from kairyu.entrypoints.server.chat_service import (
+        validate_orchestration_chat_input,
+    )
+    from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+
+    common = "agent harness " * 300
+
+    def key(*contents: str) -> str | None:
+        validated = validate_orchestration_chat_input(
+            ChatCompletionRequest(
+                model="kairyu-auto",
+                messages=[
+                    {"role": "user", "content": content}
+                    for content in contents
+                ],
+            )
+        )
+        return validated.conversation_affinity_key
+
+    first = key(common + "task A")
+    later = key(common + "task A", "appended terminal output")
+    other = key(common + "task B")
+
+    assert first is not None
+    assert first == later
+    assert other != first
+
+
 class _DisconnectingRequest:
     """Request stub whose receive channel reports a client disconnect."""
 

@@ -1240,16 +1240,19 @@ class Orchestrator:
         return {name: self._resolve_engine(name, notes) for name in needed}
 
     @staticmethod
-    def _conversation_affinity_key(prompt: object) -> str | None:
+    def _conversation_affinity_key(
+        call: OrchestrationRequest,
+    ) -> str | None:
         """Stable KV-affinity key for consecutive turns of one conversation.
 
-        Agent loops resend the same conversation with new turns appended, so
-        hashing a fixed-length head (long enough to pass the constant L2
-        preamble and reach conversation-specific text) keeps every turn on
-        the replica that already holds the warm prefix, instead of the
-        per-request random session defeating KV reuse (issue #495).
+        Role-aware HTTP callers provide a hash of the immutable conversation
+        opening. Transport-neutral legacy callers retain the fixed-prefix
+        fallback because they provide only an opaque prompt string.
         """
 
+        if call.conversation_affinity_key is not None:
+            return call.conversation_affinity_key
+        prompt = call.prompt
         if not isinstance(prompt, str) or not prompt:
             return None
         return "conv-" + hashlib.sha256(prompt[:2048].encode()).hexdigest()[:16]
@@ -1279,7 +1282,7 @@ class Orchestrator:
             worker_trace=self._conductor_worker_trace(),
             usage_observer=usage_observer,
             stage_observer=self._stage_observer,
-            affinity_key=self._conversation_affinity_key(call.prompt),
+            affinity_key=self._conversation_affinity_key(call),
             expose_intermediate_outputs=self._expose_intermediate_outputs,
             multimodal_prompt=call.multimodal_prompt,
             chat_template_kwargs=call.chat_template_kwargs,

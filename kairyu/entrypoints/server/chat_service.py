@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -133,6 +134,10 @@ class ValidatedChatInput:
     # The latest user turn demands a machine-parsed output format in plain
     # text; incompatible with a prose head opening (issue #495).
     structured_format_in_prompt: bool = False
+    # Stable, role-aware hash of the immutable conversation opening. This
+    # distinguishes tasks that share a long agent-harness preamble while
+    # keeping appended turns on the same replica.
+    conversation_affinity_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -879,6 +884,26 @@ def _structured_format_demanded(text: str) -> bool:
     return False
 
 
+def _conversation_affinity_key(messages: _PreparedChatMessages) -> str | None:
+    """Hash the instruction prefix through the first user turn."""
+
+    anchor: list[tuple[str, str]] = []
+    for message in messages.messages:
+        if message.role not in {"system", "developer", "user"}:
+            continue
+        anchor.append((message.role, message.display_content))
+        if message.role == "user":
+            break
+    if not anchor:
+        return None
+    payload = json.dumps(
+        anchor,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "conv-" + hashlib.sha256(payload).hexdigest()[:16]
+
+
 def validate_orchestration_chat_input(
     request: ChatCompletionRequest,
 ) -> ValidatedChatInput:
@@ -949,6 +974,7 @@ def validate_orchestration_chat_input(
             and _structured_format_demanded(message.display_content or "")
             for message in prepared.messages
         ),
+        conversation_affinity_key=_conversation_affinity_key(prepared),
     )
 
 

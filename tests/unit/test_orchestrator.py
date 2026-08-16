@@ -704,12 +704,23 @@ async def test_conversation_affinity_key_keeps_turns_on_one_session() -> None:
             backend.streamed.clear()
         return sessions
 
-    conversation = COMPLEX * 20  # longer than the 2048-char affinity head
-    await orchestrator.run(conversation)
+    conversation = COMPLEX * 20
+
+    def call(prompt: str, affinity_key: str) -> OrchestrationRequest:
+        sampling = SamplingParams(max_tokens=1024)
+        return OrchestrationRequest(
+            prompt=prompt,
+            sampling_params=sampling,
+            conversation_affinity_key=affinity_key,
+        )
+
+    await orchestrator.run(call(conversation, "conv-task-a"))
     first_turn = observed_sessions()
-    await orchestrator.run(conversation + " appended tool-result turn")
+    await orchestrator.run(
+        call(conversation + " appended tool-result turn", "conv-task-a")
+    )
     second_turn = observed_sessions()
-    await orchestrator.run("unrelated conversation " + conversation)
+    await orchestrator.run(call(conversation, "conv-task-b"))
     other_conversation = observed_sessions()
 
     assert len(first_turn) == 1
