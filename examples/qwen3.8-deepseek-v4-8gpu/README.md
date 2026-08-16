@@ -59,7 +59,7 @@ the execution matrix; the draft is re-executed and verified by the thinking
 DeepSeek verifier before the DeepSeek continuation streams the remainder
 after the committed opening. A failed
 verifier repeats synthesis, execution, and verification at most twice
-(`moa_samples: 0`, `max_refine_depth: 2`, `max_steps: 15`); L2 never calls the
+(`moa_samples: 0`, `max_refine_depth: 1`, `max_steps: 12`); L2 never calls the
 public L3 endpoint recursively.
 
 The executor is a CPU-only container with `network_mode: none` — it has no IP

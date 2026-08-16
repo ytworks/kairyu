@@ -29,6 +29,10 @@ class OrchestrationRequest:
     tools: tuple[Mapping[str, object], ...] = ()
     tool_choice: str | Mapping[str, object] | None = None
     tools_in_prompt: bool = False
+    # The latest user turn demands a machine-parsed output format in plain
+    # text (e.g. "format your response as JSON"). Like tools/response_format,
+    # this intent is incompatible with a prose head opening (issue #495).
+    structured_format_in_prompt: bool = False
     response_format: Mapping[str, object] | None = None
     parallel_tool_calls: bool | None = None
     tool_call_protocol: str = "generic"

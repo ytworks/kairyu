@@ -3,7 +3,10 @@ server:
   port: 8000
   api_keys_env: null
   max_concurrency: 256
-  admission_wait_timeout_s: 86400
+  # A bounded queue wait fails a stuck request fast instead of parking it for
+  # a day; the measured worst-case E2E envelope (generic c32 p99 ~510s,
+  # MEASUREMENTS.md) stays far inside this bound (issue #495).
+  admission_wait_timeout_s: 600
   max_chat_body_bytes: 16777216
 
 pools:
@@ -15,7 +18,10 @@ pools:
           base_url: http://qwen-0:8000/v1
           model: qwen3.8-27b
           api_key_env: null
-          timeout_s: 86400
+          # Bounded so a hung upstream call fails instead of holding its
+          # replica slot for a day; > the measured per-stage worst case
+          # (issue #495).
+          timeout_s: 1800
           upstream: vllm
           capabilities:
             allow_prompt_kinds: [multimodal]
@@ -62,7 +68,8 @@ pools:
           base_url: http://deepseek:8000/v1
           model: deepseek-v4-flash-0731
           api_key_env: null
-          timeout_s: 86400
+          # Bounded for the same issue #495 rationale as the Qwen pool.
+          timeout_s: 1800
           upstream: vllm
           allow_templated_chat_passthrough: true
           chat_tokenizer: /models/deepseek/deepseek-v4-flash-0731

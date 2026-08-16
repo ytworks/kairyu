@@ -130,6 +130,9 @@ class ValidatedChatInput:
     tool_call_protocol: ToolCallProtocol = ToolCallProtocol.GENERIC
     parallel_tool_calls: bool | None = None
     orchestration_multimodal_prompt: MultimodalPrompt | None = None
+    # The latest user turn demands a machine-parsed output format in plain
+    # text; incompatible with a prose head opening (issue #495).
+    structured_format_in_prompt: bool = False
 
 
 @dataclass(frozen=True)
@@ -812,6 +815,25 @@ async def validate_chat_input_async(
     )
 
 
+_STRUCTURED_FORMAT_PATTERN = re.compile(r"\b(json|jsonl|yaml|xml)\b", re.IGNORECASE)
+
+
+def _structured_format_demanded(text: str) -> bool:
+    """True when instruction text names a machine-parsed text format.
+
+    Agent harnesses (e.g. Terminus-2) demand "format your response as JSON"
+    in plain text without tools or response_format, so the split-stream
+    head's mandatory prose opening corrupts the reply (issue #495). The
+    demand is stated once (usually the first user message) and binds every
+    later turn whose latest message is just terminal output, so callers must
+    scan the whole instruction-bearing side of the conversation. The check
+    is deliberately sensitive: a false positive only skips the head's early
+    bytes for one turn, while a false negative breaks the reply format.
+    """
+
+    return bool(_STRUCTURED_FORMAT_PATTERN.search(text))
+
+
 def validate_orchestration_chat_input(
     request: ChatCompletionRequest,
 ) -> ValidatedChatInput:
@@ -876,6 +898,11 @@ def validate_orchestration_chat_input(
             _render_multimodal_prompt(request, None, prepared)
             if prepared.has_images
             else None
+        ),
+        structured_format_in_prompt=any(
+            message.role in {"system", "developer", "user"}
+            and _structured_format_demanded(message.display_content or "")
+            for message in prepared.messages
         ),
     )
 

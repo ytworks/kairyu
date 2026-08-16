@@ -658,6 +658,41 @@ async def test_async_prepare_reuses_exact_initial_role_request(stream) -> None:
     )
 
 
+async def test_conversation_affinity_key_keeps_turns_on_one_session() -> None:
+    # Issue #495: consecutive agent turns resend the same conversation with
+    # new turns appended; their KV-affinity session must stay stable so the
+    # replica holding the warm prefix keeps the traffic, while a different
+    # conversation maps to a different session.
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = _PreparingBackend("tier2", events)
+    orchestrator = _orchestrator(engines={"tier1": tier1, "tier2": tier2})
+
+    def observed_sessions() -> set[str]:
+        sessions = {
+            request.cache_hint.session_id
+            for backend in (tier1, tier2)
+            for request in backend.generated + backend.streamed
+            if request.cache_hint is not None
+        }
+        for backend in (tier1, tier2):
+            backend.generated.clear()
+            backend.streamed.clear()
+        return sessions
+
+    conversation = COMPLEX * 20  # longer than the 2048-char affinity head
+    await orchestrator.run(conversation)
+    first_turn = observed_sessions()
+    await orchestrator.run(conversation + " appended tool-result turn")
+    second_turn = observed_sessions()
+    await orchestrator.run("unrelated conversation " + conversation)
+    other_conversation = observed_sessions()
+
+    assert len(first_turn) == 1
+    assert first_turn == second_turn
+    assert other_conversation != first_turn
+
+
 @pytest.mark.parametrize("stream", [False, True])
 async def test_async_prepare_reuses_exact_moa_proposal_requests(stream) -> None:
     events: list[tuple[str, str]] = []

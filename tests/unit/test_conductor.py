@@ -516,6 +516,30 @@ async def test_verifier_fail_triggers_refinement_until_pass():
     assert result.budget_state.steps_used == 4
 
 
+async def test_inconclusive_verdict_reverifies_once_instead_of_refining():
+    # Issue #495: a verdict that never declares PASS/FAIL (deliberation
+    # consumed the role's token budget) used to count as FAIL and burn a full
+    # refinement round; it must instead trigger one immediate re-verification
+    # whose outcome then stands.
+    backend = ScriptedBackend(["draft v1", "", "PASS: fine"])
+    roles = (
+        RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(
+            name="check",
+            worker="w",
+            prompt="verify: {worker}",
+            role_type="verifier",
+            verifies="worker",
+            depends_on=("worker",),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+    result = await conductor.run("task", budget=Budget(max_refine_depth=2))
+    assert result.outputs["worker"] == "draft v1"  # no refinement round ran
+    assert result.outputs["check"] == "PASS: fine"
+    assert "ran out of output budget" in backend.prompts_seen[2]
+
+
 async def test_refinement_depth_is_bounded():
     backend = ScriptedBackend(["d1", "FAIL 1", "d2", "FAIL 2", "d3", "FAIL 3"])
     roles = (

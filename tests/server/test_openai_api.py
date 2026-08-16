@@ -4188,12 +4188,111 @@ async def test_models_retrieve_returns_model_object_and_standard_404(app):
         "object": "model",
         "created": 0,
         "owned_by": "kairyu",
+        "max_model_len": None,
     }
     assert auto_model.status_code == 200
     assert auto_model.json()["id"] == "kairyu-auto"
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "model_not_found"
     assert missing.json()["error"]["type"] == "invalid_request_error"
+
+
+def test_orchestration_input_flags_structured_format_demand():
+    # Issue #495: agent harnesses demand "format your response as JSON" in
+    # plain text; the flag must reach orchestration so the prose head is
+    # disabled for that call.
+    from kairyu.entrypoints.server.chat_service import (
+        validate_orchestration_chat_input,
+    )
+    from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+
+    def validated(*contents: str):
+        return validate_orchestration_chat_input(
+            ChatCompletionRequest(
+                model="kairyu-auto",
+                messages=[
+                    {"role": "user", "content": content} for content in contents
+                ],
+            )
+        )
+
+    json_demand = validated("Format your response as JSON with this structure.")
+    assert json_demand.structured_format_in_prompt
+    assert not validated("Explain how tides work.").structured_format_in_prompt
+    # The demand binds later turns whose latest message is just command
+    # output (agent loops state the format once, in the first message).
+    later_turn = validated(
+        "Format your response as JSON with this structure.",
+        "ls: total 0",
+    )
+    assert later_turn.structured_format_in_prompt
+
+
+class _DisconnectingRequest:
+    """Request stub whose receive channel reports a client disconnect."""
+
+    def __init__(self, disconnect: bool):
+        self._disconnect = disconnect
+
+    async def receive(self):
+        if self._disconnect:
+            return {"type": "http.disconnect"}
+        await asyncio.Event().wait()
+
+
+async def test_client_disconnect_cancels_orchestration_run():
+    # Issue #495: a dropped client must cancel the in-flight DAG instead of
+    # leaving it running to completion while holding admission capacity.
+    from kairyu.entrypoints.server.app import _run_until_client_disconnect
+
+    cancelled = asyncio.Event()
+
+    async def hanging_run():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    result, response = await _run_until_client_disconnect(
+        _DisconnectingRequest(disconnect=True), hanging_run()
+    )
+    assert result is None
+    assert response is not None
+    assert response.status_code == 499
+    assert cancelled.is_set()
+
+    async def quick_run():
+        return "done"
+
+    result, response = await _run_until_client_disconnect(
+        _DisconnectingRequest(disconnect=False), quick_run()
+    )
+    assert result == "done"
+    assert response is None
+
+
+async def test_models_advertise_context_length():
+    # Issue #495: LiteLLM-style clients read the model card for the context
+    # window; a served engine's limit must be advertised, and an orchestration
+    # advertises its largest engine.
+    engine = StubBackend(text="OK", finish_reason="stop")
+    engine.max_model_len = 4096
+    tier = StubBackend(text="OK", finish_reason="stop")
+    tier.max_model_len = 32768
+    app = create_legacy_app(
+        engines={"stub": engine},
+        orchestrator=Orchestrator(engines={"tier1": tier}),
+    )
+
+    async with _client(app) as client:
+        listed = await client.get("/v1/models")
+        auto_model = await client.get("/v1/models/kairyu-auto")
+
+    cards = {card["id"]: card for card in listed.json()["data"]}
+    assert cards["stub"]["max_model_len"] == 4096
+    assert cards["kairyu-auto"]["max_model_len"] == 32768
+    assert auto_model.json()["max_model_len"] == 32768
 
 
 @pytest.mark.parametrize("stream", [False, True])

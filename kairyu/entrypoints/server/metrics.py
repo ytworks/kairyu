@@ -391,6 +391,30 @@ class ServerMetrics:
             ["endpoint", "phase"],
             registry=self.registry,
         )
+        self.conductor_stage_seconds = Histogram(
+            "kairyu_conductor_stage_seconds",
+            (
+                "Orchestration DAG stage wall time by public model, stage "
+                "node, operation, and terminal status (issue #495 latency "
+                "attribution)"
+            ),
+            ["model", "node", "operation", "status"],
+            registry=self.registry,
+            buckets=(
+                0.05,
+                0.1,
+                0.25,
+                0.5,
+                1.0,
+                2.5,
+                5.0,
+                10.0,
+                30.0,
+                60.0,
+                120.0,
+                300.0,
+            ),
+        )
         self.admission_active_requests = Gauge(
             "kairyu_admission_active_requests",
             "Requests holding backend-aware HTTP admission slots",
@@ -477,6 +501,22 @@ class ServerMetrics:
         if reason not in {"overflow", "timeout"}:
             raise ValueError(f"invalid admission rejection reason {reason!r}")
         self.admission_rejections_total.labels(reason=reason).inc()
+
+    def record_conductor_stage(
+        self,
+        model: str,
+        node: str,
+        operation: str,
+        status: str,
+        seconds: float,
+    ) -> None:
+        """Record one orchestration DAG stage observation (issue #495)."""
+
+        if seconds < 0:
+            raise ValueError("stage duration must be non-negative")
+        self.conductor_stage_seconds.labels(model, node, operation, status).observe(
+            seconds
+        )
 
     def record_preplacement_phase(
         self,

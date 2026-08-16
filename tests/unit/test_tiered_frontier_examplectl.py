@@ -320,10 +320,10 @@ def test_tiered_l2_pins_only_the_explicit_coding_dag() -> None:
         == "head-streamed-execution-gated-coding-dag"
     )
     assert config["orchestration"]["product_normal_calls"] == 9
-    assert config["orchestration"]["product_max_calls"] == 15
-    assert config["orchestration"]["product_max_refinements"] == 2
-    assert maximum.budget.max_steps == 15
-    assert maximum.budget.max_refine_depth == 2
+    assert config["orchestration"]["product_max_calls"] == 12
+    assert config["orchestration"]["product_max_refinements"] == 1
+    assert maximum.budget.max_steps == 12
+    assert maximum.budget.max_refine_depth == 1
     expected_roles = list(config["orchestration"]["roles"])
     assert [role.name for role in maximum.roles] == expected_roles == [
         "head",
@@ -453,7 +453,7 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                     ],
                     "stream_head": "head",
                     "moa_samples": 0,
-                    "budget": {"max_steps": 15, "max_refine_depth": 2},
+                    "budget": {"max_steps": 12, "max_refine_depth": 1},
                     "expose_intermediate_outputs": True,
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
