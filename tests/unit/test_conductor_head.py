@@ -262,6 +262,60 @@ async def test_continuation_sentinel_declines_and_head_is_whole_answer():
     assert run_result.final_text == "Intro done."
 
 
+@pytest.mark.parametrize("stream", [False, True])
+async def test_verified_draft_equal_to_head_skips_publisher(stream):
+    roles = (
+        RoleSpec(name="head", worker="hw", role_type="head", prompt="[head] {query}"),
+        RoleSpec(
+            name="draft",
+            worker="dw",
+            prompt="[draft] {query} :: {head}",
+            depends_on=("head",),
+        ),
+        RoleSpec(
+            name="check",
+            worker="vw",
+            prompt="[check] {draft}",
+            role_type="verifier",
+            verifies="draft",
+            depends_on=("draft",),
+        ),
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[cont] {head} :: {draft} :: {check}",
+            depends_on=("head", "draft", "check"),
+        ),
+    )
+    continuation = StreamScriptedBackend(
+        ['The committed opening is "OK" and already answers the request.']
+    )
+    conductor = Conductor(
+        roles,
+        {
+            "hw": StreamScriptedBackend(["OK"]),
+            "dw": StreamScriptedBackend(["OK"]),
+            "vw": StreamScriptedBackend(["PASS"]),
+            "cw": continuation,
+        },
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await conductor.run("task")
+
+    assert result.final_text == "OK"
+    assert continuation.requests_seen == []
+    skipped = [
+        event for event in result.trace if event.kind == "skipped:complete_head"
+    ]
+    assert skipped and skipped[0].metadata["reason"] == "verified_complete_head"
+
+
 async def test_continuation_sentinel_divergence_flushes_verbatim():
     # Only an exact sentinel-only output is suppressed; anything longer is
     # published verbatim so content is never lost.
