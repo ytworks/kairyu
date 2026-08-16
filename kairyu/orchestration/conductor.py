@@ -1041,6 +1041,18 @@ class Conductor:
         )
 
     @staticmethod
+    def _has_public_output(
+        text: str,
+        completions: tuple[CompletionOutput, ...],
+    ) -> bool:
+        """Whether any returned choice contains caller-visible text."""
+
+        return bool(
+            text.strip()
+            or any(completion.text.strip() for completion in completions)
+        )
+
+    @staticmethod
     def _model_reasoning(completions: tuple[CompletionOutput, ...]) -> str | None:
         parts = tuple(
             completion.reasoning_content
@@ -1711,7 +1723,7 @@ class Conductor:
                 is_final_unit
                 and verifier is None
                 and not empty_retry_used
-                and not text.strip()
+                and not self._has_public_output(text, completions)
                 and not self._head_committed_text(run)
             ):
                 # One bounded re-dispatch before the run is declared unusable
@@ -1844,7 +1856,10 @@ class Conductor:
             prompt = f"{refined}{spec.prompt_suffix}"
         if (
             is_final_unit
-            and not run.outputs.get(spec.name, "").strip()
+            and not self._has_public_output(
+                run.outputs.get(spec.name, ""),
+                run.final_completions,
+            )
             and not self._head_committed_text(run)
         ):
             # An empty public answer after the bounded retry is a failure the
@@ -2469,7 +2484,10 @@ class Conductor:
                         emitted_text += event.text
                     yield event
                 if (
-                    run.outputs.get(final.name, "").strip()
+                    self._has_public_output(
+                        run.outputs.get(final.name, ""),
+                        run.final_completions,
+                    )
                     or final.name not in run.outputs
                     or self._head_committed_text(run)
                 ):
@@ -2495,7 +2513,10 @@ class Conductor:
                 partial_result(emitted_text if head_active else self._final_text(run)),
             ) from error
         if (
-            not run.outputs.get(final.name, "").strip()
+            not self._has_public_output(
+                run.outputs.get(final.name, ""),
+                run.final_completions,
+            )
             and final.name in run.outputs
             and not self._head_committed_text(run)
         ):
