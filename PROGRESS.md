@@ -112,8 +112,9 @@ in `.claude/rules/progress-log.md`).
 - Why: a traced minimal tool turn spent 20.8 s of 25.8 s in three thinking
   verifier passes; the rerun showed head prose corrupting JSON replies and
   ~11-minute single responses against the 900 s Terminal-Bench budget.
-- Refs: #495, ECO-D4 2026-08-16 amendment; `kairyu/orchestration/{conductor,
-  orchestrator}.py`; `kairyu/entrypoints/server/{app,metrics,protocol}.py`;
+- Refs: #495, #501 (+review PRs #502–#507), ECO-D4 2026-08-16 amendment;
+  `kairyu/orchestration/{conductor,orchestrator}.py`;
+  `kairyu/entrypoints/server/{app,chat_service,metrics,protocol}.py`;
   `examples/qwen3.8-deepseek-v4-8gpu/{auto-max,kairyu}.yaml`
 
 ### 2026-08-16 — [amendment] OpenAI Chat Completions output contract (issue #496)

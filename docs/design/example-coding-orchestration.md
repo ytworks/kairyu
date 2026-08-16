@@ -210,8 +210,13 @@ also raised 2048 → 4096 for the same measured reason as
 `internal_max_tokens` — its thinking span nondeterministically overran 2048,
 truncating the verdict and burning the re-verification plus a refinement
 round per occurrence. (3) The conductor's
-KV-affinity `session_id` derives from a 2048-char conversation-head hash, so
-consecutive agent turns stay on the replica holding the warm prefix.
+KV-affinity `session_id` derives from a role-aware hash of the immutable
+conversation opening (system/developer messages through the first user
+turn; #507), so consecutive agent turns stay on the replica holding the
+warm prefix while tasks sharing a long agent-harness preamble still map to
+distinct keys — the earlier fixed 2048-char prompt-head hash collapsed such
+tasks onto one replica and remains only as the legacy string-caller
+fallback.
 (4) The non-streaming AUTO handler cancels the in-flight DAG when the HTTP
 client disconnects (499), releasing admission and replica capacity.
 (5) Per-stage wall time is exported as `kairyu_conductor_stage_seconds`
@@ -225,15 +230,28 @@ head's mandatory prose opening corrupted the JSON, and single replies grew
 to ~10K tokens (~11 minutes) while refinement rounds fired on 0.8 of
 requests. The EO-D7 head-disable intent list therefore gains a fourth
 member: a plain-text demand for a machine-parsed format anywhere in the
-system/developer/user side of the conversation (json/jsonl/yaml/xml word
-match, deliberately sensitive — a false positive only costs one turn's
-early bytes; agent loops state the demand once in the first message while
-every later turn's latest message is just command output), detected at L3
-and carried as `OrchestrationRequest.structured_format_in_prompt`; and the example budget
+system/developer/user side of the conversation, detected at L3 and carried
+as `OrchestrationRequest.structured_format_in_prompt` (agent loops state
+the demand once in the first message while every later turn's latest
+message is just command output). Detection matches command forms — format
+as/in, respond/reply/answer as/in/with/using, must/should be, "in X
+format" over json/jsonl/yaml/xml with a trailing-negation guard (#506) —
+not bare format-word mentions, which would disable the TTFT-gated head on
+ordinary chat that merely discusses those formats; and the example budget
 drops `max_refine_depth` 2 → 1 (`max_steps` 15 → 12), keeping every DAG
-role. The official 900-second Terminal-Bench budget is unchanged;
-prompt/policy edits again invalidate the measured artifact until
-`./verify.sh serving-auto-max` and `serving-auto-max-coding` are re-run.
+role. Post-review refinements from the same round: a doubly inconclusive
+verdict retains the best draft instead of burning a refinement round
+(#503), the truncated first verification and its retry are separately
+traced without double-counting stage timing (#502), a publisher whose
+verified draft dedups to nothing beyond the committed opening is skipped
+deterministically (#505, complementing the sentinel), and the model card
+advertises the minimum engine context — the truthful bound when a
+mandatory smaller worker sits in every route (#504). The official
+900-second Terminal-Bench budget is unchanged; final verification run
+`20260816T094355Z-0624822c` completed both previously affected tasks
+inside the budget with reward 1.0 each. Prompt/policy edits again
+invalidate the measured artifact until `./verify.sh serving-auto-max` and
+`serving-auto-max-coding` are re-run.
 
 The example gate: `./verify.sh serving-auto-max-coding` runs a deterministic
 self-contained Python-task matrix (c1/8/16/32), requires a valid trace with a
