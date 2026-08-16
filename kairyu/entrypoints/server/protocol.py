@@ -541,6 +541,10 @@ class ModelCard(BaseModel):
     object: str = "model"
     created: int = 0
     owned_by: str = "kairyu"
+    # vLLM-compatible extension (issue #495): the serving context length, so
+    # OpenAI-compatible clients (LiteLLM model-info lookup) can bound context
+    # management instead of falling back to a guessed default.
+    max_model_len: int | None = None
 
 
 class ModelList(BaseModel):

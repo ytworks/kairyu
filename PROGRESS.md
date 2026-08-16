@@ -98,6 +98,24 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-16 — [amendment] Agent tool-turn latency and cancellation (issue #495)
+- What: tool-turn FAIL/refine loop removed (verifier/synthesis prompts declare
+  the publisher emits the tool call; inconclusive verdicts re-verify once,
+  never auto-FAIL; verifier cap 2048→4096); a complete committed opening is
+  declined via a stripped NO_CONTINUATION sentinel; conversation-head
+  KV-affinity session; client-disconnect cancels the non-streaming AUTO DAG
+  (499); `kairyu_conductor_stage_seconds` per-stage metric; `/v1/models`
+  advertises `max_model_len`; example timeouts bounded (600 s / 1800 s);
+  after a still-timing-out rerun, a plain-text structured-format demand
+  (Terminus-2 "format as JSON") now disables the head like tools do, and the
+  example refine depth drops 2→1.
+- Why: a traced minimal tool turn spent 20.8 s of 25.8 s in three thinking
+  verifier passes; the rerun showed head prose corrupting JSON replies and
+  ~11-minute single responses against the 900 s Terminal-Bench budget.
+- Refs: #495, #501 (+review PRs #502–#507), ECO-D4 2026-08-16 amendment;
+  `kairyu/orchestration/`; `kairyu/entrypoints/server/`;
+  `examples/qwen3.8-deepseek-v4-8gpu/{auto-max,kairyu}.yaml`
+
 ### 2026-08-16 — [amendment] OpenAI Chat Completions output contract (issue #496)
 - What: omitted output limits are context-bound (16-token fallback removed,
   admission reserves max_model_len); a caller limit is one budget across

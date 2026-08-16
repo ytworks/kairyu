@@ -145,6 +145,30 @@ def _orchestrator(**kwargs) -> Orchestrator:
     return Orchestrator(engines=engines, **kwargs)
 
 
+def test_max_model_len_is_safe_for_every_orchestration_engine():
+    small = MockBackend()
+    small.max_model_len = 262_144
+    large = MockBackend()
+    large.max_model_len = 1_048_576
+
+    orchestrator = _orchestrator(
+        engines={"tier1": small, "tier2": large},
+    )
+
+    assert orchestrator.max_model_len == 262_144
+
+
+def test_max_model_len_is_unknown_when_any_engine_has_no_metadata():
+    known = MockBackend()
+    known.max_model_len = 32_768
+
+    orchestrator = _orchestrator(
+        engines={"tier1": known, "tier2": MockBackend()},
+    )
+
+    assert orchestrator.max_model_len is None
+
+
 def test_orchestrator_rejects_templated_shared_prefix_at_construction():
     with pytest.raises(ValueError, match="shared_prefix.*pre-rendered"):
         _orchestrator(shared_prefix=TemplatedPrompt("<BOS>already rendered"))
@@ -656,6 +680,52 @@ async def test_async_prepare_reuses_exact_initial_role_request(stream) -> None:
         + tier2.generated
         + tier2.streamed
     )
+
+
+async def test_conversation_affinity_key_keeps_turns_on_one_session() -> None:
+    # Issue #495: consecutive agent turns resend the same conversation with
+    # new turns appended; their KV-affinity session must stay stable so the
+    # replica holding the warm prefix keeps the traffic, while a different
+    # conversation maps to a different session.
+    events: list[tuple[str, str]] = []
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = _PreparingBackend("tier2", events)
+    orchestrator = _orchestrator(engines={"tier1": tier1, "tier2": tier2})
+
+    def observed_sessions() -> set[str]:
+        sessions = {
+            request.cache_hint.session_id
+            for backend in (tier1, tier2)
+            for request in backend.generated + backend.streamed
+            if request.cache_hint is not None
+        }
+        for backend in (tier1, tier2):
+            backend.generated.clear()
+            backend.streamed.clear()
+        return sessions
+
+    conversation = COMPLEX * 20
+
+    def call(prompt: str, affinity_key: str) -> OrchestrationRequest:
+        sampling = SamplingParams(max_tokens=1024)
+        return OrchestrationRequest(
+            prompt=prompt,
+            sampling_params=sampling,
+            conversation_affinity_key=affinity_key,
+        )
+
+    await orchestrator.run(call(conversation, "conv-task-a"))
+    first_turn = observed_sessions()
+    await orchestrator.run(
+        call(conversation + " appended tool-result turn", "conv-task-a")
+    )
+    second_turn = observed_sessions()
+    await orchestrator.run(call(conversation, "conv-task-b"))
+    other_conversation = observed_sessions()
+
+    assert len(first_turn) == 1
+    assert first_turn == second_turn
+    assert other_conversation != first_turn
 
 
 @pytest.mark.parametrize("stream", [False, True])

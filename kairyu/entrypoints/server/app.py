@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime
 import email.message
 import inspect
 import json
@@ -17,7 +18,7 @@ import threading
 import time
 import uuid
 import weakref
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -46,6 +47,7 @@ from kairyu.engine.backend import (
     GenerationUsage,
     UpstreamClientError,
     backend_admission_upper_bound_async,
+    backend_max_model_len,
     backend_sequence_budget,
     backend_supports_slo_defer,
     prepare_backend_request,
@@ -506,6 +508,80 @@ def _validate_generation_request(
     except ValueError as error:
         return invalid_request(str(error))
     return None
+
+
+def _parse_trace_timestamp(value: str | None) -> datetime.datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _conductor_stage_metrics_observer(metrics, model: str):
+    """Feed conductor trace events into the per-stage histogram (issue #495)."""
+
+    def observe(event) -> None:
+        timing = getattr(event, "timing", None)
+        started = _parse_trace_timestamp(getattr(timing, "started_at", None))
+        completed = _parse_trace_timestamp(getattr(timing, "completed_at", None))
+        if started is None or completed is None:
+            return
+        seconds = (completed - started).total_seconds()
+        if seconds < 0:
+            return
+        metrics.record_conductor_stage(
+            model,
+            event.node,
+            event.operation,
+            event.status,
+            seconds,
+        )
+
+    return observe
+
+
+async def _watch_client_disconnect(http_request: Request) -> None:
+    """Resolve when the HTTP client drops the connection."""
+
+    while True:
+        message = await http_request.receive()
+        if message["type"] == "http.disconnect":
+            return
+
+
+async def _run_until_client_disconnect(
+    http_request: Request,
+    work: Awaitable[Any],
+) -> tuple[Any, Response | None]:
+    """Await ``work`` unless the client disconnects first (issue #495).
+
+    A dropped client can no longer read the response, so the in-flight
+    orchestration is cancelled to release replicas, the admission slot, and
+    the tenant reservation immediately instead of running to completion.
+    Returns ``(result, None)`` normally, or ``(None, response)`` after a
+    disconnect-triggered cancellation; ``work``'s exceptions propagate.
+    """
+
+    work_task = asyncio.ensure_future(work)
+    disconnect_task = asyncio.ensure_future(_watch_client_disconnect(http_request))
+    try:
+        done, _ = await asyncio.wait(
+            (work_task, disconnect_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if work_task not in done:
+            work_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await work_task
+            logger.info("client disconnected; cancelled in-flight orchestration")
+            return None, Response(status_code=499)
+    finally:
+        disconnect_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await disconnect_task
+    return work_task.result(), None
 
 
 def _tenant_reservation(http_request: Request):
@@ -1923,6 +1999,14 @@ def create_app(
                 metrics.track_pool(name, engine)
             metrics.track_scheduler(name, engine)
             metrics.track_cuda_graph(name, engine)
+        for auto_name, auto_orchestrator in auto_models.items():
+            stage_observer_setter = getattr(
+                auto_orchestrator, "set_stage_observer", None
+            )
+            if stage_observer_setter is not None:
+                stage_observer_setter(
+                    _conductor_stage_metrics_observer(metrics, auto_name)
+                )
     api_keys = settings.resolve_api_keys() if resolved_api_keys is None else resolved_api_keys
     admin_keys = (
         settings.resolve_admin_keys() if resolved_admin_keys is None else resolved_admin_keys
@@ -2125,10 +2209,26 @@ def create_app(
     # independent of access-log/metrics feature flags (G5 F1a).
     app.add_middleware(RequestIngressMiddleware)
 
+    def _served_max_model_len(name: str) -> int | None:
+        # Context length for the Model card (issue #495): engines advertise
+        # their own limit; an orchestration serves up to its largest engine.
+        engine = served_engines.get(name)
+        if engine is not None:
+            return backend_max_model_len(engine)
+        selected = auto_models.get(name)
+        if selected is not None:
+            return getattr(selected, "max_model_len", None)
+        return None
+
     @app.get("/v1/models")
     async def list_models() -> ModelList:
         names = list(served_engines) + list(auto_models) + list(served_embedding_backends)
-        return ModelList(data=[ModelCard(id=name) for name in names])
+        return ModelList(
+            data=[
+                ModelCard(id=name, max_model_len=_served_max_model_len(name))
+                for name in names
+            ]
+        )
 
     @app.get("/v1/models/{model_id:path}")
     async def retrieve_model(model_id: str):
@@ -2139,7 +2239,9 @@ def create_app(
             or model_id in auto_models
             or model_id in served_embedding_backends
         ):
-            return ModelCard(id=model_id)
+            return ModelCard(
+                id=model_id, max_model_len=_served_max_model_len(model_id)
+            )
         return model_not_found(model_id)
 
     @app.post("/v1/route", response_model=RoutePreviewResponse)
@@ -2265,6 +2367,10 @@ def create_app(
                     tool_choice=request.tool_choice,
                     parallel_tool_calls=request.parallel_tool_calls,
                     tools_in_prompt=validated_input.tools_in_prompt,
+                    structured_format_in_prompt=validated_input.structured_format_in_prompt,
+                    conversation_affinity_key=(
+                        validated_input.conversation_affinity_key
+                    ),
                     response_format=request.response_format,
                     tool_call_protocol=validated_input.tool_call_protocol.value,
                     reasoning_effort=request.reasoning_effort,
@@ -2324,10 +2430,15 @@ def create_app(
                 )
             try:
                 _mark_tenant_dispatched(http_request)
-                result = await selected.run(
-                    orchestration_request,
-                    prepared=prepared_orchestration,
+                result, disconnect_response = await _run_until_client_disconnect(
+                    http_request,
+                    selected.run(
+                        orchestration_request,
+                        prepared=prepared_orchestration,
+                    ),
                 )
+                if disconnect_response is not None:
+                    return disconnect_response
             except OrchestratorExecutionError as error:
                 logger.exception("orchestrator backend error")
                 result = error.result

@@ -29,12 +29,18 @@ class OrchestrationRequest:
     tools: tuple[Mapping[str, object], ...] = ()
     tool_choice: str | Mapping[str, object] | None = None
     tools_in_prompt: bool = False
+    # The latest user turn demands a machine-parsed output format in plain
+    # text (e.g. "format your response as JSON"). Like tools/response_format,
+    # this intent is incompatible with a prose head opening (issue #495).
+    structured_format_in_prompt: bool = False
     response_format: Mapping[str, object] | None = None
     parallel_tool_calls: bool | None = None
     tool_call_protocol: str = "generic"
     reasoning_effort: str | None = None
     multimodal_prompt: MultimodalPrompt | None = None
     chat_template_kwargs: Mapping[str, object] | None = None
+    # Appended to preserve the positional constructor contract above.
+    conversation_affinity_key: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -51,6 +57,11 @@ class OrchestrationRequest:
             )
         if self.reasoning_effort not in {None, "low", "high", "max"}:
             raise ValueError("reasoning_effort must be low, high, max, or null")
+        if self.conversation_affinity_key is not None and (
+            not isinstance(self.conversation_affinity_key, str)
+            or not self.conversation_affinity_key
+        ):
+            raise ValueError("conversation_affinity_key must be a non-empty string or null")
         if self.multimodal_prompt is not None and not isinstance(
             self.multimodal_prompt,
             MultimodalPrompt,

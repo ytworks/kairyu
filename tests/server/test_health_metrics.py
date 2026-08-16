@@ -125,6 +125,29 @@ async def test_readyz_explains_healthy_but_draining_pool() -> None:
     }
 
 
+async def test_metrics_exposes_conductor_stage_series():
+    # Issue #495: orchestration DAG stage latency must be attributable per
+    # stage from /metrics, not only from per-request opt-in traces.
+    from kairyu.orchestration.orchestrator import Orchestrator
+
+    orchestrator = Orchestrator(engines={"tier1": MockBackend(), "tier2": MockBackend()})
+    app = create_legacy_app(
+        engines={"m": MockBackend()},
+        orchestrator=orchestrator,
+    )
+    async with _client(app) as client:
+        ok = await client.post(
+            "/v1/chat/completions",
+            # Long enough to route multi_agent, i.e. through the Conductor DAG.
+            json=_chat_body("plan this step by step " * 200, model="kairyu-auto"),
+        )
+        assert ok.status_code == 200
+        metrics = await client.get("/metrics")
+    text = metrics.text
+    assert 'kairyu_conductor_stage_seconds_count{model="kairyu-auto"' in text
+    assert 'operation="generation"' in text
+
+
 async def test_metrics_exposes_request_and_pool_series():
     pool = ReplicaPool([MockBackend(), MockBackend()])
     app = create_legacy_app(engines={"pooled": pool})

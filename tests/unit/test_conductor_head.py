@@ -237,6 +237,99 @@ async def test_continuation_divergent_text_flushes_verbatim():
     assert result.final_text == "Intro. Interesting tail."
 
 
+async def test_continuation_sentinel_declines_and_head_is_whole_answer():
+    # EO-D7 amendment (issue #495): a publisher that finds the committed
+    # opening complete answers exactly NO_CONTINUATION; the conductor must
+    # suppress it instead of publishing deliberation-shaped text.
+    head = StreamScriptedBackend(["Intro done."])
+    draft = StreamScriptedBackend(["draft"])
+    continuation = StreamScriptedBackend(["NO_", "NO_CONTINUATION"])
+    conductor = _conductor(head, draft, continuation)
+
+    events = await _collect(conductor.stream("task"))
+    result = events[-1].result
+    assert result is not None
+    assert result.final_text == "Intro done."
+    assert "".join(e.text for e in events if e.kind == "delta") == "Intro done."
+
+    # The non-streaming merge applies the same suppression.
+    run_conductor = _conductor(
+        StreamScriptedBackend(["Intro done."]),
+        StreamScriptedBackend(["draft"]),
+        StreamScriptedBackend(["NO_CONTINUATION"]),
+    )
+    run_result = await run_conductor.run("task")
+    assert run_result.final_text == "Intro done."
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_verified_draft_equal_to_head_skips_publisher(stream):
+    roles = (
+        RoleSpec(name="head", worker="hw", role_type="head", prompt="[head] {query}"),
+        RoleSpec(
+            name="draft",
+            worker="dw",
+            prompt="[draft] {query} :: {head}",
+            depends_on=("head",),
+        ),
+        RoleSpec(
+            name="check",
+            worker="vw",
+            prompt="[check] {draft}",
+            role_type="verifier",
+            verifies="draft",
+            depends_on=("draft",),
+        ),
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[cont] {head} :: {draft} :: {check}",
+            depends_on=("head", "draft", "check"),
+        ),
+    )
+    continuation = StreamScriptedBackend(
+        ['The committed opening is "OK" and already answers the request.']
+    )
+    conductor = Conductor(
+        roles,
+        {
+            "hw": StreamScriptedBackend(["OK"]),
+            "dw": StreamScriptedBackend(["OK"]),
+            "vw": StreamScriptedBackend(["PASS"]),
+            "cw": continuation,
+        },
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await conductor.run("task")
+
+    assert result.final_text == "OK"
+    assert continuation.requests_seen == []
+    skipped = [
+        event for event in result.trace if event.kind == "skipped:complete_head"
+    ]
+    assert skipped and skipped[0].metadata["reason"] == "verified_complete_head"
+
+
+async def test_continuation_sentinel_divergence_flushes_verbatim():
+    # Only an exact sentinel-only output is suppressed; anything longer is
+    # published verbatim so content is never lost.
+    head = StreamScriptedBackend(["Intro done."])
+    draft = StreamScriptedBackend(["draft"])
+    continuation = StreamScriptedBackend(["NO_CONTINUATION", "NO_CONTINUATION needed: more."])
+    conductor = _conductor(head, draft, continuation)
+
+    events = await _collect(conductor.stream("task"))
+    result = events[-1].result
+    assert result is not None
+    assert result.final_text == "Intro done.NO_CONTINUATION needed: more."
+
+
 async def test_head_zero_byte_failure_degrades_to_continuation_only():
     head = StreamScriptedBackend(["never"], fail_after=0)
     draft = StreamScriptedBackend(["draft"])
@@ -307,6 +400,27 @@ async def test_head_skipped_for_incompatible_public_intent():
     run_result = await conductor.run("task")
     assert run_result.final_text == "Full answer."
     assert "head" not in run_result.outputs
+
+
+async def test_head_skipped_for_structured_format_demand():
+    # Issue #495: a plain-text demand for a machine-parsed format (agent
+    # harnesses ask "format your response as JSON" without tools or
+    # response_format) disables the head like any other incompatible intent.
+    head = StreamScriptedBackend(["Intro. "])
+    draft = StreamScriptedBackend(["draft"])
+    continuation = StreamScriptedBackend(['{"analysis": "..."}'])
+    conductor = _conductor(
+        head,
+        draft,
+        continuation,
+        final_structured_format_in_prompt=True,
+    )
+
+    result = await conductor.run("task")
+    assert result.final_text == '{"analysis": "..."}'
+    assert "head" not in result.outputs
+    skipped = [e for e in result.trace if e.kind == "skipped:intent"]
+    assert skipped and skipped[0].node == "head"
 
 
 async def test_run_and_stream_concatenation_parity():

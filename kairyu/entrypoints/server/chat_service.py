@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -130,6 +131,13 @@ class ValidatedChatInput:
     tool_call_protocol: ToolCallProtocol = ToolCallProtocol.GENERIC
     parallel_tool_calls: bool | None = None
     orchestration_multimodal_prompt: MultimodalPrompt | None = None
+    # The latest user turn demands a machine-parsed output format in plain
+    # text; incompatible with a prose head opening (issue #495).
+    structured_format_in_prompt: bool = False
+    # Stable, role-aware hash of the immutable conversation opening. This
+    # distinguishes tasks that share a long agent-harness preamble while
+    # keeping appended turns on the same replica.
+    conversation_affinity_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -812,6 +820,90 @@ async def validate_chat_input_async(
     )
 
 
+_STRUCTURED_FORMAT_NAME = r"(?:json|jsonl|yaml|xml)"
+_STRUCTURED_FORMAT_PATTERNS = (
+    re.compile(
+        rf"\bformat\s+(?:your\s+|the\s+)?"
+        rf"(?:response|answer|output)\s+(?:as|in)\s+"
+        rf"(?:valid\s+|strict\s+)?{_STRUCTURED_FORMAT_NAME}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:return|output|emit|produce)\s+"
+        rf"(?:only\s+|valid\s+|strict\s+)*"
+        rf"{_STRUCTURED_FORMAT_NAME}\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:respond|reply|answer)\s+(?:strictly\s+)?"
+        rf"(?:as|in|with|using)\s+"
+        rf"(?:(?:a|an|the)\s+)?(?:valid\s+|strict\s+)?"
+        rf"{_STRUCTURED_FORMAT_NAME}"
+        rf"(?:\s+(?:object|document|response|output))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:response|answer|output|reply)\s+"
+        rf"(?:must|should)\s+be\s+"
+        rf"(?:(?:a|an|the)\s+)?(?:valid\s+|strict\s+)?"
+        rf"{_STRUCTURED_FORMAT_NAME}"
+        rf"(?:\s+(?:object|document|response|output))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bin\s+(?:valid\s+|strict\s+)?"
+        rf"{_STRUCTURED_FORMAT_NAME}\s+format\b",
+        re.IGNORECASE,
+    ),
+)
+_NEGATED_FORMAT_COMMAND = re.compile(
+    r"(?:\bdo\s+not|\bdon't|\bnever|\bnot\s+to|"
+    r"\bmust\s+not(?:\s+be)?|\bshould\s+not(?:\s+be)?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _structured_format_demanded(text: str) -> bool:
+    """True when instruction text names a machine-parsed text format.
+
+    Agent harnesses (e.g. Terminus-2) demand "format your response as JSON"
+    in plain text without tools or response_format, so the split-stream
+    head's mandatory prose opening corrupts the reply (issue #495). The
+    demand is stated once (usually the first user message) and binds every
+    later turn whose latest message is just terminal output, so callers must
+    scan the whole instruction-bearing side of the conversation. The check
+    is deliberately sensitive: a false positive only skips the head's early
+    bytes for one turn, while a false negative breaks the reply format.
+    """
+
+    for pattern in _STRUCTURED_FORMAT_PATTERNS:
+        for match in pattern.finditer(text):
+            prefix = text[max(0, match.start() - 24) : match.start()]
+            if not _NEGATED_FORMAT_COMMAND.search(prefix):
+                return True
+    return False
+
+
+def _conversation_affinity_key(messages: _PreparedChatMessages) -> str | None:
+    """Hash the instruction prefix through the first user turn."""
+
+    anchor: list[tuple[str, str]] = []
+    for message in messages.messages:
+        if message.role not in {"system", "developer", "user"}:
+            continue
+        anchor.append((message.role, message.display_content))
+        if message.role == "user":
+            break
+    if not anchor:
+        return None
+    payload = json.dumps(
+        anchor,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "conv-" + hashlib.sha256(payload).hexdigest()[:16]
+
+
 def validate_orchestration_chat_input(
     request: ChatCompletionRequest,
 ) -> ValidatedChatInput:
@@ -877,6 +969,12 @@ def validate_orchestration_chat_input(
             if prepared.has_images
             else None
         ),
+        structured_format_in_prompt=any(
+            message.role in {"system", "developer", "user"}
+            and _structured_format_demanded(message.display_content or "")
+            for message in prepared.messages
+        ),
+        conversation_affinity_key=_conversation_affinity_key(prepared),
     )
 
 

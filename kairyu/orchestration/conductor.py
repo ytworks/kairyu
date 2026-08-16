@@ -58,6 +58,11 @@ from kairyu.sampling_params import PARALLEL_TOOL_CALLS_EXTRA_ARG, SamplingParams
 
 _PASS_PREFIX = "PASS"
 
+# EO-D7 amendment (issue #495): a publisher continuing a committed opening may
+# answer exactly this sentinel to decline continuation; the conductor strips
+# it from the public answer instead of publishing deliberation-shaped text.
+NO_CONTINUATION_SENTINEL = "NO_CONTINUATION"
+
 CostModel = Callable[[GenerationRequest, GenerationResult], float]
 
 
@@ -257,27 +262,53 @@ class _ContinuationDeduper:
         self._committed = committed
         self._buffer = ""
         self._matching = bool(committed)
+        # With a committed opening the publisher may decline to continue by
+        # answering exactly NO_CONTINUATION (EO-D7 amendment, issue #495):
+        # buffer while the output is still a prefix of the sentinel and
+        # suppress it only on an exact sentinel-only stream.
+        self._sentinel_active = bool(committed)
+        self._sentinel_buffer = ""
 
     def feed(self, delta: str) -> str:
         if not self._matching:
-            return delta
+            return self._sentinel_feed(delta)
         candidate = self._buffer + delta
         stripped = candidate.lstrip()
         if stripped.startswith(self._committed):
             self._matching = False
             self._buffer = ""
-            return stripped[len(self._committed) :]
+            return self._sentinel_feed(stripped[len(self._committed) :])
         if self._committed.startswith(stripped):
             self._buffer = candidate
             return ""
         self._matching = False
         self._buffer = ""
+        return self._sentinel_feed(candidate)
+
+    def _sentinel_feed(self, out: str) -> str:
+        if not self._sentinel_active or not out:
+            return out
+        candidate = self._sentinel_buffer + out
+        stripped = candidate.strip()
+        if not stripped or NO_CONTINUATION_SENTINEL.startswith(stripped):
+            self._sentinel_buffer = candidate
+            return ""
+        # Divergence (including sentinel followed by more text) flushes
+        # verbatim: content is never lost, only an exact sentinel is dropped.
+        self._sentinel_active = False
+        self._sentinel_buffer = ""
         return candidate
 
     def flush(self) -> str:
         buffered, self._buffer = self._buffer, ""
         self._matching = False
-        return buffered
+        withheld, self._sentinel_buffer = self._sentinel_buffer, ""
+        combined = withheld + buffered
+        if self._sentinel_active:
+            self._sentinel_active = False
+            if combined.strip() == NO_CONTINUATION_SENTINEL:
+                return ""
+        return combined
 
 
 def dedup_public_continuation(committed: str, continuation: str) -> str:
@@ -287,8 +318,14 @@ def dedup_public_continuation(committed: str, continuation: str) -> str:
         return continuation
     stripped = continuation.lstrip()
     if stripped.startswith(committed):
-        return stripped[len(committed) :]
-    return continuation
+        stripped = stripped[len(committed) :]
+    else:
+        stripped = continuation
+    if stripped.strip() == NO_CONTINUATION_SENTINEL:
+        # The publisher declined to continue a complete committed opening
+        # (EO-D7 amendment, issue #495).
+        return ""
+    return stripped
 
 
 def _completion_tokens_for_public_budget(
@@ -365,6 +402,15 @@ def _is_pass(verdict_text: str) -> bool:
     return first_line.upper().startswith(_PASS_PREFIX)
 
 
+def _verdict_is_inconclusive(verdict_text: str) -> bool:
+    """True when no PASS/FAIL was declared (e.g. the role's private
+    deliberation consumed its whole token budget before a public verdict)."""
+
+    first_line = verdict_text.strip().splitlines()[0] if verdict_text.strip() else ""
+    upper = first_line.upper()
+    return not (upper.startswith(_PASS_PREFIX) or upper.startswith("FAIL"))
+
+
 class Conductor:
     def __init__(
         self,
@@ -376,9 +422,12 @@ class Conductor:
         final_tools: tuple[Mapping[str, object], ...] = (),
         final_tool_choice: str | Mapping[str, object] | None = None,
         final_tools_in_prompt: bool = False,
+        final_structured_format_in_prompt: bool = False,
         cost_model: CostModel = zero_cost,
         worker_trace: Mapping[str, WorkerTraceIdentity] | None = None,
         usage_observer: Callable[[GenerationUsage], None] | None = None,
+        stage_observer: Callable[[TraceEvent], None] | None = None,
+        affinity_key: str | None = None,
         final_parallel_tool_calls: bool | None = None,
         final_tool_call_protocol: str = "generic",
         expose_intermediate_outputs: bool = False,
@@ -403,10 +452,13 @@ class Conductor:
         self._final_tools = tuple(final_tools)
         self._final_tool_choice = final_tool_choice
         self._final_tools_in_prompt = final_tools_in_prompt
+        self._final_structured_format_in_prompt = final_structured_format_in_prompt
         self._final_parallel_tool_calls = final_parallel_tool_calls
         self._final_tool_call_protocol = final_tool_call_protocol
         self._cost_model = cost_model
         self._usage_observer = usage_observer
+        self._stage_observer = stage_observer
+        self._affinity_key = affinity_key
         self._expose_intermediate_outputs = expose_intermediate_outputs
         self._multimodal_prompt = multimodal_prompt
         self._chat_template_kwargs = (
@@ -471,6 +523,11 @@ class Conductor:
         if self._head is None:
             return False
         if self._final_tools or self._final_tools_in_prompt:
+            return False
+        if self._final_structured_format_in_prompt:
+            # A plain-text demand for a machine-parsed format (issue #495):
+            # the head's mandatory prose opening would corrupt the reply the
+            # same way tools/response_format would.
             return False
         params = self._final_sampling_params
         if params.n != 1 or params.best_of not in (None, 1):
@@ -811,8 +868,11 @@ class Conductor:
         return self._chat_template_kwargs
 
     def _cache_hint(self, session: str, *, multimodal: bool = False) -> CacheHint:
+        # A conversation-derived affinity key keeps consecutive agent turns on
+        # the replica holding the warm KV prefix (issue #495); the per-request
+        # session only namespaces request ids, so it stays unique.
         return CacheHint(
-            session_id=session,
+            session_id=self._affinity_key or session,
             prefix_fingerprint="" if multimodal else self._prefix_fingerprint,
         )
 
@@ -990,7 +1050,7 @@ class Conductor:
         error: TraceError | None = None,
     ) -> TraceEvent:
         identity = self._worker_trace[spec.worker]
-        return TraceEvent(
+        event = TraceEvent(
             node=spec.name,
             kind=kind,
             detail=detail,
@@ -1007,6 +1067,12 @@ class Conductor:
             metadata=dict(metadata or {}),
             error=error,
         )
+        # Every conductor trace event funnels through here, so this is the
+        # one seam that can feed aggregate per-stage latency attribution
+        # (issue #495) without touching each dispatch site.
+        if self._stage_observer is not None:
+            self._stage_observer(event)
+        return event
 
     @staticmethod
     def _unit_public_output(
@@ -1642,6 +1708,8 @@ class Conductor:
             await self._stream_head_unit(run, session, query, spec, event_sink)
             return
         if spec.name == self._selected_final_unit().name:
+            if self._skip_verified_complete_head(run, spec):
+                return
             remaining = self._public_budget_remaining(run)
             if remaining is not None and remaining < 1:
                 # The head consumed the caller's whole public limit; the
@@ -1836,9 +1904,88 @@ class Conductor:
                 )
                 break
             verdict = verifier_observed.text
+            verdict_trace_spec = verifier
+            verdict_trace_observed: _GenerationObservation | None = (
+                verifier_observed
+            )
+            if _verdict_is_inconclusive(verdict):
+                # A truncated or empty verdict is not evidence of a draft
+                # defect, and counting it as FAIL burns a full refinement
+                # round (issue #495). One bounded re-verification demands an
+                # immediate verdict; its outcome then stands either way.
+                retry_prompt = (
+                    self._prompt_body(verifier, verifier_prompt)
+                    + "\nYour previous verification ran out of output budget "
+                    "before emitting a verdict. Answer immediately: PASS or "
+                    "FAIL on the first line, then at most three short bullet "
+                    "points."
+                    + verifier.prompt_suffix
+                )
+                run.trace.append(
+                    self._trace_event(
+                        verifier,
+                        "verified:inconclusive",
+                        operation="verification",
+                        status="success",
+                        attempt=depth,
+                        detail=f"attempt={depth} inconclusive=true",
+                        timing=verifier_observed.timing,
+                        usage=verifier_observed.usage,
+                        budget=verifier_observed.budget,
+                        metadata={
+                            "pass": False,
+                            "inconclusive": True,
+                            "reverification": False,
+                        },
+                    )
+                )
+                retry_spec = replace(
+                    verifier, name=f"{verifier.name}:reverify"
+                )
+                # The first observation has already been emitted. If the
+                # retry cannot dispatch or fails, the final round outcome
+                # remains attributable to the original verifier without
+                # counting that stage timing twice.
+                verdict_trace_observed = None
+                try:
+                    retry_observed = await self._generate(
+                        run,
+                        session,
+                        verifier.name,
+                        verifier.worker,
+                        retry_prompt,
+                        depth,
+                        spec=retry_spec,
+                        operation="verification",
+                    )
+                    verifier_observed = retry_observed
+                    verdict = verifier_observed.text
+                    verdict_trace_spec = retry_spec
+                    verdict_trace_observed = retry_observed
+                except _BudgetRefused:
+                    run.trace.append(
+                        self._trace_event(
+                            retry_spec,
+                            "skipped:budget",
+                            operation="verification",
+                            status="skipped",
+                            attempt=depth,
+                            budget=TraceBudget.between(run.budget, run.budget),
+                            metadata={"reason": "budget"},
+                        )
+                    )
+                except _ObservedGenerationError:
+                    pass
             run.outputs[verifier.name] = verdict
             passed = _is_pass(verdict)
-            can_refine = run.budget.can_refine(depth)
+            verdict_inconclusive = _verdict_is_inconclusive(verdict)
+            # One immediate re-verification is the bounded recovery for a
+            # missing verdict. If that attempt is also inconclusive, retain
+            # the best draft instead of converting missing control output
+            # into a synthetic FAIL and paying a full refinement round.
+            can_refine = (
+                run.budget.can_refine(depth) and not verdict_inconclusive
+            )
             verifier_intermediate = self._record_intermediate(
                 run,
                 verifier,
@@ -1847,18 +1994,35 @@ class Conductor:
             )
             run.trace.append(
                 self._trace_event(
-                    verifier,
+                    verdict_trace_spec,
                     "verified",
                     operation="verification",
                     status="success",
                     attempt=depth,
                     detail=f"attempt={depth} pass={passed}",
-                    timing=verifier_observed.timing,
-                    usage=verifier_observed.usage,
-                    budget=verifier_observed.budget,
+                    timing=(
+                        verdict_trace_observed.timing
+                        if verdict_trace_observed is not None
+                        else None
+                    ),
+                    usage=(
+                        verdict_trace_observed.usage
+                        if verdict_trace_observed is not None
+                        else None
+                    ),
+                    budget=(
+                        verdict_trace_observed.budget
+                        if verdict_trace_observed is not None
+                        else TraceBudget.between(run.budget, run.budget)
+                    ),
                     metadata={
                         "pass": passed,
-                        "refinement_exhausted": not passed and not can_refine,
+                        "inconclusive": verdict_inconclusive,
+                        "refinement_exhausted": (
+                            not passed
+                            and not can_refine
+                            and not verdict_inconclusive
+                        ),
                     },
                 )
             )
@@ -2016,6 +2180,43 @@ class Conductor:
         if self._head is None or not self._head_enabled():
             return ""
         return run.outputs.get(self._head.name, "")
+
+    def _skip_verified_complete_head(
+        self,
+        run: _RunState,
+        final: RoleSpec,
+    ) -> bool:
+        """Skip a publisher when a verified draft adds nothing to the head."""
+
+        head_text = self._head_committed_text(run)
+        if not head_text or final.role_type != "publisher":
+            return False
+        for target, verifier in self._verifier_for.items():
+            if target not in final.depends_on or verifier.name not in final.depends_on:
+                continue
+            draft = run.outputs.get(target, "")
+            verdict = run.outputs.get(verifier.name, "")
+            if (
+                draft
+                and _is_pass(verdict)
+                and not dedup_public_continuation(head_text, draft).strip()
+            ):
+                run.trace.append(
+                    self._trace_event(
+                        final,
+                        "skipped:complete_head",
+                        operation="generation",
+                        status="skipped",
+                        attempt=0,
+                        budget=TraceBudget.between(run.budget, run.budget),
+                        metadata={
+                            "reason": "verified_complete_head",
+                            "head": True,
+                        },
+                    )
+                )
+                return True
+        return False
 
     def _public_completion_tokens(self, run: _RunState) -> int | None:
         """Backend-reported tokens of the public answer, ``None`` if unknown.
@@ -2488,8 +2689,13 @@ class Conductor:
             if head_active and self._head is not None
             else ""
         )
+        final_attempts = (
+            ()
+            if self._skip_verified_complete_head(run, final)
+            else range(2)
+        )
         try:
-            for final_attempt in range(2):
+            for final_attempt in final_attempts:
                 async for event in self._stream_unit(
                     run,
                     session,

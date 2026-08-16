@@ -107,10 +107,10 @@
     ],
     "stream_head": "head",
     "executor_worker": "sandbox",
-    "max_steps": 15,
+    "max_steps": 12,
     "product_normal_calls": 9,
-    "product_max_calls": 15,
-    "product_max_refinements": 2,
+    "product_max_calls": 12,
+    "product_max_refinements": 1,
     "product_exposes_intermediate_outputs": true
   },
   "executor": {

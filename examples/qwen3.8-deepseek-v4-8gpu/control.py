@@ -457,8 +457,8 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         raise SystemExit(
             f"Kairyu product policy max_steps must be {orchestration['max_steps']}"
         )
-    if policy.get("budget", {}).get("max_refine_depth") != 2:
-        raise SystemExit("Kairyu product policy max_refine_depth must be 2")
+    if policy.get("budget", {}).get("max_refine_depth") != 1:
+        raise SystemExit("Kairyu product policy max_refine_depth must be 1")
     if policy.get("expose_intermediate_outputs") is not True:
         raise SystemExit("Kairyu product policy must expose separate intermediate output")
     configured = policy.get("configured_engines", {})

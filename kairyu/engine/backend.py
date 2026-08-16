@@ -834,6 +834,25 @@ def backend_supports_slo_defer(
     return supported
 
 
+def backend_max_model_len(backend: object) -> int | None:
+    """Resolve a backend's serving context length without probing a request.
+
+    A direct engine advertises ``max_model_len``; a ``ReplicaPool`` carries it
+    only as unanimous declared deployment metadata. Model-card publication
+    (issue #495) needs one resolution rule for both shapes.
+    """
+
+    length = getattr(backend, "max_model_len", None)
+    if isinstance(length, int) and length > 0:
+        return length
+    snapshot = getattr(backend, "declared_metadata_snapshot", None)
+    if callable(snapshot):
+        declared = snapshot().get("max_model_len")
+        if isinstance(declared, int) and declared > 0:
+            return declared
+    return None
+
+
 def backend_supports_prompt_kind(backend: object, kind: str) -> bool:
     """Resolve an optional prompt-kind capability without probing a request.
 

@@ -189,6 +189,70 @@ measured artifact: `./verify.sh serving-auto-max` and
 `serving-auto-max-coding` must be re-run before the example's gate status is
 quoted again.
 
+Review amendment (2026-08-16, issue #495 — agent tool-turn latency): a live
+per-stage trace of a minimal tool-call turn measured 25.8 s, 81% of it three
+thinking-verifier passes: the tools-blind internal roles cannot emit a tool
+call, so the verifier deterministically FAILed the draft and burned the full
+refinement budget on every agent turn. Changes, keeping the full DAG:
+(1) the `draft_synthesis`/`verifier` prompts now state that the actual tool
+call is emitted by the downstream publisher — a tool-turn draft is judged on
+intended action and content, never on the absence of tool-call syntax; the
+continuation prompt forbids commentary text around the answer, and a
+publisher that finds the committed opening complete answers exactly
+`NO_CONTINUATION`, which the conductor strips on both the streaming and
+whole-text seams (only the exact sentinel is dropped; any longer output
+flushes verbatim) — "output nothing" alone was measured unfollowable, the
+model published its deliberation instead. (2) A verdict
+that declares neither PASS nor FAIL (private deliberation consumed the role's
+token cap) triggers one bounded re-verification demanding an immediate
+verdict instead of counting as FAIL (`conductor.py`); the verifier cap is
+also raised 2048 → 4096 for the same measured reason as
+`internal_max_tokens` — its thinking span nondeterministically overran 2048,
+truncating the verdict and burning the re-verification plus a refinement
+round per occurrence. (3) The conductor's
+KV-affinity `session_id` derives from a role-aware hash of the immutable
+conversation opening (system/developer messages through the first user
+turn; #507), so consecutive agent turns stay on the replica holding the
+warm prefix while tasks sharing a long agent-harness preamble still map to
+distinct keys — the earlier fixed 2048-char prompt-head hash collapsed such
+tasks onto one replica and remains only as the legacy string-caller
+fallback.
+(4) The non-streaming AUTO handler cancels the in-flight DAG when the HTTP
+client disconnects (499), releasing admission and replica capacity.
+(5) Per-stage wall time is exported as `kairyu_conductor_stage_seconds`
+(model/node/operation/status) and `/v1/models` advertises `max_model_len` so
+LiteLLM-class clients stop guessing the context window. (6) The example
+deployment bounds `admission_wait_timeout_s` (600 s) and upstream
+`timeout_s` (1800 s) instead of the previous 86400 s no-op values.
+(7) A rerun with (1)–(6) still timed out: Terminus-2 demands "format your
+response as JSON" in plain text (no tools, no response_format), the enabled
+head's mandatory prose opening corrupted the JSON, and single replies grew
+to ~10K tokens (~11 minutes) while refinement rounds fired on 0.8 of
+requests. The EO-D7 head-disable intent list therefore gains a fourth
+member: a plain-text demand for a machine-parsed format anywhere in the
+system/developer/user side of the conversation, detected at L3 and carried
+as `OrchestrationRequest.structured_format_in_prompt` (agent loops state
+the demand once in the first message while every later turn's latest
+message is just command output). Detection matches command forms — format
+as/in, respond/reply/answer as/in/with/using, must/should be, "in X
+format" over json/jsonl/yaml/xml with a trailing-negation guard (#506) —
+not bare format-word mentions, which would disable the TTFT-gated head on
+ordinary chat that merely discusses those formats; and the example budget
+drops `max_refine_depth` 2 → 1 (`max_steps` 15 → 12), keeping every DAG
+role. Post-review refinements from the same round: a doubly inconclusive
+verdict retains the best draft instead of burning a refinement round
+(#503), the truncated first verification and its retry are separately
+traced without double-counting stage timing (#502), a publisher whose
+verified draft dedups to nothing beyond the committed opening is skipped
+deterministically (#505, complementing the sentinel), and the model card
+advertises the minimum engine context — the truthful bound when a
+mandatory smaller worker sits in every route (#504). The official
+900-second Terminal-Bench budget is unchanged; final verification run
+`20260816T094355Z-0624822c` completed both previously affected tasks
+inside the budget with reward 1.0 each. Prompt/policy edits again
+invalidate the measured artifact until `./verify.sh serving-auto-max` and
+`serving-auto-max-coding` are re-run.
+
 The example gate: `./verify.sh serving-auto-max-coding` runs a deterministic
 self-contained Python-task matrix (c1/8/16/32), requires a valid trace with a
 successful head and continuation in every sample, and counts a sample as

@@ -516,6 +516,160 @@ async def test_verifier_fail_triggers_refinement_until_pass():
     assert result.budget_state.steps_used == 4
 
 
+async def test_inconclusive_verdict_reverifies_once_instead_of_refining():
+    # Issue #495: a verdict that never declares PASS/FAIL (deliberation
+    # consumed the role's token budget) used to count as FAIL and burn a full
+    # refinement round; it must instead trigger one immediate re-verification
+    # whose outcome then stands.
+    backend = ScriptedBackend(["draft v1", "", "PASS: fine"])
+    roles = (
+        RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(
+            name="check",
+            worker="w",
+            prompt="verify: {worker}",
+            role_type="verifier",
+            verifies="worker",
+            depends_on=("worker",),
+        ),
+    )
+    observed_events = []
+    conductor = Conductor(
+        roles=roles,
+        workers={"w": backend},
+        stage_observer=observed_events.append,
+    )
+    result = await conductor.run("task", budget=Budget(max_refine_depth=2))
+    assert result.outputs["worker"] == "draft v1"  # no refinement round ran
+    assert result.outputs["check"] == "PASS: fine"
+    assert "ran out of output budget" in backend.prompts_seen[2]
+    verifier_events = [
+        event for event in result.trace if event.role == "verifier"
+    ]
+    assert [event.node for event in verifier_events] == [
+        "check",
+        "check:reverify",
+    ]
+    assert [event.status for event in verifier_events] == [
+        "success",
+        "success",
+    ]
+    assert verifier_events[0].kind == "verified:inconclusive"
+    assert verifier_events[0].metadata["inconclusive"] is True
+    assert [
+        event.node for event in observed_events if event.role == "verifier"
+    ] == ["check", "check:reverify"]
+
+
+async def test_inconclusive_reverify_budget_refusal_traces_final_outcome():
+    backend = ScriptedBackend(["draft v1", ""])
+    roles = (
+        RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(
+            name="check",
+            worker="w",
+            prompt="verify: {worker}",
+            role_type="verifier",
+            verifies="worker",
+            depends_on=("worker",),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+
+    result = await conductor.run(
+        "task",
+        budget=Budget(max_steps=2, max_refine_depth=2),
+    )
+
+    verifier_events = [
+        event for event in result.trace if event.role == "verifier"
+    ]
+    assert [
+        (event.node, event.kind, event.status) for event in verifier_events
+    ] == [
+        ("check", "verified:inconclusive", "success"),
+        ("check:reverify", "skipped:budget", "skipped"),
+        ("check", "verified", "success"),
+    ]
+    final = verifier_events[-1]
+    assert final.timing is None
+    assert final.metadata == {
+        "pass": False,
+        "inconclusive": True,
+        "refinement_exhausted": False,
+    }
+
+
+async def test_inconclusive_reverify_failure_traces_final_outcome():
+    class _FailingReverifyBackend(ScriptedBackend):
+        async def generate(self, request: GenerationRequest) -> GenerationResult:
+            if len(self.requests_seen) == 2:
+                self.requests_seen.append(request)
+                self.prompts_seen.append(request.prompt)
+                raise RuntimeError("reverification failed")
+            return await super().generate(request)
+
+    backend = _FailingReverifyBackend(["draft v1", ""])
+    roles = (
+        RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(
+            name="check",
+            worker="w",
+            prompt="verify: {worker}",
+            role_type="verifier",
+            verifies="worker",
+            depends_on=("worker",),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+
+    result = await conductor.run("task", budget=Budget(max_refine_depth=2))
+
+    verifier_events = [
+        event for event in result.trace if event.role == "verifier"
+    ]
+    assert [
+        (event.node, event.kind, event.status) for event in verifier_events
+    ] == [
+        ("check", "verified:inconclusive", "success"),
+        ("check:reverify", "failed", "failed"),
+        ("check", "verified", "success"),
+    ]
+    final = verifier_events[-1]
+    assert final.timing is None
+    assert final.metadata == {
+        "pass": False,
+        "inconclusive": True,
+        "refinement_exhausted": False,
+    }
+
+
+async def test_second_inconclusive_verdict_keeps_best_draft_without_refining():
+    backend = ScriptedBackend(["draft v1", "", ""])
+    roles = (
+        RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(
+            name="check",
+            worker="w",
+            prompt="verify: {worker}",
+            role_type="verifier",
+            verifies="worker",
+            depends_on=("worker",),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+
+    result = await conductor.run("task", budget=Budget(max_refine_depth=2))
+
+    assert result.outputs["worker"] == "draft v1"
+    assert result.outputs["check"] == ""
+    assert result.budget_state.steps_used == 3
+    assert len(backend.prompts_seen) == 3
+    verifier_events = [event for event in result.trace if event.role == "verifier"]
+    assert verifier_events[-1].metadata["inconclusive"] is True
+    assert verifier_events[-1].metadata["refinement_exhausted"] is False
+
+
 async def test_refinement_depth_is_bounded():
     backend = ScriptedBackend(["d1", "FAIL 1", "d2", "FAIL 2", "d3", "FAIL 3"])
     roles = (

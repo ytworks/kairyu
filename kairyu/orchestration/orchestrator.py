@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
@@ -16,6 +17,7 @@ from kairyu.engine.backend import (
     GenerationResult,
     GenerationUsage,
     backend_admission_upper_bound,
+    backend_max_model_len,
     backend_supports_chat_template_kwargs,
     backend_supports_prompt_kind,
     prepare_backend_request,
@@ -283,6 +285,10 @@ class Orchestrator:
         # m11 A4: >0 routes multi_agent through MoA (the deep kairyu-auto-max tier)
         self._moa_samples = moa_samples
         self._expose_intermediate_outputs = expose_intermediate_outputs
+        # Serving-layer hook for aggregate per-stage latency attribution
+        # (issue #495); set after construction because the deploy builder,
+        # not the HTTP app that owns metrics, constructs orchestrators.
+        self._stage_observer: Callable[[TraceEvent], None] | None = None
         self._execution_workers = dict(execution_workers or {})
         supplied_executor_descriptors = dict(executor_descriptors or {})
         self._executor_descriptors = {
@@ -1099,6 +1105,31 @@ class Orchestrator:
         prepared.dispatch.moa_setup = None
         return setup
 
+    def set_stage_observer(
+        self,
+        observer: Callable[[TraceEvent], None] | None,
+    ) -> None:
+        """Install the per-stage trace-event hook used for latency metrics."""
+
+        self._stage_observer = observer
+
+    @property
+    def max_model_len(self) -> int | None:
+        """Context length that every configured orchestration engine can serve.
+
+        A public AUTO request may traverse multiple workers. Advertising the
+        largest worker's context lets clients submit prompts that a mandatory
+        smaller worker rejects. Unknown worker metadata likewise means there
+        is no truthful global limit to publish.
+        """
+
+        lengths = [
+            backend_max_model_len(engine) for engine in self._engines.values()
+        ]
+        if not lengths or any(length is None for length in lengths):
+            return None
+        return min(length for length in lengths if length is not None)
+
     def admission_upper_bound(
         self,
         request: str | OrchestrationRequest,
@@ -1208,6 +1239,24 @@ class Orchestrator:
         needed = {role.worker for role in self._generation_roles()}
         return {name: self._resolve_engine(name, notes) for name in needed}
 
+    @staticmethod
+    def _conversation_affinity_key(
+        call: OrchestrationRequest,
+    ) -> str | None:
+        """Stable KV-affinity key for consecutive turns of one conversation.
+
+        Role-aware HTTP callers provide a hash of the immutable conversation
+        opening. Transport-neutral legacy callers retain the fixed-prefix
+        fallback because they provide only an opaque prompt string.
+        """
+
+        if call.conversation_affinity_key is not None:
+            return call.conversation_affinity_key
+        prompt = call.prompt
+        if not isinstance(prompt, str) or not prompt:
+            return None
+        return "conv-" + hashlib.sha256(prompt[:2048].encode()).hexdigest()[:16]
+
     def _new_conductor(
         self,
         call: OrchestrationRequest,
@@ -1226,11 +1275,14 @@ class Orchestrator:
             final_tools=call.tools,
             final_tool_choice=call.tool_choice,
             final_tools_in_prompt=call.tools_in_prompt,
+            final_structured_format_in_prompt=call.structured_format_in_prompt,
             final_parallel_tool_calls=call.parallel_tool_calls,
             final_tool_call_protocol=call.tool_call_protocol,
             cost_model=self._cost_model,
             worker_trace=self._conductor_worker_trace(),
             usage_observer=usage_observer,
+            stage_observer=self._stage_observer,
+            affinity_key=self._conversation_affinity_key(call),
             expose_intermediate_outputs=self._expose_intermediate_outputs,
             multimodal_prompt=call.multimodal_prompt,
             chat_template_kwargs=call.chat_template_kwargs,
