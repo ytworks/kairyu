@@ -1115,14 +1115,20 @@ class Orchestrator:
 
     @property
     def max_model_len(self) -> int | None:
-        """Largest engine context this orchestration can serve publicly."""
+        """Context length that every configured orchestration engine can serve.
+
+        A public AUTO request may traverse multiple workers. Advertising the
+        largest worker's context lets clients submit prompts that a mandatory
+        smaller worker rejects. Unknown worker metadata likewise means there
+        is no truthful global limit to publish.
+        """
 
         lengths = [
-            length
-            for engine in self._engines.values()
-            if (length := backend_max_model_len(engine)) is not None
+            backend_max_model_len(engine) for engine in self._engines.values()
         ]
-        return max(lengths, default=None)
+        if not lengths or any(length is None for length in lengths):
+            return None
+        return min(length for length in lengths if length is not None)
 
     def admission_upper_bound(
         self,

@@ -145,6 +145,30 @@ def _orchestrator(**kwargs) -> Orchestrator:
     return Orchestrator(engines=engines, **kwargs)
 
 
+def test_max_model_len_is_safe_for_every_orchestration_engine():
+    small = MockBackend()
+    small.max_model_len = 262_144
+    large = MockBackend()
+    large.max_model_len = 1_048_576
+
+    orchestrator = _orchestrator(
+        engines={"tier1": small, "tier2": large},
+    )
+
+    assert orchestrator.max_model_len == 262_144
+
+
+def test_max_model_len_is_unknown_when_any_engine_has_no_metadata():
+    known = MockBackend()
+    known.max_model_len = 32_768
+
+    orchestrator = _orchestrator(
+        engines={"tier1": known, "tier2": MockBackend()},
+    )
+
+    assert orchestrator.max_model_len is None
+
+
 def test_orchestrator_rejects_templated_shared_prefix_at_construction():
     with pytest.raises(ValueError, match="shared_prefix.*pre-rendered"):
         _orchestrator(shared_prefix=TemplatedPrompt("<BOS>already rendered"))
