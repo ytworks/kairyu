@@ -2368,6 +2368,9 @@ def create_app(
                     parallel_tool_calls=request.parallel_tool_calls,
                     tools_in_prompt=validated_input.tools_in_prompt,
                     structured_format_in_prompt=validated_input.structured_format_in_prompt,
+                    conversation_affinity_key=(
+                        validated_input.conversation_affinity_key
+                    ),
                     response_format=request.response_format,
                     tool_call_protocol=validated_input.tool_call_protocol.value,
                     reasoning_effort=request.reasoning_effort,
