@@ -1902,6 +1902,10 @@ class Conductor:
                 )
                 break
             verdict = verifier_observed.text
+            verdict_trace_spec = verifier
+            verdict_trace_observed: _GenerationObservation | None = (
+                verifier_observed
+            )
             if _verdict_is_inconclusive(verdict):
                 # A truncated or empty verdict is not evidence of a draft
                 # defect, and counting it as FAIL burns a full refinement
@@ -1915,19 +1919,60 @@ class Conductor:
                     "points."
                     + verifier.prompt_suffix
                 )
+                run.trace.append(
+                    self._trace_event(
+                        verifier,
+                        "verified:inconclusive",
+                        operation="verification",
+                        status="success",
+                        attempt=depth,
+                        detail=f"attempt={depth} inconclusive=true",
+                        timing=verifier_observed.timing,
+                        usage=verifier_observed.usage,
+                        budget=verifier_observed.budget,
+                        metadata={
+                            "pass": False,
+                            "inconclusive": True,
+                            "reverification": False,
+                        },
+                    )
+                )
+                retry_spec = replace(
+                    verifier, name=f"{verifier.name}:reverify"
+                )
+                # The first observation has already been emitted. If the
+                # retry cannot dispatch or fails, the final round outcome
+                # remains attributable to the original verifier without
+                # counting that stage timing twice.
+                verdict_trace_observed = None
                 try:
-                    verifier_observed = await self._generate(
+                    retry_observed = await self._generate(
                         run,
                         session,
                         verifier.name,
                         verifier.worker,
                         retry_prompt,
                         depth,
-                        spec=replace(verifier, name=f"{verifier.name}:reverify"),
+                        spec=retry_spec,
                         operation="verification",
                     )
+                    verifier_observed = retry_observed
                     verdict = verifier_observed.text
-                except (_BudgetRefused, _ObservedGenerationError):
+                    verdict_trace_spec = retry_spec
+                    verdict_trace_observed = retry_observed
+                except _BudgetRefused:
+                    run.trace.append(
+                        self._trace_event(
+                            retry_spec,
+                            "skipped:budget",
+                            operation="verification",
+                            status="skipped",
+                            attempt=depth,
+                            budget=TraceBudget.between(run.budget, run.budget),
+                            metadata={"reason": "budget"},
+                        )
+                    )
+                except _ObservedGenerationError:
                     pass
             run.outputs[verifier.name] = verdict
             passed = _is_pass(verdict)
@@ -1947,15 +1992,27 @@ class Conductor:
             )
             run.trace.append(
                 self._trace_event(
-                    verifier,
+                    verdict_trace_spec,
                     "verified",
                     operation="verification",
                     status="success",
                     attempt=depth,
                     detail=f"attempt={depth} pass={passed}",
-                    timing=verifier_observed.timing,
-                    usage=verifier_observed.usage,
-                    budget=verifier_observed.budget,
+                    timing=(
+                        verdict_trace_observed.timing
+                        if verdict_trace_observed is not None
+                        else None
+                    ),
+                    usage=(
+                        verdict_trace_observed.usage
+                        if verdict_trace_observed is not None
+                        else None
+                    ),
+                    budget=(
+                        verdict_trace_observed.budget
+                        if verdict_trace_observed is not None
+                        else TraceBudget.between(run.budget, run.budget)
+                    ),
                     metadata={
                         "pass": passed,
                         "inconclusive": verdict_inconclusive,
