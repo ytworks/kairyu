@@ -29,6 +29,7 @@ import httpx
 
 from kairyu.async_thread import run_prompt_work
 from kairyu.engine.backend import (
+    UNLIMITED_OUTPUT_ADMISSION_TOKENS,
     AdmissionUpperBound,
     GenerationRequest,
     GenerationResult,
@@ -762,6 +763,7 @@ class OpenAICompatBackend:
         OpenAIRequestCapabilities,
         ImageInputPolicy | None,
         bool,
+        int | None,
     ] | None:
         """Identity for replicas with exactly equivalent admission ceilings."""
 
@@ -771,6 +773,7 @@ class OpenAICompatBackend:
             self._capabilities,
             self._image_input_policy,
             self._allow_templated_chat_passthrough,
+            self.max_model_len,
         )
 
     def _validate_request_structure(self, request: GenerationRequest) -> None:
@@ -863,13 +866,18 @@ class OpenAICompatBackend:
         """Reserve a configured processor ceiling, never media-byte heuristics."""
 
         if not isinstance(request.prompt, MultimodalPrompt):
-            return default_admission_upper_bound(request)
+            return default_admission_upper_bound(
+                request,
+                fallback_output_tokens=self.max_model_len,
+            )
         policy = self._image_input_policy
         if policy is None:  # Defensive: validation owns the normal error.
             raise ValueError("multimodal admission requires image_input_policy")
         max_tokens = request.sampling_params.max_tokens
         if max_tokens is None:
-            raise ValueError("multimodal admission requires a finite max_tokens")
+            # OpenAI-style limitless request: reserve the context-length
+            # ceiling (or the documented constant) instead of rejecting.
+            max_tokens = self.max_model_len or UNLIMITED_OUTPUT_ADMISSION_TOKENS
         candidates = max(
             request.sampling_params.n,
             request.sampling_params.best_of or request.sampling_params.n,

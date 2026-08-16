@@ -292,3 +292,23 @@ async def test_matrix_mode_reports_per_candidate_consensus():
     assert exec_event.metadata["candidates"] == 2
     # A matrix stage is one orchestration step regardless of candidate count.
     assert result.budget_state.steps_used == 5
+
+
+async def test_budget_skip_fallback_never_publishes_executor_output():
+    """Issue #496: best-so-far falls back to a generation stage, never the
+    executor's machine report, when the final unit is budget-refused."""
+
+    gen = ScriptedBackend([TEST_ANSWER, CODE_ANSWER, "unused final"])
+    sandbox = FakeExecutor()
+    conductor = Conductor(
+        _executor_roles(),
+        {"gen": gen},
+        execution_workers={"sandbox": sandbox},
+    )
+    # testgen + proposal consume both steps; exec is free; final is refused.
+    result = await conductor.run("task", budget=Budget(max_steps=2))
+
+    assert "final" not in result.outputs
+    assert any(event.kind == "skipped:budget" for event in result.trace)
+    assert result.final_text in {TEST_ANSWER, CODE_ANSWER}
+    assert "UNTRUSTED" not in result.final_text

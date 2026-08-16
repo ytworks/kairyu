@@ -163,6 +163,8 @@ def build_orchestrator(
                 sampling=_role_sampling(role),
                 executor=_role_executor(role),
                 prompt_suffix=role.prompt_suffix,
+                prompt_headless=role.prompt_headless,
+                reasoning_closed=role.reasoning_closed,
             )
             for role in spec.roles
         )

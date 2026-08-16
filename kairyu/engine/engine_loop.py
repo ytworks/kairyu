@@ -608,13 +608,24 @@ class EngineLoop:
         assert text is not None
         return self.tokenize_prompt(text)
 
-    @staticmethod
-    def _max_new_tokens(params: SamplingParams) -> int:
-        return (
-            params.max_tokens
-            if params.max_tokens is not None
-            else _DEFAULT_MAX_NEW_TOKENS
-        )
+    def _max_new_tokens(
+        self,
+        params: SamplingParams,
+        prompt_token_ids: tuple[int, ...],
+    ) -> int:
+        if params.max_tokens is not None:
+            return params.max_tokens
+        if self._max_model_len is not None:
+            # OpenAI chat contract for an omitted limit: generate up to the
+            # model's remaining context (issue #496).
+            remaining = self._max_model_len - len(prompt_token_ids)
+            if remaining < 1:
+                raise ValueError(
+                    f"prompt tokens ({len(prompt_token_ids)}) already fill "
+                    f"max_model_len ({self._max_model_len})"
+                )
+            return remaining
+        return _DEFAULT_MAX_NEW_TOKENS
 
     def _validate_context_length(
         self,
@@ -645,7 +656,7 @@ class EngineLoop:
             raise ValueError("trace_requested must be a boolean")
         tokenize_started_ns = perf_counter_ns() if trace_requested else None
         prompt_token_ids = self.resolve_prompt_token_ids(prompt)
-        max_new_tokens = self._max_new_tokens(params)
+        max_new_tokens = self._max_new_tokens(params, prompt_token_ids)
         self._validate_context_length(prompt_token_ids, max_new_tokens)
         if (
             engine_sampling_from(params).needs_grammar
@@ -713,7 +724,10 @@ class EngineLoop:
                 raise ValueError("prepared prompt belongs to a different engine loop")
             if prepared_prompt.prompt != prompt:
                 raise ValueError("prepared prompt does not match the submitted prompt")
-            max_new_tokens = self._max_new_tokens(params)
+            max_new_tokens = self._max_new_tokens(
+                params,
+                prepared_prompt.prompt_token_ids,
+            )
             if prepared_prompt.max_new_tokens != max_new_tokens:
                 raise ValueError(
                     "prepared prompt max_tokens does not match the submitted request"

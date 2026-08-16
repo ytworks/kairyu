@@ -63,6 +63,30 @@ class StreamScriptedBackend:
         return None
 
 
+class UsageFreeBackend(StreamScriptedBackend):
+    """Head backend with optional exact token IDs but no usage object."""
+
+    def __init__(self, text: str, *, token_ids: tuple[int, ...] = ()) -> None:
+        super().__init__([text])
+        self._token_ids = token_ids
+
+    def _result(self, request, text, *, finished):
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text=text,
+                    token_ids=self._token_ids,
+                    finish_reason="stop" if finished else None,
+                ),
+            ),
+            usage=None,
+            finished=finished,
+        )
+
+
 class GatedScriptedBackend:
     """Holds generate() until released so head concurrency is observable."""
 
@@ -380,7 +404,10 @@ async def test_per_role_sampling_overrides_reach_backend_requests():
     assert draft_params.max_tokens == 1024
     assert draft_params.seed == 9
     continuation_params = continuation.requests_seen[0].sampling_params
-    assert continuation_params.max_tokens == 4096
+    # The caller's public limit is one budget across the head/continuation
+    # seam (issue #496): the head reported 7 completion tokens, so the
+    # continuation may generate at most 4096 - 7.
+    assert continuation_params.max_tokens == 4089
     assert continuation_params.temperature == 0.6
 
 
@@ -514,3 +541,406 @@ async def test_prompt_suffix_survives_refinement_attempts():
     )
     check_prompts = [p for p in backend.prompts if p.startswith("[check]")]
     assert all(p.endswith("<THINK>") for p in check_prompts)
+
+
+class ReasoningOnlyBackend:
+    """Simulates an upstream reasoning parser eating a direct answer.
+
+    The generated text carries no emitted </think>, so the parser classifies
+    the whole answer as reasoning and public text arrives empty (issue #496).
+    """
+
+    def __init__(self, answer: str) -> None:
+        self._answer = answer
+        self.requests_seen: list[GenerationRequest] = []
+
+    def _result(self, request):
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=(),
+                    finish_reason="stop",
+                    reasoning_content=self._answer,
+                ),
+            ),
+            usage=GenerationUsage(prompt_tokens=3, completion_tokens=4),
+            finished=True,
+        )
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests_seen.append(request)
+        return self._result(request)
+
+    async def stream(self, request):
+        self.requests_seen.append(request)
+        yield self._result(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
+class MixedChoiceBackend:
+    """Returns an empty first choice and a usable second choice."""
+
+    def __init__(self) -> None:
+        self.requests_seen: list[GenerationRequest] = []
+
+    def _result(self, request):
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=(),
+                    finish_reason="stop",
+                ),
+                CompletionOutput(
+                    index=1,
+                    text="valid second choice",
+                    token_ids=(),
+                    finish_reason="stop",
+                ),
+            ),
+            usage=GenerationUsage(prompt_tokens=3, completion_tokens=3),
+            finished=True,
+        )
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests_seen.append(request)
+        return self._result(request)
+
+    async def stream(self, request):
+        self.requests_seen.append(request)
+        yield self._result(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_empty_first_choice_preserves_nonempty_later_choice(stream):
+    backend = MixedChoiceBackend()
+    conductor = Conductor(
+        (
+            RoleSpec(
+                name="final",
+                worker="w",
+                role_type="publisher",
+                prompt="{query}",
+            ),
+        ),
+        {"w": backend},
+        final_sampling_params=SamplingParams(n=2, max_tokens=32),
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await conductor.run("task")
+
+    assert result.final_unit_ok
+    assert [(choice.index, choice.text) for choice in result.completions] == [
+        (0, ""),
+        (1, "valid second choice"),
+    ]
+    assert len(backend.requests_seen) == 1
+    assert not any(
+        event.kind in {"retry:empty_output", "failed"} for event in result.trace
+    )
+
+
+async def test_caller_limit_is_one_budget_across_head_and_continuation():
+    """Issue #496 item 1: max_tokens bounds head + continuation together."""
+
+    def build():
+        head = StreamScriptedBackend(["Intro. "])  # reports 7 completion tokens
+        draft = StreamScriptedBackend(["draft"])
+        continuation = StreamScriptedBackend(["Body."])
+        return head, continuation, _conductor(
+            head,
+            draft,
+            continuation,
+            sampling_params=SamplingParams(max_tokens=1024),
+            final_sampling_params=SamplingParams(max_tokens=100),
+        )
+
+    head, continuation, conductor = build()
+    events = await _collect(conductor.stream("task"))
+    result = events[-1].result
+    assert result is not None
+    # The head role declares no override: its cap is min(internal, caller).
+    assert head.requests_seen[0].sampling_params.max_tokens == 100
+    # The continuation gets the remaining public budget: 100 - 7.
+    assert continuation.requests_seen[0].sampling_params.max_tokens == 93
+    assert result.completions[0].finish_reason == "stop"
+    # Backend-reported public tokens: head 7 + continuation 5.
+    assert result.public_completion_tokens == 12
+
+    head, continuation, conductor = build()
+    run_result = await conductor.run("task")
+    assert continuation.requests_seen[0].sampling_params.max_tokens == 93
+    assert run_result.public_completion_tokens == 12
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_missing_head_usage_without_token_ids_consumes_head_cap(stream):
+    head_text = "漢字漢字漢字漢字漢字"
+    head = UsageFreeBackend(head_text)
+    continuation = StreamScriptedBackend(["Body."])
+    conductor = _conductor(
+        head,
+        StreamScriptedBackend(["draft"]),
+        continuation,
+        sampling_params=SamplingParams(max_tokens=1024),
+        final_sampling_params=SamplingParams(max_tokens=10),
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await conductor.run("task")
+
+    assert head.requests_seen[0].sampling_params.max_tokens == 10
+    assert not continuation.requests_seen
+    assert result.final_text == head_text
+    assert result.completions[0].finish_reason == "length"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_head_token_ids_size_remaining_budget_without_usage(stream):
+    head = UsageFreeBackend("漢字漢", token_ids=(11, 12, 13))
+    continuation = StreamScriptedBackend(["Body."])
+    conductor = _conductor(
+        head,
+        StreamScriptedBackend(["draft"]),
+        continuation,
+        sampling_params=SamplingParams(max_tokens=1024),
+        final_sampling_params=SamplingParams(max_tokens=10),
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await conductor.run("task")
+
+    assert continuation.requests_seen[0].sampling_params.max_tokens == 7
+    assert result.completions[0].finish_reason == "stop"
+
+
+async def test_head_role_cap_is_clamped_to_caller_limit():
+    head = StreamScriptedBackend(["Intro. "])
+    draft = StreamScriptedBackend(["draft"])
+    continuation = StreamScriptedBackend(["Body."])
+    roles = (
+        RoleSpec(
+            name="head",
+            worker="hw",
+            role_type="head",
+            prompt="[head] {query}",
+            sampling=RoleSamplingOverrides(max_tokens=256),
+        ),
+    ) + _head_roles()[1:]
+    conductor = Conductor(
+        roles,
+        {"hw": head, "dw": draft, "cw": continuation},
+        sampling_params=SamplingParams(max_tokens=1024),
+        final_sampling_params=SamplingParams(max_tokens=40),
+    )
+    await _collect(conductor.stream("task"))
+    assert head.requests_seen[0].sampling_params.max_tokens == 40
+
+
+async def test_exhausted_public_budget_skips_continuation_and_reports_length():
+    """Issue #496 item 2 inverse: a truncating limit reports length honestly."""
+
+    def build():
+        head = StreamScriptedBackend(["Intro. "])  # consumes all 7 tokens
+        draft = StreamScriptedBackend(["draft"])
+        continuation = StreamScriptedBackend(["Body."])
+        return continuation, _conductor(
+            head,
+            draft,
+            continuation,
+            sampling_params=SamplingParams(max_tokens=1024),
+            final_sampling_params=SamplingParams(max_tokens=7),
+        )
+
+    continuation, conductor = build()
+    events = await _collect(conductor.stream("task"))
+    result = events[-1].result
+    assert result is not None
+    assert result.final_text == "Intro. "
+    assert result.completions[0].finish_reason == "length"
+    assert not continuation.requests_seen
+    assert any(e.kind == "skipped:public_budget" for e in result.trace)
+
+    continuation, conductor = build()
+    run_result = await conductor.run("task")
+    assert run_result.final_text == "Intro. "
+    assert run_result.completions[0].finish_reason == "length"
+    assert not continuation.requests_seen
+
+
+async def test_reasoning_closed_reclaims_parser_classified_answer():
+    """Issue #496 item 4: a closed-reasoning publisher's answer is public."""
+
+    roles = (
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[cont] {query}",
+            prompt_suffix="</think>",
+            reasoning_closed=True,
+        ),
+    )
+
+    run_result = await Conductor(
+        roles, {"cw": ReasoningOnlyBackend("The answer is 5.")}
+    ).run("task")
+    assert run_result.final_text == "The answer is 5."
+    assert run_result.completions[0].text == "The answer is 5."
+    assert run_result.completions[0].reasoning_content is None
+    assert run_result.final_unit_ok
+
+    events = await _collect(
+        Conductor(roles, {"cw": ReasoningOnlyBackend("The answer is 5.")}).stream(
+            "task"
+        )
+    )
+    stream_result = events[-1].result
+    assert stream_result is not None
+    assert stream_result.final_text == "The answer is 5."
+    # The reclaimed answer still reaches the stream as public deltas.
+    assert (
+        "".join(e.text for e in events if e.kind == "delta") == "The answer is 5."
+    )
+
+
+async def test_headless_prompt_renders_when_tools_disable_the_head():
+    head = StreamScriptedBackend(["Intro. "])
+    draft = StreamScriptedBackend(["draft"])
+    continuation = StreamScriptedBackend(["Tool answer."])
+    roles = _head_roles()[:2] + (
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[cont] {head} :: {draft}",
+            prompt_headless="[cont-headless] {query} :: {draft}",
+            depends_on=("head", "draft"),
+        ),
+    )
+    conductor = Conductor(
+        roles,
+        {"hw": head, "dw": draft, "cw": continuation},
+        final_tools=({"type": "function", "function": {"name": "add"}},),
+    )
+    result = await conductor.run("task")
+    assert result.final_text == "Tool answer."
+    assert continuation.requests_seen[0].prompt.startswith("[cont-headless] task")
+    # With the head enabled the ordinary continuation body is used.
+    head2 = StreamScriptedBackend(["Intro. "])
+    continuation2 = StreamScriptedBackend(["Body."])
+    conductor2 = Conductor(
+        roles,
+        {"hw": head2, "dw": StreamScriptedBackend(["draft"]), "cw": continuation2},
+    )
+    await conductor2.run("task")
+    assert continuation2.requests_seen[0].prompt.startswith("[cont] Intro. ")
+
+
+async def test_empty_final_output_retries_once_then_marks_run_unusable():
+    """Issue #496 items 3/4: an empty answer is never a silent stop."""
+
+    empty = StreamScriptedBackend(["", ""])
+    draft = StreamScriptedBackend(["draft"])
+    roles = (
+        RoleSpec(name="draft", worker="dw", prompt="[draft] {query}"),
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[cont] {draft}",
+            depends_on=("draft",),
+        ),
+    )
+    conductor = Conductor(roles, {"dw": draft, "cw": empty})
+    result = await conductor.run("task")
+    assert result.final_text == ""
+    assert not result.final_unit_ok
+    assert len(empty.requests_seen) == 2  # one bounded retry
+    assert any(e.kind == "retry:empty_output" for e in result.trace)
+    assert any(
+        e.kind == "failed" and e.detail == "empty_output" for e in result.trace
+    )
+    # An internal stage's text never substitutes for the public answer.
+    assert "draft" not in result.final_text
+
+
+@pytest.mark.parametrize("refusal", ["max_steps", "max_cost"])
+async def test_empty_final_retry_budget_refusal_marks_run_unusable(refusal):
+    empty = StreamScriptedBackend([""])
+    draft = StreamScriptedBackend(["draft"])
+    roles = (
+        RoleSpec(name="draft", worker="dw", prompt="[draft] {query}"),
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[cont] {draft}",
+            depends_on=("draft",),
+        ),
+    )
+    cost_model = (
+        (lambda request, result: 1.0 if request.prompt.startswith("[cont]") else 0.0)
+        if refusal == "max_cost"
+        else (lambda request, result: 0.0)
+    )
+    budget = (
+        Budget(max_cost_usd=0.5)
+        if refusal == "max_cost"
+        else Budget(max_steps=2)
+    )
+    conductor = Conductor(
+        roles,
+        {"dw": draft, "cw": empty},
+        cost_model=cost_model,
+    )
+
+    result = await conductor.run("task", budget=budget)
+
+    assert result.final_text == ""
+    assert not result.final_unit_ok
+    assert result.outputs == {"draft": "draft"}
+    assert len(empty.requests_seen) == 1
+    assert any(e.kind == "retry:empty_output" for e in result.trace)
+    assert any(e.kind == "skipped:budget" and e.attempt == 1 for e in result.trace)
+    assert any(
+        e.kind == "failed" and e.detail == "empty_output" and e.attempt == 1
+        for e in result.trace
+    )
+
+
+async def test_committed_head_exempts_empty_continuation_from_failure():
+    head = StreamScriptedBackend(["Intro. "])
+    draft = StreamScriptedBackend(["draft"])
+    continuation = StreamScriptedBackend([""])
+    conductor = _conductor(head, draft, continuation)
+    result = await conductor.run("task")
+    # EO-D7 best-so-far: the committed head stands alone, no error.
+    assert result.final_text == "Intro. "
+    assert result.final_unit_ok
+    assert len(continuation.requests_seen) == 1

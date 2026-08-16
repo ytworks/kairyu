@@ -114,6 +114,51 @@ history so a response can be appended to the next request. Compatibility-only
 value and every other unsupported message field still fail before backend
 dispatch.
 
+**OpenAI output-contract amendment (2026-08-16, issue #496).** Chat
+Completions follows the documented OpenAI output semantics end to end:
+
+- An omitted `max_tokens`/`max_completion_tokens` means "bounded by the
+  model's remaining context", never a server-materialized 16 (issue #458).
+  The gateway passes `None` through; OpenAI-compatible upstreams omit the
+  field, the native engine clamps to `max_model_len - prompt`, and tenant
+  admission reserves the backend's `max_model_len` (or a documented
+  constant) instead of rejecting, settled by exact usage.
+- A finite caller limit is ONE budget across the public answer: the head's
+  role cap is clamped to it, the selected final unit receives the remaining
+  budget after the head's reported completion tokens, and a fully consumed
+  budget skips the continuation (`skipped:public_budget`) and reports
+  `finish_reason: "length"` for the committed head-only answer. The limit
+  governs the public completion (content + tool calls); private stages stay
+  governed by `internal_max_tokens` (#208).
+- Standard `usage.prompt_tokens`/`completion_tokens`/`total_tokens` describe
+  the caller-visible request and completion — backend truth when the public
+  stages reported it, otherwise the m9 wire approximation. The cumulative
+  internal-call totals keep their #196 meaning exclusively on
+  `orchestration_input_tokens`/`orchestration_output_tokens`, and metering
+  continues to bill the cumulative totals.
+- A selected final unit that fails or produces no public text gets one
+  bounded re-dispatch; if still empty the response is an explicit upstream
+  error (502 / SSE error event) with usage attached — never a silent
+  `finish_reason: "stop"` with empty `content`, and never an internal
+  stage's text published as the answer. Budget-exhaustion best-so-far
+  (EO-D7/O4) is unchanged but may only fall back to generation stages,
+  never executor output or the head.
+- Roles may declare `reasoning_closed` (the rendered scaffold already closed
+  the model's private-reasoning span, so upstream reasoning-classified
+  output with empty public text is reclaimed as the answer) and
+  `prompt_headless` (the complete-answer body rendered for the selected
+  final unit when the head is absent or disabled — tools, `n>1`, logprobs,
+  `response_format`).
+- `GET /v1/models/{model}` returns the standard Model object for every
+  served id (engines, AUTO orchestrators, embeddings) and the standard
+  `model_not_found` error body otherwise.
+- `reasoning_content` remains a documented Kairyu extension: an operator
+  opt-in (EO-D4) carrying attributed intermediate stage output. Standard
+  clients never need it to recover the answer; when enabled it exposes the
+  configured role/worker/engine/model attribution by design, so operators
+  who must not reveal internal identifiers leave
+  `expose_intermediate_outputs` off.
+
 Typed final events retain cumulative `CompletionOutput` choices, so unary and
 SSE preserve every choice index, finish/stop reason, cumulative logprob, and
 token logprob exactly once. Tool-enabled streams buffer until every final

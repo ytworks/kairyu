@@ -455,21 +455,25 @@ def _orchestration_wire_usage(
     *,
     prompt_tokens: int,
     completion_tokens: int,
-    cached_tokens: int,
-    approximate_missing_standard_usage: bool = False,
+    public_prompt_tokens: int | None = None,
+    public_completion_tokens: int | None = None,
 ) -> Usage:
-    """Build OpenAI usage plus exact cumulative AUTO internal-call totals."""
+    """OpenAI usage describes the public request/response; AUTO totals are exact.
 
-    reported = (
-        None
-        if approximate_missing_standard_usage and prompt_tokens == 0 and completion_tokens == 0
-        else GenerationUsage(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            cached_tokens=cached_tokens,
-        )
-    )
-    usage = _wire_usage(prompt, completions, reported)
+    Standard ``prompt_tokens``/``completion_tokens`` keep their documented
+    OpenAI meaning (issue #496): the caller-visible prompt and completion,
+    from backend truth when the public stages reported it and otherwise the
+    m9 wire approximation. Cumulative internal-call totals — every stage,
+    retry, verifier — stay in ``orchestration_input_tokens`` /
+    ``orchestration_output_tokens`` (m11 #196) and in metering.
+    """
+
+    usage = _wire_usage(prompt, completions, None)
+    if public_prompt_tokens is not None:
+        usage.prompt_tokens = public_prompt_tokens
+    if public_completion_tokens is not None:
+        usage.completion_tokens = public_completion_tokens
+    usage.total_tokens = usage.prompt_tokens + usage.completion_tokens
     usage.orchestration_input_tokens = prompt_tokens
     usage.orchestration_output_tokens = completion_tokens
     return usage
@@ -1244,7 +1248,8 @@ async def _stream_orchestrator(
                 completions,
                 prompt_tokens=final_result.prompt_tokens,
                 completion_tokens=final_result.completion_tokens,
-                cached_tokens=final_result.cached_tokens,
+                public_prompt_tokens=final_result.public_prompt_tokens,
+                public_completion_tokens=final_result.public_completion_tokens,
             )
             metadata = _orchestrator_metadata_chunk(
                 response_id,
@@ -1291,8 +1296,8 @@ async def _stream_orchestrator(
                 completions,
                 prompt_tokens=final_result.prompt_tokens,
                 completion_tokens=final_result.completion_tokens,
-                cached_tokens=final_result.cached_tokens,
-                approximate_missing_standard_usage=True,
+                public_prompt_tokens=final_result.public_prompt_tokens,
+                public_completion_tokens=final_result.public_completion_tokens,
             )
             metadata = _orchestrator_metadata_chunk(
                 response_id,
@@ -2125,6 +2130,18 @@ def create_app(
         names = list(served_engines) + list(auto_models) + list(served_embedding_backends)
         return ModelList(data=[ModelCard(id=name) for name in names])
 
+    @app.get("/v1/models/{model_id:path}")
+    async def retrieve_model(model_id: str):
+        # OpenAI Models API retrieve (issue #496): the same served surface as
+        # the list endpoint, one Model object or a standard 404 error body.
+        if (
+            model_id in served_engines
+            or model_id in auto_models
+            or model_id in served_embedding_backends
+        ):
+            return ModelCard(id=model_id)
+        return model_not_found(model_id)
+
     @app.post("/v1/route", response_model=RoutePreviewResponse)
     async def preview_route(
         request: RoutePreviewRequest,
@@ -2327,12 +2344,21 @@ def create_app(
                     completions,
                     prompt_tokens=result.prompt_tokens,
                     completion_tokens=result.completion_tokens,
-                    cached_tokens=result.cached_tokens,
+                    public_prompt_tokens=result.public_prompt_tokens,
+                    public_completion_tokens=result.public_completion_tokens,
                 )
                 _record_usage(
                     http_request,
                     request.model,
-                    usage,
+                    # Bill the cumulative internal-call totals, not the
+                    # public-facing standard fields (m11 #196).
+                    GenerationUsage(
+                        prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens,
+                        cached_tokens=result.cached_tokens,
+                    )
+                    if result.prompt_tokens or result.completion_tokens
+                    else None,
                     prompt=prompt,
                     completions=completions,
                     usage_exact=False,
@@ -2355,9 +2381,28 @@ def create_app(
             completions = result.completions or (
                 CompletionOutput(index=0, text=result.text, token_ids=(), finish_reason="stop"),
             )
-            # OrchestratorResult uses 0/0 when its backend did not report usage.
-            # Keep that state missing so the same wire approximation can derive it.
-            usage = (
+            # Standard usage keeps the OpenAI public meaning; cumulative AUTO
+            # totals ride the orchestration_* extensions and metering below
+            # bills the aggregate explicitly (issue #496, m11 #196).
+            response = completion_response(
+                request,
+                prompt,
+                completions,
+                normalized_tool_choice=normalized_tool_choice,
+                tool_call_protocol=validated_input.tool_call_protocol,
+            )
+            response.usage = _orchestration_wire_usage(
+                prompt,
+                completions,
+                prompt_tokens=result.prompt_tokens,
+                completion_tokens=result.completion_tokens,
+                public_prompt_tokens=result.public_prompt_tokens,
+                public_completion_tokens=result.public_completion_tokens,
+            )
+            # OrchestratorResult uses 0/0 when its backend did not report
+            # usage; keep that state missing so metering derives the wire
+            # approximation instead of billing zero.
+            metered_usage = (
                 GenerationUsage(
                     prompt_tokens=result.prompt_tokens,
                     completion_tokens=result.completion_tokens,
@@ -2366,16 +2411,6 @@ def create_app(
                 if result.prompt_tokens or result.completion_tokens
                 else None
             )
-            response = completion_response(
-                request,
-                prompt,
-                completions,
-                usage=usage,
-                normalized_tool_choice=normalized_tool_choice,
-                tool_call_protocol=validated_input.tool_call_protocol,
-            )
-            response.usage.orchestration_input_tokens = result.prompt_tokens
-            response.usage.orchestration_output_tokens = result.completion_tokens
             if not tool_choice_is_satisfied(
                 response.choices,
                 normalized_tool_choice,
@@ -2383,7 +2418,7 @@ def create_app(
                 _record_usage(
                     http_request,
                     request.model,
-                    response.usage,
+                    metered_usage,
                     prompt=prompt,
                     completions=completions,
                     usage_exact=False,
@@ -2405,7 +2440,7 @@ def create_app(
                 _record_usage(
                     http_request,
                     request.model,
-                    response.usage,
+                    metered_usage,
                     prompt=prompt,
                     completions=completions,
                     usage_exact=False,
@@ -2423,7 +2458,7 @@ def create_app(
             _record_usage(
                 http_request,
                 request.model,
-                response.usage,
+                metered_usage,
                 prompt=prompt,
                 completions=completions,
                 usage_exact=False,

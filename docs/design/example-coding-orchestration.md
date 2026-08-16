@@ -168,6 +168,27 @@ Mechanism, owned by `kairyu/orchestration/conductor.py`:
   `internal_max_tokens` (#208); the selected final unit rejects overrides —
   it carries the caller's public intent.
 
+Review amendment (2026-08-16, issue #496): the head's role cap is clamped to
+the caller's public output limit and the continuation receives the remaining
+budget after the head's reported completion tokens — a finite caller limit is
+one budget across the split stream, and a consumed budget skips the
+continuation and reports `length` for the head-only answer. The `continuation`
+role declares `reasoning_closed: true`: its `…</think>` scaffold is
+prompt-side, so a direct answer that the DeepSeek reasoning parser classifies
+entirely as reasoning is reclaimed as public text instead of surfacing an
+empty `content`. It also declares a `prompt_headless` body rendered whenever
+the head is disabled for the call (tools, `n>1`, logprobs, `response_format`):
+with no committed opening to continue — exactly the post-tool-result turn —
+the publisher writes the complete answer from the conversation context. The
+head prompt gained an exact-answer branch (write exactly the requested fixed
+output and nothing else) and the continuation prompt an "output nothing
+further when the opening already answers" clause. An empty final unit gets one
+bounded re-dispatch and then surfaces as an explicit error, never a silent
+empty `stop` (m11 2026-08-16 amendment). These prompt/policy edits change the
+measured artifact: `./verify.sh serving-auto-max` and
+`serving-auto-max-coding` must be re-run before the example's gate status is
+quoted again.
+
 The example gate: `./verify.sh serving-auto-max-coding` runs a deterministic
 self-contained Python-task matrix (c1/8/16/32), requires a valid trace with a
 successful head and continuation in every sample, and counts a sample as

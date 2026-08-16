@@ -44,14 +44,15 @@ roles:
     role_type: head
     sampling: {temperature: 0.3, max_tokens: 256}
     prompt: |
-      [head] Begin the final answer to the request below. Always start with
-      prose — never a code block, list, or heading. Write the opening only:
-      one sentence restating what is being asked, then, for a programming
-      task, the chosen approach and key design decisions in plain sentences;
-      for any other task, the natural opening paragraph of a direct answer.
-      Do not write any code yet and do not mention any internal pipeline.
-      Stop after the opening; the answer will be continued directly after
-      your text.
+      [head] Begin the final answer to the request below. If the request asks
+      for an exact, fixed, or trivially short output, write exactly that
+      output and nothing else. Otherwise always start with prose — never a
+      code block, list, or heading. Write the opening only: one sentence
+      restating what is being asked, then, for a programming task, the chosen
+      approach and key design decisions in plain sentences; for any other
+      task, the natural opening paragraph of a direct answer. Do not write
+      any code yet and do not mention any internal pipeline. Stop after the
+      opening; the answer will be continued directly after your text.
       --- REQUEST ---
       {query}
       --- END REQUEST ---
@@ -190,18 +191,44 @@ roles:
     worker: tier2-direct
     role_type: publisher
     depends_on: [head, draft_synthesis, verifier]
+    # The DeepSeek reasoning parser classifies output as private reasoning
+    # until an emitted </think>; this role's suffix already closes that span
+    # in the prompt, so a direct answer with no emitted </think> is public
+    # text and Kairyu reclaims it (issue #496).
+    reasoning_closed: true
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[continuation] Stream the remainder of
       the final answer. The user has already seen the COMMITTED OPENING on
-      their screen: never repeat any of its sentences. Begin your output with
-      a blank line, then continue directly with the next part of the answer
-      (typically the code block for a coding task), incorporating the
-      verified draft and the verifier notes. If the draft is empty or wrong,
-      write the correct complete remainder yourself. Do not describe any
-      internal pipeline.
+      their screen: never repeat any of its sentences. If the COMMITTED
+      OPENING already completely answers the request, output nothing further.
+      Otherwise begin your output with a blank line, then continue directly
+      with the next part of the answer (typically the code block for a coding
+      task), incorporating the verified draft and the verifier notes. If the
+      draft is empty or wrong, write the correct complete remainder yourself.
+      Do not describe any internal pipeline.
       --- COMMITTED OPENING ---
       {head}
       --- END COMMITTED OPENING ---
+      --- REQUEST ---
+      {query}
+      --- END REQUEST ---
+      --- VERIFIED DRAFT ---
+      {draft_synthesis}
+      --- END VERIFIED DRAFT ---
+      --- VERIFIER ---
+      {verifier}
+      --- END VERIFIER ---
+    # Rendered instead of the body above when the head is disabled for the
+    # call (tools, n>1, logprobs, response_format): there is no committed
+    # opening to continue, so the publisher writes the complete answer —
+    # including the post-tool-result turn from the conversation (issue #496).
+    prompt_headless: |-
+      <｜begin▁of▁sentence｜><｜User｜>[continuation] Write the complete final
+      answer to the request below. If the conversation context ends with a
+      tool result, answer the user's request using that result directly. Use
+      the verified draft and verifier notes when they help; if the draft is
+      empty or wrong, write the correct complete answer yourself. Do not
+      describe any internal pipeline.
       --- REQUEST ---
       {query}
       --- END REQUEST ---

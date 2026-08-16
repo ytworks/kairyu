@@ -895,6 +895,8 @@ def _validate_orchestrator_topology(
             sampling=_loader_role_sampling(role),
             executor=_loader_role_executor(role),
             prompt_suffix=role.prompt_suffix,
+            prompt_headless=role.prompt_headless,
+            reasoning_closed=role.reasoning_closed,
         )
         for role in spec.roles
     )
@@ -905,11 +907,27 @@ def _validate_orchestrator_topology(
         worker.name for worker in spec.workers if worker.executor_ref is not None
     }
     try:
-        Conductor(
+        conductor = Conductor(
             roles,
             {name: object() for name in generation_workers},
             execution_workers={name: object() for name in execution_workers},
         )
+        final_unit = conductor._selected_final_unit().name
+        for role in roles:
+            if role.prompt_headless and role.name != final_unit:
+                findings.append(
+                    _finding(
+                        artifact=artifact,
+                        field=f"roles.{role.name}.prompt_headless",
+                        check="schema",
+                        code="schema.headless_prompt_unused",
+                        message=(
+                            "prompt_headless is only rendered for the selected "
+                            f"final unit ({final_unit!r}); it is never used on "
+                            f"role {role.name!r}"
+                        ),
+                    )
+                )
     except ValueError as error:
         message = (
             "orchestrator role graph contains a cycle"

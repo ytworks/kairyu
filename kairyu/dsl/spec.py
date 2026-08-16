@@ -99,6 +99,15 @@ class RoleNodeSpec(BaseModel):
     # Appended after the prompt body on every attempt, including verifier
     # refinements — for worker-native scaffolding that must end the prompt.
     prompt_suffix: str = ""
+    # Alternate body rendered for the selected final unit when the head is
+    # absent or disabled for the call (tools, n>1, ...): the publisher then
+    # writes the complete answer instead of continuing a committed opening
+    # (issue #496). Uses the same placeholders and prompt_suffix.
+    prompt_headless: str = ""
+    # Declares that this role's rendered scaffold already closed the model's
+    # private-reasoning span, so upstream reasoning-classified output with an
+    # empty public text is the answer itself, not hidden deliberation.
+    reasoning_closed: bool = False
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
@@ -110,6 +119,11 @@ class RoleNodeSpec(BaseModel):
         if self.executor is not None:
             if self.sampling is not None:
                 raise ValueError(f"executor role {self.name!r} cannot declare sampling")
+            if self.prompt_headless or self.reasoning_closed:
+                raise ValueError(
+                    f"executor role {self.name!r} cannot declare prompt_headless "
+                    "or reasoning_closed"
+                )
             deps = set(self.depends_on)
             missing = (set(self.executor.code_from) | set(self.executor.tests_from)) - deps
             if missing:

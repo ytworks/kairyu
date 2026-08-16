@@ -34,6 +34,12 @@ _TOOL_FUNCTION_NAME_RE = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _MAX_STAGE_DURATION_NS = (1 << 63) - 1
 _MAX_STAGE_OCCURRENCES = (1 << 31) - 1
 
+# Reservation-only decode ceiling for OpenAI-style limitless requests
+# (max_tokens omitted) against a backend whose max_model_len is unknown.
+# Generation itself stays bounded by the serving model's context upstream;
+# admission merely needs a finite reservation, which exact usage settles.
+UNLIMITED_OUTPUT_ADMISSION_TOKENS = 8192
+
 
 class Shutdownable(Protocol):
     async def shutdown(self) -> None: ...
@@ -568,7 +574,11 @@ def validate_native_request_surface(request: GenerationRequest) -> None:
         )
 
 
-def admission_upper_bound(request: GenerationRequest) -> AdmissionUpperBound:
+def admission_upper_bound(
+    request: GenerationRequest,
+    *,
+    fallback_output_tokens: int | None = None,
+) -> AdmissionUpperBound:
     """Transport-neutral, no-I/O upper bound for one generation.
 
     The gateway intentionally does not own model tokenizers.  We count the
@@ -576,11 +586,18 @@ def admission_upper_bound(request: GenerationRequest) -> AdmissionUpperBound:
     chat-template envelope in UTF-8 work units, then multiply both prefill and
     decode by the actual candidate fan-out.  This stays O(request bytes) and
     avoids placing tenant bookkeeping in the scheduler token hot path.
+
+    ``max_tokens=None`` follows the OpenAI chat contract (generation bounded
+    by the model's remaining context), so the decode reservation falls back
+    to ``fallback_output_tokens`` — the backend's ``max_model_len`` when
+    known — or ``UNLIMITED_OUTPUT_ADMISSION_TOKENS``. The fallback sizes the
+    reservation only; exact usage settles the difference afterwards.
     """
 
     params = request.sampling_params
-    if params.max_tokens is None:
-        raise ValueError("tenant-isolated generation requires a finite max_tokens")
+    max_tokens = params.max_tokens
+    if max_tokens is None:
+        max_tokens = fallback_output_tokens or UNLIMITED_OUTPUT_ADMISSION_TOKENS
     candidates = max(params.n, params.best_of or params.n)
     prompt = prompt_with_tool_intent(request)
     metadata = json.dumps(
@@ -618,7 +635,7 @@ def admission_upper_bound(request: GenerationRequest) -> AdmissionUpperBound:
             + fixed_template_envelope,
         )
     return AdmissionUpperBound(
-        tokens=candidates * (prompt_upper + params.max_tokens),
+        tokens=candidates * (prompt_upper + max_tokens),
         refundable_on_exact_usage=candidates == 1,
     )
 
@@ -636,7 +653,13 @@ def backend_admission_upper_bound(
     """
 
     resolve = getattr(backend, "admission_upper_bound", None)
-    bound = resolve(request) if callable(resolve) else admission_upper_bound(request)
+    if callable(resolve):
+        bound = resolve(request)
+    else:
+        bound = admission_upper_bound(
+            request,
+            fallback_output_tokens=getattr(backend, "max_model_len", None),
+        )
     return _validated_admission_upper_bound(backend, bound)
 
 
@@ -676,7 +699,16 @@ async def backend_admission_upper_bound_async(
     resolve = getattr(backend, "admission_upper_bound", None)
     from kairyu.async_thread import run_prompt_work
 
-    calculate = resolve if callable(resolve) else admission_upper_bound
+    if callable(resolve):
+        calculate = resolve
+    else:
+
+        def calculate(request: GenerationRequest) -> AdmissionUpperBound:
+            return admission_upper_bound(
+                request,
+                fallback_output_tokens=getattr(backend, "max_model_len", None),
+            )
+
     bound = await run_prompt_work(calculate, request)
     return _validated_admission_upper_bound(backend, bound)
 
@@ -687,15 +719,17 @@ _GENERIC_ADMISSION_CONTRACT = object()
 def backend_admission_upper_bound_key(backend: object) -> object | None:
     """Return an explicit immutable key for equivalent admission semantics.
 
-    The generic fallback depends only on ``GenerationRequest`` and therefore
-    shares one process-wide contract. A backend override must opt in with its
-    own immutable key; unknown or unhashable declarations are never deduped.
+    The generic fallback depends only on ``GenerationRequest`` plus the
+    backend's ``max_model_len`` (the limitless-request reservation ceiling),
+    so backends sharing that ceiling share one contract. A backend override
+    must opt in with its own immutable key; unknown or unhashable
+    declarations are never deduped.
     """
 
     resolve_async = getattr(backend, "admission_upper_bound_async", None)
     resolve = getattr(backend, "admission_upper_bound", None)
     if not callable(resolve_async) and not callable(resolve):
-        return _GENERIC_ADMISSION_CONTRACT
+        return (_GENERIC_ADMISSION_CONTRACT, getattr(backend, "max_model_len", None))
     key = getattr(backend, "admission_upper_bound_key", None)
     if key is None:
         return None

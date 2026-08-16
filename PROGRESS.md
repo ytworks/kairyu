@@ -98,7 +98,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
-<<<<<<< HEAD
+### 2026-08-16 — [amendment] OpenAI Chat Completions output contract (issue #496)
+- What: omitted output limits are context-bound (16-token fallback removed,
+  admission reserves max_model_len); a caller limit is one budget across
+  head+continuation with honest finish_reason; standard usage now means the
+  public request/completion (orchestration_* keep #196 cumulative totals,
+  metering still bills them); empty final output retries once then 502;
+  `reasoning_closed`/`prompt_headless` role contracts; GET /v1/models/{id}.
+- Why: issue #496 — orchestrated responses ignored caller limits, reported
+  deterministic "length", and lost post-tool answers to `reasoning_content`.
+- Refs: #496, #458, m11 2026-08-16 amendment, ECO-D4 2026-08-16 amendment
+
 ### 2026-08-15 — [amendment] Sandbox reaps escaped submission descendants
 - What: the coding executor now acts as a child subreaper and sweeps/reaps
   same-UID runner descendants not owned by another live submission on every
@@ -106,7 +116,7 @@ in `.claude/rules/progress-log.md`).
 - Why: timeout-only process-group cleanup allowed `setsid()` children to retain
   resources and mutate later execution evidence after an accepted result.
 - Refs: ECO-D1; `examples/qwen3.8-deepseek-v4-8gpu/sandbox/runner.py`
-=======
+
 ### 2026-08-15 — [amendment] Executor deadline includes queue admission
 - What: deployment executor config now declares queue allowance; the client
   shares one wall-plus-queue deadline across retries and the runner rejects
@@ -114,7 +124,6 @@ in `.claude/rules/progress-log.md`).
 - Why: the previous 8s queue plus 10s execution exceeded the 15s client
   deadline, discarding valid work as `unavailable` under contention.
 - Refs: ECO-D1; `kairyu/orchestration/execution.py`; PR #488 review
->>>>>>> origin/codex/executor-deadline-budget
 
 ### 2026-08-15 — [amendment] Sandbox transport removes the reverse network path
 - What: replaced the bidirectional internal Docker bridge with a shared Unix
