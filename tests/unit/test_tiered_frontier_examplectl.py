@@ -146,7 +146,12 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         assert json.loads(
             _option(service["command"], "--compilation-config")
         ) == {"cudagraph_mode": "PIECEWISE"}
-        assert "--speculative-config" not in service["command"]
+        # Issue #509: measured MTP-3 adoption (c1 +43.9%, c4/c8 aggregate
+        # +26%, lossless); see the example's MEASUREMENTS.md selection.
+        assert json.loads(_option(service["command"], "--speculative-config")) == {
+            "method": "mtp",
+            "num_speculative_tokens": 3,
+        }
         assert service["volumes"][-2]["target"] == "/root/.cache"
         assert service["volumes"][-1] == (
             "../qwen3.8-27b-1gpu/chat_template.jinja:"
