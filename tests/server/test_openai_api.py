@@ -4216,16 +4216,29 @@ def test_orchestration_input_flags_structured_format_demand():
             )
         )
 
-    json_demand = validated("Format your response as JSON with this structure.")
-    assert json_demand.structured_format_in_prompt
-    assert validated("Return valid JSON only.").structured_format_in_prompt
-    assert validated("Respond in YAML.").structured_format_in_prompt
-    assert not validated("Explain how tides work.").structured_format_in_prompt
-    assert not validated(
-        "In one sentence, explain what JSON is. Use ordinary prose, not JSON output."
-    ).structured_format_in_prompt
-    assert not validated("Compare JSON and XML.").structured_format_in_prompt
-    assert not validated("Do not return JSON.").structured_format_in_prompt
+    demanded = (
+        "Format your response as JSON with the following structure:",
+        "Provide the answer as JSON.",
+        "Return only JSON.",
+        "Reply with JSON.",
+        "Your response must be valid JSON.",
+        "Respond with a JSON object.",
+        "All output must be in JSON format.",
+        "Answer using YAML.",
+    )
+    for prompt in demanded:
+        assert validated(prompt).structured_format_in_prompt, prompt
+
+    prose_only = (
+        "Explain how tides work.",
+        "In one sentence, explain what JSON is. Use ordinary prose, not JSON output.",
+        "Compare JSON and XML.",
+        "Do not return JSON.",
+        "Do not reply with JSON.",
+        "All output must not be in JSON format.",
+    )
+    for prompt in prose_only:
+        assert not validated(prompt).structured_format_in_prompt, prompt
     # The demand binds later turns whose latest message is just command
     # output (agent loops state the format once, in the first message).
     later_turn = validated(

@@ -831,12 +831,29 @@ _STRUCTURED_FORMAT_PATTERNS = (
     ),
     re.compile(
         rf"\b(?:respond|reply|answer)\s+(?:strictly\s+)?"
-        rf"(?:as|in)\s+(?:valid\s+)?{_STRUCTURED_FORMAT_NAME}\b",
+        rf"(?:as|in|with|using)\s+"
+        rf"(?:(?:a|an|the)\s+)?(?:valid\s+|strict\s+)?"
+        rf"{_STRUCTURED_FORMAT_NAME}"
+        rf"(?:\s+(?:object|document|response|output))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:response|answer|output|reply)\s+"
+        rf"(?:must|should)\s+be\s+"
+        rf"(?:(?:a|an|the)\s+)?(?:valid\s+|strict\s+)?"
+        rf"{_STRUCTURED_FORMAT_NAME}"
+        rf"(?:\s+(?:object|document|response|output))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\bin\s+(?:valid\s+|strict\s+)?"
+        rf"{_STRUCTURED_FORMAT_NAME}\s+format\b",
         re.IGNORECASE,
     ),
 )
 _NEGATED_FORMAT_COMMAND = re.compile(
-    r"(?:\bdo\s+not|\bdon't|\bnever|\bnot\s+to)\s*$",
+    r"(?:\bdo\s+not|\bdon't|\bnever|\bnot\s+to|"
+    r"\bmust\s+not(?:\s+be)?|\bshould\s+not(?:\s+be)?)\s*$",
     re.IGNORECASE,
 )
 
