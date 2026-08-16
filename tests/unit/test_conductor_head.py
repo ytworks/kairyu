@@ -559,6 +559,80 @@ class ReasoningOnlyBackend:
         return None
 
 
+class MixedChoiceBackend:
+    """Returns an empty first choice and a usable second choice."""
+
+    def __init__(self) -> None:
+        self.requests_seen: list[GenerationRequest] = []
+
+    def _result(self, request):
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=(),
+                    finish_reason="stop",
+                ),
+                CompletionOutput(
+                    index=1,
+                    text="valid second choice",
+                    token_ids=(),
+                    finish_reason="stop",
+                ),
+            ),
+            usage=GenerationUsage(prompt_tokens=3, completion_tokens=3),
+            finished=True,
+        )
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests_seen.append(request)
+        return self._result(request)
+
+    async def stream(self, request):
+        self.requests_seen.append(request)
+        yield self._result(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_empty_first_choice_preserves_nonempty_later_choice(stream):
+    backend = MixedChoiceBackend()
+    conductor = Conductor(
+        (
+            RoleSpec(
+                name="final",
+                worker="w",
+                role_type="publisher",
+                prompt="{query}",
+            ),
+        ),
+        {"w": backend},
+        final_sampling_params=SamplingParams(n=2, max_tokens=32),
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await conductor.run("task")
+
+    assert result.final_unit_ok
+    assert [(choice.index, choice.text) for choice in result.completions] == [
+        (0, ""),
+        (1, "valid second choice"),
+    ]
+    assert len(backend.requests_seen) == 1
+    assert not any(
+        event.kind in {"retry:empty_output", "failed"} for event in result.trace
+    )
+
+
 async def test_caller_limit_is_one_budget_across_head_and_continuation():
     """Issue #496 item 1: max_tokens bounds head + continuation together."""
 
