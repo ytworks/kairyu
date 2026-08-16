@@ -1700,18 +1700,37 @@ class Conductor:
                     operation="generation",
                 )
             except _BudgetRefused:
+                refused_attempt = depth + (1 if empty_retry_used else 0)
                 run.trace.append(
                     self._trace_event(
                         spec,
                         "skipped:budget",
                         operation="generation",
                         status="skipped",
-                        attempt=depth,
+                        attempt=refused_attempt,
                         budget=TraceBudget.between(run.budget, run.budget),
                         metadata={"reason": "budget"},
                     )
                 )
                 if spec.name not in run.outputs:
+                    if is_final_unit and empty_retry_used:
+                        # The first final attempt was empty and its one bounded
+                        # retry could not be admitted. Treat that as the same
+                        # unusable final result as a second empty generation;
+                        # otherwise _final_output_unit() may publish an
+                        # internal stage as a successful answer.
+                        run.final_unit_unusable = True
+                        run.trace.append(
+                            self._trace_event(
+                                spec,
+                                "failed",
+                                operation="generation",
+                                status="failed",
+                                attempt=refused_attempt,
+                                detail="empty_output",
+                                error=TraceError(type="EmptyFinalOutput"),
+                            )
+                        )
                     return
                 break
             text, completions = self._unit_public_output(
