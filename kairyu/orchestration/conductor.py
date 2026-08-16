@@ -1931,7 +1931,14 @@ class Conductor:
                     pass
             run.outputs[verifier.name] = verdict
             passed = _is_pass(verdict)
-            can_refine = run.budget.can_refine(depth)
+            verdict_inconclusive = _verdict_is_inconclusive(verdict)
+            # One immediate re-verification is the bounded recovery for a
+            # missing verdict. If that attempt is also inconclusive, retain
+            # the best draft instead of converting missing control output
+            # into a synthetic FAIL and paying a full refinement round.
+            can_refine = (
+                run.budget.can_refine(depth) and not verdict_inconclusive
+            )
             verifier_intermediate = self._record_intermediate(
                 run,
                 verifier,
@@ -1951,7 +1958,12 @@ class Conductor:
                     budget=verifier_observed.budget,
                     metadata={
                         "pass": passed,
-                        "refinement_exhausted": not passed and not can_refine,
+                        "inconclusive": verdict_inconclusive,
+                        "refinement_exhausted": (
+                            not passed
+                            and not can_refine
+                            and not verdict_inconclusive
+                        ),
                     },
                 )
             )
