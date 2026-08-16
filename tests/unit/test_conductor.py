@@ -540,6 +540,32 @@ async def test_inconclusive_verdict_reverifies_once_instead_of_refining():
     assert "ran out of output budget" in backend.prompts_seen[2]
 
 
+async def test_second_inconclusive_verdict_keeps_best_draft_without_refining():
+    backend = ScriptedBackend(["draft v1", "", ""])
+    roles = (
+        RoleSpec(name="worker", worker="w", prompt="do: {query}"),
+        RoleSpec(
+            name="check",
+            worker="w",
+            prompt="verify: {worker}",
+            role_type="verifier",
+            verifies="worker",
+            depends_on=("worker",),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"w": backend})
+
+    result = await conductor.run("task", budget=Budget(max_refine_depth=2))
+
+    assert result.outputs["worker"] == "draft v1"
+    assert result.outputs["check"] == ""
+    assert result.budget_state.steps_used == 3
+    assert len(backend.prompts_seen) == 3
+    verifier_events = [event for event in result.trace if event.role == "verifier"]
+    assert verifier_events[-1].metadata["inconclusive"] is True
+    assert verifier_events[-1].metadata["refinement_exhausted"] is False
+
+
 async def test_refinement_depth_is_bounded():
     backend = ScriptedBackend(["d1", "FAIL 1", "d2", "FAIL 2", "d3", "FAIL 3"])
     roles = (
