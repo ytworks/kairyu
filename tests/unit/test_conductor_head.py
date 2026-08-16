@@ -743,6 +743,50 @@ async def test_empty_final_output_retries_once_then_marks_run_unusable():
     assert "draft" not in result.final_text
 
 
+@pytest.mark.parametrize("refusal", ["max_steps", "max_cost"])
+async def test_empty_final_retry_budget_refusal_marks_run_unusable(refusal):
+    empty = StreamScriptedBackend([""])
+    draft = StreamScriptedBackend(["draft"])
+    roles = (
+        RoleSpec(name="draft", worker="dw", prompt="[draft] {query}"),
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[cont] {draft}",
+            depends_on=("draft",),
+        ),
+    )
+    cost_model = (
+        (lambda request, result: 1.0 if request.prompt.startswith("[cont]") else 0.0)
+        if refusal == "max_cost"
+        else (lambda request, result: 0.0)
+    )
+    budget = (
+        Budget(max_cost_usd=0.5)
+        if refusal == "max_cost"
+        else Budget(max_steps=2)
+    )
+    conductor = Conductor(
+        roles,
+        {"dw": draft, "cw": empty},
+        cost_model=cost_model,
+    )
+
+    result = await conductor.run("task", budget=budget)
+
+    assert result.final_text == ""
+    assert not result.final_unit_ok
+    assert result.outputs == {"draft": "draft"}
+    assert len(empty.requests_seen) == 1
+    assert any(e.kind == "retry:empty_output" for e in result.trace)
+    assert any(e.kind == "skipped:budget" and e.attempt == 1 for e in result.trace)
+    assert any(
+        e.kind == "failed" and e.detail == "empty_output" and e.attempt == 1
+        for e in result.trace
+    )
+
+
 async def test_committed_head_exempts_empty_continuation_from_failure():
     head = StreamScriptedBackend(["Intro. "])
     draft = StreamScriptedBackend(["draft"])
