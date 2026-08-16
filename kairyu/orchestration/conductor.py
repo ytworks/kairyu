@@ -1708,6 +1708,8 @@ class Conductor:
             await self._stream_head_unit(run, session, query, spec, event_sink)
             return
         if spec.name == self._selected_final_unit().name:
+            if self._skip_verified_complete_head(run, spec):
+                return
             remaining = self._public_budget_remaining(run)
             if remaining is not None and remaining < 1:
                 # The head consumed the caller's whole public limit; the
@@ -2178,6 +2180,43 @@ class Conductor:
         if self._head is None or not self._head_enabled():
             return ""
         return run.outputs.get(self._head.name, "")
+
+    def _skip_verified_complete_head(
+        self,
+        run: _RunState,
+        final: RoleSpec,
+    ) -> bool:
+        """Skip a publisher when a verified draft adds nothing to the head."""
+
+        head_text = self._head_committed_text(run)
+        if not head_text or final.role_type != "publisher":
+            return False
+        for target, verifier in self._verifier_for.items():
+            if target not in final.depends_on or verifier.name not in final.depends_on:
+                continue
+            draft = run.outputs.get(target, "")
+            verdict = run.outputs.get(verifier.name, "")
+            if (
+                draft
+                and _is_pass(verdict)
+                and not dedup_public_continuation(head_text, draft).strip()
+            ):
+                run.trace.append(
+                    self._trace_event(
+                        final,
+                        "skipped:complete_head",
+                        operation="generation",
+                        status="skipped",
+                        attempt=0,
+                        budget=TraceBudget.between(run.budget, run.budget),
+                        metadata={
+                            "reason": "verified_complete_head",
+                            "head": True,
+                        },
+                    )
+                )
+                return True
+        return False
 
     def _public_completion_tokens(self, run: _RunState) -> int | None:
         """Backend-reported tokens of the public answer, ``None`` if unknown.
@@ -2650,8 +2689,13 @@ class Conductor:
             if head_active and self._head is not None
             else ""
         )
+        final_attempts = (
+            ()
+            if self._skip_verified_complete_head(run, final)
+            else range(2)
+        )
         try:
-            for final_attempt in range(2):
+            for final_attempt in final_attempts:
                 async for event in self._stream_unit(
                     run,
                     session,
