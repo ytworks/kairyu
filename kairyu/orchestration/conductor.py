@@ -291,18 +291,30 @@ def dedup_public_continuation(committed: str, continuation: str) -> str:
     return continuation
 
 
-def _observed_completion_tokens(
-    observed: _GenerationObservation,
+def _completion_tokens_for_public_budget(
+    usage: GenerationUsage | None,
+    completions: tuple[CompletionOutput, ...],
     text: str,
+    *,
+    unreported_upper_bound: int | None,
 ) -> int:
-    """Head budget accounting: backend truth, else a whitespace approximation.
+    """Account for the head without ever under-reserving caller output.
 
-    The approximation only sizes the continuation's remaining public budget
-    (issue #496); billing always uses backend-reported usage (m9).
+    Backend usage is authoritative, followed by exact returned token IDs. If
+    neither is available, a finite head dispatch must be charged at its full
+    upper bound: a whitespace estimate can undercount CJK or other unbroken
+    text and let head + continuation exceed the caller limit. The final text
+    approximation remains useful only when no finite dispatch bound exists;
+    billing still uses backend-reported usage (m9).
     """
 
-    if observed.usage is not None:
-        return observed.usage.completion_tokens
+    if usage is not None:
+        return usage.completion_tokens
+    token_count = sum(len(completion.token_ids) for completion in completions)
+    if token_count:
+        return token_count
+    if unreported_upper_bound is not None:
+        return unreported_upper_bound
     return len(text.split())
 
 
@@ -1522,10 +1534,11 @@ class Conductor:
                     raise RuntimeError("head worker stream produced no result")
                 committed = last_result.text or "".join(text_parts)
                 run.outputs[spec.name] = committed
-                run.head_completion_tokens = (
-                    latest_usage.completion_tokens
-                    if latest_usage is not None
-                    else len(committed.split())
+                run.head_completion_tokens = _completion_tokens_for_public_budget(
+                    latest_usage,
+                    last_result.completions,
+                    committed,
+                    unreported_upper_bound=request.sampling_params.max_tokens,
                 )
                 run.head_usage_reported = latest_usage is not None
                 actual_cost = self._cost_model(request, last_result)
@@ -1539,10 +1552,11 @@ class Conductor:
             partial_text = "".join(text_parts)
             if partial_text:
                 run.outputs[spec.name] = partial_text
-                run.head_completion_tokens = (
-                    latest_usage.completion_tokens
-                    if latest_usage is not None
-                    else len(partial_text.split())
+                run.head_completion_tokens = _completion_tokens_for_public_budget(
+                    latest_usage,
+                    last_result.completions if last_result is not None else (),
+                    partial_text,
+                    unreported_upper_bound=request.sampling_params.max_tokens,
                 )
                 run.head_usage_reported = latest_usage is not None
             run.budget = run.budget.release(unknown_cost=unknown_cost)
@@ -1720,9 +1734,11 @@ class Conductor:
             run.outputs[spec.name] = text
             intermediate = self._record_intermediate(run, spec, depth, observed)
             if spec.role_type == "head":
-                run.head_completion_tokens = _observed_completion_tokens(
-                    observed,
+                run.head_completion_tokens = _completion_tokens_for_public_budget(
+                    observed.usage,
+                    observed.completions,
                     text,
+                    unreported_upper_bound=self._head_sampling_params().max_tokens,
                 )
                 run.head_usage_reported = observed.usage is not None
             if is_final_unit:

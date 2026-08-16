@@ -63,6 +63,30 @@ class StreamScriptedBackend:
         return None
 
 
+class UsageFreeBackend(StreamScriptedBackend):
+    """Head backend with optional exact token IDs but no usage object."""
+
+    def __init__(self, text: str, *, token_ids: tuple[int, ...] = ()) -> None:
+        super().__init__([text])
+        self._token_ids = token_ids
+
+    def _result(self, request, text, *, finished):
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text=text,
+                    token_ids=self._token_ids,
+                    finish_reason="stop" if finished else None,
+                ),
+            ),
+            usage=None,
+            finished=finished,
+        )
+
+
 class GatedScriptedBackend:
     """Holds generate() until released so head concurrency is observable."""
 
@@ -590,6 +614,55 @@ async def test_caller_limit_is_one_budget_across_head_and_continuation():
     run_result = await conductor.run("task")
     assert continuation.requests_seen[0].sampling_params.max_tokens == 93
     assert run_result.public_completion_tokens == 12
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_missing_head_usage_without_token_ids_consumes_head_cap(stream):
+    head_text = "漢字漢字漢字漢字漢字"
+    head = UsageFreeBackend(head_text)
+    continuation = StreamScriptedBackend(["Body."])
+    conductor = _conductor(
+        head,
+        StreamScriptedBackend(["draft"]),
+        continuation,
+        sampling_params=SamplingParams(max_tokens=1024),
+        final_sampling_params=SamplingParams(max_tokens=10),
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await conductor.run("task")
+
+    assert head.requests_seen[0].sampling_params.max_tokens == 10
+    assert not continuation.requests_seen
+    assert result.final_text == head_text
+    assert result.completions[0].finish_reason == "length"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_head_token_ids_size_remaining_budget_without_usage(stream):
+    head = UsageFreeBackend("漢字漢", token_ids=(11, 12, 13))
+    continuation = StreamScriptedBackend(["Body."])
+    conductor = _conductor(
+        head,
+        StreamScriptedBackend(["draft"]),
+        continuation,
+        sampling_params=SamplingParams(max_tokens=1024),
+        final_sampling_params=SamplingParams(max_tokens=10),
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await conductor.run("task")
+
+    assert continuation.requests_seen[0].sampling_params.max_tokens == 7
+    assert result.completions[0].finish_reason == "stop"
 
 
 async def test_head_role_cap_is_clamped_to_caller_limit():
