@@ -1838,6 +1838,40 @@ def _record_usage(
     )
 
 
+def _record_profile_judge_preflight_usage(
+    http_request: Request,
+    model: str,
+    prompt: PromptInput,
+    request: OrchestrationRequest,
+) -> None:
+    """Settle exact judge work when later orchestration preflight rejects."""
+
+    event = request.role_profile_judge_event
+    if event is None or event.usage is None:
+        return
+    usage = event.usage
+    admission = _tenant_reservation(http_request)
+    if admission is not None:
+        admission.settle_tokens(
+            usage.prompt_tokens + usage.completion_tokens,
+            exact=True,
+            force_refund_surplus=True,
+        )
+
+    _record_usage(
+        http_request,
+        model,
+        GenerationUsage(
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            cached_tokens=usage.cached_tokens,
+        ),
+        prompt=prompt,
+        completions=(),
+        usage_exact=True,
+    )
+
+
 def _session_id(request: ChatCompletionRequest, http_request: Request) -> str | None:
     """Session for ReplicaPool affinity: X-Session-ID header, else the OpenAI user field."""
     return http_request.headers.get("x-session-id") or request.user
@@ -2391,14 +2425,32 @@ def create_app(
                     if not judge_will_run:
                         bound = await selected.admission_upper_bound_async(orchestration_request)
                 except UpstreamClientError as error:
+                    _record_profile_judge_preflight_usage(
+                        http_request,
+                        request.model,
+                        prompt,
+                        orchestration_request,
+                    )
                     chat_error = chat_error_from_upstream_client_error(error)
                     return JSONResponse(
                         status_code=chat_error.status_code,
                         content={"error": chat_error.payload()},
                     )
                 except ValueError as error:
+                    _record_profile_judge_preflight_usage(
+                        http_request,
+                        request.model,
+                        prompt,
+                        orchestration_request,
+                    )
                     return invalid_request(str(error))
                 except RuntimeError as error:
+                    _record_profile_judge_preflight_usage(
+                        http_request,
+                        request.model,
+                        prompt,
+                        orchestration_request,
+                    )
                     return upstream_error(error)
             finally:
                 _record_preplacement_phase(

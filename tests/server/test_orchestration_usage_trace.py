@@ -849,3 +849,85 @@ def test_profile_judge_quota_is_reserved_before_dispatch():
     assert response.status_code == 429
     assert not judge.prompts_seen
     assert not engine.prompts_seen
+
+
+def test_profile_judge_usage_settles_when_later_preflight_rejects(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from kairyu.engine.mock import MockBackend
+    from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
+    from kairyu.orchestration.conductor import RoleSpec
+    from kairyu.orchestration.orchestrator import ProfileJudge
+
+    class UsageJudge(MockBackend):
+        def __init__(self):
+            super().__init__(
+                responses={"Reply with exactly one word: CODE or GENERAL.": "GENERAL"}
+            )
+            self.reported_usage = None
+
+        async def generate(self, request):
+            result = await super().generate(request)
+            self.reported_usage = result.usage
+            return result
+
+    class FailingPrepareBackend(MockBackend):
+        async def prepare_request(self, request):
+            raise ValueError("final worker rejected prepared request")
+
+    engine = FailingPrepareBackend()
+    judge = UsageJudge()
+    final_role = RoleSpec(
+        name="final",
+        worker="tier1",
+        role_type="synthesizer",
+        prompt="[final] {query}",
+    )
+    orchestrator = Orchestrator(
+        {"tier1": engine, "judge": judge},
+        roles=(final_role,),
+        general_roles=(final_role,),
+        profile_judge=ProfileJudge(worker="judge"),
+    )
+    token_budget = 100_000
+    app = create_legacy_app(
+        {"plain": engine},
+        orchestrators={"auto": orchestrator},
+        tenant_config=TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=60,
+                    token_burst=token_budget,
+                )
+            }
+        ),
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "Write a Rust CLI."}],
+                "max_tokens": 8,
+            },
+        )
+
+    assert response.status_code == 400
+    assert len(judge.prompts_seen) == 1
+    assert not engine.prompts_seen
+    assert judge.reported_usage is not None
+    actual_tokens = (
+        judge.reported_usage.prompt_tokens
+        + judge.reported_usage.completion_tokens
+    )
+    assert app.state.tenant_limiter.token_balance("default") == pytest.approx(
+        token_budget - actual_tokens
+    )
+    assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0
+    totals = app.state.usage_ledger.totals()["default"]
+    assert totals["requests"] == 1
+    assert totals["prompt_tokens"] == judge.reported_usage.prompt_tokens
+    assert totals["completion_tokens"] == judge.reported_usage.completion_tokens
