@@ -22,6 +22,7 @@ from kairyu.orchestration.orchestrator import (
     EngineDescriptor,
     Orchestrator,
     PreviewNotSupportedError,
+    _parse_profile_verdict,
 )
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.request import OrchestrationRequest
@@ -1587,6 +1588,24 @@ async def test_code_task_turn_keeps_primary_profile():
 _JUDGE_PROMPT_MARKER = "Reply with exactly one word: CODE or GENERAL."
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("CODE", "code"),
+        (" code\n", "code"),
+        ("GENERAL", "general"),
+        ("\tgeneral ", "general"),
+        ("not CODE", None),
+        ("The answer is CODE.", None),
+        ("GENERAL explanation", None),
+        ("CODE or GENERAL", None),
+        ("", None),
+    ],
+)
+def test_parse_profile_verdict_requires_exact_word(text, expected):
+    assert _parse_profile_verdict(text) == expected
+
+
 def test_profile_judge_admission_reserves_judge_and_worst_profile():
     tier1 = MockBackend()
     tier2 = MockBackend()
@@ -1777,7 +1796,7 @@ async def test_judge_failure_falls_back_to_code_task_signal():
 async def test_unparseable_judge_verdict_falls_back():
     tier1 = MockBackend()
     tier2 = MockBackend()
-    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "maybe CODE or GENERAL?"})
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "not CODE"})
     orchestrator = _profiled_orchestrator(tier1, tier2, judge)
     call = await orchestrator.judge_role_profile(
         OrchestrationRequest(
