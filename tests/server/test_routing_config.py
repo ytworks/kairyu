@@ -76,7 +76,10 @@ general_roles:
     worker: tier2
     role_type: synthesizer
     prompt: "general final: {query}"
-profile_judge: {worker: tier2}
+profile_judge:
+  worker: tier2
+  prompt_prefix: "<u>"
+  prompt_suffix: "<a>"
 """
     )
     app = create_app(
@@ -93,6 +96,8 @@ profile_judge: {worker: tier2}
         "worker": "tier2",
         "timeout_seconds": 5.0,
         "max_tokens": 8,
+        "prompt_prefix": "<u>",
+        "prompt_suffix": "<a>",
     }
 
 

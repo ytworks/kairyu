@@ -170,6 +170,8 @@ class ProfileJudgePayload(BaseModel):
     worker: str
     timeout_seconds: float
     max_tokens: int
+    prompt_prefix: str = ""
+    prompt_suffix: str = ""
 
 
 class RoutingModelDescriptorPayload(BaseModel):

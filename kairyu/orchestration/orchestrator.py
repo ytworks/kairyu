@@ -198,6 +198,8 @@ class ProfileJudge:
     worker: str
     timeout_seconds: float = 5.0
     max_tokens: int = 8
+    prompt_prefix: str = ""
+    prompt_suffix: str = ""
 
 
 # Verdict-only classification for a non-thinking direct engine. The judge can
@@ -490,6 +492,8 @@ class Orchestrator:
                             "worker": self._profile_judge.worker,
                             "timeout_seconds": self._profile_judge.timeout_seconds,
                             "max_tokens": self._profile_judge.max_tokens,
+                            "prompt_prefix": self._profile_judge.prompt_prefix,
+                            "prompt_suffix": self._profile_judge.prompt_suffix,
                         }
                     }
                     if self._profile_judge is not None
@@ -628,9 +632,16 @@ class Orchestrator:
     def _profile_judge_request(self, call: OrchestrationRequest) -> GenerationRequest:
         assert self._profile_judge is not None
         view = latest_user_view(call.prompt)[-_PROFILE_JUDGE_VIEW_CHARS:]
+        prompt = (
+            self._profile_judge.prompt_prefix
+            + _PROFILE_JUDGE_PROMPT.format(request=view)
+            + self._profile_judge.prompt_suffix
+        )
+        if self._profile_judge.prompt_prefix or self._profile_judge.prompt_suffix:
+            prompt = TemplatedPrompt(prompt)
         return GenerationRequest(
             request_id=f"profile-judge-{uuid.uuid4().hex[:12]}",
-            prompt=_PROFILE_JUDGE_PROMPT.format(request=view),
+            prompt=prompt,
             sampling_params=SamplingParams(
                 max_tokens=self._profile_judge.max_tokens,
                 temperature=0.0,

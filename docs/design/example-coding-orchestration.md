@@ -364,6 +364,11 @@ behavior instead of failing or delaying requests. The verdict is recorded
 in the result trace (`profile judge: …`) and `/routing` reports the judge
 configuration.
 
+The judge policy owns optional prompt prefix/suffix scaffolding; the example
+uses the same DeepSeek user/assistant boundary and pre-closed reasoning span as
+its non-thinking publisher because the shared vLLM service intentionally runs
+an identity chat template.
+
 ## Acceptance
 
 - CPU suite: head streaming, dedup, error contract, per-role sampling,

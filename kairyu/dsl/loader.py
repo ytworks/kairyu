@@ -177,6 +177,8 @@ def build_orchestrator(
             worker=spec.profile_judge.worker,
             timeout_seconds=spec.profile_judge.timeout_seconds,
             max_tokens=spec.profile_judge.max_tokens,
+            prompt_prefix=spec.profile_judge.prompt_prefix,
+            prompt_suffix=spec.profile_judge.prompt_suffix,
         )
         if spec.profile_judge is not None
         else None

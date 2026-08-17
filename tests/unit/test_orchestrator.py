@@ -1,8 +1,10 @@
 import asyncio
 import copy
+import json
 import threading
 from dataclasses import replace
 
+import httpx
 import pytest
 
 from kairyu.engine.backend import (
@@ -12,6 +14,7 @@ from kairyu.engine.backend import (
     UpstreamClientError,
 )
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.moa import MoAEvent, MoAResult
@@ -1466,7 +1469,14 @@ def test_requires_at_least_one_engine():
         Orchestrator(engines={})
 
 
-def _profiled_orchestrator(tier1, tier2, judge=None):
+def _profiled_orchestrator(
+    tier1,
+    tier2,
+    judge=None,
+    *,
+    judge_prompt_prefix="",
+    judge_prompt_suffix="",
+):
     # Issue #509: one served model, two ensemble DAGs. The coding profile is
     # a single synthesizer; the general profile fans out before its final.
     # An optional judge engine enables the LLM coding/general verdict.
@@ -1509,7 +1519,14 @@ def _profiled_orchestrator(tier1, tier2, judge=None):
         roles=coding_roles,
         general_roles=general_roles,
         profile_judge=(
-            ProfileJudge(worker="judge", timeout_seconds=0.05) if judge is not None else None
+            ProfileJudge(
+                worker="judge",
+                timeout_seconds=0.05,
+                prompt_prefix=judge_prompt_prefix,
+                prompt_suffix=judge_prompt_suffix,
+            )
+            if judge is not None
+            else None
         ),
     )
 
@@ -1588,6 +1605,92 @@ def test_profile_judge_admission_reserves_judge_and_worst_profile():
 
     assert combined.tokens > max(profile_bounds)
     assert not combined.refundable_on_exact_usage
+
+
+async def test_judge_applies_configured_worker_prompt_scaffold():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    orchestrator = _profiled_orchestrator(
+        tier1,
+        tier2,
+        judge,
+        judge_prompt_prefix="<bos><user>",
+        judge_prompt_suffix="<assistant></think>",
+    )
+
+    await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Explain Python decorators.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+
+    assert len(judge.prompts_seen) == 1
+    prompt = judge.prompts_seen[0]
+    assert isinstance(prompt, TemplatedPrompt)
+    assert prompt.startswith("<bos><user>")
+    assert prompt.endswith("<assistant></think>")
+    assert _JUDGE_PROMPT_MARKER in prompt
+
+
+async def test_judge_scaffold_dispatches_over_vllm_completions_wire():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "GENERAL",
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 32,
+                    "completion_tokens": 1,
+                    "total_tokens": 33,
+                },
+            },
+        )
+
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="judge",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+    )
+    orchestrator = _profiled_orchestrator(
+        tier1,
+        tier2,
+        judge,
+        judge_prompt_prefix="<bos><user>",
+        judge_prompt_suffix="<assistant></think>",
+    )
+
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Explain Python decorators.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    await judge.shutdown()
+
+    assert call.role_profile_judgment == "general"
+    assert captured["path"] == "/v1/completions"
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["prompt"].startswith("<bos><user>")
+    assert body["prompt"].endswith("<assistant></think>")
+    assert "messages" not in body
 
 
 async def test_judge_overrides_code_vocabulary_to_general():
