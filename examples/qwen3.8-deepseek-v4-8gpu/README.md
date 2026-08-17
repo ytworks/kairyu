@@ -65,8 +65,9 @@ deterministic keyword code-task signal decides instead, so a judge outage
 degrades to the pre-judge selector rather than failing requests.
 
 The chosen profile is observable: the result trace carries
-`role profile: coding|general`, `/routing` reports both role lists, and the
-launcher asserts both DAG shapes at readiness.
+`role profile: primary|general` (`primary` is the coding ensemble) plus
+`profile judge: <verdict>` when the judge ran, `/routing` reports both role
+lists, and the launcher asserts both DAG shapes at readiness.
 
 ### Coding profile (9 roles — unchanged specialization)
 
@@ -138,11 +139,13 @@ flowchart LR
     GS --> GC
 ```
 
-On agent turns (tools or a plain-text format demand) the head is disabled for
-the call (issue #495) in either profile: there is no committed opening, the
-publisher renders its `prompt_headless` body, and the whole answer comes from
-the verified continuation — measured at ~15 s per turn on this hardware
-against the previous 63.9 s median (issue #509).
+On agent turns (tools, a plain-text format demand, `response_format`, `n>1`,
+or `logprobs`) the head is disabled for the call (issue #495) in either
+profile: there is no committed opening, the publisher renders its
+`prompt_headless` body, and the whole answer comes from the verified
+continuation. These changes target the previous 63.9 s public-request p50
+(issue #509); the refreshed serving evidence comes from re-running the
+`verify.sh` gates below.
 
 Qwen fits one 96 GB card, so four independent TP1 replicas provide more
 aggregate memory bandwidth and lower queueing TTFT than spreading one dense
@@ -177,7 +180,7 @@ synthesizes a private draft from the committed opening, both candidates, and
 the execution matrix; the draft is re-executed and verified by the thinking
 DeepSeek verifier before the DeepSeek continuation streams the remainder
 after the committed opening. A failed
-verifier repeats synthesis, execution, and verification at most twice
+verifier repeats synthesis, execution, and verification at most once
 (`moa_samples: 0`, `max_refine_depth: 1`, `max_steps: 12`); L2 never calls the
 public L3 endpoint recursively.
 
@@ -228,9 +231,9 @@ Kairyu L3, and is explicitly limited to `kairyu-auto-max`. The public
 `/v1/models` endpoint additionally returns `embed-small`; the L1 pools are not
 public IDs or Chat UI choices. The launcher validates that exact public
 inventory, the explicit nine-role coding DAG (including the streamed head and
-the sandbox executor binding), the seven-role general ensemble profile, and
-two ordered finite 384-dimensional embedding vectors with positive usage
-before printing the URL.
+the sandbox executor binding), the seven-role general ensemble profile, the
+LLM profile judge bound to the direct-DeepSeek worker, and two ordered finite
+384-dimensional embedding vectors with positive usage before printing the URL.
 
 The embedding model is the truthfully named
 `sentence-transformers/all-MiniLM-L6-v2` FastEmbed deployment, not an alias for
@@ -268,16 +271,19 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./verify.sh serving-auto-max-coding
 ```
 
-`serving-auto-max` records the generic-workload product serving matrix and
-proves the executor skip path end-to-end. `serving-auto-max-coding` runs a
+`serving-auto-max` records the generic-workload product serving matrix (a
+generic turn routes through the general ensemble profile, which has no
+sandbox stages). `serving-auto-max-coding` runs a
 deterministic self-contained Python-task dataset at c1/8/16/32, requires real
 (non-skipped) sandbox execution in at least 90% of each row's traces,
 measures the paired DeepSeek-direct row on the same dataset through the
 loopback L1 endpoint, and
 **fails unless the product's semantic TTFT p50 stays within 2x the direct
-row** (pinned `example.json` denominators are the fallback ceiling). All
-historical performance rows in `MEASUREMENTS.md` predate the coding DAG and do
-not transfer without a fresh run. ChatUI continues to call only Kairyu L3. Raw
+row** (pinned `example.json` denominators are the fallback ceiling). The
+historical product serving rows in `MEASUREMENTS.md` predate the coding DAG
+and do not transfer without a fresh run; the Tier1 speculative-decoding
+selection rows are role-shaped L1 worker measurements taken against the
+deployed worker configuration. ChatUI continues to call only Kairyu L3. Raw
 artifacts go to the configured NVMe `verification-results/<UTC-run-id>/`
 directory. Model and product evaluations are invoked explicitly through
 `python -m evals`; coding accuracy versus frontier APIs is owned by the
