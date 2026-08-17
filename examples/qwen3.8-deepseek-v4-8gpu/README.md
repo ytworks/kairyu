@@ -40,7 +40,7 @@ Conductor DAGs: there is no route that hits a single L1 engine directly.**
 flowchart TD
     R["Chat request to kairyu-auto-max"] --> A{"Agent / format-constrained turn?<br/>tools declared, tools in prompt,<br/>or a plain-text format demand such as<br/>&quot;format your response as JSON&quot;"}
     A -- "yes" --> G["GENERAL profile<br/>7-role ensemble, reply-format-faithful"]
-    A -- "no" --> B{"Latest user turn asks for code?<br/>code fence, or code vocabulary:<br/>python / function / implement /<br/>コード / 実装 / 関数 ..."}
+    A -- "no" --> B{"Latest user turn asks for code?<br/>code fence, or authoring cue + code artifact/language:<br/>write + Rust CLI / implement + Python function /<br/>実装 + 関数 ..."}
     B -- "yes" --> C["CODING profile<br/>9-role ensemble with sandbox execution"]
     B -- "no" --> G
 ```
@@ -51,8 +51,9 @@ Concrete examples:
 |---|---|---|
 | Terminus-2 agent turn: "…Format your response as JSON… run these shell commands" | general | plain-text structured-format demand |
 | Codex CLI / IDE turn with declared `tools` | general | tools present |
-| "Write a python function that reverses a list." | coding | code vocabulary in the latest user turn |
-| "リストを逆順にする関数を実装して" | coding | code vocabulary (Japanese) |
+| "Write a Rust CLI." | coding | authoring cue plus a language/code artifact |
+| "リストを逆順にする関数を実装して" | coding | authoring cue plus a code artifact (Japanese) |
+| "What does a program manager do?" | general | incidental `program` vocabulary without code-authoring intent |
 | "What should I cook tonight with rice and eggs?" | general | no agent envelope, no code signal |
 
 The chosen profile is observable: the result trace carries

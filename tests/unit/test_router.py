@@ -6,7 +6,7 @@ import time
 import pytest
 
 import kairyu.orchestration.router as router_module
-from kairyu.orchestration.features import extract_features
+from kairyu.orchestration.features import code_task_signal, extract_features
 from kairyu.orchestration.router import (
     JsonlRouterLog,
     RuleRouter,
@@ -34,6 +34,33 @@ def test_extract_features_is_pure_and_counts_signals():
     assert features.question_count == 1
     again = extract_features(CODE_QUERY)
     assert again == features
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "Write a Rust CLI.",
+        "Implement a Python function that reverses a list.",
+        "Fix this bug in TypeScript.",
+        "リストを逆順にする関数を実装して",
+        "Explain this snippet:\n```python\nprint('ok')\n```",
+    ],
+)
+def test_code_task_signal_accepts_explicit_authoring_intent(query):
+    assert code_task_signal(query) is True
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "What does a program manager do?",
+        "Compare functional organizations with matrix organizations.",
+        "Explain how Python became popular.",
+        "Write a program management update.",
+    ],
+)
+def test_code_task_signal_rejects_incidental_vocabulary(query):
+    assert code_task_signal(query) is False
 
 
 def test_simple_query_routes_to_tier1():

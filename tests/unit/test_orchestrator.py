@@ -1552,6 +1552,21 @@ async def test_structured_format_turn_runs_general_profile():
     assert not any("[c_final" in prompt for prompt in prompts)
 
 
+async def test_incidental_code_substrings_run_general_profile():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    orchestrator = _profiled_orchestrator(tier1, tier2)
+    call = OrchestrationRequest(
+        prompt="Compare program managers with functional organizations.",
+        sampling_params=SamplingParams(max_tokens=64),
+    )
+    result = await orchestrator.run(call)
+    assert "role profile: general" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)
+
+
 async def test_code_task_turn_keeps_primary_profile():
     tier1 = MockBackend()
     tier2 = MockBackend()

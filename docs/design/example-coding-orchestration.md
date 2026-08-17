@@ -325,8 +325,9 @@ deterministic rule computed identically at preview/preflight and execution
 time (a pure function of the call, so the prepared-request contract cannot
 diverge): tools, tools-in-prompt, or a plain-text structured-format demand
 (the EO-D7 head-disable signals) select the general profile; otherwise a
-code-task signal in the latest user turn (code fence or code vocabulary,
-scanned on the caller's words, not the L2 envelope) keeps the coding
+code-task signal in the latest user turn (a code fence, or a bounded
+authoring cue plus a code artifact/language; scanned on the caller's words,
+not the L2 envelope) keeps the coding
 profile; otherwise general. Constraints, per the product's purpose: the
 coding profile is unchanged; both profiles are full Conductor ensembles
 under the same TTFT gate; there is no single-engine route in auto-max, and

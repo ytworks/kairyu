@@ -62,26 +62,27 @@ def extract_features(query: str) -> QueryFeatures:
 # Role-profile selection (issue #509) is a separate helper rather than a new
 # QueryFeatures field: the dataclass doubles as the M4 training corpus schema
 # and must not drift when serving-side signals are added.
-_CODE_TASK_KEYWORDS = (
-    "code",
-    "coding",
-    "program",
-    "python",
-    "function",
-    "script",
-    "implement",
-    "algorithm",
-    "compile",
-    "debug",
-    "refactor",
-    "unit test",
-    "コード",
-    "プログラム",
-    "実装",
-    "関数",
-    "スクリプト",
-    "アルゴリズム",
-    "デバッグ",
+_CODE_AUTHORING_CUE = re.compile(
+    r"\b(?:write|writes|writing|build|builds|building|create|creates|creating|"
+    r"implement|implements|implementing|code|coding|develop|developing|fix|fixing|"
+    r"debug|debugging|refactor|refactoring|compile|compiling|test|testing)\b",
+    re.IGNORECASE,
+)
+_CODE_ARTIFACT_OR_LANGUAGE = re.compile(
+    r"(?:\b(?:code|program(?!\s+(?:manager|management|office|update|status|plan))|"
+    r"software|app(?:lication)?|function|method|class|script|algorithm|unit tests?|"
+    r"tests?|bug|cli|api|module|package|library|compiler|parser|endpoint|python|"
+    r"rust|golang|java|javascript|typescript|ruby|php|swift|kotlin|scala|sql|bash|"
+    r"shell|html|css|react|vue)\b|(?<!\w)c\+\+(?!\w)|(?<!\w)c#(?!\w))",
+    re.IGNORECASE,
+)
+_JAPANESE_CODE_AUTHORING_CUE = re.compile(
+    r"(?:書いて|書く|作って|作成|実装|開発|修正|直して|デバッグ|"
+    r"リファクタ|コンパイル|テスト)"
+)
+_JAPANESE_CODE_ARTIFACT = re.compile(
+    r"(?:コード|プログラム|ソフトウェア|アプリ|関数|メソッド|クラス|"
+    r"スクリプト|アルゴリズム|単体テスト|バグ|モジュール|ライブラリ)"
 )
 
 # Mirrors the L2 conversation rendering in
@@ -110,5 +111,10 @@ def code_task_signal(query: str) -> bool:
 
     if _CODE_FENCE in query:
         return True
-    lowered = query.lower()
-    return any(keyword in lowered for keyword in _CODE_TASK_KEYWORDS)
+    english = _CODE_AUTHORING_CUE.search(query) and _CODE_ARTIFACT_OR_LANGUAGE.search(
+        query
+    )
+    japanese = _JAPANESE_CODE_AUTHORING_CUE.search(
+        query
+    ) and _JAPANESE_CODE_ARTIFACT.search(query)
+    return bool(english or japanese)
