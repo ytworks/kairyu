@@ -55,6 +55,52 @@ roles:
     assert "secret prompt" not in serialized
 
 
+async def test_routing_config_reports_profile_judge(monkeypatch):
+    # Issue #509 amendment: the launcher validates the served judge over
+    # /routing, so the HTTP payload must carry the judge configuration.
+    monkeypatch.setattr("kairyu.dsl.loader._build_worker", lambda worker: MockBackend())
+    spec = load_spec(
+        """
+workers:
+  - name: tier1
+    backend: mock
+  - name: tier2
+    backend: mock
+roles:
+  - name: draft
+    worker: tier1
+    role_type: synthesizer
+    prompt: "code draft: {query}"
+general_roles:
+  - name: g_final
+    worker: tier2
+    role_type: synthesizer
+    prompt: "general final: {query}"
+profile_judge:
+  worker: tier2
+  prompt_prefix: "<u>"
+  prompt_suffix: "<a>"
+"""
+    )
+    app = create_app(
+        engines={},
+        orchestrators={"auto": build_orchestrator(spec)},
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/routing")
+
+    descriptor = response.json()["models"]["auto"]
+    assert descriptor["profile_judge"] == {
+        "worker": "tier2",
+        "timeout_seconds": 5.0,
+        "max_tokens": 8,
+        "prompt_prefix": "<u>",
+        "prompt_suffix": "<a>",
+    }
+
+
 async def test_routing_config_is_explicitly_empty_without_orchestrators():
     app = create_app(engines={})
     async with httpx.AsyncClient(

@@ -282,6 +282,23 @@ roles:
 # Terminal-Bench window showed the coding contracts idling on such turns:
 # testgen NOT_APPLICABLE 311/311, drafts bound to a `solution` module the
 # task never asked for, and reply-format drift on JSON-envelope turns.
+#
+# The coding/general split is judged by the direct (non-thinking) DeepSeek
+# worker with a bounded verdict-only call (issue #509 amendment): keyword
+# heuristics misroute incidental code vocabulary ("test", "program", "bug")
+# into the sandbox coding DAG and miss unlisted languages. Tools /
+# response_format / plain-text format demands stay deterministic and are
+# never judged; on judge timeout or an unparseable verdict the deterministic
+# code-task signal applies.
+profile_judge:
+  worker: tier2-direct
+  timeout_seconds: 5.0
+  max_tokens: 8
+  # The shared vLLM endpoint uses an identity chat template. Close the
+  # reasoning span in the prompt so its parser exposes the verdict as content.
+  prompt_prefix: "<｜begin▁of▁sentence｜><｜User｜>"
+  prompt_suffix: "<｜Assistant｜></think>"
+
 general_roles:
   - name: head_general
     worker: tier1

@@ -179,6 +179,24 @@ class RouterSpec(BaseModel):
         return self
 
 
+class ProfileJudgeSpec(BaseModel):
+    """LLM judgment for the coding/general profile split (issue #509).
+
+    A bounded verdict-only call on a configured generation worker decides
+    whether a turn asks for code authoring. Head-disable signals stay
+    deterministic and are never judged; on judge timeout or an unparseable
+    verdict the deterministic code-task signal applies.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    worker: str
+    timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
+    max_tokens: int = Field(default=8, ge=1, le=64)
+    prompt_prefix: str = ""
+    prompt_suffix: str = ""
+
+
 class OrchestratorSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -189,6 +207,9 @@ class OrchestratorSpec(BaseModel):
     # under the same model name; the orchestrator selects per request and no
     # profile ever routes to a single engine directly.
     general_roles: tuple[RoleNodeSpec, ...] = ()
+    # Optional LLM verdict for the coding/general split (issue #509
+    # amendment). Without it the deterministic code-task signal decides.
+    profile_judge: ProfileJudgeSpec | None = None
     budget: BudgetSpec = BudgetSpec()
     router: RouterSpec = RouterSpec()
     shared_prefix: str = ""
@@ -219,6 +240,16 @@ class OrchestratorSpec(BaseModel):
                 "general_roles cannot be combined with moa_samples > 0; "
                 "choose role DAG profiles or MoA mode"
             )
+        if self.profile_judge is not None:
+            if not self.general_roles:
+                raise ValueError("profile_judge requires general_roles")
+            if self.profile_judge.worker not in known:
+                raise ValueError(
+                    f"profile_judge references unknown worker "
+                    f"{self.profile_judge.worker!r}"
+                )
+            if self.profile_judge.worker in executor_workers:
+                raise ValueError("profile_judge worker must be a generation worker")
         for profile, roles in (("roles", self.roles), ("general_roles", self.general_roles)):
             for role in roles:
                 if role.worker not in known:

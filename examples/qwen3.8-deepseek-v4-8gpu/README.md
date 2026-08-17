@@ -31,30 +31,38 @@ opening. The same TTFT gate applies to both profiles.
 
 ## Which requests take which DAG (automatic profile selection)
 
-One served model, two full ensembles (ECO-D6, issue #509). The profile is
-chosen per request by a deterministic rule — a pure function of the call, so
-preflight and execution always agree — and **both outcomes are complete
-Conductor DAGs: there is no route that hits a single L1 engine directly.**
+One served model, two full ensembles (ECO-D6, issue #509). Agent and
+format-constrained signals stay deterministic; the code-authoring question
+is answered by an LLM profile judge whose verdict is attached to the call
+once, before preflight and admission, so selection remains a pure function
+of the call and preflight and execution always agree. **Both outcomes are
+complete Conductor DAGs: there is no route that hits a single L1 engine
+directly.**
 
 ```mermaid
 flowchart TD
     R["Chat request to kairyu-auto-max"] --> A{"Agent / format-constrained turn?<br/>tools declared, tools in prompt, API response_format,<br/>or a plain-text format demand such as<br/>&quot;format your response as JSON&quot;"}
     A -- "yes" --> G["GENERAL profile<br/>7-role ensemble, reply-format-faithful"]
-    A -- "no" --> B{"Latest user turn asks for code?<br/>code fence, or code vocabulary:<br/>python / function / implement /<br/>コード / 実装 / 関数 ..."}
-    B -- "yes" --> C["CODING profile<br/>9-role ensemble with sandbox execution"]
-    B -- "no" --> G
+    A -- "no" --> B{"Latest user turn asks for code authoring?<br/>LLM profile judge: bounded CODE / GENERAL verdict<br/>by the direct DeepSeek worker (5 s timeout);<br/>keyword code-task signal only as fallback"}
+    B -- "CODE" --> C["CODING profile<br/>9-role ensemble with sandbox execution"]
+    B -- "GENERAL" --> G
 ```
 
 Concrete examples:
 
 | Request | Profile | Why |
 |---|---|---|
-| Terminus-2 agent turn: "…Format your response as JSON… run these shell commands" | general | plain-text structured-format demand |
+| Terminus-2 agent turn: "…Format your response as JSON… run these shell commands" | general | plain-text structured-format demand (never judged) |
 | Code request with API `response_format={"type":"json_object"}` | general | API-enforced reply format takes precedence over coding specialization |
-| Codex CLI / IDE turn with declared `tools` | general | tools present |
-| "Write a python function that reverses a list." | coding | code vocabulary in the latest user turn |
-| "リストを逆順にする関数を実装して" | coding | code vocabulary (Japanese) |
-| "What should I cook tonight with rice and eggs?" | general | no agent envelope, no code signal |
+| Codex CLI / IDE turn with declared `tools` | general | tools present (never judged) |
+| "Write a python function that reverses a list." | coding | judge verdict CODE |
+| "リストを逆順にする関数を実装して" | coding | judge verdict CODE (Japanese) |
+| "What does a program manager do?" | general | judge verdict GENERAL despite incidental `program` vocabulary |
+| "What should I cook tonight with rice and eggs?" | general | judge verdict GENERAL |
+
+The judge is availability-neutral: on timeout or an unparseable verdict the
+deterministic keyword code-task signal decides instead, so a judge outage
+degrades to the pre-judge selector rather than failing requests.
 
 The chosen profile is observable: the result trace carries
 `role profile: coding|general`, `/routing` reports both role lists, and the

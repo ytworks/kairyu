@@ -186,6 +186,63 @@ class EngineDescriptor:
 
 
 @dataclass(frozen=True)
+class ProfileJudge:
+    """LLM judgment policy for the coding/general profile split (issue #509).
+
+    The judged question is only "does this turn ask for code authoring";
+    the head-disable signals (tools, response_format, plain-text format
+    demands) stay deterministic and never reach the judge.
+    """
+
+    worker: str
+    timeout_seconds: float = 5.0
+    max_tokens: int = 8
+    prompt_prefix: str = ""
+    prompt_suffix: str = ""
+
+
+# Verdict-only classification for a non-thinking direct engine. The judge can
+# only pick between the two full Conductor ensembles; it never routes to a
+# single engine.
+_PROFILE_JUDGE_PROMPT = (
+    "You route requests inside an inference product. Decide whether the "
+    "user's request asks you to author or modify computer code (write, "
+    "implement, fix, debug, refactor, or test a program). Mentioning "
+    "code-adjacent vocabulary without asking for code authoring does not "
+    "count. Reply with exactly one word: CODE or GENERAL.\n\n"
+    "USER REQUEST:\n{request}\n\nAnswer:"
+)
+# Bound the judged view so a long agent conversation cannot inflate the
+# judge's prefill beyond a fixed latency envelope.
+_PROFILE_JUDGE_VIEW_CHARS = 4000
+_PROFILE_JUDGE_TRUNCATION_MARKER = "\n\n[... middle of request omitted ...]\n\n"
+
+
+def _bounded_profile_judge_view(prompt: str) -> str:
+    view = latest_user_view(prompt)
+    if len(view) <= _PROFILE_JUDGE_VIEW_CHARS:
+        return view
+
+    available_chars = _PROFILE_JUDGE_VIEW_CHARS - len(_PROFILE_JUDGE_TRUNCATION_MARKER)
+    head_chars = (available_chars + 1) // 2
+    tail_chars = available_chars - head_chars
+    return (
+        view[:head_chars]
+        + _PROFILE_JUDGE_TRUNCATION_MARKER
+        + view[-tail_chars:]
+    )
+
+
+def _parse_profile_verdict(text: str) -> str | None:
+    verdict = text.strip().casefold()
+    if verdict == "code":
+        return "code"
+    if verdict == "general":
+        return "general"
+    return None
+
+
+@dataclass(frozen=True)
 class _IntentRequest:
     engine_key: str
     request: GenerationRequest
@@ -255,6 +312,7 @@ class Orchestrator:
         expose_intermediate_outputs: bool = False,
         execution_workers: Mapping[str, ExecutionBackend] | None = None,
         executor_descriptors: Mapping[str, ExecutorDescriptor] | None = None,
+        profile_judge: ProfileJudge | None = None,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
@@ -269,9 +327,10 @@ class Orchestrator:
             )
         self._engines = dict(engines)
         self._owned_engines = tuple(
-            {id(engine): engine for engine in (
-                self._engines.values() if owned_engines is None else owned_engines
-            )}.values()
+            {
+                id(engine): engine
+                for engine in (self._engines.values() if owned_engines is None else owned_engines)
+            }.values()
         )
         self._owner_token = object()
         supplied_descriptors = dict(engine_descriptors or {})
@@ -289,6 +348,17 @@ class Orchestrator:
         # calls outside the primary DAG's task specialization. Never a direct
         # single-engine route — both profiles run the full Conductor.
         self._general_roles = general_roles
+        # Optional LLM verdict for the coding/general split (issue #509
+        # amendment). Judgment is attached to the call at the serving
+        # boundary; profile selection itself stays a pure function.
+        self._profile_judge = profile_judge
+        if profile_judge is not None:
+            if general_roles is None:
+                raise ValueError("profile_judge requires general_roles")
+            if profile_judge.worker not in self._engines:
+                raise ValueError(
+                    f"profile_judge references unknown worker {profile_judge.worker!r}"
+                )
         self._budget = budget or Budget()
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
@@ -429,8 +499,26 @@ class Orchestrator:
                 "profile_selector": (
                     "general on tools/tools_in_prompt/response_format/"
                     "structured_format_in_prompt "
-                    "or when the latest user turn carries no code-task signal; "
-                    "both profiles are Conductor ensembles (issue #509)"
+                    + (
+                        "or per the attached LLM profile-judge verdict "
+                        "(deterministic code-task signal as fallback); "
+                        if self._profile_judge is not None
+                        else "or when the latest user turn carries no code-task signal; "
+                    )
+                    + "both profiles are Conductor ensembles (issue #509)"
+                ),
+                **(
+                    {
+                        "profile_judge": {
+                            "worker": self._profile_judge.worker,
+                            "timeout_seconds": self._profile_judge.timeout_seconds,
+                            "max_tokens": self._profile_judge.max_tokens,
+                            "prompt_prefix": self._profile_judge.prompt_prefix,
+                            "prompt_suffix": self._profile_judge.prompt_suffix,
+                        }
+                    }
+                    if self._profile_judge is not None
+                    else {}
                 ),
             }
             if self._general_roles is not None
@@ -529,6 +617,8 @@ class Orchestrator:
             or call.structured_format_in_prompt
         ):
             return "general"
+        if call.role_profile_judgment is not None:
+            return "primary" if call.role_profile_judgment == "code" else "general"
         prompt = call.prompt
         if isinstance(prompt, str) and code_task_signal(latest_user_view(prompt)):
             return "primary"
@@ -539,6 +629,153 @@ class Orchestrator:
             assert self._general_roles is not None
             return self._general_roles
         return self._roles
+
+    def will_judge_role_profile(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> bool:
+        """Whether this call would dispatch the optional profile judge."""
+
+        call = self._request(request)
+        return not (
+            self._profile_judge is None
+            or self._general_roles is None
+            or self._moa_samples > 0
+            or call.role_profile_judgment is not None
+            or call.role_profile_judge_event is not None
+            or not isinstance(call.prompt, str)
+            or call.tools
+            or call.tools_in_prompt
+            or call.response_format is not None
+            or call.structured_format_in_prompt
+        )
+
+    def _profile_judge_request(self, call: OrchestrationRequest) -> GenerationRequest:
+        assert self._profile_judge is not None
+        view = _bounded_profile_judge_view(call.prompt)
+        prompt = (
+            self._profile_judge.prompt_prefix
+            + _PROFILE_JUDGE_PROMPT.format(request=view)
+            + self._profile_judge.prompt_suffix
+        )
+        if self._profile_judge.prompt_prefix or self._profile_judge.prompt_suffix:
+            prompt = TemplatedPrompt(prompt)
+        return GenerationRequest(
+            request_id=f"profile-judge-{uuid.uuid4().hex[:12]}",
+            prompt=prompt,
+            sampling_params=SamplingParams(
+                max_tokens=self._profile_judge.max_tokens,
+                temperature=0.0,
+            ),
+        )
+
+    @staticmethod
+    def _profile_judge_usage(call: OrchestrationRequest) -> GenerationUsage:
+        event = call.role_profile_judge_event
+        usage = event.usage if event is not None else None
+        return GenerationUsage(
+            prompt_tokens=usage.prompt_tokens if usage is not None else 0,
+            completion_tokens=usage.completion_tokens if usage is not None else 0,
+            cached_tokens=usage.cached_tokens if usage is not None else 0,
+        )
+
+    @classmethod
+    def _usage_with_profile_judge(
+        cls,
+        call: OrchestrationRequest,
+        usage: GenerationUsage,
+    ) -> GenerationUsage:
+        judge = cls._profile_judge_usage(call)
+        return GenerationUsage(
+            prompt_tokens=judge.prompt_tokens + usage.prompt_tokens,
+            completion_tokens=judge.completion_tokens + usage.completion_tokens,
+            cached_tokens=judge.cached_tokens + usage.cached_tokens,
+        )
+
+    async def judge_role_profile(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> OrchestrationRequest:
+        """Attach one accounted coding/general verdict before preflight."""
+
+        call = self._request(request)
+        if not self.will_judge_role_profile(call):
+            return call
+        judge_request = self._profile_judge_request(call)
+        queued_at = utc_now_iso()
+        assert self._profile_judge is not None
+        engine = self._engines[self._profile_judge.worker]
+        descriptor = self._engine_descriptors[self._profile_judge.worker]
+        started_at = utc_now_iso()
+        try:
+            result = await asyncio.wait_for(
+                engine.generate(judge_request),
+                timeout=self._profile_judge.timeout_seconds,
+            )
+        except Exception as error:
+            event = TraceEvent(
+                node="profile_judge",
+                kind="fallback",
+                detail="backend failure; deterministic signal applies",
+                operation="classification",
+                status="failed",
+                role="profile_judge",
+                worker=self._profile_judge.worker,
+                engine=self._profile_judge.worker,
+                model=descriptor.model,
+                timing=TraceTiming(
+                    queued_at=queued_at,
+                    started_at=started_at,
+                    completed_at=utc_now_iso(),
+                ),
+                metadata={"fallback": "backend_error"},
+                error=TraceError(type=type(error).__name__),
+            )
+            if self._stage_observer is not None:
+                self._stage_observer(event)
+            return replace(call, role_profile_judge_event=event)
+        verdict = _parse_profile_verdict(result.text)
+        trace_usage = (
+            TraceUsage(
+                prompt_tokens=result.usage.prompt_tokens,
+                completion_tokens=result.usage.completion_tokens,
+                cached_tokens=result.usage.cached_tokens,
+            )
+            if result.usage is not None
+            else None
+        )
+        event = TraceEvent(
+            node="profile_judge",
+            kind="judged" if verdict is not None else "fallback",
+            detail=(
+                f"profile: {verdict}"
+                if verdict is not None
+                else "unparseable verdict; deterministic signal applies"
+            ),
+            operation="classification",
+            status="success" if verdict is not None else "failed",
+            role="profile_judge",
+            worker=self._profile_judge.worker,
+            engine=self._profile_judge.worker,
+            model=descriptor.model,
+            timing=TraceTiming(
+                queued_at=queued_at,
+                started_at=started_at,
+                completed_at=utc_now_iso(),
+            ),
+            usage=trace_usage,
+            metadata={
+                "verdict": verdict,
+                "fallback": None if verdict is not None else "unparseable_verdict",
+            },
+        )
+        if self._stage_observer is not None:
+            self._stage_observer(event)
+        return replace(
+            call,
+            role_profile_judgment=verdict,
+            role_profile_judge_event=event,
+        )
 
     def _conductor_final_role(self, roles: tuple[RoleSpec, ...]) -> RoleSpec:
         units = [role for role in roles if role.role_type != "verifier"]
@@ -565,9 +802,7 @@ class Orchestrator:
         if decision is None:
             keys = {"tier1", "tier2", self._conductor_final_role(roles).worker}
         elif decision.target == "multi_agent":
-            keys = {
-                "tier2" if self._moa_samples > 0 else self._conductor_final_role(roles).worker
-            }
+            keys = {"tier2" if self._moa_samples > 0 else self._conductor_final_role(roles).worker}
         else:
             keys = {decision.target}
         fallback = next(iter(self._engines))
@@ -603,15 +838,12 @@ class Orchestrator:
         decision: RouteDecision | None,
     ) -> None:
         if call.multimodal_prompt is not None:
-            if self._moa_samples > 0 and (
-                decision is None or decision.target == "multi_agent"
-            ):
+            if self._moa_samples > 0 and (decision is None or decision.target == "multi_agent"):
                 raise ValueError("multimodal orchestration does not support MoA sampling")
             if decision is not None and decision.target != "multi_agent":
                 keys = self._final_engine_keys(call, decision)
                 if not all(
-                    backend_supports_prompt_kind(self._engines[key], "multimodal")
-                    for key in keys
+                    backend_supports_prompt_kind(self._engines[key], "multimodal") for key in keys
                 ):
                     raise ValueError(
                         f"orchestration route {decision.target!r} does not support image inputs"
@@ -646,8 +878,7 @@ class Orchestrator:
                 for key in media_keys
             ):
                 raise ValueError(
-                    "image-capable orchestration workers do not all support "
-                    "chat_template_kwargs"
+                    "image-capable orchestration workers do not all support chat_template_kwargs"
                 )
         if call.sampling_params.n <= 1:
             return
@@ -657,8 +888,7 @@ class Orchestrator:
             (decision is None or decision.target == "multi_agent")
             and self._moa_samples == 0
             and any(
-                role.role_type == "verifier" and role.verifies == final_role.name
-                for role in roles
+                role.role_type == "verifier" and role.verifies == final_role.name for role in roles
             )
         ):
             raise ValueError(
@@ -736,9 +966,7 @@ class Orchestrator:
             tool_call_protocol=call.tool_call_protocol,
             reasoning_effort=call.reasoning_effort,
             chat_template_kwargs=(
-                call.chat_template_kwargs
-                if isinstance(prompt, MultimodalPrompt)
-                else None
+                call.chat_template_kwargs if isinstance(prompt, MultimodalPrompt) else None
             ),
         )
 
@@ -1194,9 +1422,7 @@ class Orchestrator:
         is no truthful global limit to publish.
         """
 
-        lengths = [
-            backend_max_model_len(engine) for engine in self._engines.values()
-        ]
+        lengths = [backend_max_model_len(engine) for engine in self._engines.values()]
         if not lengths or any(length is None for length in lengths):
             return None
         return min(length for length in lengths if length is not None)
@@ -1214,6 +1440,20 @@ class Orchestrator:
         """
 
         call = self._request(request)
+        if self.will_judge_role_profile(call):
+            assert self._profile_judge is not None
+            judge_bound = backend_admission_upper_bound(
+                self._engines[self._profile_judge.worker],
+                self._profile_judge_request(call),
+            )
+            profile_bounds = (
+                self.admission_upper_bound(replace(call, role_profile_judgment=profile))
+                for profile in ("code", "general")
+            )
+            return AdmissionUpperBound(
+                tokens=judge_bound.tokens + max(bound.tokens for bound in profile_bounds),
+                refundable_on_exact_usage=False,
+            )
         internal = self._internal_sampling_params(call)
         if internal.max_tokens is None:
             raise ValueError("AUTO tenant admission requires a finite internal limit")
@@ -1222,10 +1462,7 @@ class Orchestrator:
         # or the documented constant — instead of rejecting the request.
         public_output_fallback = (
             max(
-                (
-                    getattr(engine, "max_model_len", None) or 0
-                    for engine in self._engines.values()
-                ),
+                (getattr(engine, "max_model_len", None) or 0 for engine in self._engines.values()),
                 default=0,
             )
             or UNLIMITED_OUTPUT_ADMISSION_TOKENS
@@ -1502,7 +1739,13 @@ class Orchestrator:
         call = self._call_with_prepared_handle(request, prepared)
         query = call.prompt
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
-        trace_started_at = utc_now_iso()
+        judge_event = call.role_profile_judge_event
+        judge_usage = self._profile_judge_usage(call)
+        trace_started_at = (
+            judge_event.timing.started_at
+            if judge_event is not None and judge_event.timing is not None
+            else utc_now_iso()
+        )
         route_started_at = utc_now_iso()
         from kairyu.telemetry import traced_span
 
@@ -1521,7 +1764,9 @@ class Orchestrator:
         notes: list[str] = [f"route: {decision.target} ({decision.reason})"]
         if self._general_roles is not None and decision.target == "multi_agent":
             notes.append(f"role profile: {self._role_profile(call)}")
-        trace_events = [
+            if call.role_profile_judgment is not None:
+                notes.append(f"profile judge: {call.role_profile_judgment}")
+        trace_events = ([judge_event] if judge_event is not None else []) + [
             self._route_trace_event(
                 decision,
                 started_at=route_started_at,
@@ -1545,9 +1790,9 @@ class Orchestrator:
                 route=decision,
                 trace=tuple(notes),
                 completions=completions,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cached_tokens=cached_tokens,
+                prompt_tokens=judge_usage.prompt_tokens + prompt_tokens,
+                completion_tokens=judge_usage.completion_tokens + completion_tokens,
+                cached_tokens=judge_usage.cached_tokens + cached_tokens,
                 reasoning_content=reasoning_content,
                 public_prompt_tokens=public_prompt_tokens,
                 public_completion_tokens=public_completion_tokens,
@@ -1994,7 +2239,22 @@ class Orchestrator:
     ):
         prompt = call.prompt
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
-        trace_started_at = utc_now_iso()
+        judge_event = call.role_profile_judge_event
+        judge_usage = self._profile_judge_usage(call)
+        trace_started_at = (
+            judge_event.timing.started_at
+            if judge_event is not None and judge_event.timing is not None
+            else utc_now_iso()
+        )
+        external_usage_observer = usage_observer
+        if external_usage_observer is not None:
+            if judge_usage.prompt_tokens or judge_usage.completion_tokens:
+                external_usage_observer(judge_usage)
+
+            def observe_with_profile_judge(usage: GenerationUsage) -> None:
+                external_usage_observer(self._usage_with_profile_judge(call, usage))
+
+            usage_observer = observe_with_profile_judge
         route_started_at = utc_now_iso()
         from kairyu.telemetry import traced_span
 
@@ -2013,7 +2273,9 @@ class Orchestrator:
         notes = [f"route: {decision.target} ({decision.reason})"]
         if self._general_roles is not None and decision.target == "multi_agent":
             notes.append(f"role profile: {self._role_profile(call)}")
-        trace_events = [
+            if call.role_profile_judgment is not None:
+                notes.append(f"profile judge: {call.role_profile_judgment}")
+        trace_events = ([judge_event] if judge_event is not None else []) + [
             self._route_trace_event(
                 decision,
                 started_at=route_started_at,
@@ -2037,9 +2299,9 @@ class Orchestrator:
                 route=decision,
                 trace=tuple(notes),
                 completions=completions,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                cached_tokens=cached_tokens,
+                prompt_tokens=judge_usage.prompt_tokens + prompt_tokens,
+                completion_tokens=judge_usage.completion_tokens + completion_tokens,
+                cached_tokens=judge_usage.cached_tokens + cached_tokens,
                 reasoning_content=reasoning_content,
                 public_prompt_tokens=public_prompt_tokens,
                 public_completion_tokens=public_completion_tokens,
@@ -2084,9 +2346,7 @@ class Orchestrator:
                             usage_observer(latest_usage)
                     completion = partial.completions[0] if partial.completions else None
                     delta, emitted = (
-                        completion.delta_after(emitted)
-                        if completion is not None
-                        else ("", emitted)
+                        completion.delta_after(emitted) if completion is not None else ("", emitted)
                     )
                     text_parts.append(delta)
                     if first_token_at is None and partial.completions:
@@ -2164,9 +2424,7 @@ class Orchestrator:
                                 failover_usage = partial.usage
                                 if usage_observer is not None:
                                     usage_observer(failover_usage)
-                            completion = (
-                                partial.completions[0] if partial.completions else None
-                            )
+                            completion = partial.completions[0] if partial.completions else None
                             delta, failover_emitted = (
                                 completion.delta_after(failover_emitted)
                                 if completion is not None
@@ -2259,10 +2517,7 @@ class Orchestrator:
                     yield OrchestratorEvent(
                         kind="result",
                         result=result_with_trace(
-                            text=(
-                                failover_last.text
-                                or "".join(failover_text_parts)
-                            ),
+                            text=(failover_last.text or "".join(failover_text_parts)),
                             completions=failover_last.completions,
                             prompt_tokens=usage.prompt_tokens,
                             completion_tokens=usage.completion_tokens,
@@ -2326,11 +2581,7 @@ class Orchestrator:
             yield OrchestratorEvent(
                 kind="result",
                 result=result_with_trace(
-                    text=(
-                        (last.text or "".join(text_parts))
-                        if last is not None
-                        else ""
-                    ),
+                    text=((last.text or "".join(text_parts)) if last is not None else ""),
                     completions=last.completions if last is not None else (),
                     prompt_tokens=usage[0],
                     completion_tokens=usage[1],
@@ -2429,9 +2680,7 @@ class Orchestrator:
                         yield OrchestratorEvent(
                             kind="delta",
                             text=event.text,
-                            completions=_public_multistage_completions(
-                                event.completions
-                            ),
+                            completions=_public_multistage_completions(event.completions),
                         )
                     else:
                         moa_result = event.result
@@ -2669,9 +2918,7 @@ class Orchestrator:
                     yield OrchestratorEvent(
                         kind="delta",
                         text=event.text,
-                        completions=_public_multistage_completions(
-                            event.completions
-                        ),
+                        completions=_public_multistage_completions(event.completions),
                     )
                 else:
                     conductor_result = event.result

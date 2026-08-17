@@ -115,6 +115,7 @@
       "continuation_general"
     ],
     "stream_head": "head",
+    "profile_judge_worker": "tier2-direct",
     "executor_worker": "sandbox",
     "max_steps": 12,
     "product_normal_calls": 9,

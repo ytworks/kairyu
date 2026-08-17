@@ -98,6 +98,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-17 — [amendment] Profile judge work obeys tenant accounting
+- What: profile-judge GPU work is reserved before dispatch, included in
+  cumulative orchestration usage and metering, and emitted as a structured
+  trace event; the reservation covers the judge plus the larger profile DAG.
+- Why: PR #516 review found that the pre-admission judge call bypassed tenant
+  token quotas and discarded backend-reported usage.
+- Refs: PR #516 review; `kairyu/orchestration/`;
+  `kairyu/entrypoints/server/app.py`
+
 ### 2026-08-17 — [amendment] Tiered Qwen MTP remains candidate-only
 - What: removed MTP-3 from the selected four-replica Qwen deployment while
   retaining its c1/c4/c8 measurements as candidate evidence; compose, metadata,
@@ -120,6 +129,19 @@ in `.claude/rules/progress-log.md`).
   p50 63.9 s/request; coding contracts idled on agent JSON turns.
 - Refs: #509; ECO-D6 + ECO-D4 2026-08-17 amendment; `kairyu/orchestration/`;
   `examples/qwen3.8-deepseek-v4-8gpu/`; its MEASUREMENTS.md
+
+### 2026-08-17 — [amendment] LLM profile judge for the coding/general split
+- What: the code-authoring half of profile selection is judged by an optional
+  `profile_judge` worker (example: direct DeepSeek, greedy, ≤8 tokens, 5 s
+  timeout); the verdict is attached to the call at the serving boundary before
+  preflight/admission so selection stays a pure function; head-disable signals
+  stay deterministic and are never judged; on judge failure the keyword
+  code-task signal decides as before.
+- Why: owner review of #510 — keyword heuristics misroute incidental code
+  vocabulary into the sandbox coding DAG and miss unlisted languages; the
+  split is a semantic judgment and belongs to an LLM.
+- Refs: #509, #510 review; ECO-D6 2026-08-17 LLM-profile-judge amendment;
+  `kairyu/orchestration/`; `examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml`
 
 ### 2026-08-16 — [amendment] Agent tool-turn latency and cancellation (issue #495)
 - What: tool-turn FAIL/refine loop removed (verifier/synthesis prompts declare

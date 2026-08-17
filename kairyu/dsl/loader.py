@@ -23,7 +23,11 @@ from kairyu.orchestration.execution import (
     ExecutionLimits,
     ExecutorDescriptor,
 )
-from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
+from kairyu.orchestration.orchestrator import (
+    EngineDescriptor,
+    Orchestrator,
+    ProfileJudge,
+)
 from kairyu.orchestration.router import RouteThresholds, RuleRouter, load_calibrated_router
 from kairyu.sampling_params import SamplingParams
 
@@ -168,6 +172,17 @@ def build_orchestrator(
 
     roles = tuple(_role_spec(role) for role in spec.roles) or None
     general_roles = tuple(_role_spec(role) for role in spec.general_roles) or None
+    profile_judge = (
+        ProfileJudge(
+            worker=spec.profile_judge.worker,
+            timeout_seconds=spec.profile_judge.timeout_seconds,
+            max_tokens=spec.profile_judge.max_tokens,
+            prompt_prefix=spec.profile_judge.prompt_prefix,
+            prompt_suffix=spec.profile_judge.prompt_suffix,
+        )
+        if spec.profile_judge is not None
+        else None
+    )
     budget = Budget(
         max_steps=spec.budget.max_steps,
         max_refine_depth=spec.budget.max_refine_depth,
@@ -203,4 +218,5 @@ def build_orchestrator(
         expose_intermediate_outputs=spec.expose_intermediate_outputs,
         execution_workers=execution_workers,
         executor_descriptors=executor_descriptors,
+        profile_judge=profile_judge,
     )

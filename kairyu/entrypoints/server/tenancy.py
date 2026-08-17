@@ -409,11 +409,19 @@ class TenantAdmission:
             raise RuntimeError("tenant tokens must be reserved before dispatch")
         self._dispatched = True
 
-    def settle_tokens(self, actual_tokens: int, *, exact: bool = True) -> None:
+    def settle_tokens(
+        self,
+        actual_tokens: int,
+        *,
+        exact: bool = True,
+        force_refund_surplus: bool = False,
+    ) -> None:
         """Reconcile a reservation once authoritative usage is available."""
 
         if type(actual_tokens) is not int or actual_tokens < 0:
             raise ValueError("actual token count must be a non-negative integer")
+        if force_refund_surplus and not exact:
+            raise ValueError("surplus refund requires exact token usage")
         if self._released:
             raise RuntimeError("cannot settle a released admission")
         if self._limiter is None:
@@ -429,7 +437,8 @@ class TenantAdmission:
             self.tenant,
             self._reserved_tokens,
             actual_tokens,
-            refund_surplus=exact and self._refundable_on_exact_usage,
+            refund_surplus=exact
+            and (self._refundable_on_exact_usage or force_refund_surplus),
         )
         self._settled = True
 
