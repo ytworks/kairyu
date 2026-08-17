@@ -38,7 +38,7 @@ Conductor DAGs: there is no route that hits a single L1 engine directly.**
 
 ```mermaid
 flowchart TD
-    R["Chat request to kairyu-auto-max"] --> A{"Agent / format-constrained turn?<br/>tools declared, tools in prompt,<br/>or a plain-text format demand such as<br/>&quot;format your response as JSON&quot;"}
+    R["Chat request to kairyu-auto-max"] --> A{"Agent / format-constrained turn?<br/>tools declared, tools in prompt, API response_format,<br/>or a plain-text format demand such as<br/>&quot;format your response as JSON&quot;"}
     A -- "yes" --> G["GENERAL profile<br/>7-role ensemble, reply-format-faithful"]
     A -- "no" --> B{"Latest user turn asks for code?<br/>code fence, or code vocabulary:<br/>python / function / implement /<br/>コード / 実装 / 関数 ..."}
     B -- "yes" --> C["CODING profile<br/>9-role ensemble with sandbox execution"]
@@ -50,6 +50,7 @@ Concrete examples:
 | Request | Profile | Why |
 |---|---|---|
 | Terminus-2 agent turn: "…Format your response as JSON… run these shell commands" | general | plain-text structured-format demand |
+| Code request with API `response_format={"type":"json_object"}` | general | API-enforced reply format takes precedence over coding specialization |
 | Codex CLI / IDE turn with declared `tools` | general | tools present |
 | "Write a python function that reverses a list." | coding | code vocabulary in the latest user turn |
 | "リストを逆順にする関数を実装して" | coding | code vocabulary (Japanese) |

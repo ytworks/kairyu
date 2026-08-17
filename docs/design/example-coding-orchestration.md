@@ -323,8 +323,9 @@ one served model (`kairyu-auto-max`) carries a second, equally full ensemble
 DAG — `OrchestratorSpec.general_roles` — selected per request by a
 deterministic rule computed identically at preview/preflight and execution
 time (a pure function of the call, so the prepared-request contract cannot
-diverge): tools, tools-in-prompt, or a plain-text structured-format demand
-(the EO-D7 head-disable signals) select the general profile; otherwise a
+diverge): tools, tools-in-prompt, API `response_format`, or a plain-text
+structured-format demand (the EO-D7 head-disable signals) select the general
+profile; otherwise a
 code-task signal in the latest user turn (code fence or code vocabulary,
 scanned on the caller's words, not the L2 envelope) keeps the coding
 profile; otherwise general. Constraints, per the product's purpose: the
