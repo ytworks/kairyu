@@ -19,6 +19,7 @@ from kairyu.orchestration.orchestrator import (
     EngineDescriptor,
     Orchestrator,
     PreviewNotSupportedError,
+    _bounded_profile_judge_view,
 )
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.request import OrchestrationRequest
@@ -1599,6 +1600,20 @@ async def test_code_task_turn_keeps_primary_profile():
 
 
 _JUDGE_PROMPT_MARKER = "Reply with exactly one word: CODE or GENERAL."
+
+
+def test_bounded_profile_judge_view_preserves_request_intent_and_tail():
+    intent = "Summarize this source without modifying it.\n"
+    trailing_context = "\nFinal context: focus on the public API."
+    prompt = intent + ("x" * 5000) + trailing_context
+
+    view = _bounded_profile_judge_view(prompt)
+
+    assert len(view) == 4000
+    assert view.startswith(intent)
+    assert view.endswith(trailing_context)
+    assert "[... middle of request omitted ...]" in view
+    assert _bounded_profile_judge_view("short request") == "short request"
 
 
 async def test_judge_overrides_code_vocabulary_to_general():

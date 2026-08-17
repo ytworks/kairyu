@@ -351,7 +351,8 @@ failure this design exists to fix. Decision: an optional
 `OrchestratorSpec.profile_judge` names a generation worker (this example:
 `tier2-direct`, the non-thinking DeepSeek publisher engine) that answers a
 bounded verdict-only prompt — CODE or GENERAL — over the latest user turn
-(greedy, ≤8 output tokens, view capped at 4,000 chars, 5 s timeout). The
+(greedy, ≤8 output tokens, a 4,000-character view retaining both its head
+and tail, 5 s timeout). The
 serving boundary attaches the verdict to the call once, before preflight
 and admission, so profile selection stays a pure function of the call and
 the prepared-request contract still cannot diverge. The deterministic
