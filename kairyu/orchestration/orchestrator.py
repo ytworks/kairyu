@@ -215,6 +215,22 @@ _PROFILE_JUDGE_PROMPT = (
 # Bound the judged view so a long agent conversation cannot inflate the
 # judge's prefill beyond a fixed latency envelope.
 _PROFILE_JUDGE_VIEW_CHARS = 4000
+_PROFILE_JUDGE_TRUNCATION_MARKER = "\n\n[... middle of request omitted ...]\n\n"
+
+
+def _bounded_profile_judge_view(prompt: str) -> str:
+    view = latest_user_view(prompt)
+    if len(view) <= _PROFILE_JUDGE_VIEW_CHARS:
+        return view
+
+    available_chars = _PROFILE_JUDGE_VIEW_CHARS - len(_PROFILE_JUDGE_TRUNCATION_MARKER)
+    head_chars = (available_chars + 1) // 2
+    tail_chars = available_chars - head_chars
+    return (
+        view[:head_chars]
+        + _PROFILE_JUDGE_TRUNCATION_MARKER
+        + view[-tail_chars:]
+    )
 
 
 def _parse_profile_verdict(text: str) -> str | None:
@@ -631,7 +647,7 @@ class Orchestrator:
 
     def _profile_judge_request(self, call: OrchestrationRequest) -> GenerationRequest:
         assert self._profile_judge is not None
-        view = latest_user_view(call.prompt)[-_PROFILE_JUDGE_VIEW_CHARS:]
+        view = _bounded_profile_judge_view(call.prompt)
         prompt = (
             self._profile_judge.prompt_prefix
             + _PROFILE_JUDGE_PROMPT.format(request=view)
