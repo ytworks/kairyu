@@ -250,9 +250,9 @@ def test_non_auto_usage_shape_is_unchanged_and_auto_fields_are_discoverable(
                 "messages": [{"role": "user", "content": "hello"}],
             },
         )
-        usage_schema = client.get("/openapi.json").json()["components"]["schemas"][
-            "Usage"
-        ]["properties"]
+        usage_schema = client.get("/openapi.json").json()["components"]["schemas"]["Usage"][
+            "properties"
+        ]
 
     usage = response.json()["usage"]
     assert "orchestration_input_tokens" not in usage
@@ -279,9 +279,7 @@ def test_stream_trace_opt_in_returns_route_dag_verifier_and_timing(tmp_path):
         )
 
     metadata = next(
-        payload
-        for payload in _sse_payloads(response.text)
-        if "kairyu_trace_v2" in payload
+        payload for payload in _sse_payloads(response.text) if "kairyu_trace_v2" in payload
     )
     assert "usage" not in metadata
     assert metadata["kairyu_route"]["target"] == "multi_agent"
@@ -290,9 +288,7 @@ def test_stream_trace_opt_in_returns_route_dag_verifier_and_timing(tmp_path):
     assert trace["request_id"].startswith("chatcmpl-")
     assert trace["events"][0]["kind"] == "routing"
     verifier = next(event for event in trace["events"] if event["role"] == "verifier")
-    final = next(
-        event for event in trace["events"] if event["role"] == "synthesizer"
-    )
+    final = next(event for event in trace["events"] if event["role"] == "synthesizer")
     assert verifier["kind"] == "verification"
     assert verifier["detail"]["pass"] is True
     assert final["timing"]["first_token_at"]
@@ -350,14 +346,11 @@ def test_openai_sdk_accepts_usage_and_trace_terminal_metadata(tmp_path):
             )
         )
 
-    assert "".join(
-        choice.delta.content or ""
-        for chunk in chunks
-        for choice in chunk.choices
-    ) == "final synthesized answer"
-    metadata = next(
-        chunk for chunk in chunks if getattr(chunk, "kairyu_trace_v2", None)
+    assert (
+        "".join(choice.delta.content or "" for chunk in chunks for choice in chunk.choices)
+        == "final synthesized answer"
     )
+    metadata = next(chunk for chunk in chunks if getattr(chunk, "kairyu_trace_v2", None))
     assert metadata.usage.orchestration_input_tokens == 40
     assert metadata.usage.orchestration_output_tokens == 8
     assert metadata.kairyu_trace_v2["events"][0]["kind"] == "routing"
@@ -584,9 +577,8 @@ async def test_conductor_disconnect_finalizes_prefinal_and_partial_usage(tmp_pat
         return {"type": "http.disconnect"}
 
     async def send(message):
-        if (
-            message["type"] == "http.response.body"
-            and b"partial answer" in message.get("body", b"")
+        if message["type"] == "http.response.body" and b"partial answer" in message.get(
+            "body", b""
         ):
             disconnect.set()
 
@@ -744,9 +736,7 @@ def test_chat_endpoint_attaches_profile_judge_verdict(tmp_path):
     from kairyu.orchestration.orchestrator import ProfileJudge
 
     engine = MockBackend()
-    judge = MockBackend(
-        responses={"Reply with exactly one word: CODE or GENERAL.": "GENERAL"}
-    )
+    judge = MockBackend(responses={"Reply with exactly one word: CODE or GENERAL.": "GENERAL"})
     orchestrator = Orchestrator(
         {"tier1": engine, "tier2": engine, "judge": judge},
         roles=(
@@ -783,6 +773,7 @@ def test_chat_endpoint_attaches_profile_judge_verdict(tmp_path):
     with TestClient(app) as client:
         response = client.post(
             "/v1/chat/completions",
+            headers={"X-Kairyu-Trace": "1"},
             json={
                 "model": "auto",
                 "messages": [{"role": "user", "content": prompt}],
@@ -791,6 +782,70 @@ def test_chat_endpoint_attaches_profile_judge_verdict(tmp_path):
 
     assert response.status_code == 200
     assert len(judge.prompts_seen) == 1
+    payload = response.json()
+    judgment = payload["kairyu_trace_v2"]["events"][0]
+    assert judgment["node"] == "profile_judge"
+    assert judgment["kind"] == "classification"
+    assert judgment["detail"]["verdict"] == "general"
+    assert judgment["usage"] is not None
+    traced = [
+        event["usage"]
+        for event in payload["kairyu_trace_v2"]["events"]
+        if event["usage"] is not None
+    ]
+    usage = payload["usage"]
+    assert usage["orchestration_input_tokens"] == sum(item["prompt_tokens"] for item in traced)
+    assert usage["orchestration_output_tokens"] == sum(item["completion_tokens"] for item in traced)
     prompts = [p for p in engine.prompts_seen if isinstance(p, str)]
     assert any("[g_final]" in p for p in prompts)
     assert not any("[c_final]" in p for p in prompts)
+
+
+def test_profile_judge_quota_is_reserved_before_dispatch():
+    from fastapi.testclient import TestClient
+
+    from kairyu.engine.mock import MockBackend
+    from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
+    from kairyu.orchestration.conductor import RoleSpec
+    from kairyu.orchestration.orchestrator import ProfileJudge
+
+    engine = MockBackend()
+    judge = MockBackend(responses={"Reply with exactly one word: CODE or GENERAL.": "GENERAL"})
+    final_role = RoleSpec(
+        name="final",
+        worker="tier1",
+        role_type="synthesizer",
+        prompt="[final] {query}",
+    )
+    orchestrator = Orchestrator(
+        {"tier1": engine, "judge": judge},
+        roles=(final_role,),
+        general_roles=(final_role,),
+        profile_judge=ProfileJudge(worker="judge"),
+    )
+    app = create_legacy_app(
+        {"plain": engine},
+        orchestrators={"auto": orchestrator},
+        tenant_config=TenantConfig(
+            limits={
+                "default": TenantLimits(
+                    requests_per_minute=60,
+                    tokens_per_minute=1,
+                    token_burst=1,
+                )
+            }
+        ),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "Write a Rust CLI."}],
+            },
+        )
+
+    assert response.status_code == 429
+    assert not judge.prompts_seen
+    assert not engine.prompts_seen
