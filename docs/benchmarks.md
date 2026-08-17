@@ -140,8 +140,9 @@ the deployment manifest. The declaration is recorded but is not remote
 attestation of kernels or checkpoint contents.
 
 ~~~bash
-uv run --frozen python -m evals quant-sweep \
-  --run RUN_ID --results-dir bench/results/quantization
+uv run --frozen python -m evals quant-sweep --run RUN_ID \
+  --tolerance gsm8k=1.0 --tolerance mmlu=1.0 \
+  --tolerance ifeval=1.0 --tolerance gpqa-diamond=1.0
 ~~~
 
 The artifact keeps every task gate separately. It never averages tasks or
@@ -155,7 +156,8 @@ request policy and evaluator methodology must match.
 
 ~~~bash
 uv run --frozen python -m evals compare --suite core \
-  --baseline BASE_RUN:baseline --candidate CANDIDATE_RUN:candidate \
+  --baseline BASE_RUN --candidate CANDIDATE_RUN \
+  --baseline-target baseline --candidate-target candidate \
   --tolerance gsm8k=1.0 --tolerance mmlu=1.0 --tolerance ifeval=1.0
 ~~~
 

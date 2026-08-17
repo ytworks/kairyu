@@ -33,7 +33,8 @@ uv run --frozen python -m verification check
 uv run --frozen python scripts/verify_verification_registry.py
 ```
 
-Run a registered non-formal gate by ID and put its arguments after `--`:
+Run a registered gate by ID and put its arguments after `--` (a gate with no
+formal status writes no execution record):
 
 ```bash
 uv run --frozen python -m verification run \
@@ -68,8 +69,9 @@ doc references, rejects undeclared entrypoint-to-entrypoint imports, rejects
 `bench/results/` stays in place because retained formal artifacts bind exact
 historical paths and bytes. `bench/results/index.json` remains the discovery
 catalog, and `scripts/verify_bench_results_index.py` validates it against
-tracked files. New runtime outputs under `verification/results/` are ignored
-unless ### CPU microbenchmark CI smoke gate
+tracked files. New runtime outputs under `verification/results/` are ignored.
+
+### CPU microbenchmark CI smoke gate
 
 Pull requests run six source-checkout-only CPU benchmarks in one dedicated
 Python 3.12 job:
@@ -222,6 +224,7 @@ verification/fleet/correctness/agentic_kv_tier_f4b_bench.py
 verification/l1/performance/attention_backend_profile_bench.py
 verification/l1/diagnostic/audit_io_bench.py
 verification/orchestration/performance/auto_params_bench.py
+verification/l1/correctness/batch_invariance_bench.py
 verification/l1/performance/batched_prefill_qwen.py
 verification/l1/correctness/batched_spec_verify_qwen.py
 verification/l1/performance/decode_page_table_cache_qwen.py
@@ -237,6 +240,7 @@ verification/product/performance/frontier_compare.py
 verification/l1/performance/future_token_bench.py
 verification/l1/performance/g2_a6_vllm_bench.py
 verification/l1/performance/g2_a9_dp_tp_crossover_bench.py
+verification/l1/correctness/g4_ma1_nvfp4_correctness_bench.py
 verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_bench.py
 verification/l1/correctness/g4_ma1_qwen3_235b_nvfp4_capture.py
 verification/l1/correctness/g4_ma2_qwen3_235b_ep_kv_bench.py

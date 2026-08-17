@@ -26,10 +26,10 @@ bash scripts/kind_rollout_gate.sh --formal
 bash scripts/kind_rollout_gate.sh --smoke
 ```
 
-Pull requests run the smoke profile by default.  Applying the
-`f1b-formal` label runs the formal profile on the pull request commit, including
-the initial pull request before this workflow exists on the default branch.
-`workflow_dispatch` uses formal by default.
+Pull requests always run the smoke profile; the formal profile is reachable
+only through `workflow_dispatch`, which defaults to formal.  The
+`pull_request` trigger checks out the pull request head SHA, so the gate runs
+on the proposed commit even before this workflow exists on the default branch.
 
 Both overlays deliberately retain the F1a namespace and workload names.  Each
 run uses a fresh, dedicated kind cluster, while retaining the exact gateway,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-command lifecycle for the only Kairyu example."""
+"""One-command lifecycle for the DeepSeek-V4-Flash-0731 eight-GPU example."""
 
 from __future__ import annotations
 

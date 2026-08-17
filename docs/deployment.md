@@ -47,10 +47,10 @@ KV pages, TP collectives, and P-D transfers never leave the DC fabric
 
 Kubernetes is deliberately not required: the fleet is small and static, GPU
 nodes are pinned to hardware, and the design lineage excludes elasticity
-(g2 §6). Everything is containerized, so adopting k3s/RKE2 later is
-manifest-writing, not re-architecture. Revisit k8s when any of these hold:
-the fleet grows past ~5–8 nodes, multiple teams deploy onto the cluster, or
-rolling deploys become weekly toil.
+(g2 §6). Everything is containerized, and a CI-tested Helm chart plus kind
+manifests already exist for the k8s path (§8). Revisit k8s when any of these
+hold: the fleet grows past ~5–8 nodes, multiple teams deploy onto the
+cluster, or rolling deploys become weekly toil.
 
 Per node: install Docker, drop the compose file + config, and wrap it in a
 systemd unit so the stack survives reboots:
@@ -80,9 +80,12 @@ compose service.
 
 ## 4. Configuration walkthrough
 
-Both roles run the same image (`Dockerfile` at the repo root); the mounted
-DeploymentSpec decides what the process is. Working CPU examples live in
-`deploy/compose/` and are exercised by `scripts/compose_smoke.sh` in CI.
+Both roles run the same image; the mounted DeploymentSpec decides what the
+process is. CPU nodes use the root `Dockerfile`; GPU nodes use
+`Dockerfile.cuda` (CUDA runtime plus the `gpu` extra). Working CPU examples
+live in `deploy/compose/` and are exercised by `scripts/compose_smoke.sh` in
+CI; the GPU counterpart is `deploy/compose/docker-compose.gpu.yaml` with
+`gateway-gpu.yaml` / `gpu-replica.yaml`.
 The flat `server:` mapping is a versioned deployment schema and is translated
 explicitly to runtime server settings. Runtime-only settings do not
 automatically become accepted YAML keys.
@@ -263,7 +266,7 @@ pools:
     queue_depth_threshold: 8
     prefix_index: true                     # optional cross-session KV-aware routing
     probe_interval_s: 5.0
-orchestrator: { spec: agent_pool.yaml }          # optional: kairyu-auto routing
+orchestrator: { spec: my-orchestrator.yaml }     # optional: kairyu-auto routing
 legacy_chat_models: [llama-70b, kairyu-auto]     # current remote/AUTO compatibility
 embeddings:
   embed-test:
@@ -362,7 +365,8 @@ tokens; a process-local submit signal only wakes the local poller. After an
 owner crash, inference may run again, but only the current fenced claimant may
 publish the terminal job and output.
 
-The formal F5b GPU check is `bench/noisy_neighbor_gpu_bench.py --assert-gate`.
+The formal F5b GPU check is
+`verification/fleet/resilience/noisy_neighbor_gpu_bench.py --assert-gate`.
 It compares 10x offered noisy traffic against bracketed compliant-neighbor
 controls with matched accepted work; good-only latency is retained as a
 secondary reference. The pinned Qwen3-32B TP8 result is
@@ -685,12 +689,16 @@ it). A Direct Connect / ExpressRoute class link gives predictable latency
 for TTFT-sensitive SLOs; keep an IPsec VPN as the fallback path. Restrict
 the edge→DC path to the gateway port; replica ports stay DC-internal.
 
-## 8. Appendix: Kubernetes (untested reference)
+## 8. Appendix: Kubernetes (Helm chart + kind manifests)
 
-If a revisit trigger from §3 fires, the migration is: one Deployment per
-role, the DeploymentSpec as a ConfigMap, `/health`→livenessProbe,
+If a revisit trigger from §3 fires, the migration shape is: the
+DeploymentSpec as a ConfigMap, `/health`→livenessProbe,
 `/readyz`→readinessProbe, a Service in front of gateway pods, and the NVIDIA
 GPU operator on replica nodes (pin one replica pod per node with
-`nodeSelector` + `resources.limits.nvidia.com/gpu`). These manifests are
-deliberately not shipped as tested artifacts — the compose topology is the
-supported path until the triggers fire (m7 D2).
+`nodeSelector` + `resources.limits.nvidia.com/gpu`). A Helm chart
+(`deploy/helm/kairyu/`, GPU overlay `values-gpu.yaml`) and kind kustomize
+manifests (`deploy/kind/f1a|f1b|f1c/`, gateway Deployment + replica
+StatefulSet as in §5) are shipped and exercised in CI by
+`scripts/helm_integration.sh`, `scripts/kind_smoke.sh`, and the F1a/F1b/F1c
+gate workflows. The compose topology remains the recommended small-fleet
+path (m7 D2).
