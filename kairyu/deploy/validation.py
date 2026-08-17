@@ -32,7 +32,7 @@ from kairyu.dsl.loader import (
     _role_sampling as _loader_role_sampling,
 )
 from kairyu.dsl.loader import load_spec
-from kairyu.dsl.spec import OrchestratorSpec
+from kairyu.dsl.spec import OrchestratorSpec, RoleNodeSpec
 from kairyu.engine.config_validation import validate_backend_options
 from kairyu.engine.core.quant_config import (
     QuantMethod,
@@ -884,65 +884,69 @@ def _validate_orchestrator_topology(
         return findings
     if not spec.roles:
         return findings
-    roles = tuple(
-        RoleSpec(
-            name=role.name,
-            worker=role.worker,
-            prompt=role.prompt,
-            role_type=role.role_type,
-            depends_on=role.depends_on,
-            verifies=role.verifies,
-            sampling=_loader_role_sampling(role),
-            executor=_loader_role_executor(role),
-            prompt_suffix=role.prompt_suffix,
-            prompt_headless=role.prompt_headless,
-            reasoning_closed=role.reasoning_closed,
-        )
-        for role in spec.roles
-    )
     generation_workers = {
         worker.name for worker in spec.workers if worker.executor_ref is None
     }
     execution_workers = {
         worker.name for worker in spec.workers if worker.executor_ref is not None
     }
-    try:
-        conductor = Conductor(
-            roles,
-            {name: object() for name in generation_workers},
-            execution_workers={name: object() for name in execution_workers},
-        )
-        final_unit = conductor._selected_final_unit().name
-        for role in roles:
-            if role.prompt_headless and role.name != final_unit:
-                findings.append(
-                    _finding(
-                        artifact=artifact,
-                        field=f"roles.{role.name}.prompt_headless",
-                        check="schema",
-                        code="schema.headless_prompt_unused",
-                        message=(
-                            "prompt_headless is only rendered for the selected "
-                            f"final unit ({final_unit!r}); it is never used on "
-                            f"role {role.name!r}"
-                        ),
-                    )
-                )
-    except ValueError as error:
-        message = (
-            "orchestrator role graph contains a cycle"
-            if "cycle" in str(error).lower()
-            else "orchestrator role graph is invalid"
-        )
-        findings.append(
-            _finding(
-                artifact=artifact,
-                field="roles",
-                check="schema",
-                code="schema.invalid_role_graph",
-                message=message,
+    profiles: tuple[tuple[str, tuple[RoleNodeSpec, ...]], ...] = (("roles", spec.roles),)
+    if spec.general_roles:
+        profiles += (("general_roles", spec.general_roles),)
+    for field_name, node_specs in profiles:
+        roles = tuple(
+            RoleSpec(
+                name=role.name,
+                worker=role.worker,
+                prompt=role.prompt,
+                role_type=role.role_type,
+                depends_on=role.depends_on,
+                verifies=role.verifies,
+                sampling=_loader_role_sampling(role),
+                executor=_loader_role_executor(role),
+                prompt_suffix=role.prompt_suffix,
+                prompt_headless=role.prompt_headless,
+                reasoning_closed=role.reasoning_closed,
             )
+            for role in node_specs
         )
+        try:
+            conductor = Conductor(
+                roles,
+                {name: object() for name in generation_workers},
+                execution_workers={name: object() for name in execution_workers},
+            )
+            final_unit = conductor._selected_final_unit().name
+            for role in roles:
+                if role.prompt_headless and role.name != final_unit:
+                    findings.append(
+                        _finding(
+                            artifact=artifact,
+                            field=f"{field_name}.{role.name}.prompt_headless",
+                            check="schema",
+                            code="schema.headless_prompt_unused",
+                            message=(
+                                "prompt_headless is only rendered for the selected "
+                                f"final unit ({final_unit!r}); it is never used on "
+                                f"role {role.name!r}"
+                            ),
+                        )
+                    )
+        except ValueError as error:
+            message = (
+                "orchestrator role graph contains a cycle"
+                if "cycle" in str(error).lower()
+                else "orchestrator role graph is invalid"
+            )
+            findings.append(
+                _finding(
+                    artifact=artifact,
+                    field=field_name,
+                    check="schema",
+                    code="schema.invalid_role_graph",
+                    message=message,
+                )
+            )
     return findings
 
 

@@ -253,6 +253,35 @@ inside the budget with reward 1.0 each. Prompt/policy edits again
 invalidate the measured artifact until `./verify.sh serving-auto-max` and
 `serving-auto-max-coding` are re-run.
 
+Review amendment (2026-08-17, issue #509 — Terminal-Bench timeout root
+causes): the interim run (89 trials) produced 12 `AgentTimeoutError`s
+against the 900 s Terminus budget with public-request p50 63.9 s / p90
+203.8 s and zero transport errors — pure per-turn cost. Two defects are
+fixed without touching any contract: (1) the verifier ran greedy
+(`temperature: 0.0`) on a thinking model, a documented cause of looping
+deliberation (DeepSeek reasoning guidance: 0.5–0.7); 186/357 verdicts (52%)
+burned the full 4096-token cap inside `<think>` before PASS/FAIL, each
+triggering the bounded re-verification — the verifier (both profiles) now
+samples at `temperature: 0.6, top_p: 0.95`, keeping caller-seeded runs
+reproducible via the seed pass-through. (2) Qwen role prompts placed the
+role instruction before the conversation, so the growing agent conversation
+could never share prefill across roles or turns (measured 37.9% prefix-hit
+rate on the Qwen pool vs 70.2% on DeepSeek); every Qwen role now leads with
+a byte-identical `--- REQUEST ---` framing and puts its instruction after
+the conversation, letting the prefix-indexed replicas reuse the
+conversation KV. Both edits invalidate the measured artifact until the
+`verify.sh` gates are re-run.
+
+Review amendment (2026-08-17, issue #509 — Qwen MTP concurrency envelope):
+the MTP-3 candidate stays disabled in the selected four-replica deployment.
+Its role-shaped evidence covers only c1/c4/c8, while the public product admits
+256 requests and the committed serving gates include c16/c32. The matching
+Qwen TP1 saturation rows regressed with MTP-3, so assuming fan-out always keeps
+per-replica overlap below c8 is not an accepted capacity proof. Re-enable MTP
+only after the deployed configuration passes c1/c8/c16/c32 without aggregate
+throughput or tail-latency regression; the c1/c4/c8 measurements remain
+recorded as candidate evidence.
+
 The example gate: `./verify.sh serving-auto-max-coding` runs a deterministic
 self-contained Python-task matrix (c1/8/16/32), requires a valid trace with a
 successful head and continuation in every sample, and counts a sample as
@@ -292,6 +321,67 @@ benchmark is requested as `ytworks/kairyu-bench#10`; no kairyu-bench
 implementation work is part of this change. The removed Accuracy suite is
 not resurrected; `verification/` continues to gate serving behavior only.
 
+### ECO-D6 — General ensemble profile with automatic per-request selection (issue #509)
+
+The coding DAG's role contracts are Python-module/pytest-specialized by
+design (ECO-D2). The Terminal-Bench window showed those contracts idling on
+agent-loop turns: Terminus demands shell-command batches in a JSON envelope,
+testgen answered NOT_APPLICABLE 311/311 (so the sandbox never grounded a
+draft), proposals stayed bound to a `solution` module the task never asked
+for, and reply-format drift contributed to score-0 completions. Decision:
+one served model (`kairyu-auto-max`) carries a second, equally full ensemble
+DAG — `OrchestratorSpec.general_roles` — selected per request by a
+deterministic rule computed identically at preview/preflight and execution
+time (a pure function of the call, so the prepared-request contract cannot
+diverge): tools, tools-in-prompt, API `response_format`, or a plain-text
+structured-format demand (the EO-D7 head-disable signals) select the general
+profile; otherwise a
+code-task signal in the latest user turn (code fence or code vocabulary,
+scanned on the caller's words, not the L2 envelope) keeps the coding
+profile; otherwise general. Constraints, per the product's purpose: the
+coding profile is unchanged; both profiles are full Conductor ensembles
+under the same TTFT gate; there is no single-engine route in auto-max, and
+no role is skipped inside either profile. `general_roles` is mutually exclusive
+with `moa_samples > 0`; configuration fails closed instead of silently ignoring
+both role DAGs in MoA mode. The example's general profile uses
+every deployment model — Qwen head + two Qwen proposals + a thinking
+DeepSeek deep proposal, Qwen synthesis, thinking DeepSeek verification
+(format deviation is a FAIL), and the direct DeepSeek publisher with the
+same `prompt_headless`/`reasoning_closed`/NO_CONTINUATION contracts as the
+coding continuation. The chosen profile is recorded in the result trace
+(`role profile: …`) and `/routing` reports both role sets; launcher
+readiness (`control.py`) asserts the general role list like the coding one.
+
+Review amendment (2026-08-17, issue #509 — LLM profile judge, owner
+direction on the #510 review): the code-task half of the selector is no
+longer decided by keyword matching. Substring and word-boundary heuristics
+were both shown to misroute — incidental vocabulary ("What does a program
+manager do?", "test for diabetes", "fix the bug in my essay") lands in the
+sandbox coding DAG, while unlisted languages ("Write a Rust CLI") miss it —
+and the misrouted coding contracts are exactly the idle-specialization
+failure this design exists to fix. Decision: an optional
+`OrchestratorSpec.profile_judge` names a generation worker (this example:
+`tier2-direct`, the non-thinking DeepSeek publisher engine) that answers a
+bounded verdict-only prompt — CODE or GENERAL — over the latest user turn
+(greedy, ≤8 output tokens, a 4,000-character view retaining both its head
+and tail, 5 s timeout). The
+serving boundary attaches the verdict to the call once, before preflight
+and admission, so profile selection stays a pure function of the call and
+the prepared-request contract still cannot diverge. The deterministic
+head-disable signals (tools, tools-in-prompt, API `response_format`,
+plain-text format demand) short-circuit before the judge and never spend a
+model call. The judge is availability-neutral: on timeout, backend error,
+or an unparseable verdict the call stays unattached and the deterministic
+code-task signal decides, so a judge outage degrades to the pre-amendment
+behavior instead of failing or delaying requests. The verdict is recorded
+in the result trace (`profile judge: …`) and `/routing` reports the judge
+configuration.
+
+The judge policy owns optional prompt prefix/suffix scaffolding; the example
+uses the same DeepSeek user/assistant boundary and pre-closed reasoning span as
+its non-thinking publisher because the shared vLLM service intentionally runs
+an identity chat template.
+
 ## Acceptance
 
 - CPU suite: head streaming, dedup, error contract, per-role sampling,
@@ -301,6 +391,11 @@ not resurrected; `verification/` continues to gate serving behavior only.
   same change.
 - Launcher `_validate_ready` requires the nine-role DAG, `stream_head: head`,
   `max_steps: 15`, the executor binding, and the executor health probe.
+- Profile-judge amendment: CPU tests cover the judged verdict overriding the
+  keyword signal in both directions, the head-disable short-circuit spending
+  no judge call, timeout/unparseable fallback, judged preflight/execution
+  agreement, and the serving boundary attaching the verdict; the launcher
+  asserts the served judge worker against the example metadata.
 - `serving-auto-max` passes end-to-end with executor stages present and the
   split head/continuation public stream traced.
 - `serving-auto-max-coding` passes its TTFT gate at every concurrency row

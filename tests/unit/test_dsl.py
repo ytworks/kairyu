@@ -298,3 +298,101 @@ workers:
     options: {upstream: inferred}
 """
         )
+
+
+GENERAL_PROFILE_SPEC = """
+workers:
+  - name: tier1
+    backend: mock
+  - name: tier2
+    backend: mock
+roles:
+  - name: draft
+    worker: tier1
+    role_type: synthesizer
+    prompt: "code draft: {query}"
+general_roles:
+  - name: g_prop
+    worker: tier1
+    prompt: "general proposal: {query}"
+  - name: g_final
+    worker: tier2
+    role_type: synthesizer
+    depends_on: [g_prop]
+    prompt: "general final: {query} {g_prop}"
+"""
+
+
+def test_general_roles_profile_loads_and_builds():
+    spec = load_spec(GENERAL_PROFILE_SPEC)
+    assert [role.name for role in spec.general_roles] == ["g_prop", "g_final"]
+    descriptor = build_orchestrator(spec).describe_routing()
+    assert [role["name"] for role in descriptor["general_roles"]] == [
+        "g_prop",
+        "g_final",
+    ]
+    assert "profile_selector" in descriptor
+
+
+def test_general_roles_reject_moa_mode():
+    with pytest.raises(
+        ValidationError,
+        match="general_roles cannot be combined with moa_samples > 0",
+    ):
+        load_spec(GENERAL_PROFILE_SPEC + "\nmoa_samples: 2\n")
+
+
+def test_profile_judge_loads_and_is_described():
+    spec = load_spec(
+        GENERAL_PROFILE_SPEC
+        + "\nprofile_judge: {worker: tier2, prompt_prefix: '<u>', prompt_suffix: '<a>'}\n"
+    )
+    assert spec.profile_judge.worker == "tier2"
+    assert spec.profile_judge.prompt_prefix == "<u>"
+    assert spec.profile_judge.prompt_suffix == "<a>"
+    descriptor = build_orchestrator(spec).describe_routing()
+    assert descriptor["profile_judge"] == {
+        "worker": "tier2",
+        "timeout_seconds": 5.0,
+        "max_tokens": 8,
+        "prompt_prefix": "<u>",
+        "prompt_suffix": "<a>",
+    }
+    assert "profile-judge verdict" in descriptor["profile_selector"]
+
+
+def test_profile_judge_is_validated():
+    with pytest.raises(ValidationError, match="profile_judge references unknown"):
+        load_spec(
+            GENERAL_PROFILE_SPEC + "\nprofile_judge: {worker: missing}\n"
+        )
+    with pytest.raises(ValidationError, match="profile_judge requires general_roles"):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+roles:
+  - {name: draft, worker: tier1, prompt: "d: {query}"}
+profile_judge: {worker: tier1}
+"""
+        )
+
+
+def test_general_roles_are_validated_like_primary_roles():
+    with pytest.raises(ValidationError, match="general_roles.*unknown worker"):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+roles:
+  - {name: draft, worker: tier1, prompt: "d: {query}"}
+general_roles:
+  - {name: g_final, worker: missing, prompt: "g: {query}"}
+"""
+        )
+    with pytest.raises(ValidationError, match="general_roles requires a primary"):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+general_roles:
+  - {name: g_final, worker: tier1, prompt: "g: {query}"}
+"""
+        )

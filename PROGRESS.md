@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-15. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-17. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example is a coding-first product: an unchanged L1 fleet (four Qwen3.8 TP1 vLLM workers + the measured DeepSeek TP4/EP4 DSpark worker) under a nine-role L2 DAG where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds a networkless CPU sandbox over a Unix-socket transport, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example is a coding-first product: an L1 fleet of four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker, under a nine-role coding L2 DAG plus a seven-role general ensemble profile auto-selected for agent/format-constrained and non-code turns (never a direct single-engine route) where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds a networkless CPU sandbox over a Unix-socket transport, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,51 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-17 — [amendment] Profile judge work obeys tenant accounting
+- What: profile-judge GPU work is reserved before dispatch, included in
+  cumulative orchestration usage and metering, and emitted as a structured
+  trace event; the reservation covers the judge plus the larger profile DAG.
+- Why: PR #516 review found that the pre-admission judge call bypassed tenant
+  token quotas and discarded backend-reported usage.
+- Refs: PR #516 review; `kairyu/orchestration/`;
+  `kairyu/entrypoints/server/app.py`
+
+### 2026-08-17 — [amendment] Tiered Qwen MTP remains candidate-only
+- What: removed MTP-3 from the selected four-replica Qwen deployment while
+  retaining its c1/c4/c8 measurements as candidate evidence; compose, metadata,
+  tests, and operator docs now agree on no speculation.
+- Why: the public product admits 256 requests and gates c16/c32, but the new
+  role-shaped run stopped at c8; the matching Qwen TP1 c16/c32 rows regressed,
+  so the deployed high-concurrency envelope was not proven safe.
+- Refs: #509; ECO-D4 2026-08-17 Qwen MTP concurrency amendment;
+  `examples/qwen3.8-deepseek-v4-8gpu/`
+
+### 2026-08-17 — [design] General ensemble profile and Terminal-Bench latency fixes
+- What: `general_roles` — a second full-ensemble DAG under one served model,
+  deterministically selected (tools/format-demand/non-code → general; code
+  authoring keeps the coding DAG; never a single-engine route); example gains a
+  7-role all-model general profile; verifier T 0.0→0.6/top_p 0.95 (greedy
+  thinking looped: 52% of verdicts burned the 4096 cap → reverify); Qwen
+  prompts lead with a shared REQUEST block (prefix reuse); measured MTP-3
+  adopted on Qwen workers (c1 +43.9%, c4/c8 +26%, lossless).
+- Why: issue #509 — 12/27 Terminal-Bench trials hit the 900 s agent timeout at
+  p50 63.9 s/request; coding contracts idled on agent JSON turns.
+- Refs: #509; ECO-D6 + ECO-D4 2026-08-17 amendment; `kairyu/orchestration/`;
+  `examples/qwen3.8-deepseek-v4-8gpu/`; its MEASUREMENTS.md
+
+### 2026-08-17 — [amendment] LLM profile judge for the coding/general split
+- What: the code-authoring half of profile selection is judged by an optional
+  `profile_judge` worker (example: direct DeepSeek, greedy, ≤8 tokens, 5 s
+  timeout); the verdict is attached to the call at the serving boundary before
+  preflight/admission so selection stays a pure function; head-disable signals
+  stay deterministic and are never judged; on judge failure the keyword
+  code-task signal decides as before.
+- Why: owner review of #510 — keyword heuristics misroute incidental code
+  vocabulary into the sandbox coding DAG and miss unlisted languages; the
+  split is a semantic judgment and belongs to an LLM.
+- Refs: #509, #510 review; ECO-D6 2026-08-17 LLM-profile-judge amendment;
+  `kairyu/orchestration/`; `examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml`
 
 ### 2026-08-16 — [amendment] Agent tool-turn latency and cancellation (issue #495)
 - What: tool-turn FAIL/refine loop removed (verifier/synthesis prompts declare
@@ -142,59 +187,3 @@ in `.claude/rules/progress-log.md`).
 - Why: the previous 8s queue plus 10s execution exceeded the 15s client
   deadline, discarding valid work as `unavailable` under contention.
 - Refs: ECO-D1; `kairyu/orchestration/execution.py`; PR #488 review
-
-### 2026-08-15 — [amendment] Sandbox transport removes the reverse network path
-- What: replaced the bidirectional internal Docker bridge with a shared Unix
-  domain socket and `network_mode: none` on the executor; Kairyu mounts the
-  socket volume read-only and the deployment executor client supports UDS.
-- Why: an internal bridge blocks external routing but still lets hostile
-  submitted code connect back to Kairyu, violating ECO-D1's no-egress
-  boundary.
-- Refs: PR #488 review; ECO-D1; `kairyu/orchestration/execution.py`;
-  `examples/qwen3.8-deepseek-v4-8gpu/{compose.yaml,sandbox/runner.py}`
-
-### 2026-08-15 — [design] Coding orchestration with head streaming and sandbox execution
-- What: replaced the tiered example's seven-role DAG with a nine-role coding
-  DAG on the unchanged L1 fleet; added L2 mechanisms for a t=0 public head
-  stream + verified continuation, incremental reasoning streaming, per-role
-  sampling/prompt suffixes, and deployment-owned sandbox executors run as
-  untrusted-data DAG stages; TTFT gate: public p50 ≤2× DeepSeek-direct per
-  concurrency (live c1 smoke ~0.3 s vs the 1.56 s budget).
-- Why: frontier-level coding accuracy needs ensemble + execution-grounded
-  verification, but the old collect-then-synthesize DAG left first public
-  tokens ~10× over the agreed 2×-DeepSeek TTFT budget; only E2E is
-  unconstrained, so the answer opening streams while the ensemble runs.
-- Refs: ECO-D1..D5 in `docs/design/example-coding-orchestration.md`;
-  `kairyu/orchestration/{conductor,execution}.py`;
-  `examples/qwen3.8-deepseek-v4-8gpu/`
-
-### 2026-08-15 — [progress] Frontier examples move to Qwen3.8
-- What: replaced both Qwen3.6 example surfaces with attested Qwen3.8-27B-FP8,
-  selected a measured 32K/no-MTP/piecewise-graph vLLM v0.23.0 L1 envelope,
-  ported it unchanged to four TP1 replicas, and passed an eight-GPU product
-  chat plus embedding smoke without changing the L2 role DAG or L3 contract.
-- Why: DeepSeek remains on the measured `aa0d513027` DSpark build because the
-  official v0.23.0 runtime cannot serve the 0731 checkpoint's draft path.
-- Refs: `examples/qwen3.8-{27b-1gpu,deepseek-v4-8gpu}/`;
-  `examples/qwen3.8-27b-1gpu/MEASUREMENTS.md`
-
-### 2026-08-14 — [progress] Accuracy removal and verification migration completed
-- What: removed the named Accuracy suite and its code, fixtures, dependencies,
-  tests, examples, and active documentation; retained four explicit eval suites
-  and moved Kairyu serving/correctness gates to checkout-only verification.
-- Refs: PR #486; `evals/`; `verification/`; `evidence/`;
-  `docs/design/verification-framework.md`
-
-### 2026-08-14 — [progress] Accuracy implementation removed
-- What: removed the externally migrated Accuracy adapters, judge and published
-  comparison paths, fixtures, dependencies, and tests; retained eval tests now
-  live under `tests/evals/` and require an explicit retained suite.
-- Refs: PR #486; `evals/`; `tests/evals/`; `pyproject.toml`
-
-### 2026-08-14 — [progress] Verification framework split implemented
-- What: moved 68 Kairyu gates into checkout-only `verification/` by scope and
-  kind, added a strict registry/runner and neutral `evidence/` contracts, and
-  kept all 205 tracked legacy result files byte-identical at `bench/results/`.
-- Refs: PR #486; `verification/registry.toml`;
-  `docs/design/verification-framework.md`
-

@@ -34,7 +34,13 @@ class TokenLimiterSink(Protocol):
 class TokenReservationSink(Protocol):
     def mark_dispatched(self) -> None: ...
 
-    def settle_tokens(self, actual_tokens: int, *, exact: bool = True) -> None: ...
+    def settle_tokens(
+        self,
+        actual_tokens: int,
+        *,
+        exact: bool = True,
+        force_refund_surplus: bool = False,
+    ) -> None: ...
 
 
 class UsageMetricsSink(Protocol):

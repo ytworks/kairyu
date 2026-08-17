@@ -1,8 +1,10 @@
 import asyncio
 import copy
+import json
 import threading
 from dataclasses import replace
 
+import httpx
 import pytest
 
 from kairyu.engine.backend import (
@@ -12,6 +14,7 @@ from kairyu.engine.backend import (
     UpstreamClientError,
 )
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.moa import MoAEvent, MoAResult
@@ -19,6 +22,8 @@ from kairyu.orchestration.orchestrator import (
     EngineDescriptor,
     Orchestrator,
     PreviewNotSupportedError,
+    _bounded_profile_judge_view,
+    _parse_profile_verdict,
 )
 from kairyu.orchestration.replica import ReplicaPool
 from kairyu.orchestration.request import OrchestrationRequest
@@ -178,9 +183,7 @@ def test_preview_route_is_non_dispatching_and_describes_effective_fallback():
     only = MockBackend()
     orchestrator = Orchestrator(
         engines={"worker": only},
-        engine_descriptors={
-            "worker": EngineDescriptor(backend_type="openai", model="small")
-        },
+        engine_descriptors={"worker": EngineDescriptor(backend_type="openai", model="small")},
     )
 
     decision = orchestrator.preview_route(SIMPLE)
@@ -233,18 +236,13 @@ async def test_tier1_stream_failure_before_output_retries_tier2_once() -> None:
     tier2 = MockBackend({SIMPLE: "tier2 answer"})
     orchestrator = _orchestrator(engines={"tier1": tier1, "tier2": tier2})
 
-    events = [
-        event
-        async for event in await orchestrator.run_chat(SIMPLE, stream=True)
-    ]
+    events = [event async for event in await orchestrator.run_chat(SIMPLE, stream=True)]
 
     assert tier1.stream_calls == 1
     assert len(tier2.prompts_seen) == 1
     assert events[-1].kind == "result"
     assert events[-1].result.text == "tier2 answer"
-    assert any(
-        "retrying once on tier2" in note for note in events[-1].result.trace
-    )
+    assert any("retrying once on tier2" in note for note in events[-1].result.trace)
 
 
 def test_auto_admission_bound_accounts_for_internal_fanout() -> None:
@@ -265,8 +263,7 @@ def test_auto_admission_bound_accounts_for_internal_fanout() -> None:
     )
     assert orchestrator.preview_route(SIMPLE).target == "tier1"
     assert (
-        orchestrator.admission_upper_bound(direct_preview_call).tokens
-        > len(SIMPLE.encode()) + 32
+        orchestrator.admission_upper_bound(direct_preview_call).tokens > len(SIMPLE.encode()) + 32
     )
 
 
@@ -451,9 +448,7 @@ async def test_prepared_handle_copies_share_one_dispatch_capability() -> None:
         replace(prepared),
     )
 
-    await asyncio.gather(
-        *(orchestrator.run(call, prepared=alias) for alias in aliases)
-    )
+    await asyncio.gather(*(orchestrator.run(call, prepared=alias) for alias in aliases))
 
     assert sum(request is exact_request for request in backend.generated) == 1
     assert len({request.request_id for request in backend.generated}) == 4
@@ -593,8 +588,7 @@ async def test_async_prepare_covers_every_multi_agent_final_and_internal_intent(
         assert internal.tools == ()
         assert internal.tool_choice is None
     assert initial_planner.prompt == (
-        "[planner] Break the task into a short actionable plan.\n"
-        f"Task: {COMPLEX}"
+        f"[planner] Break the task into a short actionable plan.\nTask: {COMPLEX}"
     )
     assert initial_planner.sampling_params.n == 1
     assert initial_planner.sampling_params.max_tokens == 5
@@ -675,10 +669,7 @@ async def test_async_prepare_reuses_exact_initial_role_request(stream) -> None:
     assert all(
         request.cache_hint is None
         or request.cache_hint.session_id == initial_planner.cache_hint.session_id
-        for request in tier1.generated
-        + tier1.streamed
-        + tier2.generated
-        + tier2.streamed
+        for request in tier1.generated + tier1.streamed + tier2.generated + tier2.streamed
     )
 
 
@@ -716,9 +707,7 @@ async def test_conversation_affinity_key_keeps_turns_on_one_session() -> None:
 
     await orchestrator.run(call(conversation, "conv-task-a"))
     first_turn = observed_sessions()
-    await orchestrator.run(
-        call(conversation + " appended tool-result turn", "conv-task-a")
-    )
+    await orchestrator.run(call(conversation + " appended tool-result turn", "conv-task-a"))
     second_turn = observed_sessions()
     await orchestrator.run(call(conversation, "conv-task-b"))
     other_conversation = observed_sessions()
@@ -871,9 +860,7 @@ async def test_async_prepare_keeps_sync_validation_error_and_runs_no_prepare() -
     orchestrator = _orchestrator(
         engines={"tier1": tier1, "tier2": MockBackend()},
     )
-    expected = (
-        "final orchestration intent is unsupported: tier1: semantic rejection"
-    )
+    expected = "final orchestration intent is unsupported: tier1: semantic rejection"
 
     with pytest.raises(ValueError, match=f"^{expected}$"):
         orchestrator.validate_request(SIMPLE)
@@ -1318,10 +1305,7 @@ async def test_conductor_verifier_failure_precedes_streamed_final_boundary():
         budget=Budget(max_refine_depth=0),
     )
 
-    events = [
-        event
-        async for event in await orchestrator.run_chat(COMPLEX, stream=True)
-    ]
+    events = [event async for event in await orchestrator.run_chat(COMPLEX, stream=True)]
 
     result = events[-1].result
     assert result is not None
@@ -1343,10 +1327,7 @@ async def test_moa_final_synthesis_streams_and_reports_trace():
         moa_samples=2,
     )
 
-    events = [
-        event
-        async for event in await orchestrator.run_chat(COMPLEX, stream=True)
-    ]
+    events = [event async for event in await orchestrator.run_chat(COMPLEX, stream=True)]
 
     deltas = [event.text for event in events if event.kind == "delta"]
     result = events[-1].result
@@ -1385,19 +1366,14 @@ async def test_multistage_response_withholds_synthesizer_private_reasoning(strea
                 yield self._with_reasoning(result)
 
     proposal = MockBackend()
-    synthesis = ReasoningBackend(
-        responses={"Synthesize": "public final answer"}
-    )
+    synthesis = ReasoningBackend(responses={"Synthesize": "public final answer"})
     orchestrator = _orchestrator(
         engines={"tier1": proposal, "tier2": synthesis},
         moa_samples=2,
     )
 
     if stream:
-        events = [
-            event
-            async for event in await orchestrator.run_chat(COMPLEX, stream=True)
-        ]
+        events = [event async for event in await orchestrator.run_chat(COMPLEX, stream=True)]
         public_completions = [
             completion
             for event in events
@@ -1493,3 +1469,417 @@ def test_run_sync_wrapper():
 def test_requires_at_least_one_engine():
     with pytest.raises(ValueError, match="engine"):
         Orchestrator(engines={})
+
+
+def test_direct_general_roles_reject_moa_mode():
+    from kairyu.orchestration.conductor import RoleSpec
+
+    with pytest.raises(
+        ValueError,
+        match="general_roles cannot be combined with moa_samples > 0",
+    ):
+        _orchestrator(
+            general_roles=(
+                RoleSpec(name="general", worker="tier1", prompt="{query}"),
+            ),
+            moa_samples=2,
+        )
+
+
+def _profiled_orchestrator(
+    tier1,
+    tier2,
+    judge=None,
+    *,
+    judge_prompt_prefix="",
+    judge_prompt_suffix="",
+):
+    # Issue #509: one served model, two ensemble DAGs. The coding profile is
+    # a single synthesizer; the general profile fans out before its final.
+    # An optional judge engine enables the LLM coding/general verdict.
+    from kairyu.orchestration.conductor import RoleSpec
+    from kairyu.orchestration.orchestrator import ProfileJudge
+
+    class MultiAgentRouter:
+        def preview(self, query, context=None):
+            return RuleRouter().route(COMPLEX)
+
+        def route(self, query, context=None):
+            return RuleRouter().route(COMPLEX)
+
+    coding_roles = (
+        RoleSpec(
+            name="c_final",
+            worker="tier1",
+            role_type="synthesizer",
+            prompt="[c_final] {query}",
+            prompt_headless="[c_final_headless] {query}",
+        ),
+    )
+    general_roles = (
+        RoleSpec(name="g_prop", worker="tier1", prompt="[g_prop] {query}"),
+        RoleSpec(
+            name="g_final",
+            worker="tier2",
+            role_type="synthesizer",
+            depends_on=("g_prop",),
+            prompt="[g_final] {query} {g_prop}",
+            prompt_headless="[g_final_headless] {query} {g_prop}",
+        ),
+    )
+    engines = {"tier1": tier1, "tier2": tier2}
+    if judge is not None:
+        engines["judge"] = judge
+    return Orchestrator(
+        engines=engines,
+        router=MultiAgentRouter(),
+        roles=coding_roles,
+        general_roles=general_roles,
+        profile_judge=(
+            ProfileJudge(
+                worker="judge",
+                timeout_seconds=0.05,
+                prompt_prefix=judge_prompt_prefix,
+                prompt_suffix=judge_prompt_suffix,
+            )
+            if judge is not None
+            else None
+        ),
+    )
+
+
+async def test_structured_format_turn_runs_general_profile():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    orchestrator = _profiled_orchestrator(tier1, tier2)
+    call = OrchestrationRequest(
+        prompt="Summarize the latest terminal output. Format your reply as JSON.",
+        sampling_params=SamplingParams(max_tokens=64),
+        structured_format_in_prompt=True,
+    )
+    result = await orchestrator.run(call)
+    assert "role profile: general" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert any("[g_final" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)
+
+
+async def test_response_format_turn_runs_general_profile():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    orchestrator = _profiled_orchestrator(tier1, tier2)
+    response_format = {"type": "json_object"}
+    call = OrchestrationRequest(
+        prompt="Implement a Python function that reverses a list.",
+        sampling_params=SamplingParams(
+            max_tokens=64,
+            extra_args={"response_format": response_format},
+        ),
+        response_format=response_format,
+    )
+    result = await orchestrator.run(call)
+    assert "role profile: general" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert any("[g_final" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)
+
+
+async def test_code_task_turn_keeps_primary_profile():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    orchestrator = _profiled_orchestrator(tier1, tier2)
+    call = OrchestrationRequest(
+        prompt="Implement a python function that reverses a list.",
+        sampling_params=SamplingParams(max_tokens=64),
+    )
+    result = await orchestrator.run(call)
+    assert "role profile: primary" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[c_final" in prompt for prompt in prompts)
+    assert not any("[g_" in prompt for prompt in prompts)
+
+
+_JUDGE_PROMPT_MARKER = "Reply with exactly one word: CODE or GENERAL."
+
+
+def test_bounded_profile_judge_view_preserves_request_intent_and_tail():
+    intent = "Summarize this source without modifying it.\n"
+    trailing_context = "\nFinal context: focus on the public API."
+    prompt = intent + ("x" * 5000) + trailing_context
+
+    view = _bounded_profile_judge_view(prompt)
+
+    assert len(view) == 4000
+    assert view.startswith(intent)
+    assert view.endswith(trailing_context)
+    assert "[... middle of request omitted ...]" in view
+    assert _bounded_profile_judge_view("short request") == "short request"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("CODE", "code"),
+        (" code\n", "code"),
+        ("GENERAL", "general"),
+        ("\tgeneral ", "general"),
+        ("not CODE", None),
+        ("The answer is CODE.", None),
+        ("GENERAL explanation", None),
+        ("CODE or GENERAL", None),
+        ("", None),
+    ],
+)
+def test_parse_profile_verdict_requires_exact_word(text, expected):
+    assert _parse_profile_verdict(text) == expected
+
+
+def test_profile_judge_admission_reserves_judge_and_worst_profile():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    call = OrchestrationRequest(
+        prompt="What does a program manager do?",
+        sampling_params=SamplingParams(max_tokens=64),
+    )
+
+    combined = orchestrator.admission_upper_bound(call)
+    profile_bounds = [
+        orchestrator.admission_upper_bound(replace(call, role_profile_judgment=profile)).tokens
+        for profile in ("code", "general")
+    ]
+
+    assert combined.tokens > max(profile_bounds)
+    assert not combined.refundable_on_exact_usage
+
+
+async def test_judge_applies_configured_worker_prompt_scaffold():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    orchestrator = _profiled_orchestrator(
+        tier1,
+        tier2,
+        judge,
+        judge_prompt_prefix="<bos><user>",
+        judge_prompt_suffix="<assistant></think>",
+    )
+
+    await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Explain Python decorators.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+
+    assert len(judge.prompts_seen) == 1
+    prompt = judge.prompts_seen[0]
+    assert isinstance(prompt, TemplatedPrompt)
+    assert prompt.startswith("<bos><user>")
+    assert prompt.endswith("<assistant></think>")
+    assert _JUDGE_PROMPT_MARKER in prompt
+
+
+async def test_judge_scaffold_dispatches_over_vllm_completions_wire():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "GENERAL",
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 32,
+                    "completion_tokens": 1,
+                    "total_tokens": 33,
+                },
+            },
+        )
+
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="judge",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+    )
+    orchestrator = _profiled_orchestrator(
+        tier1,
+        tier2,
+        judge,
+        judge_prompt_prefix="<bos><user>",
+        judge_prompt_suffix="<assistant></think>",
+    )
+
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Explain Python decorators.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    await judge.shutdown()
+
+    assert call.role_profile_judgment == "general"
+    assert captured["path"] == "/v1/completions"
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["prompt"].startswith("<bos><user>")
+    assert body["prompt"].endswith("<assistant></think>")
+    assert "messages" not in body
+
+
+async def test_judge_overrides_code_vocabulary_to_general():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="What does a program manager do?",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    assert call.role_profile_judgment == "general"
+    result = await orchestrator.run(call)
+    assert "role profile: general" in result.trace
+    assert "profile judge: general" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)
+
+
+async def test_judge_keeps_coding_profile_without_keyword_signal():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "CODE"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Write a Rust CLI that reverses its arguments.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    assert call.role_profile_judgment == "code"
+    result = await orchestrator.run(call)
+    assert "role profile: primary" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[c_final" in prompt for prompt in prompts)
+    assert not any("[g_" in prompt for prompt in prompts)
+
+
+async def test_head_disable_signals_skip_the_judge():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "CODE"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    response_format = {"type": "json_object"}
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Implement a Python function that reverses a list.",
+            sampling_params=SamplingParams(
+                max_tokens=64,
+                extra_args={"response_format": response_format},
+            ),
+            response_format=response_format,
+        )
+    )
+    assert call.role_profile_judgment is None
+    assert not judge.prompts_seen
+    result = await orchestrator.run(call)
+    assert "role profile: general" in result.trace
+
+
+async def test_judge_failure_falls_back_to_code_task_signal():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    slow_judge = MockBackend(
+        responses={_JUDGE_PROMPT_MARKER: "GENERAL"},
+        latency_s=5.0,
+    )
+    orchestrator = _profiled_orchestrator(tier1, tier2, slow_judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Implement a python function that reverses a list.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    assert call.role_profile_judgment is None
+    result = await orchestrator.run(call)
+    assert "role profile: primary" in result.trace
+    assert "profile judge:" not in result.trace
+
+
+async def test_unparseable_judge_verdict_falls_back():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "not CODE"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Implement a python function that reverses a list.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    assert call.role_profile_judgment is None
+    assert call.role_profile_judge_event is not None
+    assert call.role_profile_judge_event.usage is not None
+    assert call.role_profile_judge_event.status == "failed"
+    repeated = await orchestrator.judge_role_profile(call)
+    assert repeated is call
+    assert len(judge.prompts_seen) == 1
+
+
+async def test_judged_call_preflight_matches_execution():
+    # The judged verdict travels with the call, so preflight, admission, and
+    # execution agree even when the verdict contradicts the keyword signal.
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Explain how Python became popular.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    prepared = await orchestrator.prepare_request(call)
+    await orchestrator.admission_upper_bound_async(call)
+    result = await orchestrator.run(call, prepared=prepared)
+    assert "role profile: general" in result.trace
+    assert result.completions
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)
+
+
+async def test_general_profile_preflight_matches_execution():
+    # The prepared-request contract must pre-render the same profile the run
+    # executes, or the exact-request identity check rejects the dispatch.
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    orchestrator = _profiled_orchestrator(tier1, tier2)
+    call = OrchestrationRequest(
+        prompt="What should I cook tonight with rice and eggs?",
+        sampling_params=SamplingParams(max_tokens=64),
+    )
+    prepared = await orchestrator.prepare_request(call)
+    result = await orchestrator.run(call, prepared=prepared)
+    assert "role profile: general" in result.trace
+    assert result.completions
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)

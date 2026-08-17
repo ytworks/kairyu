@@ -23,7 +23,11 @@ from kairyu.orchestration.execution import (
     ExecutionLimits,
     ExecutorDescriptor,
 )
-from kairyu.orchestration.orchestrator import EngineDescriptor, Orchestrator
+from kairyu.orchestration.orchestrator import (
+    EngineDescriptor,
+    Orchestrator,
+    ProfileJudge,
+)
 from kairyu.orchestration.router import RouteThresholds, RuleRouter, load_calibrated_router
 from kairyu.sampling_params import SamplingParams
 
@@ -151,24 +155,33 @@ def build_orchestrator(
         for worker in spec.workers
         if worker.executor_ref is None
     }
-    roles = (
-        tuple(
-            RoleSpec(
-                name=role.name,
-                worker=role.worker,
-                prompt=role.prompt,
-                role_type=role.role_type,
-                depends_on=role.depends_on,
-                verifies=role.verifies,
-                sampling=_role_sampling(role),
-                executor=_role_executor(role),
-                prompt_suffix=role.prompt_suffix,
-                prompt_headless=role.prompt_headless,
-                reasoning_closed=role.reasoning_closed,
-            )
-            for role in spec.roles
+    def _role_spec(role: RoleNodeSpec) -> RoleSpec:
+        return RoleSpec(
+            name=role.name,
+            worker=role.worker,
+            prompt=role.prompt,
+            role_type=role.role_type,
+            depends_on=role.depends_on,
+            verifies=role.verifies,
+            sampling=_role_sampling(role),
+            executor=_role_executor(role),
+            prompt_suffix=role.prompt_suffix,
+            prompt_headless=role.prompt_headless,
+            reasoning_closed=role.reasoning_closed,
         )
-        or None
+
+    roles = tuple(_role_spec(role) for role in spec.roles) or None
+    general_roles = tuple(_role_spec(role) for role in spec.general_roles) or None
+    profile_judge = (
+        ProfileJudge(
+            worker=spec.profile_judge.worker,
+            timeout_seconds=spec.profile_judge.timeout_seconds,
+            max_tokens=spec.profile_judge.max_tokens,
+            prompt_prefix=spec.profile_judge.prompt_prefix,
+            prompt_suffix=spec.profile_judge.prompt_suffix,
+        )
+        if spec.profile_judge is not None
+        else None
     )
     budget = Budget(
         max_steps=spec.budget.max_steps,
@@ -194,6 +207,7 @@ def build_orchestrator(
         engines=engines,
         router=router,
         roles=roles,
+        general_roles=general_roles,
         budget=budget,
         shared_prefix=spec.shared_prefix,
         sampling_params=SamplingParams(max_tokens=spec.internal_max_tokens),
@@ -204,4 +218,5 @@ def build_orchestrator(
         expose_intermediate_outputs=spec.expose_intermediate_outputs,
         execution_workers=execution_workers,
         executor_descriptors=executor_descriptors,
+        profile_judge=profile_judge,
     )

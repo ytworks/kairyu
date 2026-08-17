@@ -63,6 +63,7 @@ def test_tiered_browser_gate_requires_one_model_and_separate_reasoning_ui() -> N
 def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> None:
     spec = json.loads((EXAMPLE / "example.json").read_text())
     compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
+    kairyu = yaml.safe_load((EXAMPLE / "kairyu.yaml").read_text())
 
     assert spec["hardware"] == {
         "gpu_count": 8,
@@ -118,6 +119,9 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         compose["services"]["kairyu"]["volumes"]
     )
     assert spec["vllm"]["qwen"]["release"] == "v0.23.0"
+    assert spec["vllm"]["qwen_mtp_speculative_tokens"] == 0
+    qwen_options = kairyu["pools"]["qwen3.8-27b"]["replicas"][0]["options"]
+    assert qwen_options["mtp_enabled"] is False
     assert {
         compose["services"][service]["image"]
         for service in ("qwen-0", "qwen-1", "qwen-2", "qwen-3")
@@ -146,6 +150,8 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         assert json.loads(
             _option(service["command"], "--compilation-config")
         ) == {"cudagraph_mode": "PIECEWISE"}
+        # Issue #509: c1/c4/c8 gains do not cover the deployed c16/c32
+        # envelope, so Qwen MTP stays candidate-only.
         assert "--speculative-config" not in service["command"]
         assert service["volumes"][-2]["target"] == "/root/.cache"
         assert service["volumes"][-1] == (
@@ -365,6 +371,41 @@ def test_tiered_l2_pins_only_the_explicit_coding_dag() -> None:
     # Untrusted-data delimiters (MoA pattern) guard every cross-role payload.
     for role_name in ("draft_synthesis", "verifier"):
         assert "UNTRUSTED" in by_name[role_name].prompt
+    # Issue #509: the general ensemble profile serves agent/format-constrained
+    # and non-code turns under the same model — full DAG, no sandbox stages,
+    # every deployment model participating, publisher on non-thinking DeepSeek.
+    expected_general = list(config["orchestration"]["general_roles"])
+    assert [role.name for role in maximum.general_roles] == expected_general == [
+        "head_general",
+        "proposal_direct",
+        "proposal_alt",
+        "proposal_deep",
+        "synthesis_general",
+        "verifier_general",
+        "continuation_general",
+    ]
+    general_by_name = {role.name: role for role in maximum.general_roles}
+    assert general_by_name["proposal_deep"].worker == "tier2"
+    assert general_by_name["verifier_general"].verifies == "synthesis_general"
+    assert general_by_name["continuation_general"].worker == "tier2-direct"
+    assert general_by_name["continuation_general"].reasoning_closed is True
+    assert general_by_name["continuation_general"].prompt_headless
+    assert not any(
+        role.role_type == "executor" for role in maximum.general_roles
+    )
+    # Issue #509 amendment: the coding/general split is judged by the direct
+    # (non-thinking) DeepSeek worker, and the launcher asserts the served
+    # judge against this metadata.
+    assert (
+        maximum.profile_judge.worker
+        == config["orchestration"]["profile_judge_worker"]
+        == "tier2-direct"
+    )
+    assert (
+        maximum.profile_judge.prompt_prefix
+        == "<｜begin▁of▁sentence｜><｜User｜>"
+    )
+    assert maximum.profile_judge.prompt_suffix == "<｜Assistant｜></think>"
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 
@@ -451,6 +492,19 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                             "continuation",
                         )
                     ],
+                    "general_roles": [
+                        {"name": name}
+                        for name in (
+                            "head_general",
+                            "proposal_direct",
+                            "proposal_alt",
+                            "proposal_deep",
+                            "synthesis_general",
+                            "verifier_general",
+                            "continuation_general",
+                        )
+                    ],
+                    "profile_judge": {"worker": "tier2-direct"},
                     "stream_head": "head",
                     "moa_samples": 0,
                     "budget": {"max_steps": 12, "max_refine_depth": 1},
