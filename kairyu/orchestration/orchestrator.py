@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import re
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
@@ -217,11 +216,12 @@ _PROFILE_JUDGE_VIEW_CHARS = 4000
 
 
 def _parse_profile_verdict(text: str) -> str | None:
-    has_code = re.search(r"\bCODE\b", text, re.IGNORECASE) is not None
-    has_general = re.search(r"\bGENERAL\b", text, re.IGNORECASE) is not None
-    if has_code == has_general:
-        return None
-    return "code" if has_code else "general"
+    verdict = text.strip().casefold()
+    if verdict == "code":
+        return "code"
+    if verdict == "general":
+        return "general"
+    return None
 
 
 @dataclass(frozen=True)
