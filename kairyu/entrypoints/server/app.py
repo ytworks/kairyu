@@ -1838,6 +1838,40 @@ def _record_usage(
     )
 
 
+def _record_profile_judge_preflight_usage(
+    http_request: Request,
+    model: str,
+    prompt: PromptInput,
+    request: OrchestrationRequest,
+) -> None:
+    """Settle exact judge work when later orchestration preflight rejects."""
+
+    event = request.role_profile_judge_event
+    if event is None or event.usage is None:
+        return
+    usage = event.usage
+    admission = _tenant_reservation(http_request)
+    if admission is not None:
+        admission.settle_tokens(
+            usage.prompt_tokens + usage.completion_tokens,
+            exact=True,
+            force_refund_surplus=True,
+        )
+
+    _record_usage(
+        http_request,
+        model,
+        GenerationUsage(
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            cached_tokens=usage.cached_tokens,
+        ),
+        prompt=prompt,
+        completions=(),
+        usage_exact=True,
+    )
+
+
 def _session_id(request: ChatCompletionRequest, http_request: Request) -> str | None:
     """Session for ReplicaPool affinity: X-Session-ID header, else the OpenAI user field."""
     return http_request.headers.get("x-session-id") or request.user
@@ -1949,9 +1983,7 @@ def create_app(
             f"{sorted(templated_auto_models)}"
         )
     served_embedding_backends = dict(embedding_backends or {})
-    health_engines = dict(
-        served_engines if runtime_engines is None else runtime_engines
-    )
+    health_engines = dict(served_engines if runtime_engines is None else runtime_engines)
     health_embedding_backends = dict(
         served_embedding_backends
         if runtime_embedding_backends is None
@@ -1970,11 +2002,7 @@ def create_app(
             "served model names collide across engines, orchestrators, and embeddings: "
             f"{sorted(collisions)}"
         )
-    missing_chat_policy = (
-        set(served_engines)
-        - set(chat_templates or {})
-        - set(legacy_chat_models)
-    )
+    missing_chat_policy = set(served_engines) - set(chat_templates or {}) - set(legacy_chat_models)
     if missing_chat_policy:
         logger.warning(
             "served models have no configured chat rendering policy; chat "
@@ -1986,9 +2014,7 @@ def create_app(
     metrics = ServerMetrics() if settings.metrics else None
     app.state.metrics = metrics
     slo_admission = (
-        AdmissionController(settings.ttft_slo_s)
-        if settings.ttft_slo_s is not None
-        else None
+        AdmissionController(settings.ttft_slo_s) if settings.ttft_slo_s is not None else None
     )
     app.state.slo_admission = slo_admission
     if metrics is not None:
@@ -2000,13 +2026,9 @@ def create_app(
             metrics.track_scheduler(name, engine)
             metrics.track_cuda_graph(name, engine)
         for auto_name, auto_orchestrator in auto_models.items():
-            stage_observer_setter = getattr(
-                auto_orchestrator, "set_stage_observer", None
-            )
+            stage_observer_setter = getattr(auto_orchestrator, "set_stage_observer", None)
             if stage_observer_setter is not None:
-                stage_observer_setter(
-                    _conductor_stage_metrics_observer(metrics, auto_name)
-                )
+                stage_observer_setter(_conductor_stage_metrics_observer(metrics, auto_name))
     api_keys = settings.resolve_api_keys() if resolved_api_keys is None else resolved_api_keys
     admin_keys = (
         settings.resolve_admin_keys() if resolved_admin_keys is None else resolved_admin_keys
@@ -2224,10 +2246,7 @@ def create_app(
     async def list_models() -> ModelList:
         names = list(served_engines) + list(auto_models) + list(served_embedding_backends)
         return ModelList(
-            data=[
-                ModelCard(id=name, max_model_len=_served_max_model_len(name))
-                for name in names
-            ]
+            data=[ModelCard(id=name, max_model_len=_served_max_model_len(name)) for name in names]
         )
 
     @app.get("/v1/models/{model_id:path}")
@@ -2239,9 +2258,7 @@ def create_app(
             or model_id in auto_models
             or model_id in served_embedding_backends
         ):
-            return ModelCard(
-                id=model_id, max_model_len=_served_max_model_len(model_id)
-            )
+            return ModelCard(id=model_id, max_model_len=_served_max_model_len(model_id))
         return model_not_found(model_id)
 
     @app.post("/v1/route", response_model=RoutePreviewResponse)
@@ -2368,9 +2385,7 @@ def create_app(
                     parallel_tool_calls=request.parallel_tool_calls,
                     tools_in_prompt=validated_input.tools_in_prompt,
                     structured_format_in_prompt=validated_input.structured_format_in_prompt,
-                    conversation_affinity_key=(
-                        validated_input.conversation_affinity_key
-                    ),
+                    conversation_affinity_key=(validated_input.conversation_affinity_key),
                     response_format=request.response_format,
                     tool_call_protocol=validated_input.tool_call_protocol.value,
                     reasoning_effort=request.reasoning_effort,
@@ -2382,23 +2397,60 @@ def create_app(
                     ),
                 )
                 selected = auto_models[request.model]
+                judge_will_run = selected.will_judge_role_profile(orchestration_request)
                 try:
-                    # Attach the LLM profile verdict once, before preflight and
-                    # admission, so both read the same judged call (issue #509).
-                    orchestration_request = await selected.judge_role_profile(
-                        orchestration_request
-                    )
+                    if judge_will_run:
+                        # The judge is shared GPU work too. Reserve its bound
+                        # plus the larger profile before the first dispatch.
+                        bound = await selected.admission_upper_bound_async(orchestration_request)
+                        admission_started_ns = time.perf_counter_ns()
+                        reservation_error = _reserve_tenant_work(http_request, bound)
+                        _record_preplacement_phase(
+                            http_request,
+                            "chat",
+                            "admission",
+                            admission_started_ns,
+                        )
+                        if reservation_error is not None:
+                            return reservation_error
+                        _mark_tenant_dispatched(http_request)
+                        judged, disconnect_response = await _run_until_client_disconnect(
+                            http_request,
+                            selected.judge_role_profile(orchestration_request),
+                        )
+                        if disconnect_response is not None:
+                            return disconnect_response
+                        orchestration_request = judged
                     prepared_orchestration = await selected.prepare_request(orchestration_request)
-                    bound = await selected.admission_upper_bound_async(orchestration_request)
+                    if not judge_will_run:
+                        bound = await selected.admission_upper_bound_async(orchestration_request)
                 except UpstreamClientError as error:
+                    _record_profile_judge_preflight_usage(
+                        http_request,
+                        request.model,
+                        prompt,
+                        orchestration_request,
+                    )
                     chat_error = chat_error_from_upstream_client_error(error)
                     return JSONResponse(
                         status_code=chat_error.status_code,
                         content={"error": chat_error.payload()},
                     )
                 except ValueError as error:
+                    _record_profile_judge_preflight_usage(
+                        http_request,
+                        request.model,
+                        prompt,
+                        orchestration_request,
+                    )
                     return invalid_request(str(error))
                 except RuntimeError as error:
+                    _record_profile_judge_preflight_usage(
+                        http_request,
+                        request.model,
+                        prompt,
+                        orchestration_request,
+                    )
                     return upstream_error(error)
             finally:
                 _record_preplacement_phase(
@@ -2407,16 +2459,17 @@ def create_app(
                     "routing_preflight",
                     routing_started_ns,
                 )
-            admission_started_ns = time.perf_counter_ns()
-            reservation_error = _reserve_tenant_work(http_request, bound)
-            _record_preplacement_phase(
-                http_request,
-                "chat",
-                "admission",
-                admission_started_ns,
-            )
-            if reservation_error is not None:
-                return reservation_error
+            if not judge_will_run:
+                admission_started_ns = time.perf_counter_ns()
+                reservation_error = _reserve_tenant_work(http_request, bound)
+                _record_preplacement_phase(
+                    http_request,
+                    "chat",
+                    "admission",
+                    admission_started_ns,
+                )
+                if reservation_error is not None:
+                    return reservation_error
             # Tool choices must be validated across every final choice before
             # any bytes become irrevocable SSE output. Indexed alternatives
             # and logprobs otherwise stay on the low-latency pull-through path.
@@ -2644,9 +2697,7 @@ def create_app(
             if lease.decision.action == "shed":
                 return _slo_shed_response()
             slo_lease = lease
-            http_request.scope.setdefault("state", {})[
-                _SLO_ADMISSION_LEASE_STATE_KEY
-            ] = lease
+            http_request.scope.setdefault("state", {})[_SLO_ADMISSION_LEASE_STATE_KEY] = lease
             generation_request = validated.generation_request
             if lease.decision.action == "defer":
                 admission_request = replace(

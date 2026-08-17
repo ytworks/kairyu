@@ -98,6 +98,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-17 — [amendment] Profile judge work obeys tenant accounting
+- What: profile-judge GPU work is reserved before dispatch, included in
+  cumulative orchestration usage and metering, and emitted as a structured
+  trace event; the reservation covers the judge plus the larger profile DAG.
+- Why: PR #516 review found that the pre-admission judge call bypassed tenant
+  token quotas and discarded backend-reported usage.
+- Refs: PR #516 review; `kairyu/orchestration/`;
+  `kairyu/entrypoints/server/app.py`
+
 ### 2026-08-17 — [design] General ensemble profile and Terminal-Bench latency fixes
 - What: `general_roles` — a second full-ensemble DAG under one served model,
   deterministically selected (tools/format-demand/non-code → general; code

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from kairyu.engine.prompt import MultimodalPrompt
+from kairyu.orchestration.trace import TraceEvent
 from kairyu.sampling_params import (
     PARALLEL_TOOL_CALLS_EXTRA_ARG,
     SamplingParams,
@@ -46,6 +47,12 @@ class OrchestrationRequest:
     # the pure profile function reads the same decision. None means no
     # judgment was made and the deterministic code-task signal applies.
     role_profile_judgment: str | None = None
+    # One request-local observation of the optional judge call. Carrying the
+    # exact event with the immutable call lets pre-admission judgment remain
+    # visible to later result accounting and structured trace construction.
+    # None means the judge was deterministically skipped, not that a dispatched
+    # call necessarily failed to return a verdict.
+    role_profile_judge_event: TraceEvent | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -57,13 +64,16 @@ class OrchestrationRequest:
             self.sampling_params.extra_args,
         )
         if self.tool_call_protocol not in {"generic", "llama", "qwen", "deepseek_v4"}:
-            raise ValueError(
-                "tool_call_protocol must be generic, llama, qwen or deepseek_v4"
-            )
+            raise ValueError("tool_call_protocol must be generic, llama, qwen or deepseek_v4")
         if self.reasoning_effort not in {None, "low", "high", "max"}:
             raise ValueError("reasoning_effort must be low, high, max, or null")
         if self.role_profile_judgment not in {None, "code", "general"}:
             raise ValueError("role_profile_judgment must be code, general, or null")
+        if self.role_profile_judge_event is not None and not isinstance(
+            self.role_profile_judge_event,
+            TraceEvent,
+        ):
+            raise TypeError("role_profile_judge_event must be a TraceEvent or null")
         if self.conversation_affinity_key is not None and (
             not isinstance(self.conversation_affinity_key, str)
             or not self.conversation_affinity_key
@@ -76,16 +86,11 @@ class OrchestrationRequest:
             raise TypeError("multimodal_prompt must be a MultimodalPrompt or null")
         if self.chat_template_kwargs is not None:
             if self.multimodal_prompt is None:
-                raise ValueError(
-                    "chat_template_kwargs require a multimodal orchestration prompt"
-                )
+                raise ValueError("chat_template_kwargs require a multimodal orchestration prompt")
             if not isinstance(self.chat_template_kwargs, Mapping) or any(
-                not isinstance(key, str) or not key
-                for key in self.chat_template_kwargs
+                not isinstance(key, str) or not key for key in self.chat_template_kwargs
             ):
-                raise TypeError(
-                    "chat_template_kwargs must map non-empty string keys or be null"
-                )
+                raise TypeError("chat_template_kwargs must map non-empty string keys or be null")
             object.__setattr__(
                 self,
                 "chat_template_kwargs",
