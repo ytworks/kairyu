@@ -66,7 +66,7 @@ network-less sandbox before synthesis is verified.
 
 ```mermaid
 flowchart LR
-    subgraph Q["Qwen3.8-27B TP1 pool - GPU 0-3, MTP-3"]
+    subgraph Q["Qwen3.8-27B TP1 pool - GPU 0-3, no MTP"]
         H["head<br/>streams public opening at t=0"]
         T["testgen<br/>pytest file or NOT_APPLICABLE"]
         P1["proposal_impl<br/>T=0.7"]
@@ -108,7 +108,7 @@ contribute.
 
 ```mermaid
 flowchart LR
-    subgraph Q2["Qwen3.8-27B TP1 pool - GPU 0-3, MTP-3"]
+    subgraph Q2["Qwen3.8-27B TP1 pool - GPU 0-3, no MTP"]
         GH["head_general<br/>streams public opening at t=0"]
         GP1["proposal_direct<br/>T=0.7"]
         GP2["proposal_alt<br/>T=1.0, edge-case biased"]
@@ -147,12 +147,12 @@ chunked batching, and full/piecewise CUDA Graphs.
 
 The Qwen replicas carry the single-GPU winner
 (`max_num_batched_tokens=32768`, `max_num_seqs=32`, FP8 KV, FP16
-Gated-DeltaNet state, piecewise CUDA Graphs) plus one measured deviation:
-MTP-3 speculative decoding, adopted for this deployment's role-shaped load
-(c1 +43.9%, c4/c8 aggregate +26%, lossless — see
-[MEASUREMENTS.md](MEASUREMENTS.md)); the 1-GPU general-API example stays
-no-MTP because its c16/c32 criterion regressed there. Qwen runs on official
-vLLM v0.23.0. DeepSeek intentionally stays on the measured
+Gated-DeltaNet state, piecewise CUDA Graphs) with speculative decoding disabled.
+MTP-3 remains a measured candidate: it improved the role-shaped c1/c4/c8 rows,
+but this public deployment admits c16/c32 matrices and the matching Qwen TP1
+saturation rows regressed. Re-enable it only after the deployed high-concurrency
+envelope passes without regression (see [MEASUREMENTS.md](MEASUREMENTS.md)).
+Qwen runs on official vLLM v0.23.0. DeepSeek intentionally stays on the measured
 `aa0d513027` SM120 build because v0.23.0 does not support this checkpoint's
 DSpark path and its generic MTP loader cannot load the 0731 MTP weights.
 

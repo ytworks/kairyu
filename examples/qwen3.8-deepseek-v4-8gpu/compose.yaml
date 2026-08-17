@@ -68,16 +68,8 @@ x-qwen: &qwen
     - --tool-call-parser
     - qwen3_coder
     - --disable-uvicorn-access-log
-    # MTP-3 speculative decoding (issue #509): lossless per vLLM's rejection
-    # sampling, measured on this deployment's role-shaped load (5K-token
-    # prefix-cached prompt, 512-token T=0.7 outputs, GPU 3): c1 45.6->65.6
-    # tok/s (+43.9%), c4 aggregate 166.8->210.7 (+26.3%), c8 334.4->421.1
-    # (+25.9%). The 1-GPU general API example keeps no-MTP because its
-    # c16/c32 rows regressed and MTP disables min_p/logit_bias; here the Qwen
-    # workers serve L2 roles whose sampling never uses those features and
-    # per-replica concurrency stays in the measured winning band.
-    - --speculative-config
-    - '{"method":"mtp","num_speculative_tokens":3}'
+    # MTP stays disabled until the deployed c16/c32 serving envelope is
+    # measured without regression; see MEASUREMENTS.md (issue #509).
   healthcheck: &health
     test: [CMD, python3, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)']
     interval: 5s

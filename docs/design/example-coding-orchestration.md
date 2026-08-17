@@ -272,6 +272,16 @@ the conversation, letting the prefix-indexed replicas reuse the
 conversation KV. Both edits invalidate the measured artifact until the
 `verify.sh` gates are re-run.
 
+Review amendment (2026-08-17, issue #509 — Qwen MTP concurrency envelope):
+the MTP-3 candidate stays disabled in the selected four-replica deployment.
+Its role-shaped evidence covers only c1/c4/c8, while the public product admits
+256 requests and the committed serving gates include c16/c32. The matching
+Qwen TP1 saturation rows regressed with MTP-3, so assuming fan-out always keeps
+per-replica overlap below c8 is not an accepted capacity proof. Re-enable MTP
+only after the deployed configuration passes c1/c8/c16/c32 without aggregate
+throughput or tail-latency regression; the c1/c4/c8 measurements remain
+recorded as candidate evidence.
+
 The example gate: `./verify.sh serving-auto-max-coding` runs a deterministic
 self-contained Python-task matrix (c1/8/16/32), requires a valid trace with a
 successful head and continuation in every sample, and counts a sample as

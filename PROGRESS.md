@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-15. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-08-17. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example is a coding-first product: an L1 fleet of four Qwen3.8 TP1 vLLM workers (measured MTP-3 spec decode) + the measured DeepSeek TP4/EP4 DSpark worker, under a nine-role coding L2 DAG plus a seven-role general ensemble profile auto-selected for agent/format-constrained and non-code turns (never a direct single-engine route) where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds a networkless CPU sandbox over a Unix-socket transport, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example is a coding-first product: an L1 fleet of four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker, under a nine-role coding L2 DAG plus a seven-role general ensemble profile auto-selected for agent/format-constrained and non-code turns (never a direct single-engine route) where a Qwen head streams the public answer opening from t=0 (~0.3 s at c1; semantic-TTFT gate ≤2× the DeepSeek-direct row), Qwen test/proposal fan-out feeds a networkless CPU sandbox over a Unix-socket transport, and a verified DeepSeek continuation streams the remainder after the committed opening; non-coding requests skip execution locally. Launcher readiness proves the DAG, executor binding, and a two-input 384-dimensional embedding response. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-17 — [amendment] Tiered Qwen MTP remains candidate-only
+- What: removed MTP-3 from the selected four-replica Qwen deployment while
+  retaining its c1/c4/c8 measurements as candidate evidence; compose, metadata,
+  tests, and operator docs now agree on no speculation.
+- Why: the public product admits 256 requests and gates c16/c32, but the new
+  role-shaped run stopped at c8; the matching Qwen TP1 c16/c32 rows regressed,
+  so the deployed high-concurrency envelope was not proven safe.
+- Refs: #509; ECO-D4 2026-08-17 Qwen MTP concurrency amendment;
+  `examples/qwen3.8-deepseek-v4-8gpu/`
 
 ### 2026-08-17 — [design] General ensemble profile and Terminal-Bench latency fixes
 - What: `general_roles` — a second full-ensemble DAG under one served model,
