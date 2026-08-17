@@ -267,15 +267,13 @@ this is a pure latency/throughput decision.
 | no speculation (baseline) | 45.63 | 166.78 | 334.42 |
 | MTP-3 | **65.64 (+43.9%)** | **210.66 (+26.3%)** | **421.11 (+25.9%)** |
 
-MTP-3 is adopted for all four Qwen workers: it exceeds the +30% single-stream
-adoption bar and does not regress aggregate throughput anywhere in the
-per-replica concurrency band this DAG produces (roles fan out across four
-replicas, so per-replica overlap stays at or below the measured c8 row). The
-1-GPU general API example keeps its no-MTP envelope: its selection criterion
-includes c16/c32 saturation rows, where MTP-3 was measured regressing, and
-MTP disables `min_p`/`logit_bias`, which a general OpenAI surface must keep —
-this deployment's Qwen workers serve L2 role sampling that never uses those
-features.
+MTP-3 remains candidate-only. The role-shaped c1/c4/c8 result does not prove
+that the deployed public envelope is safe: Kairyu admits 256 requests and the
+committed serving matrices exercise c16/c32, while the matching Qwen TP1
+saturation rows measured MTP-3 regressing. MTP also disables
+`min_p`/`logit_bias`. The four Qwen workers therefore keep the no-speculation
+baseline until the same deployed configuration passes c1/c8/c16/c32 without
+aggregate-throughput or tail-latency regression.
 
 ## Tier2 speculation, batch-budget, and CUDA Graph selection
 

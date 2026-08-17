@@ -63,6 +63,7 @@ def test_tiered_browser_gate_requires_one_model_and_separate_reasoning_ui() -> N
 def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> None:
     spec = json.loads((EXAMPLE / "example.json").read_text())
     compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
+    kairyu = yaml.safe_load((EXAMPLE / "kairyu.yaml").read_text())
 
     assert spec["hardware"] == {
         "gpu_count": 8,
@@ -118,6 +119,9 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         compose["services"]["kairyu"]["volumes"]
     )
     assert spec["vllm"]["qwen"]["release"] == "v0.23.0"
+    assert spec["vllm"]["qwen_mtp_speculative_tokens"] == 0
+    qwen_options = kairyu["pools"]["qwen3.8-27b"]["replicas"][0]["options"]
+    assert qwen_options["mtp_enabled"] is False
     assert {
         compose["services"][service]["image"]
         for service in ("qwen-0", "qwen-1", "qwen-2", "qwen-3")
@@ -146,12 +150,9 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         assert json.loads(
             _option(service["command"], "--compilation-config")
         ) == {"cudagraph_mode": "PIECEWISE"}
-        # Issue #509: measured MTP-3 adoption (c1 +43.9%, c4/c8 aggregate
-        # +26%, lossless); see the example's MEASUREMENTS.md selection.
-        assert json.loads(_option(service["command"], "--speculative-config")) == {
-            "method": "mtp",
-            "num_speculative_tokens": 3,
-        }
+        # Issue #509: c1/c4/c8 gains do not cover the deployed c16/c32
+        # envelope, so Qwen MTP stays candidate-only.
+        assert "--speculative-config" not in service["command"]
         assert service["volumes"][-2]["target"] == "/root/.cache"
         assert service["volumes"][-1] == (
             "../qwen3.8-27b-1gpu/chat_template.jinja:"
