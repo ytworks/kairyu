@@ -337,7 +337,7 @@ DeepSeek deep proposal, Qwen synthesis, thinking DeepSeek verification
 (format deviation is a FAIL), and the direct DeepSeek publisher with the
 same `prompt_headless`/`reasoning_closed`/NO_CONTINUATION contracts as the
 coding continuation. The chosen profile is recorded in the result trace
-(`role profile: …`) and `/v1/route` reports both role sets; launcher
+(`role profile: …`) and `/routing` reports both role sets; launcher
 readiness (`control.py`) asserts the general role list like the coding one.
 
 Review amendment (2026-08-17, issue #509 — LLM profile judge, owner
@@ -361,7 +361,7 @@ model call. The judge is availability-neutral: on timeout, backend error,
 or an unparseable verdict the call stays unattached and the deterministic
 code-task signal decides, so a judge outage degrades to the pre-amendment
 behavior instead of failing or delaying requests. The verdict is recorded
-in the result trace (`profile judge: …`) and `/v1/route` reports the judge
+in the result trace (`profile judge: …`) and `/routing` reports the judge
 configuration.
 
 ## Acceptance
