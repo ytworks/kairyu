@@ -334,6 +334,14 @@ def test_general_roles_profile_loads_and_builds():
     assert "profile_selector" in descriptor
 
 
+def test_general_roles_reject_moa_mode():
+    with pytest.raises(
+        ValidationError,
+        match="general_roles cannot be combined with moa_samples > 0",
+    ):
+        load_spec(GENERAL_PROFILE_SPEC + "\nmoa_samples: 2\n")
+
+
 def test_general_roles_are_validated_like_primary_roles():
     with pytest.raises(ValidationError, match="general_roles.*unknown worker"):
         load_spec(

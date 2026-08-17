@@ -1495,6 +1495,21 @@ def test_requires_at_least_one_engine():
         Orchestrator(engines={})
 
 
+def test_direct_general_roles_reject_moa_mode():
+    from kairyu.orchestration.conductor import RoleSpec
+
+    with pytest.raises(
+        ValueError,
+        match="general_roles cannot be combined with moa_samples > 0",
+    ):
+        _orchestrator(
+            general_roles=(
+                RoleSpec(name="general", worker="tier1", prompt="{query}"),
+            ),
+            moa_samples=2,
+        )
+
+
 def _profiled_orchestrator(tier1, tier2):
     # Issue #509: one served model, two ensemble DAGs. The coding profile is
     # a single synthesizer; the general profile fans out before its final.
