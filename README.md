@@ -12,7 +12,7 @@ chunked-prefill scheduler, speculative decoding, xgrammar structured output, TP/
 FP8/INT8/AWQ/GPTQ/NVFP4 quantization) serves real checkpoints through the same pluggable
 backend seam.
 
-- **Python**: 3.11+ &nbsp;|&nbsp; **License**: MIT &nbsp;|&nbsp; **Tests**: 800+ (coverage gate 80%, currently ~92%)
+- **Python**: 3.11+ &nbsp;|&nbsp; **License**: MIT &nbsp;|&nbsp; **Tests**: 5,000+ (coverage gate 80%)
 
 ---
 
@@ -526,8 +526,7 @@ Mixture-of-Agents instead of the Conductor.
 
 ### 6.2 Declarative agent pools (YAML / decorators)
 
-Workers, a role DAG, and a budget in one file
-([`examples/agent_pool.yaml`](examples/agent_pool.yaml) is the complete version):
+Workers, a role DAG, and a budget in one file:
 
 ```yaml
 # pool.yaml
@@ -581,10 +580,10 @@ spec is available as a decorator front-end via `kairyu.dsl.decorators.AgentPool`
 ### 6.3 Serving orchestration (`kairyu-auto`)
 
 A DeploymentSpec can serve any number of **named orchestrations alongside plain models** —
-clients just pick a model name
-([`examples/deploy_multi_orchestrator.yaml`](examples/deploy_multi_orchestrator.yaml)):
+clients just pick a model name:
 
 ```yaml
+# deploy.yaml
 engines:
   m1: {backend: mock}                # local kairyu/vllm in production; see policy below
   m2: {backend: mock}
@@ -599,7 +598,7 @@ legacy_chat_models: [kairyu-auto, kairyu-auto-max]  # explicit mock-demo framing
 ```
 
 ```bash
-uv run kairyu serve examples/deploy_multi_orchestrator.yaml
+uv run kairyu serve deploy.yaml
 curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model": "kairyu-auto", "messages": [{"role": "user", "content": "hi"}]}'
 ```
@@ -828,13 +827,13 @@ gateways, install `--extra fleet` and select `store: postgres`,
 | | `num_pages` | 4096 | KV pool pages |
 | | `page_size` | 16 | tokens per KV page |
 | | `max_num_batched_tokens` | 2048 | chunked-prefill budget per step |
-| | `speculative` | null | `"ngram"` enables speculative decoding |
+| | `speculative` | null | `"ngram"` (prompt-lookup), `"eagle"`, or `"mtp"` (learned draft heads) enables speculative decoding |
 | | `speculative_tokens` | 4 | draft length k |
 | | `tensor_parallel_size` | 1 | TP degree; >1 spawns a multi-process TP worker group from the serve process (gloo on CPU, NCCL on GPU) |
 | | `pipeline_depth` | 1 | unified engine-loop depth; 1 preserves synchronous scheduling, 2+ schedules immutable step snapshots ahead of the oldest device commit |
 | | `decode_mode` | `"eager"` | `"cuda_graph"` enables bucketed CUDA-graph decode for a real CUDA model; unsupported hardware/model/attention combinations fail at startup |
-| | `cuda_graph_max_batch` | 8 | largest captured decode batch; larger batches use eager decode |
-| | `cuda_graph_max_pages` | 512 | fixed page-table width per captured bucket; longer sequences use eager decode; must be smaller than `num_pages` |
+| | `cuda_graph_max_batch` | `max_num_seqs` (256) | largest captured decode batch; larger batches use eager decode |
+| | `cuda_graph_max_pages` | covers the model context | fixed page-table width per captured bucket; the default covers the configured context bounded by usable KV pages; longer sequences use eager decode; cannot exceed the usable KV page capacity |
 | | `cuda_graph_warmup_iters` | 3 | side-stream warmup iterations before first capture |
 | | `pd_separation` | `false` | build separate prefill and decode engines; currently requires a real model, TP=1, eager decode, and no speculative decoding |
 | | `pd_prefill_device` | auto | prefill role device (`cpu` or `cuda:N`); requires `pd_separation`; its hardware profile and attention backend are selected for this device |

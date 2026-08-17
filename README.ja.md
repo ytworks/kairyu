@@ -12,7 +12,7 @@ Python API とひとつの OpenAI 互換エンドポイントの背後に統合�
 デコーディング、xgrammar による構造化出力、TP/EP/PP、FP8/INT8/AWQ/GPTQ/NVFP4 量子化)
 が、同一のプラガブルなバックエンドシームを通して実チェックポイントを提供します。
 
-- **Python**: 3.11+ &nbsp;|&nbsp; **ライセンス**: MIT &nbsp;|&nbsp; **テスト**: 800+(カバレッジゲート 80%、現在 ~92%)
+- **Python**: 3.11+ &nbsp;|&nbsp; **ライセンス**: MIT &nbsp;|&nbsp; **テスト**: 5,000+(カバレッジゲート 80%)
 
 ---
 
@@ -208,7 +208,7 @@ max_cost_usd)` は、プラガブルな `CostModel` を通して各ユニット�
 | ステップループ | `engine_core.py`, `overlap.py`, `pipeline.py` | `ModelRunner` プロトコル + `StepOutput` コントラクト。`OverlapEngineCore` はデバイスがステップ N を実行中にステップ N+1 を計画。`PipelinedEngineCore` はステップ間のパイプライン並列を追加。 |
 | モデルランナー + サンプラー | `model_runner.py`, `sampler.py` | 実チェックポイント上のページド forward。サンプラーは固定演算順(logprobs → xgrammar 文法マスク → ペナルティ → temperature → min-p/top-k/top-p → シード付きサンプル)で、決定的な splitmix64 シードにより TP の全ランクが同一サンプルを得る。 |
 | 投機的デコーディング | `spec_runner.py`, `draft.py` | `SpeculativeRunner` は任意の `ModelRunner` をラップ: デフォルトは n-gram プロンプト参照ドラフト、EAGLE-3 / MTP ヘッド(`kairyu/models/eagle.py`, `mtp.py`)は `ModelDraftSource` 経由。greedy 検証で「出力が通常デコードと同一」という不変条件をテストで担保。 |
-| アテンションバックエンド | `attention/` | `AttentionBackend` プロトコル: `torch`(デバイス非依存のページドアテンション)、FlashInfer アダプタ(コントラクト固定)、DeepSeek 用 MLA リファレンス数学。ハードウェアプロファイルまたは `KAIRYU_ATTENTION_BACKEND` で選択。 |
+| アテンションバックエンド | `attention/` | `AttentionBackend` プロトコル: `torch`(デバイス非依存のページドアテンション)、FlashInfer、FlashAttention-3/4 prefill アダプタ、DeepSeek 用 MLA リファレンス数学。ハードウェアプロファイルまたは `KAIRYU_ATTENTION_BACKEND` で選択。 |
 | CUDA グラフシーム | `step_executor.py`, `graph_buckets.py` | バケットごとに 1 回キャプチャして静的デバイスバッファで再生。CPU 上でフェイクグラフバックエンドに対して固定済み。CUDA を触るのは `cuda_graph_gpu.py` のみ。 |
 | 分散実行 | `worker.py`, `dist_comm.py`, `pp_worker.py` | TP(rank 0 がスケジューラを駆動、スナップショットブロードキャスト、ランクごとのシャード済み safetensors ロード)、EP(MoE all-to-all)、PP(ステージスライス)— デフォルトテストスイート内で gloo によるパリティゲート済み。NCCL はコンストラクタ引数。 |
 | P-D 分離 + KV トランスポート | `pd.py`, `pd_remote.py`, `kv_serde.py`, `kv_transport*.py` | prefill/decode の分離をプロセス内、または実 2 プロセス間で TCP バイトパリティ付き KV 転送により実現。NIXL/RDMA アダプタ準備済み。 |
@@ -275,8 +275,36 @@ uv sync --group dev           # + テスト/lint ツールチェーン
 | `--extra fleet` | pyzmq, msgpack, psycopg | プロセス分離エンジン、KV イベントトランスポート、PostgreSQL 共有 BatchStore |
 | `--extra otel` | opentelemetry-sdk | トレーシングスパン(なければ no-op) |
 | `--extra gpu` | flashinfer, triton, nixl | GPU カーネル/ファブリック(Linux 限定マーカー。macOS の `uv sync` はスキップ) |
+| `--extra flashattention4` | `flash-attn-4[cu13]==4.0.0b24` | opt-in の FlashAttention-4 prefill カーネル(upstream 推奨の CUDA 13 extra を使用、Linux 限定。FlashInfer への delegated decode には `--extra gpu` を併用。両方とも `Dockerfile.cuda` に含まれる) |
 | `--extra evals` | datasets/HF Hub、評価形式、進捗 UI、固定 IFEval scorer 依存 | checkout 専用の Core、Quantization、Structured Output、Long Context 評価 |
 | `--group dev` | pytest, ruff, transformers, openai, … | テストスイート + パリティゴールデン |
+
+FlashAttention-3 は公式 upstream のソースツリーからビルドします。サポート対象の
+ビルドは FA4 パッケージと同じ immutable な upstream snapshot(タグ
+`fa4-v4.0.0.beta24`)に固定されています:
+
+```bash
+uv sync --extra gpu
+git clone https://github.com/Dao-AILab/flash-attention.git
+cd flash-attention
+git checkout 849f660f73b176e5ad5670e7f822c7fa9f3eaf8b
+git submodule update --init --recursive
+cd hopper
+python setup.py install
+```
+
+パッケージ版 FA4 は FlashInfer decode 依存と併せてインストールします:
+
+```bash
+uv sync --extra gpu --extra flashattention4
+```
+
+Kairyu が公式にサポートするのは SM90 + CUDA 12.3 以降でのこの upstream FA3
+アダプタです。代表的な SM90 GPU がない環境では、注入したフェイクモジュールで
+deferred import・API・shape・アーキテクチャ契約を検証します。明示的な FA3 選択は、
+パッケージ・API・shape・ハードウェアが一致しない場合 fail-closed で起動に失敗します。
+フェイク契約のカバレッジは性能結果ではなく、FA3 をデフォルト選択する根拠には
+なりません。
 
 vLLM は Linux GPU ホストで `vllm` バックエンドを使う場合のみ必要です(同一環境に
 インストールしてください)。
@@ -357,7 +385,8 @@ print(llm.generate(["What is paged attention?"], SamplingParams(max_tokens=64)))
 から自動検出されます。主なコンストラクタオプション(DeploymentSpec の `options:` と
 しても指定可能 — [バックエンドオプション表](#バックエンドオプション-enginesoptions)
 参照): `tokenizer`、`num_pages`、`page_size`、`max_num_batched_tokens`、
-`speculative="ngram"`、`tensor_parallel_size`、CUDA 上の
+`speculative="ngram"`、`tensor_parallel_size`、`pipeline_depth`(1 は同期互換、
+2 で schedule/device のオーバーラップ)、CUDA 上の
 `decode_mode="cuda_graph"`、prefill/decode 分離用の
 `pd_separation`／`pd_prefill_device`／`pd_decode_device`／
 `pd_defer_handoff`。
@@ -402,6 +431,8 @@ engines:
     backend: kairyu              # または: kairyu-proc | vllm | openai | mock
     options:
       model_path: /models/qwen2.5-0.5b-instruct
+      generation_config: auto    # auto | vllm | none。既定値は auto
+      pipeline_depth: 2         # 1 は同期動作を維持
       decode_mode: cuda_graph   # 明示的 opt-in。既定値は eager
       cuda_graph_max_batch: 8
       cuda_graph_max_pages: 64  # より長い page table は安全に eager へ fallback
@@ -416,6 +447,18 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 テンソル並列は YAML のエンジンごとに設定します
 (`options: {tensor_parallel_size: 2}`)— serve プロセスがマルチプロセスの TP ワーカー
 グループをスポーンします(CPU では gloo、GPU では NCCL)。CLI フラグはありません。
+
+ネイティブの `kairyu` / `kairyu-proc` エンジンは `generation_config: auto` により、
+リクエストでそのフィールドが省略された場合に限り、モデルの
+`generation_config.json` から `temperature`、`top_p`、`top_k`、`min_p`、
+`repetition_penalty` を適用します。`temperature: 1.0` のような中立値を含め、明示的な
+リクエスト値が常に優先されます。`vllm` はモデルの stop-token メタデータを保持しつつ
+中立のサンプリングデフォルトを使い、`none` は generation ファイルを完全に無視します。
+`kairyu serve CONFIG --generation-config MODE` は、ローカルに構築されるすべての
+ネイティブエンジン・プールレプリカ・リンクされたオーケストレータワーカーについて
+YAML のモードを上書きします。`/backends` は解決されたモード、ソース、5 つの実効
+サンプリングデフォルトを報告し、オーケストレートされたモデルではワーカーごとの
+レコードも含みます。
 
 prefill/decode 分離もエンジンごとに設定します。次の例では、相互に peer access
 可能な CUDA GPU ペアへ各ロールを配置します:
@@ -447,8 +490,9 @@ decode、投機的デコーディングなしを必須とします。
 
 提供エンドポイント: `/v1/chat/completions`(SSE ストリーミング、tools、logprobs、
 `n>1`、`response_format: json_schema`、vision コンテンツパーツ)、`/v1/completions`、
-`/v1/models`、`/v1/embeddings`、`/v1/responses`(型付き SSE、function tools、
-継続状態)、`/v1/files` + `/v1/batches`、`/health`、`/readyz`、
+`/v1/models`、`/v1/route`(ディスパッチしないルートプレビュー)、
+`/routing`(ルーティング記述子)、`/v1/embeddings`、`/v1/responses`(型付き SSE、
+function tools、継続状態)、`/v1/files` + `/v1/batches`、`/health`、`/readyz`、
 `/metrics`(Prometheus)、`/admin/*`。
 全リストは[設定リファレンス](#http-サーフェス)を参照してください。
 
@@ -493,8 +537,7 @@ Mixture-of-Agents を通ります。
 
 ### 6.2 宣言的エージェントプール(YAML / デコレータ)
 
-ワーカー、ロール DAG、予算を 1 ファイルで宣言します
-(完全版は [`examples/agent_pool.yaml`](examples/agent_pool.yaml)):
+ワーカー、ロール DAG、予算を 1 ファイルで宣言します:
 
 ```yaml
 # pool.yaml
@@ -549,10 +592,10 @@ print(result.route.target, result.text)
 ### 6.3 オーケストレーションを提供する(`kairyu-auto`)
 
 DeploymentSpec は、**通常のモデルと並べて任意個の名前付きオーケストレーション** を
-提供できます — クライアントはモデル名を選ぶだけです
-([`examples/deploy_multi_orchestrator.yaml`](examples/deploy_multi_orchestrator.yaml)):
+提供できます — クライアントはモデル名を選ぶだけです:
 
 ```yaml
+# deploy.yaml
 engines:
   m1: {backend: mock}                # 本番の local kairyu/vllm は下記 policy を参照
   m2: {backend: mock}
@@ -567,7 +610,7 @@ legacy_chat_models: [kairyu-auto, kairyu-auto-max]  # mock デモ用の明示的
 ```
 
 ```bash
-uv run kairyu serve examples/deploy_multi_orchestrator.yaml
+uv run kairyu serve deploy.yaml
 curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model": "kairyu-auto", "messages": [{"role": "user", "content": "hi"}]}'
 ```
@@ -577,8 +620,10 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 - ストリーミングは任意の OpenAI SDK で動作します: 直接ルートはトークンデルタをライブ
   配信し、マルチステージルートはステージ間に SSE コメントのキープアライブを流した後、
   最終回答を返します。
-- `X-Kairyu-Trace: 1` を送ると、レスポンスに `kairyu_trace` ブロック(ルーティング
-  決定、ロールごとのイベント、予算状態)が付きます。
+- `X-Kairyu-Trace: 1` を送ると、unary レスポンスにレガシーの `kairyu_trace`
+  文字列リストに加えて `kairyu_trace_v2`(バージョン付きのルート / ロールタイミング /
+  usage / 予算イベント)が付きます。構造化イベントにプロンプトや生成テキストは
+  含まれません。
 - レガシーの単一 `orchestrator:` キーも引き続き動作し、`kairyu-auto` として提供され
   ます。
 
@@ -611,19 +656,42 @@ legacy_chat_models: [fleet]          # remote pool にはローカル tokenizer 
 ```bash
 ./scripts/compose_smoke.sh                     # Docker compose で 1 ゲートウェイ + 3 レプリカ
 docker compose -f deploy/compose/docker-compose.gpu.yaml up    # ゲートウェイ + GPU レプリカ
-docker compose -f deploy/compose/docker-compose.webui.yaml up  # Open WebUI + mock モデル `default`
-./scripts/webui_smoke.sh                       # WebUI 構成の Kairyu-only smoke (UI pull なし)
+docker compose -f deploy/compose/docker-compose.webui.yaml up -d --build --wait
+./scripts/webui_smoke.sh                       # ブラウザ E2E・障害・復旧のフルスモーク
+./scripts/webui_vlm_smoke.sh                   # 8-GPU Qwen3-VL 画像チャット E2E
 helm install kairyu deploy/helm/kairyu         # k8s チャート (+ values-gpu.yaml)
 ```
 
 Open WebUI デモは [`deploy/compose/config.yaml`](deploy/compose/config.yaml) を
-`/etc/kairyu/config.yaml` にマウントし、CPU-safe で keyless な mock モデル
-`default` を 1 つ提供します。実エンジンや認証ポリシーを使う場合はこのファイルを
-置き換えてください。WebUI サービスは render 後の内部 endpoint
-`http://kairyu:8000/v1` からモデルを検出します。`scripts/webui_smoke.sh` は
-この endpoint を検証し、Kairyu だけを起動して readiness、モデル ID の完全一致、
-non-streaming completion を確認します。可変な Open WebUI image の pull や
-browser test は意図的に行いません。
+`/etc/kairyu/config.yaml` にマウントし、keyless で CPU-safe な直接モデル
+`default` と、レガシーのオーケストレートモデル `kairyu-auto` を提供します。
+`http://localhost:3000` を開いて最初のアカウントを作成し、どちらかのモデルを
+選択してください。このトポロジーは Open WebUI v0.11.0 を immutable な
+linux/amd64 digest で固定します。名前付きデータボリュームには自動生成された
+secret が保存され、mock バックエンドはこのローカルデモ専用です。本番では
+deployment / orchestrator の spec と認証ポリシーを置き換えてください。
+`scripts/webui_smoke.sh` は完全なトポロジーを起動し、別途固定した Playwright
+イメージで、新規ユーザーセットアップ・モデル選択・ストリーミング・リロード後の
+永続性・可視的なゲートウェイ障害・Open WebUI を再起動しない復旧を証明します。
+各実行は分離された Compose プロジェクトを使い、そのプロジェクトの一時 WebUI
+ボリュームだけを削除するため、通常デモのデータには影響しません。
+
+実際の画像チャットには、opt-in の 8-GPU オーバーレイを追加します。これは
+revision 固定の Qwen3-VL-32B-Instruct を stock vLLM レプリカとして TP8 で起動し、
+順序付き OpenAI コンテンツパーツを Kairyu 経由でルーティングし、Kairyu-only の
+RAG エンドポイントはそのまま維持します:
+
+```bash
+docker compose \
+  -f deploy/compose/docker-compose.webui.yaml \
+  -f deploy/compose/docker-compose.webui-vlm.yaml \
+  up -d --build --wait
+```
+
+VLM 境界はインラインの PNG、JPEG、WebP 画像 1 枚を受け付け、リモート/ローカルの
+画像 URL は拒否します。`scripts/webui_vlm_smoke.sh` は、直接のセマンティック
+チェックと正確な usage チェック、および固定 Playwright ブラウザでの実際の
+Open WebUI owned-file アップロードの両方を実行します。
 
 本番運用の詳細(DC トポロジー、systemd、ローリングモデル更新、可観測性)は
 [`docs/deployment.md`](docs/deployment.md) にあります。
@@ -643,11 +711,13 @@ server:                        # ServerSection = バインドアドレス + Serv
   api_keys_env: KAIRYU_KEYS    # カンマ区切りキーの入った環境変数名; null = キーなし
                                #   (キーなし = 信頼されたノード間メッシュモード)
   max_concurrency: 256         # /v1/* 全体の同時実行キャップ; null で無効
+  ttft_slo_s: null             # 直接チャットの admit/defer/shed TTFT 目標; null で無効
   metrics: true                # /metrics (Prometheus) を公開
   protect_metrics: false       # /metrics にも API キーを要求
   access_log: true             # リクエストごとに JSON 1 行 (X-Request-ID をエコー)
   tracing: false               # OTel スパン (otel extra が必要; なければ no-op)
   usage_ledger_path: null      # JSONL 使用量台帳; GET /admin/usage を有効化
+  admin_keys_env: null         # /admin/* 変更操作キーの環境変数名
 
 tenants:                       # 任意: 認証済み API キー -> テナントの対応
   default_tenant: default      # 下にない解決済みキーはこのテナントを使用
@@ -655,8 +725,22 @@ tenants:                       # 任意: 認証済み API キー -> テナント
     key-a: team-a
     key-b: team-b
   limits:                      # 任意: 既知テナントごとの独立したバケット
-    team-a: {requests_per_minute: 60, tokens_per_minute: 10000}
-    team-b: {requests_per_minute: 120, tokens_per_minute: 20000}
+    team-a: {requests_per_minute: 60, tokens_per_minute: 10000,
+             request_burst: 4, token_burst: 2000, max_in_flight: 4,
+             interactive_priority: 0, batch_priority: 1}
+    team-b: {requests_per_minute: 120, tokens_per_minute: 20000,
+             request_burst: 8, token_burst: 4000, max_in_flight: 8,
+             interactive_priority: 0, batch_priority: 1}
+
+pricing:                       # 任意; server.usage_ledger_path が必要
+  version: "2026-07-27"        # 全 CSV 行に含まれる immutable な識別子
+  currency: USD
+  rates:                       # 100 万トークンあたりのブレンドレート
+    uncached_input_per_million: "2.00"
+    cached_input_discount: "0.50"  # uncached-input レートからの割引率
+    output_per_million: "10.00"
+  tenant_discounts:            # 任意; コンポーネント課金後に適用される割引率
+    team-a: "0.10"
 
 engines:                       # 提供モデル名 -> バックエンド 1 つ
   qwen:
@@ -728,6 +812,16 @@ text-only path 用に remote の提供モデルを `legacy_chat_models` へ列�
 remote backend に pre-rendered な Kairyu `chat_templates` を設定すると、二重 templating を
 防ぐため startup で拒否されます。
 
+分散トレーシングには `--extra otel` をインストールし、`server.tracing: true` を
+設定します。Kairyu は W3C `traceparent`/`tracestate` のみを伝播し、baggage は
+伝播せず、プロセスグローバルな tracer provider を置き換えません。組み込み先の
+アプリケーションは既存 provider を使うことも、`configure_tracing` で private な
+provider を注入することもできます。Compose の検証パスはサービスごとに異なる
+`OTEL_SERVICE_NAME` と `OTEL_TRACES_EXPORTER=console` を使いますが、そのコンパクトな
+`KAIRYU_OTEL_SPAN` レコードはデプロイスモークの証明であって、推奨される本番
+exporter ではありません。Kairyu は span 属性や exception イベントに例外テキスト、
+スタックトレース、プロンプト、出力を入れません。
+
 上記は単一ゲートウェイ用のファイルシステム既定値です。複数ゲートウェイでは
 `--extra fleet` をインストールし、`store: postgres`、
 `dsn_env: KAIRYU_BATCH_POSTGRES_DSN`、共通の `store_id` を指定します。詳細は
@@ -738,16 +832,19 @@ remote backend に pre-rendered な Kairyu `chat_templates` を設定すると�
 | backend | オプション | デフォルト | 意味 |
 |---|---|---|---|
 | `kairyu` | `model_path` | — | safetensors チェックポイントディレクトリ(Llama-3.x / Qwen2 / Qwen3 / Qwen3-MoE / DeepSeek-V3。FP8/INT8/AWQ/GPTQ/NVFP4 量子化チェックポイントは自動検出) |
+| | `generation_config` | `"auto"` | モデルのサンプリングデフォルトポリシー: `auto` はリクエストで省略されたフィールドにモデルファイルを適用、`vllm` は中立のサンプリングデフォルト、`none` はファイルを無視 |
+| | `nvfp4_accuracy_profile` | `null` | opt-in の NVFP4 projection セレクタ(`fp8`、`dynamic_activation`、`saturation_counters`)。計測用の精度/メモリ実験向けで、デフォルト実行は不変 |
 | | `tokenizer` | モデルディレクトリ | HF トークナイザディレクトリの上書き(`tokenizer.json`) |
 | | `num_pages` | 4096 | KV プールのページ数 |
 | | `page_size` | 16 | KV ページあたりのトークン数 |
 | | `max_num_batched_tokens` | 2048 | ステップあたりの chunked-prefill 予算 |
-| | `speculative` | null | `"ngram"` で投機的デコーディングを有効化 |
+| | `speculative` | null | `"ngram"`(prompt-lookup)、`"eagle"` / `"mtp"`(学習済みドラフトヘッド)で投機的デコーディングを有効化 |
 | | `speculative_tokens` | 4 | ドラフト長 k |
 | | `tensor_parallel_size` | 1 | TP 度数。>1 で serve プロセスからマルチプロセス TP ワーカーグループをスポーン(CPU は gloo、GPU は NCCL) |
+| | `pipeline_depth` | 1 | 統一 engine-loop の深さ。1 は同期スケジューリングを維持、2+ は最古の device commit より先に immutable な step snapshot をスケジュール |
 | | `decode_mode` | `"eager"` | `"cuda_graph"` で実 CUDA モデルの bucket 化 CUDA Graph decode を有効化。非対応の hardware/model/attention 構成は起動時にエラー |
-| | `cuda_graph_max_batch` | 8 | capture する最大 decode batch。超過 batch は eager decode |
-| | `cuda_graph_max_pages` | 512 | capture bucket の固定 page-table 幅。より長い系列は eager decode。`num_pages` 未満が必須 |
+| | `cuda_graph_max_batch` | `max_num_seqs`(256) | capture する最大 decode batch。超過 batch は eager decode |
+| | `cuda_graph_max_pages` | モデルコンテキストをカバー | capture bucket の固定 page-table 幅。デフォルトは利用可能な KV page 数を上限として設定済みコンテキストをカバー。より長い系列は eager decode。利用可能な KV page 容量を超えられない |
 | | `cuda_graph_warmup_iters` | 3 | 初回 capture 前に side stream で実行する warmup 回数 |
 | | `pd_separation` | `false` | prefill と decode を別 engine として構築。現在は実 model、TP=1、eager decode、投機的デコーディングなしが必須 |
 | | `pd_prefill_device` | 自動 | prefill ロールのデバイス(`cpu` または `cuda:N`)。`pd_separation` が必須で、このデバイス用の hardware profile と attention backend を選択 |
@@ -762,11 +859,30 @@ remote backend に pre-rendered な Kairyu `chat_templates` を設定すると�
 
 | 変数 | 効果 |
 |---|---|
-| `KAIRYU_ATTENTION_BACKEND` | `torch` \| `flashinfer` — ハードウェアプロファイルによるカーネル選択を上書き(無効な値は即座にエラー) |
+| `KAIRYU_ATTENTION_BACKEND` | `auto` \| `torch` \| `flashinfer` \| `flashattention3` \| `flashattention4` — アテンションバックエンドを選択 |
 | `server.api_keys_env` で指定した変数 | カンマ区切りの API キー |
 | `KAIRYU_BENCH_CACHE` | ベンチマークデータセットのキャッシュディレクトリ(デフォルト `~/.cache/kairyu/benchmarks`) |
 | `KAIRYU_MODEL_DIR` | `docker-compose.gpu.yaml` のモデルボリューム |
 | `GLOO_SOCKET_IFNAME` | macOS で gloo ランデブーが失敗する場合に `lo0` を設定(dist テスト) |
+| `OTEL_TRACES_EXPORTER` | tracing 有効時、`console` で Kairyu 内部のコンパクトな smoke exporter を有効化。アプリケーション所有の provider を使う場合は未設定にする |
+| `OTEL_SERVICE_NAME` | コンパクト smoke exporter が使うサービス識別子 |
+
+明示的な選択は厳格です: パッケージ欠如、非対応 GPU、非対応テンソル shape は
+実行可能なエラーとともに起動に失敗します。FA3 / FA4 は prefill を担当し、
+FlashInfer が paged decode を担当します。`/backends` は両コンポーネントを報告
+します。FA4 は SM90/SM100/SM110 では paged KV を直接消費し、SM120 では page の
+同一性を維持したまま選択 page を device-to-device で materialize して prefill
+します。FA4 beta24 はプロセスごとに 1 アーキテクチャをキャッシュするため、
+Kairyu は起動時に選択デバイス・環境上書き・upstream キャッシュを検証します。
+SM の混在する FA4 ロールは別プロセスで実行してください。`auto` は安定した
+ハードウェアプロファイルのフォールバック(対応 GPU ティアでは FlashInfer、
+それ以外は torch)を使い、保持されたプロファイル別の正当性・性能エビデンスが
+ない限り FA3 / FA4 へは昇格しません。プロファイル選択されたオプション
+バックエンドが構築できない場合、`auto` のみ torch にフォールバックし、
+`/backends` が実際のフォールバックとサニタイズ済みの失敗タイプを報告します。
+明示的な選択は引き続き起動失敗になります。公式デプロイはトラフィック受け付け前に
+`kairyu-proc` を eager に構築するため、`/readyz` が serving を報告する前に同じ
+チェックが適用されます。
 
 ### HTTP サーフェス
 
@@ -775,13 +891,29 @@ vision コンテンツパーツのワイヤ形式)、`/v1/completions`、`/v1/em
 (float + base64)、`/v1/responses`(`input`、`instructions`、正規の型付き SSE、
 通常／namespace function tools、`function_call_output`、テナント分離された
 `previous_response_id`)、`/v1/models`、`/v1/files` + `/v1/batches`、`/health`、
-`/readyz`、`/metrics`、`POST /admin/drain` / `POST /admin/undrain`(認証保護。drain は
+`/v1/route`、`/routing`、`/readyz`、`/backends`、`/metrics`、
+`POST /admin/drain` / `POST /admin/undrain`(認証保護。drain は
 readyz を 503 に切り替え)、`GET /admin/usage?tenant=`(台帳有効時)。
+`pricing:` を設定すると `GET /admin/usage.csv?tenant=&start_ts=&end_ts=` が
+呼び出し元スコープのインボイス CSV をエクスポートします。
+
+ネイティブエンジンでは `/backends` に generation-config のモード、解決された
+ソース、5 つの実効サンプリングデフォルトが含まれます。ローカルプールは、全メンバーが
+同一の完全なポリシーを持つ場合にのみそのレコードを昇格します。ゲートウェイの単一
+リモート監査サンプルは `via_replica` の下に明示的にネストされたままで、フリート全体の
+デフォルトとしては提示されません。オーケストレートされたモデルは全ワーカーレコードを
+公開し、全ワーカーが一致する場合のみトップレベルのポリシーに集約します。
 
 リクエスト拡張: `X-Session-ID`(または OpenAI の `user` フィールド)はセッションを
 温まった KV プレフィックスを持つレプリカに固定します。`X-Kairyu-Trace: 1` は
-`kairyu-auto` レスポンスに `kairyu_trace` ブロックを追加します。
+unary の `kairyu-auto` レスポンスにレガシーの `kairyu_trace` とバージョン付き
+`kairyu_trace_v2` ブロックを追加します。
 `stream_options: {include_usage: true}` は最後に usage チャンクを付加します。
+名前付き AUTO モデルは、直接チャットモデルと同じサンプリング、`n`、logprob、
+tool-choice、構造化出力フィールドを受け付けます。スカラーのサンプリングは
+公開された private max-token ポリシーの下で private なオーケストレーション
+ステージに到達し、正確な公開 max-token 制限、`n`、logprobs、tools、response
+grammar は選択された最終ワーカーまたは synthesis 境界に適用されます。
 
 Responses ストリームは `response.created` から `response.completed` または
 `response.incomplete` まで、OpenAI のイベント名と欠番のない sequence number を
@@ -791,6 +923,17 @@ function call の引数と結果は通常のチャットテンプレートおよ
 往復します。稼働中モデルに対する未変更 Codex CLI の確認には
 `scripts/codex_responses_smoke.sh` を使えます。接続設定と未対応機能は
 `docs/deployment.md` に記載しています。
+
+`POST /v1/route` は `{model, messages}` を受け取り、実際のチャットと同じモデル別
+チャットテンプレートを描画してから Router の非破壊 `preview()` を呼びます。
+エンジンをディスパッチすることはなく `binding:false` を返します。並行トラフィック
+により、後続の stateful なルーター決定は異なり得ます。`GET /routing` は
+ホワイトリスト化された Router 設定、実効ターゲットフォールバック、安全なエンジン
+メタデータ、ロール依存関係、予算を返します。認証免除パスではありません。unary の
+auto モデルレスポンスに構造化 `kairyu_route` が含まれるのは `X-Kairyu-Trace: 1`
+のときだけで、同じ opt-in が `docs/design/observability-trace-contract.md` に
+記述されたプライバシーセーフな構造化実行トレースを追加します。通常の OpenAI
+互換レスポンス形状は不変です。
 
 ### マルチテナンシー
 
@@ -802,17 +945,53 @@ function call の引数と結果は通常のチャットテンプレートおよ
 preflight で拒否されます。対応表のキーは環境変数名ではなく実際の API キー値なので、
 deployment file は secret を含む設定として保護してください。
 
-各テナントには、1 分あたりのリクエスト数とトークン数について独立したバケットが
-作られます。明示的な profile がないテナントにはデフォルト値(600 requests/min、
-200,000 tokens/min)が適用されます。認証はテナント制限より先に実行されるため、拒否
-された認証情報はバケットを消費しません。`server.usage_ledger_path` を設定すると、成功
-したリクエストの使用量は JSONL 台帳と `/admin/usage` の集計で、対応するテナント名の
-下にグループ化されます。
+各テナントには、1 分あたりのリクエスト数とトークン数の独立したバケット、明示的な
+request/token バースト容量、任意の in-flight キャップ、そして信頼される
+interactive/batch スケジューリングクラスが与えられます。設定された in-flight
+リースはグローバル同時実行ガードより先に獲得され、最後の SSE/body バイトまで保持
+されます。リクエスト検証後、Chat、Responses、Completions 配列、Batch 行、AUTO は
+レプリカディスパッチ前に最悪ケースの計算トークンをアトミックに予約します。候補
+prefill(`n`/`best_of`)と AUTO の内部ファンアウトも含まれます。単一候補の正確な
+最終 usage は未使用容量を返金し、失敗・切断・usage 欠落・複数候補の作業は保守的な
+予約を保持します。これにより、コールドまたはリソース重量級のバーストが共有
+ゲートウェイ/GPU スロットをすべて消費することを防ぎます。バーストフィールドを
+省略すると従来の 1 分バケット容量が維持され、`max_in_flight` を省略すると無制限の
+ままなので、レイテンシ分離が必要なデプロイでは 3 つとも明示的に設定してください。
+priority は小さい整数ほど先に実行されます。HTTP クライアントは設定済みゲートウェイ
+を通じて自己昇格できません: interactive リクエストは `interactive_priority`
+(デフォルト 0)、Batch API の行は `batch_priority`(デフォルト 1)を受け取り、
+すべてのプロファイルで interactive priority は batch priority より厳密に小さく
+なければなりません。信頼される値と有界クラスは Kairyu レプリカトランスポートを
+通して保持され、ローカル vLLM 実行では priority スケジューリングポリシーを強制する
+ため整数が黙って無視されることはありません。明示的な profile がないテナントには
+デフォルト値(600 requests/min、200,000 tokens/min)が適用されます。認証はテナント
+制限より先に実行されるため、拒否された認証情報はバケットを消費しません。
+`server.usage_ledger_path` を設定すると、成功したリクエストの使用量は JSONL 台帳と
+`/admin/usage` の集計で、対応するテナント名の下にグループ化されます。新しい行は
+cached / uncached の入力を明示的に保存し、古い行は
+`prompt_tokens - cached_tokens` から uncached 入力を導出します。
 
 プログラマティックな呼び出しでは、従来どおり runtime 設定を直接渡せます:
 `create_app(..., tenant_config=TenantConfig(key_tenants={"key-a": "team-a"},
 limits={"team-a": TenantLimits(requests_per_minute=600,
-tokens_per_minute=200_000)}))`。
+tokens_per_minute=200_000, request_burst=8, token_burst=20_000,
+max_in_flight=8)}))`。
+
+### 料金とインボイスエクスポート
+
+`pricing:` はバージョン付きのブレンド価格表であり、モデル別の課金按分では
+ありません。金額入力はすべて decimal として解析されるため、YAML では引用符で
+囲んで精度を保ってください。`cached_input_discount` と `tenant_discounts` は
+`[0, 1]` の割合です。課金額は通貨 6 桁で half-even 丸めされ、コンポーネント行は
+表示される小計と一致し、その後にテナント割引が適用されます。
+
+インボイス期間は `[start_ts, end_ts)` の Unix タイムスタンプです。CSV は
+uncached 入力・cached 入力・出力の数量、単価、コンポーネント課金、割引、合計を
+分離します。各行には価格表バージョン、通貨、immutable な台帳スナップショットの
+SHA-256、決定的なインボイス ID が含まれます。admin キーは全テナントまたは 1
+テナントをエクスポートでき、data-plane キーは対応付けられたテナントに限定された
+ままです。不正または途中で切れた台帳入力は、部分的なインボイスではなく
+`invoice_ledger_invalid` を返します。
 
 ### デプロイ成果物
 
@@ -822,9 +1001,11 @@ tokens_per_minute=200_000)}))`。
 | `deploy/compose/docker-compose.yaml` | ゲートウェイ + CPU レプリカ 3 台のスモークトポロジー |
 | `deploy/compose/docker-compose.gpu.yaml` | ゲートウェイ + GPU レプリカ(nvidia デバイス予約) |
 | `deploy/compose/docker-compose.webui.yaml` | ゲートウェイ上の Open WebUI チャット UI |
+| `deploy/compose/docker-compose.webui-vlm.yaml` | opt-in の Qwen3-VL-32B TP8 画像チャットオーバーレイ |
 | `deploy/helm/kairyu/`(+ `values-gpu.yaml`) | k8s チャート。readiness は `/readyz`、GPU プロファイルごとの nodeSelector |
 | `scripts/kind_smoke.sh` | kind クラスタのエンドツーエンドスモーク(CI ジョブ) |
-| `scripts/webui_smoke.sh` | Open WebUI 構成の Kairyu-only smoke。UI image は pull しない |
+| `scripts/webui_smoke.sh` | 固定版 Open WebUI のブラウザ E2E: 初回ユーザー、direct/AUTO ストリーミング、永続性、障害、復旧 |
+| `scripts/webui_vlm_smoke.sh` | 8-GPU の direct + Open WebUI 画像チャット E2E |
 | `scripts/gpu_gates/*.sh` | GPU デイのゲートスクリプト(runbook §0–§9)。すべて `--dry-run` 対応 |
 | `verification/l1/performance/serving_bench.py`, `verification/product/performance/frontier_compare.py`, `verification/l1/performance/kv_transfer_bench.py` | レイテンシ/グッドプット/転送の検証 |
 
@@ -877,24 +1058,27 @@ quantization/KV equivalence、TTFT、TPOT/TPS、throughput、goodput、vLLM 比�
 ## 9. 開発
 
 ```bash
-uv run pytest                        # テスト + カバレッジ (ゲート 80%, addopts で強制)
-uv run ruff check .                  # lint (E, F, I, UP, B; 行長 100)
-uv run python -m verification check
-uv run python scripts/verify_verification_registry.py
-uv run python scripts/verify_bench_wheel.py
-uv run python -m verification run orchestration.performance.router_latency -- --help
-uv run python -m verification run orchestration.performance.orchestration_mock_bench -- --help
+uv run --frozen pytest --fail-on-skip  # ポータブルテスト + カバレッジ (ゲート: 80%)
+uv run --frozen ruff check .           # lint (E, F, I, UP, B; 行長 100)
+uv run --frozen python scripts/verify_verification_registry.py
+uv run --frozen python scripts/verify_bench_wheel.py
+uv run --frozen python verification/orchestration/performance/router_latency.py
+uv run --frozen python verification/orchestration/performance/orchestration_mock_bench.py
 ```
 
 | pytest の実行方法 | 範囲 |
 |---|---|
-| `pytest`(デフォルト) | `gpu` と `hf_hub` マーカー以外すべて — GPU なしのどのマシンでも実行可能 |
-| `pytest -m gpu` | デプロイデイのカーネル/グラフテスト(`tests/gpu/`) |
-| `pytest -m hf_hub` | オプトインの実チェックポイントダウンロード |
-| `pytest -m dist` | マルチプロセス gloo テスト(デフォルト実行に含まれる) |
+| `pytest --fail-on-skip`(デフォルト選択) | `tests/dist` を含むポータブルな CPU テスト。環境依存スイートは明示的に deselect |
+| `scripts/gpu_gates/03_deferred.sh` | 前提条件チェック付きの CUDA カーネル/グラフスイート。選択されたテストの skip は失敗になる |
+| `pytest --fail-on-skip -m hf_hub` | ネットワーク/モデルの前提が揃った後の、オプトインの実チェックポイントダウンロード |
+| `scripts/helm_integration.sh` | 前提条件チェック付きの Helm レンダリングテスト |
+| `scripts/postgres_integration.sh` | コンテナ固定の PostgreSQL 統合テスト |
+| `pytest --fail-on-skip -m dist` | マルチプロセス gloo テスト(デフォルト実行にも含まれる) |
 
-規約: CI 向けテストはすべて `MockBackend`(決定的、依存なし)で実行します。GPU 依存の
-主張は `bench/` の再現スクリプトなしには決して報告しません。
+規約: CI 向けテストは、名前付き統合ゲートが実依存を提供しない限り、すべて
+`MockBackend`(決定的、依存なし)で実行します。前提条件の欠如は非ゼロステータスの
+「未実行」として報告され、選択されたテストの skip で CI ジョブを green にすることは
+できません。GPU 依存の主張は `bench/` の再現スクリプトなしには決して報告しません。
 
 ## 10. ドキュメント索引
 
@@ -906,6 +1090,7 @@ uv run python -m verification run orchestration.performance.orchestration_mock_b
 | [`docs/deployment.md`](docs/deployment.md) | 本番デプロイ: DC トポロジー、systemd、ローリング更新、可観測性 |
 | [`docs/gpu-runbook.md`](docs/gpu-runbook.md) | GPU デイ実行計画の集約(パフォーマンスゲート、カーネルチューニング、ファブリック立ち上げ) |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | インストール済みベンチマークスイートのガイド |
+| [`docs/ide-clients.md`](docs/ide-clients.md) | Cline/Continue のセットアップ、対応 API サーフェス、SOCKS 検証 |
 
 ## 11. ライセンス
 
