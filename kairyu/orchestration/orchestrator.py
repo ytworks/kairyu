@@ -262,6 +262,11 @@ class Orchestrator:
             raise ValueError(
                 "orchestration shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
             )
+        if general_roles and moa_samples > 0:
+            raise ValueError(
+                "general_roles cannot be combined with moa_samples > 0; "
+                "choose role DAG profiles or MoA mode"
+            )
         self._engines = dict(engines)
         self._owned_engines = tuple(
             {id(engine): engine for engine in (

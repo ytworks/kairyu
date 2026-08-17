@@ -330,7 +330,9 @@ scanned on the caller's words, not the L2 envelope) keeps the coding
 profile; otherwise general. Constraints, per the product's purpose: the
 coding profile is unchanged; both profiles are full Conductor ensembles
 under the same TTFT gate; there is no single-engine route in auto-max, and
-no role is skipped inside either profile. The example's general profile uses
+no role is skipped inside either profile. `general_roles` is mutually exclusive
+with `moa_samples > 0`; configuration fails closed instead of silently ignoring
+both role DAGs in MoA mode. The example's general profile uses
 every deployment model — Qwen head + two Qwen proposals + a thinking
 DeepSeek deep proposal, Qwen synthesis, thinking DeepSeek verification
 (format deviation is a FAIL), and the direct DeepSeek publisher with the

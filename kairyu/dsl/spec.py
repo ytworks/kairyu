@@ -214,6 +214,11 @@ class OrchestratorSpec(BaseModel):
         }
         if self.general_roles and not self.roles:
             raise ValueError("general_roles requires a primary roles DAG")
+        if self.general_roles and self.moa_samples > 0:
+            raise ValueError(
+                "general_roles cannot be combined with moa_samples > 0; "
+                "choose role DAG profiles or MoA mode"
+            )
         for profile, roles in (("roles", self.roles), ("general_roles", self.general_roles)):
             for role in roles:
                 if role.worker not in known:
