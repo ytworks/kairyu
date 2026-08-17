@@ -5,12 +5,14 @@ This example starts one layered coding-first product path with one command:
 ```text
 Open WebUI
     -> Kairyu L3 product API (:8003; model kairyu-auto-max)
-        -> Kairyu L2 coding role DAG
-            -> head (Qwen): streams the public answer opening from t=0
-            -> testgen + 2 diverse proposals (Qwen TP1 pool, parallel)
-            -> sandbox executor: runs proposals against generated pytest
-            -> Qwen draft synthesis -> executor -> DeepSeek verifier (<=2 refines)
-            -> continuation (DeepSeek): streams the verified remainder
+        -> Kairyu L2: auto-selects ONE of two full ensemble DAGs per request
+            [coding profile - 9 roles]          [general profile - 7 roles]
+            head (Qwen) streams opening         head (Qwen) streams opening
+            testgen + 2 proposals (Qwen)        2 Qwen proposals + 1 thinking
+            sandbox runs generated pytest         DeepSeek deep proposal
+            Qwen synthesis -> executor          Qwen synthesis (format-faithful)
+            DeepSeek thinking verifier          DeepSeek thinking verifier
+            continuation (DeepSeek direct)      continuation (DeepSeek direct)
         -> deployment-owned L1 pools: 4 x Qwen3.8-27B-FP8 TP1 (GPU 0-3),
            DeepSeek-V4-Flash-0731 TP4+EP4 (GPU 4-7), CPU sandbox executor
     -> Kairyu L3 final answer
@@ -25,10 +27,113 @@ TTFT (~0.3 s measured at c1), so the product's semantic TTFT (first public
 `content` token) is gated at **<= 2x the DeepSeek L1 direct row at the same
 concurrency** while the
 ensemble, sandbox execution, and verification run behind the committed
-opening. Non-coding requests take the same DAG: the test generator answers
-`NOT_APPLICABLE`, both executor stages skip locally with zero sandbox latency
-and zero budget steps, and the pipeline degrades to the plan/propose/
-synthesize/verify quality path.
+opening. The same TTFT gate applies to both profiles.
+
+## Which requests take which DAG (automatic profile selection)
+
+One served model, two full ensembles (ECO-D6, issue #509). The profile is
+chosen per request by a deterministic rule — a pure function of the call, so
+preflight and execution always agree — and **both outcomes are complete
+Conductor DAGs: there is no route that hits a single L1 engine directly.**
+
+```mermaid
+flowchart TD
+    R["Chat request to kairyu-auto-max"] --> A{"Agent / format-constrained turn?<br/>tools declared, tools in prompt,<br/>or a plain-text format demand such as<br/>&quot;format your response as JSON&quot;"}
+    A -- "yes" --> G["GENERAL profile<br/>7-role ensemble, reply-format-faithful"]
+    A -- "no" --> B{"Latest user turn asks for code?<br/>code fence, or code vocabulary:<br/>python / function / implement /<br/>コード / 実装 / 関数 ..."}
+    B -- "yes" --> C["CODING profile<br/>9-role ensemble with sandbox execution"]
+    B -- "no" --> G
+```
+
+Concrete examples:
+
+| Request | Profile | Why |
+|---|---|---|
+| Terminus-2 agent turn: "…Format your response as JSON… run these shell commands" | general | plain-text structured-format demand |
+| Codex CLI / IDE turn with declared `tools` | general | tools present |
+| "Write a python function that reverses a list." | coding | code vocabulary in the latest user turn |
+| "リストを逆順にする関数を実装して" | coding | code vocabulary (Japanese) |
+| "What should I cook tonight with rice and eggs?" | general | no agent envelope, no code signal |
+
+The chosen profile is observable: the result trace carries
+`role profile: coding|general`, `/routing` reports both role lists, and the
+launcher asserts both DAG shapes at readiness.
+
+### Coding profile (9 roles — unchanged specialization)
+
+Execution-grounded: proposals are run against a generated pytest file in the
+network-less sandbox before synthesis is verified.
+
+```mermaid
+flowchart LR
+    subgraph Q["Qwen3.8-27B TP1 pool - GPU 0-3, MTP-3"]
+        H["head<br/>streams public opening at t=0"]
+        T["testgen<br/>pytest file or NOT_APPLICABLE"]
+        P1["proposal_impl<br/>T=0.7"]
+        P2["proposal_edge<br/>T=0.9"]
+        S["draft_synthesis<br/>T=0.2 merges candidates + evidence"]
+    end
+    subgraph X["CPU sandbox - network_mode: none"]
+        E1["exec_matrix<br/>proposals x tests"]
+        E2["exec_draft<br/>draft x tests"]
+    end
+    subgraph D["DeepSeek-V4 TP4+EP4 - GPU 4-7"]
+        V["verifier - thinking, T=0.6<br/>PASS / FAIL, max 1 refine"]
+        C["continuation - direct<br/>streams verified remainder"]
+    end
+    T --> E1
+    P1 --> E1
+    P2 --> E1
+    H --> S
+    P1 --> S
+    P2 --> S
+    E1 --> S
+    S --> E2
+    T --> E2
+    S --> V
+    E2 --> V
+    V --> C
+    H --> C
+    S --> C
+```
+
+### General profile (7 roles — every model, no sandbox stages)
+
+Reply-format-faithful: every role's contract is "answer in exactly the format
+the conversation demands" (for example an agent loop's JSON envelope), and a
+format deviation is a verifier FAIL. Execution grounding stays the coding
+profile's specialization; the general profile instead adds a third,
+reasoning-diverse proposal on thinking DeepSeek so all deployed models
+contribute.
+
+```mermaid
+flowchart LR
+    subgraph Q2["Qwen3.8-27B TP1 pool - GPU 0-3, MTP-3"]
+        GH["head_general<br/>streams public opening at t=0"]
+        GP1["proposal_direct<br/>T=0.7"]
+        GP2["proposal_alt<br/>T=1.0, edge-case biased"]
+        GS["synthesis_general<br/>T=0.2 merges 3 candidates"]
+    end
+    subgraph D2["DeepSeek-V4 TP4+EP4 - GPU 4-7"]
+        GP3["proposal_deep<br/>thinking, T=0.6<br/>deliberate then answer"]
+        GV["verifier_general - thinking, T=0.6<br/>format deviation = FAIL"]
+        GC["continuation_general - direct<br/>streams verified remainder"]
+    end
+    GH --> GS
+    GP1 --> GS
+    GP2 --> GS
+    GP3 --> GS
+    GS --> GV
+    GV --> GC
+    GH --> GC
+    GS --> GC
+```
+
+On agent turns (tools or a plain-text format demand) the head is disabled for
+the call (issue #495) in either profile: there is no committed opening, the
+publisher renders its `prompt_headless` body, and the whole answer comes from
+the verified continuation — measured at ~15 s per turn on this hardware
+against the previous 63.9 s median (issue #509).
 
 Qwen fits one 96 GB card, so four independent TP1 replicas provide more
 aggregate memory bandwidth and lower queueing TTFT than spreading one dense
@@ -40,15 +145,20 @@ image placeholders. DeepSeek is sharded TP4+EP4 for capacity and retains the
 measured eight-GPU example's FP8 KV, DSpark-5, SM120 fallbacks, prefix caching,
 chunked batching, and full/piecewise CUDA Graphs.
 
-The Qwen replicas carry the single-GPU winner unchanged:
-`max_num_batched_tokens=32768`, `max_num_seqs=32`, FP8 KV, FP16
-Gated-DeltaNet state, piecewise CUDA Graphs, and no MTP. Qwen runs on official
+The Qwen replicas carry the single-GPU winner
+(`max_num_batched_tokens=32768`, `max_num_seqs=32`, FP8 KV, FP16
+Gated-DeltaNet state, piecewise CUDA Graphs) plus one measured deviation:
+MTP-3 speculative decoding, adopted for this deployment's role-shaped load
+(c1 +43.9%, c4/c8 aggregate +26%, lossless — see
+[MEASUREMENTS.md](MEASUREMENTS.md)); the 1-GPU general-API example stays
+no-MTP because its c16/c32 criterion regressed there. Qwen runs on official
 vLLM v0.23.0. DeepSeek intentionally stays on the measured
 `aa0d513027` SM120 build because v0.23.0 does not support this checkpoint's
 DSpark path and its generic MTP loader cannot load the 0731 MTP weights.
 
 Kairyu exposes one public chat model, `kairyu-auto-max`, and one public
-embedding model, `embed-small`. A chat request enters L3 once, then L2 borrows
+embedding model, `embed-small`. A coding-profile chat request enters L3 once,
+then L2 borrows
 the deployment-owned L1 pools through `engine_ref` and the sandbox execution
 service through `executor_ref`: the Qwen head streams the committed public
 opening immediately while a Qwen test generator and two temperature/seed
@@ -109,8 +219,9 @@ Kairyu L3, and is explicitly limited to `kairyu-auto-max`. The public
 `/v1/models` endpoint additionally returns `embed-small`; the L1 pools are not
 public IDs or Chat UI choices. The launcher validates that exact public
 inventory, the explicit nine-role coding DAG (including the streamed head and
-the sandbox executor binding), and two ordered finite 384-dimensional
-embedding vectors with positive usage before printing the URL.
+the sandbox executor binding), the seven-role general ensemble profile, and
+two ordered finite 384-dimensional embedding vectors with positive usage
+before printing the URL.
 
 The embedding model is the truthfully named
 `sentence-transformers/all-MiniLM-L6-v2` FastEmbed deployment, not an alias for
