@@ -13,7 +13,9 @@ Each `run.sh` command prints its API and Chat UI URLs when the stack is ready.
 Qwen3.8 uses the digest-pinned official vLLM v0.23.0 image. Both DeepSeek
 deployments share the same measured `aa0d513027` SM120 build, retaining
 DSpark performance and checkpoint compatibility that v0.23.0 cannot provide.
-Persistent model and UI state stays below `/mnt/nvme`.
+The two Qwen-hosting environments keep persistent model, UI, and cache state
+on bind-backed storage below `/mnt/nvme`; the standalone
+`deepseek-v4-flash-0731-8gpu` example uses Docker-managed volumes.
 
 Start everything and print the local Chat UI URL:
 

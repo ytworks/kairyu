@@ -1,6 +1,7 @@
 # DeepSeek-V4-Flash-0731 on 8 x RTX PRO 6000 Blackwell
 
-This is the repository's only example. It starts the complete local stack:
+This is the single-model eight-GPU example (see [`../README.md`](../README.md)
+for all three environments). It starts the complete local stack:
 
 ```text
 Open WebUI -> Kairyu L3 (:8002) -> vLLM L1 (TP8 + EP8, all 8 GPUs)
@@ -33,8 +34,8 @@ implementation supports it on SM100 datacenter Blackwell, not SM120.
 
 The command verifies exactly eight matching GPUs, reuses or builds the pinned
 SM120 vLLM source revision if its image is absent, downloads and hashes the
-exact model revision if its model volume is absent, builds Kairyu, waits for
-readiness, and prints:
+exact model revision unless its content attestation is already present, builds
+Kairyu, waits for readiness, and prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8002/v1
