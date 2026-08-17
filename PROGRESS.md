@@ -111,6 +111,19 @@ in `.claude/rules/progress-log.md`).
 - Refs: #509; ECO-D6 + ECO-D4 2026-08-17 amendment; `kairyu/orchestration/`;
   `examples/qwen3.8-deepseek-v4-8gpu/`; its MEASUREMENTS.md
 
+### 2026-08-17 — [amendment] LLM profile judge for the coding/general split
+- What: the code-authoring half of profile selection is judged by an optional
+  `profile_judge` worker (example: direct DeepSeek, greedy, ≤8 tokens, 5 s
+  timeout); the verdict is attached to the call at the serving boundary before
+  preflight/admission so selection stays a pure function; head-disable signals
+  stay deterministic and are never judged; on judge failure the keyword
+  code-task signal decides as before.
+- Why: owner review of #510 — keyword heuristics misroute incidental code
+  vocabulary into the sandbox coding DAG and miss unlisted languages; the
+  split is a semantic judgment and belongs to an LLM.
+- Refs: #509, #510 review; ECO-D6 2026-08-17 LLM-profile-judge amendment;
+  `kairyu/orchestration/`; `examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml`
+
 ### 2026-08-16 — [amendment] Agent tool-turn latency and cancellation (issue #495)
 - What: tool-turn FAIL/refine loop removed (verifier/synthesis prompts declare
   the publisher emits the tool call; inconclusive verdicts re-verify once,

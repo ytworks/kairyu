@@ -392,6 +392,14 @@ def test_tiered_l2_pins_only_the_explicit_coding_dag() -> None:
     assert not any(
         role.role_type == "executor" for role in maximum.general_roles
     )
+    # Issue #509 amendment: the coding/general split is judged by the direct
+    # (non-thinking) DeepSeek worker, and the launcher asserts the served
+    # judge against this metadata.
+    assert (
+        maximum.profile_judge.worker
+        == config["orchestration"]["profile_judge_worker"]
+        == "tier2-direct"
+    )
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 
@@ -490,6 +498,7 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                             "continuation_general",
                         )
                     ],
+                    "profile_judge": {"worker": "tier2-direct"},
                     "stream_head": "head",
                     "moa_samples": 0,
                     "budget": {"max_steps": 12, "max_refine_depth": 1},

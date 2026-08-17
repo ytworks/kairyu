@@ -733,3 +733,64 @@ async def test_moa_cancellation_observer_keeps_completed_proposal_usage():
         completion_tokens=2,
         cached_tokens=3,
     )
+
+
+def test_chat_endpoint_attaches_profile_judge_verdict(tmp_path):
+    # Issue #509 amendment: the serving boundary judges the coding/general
+    # split once before preflight/admission, so a turn whose keyword signal
+    # says "code" still executes the general DAG when the LLM verdict says so.
+    from kairyu.engine.mock import MockBackend
+    from kairyu.orchestration.conductor import RoleSpec
+    from kairyu.orchestration.orchestrator import ProfileJudge
+
+    engine = MockBackend()
+    judge = MockBackend(
+        responses={"Reply with exactly one word: CODE or GENERAL.": "GENERAL"}
+    )
+    orchestrator = Orchestrator(
+        {"tier1": engine, "tier2": engine, "judge": judge},
+        roles=(
+            RoleSpec(
+                name="c_final",
+                worker="tier1",
+                role_type="synthesizer",
+                prompt="[c_final] {query}",
+            ),
+        ),
+        general_roles=(
+            RoleSpec(
+                name="g_final",
+                worker="tier1",
+                role_type="synthesizer",
+                prompt="[g_final] {query}",
+            ),
+        ),
+        profile_judge=ProfileJudge(worker="judge"),
+    )
+    app = create_legacy_app(
+        {"plain": engine},
+        orchestrators={"auto": orchestrator},
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+    )
+    prompt = (
+        "First research what a program manager does and summarize the "
+        "trade-offs. Then design a plan. After that implement it. Finally "
+        "verify everything end to end."
+    )
+
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": prompt}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert len(judge.prompts_seen) == 1
+    prompts = [p for p in engine.prompts_seen if isinstance(p, str)]
+    assert any("[g_final]" in p for p in prompts)
+    assert not any("[c_final]" in p for p in prompts)

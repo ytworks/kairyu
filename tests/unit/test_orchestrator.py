@@ -1495,10 +1495,12 @@ def test_requires_at_least_one_engine():
         Orchestrator(engines={})
 
 
-def _profiled_orchestrator(tier1, tier2):
+def _profiled_orchestrator(tier1, tier2, judge=None):
     # Issue #509: one served model, two ensemble DAGs. The coding profile is
     # a single synthesizer; the general profile fans out before its final.
+    # An optional judge engine enables the LLM coding/general verdict.
     from kairyu.orchestration.conductor import RoleSpec
+    from kairyu.orchestration.orchestrator import ProfileJudge
 
     class MultiAgentRouter:
         def preview(self, query, context=None):
@@ -1527,11 +1529,19 @@ def _profiled_orchestrator(tier1, tier2):
             prompt_headless="[g_final_headless] {query} {g_prop}",
         ),
     )
+    engines = {"tier1": tier1, "tier2": tier2}
+    if judge is not None:
+        engines["judge"] = judge
     return Orchestrator(
-        engines={"tier1": tier1, "tier2": tier2},
+        engines=engines,
         router=MultiAgentRouter(),
         roles=coding_roles,
         general_roles=general_roles,
+        profile_judge=(
+            ProfileJudge(worker="judge", timeout_seconds=0.05)
+            if judge is not None
+            else None
+        ),
     )
 
 
@@ -1586,6 +1596,127 @@ async def test_code_task_turn_keeps_primary_profile():
     prompts = tier1.prompts_seen + tier2.prompts_seen
     assert any("[c_final" in prompt for prompt in prompts)
     assert not any("[g_" in prompt for prompt in prompts)
+
+
+_JUDGE_PROMPT_MARKER = "Reply with exactly one word: CODE or GENERAL."
+
+
+async def test_judge_overrides_code_vocabulary_to_general():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="What does a program manager do?",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    assert call.role_profile_judgment == "general"
+    result = await orchestrator.run(call)
+    assert "role profile: general" in result.trace
+    assert "profile judge: general" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)
+
+
+async def test_judge_keeps_coding_profile_without_keyword_signal():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "CODE"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Write a Rust CLI that reverses its arguments.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    assert call.role_profile_judgment == "code"
+    result = await orchestrator.run(call)
+    assert "role profile: primary" in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[c_final" in prompt for prompt in prompts)
+    assert not any("[g_" in prompt for prompt in prompts)
+
+
+async def test_head_disable_signals_skip_the_judge():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "CODE"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    response_format = {"type": "json_object"}
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Implement a Python function that reverses a list.",
+            sampling_params=SamplingParams(
+                max_tokens=64,
+                extra_args={"response_format": response_format},
+            ),
+            response_format=response_format,
+        )
+    )
+    assert call.role_profile_judgment is None
+    assert not judge.prompts_seen
+    result = await orchestrator.run(call)
+    assert "role profile: general" in result.trace
+
+
+async def test_judge_failure_falls_back_to_code_task_signal():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    slow_judge = MockBackend(
+        responses={_JUDGE_PROMPT_MARKER: "GENERAL"},
+        latency_s=5.0,
+    )
+    orchestrator = _profiled_orchestrator(tier1, tier2, slow_judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Implement a python function that reverses a list.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    assert call.role_profile_judgment is None
+    result = await orchestrator.run(call)
+    assert "role profile: primary" in result.trace
+    assert "profile judge:" not in result.trace
+
+
+async def test_unparseable_judge_verdict_falls_back():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "maybe CODE or GENERAL?"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Implement a python function that reverses a list.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    assert call.role_profile_judgment is None
+
+
+async def test_judged_call_preflight_matches_execution():
+    # The judged verdict travels with the call, so preflight, admission, and
+    # execution agree even when the verdict contradicts the keyword signal.
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Explain how Python became popular.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    prepared = await orchestrator.prepare_request(call)
+    await orchestrator.admission_upper_bound_async(call)
+    result = await orchestrator.run(call, prepared=prepared)
+    assert "role profile: general" in result.trace
+    assert result.completions
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
+    assert not any("[c_final" in prompt for prompt in prompts)
 
 
 async def test_general_profile_preflight_matches_execution():

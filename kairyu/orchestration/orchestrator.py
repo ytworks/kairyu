@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
@@ -186,6 +187,44 @@ class EngineDescriptor:
 
 
 @dataclass(frozen=True)
+class ProfileJudge:
+    """LLM judgment policy for the coding/general profile split (issue #509).
+
+    The judged question is only "does this turn ask for code authoring";
+    the head-disable signals (tools, response_format, plain-text format
+    demands) stay deterministic and never reach the judge.
+    """
+
+    worker: str
+    timeout_seconds: float = 5.0
+    max_tokens: int = 8
+
+
+# Verdict-only classification for a non-thinking direct engine. The judge can
+# only pick between the two full Conductor ensembles; it never routes to a
+# single engine.
+_PROFILE_JUDGE_PROMPT = (
+    "You route requests inside an inference product. Decide whether the "
+    "user's request asks you to author or modify computer code (write, "
+    "implement, fix, debug, refactor, or test a program). Mentioning "
+    "code-adjacent vocabulary without asking for code authoring does not "
+    "count. Reply with exactly one word: CODE or GENERAL.\n\n"
+    "USER REQUEST:\n{request}\n\nAnswer:"
+)
+# Bound the judged view so a long agent conversation cannot inflate the
+# judge's prefill beyond a fixed latency envelope.
+_PROFILE_JUDGE_VIEW_CHARS = 4000
+
+
+def _parse_profile_verdict(text: str) -> str | None:
+    has_code = re.search(r"\bCODE\b", text, re.IGNORECASE) is not None
+    has_general = re.search(r"\bGENERAL\b", text, re.IGNORECASE) is not None
+    if has_code == has_general:
+        return None
+    return "code" if has_code else "general"
+
+
+@dataclass(frozen=True)
 class _IntentRequest:
     engine_key: str
     request: GenerationRequest
@@ -255,6 +294,7 @@ class Orchestrator:
         expose_intermediate_outputs: bool = False,
         execution_workers: Mapping[str, ExecutionBackend] | None = None,
         executor_descriptors: Mapping[str, ExecutorDescriptor] | None = None,
+        profile_judge: ProfileJudge | None = None,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
@@ -284,6 +324,17 @@ class Orchestrator:
         # calls outside the primary DAG's task specialization. Never a direct
         # single-engine route — both profiles run the full Conductor.
         self._general_roles = general_roles
+        # Optional LLM verdict for the coding/general split (issue #509
+        # amendment). Judgment is attached to the call at the serving
+        # boundary; profile selection itself stays a pure function.
+        self._profile_judge = profile_judge
+        if profile_judge is not None:
+            if general_roles is None:
+                raise ValueError("profile_judge requires general_roles")
+            if profile_judge.worker not in self._engines:
+                raise ValueError(
+                    f"profile_judge references unknown worker {profile_judge.worker!r}"
+                )
         self._budget = budget or Budget()
         self._shared_prefix = shared_prefix
         self._sampling_params = sampling_params or SamplingParams(max_tokens=1024)
@@ -424,8 +475,24 @@ class Orchestrator:
                 "profile_selector": (
                     "general on tools/tools_in_prompt/response_format/"
                     "structured_format_in_prompt "
-                    "or when the latest user turn carries no code-task signal; "
-                    "both profiles are Conductor ensembles (issue #509)"
+                    + (
+                        "or per the attached LLM profile-judge verdict "
+                        "(deterministic code-task signal as fallback); "
+                        if self._profile_judge is not None
+                        else "or when the latest user turn carries no code-task signal; "
+                    )
+                    + "both profiles are Conductor ensembles (issue #509)"
+                ),
+                **(
+                    {
+                        "profile_judge": {
+                            "worker": self._profile_judge.worker,
+                            "timeout_seconds": self._profile_judge.timeout_seconds,
+                            "max_tokens": self._profile_judge.max_tokens,
+                        }
+                    }
+                    if self._profile_judge is not None
+                    else {}
                 ),
             }
             if self._general_roles is not None
@@ -524,6 +591,8 @@ class Orchestrator:
             or call.structured_format_in_prompt
         ):
             return "general"
+        if call.role_profile_judgment is not None:
+            return "primary" if call.role_profile_judgment == "code" else "general"
         prompt = call.prompt
         if isinstance(prompt, str) and code_task_signal(latest_user_view(prompt)):
             return "primary"
@@ -534,6 +603,59 @@ class Orchestrator:
             assert self._general_roles is not None
             return self._general_roles
         return self._roles
+
+    async def judge_role_profile(
+        self,
+        request: str | OrchestrationRequest,
+    ) -> OrchestrationRequest:
+        """Attach the LLM coding/general verdict before preflight (issue #509).
+
+        The serving boundary calls this once, before ``prepare_request`` and
+        admission, so every consumer of the pure profile function reads one
+        attached judgment. The judge can only choose between the two full
+        Conductor ensembles and can never fail or block a request: on
+        timeout, backend error, or an unparseable verdict the call is
+        returned unattached and the deterministic code-task signal applies.
+        """
+
+        call = self._request(request)
+        if (
+            self._profile_judge is None
+            or self._general_roles is None
+            or self._moa_samples > 0
+            or call.role_profile_judgment is not None
+            or not isinstance(call.prompt, str)
+        ):
+            return call
+        if (
+            call.tools
+            or call.tools_in_prompt
+            or call.response_format is not None
+            or call.structured_format_in_prompt
+        ):
+            # Deterministically general already; no model call is spent.
+            return call
+        view = latest_user_view(call.prompt)[-_PROFILE_JUDGE_VIEW_CHARS:]
+        judge_request = GenerationRequest(
+            request_id=f"profile-judge-{uuid.uuid4().hex[:12]}",
+            prompt=_PROFILE_JUDGE_PROMPT.format(request=view),
+            sampling_params=SamplingParams(
+                max_tokens=self._profile_judge.max_tokens,
+                temperature=0.0,
+            ),
+        )
+        engine = self._engines[self._profile_judge.worker]
+        try:
+            result = await asyncio.wait_for(
+                engine.generate(judge_request),
+                timeout=self._profile_judge.timeout_seconds,
+            )
+        except Exception:
+            return call
+        verdict = _parse_profile_verdict(result.text)
+        if verdict is None:
+            return call
+        return replace(call, role_profile_judgment=verdict)
 
     def _conductor_final_role(self, roles: tuple[RoleSpec, ...]) -> RoleSpec:
         units = [role for role in roles if role.role_type != "verifier"]
@@ -1516,6 +1638,8 @@ class Orchestrator:
         notes: list[str] = [f"route: {decision.target} ({decision.reason})"]
         if self._general_roles is not None and decision.target == "multi_agent":
             notes.append(f"role profile: {self._role_profile(call)}")
+            if call.role_profile_judgment is not None:
+                notes.append(f"profile judge: {call.role_profile_judgment}")
         trace_events = [
             self._route_trace_event(
                 decision,
@@ -2008,6 +2132,8 @@ class Orchestrator:
         notes = [f"route: {decision.target} ({decision.reason})"]
         if self._general_roles is not None and decision.target == "multi_agent":
             notes.append(f"role profile: {self._role_profile(call)}")
+            if call.role_profile_judgment is not None:
+                notes.append(f"profile judge: {call.role_profile_judgment}")
         trace_events = [
             self._route_trace_event(
                 decision,

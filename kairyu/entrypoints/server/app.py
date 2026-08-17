@@ -2383,6 +2383,11 @@ def create_app(
                 )
                 selected = auto_models[request.model]
                 try:
+                    # Attach the LLM profile verdict once, before preflight and
+                    # admission, so both read the same judged call (issue #509).
+                    orchestration_request = await selected.judge_role_profile(
+                        orchestration_request
+                    )
                     prepared_orchestration = await selected.prepare_request(orchestration_request)
                     bound = await selected.admission_upper_bound_async(orchestration_request)
                 except UpstreamClientError as error:

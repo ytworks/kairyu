@@ -340,6 +340,30 @@ coding continuation. The chosen profile is recorded in the result trace
 (`role profile: …`) and `/v1/route` reports both role sets; launcher
 readiness (`control.py`) asserts the general role list like the coding one.
 
+Review amendment (2026-08-17, issue #509 — LLM profile judge, owner
+direction on the #510 review): the code-task half of the selector is no
+longer decided by keyword matching. Substring and word-boundary heuristics
+were both shown to misroute — incidental vocabulary ("What does a program
+manager do?", "test for diabetes", "fix the bug in my essay") lands in the
+sandbox coding DAG, while unlisted languages ("Write a Rust CLI") miss it —
+and the misrouted coding contracts are exactly the idle-specialization
+failure this design exists to fix. Decision: an optional
+`OrchestratorSpec.profile_judge` names a generation worker (this example:
+`tier2-direct`, the non-thinking DeepSeek publisher engine) that answers a
+bounded verdict-only prompt — CODE or GENERAL — over the latest user turn
+(greedy, ≤8 output tokens, view capped at 4,000 chars, 5 s timeout). The
+serving boundary attaches the verdict to the call once, before preflight
+and admission, so profile selection stays a pure function of the call and
+the prepared-request contract still cannot diverge. The deterministic
+head-disable signals (tools, tools-in-prompt, API `response_format`,
+plain-text format demand) short-circuit before the judge and never spend a
+model call. The judge is availability-neutral: on timeout, backend error,
+or an unparseable verdict the call stays unattached and the deterministic
+code-task signal decides, so a judge outage degrades to the pre-amendment
+behavior instead of failing or delaying requests. The verdict is recorded
+in the result trace (`profile judge: …`) and `/v1/route` reports the judge
+configuration.
+
 ## Acceptance
 
 - CPU suite: head streaming, dedup, error contract, per-role sampling,
@@ -349,6 +373,11 @@ readiness (`control.py`) asserts the general role list like the coding one.
   same change.
 - Launcher `_validate_ready` requires the nine-role DAG, `stream_head: head`,
   `max_steps: 15`, the executor binding, and the executor health probe.
+- Profile-judge amendment: CPU tests cover the judged verdict overriding the
+  keyword signal in both directions, the head-disable short-circuit spending
+  no judge call, timeout/unparseable fallback, judged preflight/execution
+  agreement, and the serving boundary attaching the verdict; the launcher
+  asserts the served judge worker against the example metadata.
 - `serving-auto-max` passes end-to-end with executor stages present and the
   split head/continuation public stream traced.
 - `serving-auto-max-coding` passes its TTFT gate at every concurrency row

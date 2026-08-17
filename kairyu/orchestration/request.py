@@ -41,6 +41,11 @@ class OrchestrationRequest:
     chat_template_kwargs: Mapping[str, object] | None = None
     # Appended to preserve the positional constructor contract above.
     conversation_affinity_key: str | None = None
+    # LLM-judged coding/general profile verdict (issue #509 amendment).
+    # Attached at most once, before preflight/admission, so every consumer of
+    # the pure profile function reads the same decision. None means no
+    # judgment was made and the deterministic code-task signal applies.
+    role_profile_judgment: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -57,6 +62,8 @@ class OrchestrationRequest:
             )
         if self.reasoning_effort not in {None, "low", "high", "max"}:
             raise ValueError("reasoning_effort must be low, high, max, or null")
+        if self.role_profile_judgment not in {None, "code", "general"}:
+            raise ValueError("role_profile_judgment must be code, general, or null")
         if self.conversation_affinity_key is not None and (
             not isinstance(self.conversation_affinity_key, str)
             or not self.conversation_affinity_key
