@@ -739,6 +739,7 @@ class OpenAICompatBackend:
         OpenAIRequestCapabilities,
         ImageInputPolicy | None,
         bool,
+        bool,
     ] | None:
         """Identity for replicas with exactly equivalent request validation.
 
@@ -756,6 +757,7 @@ class OpenAICompatBackend:
             self._capabilities,
             self._image_input_policy,
             self._allow_templated_chat_passthrough,
+            self.mtp_enabled,
         )
 
     @property
@@ -778,6 +780,12 @@ class OpenAICompatBackend:
 
     def _validate_request_structure(self, request: GenerationRequest) -> None:
         """Validate prompt structure without request-sized JSON serialization."""
+
+        if self.mtp_enabled and request.sampling_params.min_p != 0.0:
+            raise _client_error(
+                self._capabilities.upstream,
+                "does not support non-zero min_p while MTP is enabled",
+            )
 
         kind = prompt_kind(request.prompt)
         if kind not in self._capabilities.prompt_kinds:

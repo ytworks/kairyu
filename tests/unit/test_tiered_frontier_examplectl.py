@@ -63,6 +63,7 @@ def test_tiered_browser_gate_requires_one_model_and_separate_reasoning_ui() -> N
 def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> None:
     spec = json.loads((EXAMPLE / "example.json").read_text())
     compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
+    kairyu = yaml.safe_load((EXAMPLE / "kairyu.yaml").read_text())
 
     assert spec["hardware"] == {
         "gpu_count": 8,
@@ -118,6 +119,12 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         compose["services"]["kairyu"]["volumes"]
     )
     assert spec["vllm"]["qwen"]["release"] == "v0.23.0"
+    assert spec["vllm"]["qwen_mtp_speculative_tokens"] == 3
+    qwen_options = kairyu["pools"]["qwen3.8-27b"]["replicas"][0]["options"]
+    assert qwen_options["mtp_enabled"] is True
+    assert qwen_options["mtp_enabled"] == (
+        spec["vllm"]["qwen_mtp_speculative_tokens"] > 0
+    )
     assert {
         compose["services"][service]["image"]
         for service in ("qwen-0", "qwen-1", "qwen-2", "qwen-3")

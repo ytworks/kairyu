@@ -41,7 +41,7 @@ pools:
           cache_descriptor:
             family: qwen3.8-hybrid-mamba-paged-kv
           tensor_parallel_size: 1
-          mtp_enabled: false
+          mtp_enabled: true
           container_image_digest: sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f
       - backend: openai
         health_url: http://qwen-1:8000/health

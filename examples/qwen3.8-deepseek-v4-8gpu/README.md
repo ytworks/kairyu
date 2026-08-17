@@ -152,7 +152,9 @@ MTP-3 speculative decoding, adopted for this deployment's role-shaped load
 (c1 +43.9%, c4/c8 aggregate +26%, lossless — see
 [MEASUREMENTS.md](MEASUREMENTS.md)); the 1-GPU general-API example stays
 no-MTP because its c16/c32 criterion regressed there. Qwen runs on official
-vLLM v0.23.0. DeepSeek intentionally stays on the measured
+vLLM v0.23.0. The pool metadata marks MTP active so Kairyu rejects non-zero
+`min_p` during request validation, rather than surfacing vLLM's
+speculative-decoding failure after dispatch. DeepSeek intentionally stays on the measured
 `aa0d513027` SM120 build because v0.23.0 does not support this checkpoint's
 DSpark path and its generic MTP loader cannot load the 0731 MTP weights.
 

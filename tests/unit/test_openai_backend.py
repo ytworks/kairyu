@@ -162,6 +162,36 @@ def test_prerendered_chat_prompt_is_rejected_before_upstream_dispatch():
         backend.validate_request(_request(TemplatedPrompt("<BOS>hello")))
 
 
+def test_mtp_rejects_nonzero_min_p_before_upstream_dispatch():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        upstream="vllm",
+        mtp_enabled=True,
+    )
+    request = _request(
+        sampling_params=SamplingParams(max_tokens=64, min_p=0.1),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="does not support non-zero min_p while MTP is enabled",
+    ):
+        backend.validate_request(request)
+
+
+def test_mtp_accepts_neutral_min_p():
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        upstream="vllm",
+        mtp_enabled=True,
+    )
+    backend.validate_request(_request())
+
+
 async def test_payload_validation_is_offloop_and_reused_by_dispatch(monkeypatch):
     calls: list[tuple[int, bool]] = []
     encode_threads: list[int] = []
@@ -2741,10 +2771,18 @@ def test_validation_key_is_exactly_the_immutable_capability_contract():
         api_key_env=None,
         upstream="generic",
     )
+    mtp = OpenAICompatBackend(
+        base_url="http://replica-d:8000/v1",
+        model="m",
+        api_key_env=None,
+        upstream="kairyu",
+        mtp_enabled=True,
+    )
 
-    assert first.request_validation_key == (first.capabilities, None, False)
+    assert first.request_validation_key == (first.capabilities, None, False, False)
     assert first.request_validation_key == second.request_validation_key
     assert first.request_validation_key != different.request_validation_key
+    assert first.request_validation_key != mtp.request_validation_key
     assert isinstance(hash(first.request_validation_key), int)
 
 
