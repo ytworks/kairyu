@@ -1,8 +1,10 @@
 import asyncio
 import copy
+import json
 import threading
 from dataclasses import replace
 
+import httpx
 import pytest
 
 from kairyu.engine.backend import (
@@ -12,6 +14,7 @@ from kairyu.engine.backend import (
     UpstreamClientError,
 )
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
 from kairyu.orchestration.moa import MoAEvent, MoAResult
@@ -1603,6 +1606,7 @@ def test_profile_judge_admission_reserves_judge_and_worst_profile():
     assert combined.tokens > max(profile_bounds)
     assert not combined.refundable_on_exact_usage
 
+
 async def test_judge_applies_configured_worker_prompt_scaffold():
     tier1 = MockBackend()
     tier2 = MockBackend()
@@ -1628,6 +1632,65 @@ async def test_judge_applies_configured_worker_prompt_scaffold():
     assert prompt.startswith("<bos><user>")
     assert prompt.endswith("<assistant></think>")
     assert _JUDGE_PROMPT_MARKER in prompt
+
+
+async def test_judge_scaffold_dispatches_over_vllm_completions_wire():
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "text": "GENERAL",
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 32,
+                    "completion_tokens": 1,
+                    "total_tokens": 33,
+                },
+            },
+        )
+
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="judge",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        allow_templated_chat_passthrough=True,
+    )
+    orchestrator = _profiled_orchestrator(
+        tier1,
+        tier2,
+        judge,
+        judge_prompt_prefix="<bos><user>",
+        judge_prompt_suffix="<assistant></think>",
+    )
+
+    call = await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Explain Python decorators.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+    await judge.shutdown()
+
+    assert call.role_profile_judgment == "general"
+    assert captured["path"] == "/v1/completions"
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body["prompt"].startswith("<bos><user>")
+    assert body["prompt"].endswith("<assistant></think>")
+    assert "messages" not in body
 
 
 async def test_judge_overrides_code_vocabulary_to_general():
