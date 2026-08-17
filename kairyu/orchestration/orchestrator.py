@@ -422,7 +422,8 @@ class Orchestrator:
             {
                 "general_roles": [role_payload(role) for role in self._general_roles],
                 "profile_selector": (
-                    "general on tools/tools_in_prompt/structured_format_in_prompt "
+                    "general on tools/tools_in_prompt/response_format/"
+                    "structured_format_in_prompt "
                     "or when the latest user turn carries no code-task signal; "
                     "both profiles are Conductor ensembles (issue #509)"
                 ),
@@ -516,7 +517,12 @@ class Orchestrator:
 
         if self._general_roles is None:
             return "primary"
-        if call.tools or call.tools_in_prompt or call.structured_format_in_prompt:
+        if (
+            call.tools
+            or call.tools_in_prompt
+            or call.response_format is not None
+            or call.structured_format_in_prompt
+        ):
             return "general"
         prompt = call.prompt
         if isinstance(prompt, str) and code_task_signal(latest_user_view(prompt)):
