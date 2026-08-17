@@ -193,6 +193,8 @@ class ProfileJudgeSpec(BaseModel):
     worker: str
     timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
     max_tokens: int = Field(default=8, ge=1, le=64)
+    prompt_prefix: str = ""
+    prompt_suffix: str = ""
 
 
 class OrchestratorSpec(BaseModel):

@@ -336,14 +336,19 @@ def test_general_roles_profile_loads_and_builds():
 
 def test_profile_judge_loads_and_is_described():
     spec = load_spec(
-        GENERAL_PROFILE_SPEC + "\nprofile_judge: {worker: tier2}\n"
+        GENERAL_PROFILE_SPEC
+        + "\nprofile_judge: {worker: tier2, prompt_prefix: '<u>', prompt_suffix: '<a>'}\n"
     )
     assert spec.profile_judge.worker == "tier2"
+    assert spec.profile_judge.prompt_prefix == "<u>"
+    assert spec.profile_judge.prompt_suffix == "<a>"
     descriptor = build_orchestrator(spec).describe_routing()
     assert descriptor["profile_judge"] == {
         "worker": "tier2",
         "timeout_seconds": 5.0,
         "max_tokens": 8,
+        "prompt_prefix": "<u>",
+        "prompt_suffix": "<a>",
     }
     assert "profile-judge verdict" in descriptor["profile_selector"]
 

@@ -400,6 +400,11 @@ def test_tiered_l2_pins_only_the_explicit_coding_dag() -> None:
         == config["orchestration"]["profile_judge_worker"]
         == "tier2-direct"
     )
+    assert (
+        maximum.profile_judge.prompt_prefix
+        == "<｜begin▁of▁sentence｜><｜User｜>"
+    )
+    assert maximum.profile_judge.prompt_suffix == "<｜Assistant｜></think>"
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 

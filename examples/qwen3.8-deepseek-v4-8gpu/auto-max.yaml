@@ -294,6 +294,10 @@ profile_judge:
   worker: tier2-direct
   timeout_seconds: 5.0
   max_tokens: 8
+  # The shared vLLM endpoint uses an identity chat template. Close the
+  # reasoning span in the prompt so its parser exposes the verdict as content.
+  prompt_prefix: "<｜begin▁of▁sentence｜><｜User｜>"
+  prompt_suffix: "<｜Assistant｜></think>"
 
 general_roles:
   - name: head_general

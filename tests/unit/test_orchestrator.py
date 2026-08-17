@@ -1466,7 +1466,14 @@ def test_requires_at_least_one_engine():
         Orchestrator(engines={})
 
 
-def _profiled_orchestrator(tier1, tier2, judge=None):
+def _profiled_orchestrator(
+    tier1,
+    tier2,
+    judge=None,
+    *,
+    judge_prompt_prefix="",
+    judge_prompt_suffix="",
+):
     # Issue #509: one served model, two ensemble DAGs. The coding profile is
     # a single synthesizer; the general profile fans out before its final.
     # An optional judge engine enables the LLM coding/general verdict.
@@ -1509,7 +1516,14 @@ def _profiled_orchestrator(tier1, tier2, judge=None):
         roles=coding_roles,
         general_roles=general_roles,
         profile_judge=(
-            ProfileJudge(worker="judge", timeout_seconds=0.05) if judge is not None else None
+            ProfileJudge(
+                worker="judge",
+                timeout_seconds=0.05,
+                prompt_prefix=judge_prompt_prefix,
+                prompt_suffix=judge_prompt_suffix,
+            )
+            if judge is not None
+            else None
         ),
     )
 
@@ -1588,6 +1602,32 @@ def test_profile_judge_admission_reserves_judge_and_worst_profile():
 
     assert combined.tokens > max(profile_bounds)
     assert not combined.refundable_on_exact_usage
+
+async def test_judge_applies_configured_worker_prompt_scaffold():
+    tier1 = MockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    orchestrator = _profiled_orchestrator(
+        tier1,
+        tier2,
+        judge,
+        judge_prompt_prefix="<bos><user>",
+        judge_prompt_suffix="<assistant></think>",
+    )
+
+    await orchestrator.judge_role_profile(
+        OrchestrationRequest(
+            prompt="Explain Python decorators.",
+            sampling_params=SamplingParams(max_tokens=64),
+        )
+    )
+
+    assert len(judge.prompts_seen) == 1
+    prompt = judge.prompts_seen[0]
+    assert isinstance(prompt, TemplatedPrompt)
+    assert prompt.startswith("<bos><user>")
+    assert prompt.endswith("<assistant></think>")
+    assert _JUDGE_PROMPT_MARKER in prompt
 
 
 async def test_judge_overrides_code_vocabulary_to_general():
