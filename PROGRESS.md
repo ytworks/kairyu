@@ -98,6 +98,19 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-18 — [amendment] Compaction hardening from the #531 review
+- What: adopted all three review fixes — a successful compaction stores only
+  the compaction item (history replaced, not duplicated); truncated summaries
+  return response.incomplete without a compaction item (and are not
+  continuable), empty ones fail as 502 compaction_failed; tokens are now
+  AES-256-GCM sealed and tenant-bound (`responses_compaction_secret_env`,
+  ephemeral per-process key when unset). Example gateway wires the secret.
+- Why: #531 review — stored history defeated compaction, truncated/empty
+  summaries silently replaced long sessions, and marker-only tokens were
+  forgeable, contradicting the opaque/self-issued contract.
+- Refs: #531 review, #532–#534; m11 D4 2026-08-18 review amendment;
+  `kairyu/entrypoints/server/responses_service.py`; `examples/qwen3.8-deepseek-v4-8gpu/`
+
 ### 2026-08-18 — [amendment] AUTO models on /v1/responses + Codex contract (issue #530)
 - What: /v1/responses resolves everything /v1/models advertises — AUTO models
   delegate to the chat orchestration contract (metering exactly once); a
@@ -166,4 +179,3 @@ in `.claude/rules/progress-log.md`).
   split is a semantic judgment and belongs to an LLM.
 - Refs: #509, #510 review; ECO-D6 2026-08-17 LLM-profile-judge amendment;
   `kairyu/orchestration/`; `examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml`
-

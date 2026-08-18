@@ -352,7 +352,14 @@ whose `encrypted_content` is an AES-256-GCM sealed, tenant-bound token that
 decodes back into a user bridge message, failing closed on forged, modified,
 or cross-tenant tokens. A configured secret derives one deployment-stable key;
 without it, a process-local key deliberately limits tokens to one gateway
-lifetime. Known limits are deliberate: metric phase labels of a delegated AUTO
+lifetime. Per the #531 review, compaction is honest end to end: a successful
+compaction stores only the compaction item as continuation context (the
+pre-compaction history is replaced, not duplicated), a length-terminated
+summary returns `response.incomplete` with no compaction item and is not
+continuable via `previous_response_id`, and an empty summary fails as a 502
+`compaction_failed` (`error` + `response.failed` mid-stream) — Codex installs
+a compaction only on `response.completed`, so a truncated or empty summary
+must never reach that terminal. Known limits are deliberate: metric phase labels of a delegated AUTO
 call record under "chat", the 1024-token default output cap applies to AUTO
 responses as it does to engines, tenant 429s are not retried by Codex
 (bench deployments should size admission accordingly), and
