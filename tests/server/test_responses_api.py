@@ -808,26 +808,37 @@ def test_truncated_compaction_is_incomplete(tmp_path, stream):
             json={
                 "model": "m",
                 "stream": stream,
-                "store": False,
                 "input": [
                     {"type": "message", "role": "user", "content": "history"},
                     {"type": "compaction_trigger"},
                 ],
             },
         )
-    assert response.status_code == 200
-    if stream:
-        events = _sse_events(response.text)
-        assert events[-1]["type"] == "response.incomplete"
-        payload = events[-1]["response"]
-        assert not any(
-            event["type"] == "response.output_item.done" for event in events
+        assert response.status_code == 200
+        if stream:
+            events = _sse_events(response.text)
+            assert events[-1]["type"] == "response.incomplete"
+            payload = events[-1]["response"]
+            assert not any(
+                event["type"] == "response.output_item.done" for event in events
+            )
+        else:
+            payload = response.json()
+        assert payload["status"] == "incomplete"
+        assert payload["output"] == []
+        assert payload["incomplete_details"] == {"reason": "max_output_tokens"}
+        # An incomplete compaction produced no replacement context, so it must
+        # not be continuable: storing it would silently blank the thread.
+        continued = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "previous_response_id": payload["id"],
+                "input": "continue",
+            },
         )
-    else:
-        payload = response.json()
-    assert payload["status"] == "incomplete"
-    assert payload["output"] == []
-    assert payload["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert continued.status_code == 404
+    assert "previous response not found" in continued.json()["error"]["message"]
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])

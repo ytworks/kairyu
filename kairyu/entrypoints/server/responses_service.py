@@ -1129,6 +1129,7 @@ async def _buffered_events(
     stored_items: list[dict],
     store: ResponseStore,
     owner: str,
+    compaction_request: bool = False,
 ) -> AsyncIterator[str]:
     """Stream buffered generation as Responses SSE without going silent.
 
@@ -1303,7 +1304,9 @@ async def _buffered_events(
         usage=usage,
         incomplete_details=incomplete_details,
     )
-    if request.store:
+    if request.store and not (compaction_request and not output):
+        # An incomplete compaction produced no replacement context; storing an
+        # empty continuation entry would silently blank a thread.
         store.save(response_id, stored_items + output, owner=owner)
     terminal_type = "response.completed" if status == "completed" else "response.incomplete"
     yield _sse(terminal_type, sequence, response=final_response)
@@ -1821,6 +1824,7 @@ async def _orchestrated_response(
                 stored_items=stored_items,
                 store=store,
                 owner=owner,
+                compaction_request=compaction_request,
             )
         )
     delegated = await chat_dispatch(buffered_request, http_request)
@@ -1843,7 +1847,7 @@ async def _orchestrated_response(
         usage=usage,
         incomplete_details=incomplete_details,
     )
-    if request.store:
+    if request.store and not (compaction_request and not output):
         store.save(response_id, stored_items + output, owner=owner)
     return JSONResponse(content=response)
 
@@ -2156,6 +2160,7 @@ def add_responses_route(
                     stored_items=stored_items,
                     store=store,
                     owner=owner,
+                    compaction_request=compaction_request,
                 )
             )
         try:
@@ -2171,7 +2176,7 @@ def add_responses_route(
             usage=usage,
             incomplete_details=incomplete_details,
         )
-        if request.store:
+        if request.store and not (compaction_request and not output):
             store.save(response_id, stored_items + output, owner=owner)
         return JSONResponse(content=response)
 
