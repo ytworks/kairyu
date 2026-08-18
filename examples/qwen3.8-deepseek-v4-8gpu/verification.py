@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verifier-gated L2 product serving verification."""
+"""Dual-track L2 product serving verification (head/compose stream, TTFT gate)."""
 
 from __future__ import annotations
 

@@ -107,7 +107,10 @@ as a chat choice.
 - A request follows `L3 -> L2 -> L1... -> L2 -> L3` without a second L3 ingress
   and without duplicate lifecycle ownership.
 - Scripted verifier failures cause real bounded synthesis retries, with exact
-  internal usage and metadata trace accounting.
+  internal usage and metadata trace accounting. *(Superseded 2026-08-18: the
+  dual-track DAG has no verifier or refinement loop — DTO-D4 in
+  `example-dual-track-orchestration.md`; internal usage/trace accounting
+  remains in force.)*
 - Open WebUI shows model-attributed intermediate output behind its reasoning
   disclosure control and shows the publisher answer separately.
 - An assistant response containing `reasoning_content` can be appended to the
