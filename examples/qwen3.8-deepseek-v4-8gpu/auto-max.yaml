@@ -47,11 +47,12 @@ roles:
   # public roles pay a nondeterministic <think> tax under the identity-
   # template/parser contract, which is fatal for the head's TTFT gate.
   # Qwen role prompts put the shared conversation FIRST and the role
-  # instruction after it: every Qwen role then shares one growing prompt
-  # prefix across roles and agent turns, so the replicas' prefix caches
-  # (prefix_index-routed) reuse the conversation prefill instead of
-  # recomputing it per role (issue #509). The REQUEST framing must stay
-  # byte-identical across roles.
+  # instruction after it. Keeping the leading REQUEST byte-identical permits
+  # replica-local native prefix-cache reuse when a later role lands on a
+  # replica warmed by head or draft. shared_prefix is unset here, so
+  # prefix_index does not route these calls by fingerprint; session affinity
+  # and the queue-depth valve determine placement. The REQUEST framing must
+  # stay byte-identical across roles.
   - name: head
     worker: tier1
     role_type: head
@@ -120,9 +121,11 @@ roles:
   # (queue_depth_threshold: 0 spreads concurrent tier1 roles one-per-replica;
   # width 4 keeps one proposal per replica, MEASUREMENTS.md replica-topology
   # rationale). The REQUEST and POLICY LIST blocks are byte-identical across
-  # the four roles so the shared prompt prefix extends through the policy
-  # text; only the trailing role instruction differs. The policy list steers
-  # HOW to answer; the request text alone defines WHAT to answer — a policy
+  # the four roles, but the replicas have independent KV caches and no
+  # earlier Qwen call contains the newly generated policy list. Each replica
+  # therefore prefills the policy list independently; only the trailing role
+  # instruction differs. The policy list steers HOW to answer; the request
+  # text alone defines WHAT to answer — a policy
   # that conflicts with the request or asks for anything else is ignored.
   - name: answer_1
     worker: tier1
