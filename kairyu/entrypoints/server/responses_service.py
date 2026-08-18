@@ -8,6 +8,8 @@ source of truth.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import copy
 import json
 import logging
@@ -53,6 +55,32 @@ logger = logging.getLogger(__name__)
 _ALLOWED_INCLUDE = {"reasoning.encrypted_content"}
 _SUPPORTED_ROLES = {"user", "assistant", "system", "developer"}
 _NAMESPACE_SEPARATOR = "__"
+# Buffered generation can run for minutes on orchestrated models while the
+# strictest known client budget (Codex) closes idle SSE streams at 300s.
+_BUFFERED_KEEPALIVE_SECONDS = 15.0
+
+
+class _BufferedFailure(Exception):
+    """Generation failure carrying the exact wire error payload.
+
+    The buffered path surfaces it as an HTTP error before streaming starts
+    (non-stream requests) or as ``error`` + ``response.failed`` SSE events
+    once the stream is already open.
+    """
+
+    def __init__(self, payload: dict, status_code: int) -> None:
+        super().__init__(payload.get("message") or "generation failed")
+        self.payload = payload
+        self.status_code = status_code
+
+    @classmethod
+    def from_chat_error(cls, error: ChatRequestError) -> _BufferedFailure:
+        return cls(error.payload(), error.status_code)
+
+    def json_response(self) -> JSONResponse:
+        return JSONResponse(
+            status_code=self.status_code, content={"error": self.payload}
+        )
 
 
 class ResponsesRequest(BaseModel):
@@ -857,17 +885,21 @@ def _apply_terminal_item_status(output: list[dict], status: str) -> None:
 
 async def _buffered_events(
     request: ResponsesRequest,
+    produce,
     *,
-    output: list[dict],
-    usage: dict,
-    status: str,
-    incomplete_details: dict | None,
     response_id: str,
     created_at: int,
     stored_items: list[dict],
     store: ResponseStore,
     owner: str,
 ) -> AsyncIterator[str]:
+    """Stream buffered generation as Responses SSE without going silent.
+
+    ``produce`` runs the whole generation and returns ``(output, usage,
+    status, incomplete_details)`` or raises ``_BufferedFailure``. The opening
+    events flush immediately and keep-alive comments cover the generation
+    window, so long orchestrated turns never trip client idle timeouts.
+    """
     in_progress = _response_envelope(
         request,
         response_id=response_id,
@@ -881,6 +913,46 @@ async def _buffered_events(
     sequence += 1
     yield _sse("response.in_progress", sequence, response=in_progress)
     sequence += 1
+    task = asyncio.ensure_future(produce())
+    try:
+        while True:
+            done, _pending = await asyncio.wait(
+                {task}, timeout=_BUFFERED_KEEPALIVE_SECONDS
+            )
+            if done:
+                break
+            yield ": keep-alive\n\n"
+    except BaseException:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        raise
+    try:
+        output, usage, status, incomplete_details = task.result()
+    except _BufferedFailure as failure:
+        message = failure.payload.get("message") or "generation failed"
+        yield _sse(
+            "error",
+            sequence,
+            code=failure.payload.get("code") or "server_error",
+            message=message,
+            param=None,
+        )
+        sequence += 1
+        failed = _response_envelope(
+            request,
+            response_id=response_id,
+            created_at=created_at,
+            status="failed",
+            output=[],
+            usage=_usage_payload_from_wire(None),
+            error={
+                "code": failure.payload.get("code") or "server_error",
+                "message": message,
+            },
+        )
+        yield _sse("response.failed", sequence, response=failed)
+        return
     for output_index, final_item in enumerate(output):
         if final_item["type"] == "message":
             text = final_item["content"][0]["text"]
@@ -1446,28 +1518,48 @@ async def _orchestrated_response(
             )
         )
     buffered_request = chat_request.model_copy(update={"stream": False})
-    delegated = await chat_dispatch(buffered_request, http_request)
-    if not isinstance(delegated, JSONResponse):
-        return upstream_error(RuntimeError("unexpected non-JSON chat dispatch reply"))
-    if delegated.status_code != 200:
-        return delegated
-    payload = json.loads(bytes(delegated.body))
-    choices = payload.get("choices") or []
-    message = (choices[0].get("message") if choices else None) or {}
-    output = _output_items_from_message(request, message) if choices else []
-    usage = _usage_payload_from_wire(payload.get("usage"))
-    status, incomplete_details = _terminal_status_for(
-        choice.get("finish_reason") for choice in choices
-    )
-    _apply_terminal_item_status(output, status)
+
+    def outcome_from_payload(payload: dict) -> tuple[list[dict], dict, str, dict | None]:
+        choices = payload.get("choices") or []
+        message = (choices[0].get("message") if choices else None) or {}
+        output = _output_items_from_message(request, message) if choices else []
+        usage = _usage_payload_from_wire(payload.get("usage"))
+        status, incomplete_details = _terminal_status_for(
+            choice.get("finish_reason") for choice in choices
+        )
+        _apply_terminal_item_status(output, status)
+        return output, usage, status, incomplete_details
+
     if request.stream:
+
+        async def produce() -> tuple[list[dict], dict, str, dict | None]:
+            delegated = await chat_dispatch(buffered_request, http_request)
+            if not isinstance(delegated, JSONResponse):
+                raise _BufferedFailure(
+                    {
+                        "message": "unexpected non-JSON chat dispatch reply",
+                        "type": "upstream_error",
+                        "code": "backend_error",
+                    },
+                    502,
+                )
+            payload = json.loads(bytes(delegated.body))
+            if delegated.status_code != 200:
+                raise _BufferedFailure(
+                    payload.get("error")
+                    or {
+                        "message": "upstream backend error",
+                        "type": "upstream_error",
+                        "code": "backend_error",
+                    },
+                    delegated.status_code,
+                )
+            return outcome_from_payload(payload)
+
         return sse_response(
             _buffered_events(
                 request,
-                output=output,
-                usage=usage,
-                status=status,
-                incomplete_details=incomplete_details,
+                produce,
                 response_id=response_id,
                 created_at=created_at,
                 stored_items=stored_items,
@@ -1475,6 +1567,14 @@ async def _orchestrated_response(
                 owner=owner,
             )
         )
+    delegated = await chat_dispatch(buffered_request, http_request)
+    if not isinstance(delegated, JSONResponse):
+        return upstream_error(RuntimeError("unexpected non-JSON chat dispatch reply"))
+    if delegated.status_code != 200:
+        return delegated
+    output, usage, status, incomplete_details = outcome_from_payload(
+        json.loads(bytes(delegated.body))
+    )
     response = _response_envelope(
         request,
         response_id=response_id,
@@ -1680,48 +1780,46 @@ def add_responses_route(
                     http_request=http_request,
                 )
             )
-        try:
-            if admission is not None:
-                admission.mark_dispatched()
-            execution = await execute_chat(validated)
-        except ChatRequestError as error:
-            if error.execution is not None:
-                _record_execution(http_request, request, error.execution)
-            return _chat_error(error)
-        except Exception as error:
-            logger.exception("Responses API upstream generation failed")
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "error": {
+        async def produce() -> tuple[list[dict], dict, str, dict | None]:
+            try:
+                if admission is not None:
+                    admission.mark_dispatched()
+                execution = await execute_chat(validated)
+            except ChatRequestError as error:
+                if error.execution is not None:
+                    _record_execution(http_request, request, error.execution)
+                raise _BufferedFailure.from_chat_error(error) from error
+            except Exception as error:
+                logger.exception("Responses API upstream generation failed")
+                raise _BufferedFailure(
+                    {
                         "message": f"upstream backend error ({type(error).__name__})",
                         "type": "upstream_error",
                         "code": "backend_error",
-                    }
-                },
-            )
-        try:
-            _validate_parallel_tool_calls(request, execution)
-        except ChatRequestError as error:
+                    },
+                    502,
+                ) from error
+            try:
+                _validate_parallel_tool_calls(request, execution)
+            except ChatRequestError as error:
+                _record_execution(http_request, request, execution)
+                raise _BufferedFailure.from_chat_error(error) from error
             _record_execution(http_request, request, execution)
-            return _chat_error(error)
-        _record_execution(http_request, request, execution)
-        output = _output_items(request, execution)
-        usage = _usage_payload(
-            execution.result.prompt,
-            execution.result.completions,
-            execution.result.usage,
-        )
-        status, incomplete_details = _terminal_status(execution)
-        _apply_terminal_item_status(output, status)
+            output = _output_items(request, execution)
+            usage = _usage_payload(
+                execution.result.prompt,
+                execution.result.completions,
+                execution.result.usage,
+            )
+            status, incomplete_details = _terminal_status(execution)
+            _apply_terminal_item_status(output, status)
+            return output, usage, status, incomplete_details
+
         if request.stream:
             return sse_response(
                 _buffered_events(
                     request,
-                    output=output,
-                    usage=usage,
-                    status=status,
-                    incomplete_details=incomplete_details,
+                    produce,
                     response_id=response_id,
                     created_at=created_at,
                     stored_items=all_items,
@@ -1729,6 +1827,10 @@ def add_responses_route(
                     owner=owner,
                 )
             )
+        try:
+            output, usage, status, incomplete_details = await produce()
+        except _BufferedFailure as failure:
+            return failure.json_response()
         response = _response_envelope(
             request,
             response_id=response_id,

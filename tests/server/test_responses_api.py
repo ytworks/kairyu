@@ -135,6 +135,53 @@ class LengthBackend(MockBackend):
         )
 
 
+def test_buffered_stream_opens_before_generation_and_keeps_alive(
+    tmp_path, monkeypatch
+):
+    # Codex closes SSE streams that stay silent for 300s while buffered
+    # generation on orchestrated models can run for minutes: the opening
+    # events must be emitted before generation finishes and keep-alive
+    # comments must cover the generation window.
+    from kairyu.entrypoints.server import responses_service
+
+    monkeypatch.setattr(responses_service, "_BUFFERED_KEEPALIVE_SECONDS", 0.05)
+
+    class SlowBackend(MockBackend):
+        async def generate(self, request):
+            await asyncio.sleep(0.25)
+            return await super().generate(request)
+
+    app = _app(tmp_path, backend=SlowBackend({"hello": "done"}))
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": "hello",
+                "stream": True,
+                "tools": [_tool()],
+                "tool_choice": "auto",
+            },
+        )
+    assert response.status_code == 200
+    lines = [line for line in response.text.splitlines() if line]
+    # The opening events precede generation output; keep-alive comments can
+    # only appear while generation is still pending, so their presence in
+    # the middle of the stream proves the connection never goes silent.
+    assert lines[0] == "event: response.created"
+    keepalive_positions = [
+        index for index, line in enumerate(lines) if line == ": keep-alive"
+    ]
+    assert keepalive_positions
+    first_item_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line == "event: response.output_item.added"
+    )
+    assert all(position < first_item_index for position in keepalive_positions)
+    assert "event: response.completed" in lines
+
+
 @pytest.mark.parametrize(
     ("stream", "with_tools"),
     [
