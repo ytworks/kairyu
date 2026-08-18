@@ -720,6 +720,50 @@ def test_remote_compaction_trigger_round_trip(tmp_path):
     assert "final input item" in response.json()["error"]["message"]
 
 
+@pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+def test_stored_compaction_replaces_original_history(tmp_path, stream):
+    backend = MockBackend(
+        {
+            "compacted continuation": "SUMMARY ONLY",
+            "continue": "CONTINUED",
+        }
+    )
+    with TestClient(_app(tmp_path, backend)) as http:
+        compacted = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "stream": stream,
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "ORIGINAL SECRET HISTORY",
+                    },
+                    {"type": "compaction_trigger"},
+                ],
+            },
+        )
+        assert compacted.status_code == 200
+        compacted_payload = (
+            _sse_events(compacted.text)[-1]["response"]
+            if stream
+            else compacted.json()
+        )
+        continued = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "previous_response_id": compacted_payload["id"],
+                "input": "continue",
+            },
+        )
+    assert continued.status_code == 200
+    continuation_prompt = backend.prompts_seen[-1]
+    assert "SUMMARY ONLY" in continuation_prompt
+    assert "ORIGINAL SECRET HISTORY" not in continuation_prompt
+
+
 def test_websocket_upgrade_get_returns_426(tmp_path):
     # Codex (built-in openai provider, the Harbor shape) tries a WebSocket
     # upgrade first; 426 triggers its immediate, silent HTTPS fallback.

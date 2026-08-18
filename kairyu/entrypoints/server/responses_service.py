@@ -1858,6 +1858,11 @@ def add_responses_route(
                 if compaction_request
                 else all_items
             )
+            # A successful compaction replaces the continuation context. Keeping
+            # ``work_items`` here would store the full pre-compaction history next
+            # to its summary, so a later previous_response_id request would grow
+            # the prompt instead of compacting it.
+            stored_items = [] if compaction_request else work_items
             _validate_function_outputs(work_items)
             prompt_items = (
                 work_items + [_COMPACTION_INSTRUCTION_ITEM]
@@ -1927,7 +1932,7 @@ def add_responses_route(
                 chat_dispatch,
                 response_id=f"resp_{uuid.uuid4().hex}",
                 created_at=int(time.time()),
-                stored_items=work_items,
+                stored_items=stored_items,
                 store=store,
                 owner=owner,
                 compaction_request=compaction_request,
@@ -2014,7 +2019,7 @@ def add_responses_route(
                     validated,
                     response_id=response_id,
                     created_at=created_at,
-                    stored_items=work_items,
+                    stored_items=stored_items,
                     store=store,
                     owner=owner,
                     http_request=http_request,
@@ -2070,7 +2075,7 @@ def add_responses_route(
                     produce,
                     response_id=response_id,
                     created_at=created_at,
-                    stored_items=work_items,
+                    stored_items=stored_items,
                     store=store,
                     owner=owner,
                 )
@@ -2089,7 +2094,7 @@ def add_responses_route(
             incomplete_details=incomplete_details,
         )
         if request.store:
-            store.save(response_id, work_items + output, owner=owner)
+            store.save(response_id, stored_items + output, owner=owner)
         return JSONResponse(content=response)
 
     return store
