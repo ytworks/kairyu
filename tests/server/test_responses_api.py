@@ -496,6 +496,122 @@ def test_function_tool_stream_has_canonical_argument_lifecycle(tmp_path):
     assert events[-1]["response"]["output"] == [done]
 
 
+def test_function_call_output_accepts_codex_content_item_arrays(tmp_path):
+    # Codex serializes structured tool output (e.g. view_image results) as an
+    # array of content items; the text parts must feed the tool message while
+    # non-text parts stay an explicit capability rejection.
+    backend = ToolLoopBackend()
+    with TestClient(_app(tmp_path, backend)) as http:
+        first = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": "Add 2 and 3.",
+                "tools": [_tool()],
+                "tool_choice": "required",
+            },
+        )
+        call = first.json()["output"][0]
+        second = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "previous_response_id": first.json()["id"],
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": call["call_id"],
+                        "output": [
+                            {"type": "input_text", "text": "tool: "},
+                            {"type": "input_text", "text": "5"},
+                        ],
+                    }
+                ],
+                "tools": [_tool()],
+            },
+        )
+        assert second.status_code == 200
+        message = second.json()["output"][0]
+        assert message["content"][0]["text"] == "The sum is 5."
+
+        image_output = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "previous_response_id": first.json()["id"],
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": call["call_id"],
+                        "output": [
+                            {"type": "input_image", "image_url": "data:image/png;base64,AA=="}
+                        ],
+                    }
+                ],
+                "tools": [_tool()],
+            },
+        )
+    assert image_output.status_code == 400
+    assert "text tool output only" in image_output.json()["error"]["message"]
+
+
+def test_reasoning_input_items_are_accepted_and_dropped(tmp_path):
+    # Codex echoes prior reasoning items back with the full history
+    # (store:false); they must not fail the request and must not reach the
+    # prompt (Kairyu emits and renders no reasoning items).
+    backend = MockBackend({"hello": "hi there"})
+    with TestClient(_app(tmp_path, backend)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs_0199...",
+                        "summary": [{"type": "summary_text", "text": "thinking"}],
+                        "content": None,
+                        "encrypted_content": None,
+                    },
+                    {"type": "message", "role": "user", "content": "hello"},
+                ],
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["output"][0]["content"][0]["text"]
+    assert "thinking" not in backend.prompts_seen[0]
+
+
+def test_websocket_upgrade_get_returns_426(tmp_path):
+    # Codex (built-in openai provider, the Harbor shape) tries a WebSocket
+    # upgrade first; 426 triggers its immediate, silent HTTPS fallback.
+    with TestClient(_app(tmp_path)) as http:
+        response = http.get("/v1/responses")
+    assert response.status_code == 426
+    assert response.json()["error"]["code"] == "upgrade_required"
+
+
+def test_disabled_web_search_tolerates_search_configuration(tmp_path):
+    with TestClient(_app(tmp_path)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": "hello",
+                "tools": [
+                    {
+                        "type": "web_search",
+                        "external_web_access": False,
+                        "filters": {"allowed_domains": ["example.test"]},
+                        "search_context_size": "medium",
+                    }
+                ],
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["tools"][0]["type"] == "web_search"
+
+
 @pytest.mark.parametrize(
     ("payload", "message"),
     [

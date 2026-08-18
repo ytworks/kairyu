@@ -304,17 +304,63 @@ def _canonical_input(payload: str | list[dict]) -> list[dict]:
             output = item.get("output")
             if not isinstance(call_id, str) or not call_id:
                 raise ChatRequestError(f"input[{index}].call_id must be a non-empty string")
-            if not isinstance(output, str):
-                raise ChatRequestError(f"input[{index}].output must be a string")
+            if isinstance(output, list):
+                # Codex sends structured tool output (e.g. view_image) as an
+                # array of content items instead of a plain string.
+                output = _function_output_text(
+                    output, path=f"input[{index}].output"
+                )
+            elif not isinstance(output, str):
+                raise ChatRequestError(
+                    f"input[{index}].output must be a string or an array of output parts"
+                )
             items.append(
                 {"type": "function_call_output", "call_id": call_id, "output": output}
             )
+            continue
+        if kind == "reasoning":
+            # Codex echoes prior reasoning items back with the history
+            # (encrypted_content may be null or foreign). Kairyu emits no
+            # reasoning output item and renders none into the prompt, so the
+            # echo is accepted for wire compatibility and dropped.
+            unknown = set(item) - {
+                "type",
+                "id",
+                "summary",
+                "content",
+                "encrypted_content",
+                "status",
+            }
+            if unknown:
+                raise ChatRequestError(
+                    f"input[{index}] has unsupported fields: "
+                    + ", ".join(sorted(unknown))
+                )
             continue
         raise ChatRequestError(
             f"input[{index}].type {kind!r} is not supported; "
             "use message, function_call, or function_call_output"
         )
     return items
+
+
+def _function_output_text(parts: list, *, path: str) -> str:
+    texts: list[str] = []
+    for index, part in enumerate(parts):
+        if not isinstance(part, dict):
+            raise ChatRequestError(f"{path}[{index}] must be an object")
+        kind = part.get("type")
+        if kind in {"input_text", "output_text", "text"}:
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise ChatRequestError(f"{path}[{index}].text must be a string")
+            texts.append(text)
+            continue
+        raise ChatRequestError(
+            f"{path}[{index}].type {kind!r} is not supported; "
+            "this model accepts text tool output only"
+        )
+    return "".join(texts)
 
 
 def _content_text(content: object, *, path: str) -> str:
@@ -537,7 +583,17 @@ def _chat_tools(tools: list[dict] | None) -> list[dict] | None:
                 )
             continue
         if kind == "web_search" and tool.get("external_web_access") is False:
-            unknown = set(tool) - {"type", "external_web_access"}
+            # Codex attaches search configuration (filters, location, context
+            # size) even when external access is disabled; the settings of a
+            # tool that can never run are accepted and ignored.
+            unknown = set(tool) - {
+                "type",
+                "external_web_access",
+                "filters",
+                "user_location",
+                "search_context_size",
+                "search_content_types",
+            }
             if unknown:
                 raise ChatRequestError(
                     f"tools[{index}] has unsupported fields: "
@@ -1600,6 +1656,26 @@ def add_responses_route(
 ) -> ResponseStore:
     store = ResponseStore()
     app.state.response_store = store
+
+    @app.get("/v1/responses")
+    async def responses_upgrade_required() -> JSONResponse:
+        # Codex tries a WebSocket upgrade first when it targets the built-in
+        # openai provider (the Harbor/Terminal-Bench shape). The upgrade
+        # arrives as a GET; 426 makes Codex fall back to HTTPS immediately
+        # and silently instead of burning its stream-retry budget.
+        return JSONResponse(
+            status_code=426,
+            content={
+                "error": {
+                    "message": (
+                        "WebSocket transport is not supported; "
+                        "retry over HTTPS"
+                    ),
+                    "type": "invalid_request_error",
+                    "code": "upgrade_required",
+                }
+            },
+        )
 
     @app.post("/v1/responses")
     async def responses(request: ResponsesRequest, http_request: Request):
