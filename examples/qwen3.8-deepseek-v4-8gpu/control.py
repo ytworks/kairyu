@@ -447,22 +447,14 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
     if [role.get("name") for role in policy.get("roles", ())] != expected_roles:
         raise SystemExit(
             "Kairyu L2 does not report the required "
-            f"{len(expected_roles)}-role coding product DAG"
+            f"{len(expected_roles)}-role dual-track product DAG"
         )
-    expected_general = list(orchestration.get("general_roles", ()))
-    if expected_general and [
-        role.get("name") for role in policy.get("general_roles", ())
-    ] != expected_general:
-        raise SystemExit(
-            "Kairyu L2 does not report the required "
-            f"{len(expected_general)}-role general ensemble profile"
-        )
-    expected_judge = orchestration.get("profile_judge_worker")
-    if expected_judge and policy.get("profile_judge", {}).get("worker") != expected_judge:
-        raise SystemExit(
-            "Kairyu L2 does not report the required LLM profile judge on "
-            f"worker {expected_judge!r}"
-        )
+    # The dual-track DAG is the single profile: every turn runs it, so a
+    # served general profile or profile judge means the wrong policy is live.
+    if policy.get("general_roles"):
+        raise SystemExit("Kairyu product policy must serve exactly one role profile")
+    if policy.get("profile_judge"):
+        raise SystemExit("Kairyu product policy must not configure a profile judge")
     if policy.get("stream_head") != orchestration["stream_head"]:
         raise SystemExit("Kairyu product policy must stream the head role publicly")
     if policy.get("moa_samples") != 0:
@@ -471,8 +463,11 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         raise SystemExit(
             f"Kairyu product policy max_steps must be {orchestration['max_steps']}"
         )
-    if policy.get("budget", {}).get("max_refine_depth") != 1:
-        raise SystemExit("Kairyu product policy max_refine_depth must be 1")
+    expected_refinements = orchestration["product_max_refinements"]
+    if policy.get("budget", {}).get("max_refine_depth") != expected_refinements:
+        raise SystemExit(
+            f"Kairyu product policy max_refine_depth must be {expected_refinements}"
+        )
     if policy.get("expose_intermediate_outputs") is not True:
         raise SystemExit("Kairyu product policy must expose separate intermediate output")
     configured = policy.get("configured_engines", {})
@@ -483,11 +478,6 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         != "deepseek-v4-flash-0731-thinking"
     ):
         raise SystemExit("Kairyu Tier2 L2 worker is not bound to the DeepSeek L1 pool")
-    executors = policy.get("configured_executors", {})
-    if orchestration["executor_worker"] not in executors:
-        raise SystemExit(
-            "Kairyu executor worker is not bound to the sandbox execution service"
-        )
 
 
 def _public_ui_host() -> str:

@@ -1,12 +1,68 @@
 # Measurements
 
-> **Scope note:** the "Coding DAG serving matrix" section below is the only
-> section measured on the current head-streamed, execution-gated nine-role
-> coding DAG. Every other section predates that DAG (they informed the
-> unchanged L1 topology selection: TP1×4 Qwen, DSpark-5/16K DeepSeek) and
-> must not be attributed to the current deployment.
+> **Scope note (2026-08-18):** the served L2 policy is now the dual-track
+> policy-ensemble DAG (`docs/design/example-dual-track-orchestration.md`,
+> DTO-D1..D5). The "Dual-track DAG serving matrices" section below is the
+> only section measured on it. **Every other section predates that DAG** and
+> must not be attributed to the current deployment: the coding-DAG serving
+> matrix was measured on the superseded nine-role coding DAG (its paired
+> DeepSeek-direct denominators remain the pinned `example.json` fallbacks),
+> and the older sections informed the unchanged L1 topology selection
+> (TP1×4 Qwen, DSpark-5/16K DeepSeek).
 
-## Coding DAG serving matrix (current deployment)
+## Dual-track DAG serving matrices (current deployment)
+
+Run ID: `20260818T025710Z` (`./verify.sh serving-auto-max-coding` then
+`./verify.sh serving-auto-max`, same run directory); artifacts under the NVMe
+`verification-results/20260818T025710Z/` directory, including the coding
+matrix's `ttft-gate.json`. Served policy: the 9-role dual-track DAG
+(DTO-D1..D5) — head + draft + policies wave, answer_1..4 ∥ critique wave,
+compose publisher; no general profile, no profile judge, no verifier/refine
+loop, no sandbox stages. Datasets, concurrencies, request counts, sampling,
+and the paired same-dataset DeepSeek-direct denominator rows are unchanged
+from the previous coding-DAG run.
+
+Coding matrix (32 deterministic Python tasks per row, natural completion,
+`max_tokens 4096`, public tokens via the DeepSeek loopback tokenizer oracle;
+gate: product semantic TTFT p50 ≤ 2.0× the paired direct row):
+
+| c | product semantic TTFT p50/p99 (ms) | DeepSeek-direct TTFT p50/p99 (ms) | ratio | gate | E2E p50/p99 (ms) | public tok/s | success |
+|---|---|---|---|---|---|---|---|
+| 1 | 418.95 / 436.40 | 2,348.34 / 2,767.83 | 0.18× | PASS | 46,142 / 84,820 | 46.18 | 32/32 |
+| 8 | 589.17 / 1,980.65 | 7,346.63 / 15,039.34 | 0.08× | PASS | 85,124 / 147,936 | 136.21 | 32/32 |
+| 16 | 724.55 / 7,322.23 | 11,399.93 / 16,341.58 | 0.06× | PASS | 135,345 / 179,807 | 205.80 | 32/32 |
+| 32 | 9,361.45 / 14,837.27 | 14,054.86 / 19,033.20 | 0.67× | PASS | 235,645 / 293,637 | 185.29 | 32/32 |
+
+All four rows pass against their paired direct denominators
+(`denominator_source: paired_direct`). The previously marginal c32 row
+improves from 1.87× (nine-role coding DAG, run `20260815T213146Z`) to
+0.67×: wave 1 of the dual-track DAG places only two small Qwen calls (head,
+draft) per request where the coding DAG placed three larger ones plus an
+LLM profile judge on the serial admission path, so head TTFT stays clear of
+Qwen TP1 saturation at c32. Coding E2E is mixed versus the old DAG (c1
+58.5 s → 46.1 s p50; c32 164.6 s → 235.6 s p50) — E2E is unconstrained by
+design, and the c32 growth tracks the wave-2 fan-out of four 2048-token
+Qwen answers per request at saturation.
+
+Generic matrix (~8K-token prompts, natural completion, head/compose stream
+traced with `require_head`; not TTFT-gated):
+
+| c | semantic TTFT p50/p99 (ms) | E2E p50/p99 (ms) | public output tok/s | success |
+|---|---|---|---|---|
+| 1 | 2,040.14 / 2,109.24 | 25,662 / 37,867 | 19.33 | 32/32 |
+| 8 | 5,931.48 / 19,776.62 | 87,690 / 158,306 | 35.56 | 32/32 |
+| 16 | 13,577.00 / 43,337.77 | 145,755 / 229,581 | 47.66 | 32/32 |
+| 32 | 54,847.07 / 71,917.04 | 293,867 / 330,481 | 47.76 | 32/32 |
+
+Versus the previous generic run (`20260815T191509Z`, seven-role general
+profile): TTFT p50 improves at every concurrency (c32 89,988 → 54,847 ms)
+and E2E contracts (c1 73.2 s → 25.7 s p50; c32 p99 510 s → 330 s), keeping
+the worst case far inside the 600 s admission-wait bound. Single-request
+smokes on the same build: normal chat turn 14.9 s E2E with all seven
+internal stages traced; tool turn (head-disabled, `prompt_headless`) 11.7 s
+returning a correct `tool_calls` envelope.
+
+## Coding DAG serving matrix (superseded nine-role coding DAG)
 
 Run ID: `20260815T213146Z` (`./verify.sh serving-auto-max-coding`); artifacts
 under the NVMe `verification-results/20260815T213146Z/serving-auto-max-coding/`

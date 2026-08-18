@@ -1,6 +1,12 @@
 # Tiered Example Coding Orchestration
 
-Status: **Accepted; implementation in progress** (2026-08-15).
+Status: **Superseded** (2026-08-18) by
+`example-dual-track-orchestration.md`: ECO-D2/D3/D5/D6 (coding DAG, general
+profile, profile judge, execution stages) are discarded by owner decision;
+ECO-D1 (deployment-owned sandbox executors) remains in force as
+deployed-but-unreferenced infrastructure, and ECO-D4's TTFT gate and head
+streaming continue as DTO-D3. Historical status when active: Accepted
+(2026-08-15).
 Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes.
 Supersedes the EO-D3 role graph in `example-layered-orchestration.md`

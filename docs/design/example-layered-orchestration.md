@@ -40,6 +40,11 @@ absent from `/routing`.
 > the "verify a draft before publishing" rule survive there; the
 > pre-verified public stream is now split into a committed head prefix plus
 > a verified continuation (ECO-D4). EO-D1/D2/D4/D5/D6 remain in force.
+>
+> **Superseded again (2026-08-18):** the coding/general two-profile scheme
+> was replaced by the dual-track policy-ensemble DAG of
+> `example-dual-track-orchestration.md` (DTO-D1..D5); the head-streamed
+> public seam continues as DTO-D3.
 
 The UI-visible model uses this role graph instead of the single-pass MoA
 shortcut:
