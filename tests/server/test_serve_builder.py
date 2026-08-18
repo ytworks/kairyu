@@ -1255,9 +1255,11 @@ tenants:
     settings_calls = 0
     api_key_resolutions = 0
     admin_key_resolutions = 0
+    compaction_key_resolutions = 0
     real_to_server_settings = ServerSection.to_server_settings
     real_resolve_api_keys = ServerSettings.resolve_api_keys
     real_resolve_admin_keys = ServerSettings.resolve_admin_keys
+    real_resolve_compaction_key = ServerSettings.resolve_responses_compaction_key
 
     def recording_server_settings(section):
         nonlocal settings_calls
@@ -1274,6 +1276,11 @@ tenants:
         admin_key_resolutions += 1
         return real_resolve_admin_keys(settings)
 
+    def recording_resolve_compaction_key(settings):
+        nonlocal compaction_key_resolutions
+        compaction_key_resolutions += 1
+        return real_resolve_compaction_key(settings)
+
     monkeypatch.setattr(
         ServerSection,
         "to_server_settings",
@@ -1289,6 +1296,11 @@ tenants:
         "resolve_admin_keys",
         recording_resolve_admin_keys,
     )
+    monkeypatch.setattr(
+        ServerSettings,
+        "resolve_responses_compaction_key",
+        recording_resolve_compaction_key,
+    )
 
     app = build_app_from_spec(spec)
 
@@ -1296,6 +1308,7 @@ tenants:
     assert settings_calls == 1
     assert api_key_resolutions == 1
     assert admin_key_resolutions == 1
+    assert compaction_key_resolutions == 1
     assert config.tenant_for_key("key-a") == "tenant-a"
     assert config.tenant_for_key("key-b") == "tenant-b"
     assert config.tenant_for_key("unmapped-key") == "fallback"
@@ -1533,6 +1546,33 @@ tenants:
 
     assert app.state.tenant_limiter is not None
     assert resolution_counts == {"data": 1, "admin": 1}
+
+
+def test_builder_compaction_secret_failure_precedes_owned_backends(monkeypatch):
+    secret_env = "KAIRYU_SHORT_RESPONSES_COMPACTION_SECRET"
+    monkeypatch.setenv(secret_env, "too-short")
+    spec = load_deployment_spec(
+        f"""
+server:
+  responses_compaction_secret_env: {secret_env}
+engines:
+  m: {{ backend: mock }}
+"""
+    )
+    created_backends = []
+    real_create_backend = builder_module.create_backend
+
+    def recording_create_backend(name, **options):
+        backend = real_create_backend(name, **options)
+        created_backends.append(backend)
+        return backend
+
+    monkeypatch.setattr(builder_module, "create_backend", recording_create_backend)
+
+    with pytest.raises(ValueError, match="at least 32 UTF-8 bytes"):
+        build_app_from_spec(spec)
+
+    assert created_backends == []
 
 
 @pytest.mark.parametrize("failing_key_set", ["data", "admin"])

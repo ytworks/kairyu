@@ -179,6 +179,13 @@ class ServerSection(BaseModel):
             "(keyless node-to-node replicas, design m6 D2 / m7 D5)."
         ),
     )
+    responses_compaction_secret_env: str | None = Field(
+        default=None,
+        description=(
+            "Env var holding a secret used to encrypt Responses compaction tokens; "
+            "None uses a process-local ephemeral key."
+        ),
+    )
     max_concurrency: int | None = Field(
         default=None,
         ge=1,
@@ -252,6 +259,7 @@ class ServerSection(BaseModel):
 
         return ServerSettings(
             api_keys_env=self.api_keys_env,
+            responses_compaction_secret_env=self.responses_compaction_secret_env,
             max_concurrency=self.max_concurrency,
             admission_wait_timeout_s=self.admission_wait_timeout_s,
             ttft_slo_s=self.ttft_slo_s,

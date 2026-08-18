@@ -348,12 +348,15 @@ WebSocket-first built-in `openai` provider (the Harbor/Terminal-Bench shape)
 falls back to HTTPS immediately; and remote compaction v2 is served — a
 terminal `compaction_trigger` item runs a tool-free summarization turn
 through the same engine/orchestration path and returns one `compaction` item
-whose `encrypted_content` is an opaque self-issued token that decodes back
-into a user bridge message, failing closed on foreign tokens. Known limits
-are deliberate: metric phase labels of a delegated AUTO call record under
-"chat", the 1024-token default output cap applies to AUTO responses as it
-does to engines, tenant 429s are not retried by Codex (bench deployments
-should size admission accordingly), and `/v1/completions` stays engine-only.
+whose `encrypted_content` is an AES-256-GCM sealed, tenant-bound token that
+decodes back into a user bridge message, failing closed on forged, modified,
+or cross-tenant tokens. A configured secret derives one deployment-stable key;
+without it, a process-local key deliberately limits tokens to one gateway
+lifetime. Known limits are deliberate: metric phase labels of a delegated AUTO
+call record under "chat", the 1024-token default output cap applies to AUTO
+responses as it does to engines, tenant 429s are not retried by Codex
+(bench deployments should size admission accordingly), and
+`/v1/completions` stays engine-only.
 Acceptance: pytest contract tests plus unmodified codex-cli 0.147.0 runs —
 custom-provider text/tool smokes and a Harbor-shaped (`openai_base_url`
 override) tool smoke — against a mock deployment mirroring the issue
