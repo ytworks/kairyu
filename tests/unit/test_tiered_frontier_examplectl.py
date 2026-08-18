@@ -622,9 +622,94 @@ def test_tiered_product_serving_requires_head_and_compose_trace(
                 "warmup_requests": 4,
                 "natural_completion": True,
                 "require_head": True,
+                "expected_generation_nodes": (
+                    "draft",
+                    "policies",
+                    "answer_1",
+                    "answer_2",
+                    "answer_3",
+                    "answer_4",
+                    "critique",
+                ),
             },
         )
     ]
+
+
+def _write_product_serving_result(row_dir: Path, stages: list[dict]) -> None:
+    result = {
+        "summary": {
+            "requests": 1,
+            "completion_tokens_total": 32,
+            "output_tokens_per_s": 1.0,
+        },
+        "samples": [
+            {
+                "completion_tokens": 32,
+                "trace": {"status": "valid", "stages": stages},
+            }
+        ],
+    }
+    (row_dir / "result-serving.json").write_text(json.dumps(result))
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        "draft",
+        "policies",
+        "answer_1",
+        "answer_2",
+        "answer_3",
+        "answer_4",
+        "critique",
+    ],
+)
+@pytest.mark.parametrize("failure_mode", ["missing", "failed"])
+def test_tiered_product_serving_requires_every_internal_generation_stage(
+    node: str,
+    failure_mode: str,
+    tmp_path: Path,
+) -> None:
+    benchmark = _load(
+        EXAMPLE / "verification.py",
+        f"tiered_product_stage_{node}_{failure_mode}",
+    )
+    stages = [
+        {"node": "head", "kind": "generation", "status": "success"},
+        {
+            "node": "compose",
+            "role": "publisher",
+            "kind": "generation",
+            "status": "success",
+        },
+        *[
+            {"node": name, "kind": "generation", "status": "success"}
+            for name in benchmark._DUAL_TRACK_INTERNAL_NODES
+        ],
+    ]
+
+    def validate() -> int:
+        return benchmark._validate_serving_row(
+            tmp_path,
+            1,
+            32,
+            expected_route="compose",
+            expected_role="publisher",
+            require_head=True,
+            expected_generation_nodes=benchmark._DUAL_TRACK_INTERNAL_NODES,
+        )
+
+    _write_product_serving_result(tmp_path, stages)
+    assert validate() == 0
+
+    if failure_mode == "missing":
+        stages = [stage for stage in stages if stage["node"] != node]
+    else:
+        next(stage for stage in stages if stage["node"] == node)["status"] = "failed"
+    _write_product_serving_result(tmp_path, stages)
+
+    assert validate() == 1
 
 
 def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
@@ -669,3 +754,7 @@ def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
     assert gate["gates"]["1"]["denominator_source"] == "pinned_fallback"
     assert validations
     assert all(row["expected_route"] == "compose" for row in validations)
+    assert all(
+        row["expected_generation_nodes"] == benchmark._DUAL_TRACK_INTERNAL_NODES
+        for row in validations
+    )
