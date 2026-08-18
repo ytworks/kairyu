@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verifier-gated L2 product serving verification."""
+"""Dual-track L2 product serving verification (head/compose stream, TTFT gate)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,16 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
-_EXECUTION_NODES = ("exec_matrix", "exec_draft")
+
+_DUAL_TRACK_INTERNAL_NODES = (
+    "draft",
+    "policies",
+    "answer_1",
+    "answer_2",
+    "answer_3",
+    "answer_4",
+    "critique",
+)
 
 
 def _nvme_root() -> Path:
@@ -138,9 +147,7 @@ def _validate_serving_row(
     expected_kind: str = "generation",
     public_tokens: bool = False,
     require_head: bool = False,
-    require_execution_success: bool = False,
-    expected_execution_nodes: tuple[str, ...] = (),
-    expected_execution_status: str | None = None,
+    expected_generation_nodes: tuple[str, ...] = (),
 ) -> int:
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -178,41 +185,6 @@ def _validate_serving_row(
             and all(sample.get("completion_tokens") == output_tokens for sample in samples)
         )
     if complete and expected_route is not None:
-        def execution_stages_match(
-            sample: dict,
-            expected_status: str | None,
-        ) -> bool:
-            stages = sample.get("trace", {}).get("stages", [])
-
-            def matches(stage: dict, node: str | None) -> bool:
-                if stage.get("kind") != "execution":
-                    return False
-                if node is not None and stage.get("node") != node:
-                    return False
-                if expected_status is None:
-                    return True
-                actual = stage.get("execution_status")
-                if expected_status == "skipped":
-                    return stage.get("status") == "skipped" and actual == "skipped"
-                # A matrix stage joins per-candidate statuses with commas. The
-                # DAG is designed to tolerate a broken candidate (consensus +
-                # verifier override), so the sandbox path counts as proven when
-                # at least one candidate ran to an `ok` report — requiring
-                # every candidate to be runnable would fail the gate on model
-                # formatting slips the pipeline explicitly absorbs.
-                return (
-                    stage.get("status") == "success"
-                    and isinstance(actual, str)
-                    and expected_status in actual.split(",")
-                )
-
-            if expected_execution_nodes:
-                return all(
-                    any(matches(stage, node) for stage in stages)
-                    for node in expected_execution_nodes
-                )
-            return any(matches(stage, None) for stage in stages)
-
         def stage_ok(sample: dict) -> bool:
             stages = sample.get("trace", {}).get("stages", [])
             if sample.get("trace", {}).get("status") != "valid":
@@ -232,24 +204,19 @@ def _validate_serving_row(
                 for stage in stages
             ):
                 return False
-            return execution_stages_match(sample, expected_execution_status)
-
-        def executed(sample: dict) -> bool:
-            return execution_stages_match(sample, "ok")
+            if any(
+                not any(
+                    stage.get("node") == node
+                    and stage.get("kind") == "generation"
+                    and stage.get("status") == "success"
+                    for stage in stages
+                )
+                for node in expected_generation_nodes
+            ):
+                return False
+            return True
 
         complete = all(stage_ok(sample) for sample in samples)
-        if complete and require_execution_success:
-            # Model formatting slips occasionally leave a run without a fenced
-            # candidate, so the sandbox gate is a >=90% floor per row, not a
-            # per-sample requirement.
-            executed_count = sum(1 for sample in samples if executed(sample))
-            if executed_count * 10 < len(samples) * 9:
-                print(
-                    f"only {executed_count}/{len(samples)} samples completed all "
-                    "required sandbox stages with execution_status=ok (>=90% required)",
-                    file=sys.stderr,
-                )
-                return 1
     if not complete:
         print("serving row did not produce complete fixed-token evidence", file=sys.stderr)
         return 1
@@ -268,9 +235,7 @@ def _serving(
     warmup_requests: int | None = None,
     natural_completion: bool = False,
     require_head: bool = False,
-    require_execution_success: bool = False,
-    expected_execution_nodes: tuple[str, ...] = (),
-    expected_execution_status: str | None = None,
+    expected_generation_nodes: tuple[str, ...] = (),
 ) -> int:
     config = SPEC["verification"]["serving"]
     requests = int(config["requests_per_concurrency"])
@@ -408,9 +373,7 @@ def _serving(
                 expected_kind=expected_kind,
                 public_tokens=natural_completion,
                 require_head=require_head,
-                require_execution_success=require_execution_success,
-                expected_execution_nodes=expected_execution_nodes,
-                expected_execution_status=expected_execution_status,
+                expected_generation_nodes=expected_generation_nodes,
             )
         if code:
             return code
@@ -418,22 +381,21 @@ def _serving(
 
 
 def serving_auto_max(run_dir: Path) -> int:
-    """Generic-workload regression envelope: the executor stages skip locally
-    while the head/continuation split public stream stays intact."""
+    """Generic-workload regression envelope: the head/compose split public
+    stream stays intact across the dual-track DAG."""
 
     return _serving(
         SPEC["orchestration"]["auto_max_model"],
         run_dir,
         tensor_parallel=4,
         replicas=1,
-        expected_route="continuation",
+        expected_route="compose",
         expected_role="publisher",
         expected_kind="generation",
         warmup_requests=4,
         natural_completion=True,
         require_head=True,
-        expected_execution_nodes=_EXECUTION_NODES,
-        expected_execution_status="skipped",
+        expected_generation_nodes=_DUAL_TRACK_INTERNAL_NODES,
     )
 
 _CODING_TASKS = (
@@ -577,7 +539,7 @@ def _bench_row(
 
 
 def serving_auto_max_coding(run_dir: Path) -> int:
-    """Coding-workload matrix with the hard public-TTFT gate (ECO-D4).
+    """Coding-workload matrix with the hard public-TTFT gate (DTO-D3, ex ECO-D4).
 
     Every concurrency row runs the same deterministic coding dataset through
     the L3 product path AND directly against the DeepSeek L1 loopback
@@ -643,13 +605,12 @@ def serving_auto_max_coding(run_dir: Path) -> int:
                 row_dir,
                 requests,
                 0,
-                expected_route="continuation",
+                expected_route="compose",
                 expected_role="publisher",
                 expected_kind="generation",
                 public_tokens=True,
                 require_head=True,
-                require_execution_success=True,
-                expected_execution_nodes=_EXECUTION_NODES,
+                expected_generation_nodes=_DUAL_TRACK_INTERNAL_NODES,
             )
         if code:
             return code
@@ -737,7 +698,7 @@ def _served_config_sha256() -> str:
 _VERIFICATIONS = {
     "serving-auto-max": (
         serving_auto_max,
-        "generic-workload product DAG serving matrix (executor skip path)",
+        "generic-workload product DAG serving matrix (head/compose stream)",
     ),
     "serving-auto-max-coding": (
         serving_auto_max_coding,

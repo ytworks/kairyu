@@ -1,20 +1,19 @@
-# Qwen3.8 + DeepSeek V4 tiered coding orchestration on 8 x RTX PRO 6000
+# Qwen3.8 + DeepSeek V4 dual-track policy ensemble on 8 x RTX PRO 6000
 
-This example starts one layered coding-first product path with one command:
+This example starts one layered quality-first product path with one command:
 
 ```text
 Open WebUI
     -> Kairyu L3 product API (:8003; model kairyu-auto-max)
-        -> Kairyu L2: auto-selects ONE of two full ensemble DAGs per request
-            [coding profile - 9 roles]          [general profile - 7 roles]
-            head (Qwen) streams opening         head (Qwen) streams opening
-            testgen + 2 proposals (Qwen)        2 Qwen proposals + 1 thinking
-            sandbox runs generated pytest         DeepSeek deep proposal
-            Qwen synthesis -> executor          Qwen synthesis (format-faithful)
-            DeepSeek thinking verifier          DeepSeek thinking verifier
-            continuation (DeepSeek direct)      continuation (DeepSeek direct)
+        -> Kairyu L2: ONE dual-track ensemble DAG for every request (9 roles)
+            Track A: DeepSeek writes 4 maximally different answer policies;
+                     4 Qwen replicas answer in parallel, one policy each
+            Track B: a Qwen quick draft, critically refined by thinking
+                     DeepSeek — concurrently with Track A
+            Merge:   direct DeepSeek composes the final answer from the
+                     refined answer + the 4 policy answers
         -> deployment-owned L1 pools: 4 x Qwen3.8-27B-FP8 TP1 (GPU 0-3),
-           DeepSeek-V4-Flash-0731 TP4+EP4 (GPU 4-7), CPU sandbox executor
+           DeepSeek-V4-Flash-0731 TP4+EP4 (GPU 4-7)
     -> Kairyu L3 final answer
 
 Embedding clients
@@ -25,133 +24,95 @@ Embedding clients
 The head role commits the public answer opening within a small-prompt Qwen
 TTFT (~0.3 s measured at c1), so the product's semantic TTFT (first public
 `content` token) is gated at **<= 2x the DeepSeek L1 direct row at the same
-concurrency** while the
-ensemble, sandbox execution, and verification run behind the committed
-opening. The same TTFT gate applies to both profiles.
+concurrency** while both tracks run behind the committed opening
+(DTO-D3, inherited from ECO-D4).
 
-## Which requests take which DAG (automatic profile selection)
+## The dual-track DAG (DTO-D1)
 
-One served model, two full ensembles (ECO-D6, issue #509). Agent and
-format-constrained signals stay deterministic; the code-authoring question
-is answered by an LLM profile judge whose verdict is attached to the call
-once, before preflight and admission, so selection remains a pure function
-of the call and preflight and execution always agree. **Both outcomes are
-complete Conductor DAGs: there is no route that hits a single L1 engine
-directly.**
+One served model, one profile, three waves. **Every request runs the complete
+Conductor DAG: there is no route that hits a single L1 engine directly, no
+profile selection, and no LLM profile judge.**
 
 ```mermaid
-flowchart TD
-    R["Chat request to kairyu-auto-max"] --> A{"Agent / format-constrained turn?<br/>tools declared, tools in prompt, API response_format,<br/>or a plain-text format demand such as<br/>&quot;format your response as JSON&quot;"}
-    A -- "yes" --> G["GENERAL profile<br/>7-role ensemble, reply-format-faithful"]
-    A -- "no" --> B{"Latest user turn asks for code authoring?<br/>LLM profile judge: bounded CODE / GENERAL verdict<br/>by the direct DeepSeek worker (5 s timeout);<br/>keyword code-task signal only as fallback"}
-    B -- "CODE" --> C["CODING profile<br/>9-role ensemble with sandbox execution"]
-    B -- "GENERAL" --> G
+flowchart LR
+    subgraph W1["Wave 1 — dependency-free"]
+        H["head (Qwen, T=0.3)<br/>streams public opening at t=0"]
+        DR["draft (Qwen, T=0.5)<br/>quick internal draft"]
+        PO["policies (DeepSeek direct, T=0.9)<br/>4 maximally different answer policies"]
+    end
+    subgraph W2["Wave 2 — two tracks in parallel"]
+        A1["answer_1 (Qwen, T=0.7)<br/>follows POLICY 1"]
+        A2["answer_2 (Qwen, T=0.7)<br/>follows POLICY 2"]
+        A3["answer_3 (Qwen, T=0.7)<br/>follows POLICY 3"]
+        A4["answer_4 (Qwen, T=0.7)<br/>follows POLICY 4"]
+        CR["critique (DeepSeek thinking, T=0.6)<br/>critical analysis of the draft<br/>-> improved answer"]
+    end
+    subgraph W3["Wave 3 — merge"]
+        CO["compose (DeepSeek direct)<br/>best final answer from the refined<br/>answer + 4 candidates; streams the<br/>remainder after the committed opening"]
+    end
+    PO --> A1
+    PO --> A2
+    PO --> A3
+    PO --> A4
+    DR --> CR
+    H --> CO
+    CR --> CO
+    A1 --> CO
+    A2 --> CO
+    A3 --> CO
+    A4 --> CO
 ```
 
-Concrete examples:
+Role contracts:
 
-| Request | Profile | Why |
+| role | worker | what it does |
 |---|---|---|
-| Terminus-2 agent turn: "…Format your response as JSON… run these shell commands" | general | plain-text structured-format demand (never judged) |
-| Code request with API `response_format={"type":"json_object"}` | general | API-enforced reply format takes precedence over coding specialization |
-| Codex CLI / IDE turn with declared `tools` | general | tools present (never judged) |
-| "Write a python function that reverses a list." | coding | judge verdict CODE |
-| "リストを逆順にする関数を実装して" | coding | judge verdict CODE (Japanese) |
-| "What does a program manager do?" | general | judge verdict GENERAL despite incidental `program` vocabulary |
-| "What should I cook tonight with rice and eggs?" | general | judge verdict GENERAL |
+| `head` | Qwen TP1 | dependency-free; streams the committed public opening from t=0 (the TTFT gate) |
+| `draft` | Qwen TP1 | quick complete internal draft — Track B's input, never published |
+| `policies` | DeepSeek direct | ONE call emitting POLICY 1..4, each a substantively different angle/method/priority set |
+| `answer_1..4` | Qwen TP1 x4 | four policy-bound answers in parallel, one per replica; the policy list steers HOW, the request alone defines WHAT |
+| `critique` | DeepSeek thinking | deliberates privately over the UNTRUSTED draft with critical thinking, then emits one improved complete answer |
+| `compose` | DeepSeek direct | the selected final unit: merges the refined answer with the best correct material from the four UNTRUSTED candidates and streams the remainder after the committed opening |
 
-The judge is availability-neutral: on timeout or an unparseable verdict the
-deterministic keyword code-task signal decides instead, so a judge outage
-degrades to the pre-judge selector rather than failing requests.
+Design notes (see
+[`docs/design/example-dual-track-orchestration.md`](../../docs/design/example-dual-track-orchestration.md)):
 
-The chosen profile is observable: the result trace carries
-`role profile: primary|general` (`primary` is the coding ensemble) plus
-`profile judge: <verdict>` when the judge ran, `/routing` reports both role
-lists, and the launcher asserts both DAG shapes at readiness.
+- The L2 DSL has no output-splitting mechanism, so each answerer receives the
+  whole policy list and is bound to its own policy by prompt plus a distinct
+  `seed_offset` (DTO-D2). The REQUEST and POLICY LIST blocks are
+  byte-identical for deterministic policy binding, not for cross-replica
+  cache reuse: the four answers run on independent replicas, and each
+  replica prefills the newly generated policy list. With `shared_prefix`
+  unset, placement follows session affinity and the queue-depth valve rather
+  than `prefix_index`; only the leading REQUEST block may receive
+  replica-local reuse from a preceding `head` or `draft` call.
+- `policies` runs on the non-thinking DeepSeek endpoint: wave-1 latency gates
+  the whole fan-out under the level-synchronous scheduler, and thinking roles
+  were measured nondeterministically burning entire caps inside `<think>` on
+  composite prompts.
+- There is no PASS/FAIL verifier and no refinement loop
+  (`max_refine_depth: 0`): the critique stage is the DAG's quality control
+  (DTO-D4). Budget: `max_steps: 10` (9 generation calls + 1 headroom for the
+  bounded empty-final-output re-dispatch), `moa_samples: 0`.
+- Per request the DeepSeek engine sees at most one in-flight call per wave
+  (policies -> critique -> compose); the four concurrent Qwen roles spread
+  one-per-replica through `queue_depth_threshold: 0`.
 
-### Coding profile (9 roles — unchanged specialization)
-
-Execution-grounded: proposals are run against a generated pytest file in the
-network-less sandbox before synthesis is verified.
-
-```mermaid
-flowchart LR
-    subgraph Q["Qwen3.8-27B TP1 pool - GPU 0-3, no MTP"]
-        H["head<br/>streams public opening at t=0"]
-        T["testgen<br/>pytest file or NOT_APPLICABLE"]
-        P1["proposal_impl<br/>T=0.7"]
-        P2["proposal_edge<br/>T=0.9"]
-        S["draft_synthesis<br/>T=0.2 merges candidates + evidence"]
-    end
-    subgraph X["CPU sandbox - network_mode: none"]
-        E1["exec_matrix<br/>proposals x tests"]
-        E2["exec_draft<br/>draft x tests"]
-    end
-    subgraph D["DeepSeek-V4 TP4+EP4 - GPU 4-7"]
-        V["verifier - thinking, T=0.6<br/>PASS / FAIL, max 1 refine"]
-        C["continuation - direct<br/>streams verified remainder"]
-    end
-    T --> E1
-    P1 --> E1
-    P2 --> E1
-    H --> S
-    P1 --> S
-    P2 --> S
-    E1 --> S
-    S --> E2
-    T --> E2
-    S --> V
-    E2 --> V
-    V --> C
-    H --> C
-    S --> C
-```
-
-### General profile (7 roles — every model, no sandbox stages)
-
-Reply-format-faithful: every role's contract is "answer in exactly the format
-the conversation demands" (for example an agent loop's JSON envelope), and a
-format deviation is a verifier FAIL. Execution grounding stays the coding
-profile's specialization; the general profile instead adds a third,
-reasoning-diverse proposal on thinking DeepSeek so all deployed models
-contribute.
-
-```mermaid
-flowchart LR
-    subgraph Q2["Qwen3.8-27B TP1 pool - GPU 0-3, no MTP"]
-        GH["head_general<br/>streams public opening at t=0"]
-        GP1["proposal_direct<br/>T=0.7"]
-        GP2["proposal_alt<br/>T=1.0, edge-case biased"]
-        GS["synthesis_general<br/>T=0.2 merges 3 candidates"]
-    end
-    subgraph D2["DeepSeek-V4 TP4+EP4 - GPU 4-7"]
-        GP3["proposal_deep<br/>thinking, T=0.6<br/>deliberate then answer"]
-        GV["verifier_general - thinking, T=0.6<br/>format deviation = FAIL"]
-        GC["continuation_general - direct<br/>streams verified remainder"]
-    end
-    GH --> GS
-    GP1 --> GS
-    GP2 --> GS
-    GP3 --> GS
-    GS --> GV
-    GV --> GC
-    GH --> GC
-    GS --> GC
-```
-
-On agent turns (tools, a plain-text format demand, `response_format`, `n>1`,
-or `logprobs`) the head is disabled for the call (issue #495) in either
-profile: there is no committed opening, the publisher renders its
-`prompt_headless` body, and the whole answer comes from the verified
-continuation. These changes target the previous 63.9 s public-request p50
-(issue #509); the refreshed serving evidence comes from re-running the
-`verify.sh` gates below.
+On agent turns (declared tools, a plain-text structured-format demand, API
+`response_format`, `n>1`, or `logprobs`) the head is disabled for the call
+(issue #495): there is no committed opening, `compose` renders its
+`prompt_headless` body, and the whole answer comes from the composed final
+unit in exactly the demanded reply format, using a trailing tool result
+directly when one is present (issue #496). Every internal role states an
+intended tool call in one sentence instead of emitting tool-call syntax —
+the publisher emits the actual call.
 
 Qwen fits one 96 GB card, so four independent TP1 replicas provide more
 aggregate memory bandwidth and lower queueing TTFT than spreading one dense
-model over PCIe with TP4. Each Qwen replica retains the checkpoint's vision
+model over PCIe with TP4 — and the width-4 policy fan-out executes one
+proposal per replica. Each Qwen replica retains the checkpoint's vision
 encoder. Kairyu validates one inline PNG/JPEG/WebP image up to 8 MiB and
-2,097,152 pixels, passes it to every image-capable Qwen proposal role, and gives
+2,097,152 pixels, passes it to every image-capable Qwen role, and gives
 the text-only DeepSeek roles the same role-tagged conversation with explicit
 image placeholders. DeepSeek is sharded TP4+EP4 for capacity and retains the
 measured eight-GPU example's FP8 KV, DSpark-5, SM120 fallbacks, prefix caching,
@@ -169,37 +130,18 @@ Qwen runs on official vLLM v0.23.0. DeepSeek intentionally stays on the measured
 DSpark path and its generic MTP loader cannot load the 0731 MTP weights.
 
 Kairyu exposes one public chat model, `kairyu-auto-max`, and one public
-embedding model, `embed-small`. A coding-profile chat request enters L3 once,
-then L2 borrows
-the deployment-owned L1 pools through `engine_ref` and the sandbox execution
-service through `executor_ref`: the Qwen head streams the committed public
-opening immediately while a Qwen test generator and two temperature/seed
-diversified Qwen proposals run in parallel; the sandbox runs each proposal
-against the generated pytest file (with a per-test consensus signal); Qwen
-synthesizes a private draft from the committed opening, both candidates, and
-the execution matrix; the draft is re-executed and verified by the thinking
-DeepSeek verifier before the DeepSeek continuation streams the remainder
-after the committed opening. A failed
-verifier repeats synthesis, execution, and verification at most once
-(`moa_samples: 0`, `max_refine_depth: 1`, `max_steps: 12`); L2 never calls the
-public L3 endpoint recursively.
-
-The executor is a CPU-only container with `network_mode: none` — it has no IP
-interface at all, so hostile code has no callback path to the gateway or
-anywhere else. Kairyu reaches its HTTP protocol only through a shared Unix
-domain socket volume (mounted read-only on the Kairyu side). The container
-also has a read-only rootfs, noexec tmpfs, non-root user, no capabilities,
-and pids/memory limits, and runs model-generated code as hostile input under
-per-submission rlimits with a wall-clock process-group killer. Executor
-results enter role prompts as untrusted machine JSON, and a sandbox outage
-degrades executor stages to an `unavailable` report instead of failing
-requests.
+embedding model, `embed-small`. A chat request enters L3 once, then L2 borrows
+the deployment-owned L1 pools through `engine_ref`; L2 never calls the public
+L3 endpoint recursively. The CPU sandbox execution service from the previous
+coding DAG stays deployed (compose service, `kairyu.yaml` executor registry,
+`sandbox/` sources) but is no longer referenced by any role — execution
+grounding can be re-adopted by a future DAG without redeploying.
 
 In the same assistant response, completed L2/L1 stages are sent as
 model-attributed `reasoning_content` and rendered by pinned Open WebUI in a
-separate expandable internal-work item. The publisher's L3 final answer alone
-is sent in `content`, so opening the item reveals each role, attempt, worker,
-engine, and model without mixing intermediate work into the answer.
+separate expandable internal-work item. The compose role's L3 final answer
+alone is sent in `content`, so opening the item reveals each role, attempt,
+worker, engine, and model without mixing intermediate work into the answer.
 
 The composed L1 services still use pinned vLLM. This proves the L3/L2/L1 object
 boundary and UI behavior, but does **not** close the native-Kairyu L1 production
@@ -230,10 +172,10 @@ Open WebUI listens on all host interfaces, requires no login, calls only
 Kairyu L3, and is explicitly limited to `kairyu-auto-max`. The public
 `/v1/models` endpoint additionally returns `embed-small`; the L1 pools are not
 public IDs or Chat UI choices. The launcher validates that exact public
-inventory, the explicit nine-role coding DAG (including the streamed head and
-the sandbox executor binding), the seven-role general ensemble profile, the
-LLM profile judge bound to the direct-DeepSeek worker, and two ordered finite
-384-dimensional embedding vectors with positive usage before printing the URL.
+inventory, the explicit nine-role dual-track DAG (including the streamed head,
+the single-profile policy, and the `{max_steps: 10, max_refine_depth: 0}`
+budget), and two ordered finite 384-dimensional embedding vectors with
+positive usage before printing the URL.
 
 The embedding model is the truthfully named
 `sentence-transformers/all-MiniLM-L6-v2` FastEmbed deployment, not an alias for
@@ -271,23 +213,21 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./verify.sh serving-auto-max-coding
 ```
 
-`serving-auto-max` records the generic-workload product serving matrix (a
-generic turn routes through the general ensemble profile, which has no
-sandbox stages). `serving-auto-max-coding` runs a
-deterministic self-contained Python-task dataset at c1/8/16/32, requires real
-(non-skipped) sandbox execution in at least 90% of each row's traces,
+`serving-auto-max` records the generic-workload product serving matrix and
+proves the head/compose public stream end-to-end. `serving-auto-max-coding`
+runs a deterministic self-contained Python-task dataset at c1/8/16/32,
 measures the paired DeepSeek-direct row on the same dataset through the
 loopback L1 endpoint, and
 **fails unless the product's semantic TTFT p50 stays within 2x the direct
 row** (pinned `example.json` denominators are the fallback ceiling). The
-historical product serving rows in `MEASUREMENTS.md` predate the coding DAG
-and do not transfer without a fresh run; the Tier1 speculative-decoding
-selection rows are role-shaped L1 worker measurements taken against the
-deployed worker configuration. ChatUI continues to call only Kairyu L3. Raw
-artifacts go to the configured NVMe `verification-results/<UTC-run-id>/`
-directory. Model and product evaluations are invoked explicitly through
-`python -m evals`; coding accuracy versus frontier APIs is owned by the
-external `kairyu-bench` repository.
+dual-track DAG's measured matrices are the dated 2026-08-18 section of
+`MEASUREMENTS.md` (run `20260818T025710Z`: TTFT gate PASS at every
+concurrency, binding c32 row 0.67×); every older section predates this DAG
+and does not transfer. ChatUI continues to call only Kairyu
+L3. Raw artifacts go to the configured NVMe
+`verification-results/<UTC-run-id>/` directory. Model and product evaluations
+are invoked explicitly through `python -m evals`; coding accuracy versus
+frontier APIs is owned by the external `kairyu-bench` repository.
 
 ## Reproducibility pins
 

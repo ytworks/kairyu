@@ -40,6 +40,11 @@ absent from `/routing`.
 > the "verify a draft before publishing" rule survive there; the
 > pre-verified public stream is now split into a committed head prefix plus
 > a verified continuation (ECO-D4). EO-D1/D2/D4/D5/D6 remain in force.
+>
+> **Superseded again (2026-08-18):** the coding/general two-profile scheme
+> was replaced by the dual-track policy-ensemble DAG of
+> `example-dual-track-orchestration.md` (DTO-D1..D5); the head-streamed
+> public seam continues as DTO-D3.
 
 The UI-visible model uses this role graph instead of the single-pass MoA
 shortcut:
@@ -102,7 +107,10 @@ as a chat choice.
 - A request follows `L3 -> L2 -> L1... -> L2 -> L3` without a second L3 ingress
   and without duplicate lifecycle ownership.
 - Scripted verifier failures cause real bounded synthesis retries, with exact
-  internal usage and metadata trace accounting.
+  internal usage and metadata trace accounting. *(Superseded 2026-08-18: the
+  dual-track DAG has no verifier or refinement loop — DTO-D4 in
+  `example-dual-track-orchestration.md`; internal usage/trace accounting
+  remains in force.)*
 - Open WebUI shows model-attributed intermediate output behind its reasoning
   disclosure control and shows the publisher answer separately.
 - An assistant response containing `reasoning_content` can be appended to the

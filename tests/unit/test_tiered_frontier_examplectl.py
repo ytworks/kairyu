@@ -298,7 +298,7 @@ def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcri
     assert "Do not stop reasoning" not in template
 
 
-def test_tiered_l2_pins_only_the_explicit_coding_dag() -> None:
+def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
 
@@ -306,15 +306,13 @@ def test_tiered_l2_pins_only_the_explicit_coding_dag() -> None:
         "tier1",
         "tier2",
         "tier2-direct",
-        "sandbox",
     ]
     assert maximum.workers[0].engine_ref == "qwen3.8-27b"
     assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
-    # The public head/continuation stream must use the NON-thinking DeepSeek
-    # policy: <think> deliberation was measured consuming the entire public
-    # token budget before the first visible byte.
+    # The public head/compose stream and the policy call must use the
+    # NON-thinking DeepSeek policy: <think> deliberation was measured
+    # consuming the entire public token budget before the first visible byte.
     assert maximum.workers[2].engine_ref == "deepseek-v4-flash-0731"
-    assert maximum.workers[3].executor_ref == "sandbox-python"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
@@ -323,89 +321,74 @@ def test_tiered_l2_pins_only_the_explicit_coding_dag() -> None:
     assert config["orchestration"]["internal_max_output_tokens"] == 4096
     assert (
         config["orchestration"]["product_policy"]
-        == "head-streamed-execution-gated-coding-dag"
+        == "dual-track-policy-ensemble-dag"
     )
     assert config["orchestration"]["product_normal_calls"] == 9
-    assert config["orchestration"]["product_max_calls"] == 12
-    assert config["orchestration"]["product_max_refinements"] == 1
-    assert maximum.budget.max_steps == 12
-    assert maximum.budget.max_refine_depth == 1
+    assert config["orchestration"]["product_max_calls"] == 10
+    assert config["orchestration"]["product_max_refinements"] == 0
+    assert maximum.budget.max_steps == 10
+    assert maximum.budget.max_refine_depth == 0
     expected_roles = list(config["orchestration"]["roles"])
     assert [role.name for role in maximum.roles] == expected_roles == [
         "head",
-        "testgen",
-        "proposal_impl",
-        "proposal_edge",
-        "exec_matrix",
-        "draft_synthesis",
-        "exec_draft",
-        "verifier",
-        "continuation",
+        "draft",
+        "policies",
+        "answer_1",
+        "answer_2",
+        "answer_3",
+        "answer_4",
+        "critique",
+        "compose",
     ]
     by_name = {role.name: role for role in maximum.roles}
-    # The head streams the public opening from t=0 on the DeepSeek worker (the
-    # measured TTFT-budget row); the continuation resumes the public stream.
+    # Qwen head: server-side template + thinking disabled makes the public
+    # opening deterministic from t=0; DeepSeek public roles pay a
+    # nondeterministic <think> tax that forfeits the TTFT gate.
     head = by_name["head"]
-    # Qwen: server-side template + thinking disabled makes the public opening
-    # deterministic; DeepSeek public roles pay a nondeterministic <think> tax.
     assert head.role_type == "head" and head.worker == "tier1"
     assert head.depends_on == ()
     assert config["orchestration"]["stream_head"] == "head"
-    continuation = by_name["continuation"]
-    assert continuation.worker == "tier2-direct"
-    assert continuation.depends_on == ("head", "draft_synthesis", "verifier")
-    # The verifier judges execution evidence that is re-run inline per attempt.
-    verifier = by_name["verifier"]
-    assert verifier.verifies == "draft_synthesis"
-    assert verifier.depends_on == ("draft_synthesis", "exec_draft")
-    exec_matrix = by_name["exec_matrix"]
-    assert exec_matrix.role_type == "executor" and exec_matrix.worker == "sandbox"
-    assert exec_matrix.executor is not None
-    assert exec_matrix.executor.mode == "matrix"
-    assert exec_matrix.executor.code_from == ("proposal_impl", "proposal_edge")
-    assert exec_matrix.executor.tests_from == ("testgen",)
-    exec_draft = by_name["exec_draft"]
-    assert exec_draft.executor is not None
-    assert exec_draft.executor.mode == "single"
-    assert exec_draft.executor.code_from == ("draft_synthesis",)
+    # Track B: quick Qwen draft, critically refined by thinking DeepSeek.
+    draft = by_name["draft"]
+    assert draft.worker == "tier1" and draft.depends_on == ()
+    critique = by_name["critique"]
+    assert critique.worker == "tier2"
+    assert critique.depends_on == ("draft",)
+    # Track A: one non-thinking DeepSeek policy call fans out to four Qwen
+    # answerers, one per replica, each bound to its policy by prompt.
+    policies = by_name["policies"]
+    assert policies.worker == "tier2-direct" and policies.depends_on == ()
+    answerers = [by_name[f"answer_{index}"] for index in range(1, 5)]
+    assert all(role.worker == "tier1" for role in answerers)
+    assert all(role.depends_on == ("policies",) for role in answerers)
+    assert {role.sampling.seed_offset for role in answerers} == {1, 2, 3, 4}
+    for index, role in enumerate(answerers, start=1):
+        assert f"POLICY {index}" in role.prompt
+    # The merge is the selected final unit: it carries the caller's public
+    # intent (no sampling override), continues the committed head opening,
+    # and renders prompt_headless on head-disabled (tool/format) turns.
+    compose = by_name["compose"]
+    assert compose.worker == "tier2-direct"
+    assert compose.depends_on == (
+        "head",
+        "critique",
+        "answer_1",
+        "answer_2",
+        "answer_3",
+        "answer_4",
+    )
+    assert compose.reasoning_closed is True
+    assert compose.prompt_headless
     # Untrusted-data delimiters (MoA pattern) guard every cross-role payload.
-    for role_name in ("draft_synthesis", "verifier"):
+    for role_name in ("critique", "compose"):
         assert "UNTRUSTED" in by_name[role_name].prompt
-    # Issue #509: the general ensemble profile serves agent/format-constrained
-    # and non-code turns under the same model — full DAG, no sandbox stages,
-    # every deployment model participating, publisher on non-thinking DeepSeek.
-    expected_general = list(config["orchestration"]["general_roles"])
-    assert [role.name for role in maximum.general_roles] == expected_general == [
-        "head_general",
-        "proposal_direct",
-        "proposal_alt",
-        "proposal_deep",
-        "synthesis_general",
-        "verifier_general",
-        "continuation_general",
-    ]
-    general_by_name = {role.name: role for role in maximum.general_roles}
-    assert general_by_name["proposal_deep"].worker == "tier2"
-    assert general_by_name["verifier_general"].verifies == "synthesis_general"
-    assert general_by_name["continuation_general"].worker == "tier2-direct"
-    assert general_by_name["continuation_general"].reasoning_closed is True
-    assert general_by_name["continuation_general"].prompt_headless
-    assert not any(
-        role.role_type == "executor" for role in maximum.general_roles
-    )
-    # Issue #509 amendment: the coding/general split is judged by the direct
-    # (non-thinking) DeepSeek worker, and the launcher asserts the served
-    # judge against this metadata.
-    assert (
-        maximum.profile_judge.worker
-        == config["orchestration"]["profile_judge_worker"]
-        == "tier2-direct"
-    )
-    assert (
-        maximum.profile_judge.prompt_prefix
-        == "<｜begin▁of▁sentence｜><｜User｜>"
-    )
-    assert maximum.profile_judge.prompt_suffix == "<｜Assistant｜></think>"
+    # One profile for every turn: no general ensemble, no profile judge, no
+    # sandbox stages (the executor service stays deployed but unreferenced).
+    assert maximum.general_roles == ()
+    assert maximum.profile_judge is None
+    assert not any(role.role_type == "executor" for role in maximum.roles)
+    assert "general_roles" not in config["orchestration"]
+    assert "profile_judge_worker" not in config["orchestration"]
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 
@@ -482,39 +465,24 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                         {"name": name}
                         for name in (
                             "head",
-                            "testgen",
-                            "proposal_impl",
-                            "proposal_edge",
-                            "exec_matrix",
-                            "draft_synthesis",
-                            "exec_draft",
-                            "verifier",
-                            "continuation",
+                            "draft",
+                            "policies",
+                            "answer_1",
+                            "answer_2",
+                            "answer_3",
+                            "answer_4",
+                            "critique",
+                            "compose",
                         )
                     ],
-                    "general_roles": [
-                        {"name": name}
-                        for name in (
-                            "head_general",
-                            "proposal_direct",
-                            "proposal_alt",
-                            "proposal_deep",
-                            "synthesis_general",
-                            "verifier_general",
-                            "continuation_general",
-                        )
-                    ],
-                    "profile_judge": {"worker": "tier2-direct"},
                     "stream_head": "head",
                     "moa_samples": 0,
-                    "budget": {"max_steps": 12, "max_refine_depth": 1},
+                    "budget": {"max_steps": 10, "max_refine_depth": 0},
                     "expose_intermediate_outputs": True,
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
                         "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
-                    },
-                    "configured_executors": {
-                        "sandbox": {"backend_type": "HttpExecutionBackend"}
+                        "tier2-direct": {"model": "deepseek-v4-flash-0731"},
                     },
                 }
             }
@@ -543,6 +511,60 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
             {"model": "deepseek-v4-flash-0731", "prompt": "kairyu"},
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("direct_model", "case"),
+    [
+        (None, "missing"),
+        ("deepseek-v4-flash-0731-thinking", "wrong"),
+    ],
+)
+def test_tiered_readiness_rejects_invalid_direct_deepseek_binding(
+    direct_model: str | None,
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _load(EXAMPLE / "control.py", f"tiered_direct_readiness_{case}")
+    configured_engines = {
+        "tier1": {"model": "qwen3.8-27b"},
+        "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
+    }
+    if direct_model is not None:
+        configured_engines["tier2-direct"] = {"model": direct_model}
+
+    def fake_json(url: str) -> dict:
+        if url.endswith("/readyz"):
+            return {"status": "ready"}
+        if url.endswith("/v1/models"):
+            return {"data": [{"id": "kairyu-auto-max"}, {"id": "embed-small"}]}
+        assert url.endswith("/routing")
+        return {
+            "models": {
+                "kairyu-auto-max": {
+                    "roles": [
+                        {"name": name}
+                        for name in control.SPEC["orchestration"]["roles"]
+                    ],
+                    "stream_head": "head",
+                    "moa_samples": 0,
+                    "budget": {"max_steps": 10, "max_refine_depth": 0},
+                    "expose_intermediate_outputs": True,
+                    "configured_engines": configured_engines,
+                }
+            }
+        }
+
+    def fake_post(url: str, _payload: dict) -> dict:
+        if url.endswith("/v1/embeddings"):
+            return _embedding_response()
+        return {"count": 1}
+
+    monkeypatch.setattr(control, "_json_url", fake_json)
+    monkeypatch.setattr(control, "_post_json_url", fake_post)
+
+    with pytest.raises(SystemExit, match="Tier2-direct"):
+        control._validate_ready("http://api.test", "http://tokenizer.test/tokenize")
 
 
 @pytest.mark.parametrize(
@@ -630,7 +652,7 @@ def test_tiered_verification_rejects_storage_outside_nvme(
 
 
 
-def test_tiered_product_serving_requires_head_and_continuation_trace(
+def test_tiered_product_serving_requires_head_and_compose_trace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     benchmark = _load(EXAMPLE / "verification.py", "tiered_example_product_verification")
@@ -649,129 +671,100 @@ def test_tiered_product_serving_requires_head_and_continuation_trace(
             {
                 "tensor_parallel": 4,
                 "replicas": 1,
-                "expected_route": "continuation",
+                "expected_route": "compose",
                 "expected_role": "publisher",
                 "expected_kind": "generation",
                 "warmup_requests": 4,
                 "natural_completion": True,
                 "require_head": True,
-                "expected_execution_nodes": ("exec_matrix", "exec_draft"),
-                "expected_execution_status": "skipped",
+                "expected_generation_nodes": (
+                    "draft",
+                    "policies",
+                    "answer_1",
+                    "answer_2",
+                    "answer_3",
+                    "answer_4",
+                    "critique",
+                ),
             },
         )
     ]
 
 
-def _write_execution_serving_result(
-    row_dir: Path,
-    statuses: dict[str, str],
-) -> None:
-    stages = [
-        {
-            "node": "continuation",
-            "role": "publisher",
-            "kind": "generation",
-            "status": "success",
+def _write_product_serving_result(row_dir: Path, stages: list[dict]) -> None:
+    result = {
+        "summary": {
+            "requests": 1,
+            "completion_tokens_total": 32,
+            "output_tokens_per_s": 1.0,
         },
-        {
-            "node": "head",
-            "role": "publisher",
-            "kind": "generation",
-            "status": "success",
-        },
-    ]
-    stages.extend(
-        {
-            "node": node,
-            "role": "executor",
-            "kind": "execution",
-            "status": "skipped" if status == "skipped" else "success",
-            "execution_status": status,
-        }
-        for node, status in statuses.items()
-    )
-    row_dir.mkdir(parents=True, exist_ok=True)
-    (row_dir / "result-serving.json").write_text(
-        json.dumps(
+        "samples": [
             {
-                "summary": {
-                    "requests": 1,
-                    "completion_tokens_total": 8,
-                    "output_tokens_per_s": 1.0,
-                },
-                "samples": [
-                    {
-                        "completion_tokens": 8,
-                        "trace": {"status": "valid", "stages": stages},
-                    }
-                ],
+                "completion_tokens": 32,
+                "trace": {"status": "valid", "stages": stages},
             }
-        ),
-        encoding="utf-8",
-    )
-
-
-@pytest.mark.parametrize("failure_status", ["unavailable", "timeout", "setup_error"])
-def test_tiered_coding_gate_counts_only_both_ok_execution_stages(
-    tmp_path: Path,
-    failure_status: str,
-) -> None:
-    benchmark = _load(EXAMPLE / "verification.py", f"tiered_gate_{failure_status}")
-    common = {
-        "expected_route": "continuation",
-        "expected_role": "publisher",
-        "expected_kind": "generation",
-        "require_head": True,
-        "require_execution_success": True,
-        "expected_execution_nodes": ("exec_matrix", "exec_draft"),
+        ],
     }
-    _write_execution_serving_result(
-        tmp_path,
-        {"exec_matrix": "ok", "exec_draft": "ok"},
-    )
-    assert benchmark._validate_serving_row(tmp_path, 1, 8, **common) == 0
-
-    _write_execution_serving_result(
-        tmp_path,
-        {"exec_matrix": "ok", "exec_draft": failure_status},
-    )
-    assert benchmark._validate_serving_row(tmp_path, 1, 8, **common) == 1
-
-    # The matrix joins per-candidate statuses; one broken candidate is a model
-    # formatting slip the DAG absorbs (consensus + verifier override), so the
-    # sandbox path still counts as executed when any candidate ran ok.
-    _write_execution_serving_result(
-        tmp_path,
-        {"exec_matrix": f"ok,{failure_status}", "exec_draft": "ok"},
-    )
-    assert benchmark._validate_serving_row(tmp_path, 1, 8, **common) == 0
-    # But a matrix with no ok candidate at all is not execution evidence.
-    _write_execution_serving_result(
-        tmp_path,
-        {"exec_matrix": failure_status, "exec_draft": "ok"},
-    )
-    assert benchmark._validate_serving_row(tmp_path, 1, 8, **common) == 1
+    (row_dir / "result-serving.json").write_text(json.dumps(result))
 
 
-def test_tiered_generic_gate_requires_both_execution_stages_to_skip(
+@pytest.mark.parametrize(
+    "node",
+    [
+        "draft",
+        "policies",
+        "answer_1",
+        "answer_2",
+        "answer_3",
+        "answer_4",
+        "critique",
+    ],
+)
+@pytest.mark.parametrize("failure_mode", ["missing", "failed"])
+def test_tiered_product_serving_requires_every_internal_generation_stage(
+    node: str,
+    failure_mode: str,
     tmp_path: Path,
 ) -> None:
-    benchmark = _load(EXAMPLE / "verification.py", "tiered_generic_execution_gate")
-    _write_execution_serving_result(
-        tmp_path,
-        {"exec_matrix": "skipped", "exec_draft": "skipped"},
+    benchmark = _load(
+        EXAMPLE / "verification.py",
+        f"tiered_product_stage_{node}_{failure_mode}",
     )
-    assert benchmark._validate_serving_row(
-        tmp_path,
-        1,
-        8,
-        expected_route="continuation",
-        expected_role="publisher",
-        expected_kind="generation",
-        require_head=True,
-        expected_execution_nodes=("exec_matrix", "exec_draft"),
-        expected_execution_status="skipped",
-    ) == 0
+    stages = [
+        {"node": "head", "kind": "generation", "status": "success"},
+        {
+            "node": "compose",
+            "role": "publisher",
+            "kind": "generation",
+            "status": "success",
+        },
+        *[
+            {"node": name, "kind": "generation", "status": "success"}
+            for name in benchmark._DUAL_TRACK_INTERNAL_NODES
+        ],
+    ]
+
+    def validate() -> int:
+        return benchmark._validate_serving_row(
+            tmp_path,
+            1,
+            32,
+            expected_route="compose",
+            expected_role="publisher",
+            require_head=True,
+            expected_generation_nodes=benchmark._DUAL_TRACK_INTERNAL_NODES,
+        )
+
+    _write_product_serving_result(tmp_path, stages)
+    assert validate() == 0
+
+    if failure_mode == "missing":
+        stages = [stage for stage in stages if stage["node"] != node]
+    else:
+        next(stage for stage in stages if stage["node"] == node)["status"] = "failed"
+    _write_product_serving_result(tmp_path, stages)
+
+    assert validate() == 1
 
 
 def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
@@ -815,7 +808,8 @@ def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
     gate = json.loads((tmp_path / "fallback" / "ttft-gate.json").read_text())
     assert gate["gates"]["1"]["denominator_source"] == "pinned_fallback"
     assert validations
+    assert all(row["expected_route"] == "compose" for row in validations)
     assert all(
-        row["expected_execution_nodes"] == ("exec_matrix", "exec_draft")
+        row["expected_generation_nodes"] == benchmark._DUAL_TRACK_INTERNAL_NODES
         for row in validations
     )
