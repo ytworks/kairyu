@@ -482,6 +482,7 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
                         "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
+                        "tier2-direct": {"model": "deepseek-v4-flash-0731"},
                     },
                 }
             }
@@ -510,6 +511,60 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
             {"model": "deepseek-v4-flash-0731", "prompt": "kairyu"},
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("direct_model", "case"),
+    [
+        (None, "missing"),
+        ("deepseek-v4-flash-0731-thinking", "wrong"),
+    ],
+)
+def test_tiered_readiness_rejects_invalid_direct_deepseek_binding(
+    direct_model: str | None,
+    case: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _load(EXAMPLE / "control.py", f"tiered_direct_readiness_{case}")
+    configured_engines = {
+        "tier1": {"model": "qwen3.8-27b"},
+        "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
+    }
+    if direct_model is not None:
+        configured_engines["tier2-direct"] = {"model": direct_model}
+
+    def fake_json(url: str) -> dict:
+        if url.endswith("/readyz"):
+            return {"status": "ready"}
+        if url.endswith("/v1/models"):
+            return {"data": [{"id": "kairyu-auto-max"}, {"id": "embed-small"}]}
+        assert url.endswith("/routing")
+        return {
+            "models": {
+                "kairyu-auto-max": {
+                    "roles": [
+                        {"name": name}
+                        for name in control.SPEC["orchestration"]["roles"]
+                    ],
+                    "stream_head": "head",
+                    "moa_samples": 0,
+                    "budget": {"max_steps": 10, "max_refine_depth": 0},
+                    "expose_intermediate_outputs": True,
+                    "configured_engines": configured_engines,
+                }
+            }
+        }
+
+    def fake_post(url: str, _payload: dict) -> dict:
+        if url.endswith("/v1/embeddings"):
+            return _embedding_response()
+        return {"count": 1}
+
+    monkeypatch.setattr(control, "_json_url", fake_json)
+    monkeypatch.setattr(control, "_post_json_url", fake_post)
+
+    with pytest.raises(SystemExit, match="Tier2-direct"):
+        control._validate_ready("http://api.test", "http://tokenizer.test/tokenize")
 
 
 @pytest.mark.parametrize(
