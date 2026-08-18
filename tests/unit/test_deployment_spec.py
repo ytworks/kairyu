@@ -288,6 +288,10 @@ def test_server_section_owns_stable_schema_without_runtime_inheritance():
             "anyOf": [{"type": "string"}, {"type": "null"}],
             "default": None,
         },
+        "responses_compaction_secret_env": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        },
         "max_concurrency": {
             "anyOf": [
                 {"minimum": 1, "type": "integer"},
@@ -338,6 +342,7 @@ server:
   host: 127.0.0.1
   port: 8100
   api_keys_env: KAIRYU_API_KEYS
+  responses_compaction_secret_env: KAIRYU_RESPONSES_COMPACTION_SECRET
   max_concurrency: 64
   admission_wait_timeout_s: 3.5
   ttft_slo_s: 2.0
@@ -357,6 +362,7 @@ engines:
     assert load_deployment_spec(dumped) == spec
     assert spec.server.to_server_settings() == ServerSettings(
         api_keys_env="KAIRYU_API_KEYS",
+        responses_compaction_secret_env="KAIRYU_RESPONSES_COMPACTION_SECRET",
         max_concurrency=64,
         admission_wait_timeout_s=3.5,
         ttft_slo_s=2.0,

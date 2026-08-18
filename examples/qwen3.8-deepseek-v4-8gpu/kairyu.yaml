@@ -2,6 +2,7 @@ server:
   host: 0.0.0.0
   port: 8000
   api_keys_env: null
+  responses_compaction_secret_env: KAIRYU_RESPONSES_COMPACTION_SECRET
   max_concurrency: 256
   # A bounded queue wait fails a stuck request fast instead of parking it for
   # a day; the measured worst-case E2E envelope (generic c32 p99 ~510s,

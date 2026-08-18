@@ -280,6 +280,10 @@ services:
     command: [/etc/kairyu/kairyu.yaml]
     environment:
       KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
+      # Codex remote-compaction tokens are AES-256-GCM sealed with this
+      # secret; without a stable value a gateway restart invalidates every
+      # outstanding token mid-session (Codex does not retry the 400).
+      KAIRYU_RESPONSES_COMPACTION_SECRET: ${KAIRYU_RESPONSES_COMPACTION_SECRET:?set a random secret of at least 32 bytes (e.g. openssl rand -hex 32)}
     volumes:
       - type: bind
         source: ${QWEN_MODEL_STORAGE_PATH}

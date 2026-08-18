@@ -244,6 +244,10 @@ frontier APIs is owned by the external `kairyu-bench` repository.
   `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 
+Set `KAIRYU_RESPONSES_COMPACTION_SECRET` to at least 32 random bytes before
+`docker compose up` (e.g. `export KAIRYU_RESPONSES_COMPACTION_SECRET=$(openssl
+rand -hex 32)`); Codex remote-compaction tokens on `/v1/responses` are sealed
+with it, and a stable value keeps them valid across gateway restarts.
 Override API/UI/tokenizer-oracle ports with `API_PORT`, `CHAT_UI_PORT`, and
 `DEEPSEEK_L1_PORT`. Both L3 endpoints bind all host interfaces by default, so
 the API and UI remain reachable through both `127.0.0.1` and the outward-facing

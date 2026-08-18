@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import struct
+from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
@@ -255,6 +256,300 @@ class TestOrchestratorSurface:
             assert any("moa" in line for line in trace), trace
 
 
+def _responses_events(body: str) -> list[dict]:
+    return [
+        json.loads(line.removeprefix("data: "))
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+class TestOrchestratedResponses:
+    """AUTO models on /v1/responses delegate to the chat orchestration
+    contract (issue #530): the Codex stateless tool loop, live text relay,
+    and store round-trips must behave as they do for engine models."""
+
+    def _tool_loop_app(self, tmp_path):
+        class AutoToolBackend(MockBackend):
+            async def generate(self, request):
+                if "tool: 5" in request.prompt:
+                    text = "The sum is 5."
+                else:
+                    text = (
+                        '<tool_call>{"name":"add","arguments":{"a":2,"b":3}}'
+                        "</tool_call>"
+                    )
+                return GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(
+                        CompletionOutput(
+                            index=0,
+                            text=text,
+                            token_ids=(1, 2, 3),
+                            finish_reason="stop",
+                        ),
+                    ),
+                    usage=GenerationUsage(prompt_tokens=11, completion_tokens=7),
+                )
+
+        backend = AutoToolBackend()
+        return create_legacy_app(
+            {},
+            orchestrators={
+                "kairyu-auto": Orchestrator({"tier1": backend, "tier2": backend})
+            },
+            settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+        )
+
+    def _backend_app(self, tmp_path, backend):
+        return create_legacy_app(
+            {},
+            orchestrators={
+                "kairyu-auto": Orchestrator({"tier1": backend, "tier2": backend})
+            },
+            settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+        )
+
+    def test_codex_shaped_stateless_tool_loop(self, tmp_path):
+        tool = {
+            "type": "function",
+            "name": "add",
+            "description": "Add two integers.",
+            "parameters": {
+                "type": "object",
+                "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+                "required": ["a", "b"],
+                "additionalProperties": False,
+            },
+            "strict": False,
+        }
+        first_turn = {
+            "model": "kairyu-auto",
+            "instructions": "You are a coding agent.",
+            "input": [{"type": "message", "role": "user", "content": "add 2 and 3"}],
+            "tools": [tool],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "reasoning": {"effort": "medium", "summary": "auto"},
+            "store": False,
+            "stream": True,
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "sess-codex",
+            "client_metadata": {"session_id": "sess-codex"},
+        }
+        with TestClient(self._tool_loop_app(tmp_path)) as client:
+            response = client.post("/v1/responses", json=first_turn)
+            assert response.status_code == 200
+            events = _responses_events(response.text)
+            assert events[0]["type"] == "response.created"
+            call_items = [
+                event["item"]
+                for event in events
+                if event["type"] == "response.output_item.done"
+                and event["item"]["type"] == "function_call"
+            ]
+            assert len(call_items) == 1
+            call = call_items[0]
+            assert call["name"] == "add"
+            assert call["call_id"]
+            assert json.loads(call["arguments"]) == {"a": 2, "b": 3}
+            terminal = events[-1]
+            assert terminal["type"] == "response.completed"
+            usage = terminal["response"]["usage"]
+            assert usage["input_tokens"] > 0 and usage["output_tokens"] > 0
+            assert usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
+
+            # Codex resends the full history (store:false) with the echoed
+            # function_call item and its output, then expects a final message.
+            second_turn = dict(first_turn)
+            second_turn["input"] = [
+                {"type": "message", "role": "user", "content": "add 2 and 3"},
+                {
+                    "type": "function_call",
+                    "id": call["id"],
+                    "call_id": call["call_id"],
+                    "name": call["name"],
+                    "arguments": call["arguments"],
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": call["call_id"],
+                    "output": "tool: 5",
+                },
+            ]
+            response = client.post("/v1/responses", json=second_turn)
+            assert response.status_code == 200
+            events = _responses_events(response.text)
+            messages = [
+                event["item"]
+                for event in events
+                if event["type"] == "response.output_item.done"
+                and event["item"]["type"] == "message"
+            ]
+            assert len(messages) == 1
+            assert messages[0]["content"][0]["text"] == "The sum is 5."
+            assert events[-1]["type"] == "response.completed"
+
+    def test_live_text_stream_relays_deltas_and_usage(self, tmp_path):
+        with TestClient(_auto_app(tmp_path)) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "kairyu-auto",
+                    "input": "hello",
+                    "stream": True,
+                    "store": False,
+                },
+            )
+            assert response.status_code == 200
+            events = _responses_events(response.text)
+            types = [event["type"] for event in events]
+            assert types[0] == "response.created"
+            assert "response.output_item.added" in types
+            deltas = [
+                event["delta"]
+                for event in events
+                if event["type"] == "response.output_text.delta"
+            ]
+            done = next(
+                event for event in events if event["type"] == "response.output_text.done"
+            )
+            assert deltas and "".join(deltas) == done["text"]
+            terminal = events[-1]
+            assert terminal["type"] == "response.completed"
+            item = terminal["response"]["output"][0]
+            assert item["type"] == "message" and item["content"][0]["text"] == done["text"]
+            usage = terminal["response"]["usage"]
+            assert usage["total_tokens"] == usage["input_tokens"] + usage["output_tokens"]
+            assert usage["output_tokens"] > 0
+            assert [event["sequence_number"] for event in events] == list(
+                range(len(events))
+            )
+
+    def test_compaction_trigger_on_auto_model(self, tmp_path):
+        with TestClient(_auto_app(tmp_path)) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "kairyu-auto",
+                    "store": False,
+                    "input": [
+                        {"type": "message", "role": "user", "content": "hello"},
+                        {"type": "compaction_trigger"},
+                    ],
+                },
+            )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "completed"
+        assert len(payload["output"]) == 1
+        assert payload["output"][0]["type"] == "compaction"
+        assert payload["output"][0]["encrypted_content"]
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+    def test_truncated_compaction_on_auto_model_is_incomplete(self, tmp_path, stream):
+        class AutoLengthBackend(MockBackend):
+            async def generate(self, request):
+                result = await super().generate(request)
+                return replace(
+                    result,
+                    completions=tuple(
+                        replace(completion, finish_reason="length")
+                        for completion in result.completions
+                    ),
+                )
+
+        with TestClient(self._backend_app(tmp_path, AutoLengthBackend())) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "kairyu-auto",
+                    "stream": stream,
+                    "store": False,
+                    "input": [
+                        {"type": "message", "role": "user", "content": "history"},
+                        {"type": "compaction_trigger"},
+                    ],
+                },
+            )
+        assert response.status_code == 200
+        if stream:
+            events = _responses_events(response.text)
+            assert events[-1]["type"] == "response.incomplete"
+            payload = events[-1]["response"]
+        else:
+            payload = response.json()
+        assert payload["status"] == "incomplete"
+        assert payload["output"] == []
+        assert payload["incomplete_details"] == {"reason": "max_output_tokens"}
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+    def test_empty_compaction_on_auto_model_fails_closed(self, tmp_path, stream):
+        class EmptyBackend(MockBackend):
+            async def generate(self, request):
+                return GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(
+                        CompletionOutput(
+                            index=0,
+                            text="",
+                            token_ids=(),
+                            finish_reason="stop",
+                        ),
+                    ),
+                    usage=GenerationUsage(prompt_tokens=3, completion_tokens=0),
+                )
+
+        with TestClient(self._backend_app(tmp_path, EmptyBackend())) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "kairyu-auto",
+                    "stream": stream,
+                    "store": False,
+                    "input": [
+                        {"type": "message", "role": "user", "content": "history"},
+                        {"type": "compaction_trigger"},
+                    ],
+                },
+            )
+        if stream:
+            assert response.status_code == 200
+            events = _responses_events(response.text)
+            assert [event["type"] for event in events[-2:]] == [
+                "error",
+                "response.failed",
+            ]
+            assert events[-2]["code"] == "compaction_failed"
+        else:
+            assert response.status_code == 502
+            assert response.json()["error"]["code"] == "compaction_failed"
+
+    def test_non_streaming_envelope_and_store_round_trip(self, tmp_path):
+        with TestClient(_auto_app(tmp_path)) as client:
+            response = client.post(
+                "/v1/responses",
+                json={"model": "kairyu-auto", "input": "hello", "store": True},
+            )
+            assert response.status_code == 200
+            payload = response.json()
+            assert payload["object"] == "response"
+            assert payload["status"] == "completed"
+            assert payload["output"][0]["type"] == "message"
+            assert payload["output"][0]["content"][0]["text"]
+            follow_up = client.post(
+                "/v1/responses",
+                json={
+                    "model": "kairyu-auto",
+                    "input": "and again",
+                    "previous_response_id": payload["id"],
+                },
+            )
+            assert follow_up.status_code == 200
+
+
 class TestTenancy:
     @pytest.mark.parametrize(
         ("surface", "model", "stream"),
@@ -266,6 +561,7 @@ class TestTenancy:
             pytest.param("chat", "kairyu-auto", False, id="sync-orchestrator"),
             pytest.param("chat", "kairyu-auto", True, id="stream-orchestrator"),
             pytest.param("responses", "m", False, id="responses"),
+            pytest.param("responses", "kairyu-auto", False, id="responses-orchestrator"),
             pytest.param("embeddings", "embedding-model", False, id="embeddings"),
             pytest.param("batch", "m", False, id="batch"),
         ],

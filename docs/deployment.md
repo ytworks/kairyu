@@ -253,6 +253,7 @@ server:
   host: 0.0.0.0
   port: 8000
   api_keys_env: KAIRYU_API_KEYS     # comma-separated client keys
+  responses_compaction_secret_env: KAIRYU_RESPONSES_COMPACTION_SECRET
   max_concurrency: 256
   ttft_slo_s: 2.0                  # optional direct-chat predictive admission
 pools:
@@ -493,17 +494,50 @@ The script creates an ephemeral Codex run with `wire_api="responses"` and a
 read-only sandbox. Its default `KAIRYU_SMOKE_MODE=tool` requires a real `pwd`
 command event, its tool result, and a final message containing `PASS`;
 `KAIRYU_SMOKE_MODE=text` selects a text-only wire smoke. Kairyu accepts Codex
-function namespaces and its disabled web-search declaration; enabled hosted
-web search remains unsupported.
+function namespaces and its disabled web-search declaration (including its
+search configuration fields); enabled hosted web search remains unsupported.
 `background`, Conversations API objects, hosted prompt templates, moderation,
 automatic truncation, context management, `max_tool_calls`, and response
 top-logprobs fail before model dispatch. This explicit rejection boundary keeps
 the accepted compatibility surface truthful. `service_tier` supports only the
 neutral `auto` selection; explicit paid/priority tiers fail rather than being
 echoed as executed. Codex reasoning/include metadata is accepted for wire
-compatibility but Kairyu emits no reasoning or encrypted-reasoning output item.
-`text.verbosity` is applied as a model instruction, not claimed as a provider
-quality-of-service tier.
+compatibility but Kairyu emits no reasoning or encrypted-reasoning output item;
+echoed `reasoning` history items and Codex-internal passthrough item fields are
+accepted and dropped. `text.verbosity` is applied as a model instruction, not
+claimed as a provider quality-of-service tier.
+
+Since issue #530, `/v1/responses` serves every chat model `/v1/models`
+advertises: orchestrated (`kairyu-auto*`) models delegate to the Chat
+Completions orchestration contract, so `public_models` topologies that hide
+every L1 pool behind a single AUTO model work end to end (this includes the
+Terminal-Bench gateway shape). Additional Codex-derived behavior:
+
+- **Buffered streams never go silent.** Any streamed request with tools
+  replies `response.created`/`response.in_progress` immediately and emits
+  `: keep-alive` comments while generation runs; Codex aborts SSE streams
+  that stay silent for 300 s. Failures after the stream opens surface as
+  `error` + `response.failed` events.
+- **WebSocket upgrades get 426.** Harbor/Terminal-Bench repoints Codex's
+  built-in `openai` provider (`openai_base_url` in `config.toml`), which
+  tries WebSocket first; 426 makes Codex fall back to HTTPS immediately and
+  silently. A custom `model_providers` entry defaults to HTTPS-only and
+  skips the attempt entirely.
+- **Remote compaction v2 is served.** Against an OpenAI-shaped base URL,
+  Codex auto-compacts near its assumed context budget by sending a terminal
+  `compaction_trigger` input item; Kairyu answers with one `compaction`
+  output item whose `encrypted_content` is an opaque self-issued token, and
+  echoed compaction items decode back into the summarized context. Tokens are
+  AES-256-GCM sealed and bound to the authenticated tenant; forged, modified,
+  or cross-tenant tokens fail closed. Set
+  `server.responses_compaction_secret_env` to the name of an environment
+  variable containing at least 32 random bytes. When unset, each process uses an
+  ephemeral key and tokens do not survive a restart or gateway hop.
+- **`function_call_output.output` arrays** are accepted (text parts
+  concatenated); image/audio tool-output parts are rejected explicitly.
+- **Codex never retries 429.** A tenant admission 429 fails the Codex turn
+  outright, so size tenant admission generously (or leave it unset) on
+  deployments that serve Codex/Terminal-Bench traffic.
 
 Operational notes:
 
@@ -515,7 +549,9 @@ Operational notes:
 - **Gateway HA**: run gateways behind an L7 load balancer that consistently
   hashes `X-Session-ID`. Use `batch.store: postgres` for cross-gateway files and
   jobs. The filesystem store remains single-gateway only and must not be shared
-  over NFS.
+  over NFS. Gateways serving remote compaction must also share the same secret
+  environment value so an authenticated token issued by one gateway can be
+  opened by another.
 - **Two GPU nodes acting as one model** (TP/PP/P-D across nodes) is an
   engine-layer concern configured by `ClusterSpec` per `docs/gpu-runbook.md`
   §7; the gateway still sees one OpenAI endpoint per coherence domain.

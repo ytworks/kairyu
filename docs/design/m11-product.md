@@ -324,6 +324,52 @@ sync/async streaming tests and an unmodified Codex CLI against Qwen3-32B TP8
 cover the wire contract and multi-turn tool loop; the reproducible record is
 `bench/results/responses-codex-qwen3-32b-tp8-2026-07-28.json`.
 
+**AUTO-model + Codex compatibility amendment (2026-08-18, issue #530).**
+`/v1/responses` resolves the union `/v1/models` advertises: engine models keep
+the existing pipeline, and orchestrated (AUTO) models delegate the normalized
+`ChatCompletionRequest` to the `/v1/chat/completions` handler so validation,
+judge-first tenant reservation, admission, public usage, and metering stay
+single-sourced in the orchestration chat contract (the delegated call meters
+exactly once; the Responses-side engine pipeline and `_record_execution` are
+skipped). AUTO live text streams re-encode the orchestrator's chat-chunk SSE
+(status keep-alives stay comments; `reasoning_content` is dropped, matching
+the documented no-reasoning-output stance); buffered replies re-enter the
+existing envelope/event builders with public usage in standard fields
+(`orchestration_*` extensions remain chat-only). A field-level audit of
+codex-rs 0.147.0 plus live runs added the rest of the Codex contract:
+buffered streams open immediately and emit `: keep-alive` comments while
+generation runs (Codex aborts silent streams at 300 s; generation failures
+after the stream opens surface as `error` + `response.failed`); input items
+accept echoed `reasoning` items (dropped), content-item-array
+`function_call_output.output` (text parts concatenated, non-text rejected),
+Codex-internal passthrough fields on any item kind, and search configuration
+on the disabled `web_search` tool; `GET /v1/responses` answers 426 so the
+WebSocket-first built-in `openai` provider (the Harbor/Terminal-Bench shape)
+falls back to HTTPS immediately; and remote compaction v2 is served — a
+terminal `compaction_trigger` item runs a tool-free summarization turn
+through the same engine/orchestration path and returns one `compaction` item
+whose `encrypted_content` is an AES-256-GCM sealed, tenant-bound token that
+decodes back into a user bridge message, failing closed on forged, modified,
+or cross-tenant tokens. A configured secret derives one deployment-stable key;
+without it, a process-local key deliberately limits tokens to one gateway
+lifetime. Per the #531 review, compaction is honest end to end: a successful
+compaction stores only the compaction item as continuation context (the
+pre-compaction history is replaced, not duplicated), a length-terminated
+summary returns `response.incomplete` with no compaction item and is not
+continuable via `previous_response_id`, and an empty summary fails as a 502
+`compaction_failed` (`error` + `response.failed` mid-stream) — Codex installs
+a compaction only on `response.completed`, so a truncated or empty summary
+must never reach that terminal. Known limits are deliberate: metric phase labels of a delegated AUTO
+call record under "chat", the 1024-token default output cap applies to AUTO
+responses as it does to engines, tenant 429s are not retried by Codex
+(bench deployments should size admission accordingly), and
+`/v1/completions` stays engine-only.
+Acceptance: pytest contract tests plus unmodified codex-cli 0.147.0 runs —
+custom-provider text/tool smokes and a Harbor-shaped (`openai_base_url`
+override) tool smoke — against a mock deployment mirroring the issue
+topology (all engines hidden behind `public_models`, one orchestrated
+model).
+
 ### D5 — Vision wire format
 
 `protocol.py` accepts OpenAI content-parts (`type: text|image_url`) in chat

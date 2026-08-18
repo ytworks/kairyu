@@ -487,13 +487,15 @@ def _preflight_server(
     TenantConfig | None,
     frozenset[str],
     frozenset[str],
+    bytes,
 ]:
     settings = spec.server.to_server_settings()
     api_keys = settings.resolve_api_keys()
     admin_keys = settings.resolve_admin_keys()
+    responses_compaction_key = settings.resolve_responses_compaction_key()
     section = spec.tenants
     if section is None:
-        return settings, None, api_keys, admin_keys
+        return settings, None, api_keys, admin_keys, responses_compaction_key
     tenant_config = TenantConfig.from_mapping(
         key_tenants=section.key_tenants,
         limits={
@@ -511,7 +513,7 @@ def _preflight_server(
         default_tenant=section.default_tenant,
         resolved_api_keys=api_keys,
     )
-    return settings, tenant_config, api_keys, admin_keys
+    return settings, tenant_config, api_keys, admin_keys, responses_compaction_key
 
 
 def build_app_from_spec(
@@ -599,7 +601,13 @@ def build_app_from_spec(
             raise ValueError(
                 "--generation-config requires a local kairyu or kairyu-proc backend"
             )
-    server_settings, tenant_config, api_keys, admin_keys = _preflight_server(spec)
+    (
+        server_settings,
+        tenant_config,
+        api_keys,
+        admin_keys,
+        responses_compaction_key,
+    ) = _preflight_server(spec)
     batch_postgres_dsn: str | None = None
     if spec.batch is not None and spec.batch.store == "postgres":
         batch_postgres_dsn = os.environ.get(spec.batch.dsn_env)
@@ -919,6 +927,7 @@ def build_app_from_spec(
         embedding_backends=served_embeddings,
         resolved_api_keys=api_keys,
         resolved_admin_keys=admin_keys,
+        resolved_responses_compaction_key=responses_compaction_key,
         price_sheet=spec.pricing,
         legacy_chat_models=served_legacy_chat_models,
         orchestration_chat_models=set(served_orchestrators),

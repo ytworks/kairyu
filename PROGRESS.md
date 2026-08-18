@@ -74,7 +74,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Incremental architecture-state paths for Qwen3.6 and DeepSeek V4 plus an explicit recompute diagnostic mode; DeepSeek EP2/4/8 Attention-DP and direct packed-FP4 execution are implemented, with SM120 single-kernel and two-rank NCCL smokes green
 - Device-side sampling, penalties, spec verification, page-table caching; TP step headers sleep on Gloo while fixed-layout delta payloads use the bounded NCCL model group and rare controls remain Gloo objects; structured masks stay on CUDA with only selected IDs returned to the host matcher; deterministic n-gram/EAGLE-3/MTP drafts preserve T>0 and penalized sampling
 - Hardened gateway: auth, tenancy metering/invoicing, priority + SLO admission, batch API, embeddings/RAG, Responses API
-- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end
+- Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end, including AUTO models over /v1/responses (#530)
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
 - The tiered RTX PRO example serves one dual-track policy-ensemble L2 DAG for every request (DTO-D1..D5) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one direct-DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; direct DeepSeek composes the remainder after the committed opening. No general profile, judge, or verifier/refine loop; the sandbox executor stays deployed but unreferenced. Both verify.sh gates green (run 20260818T025710Z: TTFT PASS c1/8/16/32, c32 1.87×→0.67×). Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
@@ -97,6 +97,32 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-18 — [amendment] Compaction hardening from the #531 review
+- What: adopted all three review fixes — a successful compaction stores only
+  the compaction item (history replaced, not duplicated); truncated summaries
+  return response.incomplete without a compaction item (and are not
+  continuable), empty ones fail as 502 compaction_failed; tokens are now
+  AES-256-GCM sealed and tenant-bound (`responses_compaction_secret_env`,
+  ephemeral per-process key when unset). Example gateway wires the secret.
+- Why: #531 review — stored history defeated compaction, truncated/empty
+  summaries silently replaced long sessions, and marker-only tokens were
+  forgeable, contradicting the opaque/self-issued contract.
+- Refs: #531 review, #532–#534; m11 D4 2026-08-18 review amendment;
+  `kairyu/entrypoints/server/responses_service.py`; `examples/qwen3.8-deepseek-v4-8gpu/`
+
+### 2026-08-18 — [amendment] AUTO models on /v1/responses + Codex contract (issue #530)
+- What: /v1/responses resolves everything /v1/models advertises — AUTO models
+  delegate to the chat orchestration contract (metering exactly once); a
+  codex-rs 0.147.0 field-level audit added buffered-stream keep-alives,
+  426 on WS upgrades, remote compaction v2, and tolerant input parsing
+  (reasoning echoes, output-part arrays, Codex passthrough fields, disabled
+  web_search config). Verified with real codex-cli 0.147.0 (custom-provider
+  and Harbor-shaped smokes) against the issue's all-engines-hidden topology.
+- Why: the Terminal-Bench Codex run failed — /v1/responses only knew public
+  L1 engines, and the audit showed the 404 was one of several turn-killers.
+- Refs: #530; m11 D4 2026-08-18 amendment; `docs/deployment.md`;
+  `kairyu/entrypoints/server/{responses_service,extra_routes,app}.py`
 
 ### 2026-08-18 — [design] Dual-track policy-ensemble DAG replaces the example L2
 - What: the example's coding/general two-profile L2 (judge, verifier/refine,
@@ -153,48 +179,3 @@ in `.claude/rules/progress-log.md`).
   split is a semantic judgment and belongs to an LLM.
 - Refs: #509, #510 review; ECO-D6 2026-08-17 LLM-profile-judge amendment;
   `kairyu/orchestration/`; `examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml`
-
-### 2026-08-16 — [amendment] Agent tool-turn latency and cancellation (issue #495)
-- What: tool-turn FAIL/refine loop removed (verifier/synthesis prompts declare
-  the publisher emits the tool call; inconclusive verdicts re-verify once,
-  never auto-FAIL; verifier cap 2048→4096); a complete committed opening is
-  declined via a stripped NO_CONTINUATION sentinel; conversation-head
-  KV-affinity session; client-disconnect cancels the non-streaming AUTO DAG
-  (499); `kairyu_conductor_stage_seconds` per-stage metric; `/v1/models`
-  advertises `max_model_len`; example timeouts bounded (600 s / 1800 s);
-  after a still-timing-out rerun, a plain-text structured-format demand
-  (Terminus-2 "format as JSON") now disables the head like tools do, and the
-  example refine depth drops 2→1.
-- Why: a traced minimal tool turn spent 20.8 s of 25.8 s in three thinking
-  verifier passes; the rerun showed head prose corrupting JSON replies and
-  ~11-minute single responses against the 900 s Terminal-Bench budget.
-- Refs: #495, #501 (+review PRs #502–#507), ECO-D4 2026-08-16 amendment;
-  `kairyu/orchestration/`; `kairyu/entrypoints/server/`;
-  `examples/qwen3.8-deepseek-v4-8gpu/{auto-max,kairyu}.yaml`
-
-### 2026-08-16 — [amendment] OpenAI Chat Completions output contract (issue #496)
-- What: omitted output limits are context-bound (16-token fallback removed,
-  admission reserves max_model_len); a caller limit is one budget across
-  head+continuation with honest finish_reason; standard usage now means the
-  public request/completion (orchestration_* keep #196 cumulative totals,
-  metering still bills them); empty final output retries once then 502;
-  `reasoning_closed`/`prompt_headless` role contracts; GET /v1/models/{id}.
-- Why: issue #496 — orchestrated responses ignored caller limits, reported
-  deterministic "length", and lost post-tool answers to `reasoning_content`.
-- Refs: #496, #458, m11 2026-08-16 amendment, ECO-D4 2026-08-16 amendment
-
-### 2026-08-15 — [amendment] Sandbox reaps escaped submission descendants
-- What: the coding executor now acts as a child subreaper and sweeps/reaps
-  same-UID runner descendants not owned by another live submission on every
-  completion path.
-- Why: timeout-only process-group cleanup allowed `setsid()` children to retain
-  resources and mutate later execution evidence after an accepted result.
-- Refs: ECO-D1; `examples/qwen3.8-deepseek-v4-8gpu/sandbox/runner.py`
-
-### 2026-08-15 — [amendment] Executor deadline includes queue admission
-- What: deployment executor config now declares queue allowance; the client
-  shares one wall-plus-queue deadline across retries and the runner rejects
-  admission when the residual budget cannot cover the declared wall limit.
-- Why: the previous 8s queue plus 10s execution exceeded the 15s client
-  deadline, discarding valid work as `unavailable` under contention.
-- Refs: ECO-D1; `kairyu/orchestration/execution.py`; PR #488 review

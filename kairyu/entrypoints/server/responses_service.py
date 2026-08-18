@@ -8,15 +8,22 @@ source of truth.
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
+import contextlib
 import copy
 import json
 import logging
+import os
 import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,7 +50,7 @@ from kairyu.entrypoints.server.metering import (
     resolve_usage_counts,
     stream_usage_owner_from_state,
 )
-from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.entrypoints.server.protocol import ChatCompletionRequest, StreamOptions
 from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
 from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.sse import escape_json_line_separators
@@ -53,6 +60,141 @@ logger = logging.getLogger(__name__)
 _ALLOWED_INCLUDE = {"reasoning.encrypted_content"}
 _SUPPORTED_ROLES = {"user", "assistant", "system", "developer"}
 _NAMESPACE_SEPARATOR = "__"
+_CODEX_INTERNAL_ITEM_FIELDS = {
+    "internal_chat_message_metadata_passthrough",
+    "encrypted_function_args",
+}
+# Buffered generation can run for minutes on orchestrated models while the
+# strictest known client budget (Codex) closes idle SSE streams at 300s.
+_BUFFERED_KEEPALIVE_SECONDS = 15.0
+# Remote compaction v2 (Codex against an OpenAI-shaped provider): a terminal
+# compaction_trigger input item requests exactly one compaction output item
+# whose encrypted_content is opaque to the client and echoed back verbatim.
+_COMPACTION_TOKEN_PREFIX = "kcp1."
+_COMPACTION_AAD_PREFIX = b"kairyu.responses.compaction.v1\0"
+_COMPACTION_NONCE_BYTES = 12
+_COMPACTION_MAX_OUTPUT_TOKENS = 4096
+_COMPACTION_INSTRUCTION_ITEM = {
+    "type": "message",
+    "role": "user",
+    "content": (
+        "Summarize the conversation above for a compacted continuation. "
+        "Capture the goals, decisions, constraints, tool results, and any "
+        "unfinished work so the conversation can continue from this summary "
+        "alone."
+    ),
+}
+
+
+class _CompactionCodec:
+    """Tenant-bound authenticated encryption for remote compaction state."""
+
+    def __init__(self, key: bytes) -> None:
+        if not isinstance(key, bytes) or len(key) != 32:
+            raise ValueError("Responses compaction key must be exactly 32 bytes")
+        self._cipher = AESGCM(key)
+
+    @staticmethod
+    def _associated_data(owner: str) -> bytes:
+        return _COMPACTION_AAD_PREFIX + owner.encode("utf-8")
+
+    def encode(self, summary: str, *, owner: str) -> str:
+        nonce = os.urandom(_COMPACTION_NONCE_BYTES)
+        sealed = self._cipher.encrypt(
+            nonce,
+            summary.encode("utf-8"),
+            self._associated_data(owner),
+        )
+        encoded = base64.urlsafe_b64encode(nonce + sealed).rstrip(b"=")
+        return _COMPACTION_TOKEN_PREFIX + encoded.decode("ascii")
+
+    def decode(self, token: object, *, owner: str) -> str:
+        if not isinstance(token, str) or not token:
+            raise ChatRequestError(
+                "compaction encrypted_content must be a non-empty string"
+            )
+        if not token.startswith(_COMPACTION_TOKEN_PREFIX):
+            raise ChatRequestError(
+                "compaction encrypted_content was not issued by this server"
+            )
+        encoded = token.removeprefix(_COMPACTION_TOKEN_PREFIX)
+        try:
+            padded = encoded + "=" * (-len(encoded) % 4)
+            payload = base64.b64decode(padded, altchars=b"-_", validate=True)
+            if len(payload) < _COMPACTION_NONCE_BYTES + 16:
+                raise ValueError("compaction token is too short")
+            plaintext = self._cipher.decrypt(
+                payload[:_COMPACTION_NONCE_BYTES],
+                payload[_COMPACTION_NONCE_BYTES:],
+                self._associated_data(owner),
+            )
+            return plaintext.decode("utf-8")
+        except (binascii.Error, InvalidTag, UnicodeDecodeError, ValueError):
+            raise ChatRequestError(
+                "compaction encrypted_content was not issued by this server"
+            ) from None
+
+
+def _extract_compaction_trigger(items: Sequence[dict]) -> bool:
+    for index, item in enumerate(items):
+        if item["type"] == "compaction_trigger" and index != len(items) - 1:
+            raise ChatRequestError("compaction_trigger must be the final input item")
+    return bool(items) and items[-1]["type"] == "compaction_trigger"
+
+
+def _compaction_output_from_message(
+    message: dict,
+    *,
+    compaction_codec: _CompactionCodec,
+    owner: str,
+) -> list[dict]:
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+    if not isinstance(content, str) or not content.strip():
+        raise _BufferedFailure(
+            {
+                "message": "upstream model returned an empty compaction summary",
+                "type": "upstream_error",
+                "code": "compaction_failed",
+            },
+            502,
+        )
+    return [
+        {
+            "type": "compaction",
+            "id": f"cmp_{uuid.uuid4().hex[:24]}",
+            "encrypted_content": compaction_codec.encode(content, owner=owner),
+            "status": "completed",
+        }
+    ]
+
+
+class _BufferedFailure(Exception):
+    """Generation failure carrying the exact wire error payload.
+
+    The buffered path surfaces it as an HTTP error before streaming starts
+    (non-stream requests) or as ``error`` + ``response.failed`` SSE events
+    once the stream is already open.
+    """
+
+    def __init__(self, payload: dict, status_code: int) -> None:
+        super().__init__(payload.get("message") or "generation failed")
+        self.payload = payload
+        self.status_code = status_code
+
+    @classmethod
+    def from_chat_error(cls, error: ChatRequestError) -> _BufferedFailure:
+        return cls(error.payload(), error.status_code)
+
+    def json_response(self) -> JSONResponse:
+        return JSONResponse(
+            status_code=self.status_code, content={"error": self.payload}
+        )
 
 
 class ResponsesRequest(BaseModel):
@@ -175,7 +317,12 @@ def _validate_request_surface(request: ResponsesRequest) -> None:
             raise ChatRequestError("stream obfuscation is not supported")
 
 
-def _canonical_input(payload: str | list[dict]) -> list[dict]:
+def _canonical_input(
+    payload: str | list[dict],
+    *,
+    compaction_codec: _CompactionCodec,
+    owner: str,
+) -> list[dict]:
     if isinstance(payload, str):
         return [{"type": "message", "role": "user", "content": payload}]
     if not isinstance(payload, list):
@@ -187,6 +334,15 @@ def _canonical_input(payload: str | list[dict]) -> list[dict]:
         kind = item.get("type")
         if kind is None and "role" in item:
             kind = "message"
+        # Codex-internal passthrough metadata rides input items verbatim when
+        # Codex addresses an OpenAI-shaped base URL (the Harbor/Terminal-Bench
+        # setup); it scrubs them for custom providers. Accepted and dropped on
+        # every item kind.
+        item = {
+            key: value
+            for key, value in item.items()
+            if key not in _CODEX_INTERNAL_ITEM_FIELDS
+        }
         if kind == "message":
             unknown = set(item) - {
                 "type",
@@ -276,17 +432,88 @@ def _canonical_input(payload: str | list[dict]) -> list[dict]:
             output = item.get("output")
             if not isinstance(call_id, str) or not call_id:
                 raise ChatRequestError(f"input[{index}].call_id must be a non-empty string")
-            if not isinstance(output, str):
-                raise ChatRequestError(f"input[{index}].output must be a string")
+            if isinstance(output, list):
+                # Codex sends structured tool output (e.g. view_image) as an
+                # array of content items instead of a plain string.
+                output = _function_output_text(
+                    output, path=f"input[{index}].output"
+                )
+            elif not isinstance(output, str):
+                raise ChatRequestError(
+                    f"input[{index}].output must be a string or an array of output parts"
+                )
             items.append(
                 {"type": "function_call_output", "call_id": call_id, "output": output}
             )
+            continue
+        if kind == "reasoning":
+            # Codex echoes prior reasoning items back with the history
+            # (encrypted_content may be null or foreign). Kairyu emits no
+            # reasoning output item and renders none into the prompt, so the
+            # echo is accepted for wire compatibility and dropped.
+            unknown = set(item) - {
+                "type",
+                "id",
+                "summary",
+                "content",
+                "encrypted_content",
+                "status",
+            }
+            if unknown:
+                raise ChatRequestError(
+                    f"input[{index}] has unsupported fields: "
+                    + ", ".join(sorted(unknown))
+                )
+            continue
+        if kind in {"compaction", "compaction_summary"}:
+            unknown = set(item) - {"type", "id", "encrypted_content", "status"}
+            if unknown:
+                raise ChatRequestError(
+                    f"input[{index}] has unsupported fields: "
+                    + ", ".join(sorted(unknown))
+                )
+            # Fail-fast on foreign or cross-tenant tokens; render re-decodes it.
+            compaction_codec.decode(item.get("encrypted_content"), owner=owner)
+            items.append(
+                {
+                    "type": "compaction",
+                    "encrypted_content": item["encrypted_content"],
+                }
+            )
+            continue
+        if kind == "compaction_trigger":
+            unknown = set(item) - {"type", "id", "status"}
+            if unknown:
+                raise ChatRequestError(
+                    f"input[{index}] has unsupported fields: "
+                    + ", ".join(sorted(unknown))
+                )
+            items.append({"type": "compaction_trigger"})
             continue
         raise ChatRequestError(
             f"input[{index}].type {kind!r} is not supported; "
             "use message, function_call, or function_call_output"
         )
     return items
+
+
+def _function_output_text(parts: list, *, path: str) -> str:
+    texts: list[str] = []
+    for index, part in enumerate(parts):
+        if not isinstance(part, dict):
+            raise ChatRequestError(f"{path}[{index}] must be an object")
+        kind = part.get("type")
+        if kind in {"input_text", "output_text", "text"}:
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise ChatRequestError(f"{path}[{index}].text must be a string")
+            texts.append(text)
+            continue
+        raise ChatRequestError(
+            f"{path}[{index}].type {kind!r} is not supported; "
+            "this model accepts text tool output only"
+        )
+    return "".join(texts)
 
 
 def _content_text(content: object, *, path: str) -> str:
@@ -341,7 +568,12 @@ def _validate_function_outputs(items: Sequence[dict]) -> None:
             consumed.add(call_id)
 
 
-def _items_to_messages(items: Sequence[dict]) -> list[dict]:
+def _items_to_messages(
+    items: Sequence[dict],
+    *,
+    compaction_codec: _CompactionCodec,
+    owner: str,
+) -> list[dict]:
     messages: list[dict] = []
     buffered_calls: list[dict] = []
 
@@ -378,6 +610,24 @@ def _items_to_messages(items: Sequence[dict]) -> list[dict]:
                     "tool_call_id": item["call_id"],
                 }
             )
+        elif kind == "compaction":
+            # Same construction as Codex's own local compaction: the summary
+            # rides a user bridge message the conversation continues from.
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Summary of the earlier conversation (compacted):\n"
+                        + compaction_codec.decode(
+                            item["encrypted_content"], owner=owner
+                        )
+                    ),
+                }
+            )
+        elif kind == "compaction_trigger":
+            # Request-level control item; the handler consumes it and it is
+            # never rendered into the prompt.
+            pass
         else:
             messages.append(
                 {
@@ -509,7 +759,17 @@ def _chat_tools(tools: list[dict] | None) -> list[dict] | None:
                 )
             continue
         if kind == "web_search" and tool.get("external_web_access") is False:
-            unknown = set(tool) - {"type", "external_web_access"}
+            # Codex attaches search configuration (filters, location, context
+            # size) even when external access is disabled; the settings of a
+            # tool that can never run are accepted and ignored.
+            unknown = set(tool) - {
+                "type",
+                "external_web_access",
+                "filters",
+                "user_location",
+                "search_context_size",
+                "search_content_types",
+            }
             if unknown:
                 raise ChatRequestError(
                     f"tools[{index}] has unsupported fields: "
@@ -601,8 +861,13 @@ def _response_format(text: dict | None) -> dict | None:
 def _to_chat_request(
     request: ResponsesRequest,
     items: Sequence[dict],
+    *,
+    compaction_codec: _CompactionCodec,
+    owner: str,
 ) -> ChatCompletionRequest:
-    messages = _items_to_messages(items)
+    messages = _items_to_messages(
+        items, compaction_codec=compaction_codec, owner=owner
+    )
     if request.instructions:
         messages.insert(0, {"role": "system", "content": request.instructions})
     verbosity = request.text.get("verbosity") if request.text else None
@@ -701,29 +966,40 @@ def _output_items(
 ) -> list[dict]:
     if not execution.response.choices:
         return []
-    choice = execution.response.choices[0]
-    calls = choice.message.tool_calls or []
+    message = execution.response.choices[0].message.model_dump(mode="json")
+    return _output_items_from_message(request, message)
+
+
+def _output_items_from_message(request: ResponsesRequest, message: dict) -> list[dict]:
+    calls = message.get("tool_calls") or []
     if calls:
         namespaces = _namespace_names(request.tools)
         items = []
         for call in calls:
-            namespace_name = namespaces.get(call.function.name)
+            function = call.get("function") or {}
+            call_name = function.get("name") or ""
+            namespace_name = namespaces.get(call_name)
             item = {
                 "id": f"fc_{uuid.uuid4().hex[:24]}",
-                "call_id": call.id,
+                "call_id": call.get("id") or "",
                 "type": "function_call",
                 "name": (
-                    namespace_name[1]
-                    if namespace_name is not None
-                    else call.function.name
+                    namespace_name[1] if namespace_name is not None else call_name
                 ),
-                "arguments": call.function.arguments,
+                "arguments": function.get("arguments") or "",
                 "status": "completed",
             }
             if namespace_name is not None:
                 item["namespace"] = namespace_name[0]
             items.append(item)
         return items
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
     return [
         {
             "type": "message",
@@ -733,7 +1009,7 @@ def _output_items(
             "content": [
                 {
                     "type": "output_text",
-                    "text": choice.message.content or "",
+                    "text": content,
                     "annotations": [],
                     "logprobs": [],
                 }
@@ -810,12 +1086,30 @@ def _sse(event_type: str, sequence_number: int, **payload) -> str:
 
 
 def _terminal_status(execution: ExecutedChat) -> tuple[str, dict | None]:
-    if any(
-        completion.finish_reason in {"length", "max_tokens"}
-        for completion in execution.result.completions
-    ):
+    return _terminal_status_for(
+        completion.finish_reason for completion in execution.result.completions
+    )
+
+
+def _terminal_status_for(finish_reasons) -> tuple[str, dict | None]:
+    if any(reason in {"length", "max_tokens"} for reason in finish_reasons):
         return "incomplete", {"reason": "max_output_tokens"}
     return "completed", None
+
+
+def _usage_payload_from_wire(usage: dict | None) -> dict:
+    """Map public Chat Completions usage onto the Responses usage shape."""
+    usage = usage or {}
+    details = usage.get("prompt_tokens_details") or {}
+    input_tokens = int(usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or 0)
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": int(details.get("cached_tokens") or 0)},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": input_tokens + output_tokens,
+    }
 
 
 def _apply_terminal_item_status(output: list[dict], status: str) -> None:
@@ -828,22 +1122,22 @@ def _apply_terminal_item_status(output: list[dict], status: str) -> None:
 
 async def _buffered_events(
     request: ResponsesRequest,
-    execution: ExecutedChat,
+    produce,
     *,
     response_id: str,
     created_at: int,
     stored_items: list[dict],
     store: ResponseStore,
     owner: str,
+    compaction_request: bool = False,
 ) -> AsyncIterator[str]:
-    output = _output_items(request, execution)
-    usage = _usage_payload(
-        execution.result.prompt,
-        execution.result.completions,
-        execution.result.usage,
-    )
-    status, incomplete_details = _terminal_status(execution)
-    _apply_terminal_item_status(output, status)
+    """Stream buffered generation as Responses SSE without going silent.
+
+    ``produce`` runs the whole generation and returns ``(output, usage,
+    status, incomplete_details)`` or raises ``_BufferedFailure``. The opening
+    events flush immediately and keep-alive comments cover the generation
+    window, so long orchestrated turns never trip client idle timeouts.
+    """
     in_progress = _response_envelope(
         request,
         response_id=response_id,
@@ -857,6 +1151,46 @@ async def _buffered_events(
     sequence += 1
     yield _sse("response.in_progress", sequence, response=in_progress)
     sequence += 1
+    task = asyncio.ensure_future(produce())
+    try:
+        while True:
+            done, _pending = await asyncio.wait(
+                {task}, timeout=_BUFFERED_KEEPALIVE_SECONDS
+            )
+            if done:
+                break
+            yield ": keep-alive\n\n"
+    except BaseException:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        raise
+    try:
+        output, usage, status, incomplete_details = task.result()
+    except _BufferedFailure as failure:
+        message = failure.payload.get("message") or "generation failed"
+        yield _sse(
+            "error",
+            sequence,
+            code=failure.payload.get("code") or "server_error",
+            message=message,
+            param=None,
+        )
+        sequence += 1
+        failed = _response_envelope(
+            request,
+            response_id=response_id,
+            created_at=created_at,
+            status="failed",
+            output=[],
+            usage=_usage_payload_from_wire(None),
+            error={
+                "code": failure.payload.get("code") or "server_error",
+                "message": message,
+            },
+        )
+        yield _sse("response.failed", sequence, response=failed)
+        return
     for output_index, final_item in enumerate(output):
         if final_item["type"] == "message":
             text = final_item["content"][0]["text"]
@@ -917,6 +1251,16 @@ async def _buffered_events(
                 part=final_item["content"][0],
             )
             sequence += 1
+        elif final_item["type"] != "function_call":
+            # Non-message, non-call output (e.g. a compaction item): the item
+            # lifecycle alone, no content-part or argument events.
+            yield _sse(
+                "response.output_item.added",
+                sequence,
+                output_index=output_index,
+                item={**final_item, "status": "in_progress"},
+            )
+            sequence += 1
         else:
             added_item = {**final_item, "arguments": "", "status": "in_progress"}
             yield _sse(
@@ -960,7 +1304,9 @@ async def _buffered_events(
         usage=usage,
         incomplete_details=incomplete_details,
     )
-    if request.store:
+    if request.store and not (compaction_request and not output):
+        # An incomplete compaction produced no replacement context; storing an
+        # empty continuation entry would silently blank a thread.
         store.save(response_id, stored_items + output, owner=owner)
     terminal_type = "response.completed" if status == "completed" else "response.incomplete"
     yield _sse(terminal_type, sequence, response=final_response)
@@ -1181,15 +1527,364 @@ async def _live_text_events(
         usage_owner.finalize()
 
 
+async def _relay_auto_chat_stream(
+    request: ResponsesRequest,
+    upstream,
+    *,
+    response_id: str,
+    created_at: int,
+    stored_items: list[dict],
+    store: ResponseStore,
+    owner: str,
+) -> AsyncIterator[str | bytes]:
+    """Re-encode the orchestrated Chat Completions SSE stream as Responses SSE.
+
+    ``upstream`` is this process's own chat-chunk stream for an AUTO model, so
+    the frames are the internal wire format this release emits: ``: status``
+    keep-alive comments, ``data: {chat chunk}`` frames, ``data: {"error": ...}``
+    frames, and a final ``data: [DONE]``.
+    """
+    message_id = f"msg_{uuid.uuid4().hex[:24]}"
+    text_delta_encoder = ResponsesTextDeltaSSEEncoder(message_id)
+    in_progress = _response_envelope(
+        request,
+        response_id=response_id,
+        created_at=created_at,
+        status="in_progress",
+        output=[],
+        usage=None,
+    )
+    sequence = 0
+    text_parts: list[str] = []
+    finish_reason: str | None = None
+    wire_usage: dict | None = None
+    error_payload: dict | None = None
+
+    async def frames() -> AsyncIterator[str]:
+        buffer = ""
+        async for chunk in upstream:
+            buffer += chunk.decode() if isinstance(chunk, bytes) else chunk
+            while "\n\n" in buffer:
+                frame, buffer = buffer.split("\n\n", 1)
+                if frame:
+                    yield frame
+        if buffer:
+            yield buffer
+
+    try:
+        yield _sse("response.created", sequence, response=in_progress)
+        sequence += 1
+        yield _sse("response.in_progress", sequence, response=in_progress)
+        sequence += 1
+        added_item = {
+            "type": "message",
+            "id": message_id,
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [],
+        }
+        yield _sse(
+            "response.output_item.added",
+            sequence,
+            output_index=0,
+            item=added_item,
+        )
+        sequence += 1
+        yield _sse(
+            "response.content_part.added",
+            sequence,
+            item_id=message_id,
+            output_index=0,
+            content_index=0,
+            part={"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+        )
+        sequence += 1
+        async for frame in frames():
+            if frame.startswith(":"):
+                # Orchestrator keep-alive comments stay comments on the
+                # Responses stream (invisible to SDKs, reset idle timers).
+                yield f"{frame}\n\n"
+                continue
+            if not frame.startswith("data:"):
+                continue
+            payload_text = frame[len("data:"):].strip()
+            if payload_text == "[DONE]":
+                break
+            try:
+                chunk_payload = json.loads(payload_text)
+            except ValueError:
+                continue
+            if "error" in chunk_payload and "choices" not in chunk_payload:
+                error_payload = chunk_payload["error"]
+                break
+            usage_value = chunk_payload.get("usage")
+            if isinstance(usage_value, dict):
+                wire_usage = usage_value
+            for choice in chunk_payload.get("choices") or ():
+                if choice.get("index", 0) != 0:
+                    continue
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                delta = choice.get("delta") or {}
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    yield text_delta_encoder.encode(sequence, content)
+                    sequence += 1
+                    text_parts.append(content)
+    except Exception as error:
+        logger.exception("Responses API orchestrated relay failed")
+        error_payload = {"message": f"upstream backend error ({type(error).__name__})"}
+    finally:
+        aclose = getattr(upstream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    text = "".join(text_parts)
+    if error_payload is not None:
+        message = error_payload.get("message") or "upstream backend error"
+        yield _sse("error", sequence, code="server_error", message=message, param=None)
+        sequence += 1
+        failed_output = []
+        if text:
+            failed_output.append(
+                {
+                    "type": "message",
+                    "id": message_id,
+                    "role": "assistant",
+                    "status": "incomplete",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": text,
+                            "annotations": [],
+                            "logprobs": [],
+                        }
+                    ],
+                }
+            )
+        failed = _response_envelope(
+            request,
+            response_id=response_id,
+            created_at=created_at,
+            status="failed",
+            output=failed_output,
+            usage=_usage_payload_from_wire(wire_usage),
+            error={"code": "server_error", "message": message},
+        )
+        yield _sse("response.failed", sequence, response=failed)
+        return
+
+    status, incomplete_details = _terminal_status_for((finish_reason,))
+    output_item = {
+        "type": "message",
+        "id": message_id,
+        "role": "assistant",
+        "status": status,
+        "content": [
+            {
+                "type": "output_text",
+                "text": text,
+                "annotations": [],
+                "logprobs": [],
+            }
+        ],
+    }
+    yield _sse(
+        "response.output_text.done",
+        sequence,
+        item_id=message_id,
+        output_index=0,
+        content_index=0,
+        text=text,
+        logprobs=[],
+    )
+    sequence += 1
+    yield _sse(
+        "response.content_part.done",
+        sequence,
+        item_id=message_id,
+        output_index=0,
+        content_index=0,
+        part=output_item["content"][0],
+    )
+    sequence += 1
+    yield _sse(
+        "response.output_item.done",
+        sequence,
+        output_index=0,
+        item=output_item,
+    )
+    sequence += 1
+    final_response = _response_envelope(
+        request,
+        response_id=response_id,
+        created_at=created_at,
+        status=status,
+        output=[output_item],
+        usage=_usage_payload_from_wire(wire_usage),
+        incomplete_details=incomplete_details,
+    )
+    if request.store:
+        store.save(response_id, stored_items + [output_item], owner=owner)
+    terminal_type = "response.completed" if status == "completed" else "response.incomplete"
+    yield _sse(terminal_type, sequence, response=final_response)
+
+
+async def _orchestrated_response(
+    request: ResponsesRequest,
+    chat_request: ChatCompletionRequest,
+    http_request: Request,
+    chat_dispatch,
+    *,
+    response_id: str,
+    created_at: int,
+    stored_items: list[dict],
+    store: ResponseStore,
+    owner: str,
+    compaction_codec: _CompactionCodec,
+    compaction_request: bool = False,
+):
+    """Serve an AUTO model by delegating to the Chat Completions handler.
+
+    The chat handler owns the entire orchestration contract (validation,
+    judge-first tenant reservation, admission, execution, public usage and
+    metering), so this branch never runs the engine-only pipeline below and
+    never records usage itself.
+    """
+    if request.stream and not request.tools and not compaction_request:
+        live_request = chat_request.model_copy(
+            update={"stream": True, "stream_options": StreamOptions(include_usage=True)}
+        )
+        delegated = await chat_dispatch(live_request, http_request)
+        if isinstance(delegated, JSONResponse):
+            return delegated
+        return sse_response(
+            _relay_auto_chat_stream(
+                request,
+                delegated.body_iterator,
+                response_id=response_id,
+                created_at=created_at,
+                stored_items=stored_items,
+                store=store,
+                owner=owner,
+            )
+        )
+    buffered_request = chat_request.model_copy(update={"stream": False})
+
+    def outcome_from_payload(payload: dict) -> tuple[list[dict], dict, str, dict | None]:
+        choices = payload.get("choices") or []
+        message = (choices[0].get("message") if choices else None) or {}
+        usage = _usage_payload_from_wire(payload.get("usage"))
+        status, incomplete_details = _terminal_status_for(
+            choice.get("finish_reason") for choice in choices
+        )
+        if compaction_request:
+            if status != "completed":
+                return [], usage, status, incomplete_details
+            output = _compaction_output_from_message(
+                message, compaction_codec=compaction_codec, owner=owner
+            )
+            return output, usage, status, None
+        output = _output_items_from_message(request, message) if choices else []
+        _apply_terminal_item_status(output, status)
+        return output, usage, status, incomplete_details
+
+    if request.stream:
+
+        async def produce() -> tuple[list[dict], dict, str, dict | None]:
+            delegated = await chat_dispatch(buffered_request, http_request)
+            if not isinstance(delegated, JSONResponse):
+                raise _BufferedFailure(
+                    {
+                        "message": "unexpected non-JSON chat dispatch reply",
+                        "type": "upstream_error",
+                        "code": "backend_error",
+                    },
+                    502,
+                )
+            payload = json.loads(bytes(delegated.body))
+            if delegated.status_code != 200:
+                raise _BufferedFailure(
+                    payload.get("error")
+                    or {
+                        "message": "upstream backend error",
+                        "type": "upstream_error",
+                        "code": "backend_error",
+                    },
+                    delegated.status_code,
+                )
+            return outcome_from_payload(payload)
+
+        return sse_response(
+            _buffered_events(
+                request,
+                produce,
+                response_id=response_id,
+                created_at=created_at,
+                stored_items=stored_items,
+                store=store,
+                owner=owner,
+                compaction_request=compaction_request,
+            )
+        )
+    delegated = await chat_dispatch(buffered_request, http_request)
+    if not isinstance(delegated, JSONResponse):
+        return upstream_error(RuntimeError("unexpected non-JSON chat dispatch reply"))
+    if delegated.status_code != 200:
+        return delegated
+    try:
+        output, usage, status, incomplete_details = outcome_from_payload(
+            json.loads(bytes(delegated.body))
+        )
+    except _BufferedFailure as failure:
+        return failure.json_response()
+    response = _response_envelope(
+        request,
+        response_id=response_id,
+        created_at=created_at,
+        status=status,
+        output=output,
+        usage=usage,
+        incomplete_details=incomplete_details,
+    )
+    if request.store and not (compaction_request and not output):
+        store.save(response_id, stored_items + output, owner=owner)
+    return JSONResponse(content=response)
+
+
 def add_responses_route(
     app: FastAPI,
     engines: Mapping,
     *,
     chat_templates=None,
     legacy_chat_models: AbstractSet[str] | None = None,
+    orchestrated_models: AbstractSet[str] | None = None,
+    chat_dispatch=None,
+    compaction_key: bytes,
 ) -> ResponseStore:
     store = ResponseStore()
     app.state.response_store = store
+    compaction_codec = _CompactionCodec(compaction_key)
+
+    @app.get("/v1/responses")
+    async def responses_upgrade_required() -> JSONResponse:
+        # Codex tries a WebSocket upgrade first when it targets the built-in
+        # openai provider (the Harbor/Terminal-Bench shape). The upgrade
+        # arrives as a GET; 426 makes Codex fall back to HTTPS immediately
+        # and silently instead of burning its stream-retry budget.
+        return JSONResponse(
+            status_code=426,
+            content={
+                "error": {
+                    "message": (
+                        "WebSocket transport is not supported; "
+                        "retry over HTTPS"
+                    ),
+                    "type": "invalid_request_error",
+                    "code": "upgrade_required",
+                }
+            },
+        )
 
     @app.post("/v1/responses")
     async def responses(request: ResponsesRequest, http_request: Request):
@@ -1207,7 +1902,12 @@ def add_responses_route(
         except ChatRequestError as error:
             return _chat_error(error)
         engine = engines.get(request.model)
-        if engine is None:
+        orchestrated = (
+            engine is None
+            and chat_dispatch is not None
+            and request.model in (orchestrated_models or ())
+        )
+        if engine is None and not orchestrated:
             return _request_error(
                 f"model {request.model!r} not found",
                 status_code=404,
@@ -1222,39 +1922,75 @@ def add_responses_route(
             context.extend(previous)
         validation_started_ns = time.perf_counter_ns()
         try:
-            current_items = _canonical_input(request.input)
+            current_items = _canonical_input(
+                request.input, compaction_codec=compaction_codec, owner=owner
+            )
             all_items = context + current_items
-            _validate_function_outputs(all_items)
-            chat_request = _to_chat_request(request, all_items)
-            cache_key = request.prompt_cache_key or request.previous_response_id
-            scheduling_class = getattr(
-                http_request.state, "scheduling_class", None
+            compaction_request = _extract_compaction_trigger(all_items)
+            work_items = (
+                [item for item in all_items if item["type"] != "compaction_trigger"]
+                if compaction_request
+                else all_items
             )
-            if scheduling_class not in {"interactive", "batch"}:
-                transported = http_request.headers.get(
-                    "x-kairyu-scheduling-class"
-                )
-                scheduling_class = (
-                    transported
-                    if transported in {"interactive", "batch"}
-                    else "interactive"
-                )
-            validated = await validate_chat_request_async(
-                chat_request,
-                engines,
-                chat_templates,
-                request_id=(
-                    getattr(http_request.state, "request_id", None)
-                    or f"resp-{uuid.uuid4().hex[:12]}"
-                ),
-                cache_hint=CacheHint(session_id=cache_key) if cache_key else None,
-                priority=getattr(http_request.state, "priority", None),
-                scheduling_class=scheduling_class,
-                placement_started_ns=getattr(
-                    http_request.state, "placement_started_ns", None
-                ),
-                legacy_chat_models=legacy_chat_models,
+            # A successful compaction replaces the continuation context. Keeping
+            # ``work_items`` here would store the full pre-compaction history next
+            # to its summary, so a later previous_response_id request would grow
+            # the prompt instead of compacting it.
+            stored_items = [] if compaction_request else work_items
+            _validate_function_outputs(work_items)
+            prompt_items = (
+                work_items + [_COMPACTION_INSTRUCTION_ITEM]
+                if compaction_request
+                else work_items
             )
+            chat_request = _to_chat_request(
+                request, prompt_items, compaction_codec=compaction_codec, owner=owner
+            )
+            if compaction_request:
+                # The summary is a plain text turn: tools cannot help it and a
+                # tool call in its place would break the client's compaction
+                # collection, so the summarization call runs tool-free with
+                # enough room for a useful summary.
+                chat_request = chat_request.model_copy(
+                    update={
+                        "tools": None,
+                        "tool_choice": None,
+                        "max_completion_tokens": (
+                            request.max_output_tokens
+                            or _COMPACTION_MAX_OUTPUT_TOKENS
+                        ),
+                    }
+                )
+            if not orchestrated:
+                cache_key = request.prompt_cache_key or request.previous_response_id
+                scheduling_class = getattr(
+                    http_request.state, "scheduling_class", None
+                )
+                if scheduling_class not in {"interactive", "batch"}:
+                    transported = http_request.headers.get(
+                        "x-kairyu-scheduling-class"
+                    )
+                    scheduling_class = (
+                        transported
+                        if transported in {"interactive", "batch"}
+                        else "interactive"
+                    )
+                validated = await validate_chat_request_async(
+                    chat_request,
+                    engines,
+                    chat_templates,
+                    request_id=(
+                        getattr(http_request.state, "request_id", None)
+                        or f"resp-{uuid.uuid4().hex[:12]}"
+                    ),
+                    cache_hint=CacheHint(session_id=cache_key) if cache_key else None,
+                    priority=getattr(http_request.state, "priority", None),
+                    scheduling_class=scheduling_class,
+                    placement_started_ns=getattr(
+                        http_request.state, "placement_started_ns", None
+                    ),
+                    legacy_chat_models=legacy_chat_models,
+                )
         except ChatRequestError as error:
             return _chat_error(error)
         finally:
@@ -1264,6 +2000,20 @@ def add_responses_route(
                     "request_validation",
                     max(0, time.perf_counter_ns() - validation_started_ns),
                 )
+        if orchestrated:
+            return await _orchestrated_response(
+                request,
+                chat_request,
+                http_request,
+                chat_dispatch,
+                response_id=f"resp_{uuid.uuid4().hex}",
+                created_at=int(time.time()),
+                stored_items=stored_items,
+                store=store,
+                owner=owner,
+                compaction_codec=compaction_codec,
+                compaction_request=compaction_request,
+            )
         prepare_started_ns = time.perf_counter_ns()
         try:
             await prepare_backend_request(
@@ -1339,65 +2089,84 @@ def add_responses_route(
 
         response_id = f"resp_{uuid.uuid4().hex}"
         created_at = int(time.time())
-        if request.stream and not request.tools:
+        if request.stream and not request.tools and not compaction_request:
             return sse_response(
                 _live_text_events(
                     request,
                     validated,
                     response_id=response_id,
                     created_at=created_at,
-                    stored_items=all_items,
+                    stored_items=stored_items,
                     store=store,
                     owner=owner,
                     http_request=http_request,
                 )
             )
-        try:
-            if admission is not None:
-                admission.mark_dispatched()
-            execution = await execute_chat(validated)
-        except ChatRequestError as error:
-            if error.execution is not None:
-                _record_execution(http_request, request, error.execution)
-            return _chat_error(error)
-        except Exception as error:
-            logger.exception("Responses API upstream generation failed")
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "error": {
+
+        async def produce() -> tuple[list[dict], dict, str, dict | None]:
+            try:
+                if admission is not None:
+                    admission.mark_dispatched()
+                execution = await execute_chat(validated)
+            except ChatRequestError as error:
+                if error.execution is not None:
+                    _record_execution(http_request, request, error.execution)
+                raise _BufferedFailure.from_chat_error(error) from error
+            except Exception as error:
+                logger.exception("Responses API upstream generation failed")
+                raise _BufferedFailure(
+                    {
                         "message": f"upstream backend error ({type(error).__name__})",
                         "type": "upstream_error",
                         "code": "backend_error",
-                    }
-                },
-            )
-        try:
-            _validate_parallel_tool_calls(request, execution)
-        except ChatRequestError as error:
+                    },
+                    502,
+                ) from error
+            try:
+                _validate_parallel_tool_calls(request, execution)
+            except ChatRequestError as error:
+                _record_execution(http_request, request, execution)
+                raise _BufferedFailure.from_chat_error(error) from error
             _record_execution(http_request, request, execution)
-            return _chat_error(error)
-        _record_execution(http_request, request, execution)
+            usage = _usage_payload(
+                execution.result.prompt,
+                execution.result.completions,
+                execution.result.usage,
+            )
+            status, incomplete_details = _terminal_status(execution)
+            if compaction_request:
+                if status != "completed":
+                    return [], usage, status, incomplete_details
+                message = (
+                    execution.response.choices[0].message.model_dump(mode="json")
+                    if execution.response.choices
+                    else {}
+                )
+                output = _compaction_output_from_message(
+                    message, compaction_codec=compaction_codec, owner=owner
+                )
+                return output, usage, status, None
+            output = _output_items(request, execution)
+            _apply_terminal_item_status(output, status)
+            return output, usage, status, incomplete_details
+
         if request.stream:
             return sse_response(
                 _buffered_events(
                     request,
-                    execution,
+                    produce,
                     response_id=response_id,
                     created_at=created_at,
-                    stored_items=all_items,
+                    stored_items=stored_items,
                     store=store,
                     owner=owner,
+                    compaction_request=compaction_request,
                 )
             )
-        output = _output_items(request, execution)
-        usage = _usage_payload(
-            execution.result.prompt,
-            execution.result.completions,
-            execution.result.usage,
-        )
-        status, incomplete_details = _terminal_status(execution)
-        _apply_terminal_item_status(output, status)
+        try:
+            output, usage, status, incomplete_details = await produce()
+        except _BufferedFailure as failure:
+            return failure.json_response()
         response = _response_envelope(
             request,
             response_id=response_id,
@@ -1407,8 +2176,8 @@ def add_responses_route(
             usage=usage,
             incomplete_details=incomplete_details,
         )
-        if request.store:
-            store.save(response_id, all_items + output, owner=owner)
+        if request.store and not (compaction_request and not output):
+            store.save(response_id, stored_items + output, owner=owner)
         return JSONResponse(content=response)
 
     return store
