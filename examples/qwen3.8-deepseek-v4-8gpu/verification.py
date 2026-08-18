@@ -16,6 +16,16 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
 
+_DUAL_TRACK_INTERNAL_NODES = (
+    "draft",
+    "policies",
+    "answer_1",
+    "answer_2",
+    "answer_3",
+    "answer_4",
+    "critique",
+)
+
 
 def _nvme_root() -> Path:
     configured = Path(os.environ.get("NVME_STORAGE_ROOT", SPEC["storage"]["root"]))
@@ -137,6 +147,7 @@ def _validate_serving_row(
     expected_kind: str = "generation",
     public_tokens: bool = False,
     require_head: bool = False,
+    expected_generation_nodes: tuple[str, ...] = (),
 ) -> int:
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -193,6 +204,16 @@ def _validate_serving_row(
                 for stage in stages
             ):
                 return False
+            if any(
+                not any(
+                    stage.get("node") == node
+                    and stage.get("kind") == "generation"
+                    and stage.get("status") == "success"
+                    for stage in stages
+                )
+                for node in expected_generation_nodes
+            ):
+                return False
             return True
 
         complete = all(stage_ok(sample) for sample in samples)
@@ -214,6 +235,7 @@ def _serving(
     warmup_requests: int | None = None,
     natural_completion: bool = False,
     require_head: bool = False,
+    expected_generation_nodes: tuple[str, ...] = (),
 ) -> int:
     config = SPEC["verification"]["serving"]
     requests = int(config["requests_per_concurrency"])
@@ -351,6 +373,7 @@ def _serving(
                 expected_kind=expected_kind,
                 public_tokens=natural_completion,
                 require_head=require_head,
+                expected_generation_nodes=expected_generation_nodes,
             )
         if code:
             return code
@@ -372,6 +395,7 @@ def serving_auto_max(run_dir: Path) -> int:
         warmup_requests=4,
         natural_completion=True,
         require_head=True,
+        expected_generation_nodes=_DUAL_TRACK_INTERNAL_NODES,
     )
 
 _CODING_TASKS = (
@@ -586,6 +610,7 @@ def serving_auto_max_coding(run_dir: Path) -> int:
                 expected_kind="generation",
                 public_tokens=True,
                 require_head=True,
+                expected_generation_nodes=_DUAL_TRACK_INTERNAL_NODES,
             )
         if code:
             return code
