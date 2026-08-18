@@ -70,10 +70,17 @@ substitute whole outputs). The four policies are therefore emitted as one
 `policies` output containing `POLICY 1:`..`POLICY 4:` sections; every
 answerer receives the whole list and is bound to its own policy by prompt
 plus a distinct `seed_offset`. The REQUEST and POLICY LIST blocks are
-byte-identical across the four answerers so the Qwen replicas' prefix caches
-(prefix_index-routed) reuse the shared prefill (issue #509 measured
-rationale); only the trailing role instruction differs. The policy list
-steers HOW to answer; the request text alone defines WHAT — answerers ignore
+byte-identical across the four answerers so only the trailing role
+instruction differs; this preserves deterministic policy binding, but does
+not produce cross-replica cache reuse. The width-four wave intentionally
+lands one answer on each independent vLLM replica, and no earlier Qwen call
+contains the newly generated policy list, so every replica prefills that
+list independently. With `shared_prefix` unset, `prefix_index` does not
+route these calls by a prefix fingerprint; session affinity and the
+queue-depth valve determine placement. The leading REQUEST block can still
+receive replica-local native prefix-cache reuse when an answer lands on a
+replica warmed by `head` or `draft`. The policy list steers HOW to answer;
+the request text alone defines WHAT — answerers ignore
 policy-list content that conflicts with the request or is not answer
 guidance (prompt-injection hygiene: policies are derived from untrusted
 conversation text).

@@ -80,8 +80,12 @@ Design notes (see
 - The L2 DSL has no output-splitting mechanism, so each answerer receives the
   whole policy list and is bound to its own policy by prompt plus a distinct
   `seed_offset` (DTO-D2). The REQUEST and POLICY LIST blocks are
-  byte-identical across the four answerers, so the Qwen replicas' prefix
-  caches reuse the shared prefill (issue #509).
+  byte-identical for deterministic policy binding, not for cross-replica
+  cache reuse: the four answers run on independent replicas, and each
+  replica prefills the newly generated policy list. With `shared_prefix`
+  unset, placement follows session affinity and the queue-depth valve rather
+  than `prefix_index`; only the leading REQUEST block may receive
+  replica-local reuse from a preceding `head` or `draft` call.
 - `policies` runs on the non-thinking DeepSeek endpoint: wave-1 latency gates
   the whole fan-out under the level-synchronous scheduler, and thinking roles
   were measured nondeterministically burning entire caps inside `<think>` on
