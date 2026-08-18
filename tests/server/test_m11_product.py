@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import struct
+from dataclasses import replace
 from types import SimpleNamespace
 
 import httpx
@@ -301,6 +302,15 @@ class TestOrchestratedResponses:
             settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
         )
 
+    def _backend_app(self, tmp_path, backend):
+        return create_legacy_app(
+            {},
+            orchestrators={
+                "kairyu-auto": Orchestrator({"tier1": backend, "tier2": backend})
+            },
+            settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+        )
+
     def test_codex_shaped_stateless_tool_loop(self, tmp_path):
         tool = {
             "type": "function",
@@ -436,6 +446,86 @@ class TestOrchestratedResponses:
         assert len(payload["output"]) == 1
         assert payload["output"][0]["type"] == "compaction"
         assert payload["output"][0]["encrypted_content"]
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+    def test_truncated_compaction_on_auto_model_is_incomplete(self, tmp_path, stream):
+        class AutoLengthBackend(MockBackend):
+            async def generate(self, request):
+                result = await super().generate(request)
+                return replace(
+                    result,
+                    completions=tuple(
+                        replace(completion, finish_reason="length")
+                        for completion in result.completions
+                    ),
+                )
+
+        with TestClient(self._backend_app(tmp_path, AutoLengthBackend())) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "kairyu-auto",
+                    "stream": stream,
+                    "store": False,
+                    "input": [
+                        {"type": "message", "role": "user", "content": "history"},
+                        {"type": "compaction_trigger"},
+                    ],
+                },
+            )
+        assert response.status_code == 200
+        if stream:
+            events = _responses_events(response.text)
+            assert events[-1]["type"] == "response.incomplete"
+            payload = events[-1]["response"]
+        else:
+            payload = response.json()
+        assert payload["status"] == "incomplete"
+        assert payload["output"] == []
+        assert payload["incomplete_details"] == {"reason": "max_output_tokens"}
+
+    @pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+    def test_empty_compaction_on_auto_model_fails_closed(self, tmp_path, stream):
+        class EmptyBackend(MockBackend):
+            async def generate(self, request):
+                return GenerationResult(
+                    request_id=request.request_id,
+                    prompt=request.prompt,
+                    completions=(
+                        CompletionOutput(
+                            index=0,
+                            text="",
+                            token_ids=(),
+                            finish_reason="stop",
+                        ),
+                    ),
+                    usage=GenerationUsage(prompt_tokens=3, completion_tokens=0),
+                )
+
+        with TestClient(self._backend_app(tmp_path, EmptyBackend())) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "kairyu-auto",
+                    "stream": stream,
+                    "store": False,
+                    "input": [
+                        {"type": "message", "role": "user", "content": "history"},
+                        {"type": "compaction_trigger"},
+                    ],
+                },
+            )
+        if stream:
+            assert response.status_code == 200
+            events = _responses_events(response.text)
+            assert [event["type"] for event in events[-2:]] == [
+                "error",
+                "response.failed",
+            ]
+            assert events[-2]["code"] == "compaction_failed"
+        else:
+            assert response.status_code == 502
+            assert response.json()["error"]["code"] == "compaction_failed"
 
     def test_non_streaming_envelope_and_store_round_trip(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:

@@ -124,6 +124,15 @@ def _compaction_output_from_message(message: dict) -> list[dict]:
             for part in content
             if isinstance(part, dict) and isinstance(part.get("text"), str)
         )
+    if not isinstance(content, str) or not content.strip():
+        raise _BufferedFailure(
+            {
+                "message": "upstream model returned an empty compaction summary",
+                "type": "upstream_error",
+                "code": "compaction_failed",
+            },
+            502,
+        )
     return [
         {
             "type": "compaction",
@@ -1714,12 +1723,14 @@ async def _orchestrated_response(
         choices = payload.get("choices") or []
         message = (choices[0].get("message") if choices else None) or {}
         usage = _usage_payload_from_wire(payload.get("usage"))
-        if compaction_request:
-            return _compaction_output_from_message(message), usage, "completed", None
-        output = _output_items_from_message(request, message) if choices else []
         status, incomplete_details = _terminal_status_for(
             choice.get("finish_reason") for choice in choices
         )
+        if compaction_request:
+            if status != "completed":
+                return [], usage, status, incomplete_details
+            return _compaction_output_from_message(message), usage, status, None
+        output = _output_items_from_message(request, message) if choices else []
         _apply_terminal_item_status(output, status)
         return output, usage, status, incomplete_details
 
@@ -1765,9 +1776,12 @@ async def _orchestrated_response(
         return upstream_error(RuntimeError("unexpected non-JSON chat dispatch reply"))
     if delegated.status_code != 200:
         return delegated
-    output, usage, status, incomplete_details = outcome_from_payload(
-        json.loads(bytes(delegated.body))
-    )
+    try:
+        output, usage, status, incomplete_details = outcome_from_payload(
+            json.loads(bytes(delegated.body))
+        )
+    except _BufferedFailure as failure:
+        return failure.json_response()
     response = _response_envelope(
         request,
         response_id=response_id,
@@ -2051,15 +2065,17 @@ def add_responses_route(
                 execution.result.completions,
                 execution.result.usage,
             )
+            status, incomplete_details = _terminal_status(execution)
             if compaction_request:
+                if status != "completed":
+                    return [], usage, status, incomplete_details
                 message = (
                     execution.response.choices[0].message.model_dump(mode="json")
                     if execution.response.choices
                     else {}
                 )
-                return _compaction_output_from_message(message), usage, "completed", None
+                return _compaction_output_from_message(message), usage, status, None
             output = _output_items(request, execution)
-            status, incomplete_details = _terminal_status(execution)
             _apply_terminal_item_status(output, status)
             return output, usage, status, incomplete_details
 

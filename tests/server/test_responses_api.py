@@ -720,6 +720,68 @@ def test_remote_compaction_trigger_round_trip(tmp_path):
     assert "final input item" in response.json()["error"]["message"]
 
 
+@pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+def test_truncated_compaction_is_incomplete(tmp_path, stream):
+    backend = LengthBackend({"compacted continuation": "TRUNCATED SUMMARY"})
+    with TestClient(_app(tmp_path, backend)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "stream": stream,
+                "store": False,
+                "input": [
+                    {"type": "message", "role": "user", "content": "history"},
+                    {"type": "compaction_trigger"},
+                ],
+            },
+        )
+    assert response.status_code == 200
+    if stream:
+        events = _sse_events(response.text)
+        assert events[-1]["type"] == "response.incomplete"
+        payload = events[-1]["response"]
+        assert not any(
+            event["type"] == "response.output_item.done" for event in events
+        )
+    else:
+        payload = response.json()
+    assert payload["status"] == "incomplete"
+    assert payload["output"] == []
+    assert payload["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+def test_empty_compaction_summary_fails_closed(tmp_path, stream):
+    backend = MockBackend({"compacted continuation": ""})
+    with TestClient(_app(tmp_path, backend)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "stream": stream,
+                "store": False,
+                "input": [
+                    {"type": "message", "role": "user", "content": "history"},
+                    {"type": "compaction_trigger"},
+                ],
+            },
+        )
+    if stream:
+        assert response.status_code == 200
+        events = _sse_events(response.text)
+        assert [event["type"] for event in events[-2:]] == [
+            "error",
+            "response.failed",
+        ]
+        assert events[-2]["code"] == "compaction_failed"
+        assert events[-1]["response"]["error"]["code"] == "compaction_failed"
+        assert events[-1]["response"]["output"] == []
+    else:
+        assert response.status_code == 502
+        assert response.json()["error"]["code"] == "compaction_failed"
+
+
 def test_websocket_upgrade_get_returns_426(tmp_path):
     # Codex (built-in openai provider, the Harbor shape) tries a WebSocket
     # upgrade first; 426 triggers its immediate, silent HTTPS fallback.
