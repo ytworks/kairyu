@@ -2043,12 +2043,22 @@ def create_app(
     )
     from kairyu.entrypoints.server.extra_routes import add_extra_routes
 
+    async def _responses_chat_dispatch(
+        chat_request: ChatCompletionRequest, http_request: Request
+    ):
+        # Late-bound: chat_completions is defined later in this scope and the
+        # forwarder only runs at request time, so AUTO models served on
+        # /v1/responses reuse the full orchestration chat contract (issue #530).
+        return await chat_completions(chat_request, http_request)
+
     add_extra_routes(
         app,
         served_engines,
         embedding_backends=served_embedding_backends,
         chat_templates=chat_templates,
         legacy_chat_models=legacy_chat_models,
+        orchestrated_models=set(auto_models),
+        chat_dispatch=_responses_chat_dispatch,
     )
 
     # add_middleware prepends, so add innermost first: metrics -> concurrency

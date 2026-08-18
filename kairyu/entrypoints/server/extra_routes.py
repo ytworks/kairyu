@@ -72,12 +72,16 @@ def add_extra_routes(
     embedding_backends: Mapping[str, EmbeddingBackend] | None = None,
     chat_templates=None,
     legacy_chat_models: AbstractSet[str] | None = None,
+    orchestrated_models: AbstractSet[str] | None = None,
+    chat_dispatch=None,
 ) -> None:
     add_responses_route(
         app,
         engines,
         chat_templates=chat_templates,
         legacy_chat_models=legacy_chat_models,
+        orchestrated_models=orchestrated_models,
+        chat_dispatch=chat_dispatch,
     )
 
     if embedding_backends:

@@ -1162,6 +1162,48 @@ public_models: [product]
     assert chat.status_code == completions.status_code == responses.status_code == 404
 
 
+async def test_public_orchestrator_serves_responses_with_all_engines_hidden(
+    tmp_path,
+    monkeypatch,
+):
+    # Issue #530: /v1/models advertised the orchestrator while /v1/responses
+    # resolved models against the (empty) public engine registry and 404ed.
+    monkeypatch.setattr(
+        builder_module,
+        "create_backend",
+        lambda *_args, **_kwargs: MockBackend(),
+    )
+    (tmp_path / "product.yaml").write_text(
+        "workers:\n  - {name: tier1, engine_ref: internal}\n",
+        encoding="utf-8",
+    )
+    app = build_app_from_spec(
+        load_deployment_spec(
+            """
+engines:
+  internal: {backend: mock}
+orchestrators:
+  product: {spec: product.yaml}
+public_models: [product]
+"""
+        ),
+        base_dir=tmp_path,
+    )
+
+    async with _client(app) as client:
+        models = await client.get("/v1/models")
+        response = await client.post(
+            "/v1/responses",
+            json={"model": "product", "input": "hello"},
+        )
+
+    assert {item["id"] for item in models.json()["data"]} == {"product"}
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "completed"
+    assert payload["output"][0]["content"][0]["text"]
+
+
 async def test_legacy_orchestrator_composes_with_named(tmp_path):
     (tmp_path / "auto.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")
     (tmp_path / "auto_max.yaml").write_text(ORCHESTRATOR_SPEC, encoding="utf-8")

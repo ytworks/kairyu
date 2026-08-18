@@ -43,7 +43,7 @@ from kairyu.entrypoints.server.metering import (
     resolve_usage_counts,
     stream_usage_owner_from_state,
 )
-from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.entrypoints.server.protocol import ChatCompletionRequest, StreamOptions
 from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
 from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.sse import escape_json_line_separators
@@ -701,29 +701,40 @@ def _output_items(
 ) -> list[dict]:
     if not execution.response.choices:
         return []
-    choice = execution.response.choices[0]
-    calls = choice.message.tool_calls or []
+    message = execution.response.choices[0].message.model_dump(mode="json")
+    return _output_items_from_message(request, message)
+
+
+def _output_items_from_message(request: ResponsesRequest, message: dict) -> list[dict]:
+    calls = message.get("tool_calls") or []
     if calls:
         namespaces = _namespace_names(request.tools)
         items = []
         for call in calls:
-            namespace_name = namespaces.get(call.function.name)
+            function = call.get("function") or {}
+            call_name = function.get("name") or ""
+            namespace_name = namespaces.get(call_name)
             item = {
                 "id": f"fc_{uuid.uuid4().hex[:24]}",
-                "call_id": call.id,
+                "call_id": call.get("id") or "",
                 "type": "function_call",
                 "name": (
-                    namespace_name[1]
-                    if namespace_name is not None
-                    else call.function.name
+                    namespace_name[1] if namespace_name is not None else call_name
                 ),
-                "arguments": call.function.arguments,
+                "arguments": function.get("arguments") or "",
                 "status": "completed",
             }
             if namespace_name is not None:
                 item["namespace"] = namespace_name[0]
             items.append(item)
         return items
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
     return [
         {
             "type": "message",
@@ -733,7 +744,7 @@ def _output_items(
             "content": [
                 {
                     "type": "output_text",
-                    "text": choice.message.content or "",
+                    "text": content,
                     "annotations": [],
                     "logprobs": [],
                 }
@@ -810,12 +821,30 @@ def _sse(event_type: str, sequence_number: int, **payload) -> str:
 
 
 def _terminal_status(execution: ExecutedChat) -> tuple[str, dict | None]:
-    if any(
-        completion.finish_reason in {"length", "max_tokens"}
-        for completion in execution.result.completions
-    ):
+    return _terminal_status_for(
+        completion.finish_reason for completion in execution.result.completions
+    )
+
+
+def _terminal_status_for(finish_reasons) -> tuple[str, dict | None]:
+    if any(reason in {"length", "max_tokens"} for reason in finish_reasons):
         return "incomplete", {"reason": "max_output_tokens"}
     return "completed", None
+
+
+def _usage_payload_from_wire(usage: dict | None) -> dict:
+    """Map public Chat Completions usage onto the Responses usage shape."""
+    usage = usage or {}
+    details = usage.get("prompt_tokens_details") or {}
+    input_tokens = int(usage.get("prompt_tokens") or 0)
+    output_tokens = int(usage.get("completion_tokens") or 0)
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": int(details.get("cached_tokens") or 0)},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": input_tokens + output_tokens,
+    }
 
 
 def _apply_terminal_item_status(output: list[dict], status: str) -> None:
@@ -828,22 +857,17 @@ def _apply_terminal_item_status(output: list[dict], status: str) -> None:
 
 async def _buffered_events(
     request: ResponsesRequest,
-    execution: ExecutedChat,
     *,
+    output: list[dict],
+    usage: dict,
+    status: str,
+    incomplete_details: dict | None,
     response_id: str,
     created_at: int,
     stored_items: list[dict],
     store: ResponseStore,
     owner: str,
 ) -> AsyncIterator[str]:
-    output = _output_items(request, execution)
-    usage = _usage_payload(
-        execution.result.prompt,
-        execution.result.completions,
-        execution.result.usage,
-    )
-    status, incomplete_details = _terminal_status(execution)
-    _apply_terminal_item_status(output, status)
     in_progress = _response_envelope(
         request,
         response_id=response_id,
@@ -1181,12 +1205,298 @@ async def _live_text_events(
         usage_owner.finalize()
 
 
+async def _relay_auto_chat_stream(
+    request: ResponsesRequest,
+    upstream,
+    *,
+    response_id: str,
+    created_at: int,
+    stored_items: list[dict],
+    store: ResponseStore,
+    owner: str,
+) -> AsyncIterator[str | bytes]:
+    """Re-encode the orchestrated Chat Completions SSE stream as Responses SSE.
+
+    ``upstream`` is this process's own chat-chunk stream for an AUTO model, so
+    the frames are the internal wire format this release emits: ``: status``
+    keep-alive comments, ``data: {chat chunk}`` frames, ``data: {"error": ...}``
+    frames, and a final ``data: [DONE]``.
+    """
+    message_id = f"msg_{uuid.uuid4().hex[:24]}"
+    text_delta_encoder = ResponsesTextDeltaSSEEncoder(message_id)
+    in_progress = _response_envelope(
+        request,
+        response_id=response_id,
+        created_at=created_at,
+        status="in_progress",
+        output=[],
+        usage=None,
+    )
+    sequence = 0
+    text_parts: list[str] = []
+    finish_reason: str | None = None
+    wire_usage: dict | None = None
+    error_payload: dict | None = None
+
+    async def frames() -> AsyncIterator[str]:
+        buffer = ""
+        async for chunk in upstream:
+            buffer += chunk.decode() if isinstance(chunk, bytes) else chunk
+            while "\n\n" in buffer:
+                frame, buffer = buffer.split("\n\n", 1)
+                if frame:
+                    yield frame
+        if buffer:
+            yield buffer
+
+    try:
+        yield _sse("response.created", sequence, response=in_progress)
+        sequence += 1
+        yield _sse("response.in_progress", sequence, response=in_progress)
+        sequence += 1
+        added_item = {
+            "type": "message",
+            "id": message_id,
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [],
+        }
+        yield _sse(
+            "response.output_item.added",
+            sequence,
+            output_index=0,
+            item=added_item,
+        )
+        sequence += 1
+        yield _sse(
+            "response.content_part.added",
+            sequence,
+            item_id=message_id,
+            output_index=0,
+            content_index=0,
+            part={"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+        )
+        sequence += 1
+        async for frame in frames():
+            if frame.startswith(":"):
+                # Orchestrator keep-alive comments stay comments on the
+                # Responses stream (invisible to SDKs, reset idle timers).
+                yield f"{frame}\n\n"
+                continue
+            if not frame.startswith("data:"):
+                continue
+            payload_text = frame[len("data:"):].strip()
+            if payload_text == "[DONE]":
+                break
+            try:
+                chunk_payload = json.loads(payload_text)
+            except ValueError:
+                continue
+            if "error" in chunk_payload and "choices" not in chunk_payload:
+                error_payload = chunk_payload["error"]
+                break
+            usage_value = chunk_payload.get("usage")
+            if isinstance(usage_value, dict):
+                wire_usage = usage_value
+            for choice in chunk_payload.get("choices") or ():
+                if choice.get("index", 0) != 0:
+                    continue
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                delta = choice.get("delta") or {}
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    yield text_delta_encoder.encode(sequence, content)
+                    sequence += 1
+                    text_parts.append(content)
+    except Exception as error:
+        logger.exception("Responses API orchestrated relay failed")
+        error_payload = {"message": f"upstream backend error ({type(error).__name__})"}
+    finally:
+        aclose = getattr(upstream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    text = "".join(text_parts)
+    if error_payload is not None:
+        message = error_payload.get("message") or "upstream backend error"
+        yield _sse("error", sequence, code="server_error", message=message, param=None)
+        sequence += 1
+        failed_output = []
+        if text:
+            failed_output.append(
+                {
+                    "type": "message",
+                    "id": message_id,
+                    "role": "assistant",
+                    "status": "incomplete",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": text,
+                            "annotations": [],
+                            "logprobs": [],
+                        }
+                    ],
+                }
+            )
+        failed = _response_envelope(
+            request,
+            response_id=response_id,
+            created_at=created_at,
+            status="failed",
+            output=failed_output,
+            usage=_usage_payload_from_wire(wire_usage),
+            error={"code": "server_error", "message": message},
+        )
+        yield _sse("response.failed", sequence, response=failed)
+        return
+
+    status, incomplete_details = _terminal_status_for((finish_reason,))
+    output_item = {
+        "type": "message",
+        "id": message_id,
+        "role": "assistant",
+        "status": status,
+        "content": [
+            {
+                "type": "output_text",
+                "text": text,
+                "annotations": [],
+                "logprobs": [],
+            }
+        ],
+    }
+    yield _sse(
+        "response.output_text.done",
+        sequence,
+        item_id=message_id,
+        output_index=0,
+        content_index=0,
+        text=text,
+        logprobs=[],
+    )
+    sequence += 1
+    yield _sse(
+        "response.content_part.done",
+        sequence,
+        item_id=message_id,
+        output_index=0,
+        content_index=0,
+        part=output_item["content"][0],
+    )
+    sequence += 1
+    yield _sse(
+        "response.output_item.done",
+        sequence,
+        output_index=0,
+        item=output_item,
+    )
+    sequence += 1
+    final_response = _response_envelope(
+        request,
+        response_id=response_id,
+        created_at=created_at,
+        status=status,
+        output=[output_item],
+        usage=_usage_payload_from_wire(wire_usage),
+        incomplete_details=incomplete_details,
+    )
+    if request.store:
+        store.save(response_id, stored_items + [output_item], owner=owner)
+    terminal_type = "response.completed" if status == "completed" else "response.incomplete"
+    yield _sse(terminal_type, sequence, response=final_response)
+
+
+async def _orchestrated_response(
+    request: ResponsesRequest,
+    chat_request: ChatCompletionRequest,
+    http_request: Request,
+    chat_dispatch,
+    *,
+    response_id: str,
+    created_at: int,
+    stored_items: list[dict],
+    store: ResponseStore,
+    owner: str,
+):
+    """Serve an AUTO model by delegating to the Chat Completions handler.
+
+    The chat handler owns the entire orchestration contract (validation,
+    judge-first tenant reservation, admission, execution, public usage and
+    metering), so this branch never runs the engine-only pipeline below and
+    never records usage itself.
+    """
+    if request.stream and not request.tools:
+        live_request = chat_request.model_copy(
+            update={"stream": True, "stream_options": StreamOptions(include_usage=True)}
+        )
+        delegated = await chat_dispatch(live_request, http_request)
+        if isinstance(delegated, JSONResponse):
+            return delegated
+        return sse_response(
+            _relay_auto_chat_stream(
+                request,
+                delegated.body_iterator,
+                response_id=response_id,
+                created_at=created_at,
+                stored_items=stored_items,
+                store=store,
+                owner=owner,
+            )
+        )
+    buffered_request = chat_request.model_copy(update={"stream": False})
+    delegated = await chat_dispatch(buffered_request, http_request)
+    if not isinstance(delegated, JSONResponse):
+        return upstream_error(RuntimeError("unexpected non-JSON chat dispatch reply"))
+    if delegated.status_code != 200:
+        return delegated
+    payload = json.loads(bytes(delegated.body))
+    choices = payload.get("choices") or []
+    message = (choices[0].get("message") if choices else None) or {}
+    output = _output_items_from_message(request, message) if choices else []
+    usage = _usage_payload_from_wire(payload.get("usage"))
+    status, incomplete_details = _terminal_status_for(
+        choice.get("finish_reason") for choice in choices
+    )
+    _apply_terminal_item_status(output, status)
+    if request.stream:
+        return sse_response(
+            _buffered_events(
+                request,
+                output=output,
+                usage=usage,
+                status=status,
+                incomplete_details=incomplete_details,
+                response_id=response_id,
+                created_at=created_at,
+                stored_items=stored_items,
+                store=store,
+                owner=owner,
+            )
+        )
+    response = _response_envelope(
+        request,
+        response_id=response_id,
+        created_at=created_at,
+        status=status,
+        output=output,
+        usage=usage,
+        incomplete_details=incomplete_details,
+    )
+    if request.store:
+        store.save(response_id, stored_items + output, owner=owner)
+    return JSONResponse(content=response)
+
+
 def add_responses_route(
     app: FastAPI,
     engines: Mapping,
     *,
     chat_templates=None,
     legacy_chat_models: AbstractSet[str] | None = None,
+    orchestrated_models: AbstractSet[str] | None = None,
+    chat_dispatch=None,
 ) -> ResponseStore:
     store = ResponseStore()
     app.state.response_store = store
@@ -1207,7 +1517,12 @@ def add_responses_route(
         except ChatRequestError as error:
             return _chat_error(error)
         engine = engines.get(request.model)
-        if engine is None:
+        orchestrated = (
+            engine is None
+            and chat_dispatch is not None
+            and request.model in (orchestrated_models or ())
+        )
+        if engine is None and not orchestrated:
             return _request_error(
                 f"model {request.model!r} not found",
                 status_code=404,
@@ -1226,35 +1541,36 @@ def add_responses_route(
             all_items = context + current_items
             _validate_function_outputs(all_items)
             chat_request = _to_chat_request(request, all_items)
-            cache_key = request.prompt_cache_key or request.previous_response_id
-            scheduling_class = getattr(
-                http_request.state, "scheduling_class", None
-            )
-            if scheduling_class not in {"interactive", "batch"}:
-                transported = http_request.headers.get(
-                    "x-kairyu-scheduling-class"
+            if not orchestrated:
+                cache_key = request.prompt_cache_key or request.previous_response_id
+                scheduling_class = getattr(
+                    http_request.state, "scheduling_class", None
                 )
-                scheduling_class = (
-                    transported
-                    if transported in {"interactive", "batch"}
-                    else "interactive"
+                if scheduling_class not in {"interactive", "batch"}:
+                    transported = http_request.headers.get(
+                        "x-kairyu-scheduling-class"
+                    )
+                    scheduling_class = (
+                        transported
+                        if transported in {"interactive", "batch"}
+                        else "interactive"
+                    )
+                validated = await validate_chat_request_async(
+                    chat_request,
+                    engines,
+                    chat_templates,
+                    request_id=(
+                        getattr(http_request.state, "request_id", None)
+                        or f"resp-{uuid.uuid4().hex[:12]}"
+                    ),
+                    cache_hint=CacheHint(session_id=cache_key) if cache_key else None,
+                    priority=getattr(http_request.state, "priority", None),
+                    scheduling_class=scheduling_class,
+                    placement_started_ns=getattr(
+                        http_request.state, "placement_started_ns", None
+                    ),
+                    legacy_chat_models=legacy_chat_models,
                 )
-            validated = await validate_chat_request_async(
-                chat_request,
-                engines,
-                chat_templates,
-                request_id=(
-                    getattr(http_request.state, "request_id", None)
-                    or f"resp-{uuid.uuid4().hex[:12]}"
-                ),
-                cache_hint=CacheHint(session_id=cache_key) if cache_key else None,
-                priority=getattr(http_request.state, "priority", None),
-                scheduling_class=scheduling_class,
-                placement_started_ns=getattr(
-                    http_request.state, "placement_started_ns", None
-                ),
-                legacy_chat_models=legacy_chat_models,
-            )
         except ChatRequestError as error:
             return _chat_error(error)
         finally:
@@ -1264,6 +1580,18 @@ def add_responses_route(
                     "request_validation",
                     max(0, time.perf_counter_ns() - validation_started_ns),
                 )
+        if orchestrated:
+            return await _orchestrated_response(
+                request,
+                chat_request,
+                http_request,
+                chat_dispatch,
+                response_id=f"resp_{uuid.uuid4().hex}",
+                created_at=int(time.time()),
+                stored_items=all_items,
+                store=store,
+                owner=owner,
+            )
         prepare_started_ns = time.perf_counter_ns()
         try:
             await prepare_backend_request(
@@ -1378,18 +1706,6 @@ def add_responses_route(
             _record_execution(http_request, request, execution)
             return _chat_error(error)
         _record_execution(http_request, request, execution)
-        if request.stream:
-            return sse_response(
-                _buffered_events(
-                    request,
-                    execution,
-                    response_id=response_id,
-                    created_at=created_at,
-                    stored_items=all_items,
-                    store=store,
-                    owner=owner,
-                )
-            )
         output = _output_items(request, execution)
         usage = _usage_payload(
             execution.result.prompt,
@@ -1398,6 +1714,21 @@ def add_responses_route(
         )
         status, incomplete_details = _terminal_status(execution)
         _apply_terminal_item_status(output, status)
+        if request.stream:
+            return sse_response(
+                _buffered_events(
+                    request,
+                    output=output,
+                    usage=usage,
+                    status=status,
+                    incomplete_details=incomplete_details,
+                    response_id=response_id,
+                    created_at=created_at,
+                    stored_items=all_items,
+                    store=store,
+                    owner=owner,
+                )
+            )
         response = _response_envelope(
             request,
             response_id=response_id,
