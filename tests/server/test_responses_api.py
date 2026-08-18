@@ -582,6 +582,105 @@ def test_reasoning_input_items_are_accepted_and_dropped(tmp_path):
     assert "thinking" not in backend.prompts_seen[0]
 
 
+def test_remote_compaction_trigger_round_trip(tmp_path):
+    # Remote compaction v2 (Codex against an OpenAI-shaped provider): a
+    # terminal compaction_trigger input item must yield exactly one
+    # compaction output item whose opaque encrypted_content restores the
+    # summarized context when echoed back on a later turn.
+    class SummarizingBackend(MockBackend):
+        async def generate(self, request):
+            if "compacted continuation" in request.prompt:
+                text = "SUMMARY: the user is porting a compressor."
+            elif "SUMMARY: the user is porting a compressor." in request.prompt:
+                text = "Continuing from the summary."
+            else:
+                text = "unexpected prompt"
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0, text=text, token_ids=(1,), finish_reason="stop"
+                    ),
+                ),
+                usage=GenerationUsage(prompt_tokens=9, completion_tokens=5),
+            )
+
+    backend = SummarizingBackend()
+    with TestClient(_app(tmp_path, backend)) as http:
+        compacted = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "store": False,
+                "stream": True,
+                "tools": [_tool()],
+                "input": [
+                    {"type": "message", "role": "user", "content": "port the compressor"},
+                    {"type": "compaction_trigger"},
+                ],
+            },
+        )
+        assert compacted.status_code == 200
+        events = _sse_events(compacted.text)
+        items = [
+            event["item"]
+            for event in events
+            if event["type"] == "response.output_item.done"
+        ]
+        assert len(items) == 1
+        assert items[0]["type"] == "compaction"
+        token = items[0]["encrypted_content"]
+        assert token
+        assert events[-1]["type"] == "response.completed"
+        assert events[-1]["response"]["output"] == items
+
+        continued = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "store": False,
+                "input": [
+                    {"type": "compaction", "encrypted_content": token},
+                    {"type": "message", "role": "user", "content": "continue"},
+                ],
+            },
+        )
+        assert continued.status_code == 200
+        text = continued.json()["output"][0]["content"][0]["text"]
+        assert text == "Continuing from the summary."
+        # The opaque token itself never reaches the prompt.
+        assert all(token not in prompt for prompt in backend.prompts_seen)
+
+        foreign = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": [
+                    {"type": "compaction", "encrypted_content": "Zm9yZWlnbg=="},
+                    {"type": "message", "role": "user", "content": "continue"},
+                ],
+            },
+        )
+    assert foreign.status_code == 400
+    assert "not issued by this server" in foreign.json()["error"]["message"]
+
+    mid_position = TestClient(_app(tmp_path))
+    with mid_position as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": [
+                    {"type": "compaction_trigger"},
+                    {"type": "message", "role": "user", "content": "hello"},
+                ],
+            },
+        )
+    assert response.status_code == 400
+    assert "final input item" in response.json()["error"]["message"]
+
+
 def test_websocket_upgrade_get_returns_426(tmp_path):
     # Codex (built-in openai provider, the Harbor shape) tries a WebSocket
     # upgrade first; 426 triggers its immediate, silent HTTPS fallback.

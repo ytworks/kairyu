@@ -9,6 +9,7 @@ source of truth.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import copy
 import json
@@ -58,6 +59,75 @@ _NAMESPACE_SEPARATOR = "__"
 # Buffered generation can run for minutes on orchestrated models while the
 # strictest known client budget (Codex) closes idle SSE streams at 300s.
 _BUFFERED_KEEPALIVE_SECONDS = 15.0
+# Remote compaction v2 (Codex against an OpenAI-shaped provider): a terminal
+# compaction_trigger input item requests exactly one compaction output item
+# whose encrypted_content is opaque to the client and echoed back verbatim.
+_COMPACTION_MARKER = "kairyu.compaction.v1"
+_COMPACTION_MAX_OUTPUT_TOKENS = 4096
+_COMPACTION_INSTRUCTION_ITEM = {
+    "type": "message",
+    "role": "user",
+    "content": (
+        "Summarize the conversation above for a compacted continuation. "
+        "Capture the goals, decisions, constraints, tool results, and any "
+        "unfinished work so the conversation can continue from this summary "
+        "alone."
+    ),
+}
+
+
+def _encode_compaction(summary: str) -> str:
+    payload = json.dumps(
+        {"k": _COMPACTION_MARKER, "summary": summary}, ensure_ascii=False
+    )
+    return base64.urlsafe_b64encode(payload.encode()).decode()
+
+
+def _decode_compaction(token: object) -> str:
+    if not isinstance(token, str) or not token:
+        raise ChatRequestError(
+            "compaction encrypted_content must be a non-empty string"
+        )
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(token.encode()).decode())
+    except Exception:
+        raise ChatRequestError(
+            "compaction encrypted_content was not issued by this server"
+        ) from None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("k") != _COMPACTION_MARKER
+        or not isinstance(payload.get("summary"), str)
+    ):
+        raise ChatRequestError(
+            "compaction encrypted_content was not issued by this server"
+        )
+    return payload["summary"]
+
+
+def _extract_compaction_trigger(items: Sequence[dict]) -> bool:
+    for index, item in enumerate(items):
+        if item["type"] == "compaction_trigger" and index != len(items) - 1:
+            raise ChatRequestError("compaction_trigger must be the final input item")
+    return bool(items) and items[-1]["type"] == "compaction_trigger"
+
+
+def _compaction_output_from_message(message: dict) -> list[dict]:
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+    return [
+        {
+            "type": "compaction",
+            "id": f"cmp_{uuid.uuid4().hex[:24]}",
+            "encrypted_content": _encode_compaction(content),
+            "status": "completed",
+        }
+    ]
 
 
 class _BufferedFailure(Exception):
@@ -337,6 +407,31 @@ def _canonical_input(payload: str | list[dict]) -> list[dict]:
                     + ", ".join(sorted(unknown))
                 )
             continue
+        if kind in {"compaction", "compaction_summary"}:
+            unknown = set(item) - {"type", "id", "encrypted_content", "status"}
+            if unknown:
+                raise ChatRequestError(
+                    f"input[{index}] has unsupported fields: "
+                    + ", ".join(sorted(unknown))
+                )
+            # Fail-fast on foreign tokens; the summary is re-decoded at render.
+            _decode_compaction(item.get("encrypted_content"))
+            items.append(
+                {
+                    "type": "compaction",
+                    "encrypted_content": item["encrypted_content"],
+                }
+            )
+            continue
+        if kind == "compaction_trigger":
+            unknown = set(item) - {"type", "id", "status"}
+            if unknown:
+                raise ChatRequestError(
+                    f"input[{index}] has unsupported fields: "
+                    + ", ".join(sorted(unknown))
+                )
+            items.append({"type": "compaction_trigger"})
+            continue
         raise ChatRequestError(
             f"input[{index}].type {kind!r} is not supported; "
             "use message, function_call, or function_call_output"
@@ -452,6 +547,22 @@ def _items_to_messages(items: Sequence[dict]) -> list[dict]:
                     "tool_call_id": item["call_id"],
                 }
             )
+        elif kind == "compaction":
+            # Same construction as Codex's own local compaction: the summary
+            # rides a user bridge message the conversation continues from.
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Summary of the earlier conversation (compacted):\n"
+                        + _decode_compaction(item["encrypted_content"])
+                    ),
+                }
+            )
+        elif kind == "compaction_trigger":
+            # Request-level control item; the handler consumes it and it is
+            # never rendered into the prompt.
+            pass
         else:
             messages.append(
                 {
@@ -1069,6 +1180,16 @@ async def _buffered_events(
                 part=final_item["content"][0],
             )
             sequence += 1
+        elif final_item["type"] != "function_call":
+            # Non-message, non-call output (e.g. a compaction item): the item
+            # lifecycle alone, no content-part or argument events.
+            yield _sse(
+                "response.output_item.added",
+                sequence,
+                output_index=output_index,
+                item={**final_item, "status": "in_progress"},
+            )
+            sequence += 1
         else:
             added_item = {**final_item, "arguments": "", "status": "in_progress"}
             yield _sse(
@@ -1547,6 +1668,7 @@ async def _orchestrated_response(
     stored_items: list[dict],
     store: ResponseStore,
     owner: str,
+    compaction_request: bool = False,
 ):
     """Serve an AUTO model by delegating to the Chat Completions handler.
 
@@ -1555,7 +1677,7 @@ async def _orchestrated_response(
     metering), so this branch never runs the engine-only pipeline below and
     never records usage itself.
     """
-    if request.stream and not request.tools:
+    if request.stream and not request.tools and not compaction_request:
         live_request = chat_request.model_copy(
             update={"stream": True, "stream_options": StreamOptions(include_usage=True)}
         )
@@ -1578,8 +1700,10 @@ async def _orchestrated_response(
     def outcome_from_payload(payload: dict) -> tuple[list[dict], dict, str, dict | None]:
         choices = payload.get("choices") or []
         message = (choices[0].get("message") if choices else None) or {}
-        output = _output_items_from_message(request, message) if choices else []
         usage = _usage_payload_from_wire(payload.get("usage"))
+        if compaction_request:
+            return _compaction_output_from_message(message), usage, "completed", None
+        output = _output_items_from_message(request, message) if choices else []
         status, incomplete_details = _terminal_status_for(
             choice.get("finish_reason") for choice in choices
         )
@@ -1715,8 +1839,34 @@ def add_responses_route(
         try:
             current_items = _canonical_input(request.input)
             all_items = context + current_items
-            _validate_function_outputs(all_items)
-            chat_request = _to_chat_request(request, all_items)
+            compaction_request = _extract_compaction_trigger(all_items)
+            work_items = (
+                [item for item in all_items if item["type"] != "compaction_trigger"]
+                if compaction_request
+                else all_items
+            )
+            _validate_function_outputs(work_items)
+            prompt_items = (
+                work_items + [_COMPACTION_INSTRUCTION_ITEM]
+                if compaction_request
+                else work_items
+            )
+            chat_request = _to_chat_request(request, prompt_items)
+            if compaction_request:
+                # The summary is a plain text turn: tools cannot help it and a
+                # tool call in its place would break the client's compaction
+                # collection, so the summarization call runs tool-free with
+                # enough room for a useful summary.
+                chat_request = chat_request.model_copy(
+                    update={
+                        "tools": None,
+                        "tool_choice": None,
+                        "max_completion_tokens": (
+                            request.max_output_tokens
+                            or _COMPACTION_MAX_OUTPUT_TOKENS
+                        ),
+                    }
+                )
             if not orchestrated:
                 cache_key = request.prompt_cache_key or request.previous_response_id
                 scheduling_class = getattr(
@@ -1764,9 +1914,10 @@ def add_responses_route(
                 chat_dispatch,
                 response_id=f"resp_{uuid.uuid4().hex}",
                 created_at=int(time.time()),
-                stored_items=all_items,
+                stored_items=work_items,
                 store=store,
                 owner=owner,
+                compaction_request=compaction_request,
             )
         prepare_started_ns = time.perf_counter_ns()
         try:
@@ -1843,19 +1994,20 @@ def add_responses_route(
 
         response_id = f"resp_{uuid.uuid4().hex}"
         created_at = int(time.time())
-        if request.stream and not request.tools:
+        if request.stream and not request.tools and not compaction_request:
             return sse_response(
                 _live_text_events(
                     request,
                     validated,
                     response_id=response_id,
                     created_at=created_at,
-                    stored_items=all_items,
+                    stored_items=work_items,
                     store=store,
                     owner=owner,
                     http_request=http_request,
                 )
             )
+
         async def produce() -> tuple[list[dict], dict, str, dict | None]:
             try:
                 if admission is not None:
@@ -1881,12 +2033,19 @@ def add_responses_route(
                 _record_execution(http_request, request, execution)
                 raise _BufferedFailure.from_chat_error(error) from error
             _record_execution(http_request, request, execution)
-            output = _output_items(request, execution)
             usage = _usage_payload(
                 execution.result.prompt,
                 execution.result.completions,
                 execution.result.usage,
             )
+            if compaction_request:
+                message = (
+                    execution.response.choices[0].message.model_dump(mode="json")
+                    if execution.response.choices
+                    else {}
+                )
+                return _compaction_output_from_message(message), usage, "completed", None
+            output = _output_items(request, execution)
             status, incomplete_details = _terminal_status(execution)
             _apply_terminal_item_status(output, status)
             return output, usage, status, incomplete_details
@@ -1898,7 +2057,7 @@ def add_responses_route(
                     produce,
                     response_id=response_id,
                     created_at=created_at,
-                    stored_items=all_items,
+                    stored_items=work_items,
                     store=store,
                     owner=owner,
                 )
@@ -1917,7 +2076,7 @@ def add_responses_route(
             incomplete_details=incomplete_details,
         )
         if request.store:
-            store.save(response_id, all_items + output, owner=owner)
+            store.save(response_id, work_items + output, owner=owner)
         return JSONResponse(content=response)
 
     return store

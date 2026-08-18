@@ -417,6 +417,26 @@ class TestOrchestratedResponses:
                 range(len(events))
             )
 
+    def test_compaction_trigger_on_auto_model(self, tmp_path):
+        with TestClient(_auto_app(tmp_path)) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "model": "kairyu-auto",
+                    "store": False,
+                    "input": [
+                        {"type": "message", "role": "user", "content": "hello"},
+                        {"type": "compaction_trigger"},
+                    ],
+                },
+            )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "completed"
+        assert len(payload["output"]) == 1
+        assert payload["output"][0]["type"] == "compaction"
+        assert payload["output"][0]["encrypted_content"]
+
     def test_non_streaming_envelope_and_store_round_trip(self, tmp_path):
         with TestClient(_auto_app(tmp_path)) as client:
             response = client.post(
