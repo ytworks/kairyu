@@ -253,6 +253,7 @@ server:
   host: 0.0.0.0
   port: 8000
   api_keys_env: KAIRYU_API_KEYS     # comma-separated client keys
+  responses_compaction_secret_env: KAIRYU_RESPONSES_COMPACTION_SECRET
   max_concurrency: 256
   ttft_slo_s: 2.0                  # optional direct-chat predictive admission
 pools:
@@ -526,8 +527,12 @@ Terminal-Bench gateway shape). Additional Codex-derived behavior:
   Codex auto-compacts near its assumed context budget by sending a terminal
   `compaction_trigger` input item; Kairyu answers with one `compaction`
   output item whose `encrypted_content` is an opaque self-issued token, and
-  echoed compaction items decode back into the summarized context. Tokens
-  Kairyu did not issue fail closed.
+  echoed compaction items decode back into the summarized context. Tokens are
+  AES-256-GCM sealed and bound to the authenticated tenant; forged, modified,
+  or cross-tenant tokens fail closed. Set
+  `server.responses_compaction_secret_env` to the name of an environment
+  variable containing at least 32 random bytes. When unset, each process uses an
+  ephemeral key and tokens do not survive a restart or gateway hop.
 - **`function_call_output.output` arrays** are accepted (text parts
   concatenated); image/audio tool-output parts are rejected explicitly.
 - **Codex never retries 429.** A tenant admission 429 fails the Codex turn
@@ -544,7 +549,9 @@ Operational notes:
 - **Gateway HA**: run gateways behind an L7 load balancer that consistently
   hashes `X-Session-ID`. Use `batch.store: postgres` for cross-gateway files and
   jobs. The filesystem store remains single-gateway only and must not be shared
-  over NFS.
+  over NFS. Gateways serving remote compaction must also share the same secret
+  environment value so an authenticated token issued by one gateway can be
+  opened by another.
 - **Two GPU nodes acting as one model** (TP/PP/P-D across nodes) is an
   engine-layer concern configured by `ClusterSpec` per `docs/gpu-runbook.md`
   §7; the gateway still sees one OpenAI endpoint per coherence domain.

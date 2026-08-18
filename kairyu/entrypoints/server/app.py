@@ -1932,6 +1932,7 @@ def create_app(
     embedding_backends: Mapping[str, EmbeddingBackend] | None = None,
     resolved_api_keys: frozenset[str] | None = None,
     resolved_admin_keys: frozenset[str] | None = None,
+    resolved_responses_compaction_key: bytes | None = None,
     price_sheet: PriceSheet | None = None,
     legacy_chat_models: AbstractSet[str] | None = None,
     orchestration_chat_models: AbstractSet[str] | None = None,
@@ -2033,6 +2034,11 @@ def create_app(
     admin_keys = (
         settings.resolve_admin_keys() if resolved_admin_keys is None else resolved_admin_keys
     )
+    responses_compaction_key = (
+        settings.resolve_responses_compaction_key()
+        if resolved_responses_compaction_key is None
+        else resolved_responses_compaction_key
+    )
     add_health_routes(
         app,
         health_engines,
@@ -2059,6 +2065,7 @@ def create_app(
         legacy_chat_models=legacy_chat_models,
         orchestrated_models=set(auto_models),
         chat_dispatch=_responses_chat_dispatch,
+        responses_compaction_key=responses_compaction_key,
     )
 
     # add_middleware prepends, so add innermost first: metrics -> concurrency

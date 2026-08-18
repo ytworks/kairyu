@@ -10,16 +10,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import copy
 import json
 import logging
+import os
 import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -66,7 +70,9 @@ _BUFFERED_KEEPALIVE_SECONDS = 15.0
 # Remote compaction v2 (Codex against an OpenAI-shaped provider): a terminal
 # compaction_trigger input item requests exactly one compaction output item
 # whose encrypted_content is opaque to the client and echoed back verbatim.
-_COMPACTION_MARKER = "kairyu.compaction.v1"
+_COMPACTION_TOKEN_PREFIX = "kcp1."
+_COMPACTION_AAD_PREFIX = b"kairyu.responses.compaction.v1\0"
+_COMPACTION_NONCE_BYTES = 12
 _COMPACTION_MAX_OUTPUT_TOKENS = 4096
 _COMPACTION_INSTRUCTION_ITEM = {
     "type": "message",
@@ -80,33 +86,53 @@ _COMPACTION_INSTRUCTION_ITEM = {
 }
 
 
-def _encode_compaction(summary: str) -> str:
-    payload = json.dumps(
-        {"k": _COMPACTION_MARKER, "summary": summary}, ensure_ascii=False
-    )
-    return base64.urlsafe_b64encode(payload.encode()).decode()
+class _CompactionCodec:
+    """Tenant-bound authenticated encryption for remote compaction state."""
 
+    def __init__(self, key: bytes) -> None:
+        if not isinstance(key, bytes) or len(key) != 32:
+            raise ValueError("Responses compaction key must be exactly 32 bytes")
+        self._cipher = AESGCM(key)
 
-def _decode_compaction(token: object) -> str:
-    if not isinstance(token, str) or not token:
-        raise ChatRequestError(
-            "compaction encrypted_content must be a non-empty string"
+    @staticmethod
+    def _associated_data(owner: str) -> bytes:
+        return _COMPACTION_AAD_PREFIX + owner.encode("utf-8")
+
+    def encode(self, summary: str, *, owner: str) -> str:
+        nonce = os.urandom(_COMPACTION_NONCE_BYTES)
+        sealed = self._cipher.encrypt(
+            nonce,
+            summary.encode("utf-8"),
+            self._associated_data(owner),
         )
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(token.encode()).decode())
-    except Exception:
-        raise ChatRequestError(
-            "compaction encrypted_content was not issued by this server"
-        ) from None
-    if (
-        not isinstance(payload, dict)
-        or payload.get("k") != _COMPACTION_MARKER
-        or not isinstance(payload.get("summary"), str)
-    ):
-        raise ChatRequestError(
-            "compaction encrypted_content was not issued by this server"
-        )
-    return payload["summary"]
+        encoded = base64.urlsafe_b64encode(nonce + sealed).rstrip(b"=")
+        return _COMPACTION_TOKEN_PREFIX + encoded.decode("ascii")
+
+    def decode(self, token: object, *, owner: str) -> str:
+        if not isinstance(token, str) or not token:
+            raise ChatRequestError(
+                "compaction encrypted_content must be a non-empty string"
+            )
+        if not token.startswith(_COMPACTION_TOKEN_PREFIX):
+            raise ChatRequestError(
+                "compaction encrypted_content was not issued by this server"
+            )
+        encoded = token.removeprefix(_COMPACTION_TOKEN_PREFIX)
+        try:
+            padded = encoded + "=" * (-len(encoded) % 4)
+            payload = base64.b64decode(padded, altchars=b"-_", validate=True)
+            if len(payload) < _COMPACTION_NONCE_BYTES + 16:
+                raise ValueError("compaction token is too short")
+            plaintext = self._cipher.decrypt(
+                payload[:_COMPACTION_NONCE_BYTES],
+                payload[_COMPACTION_NONCE_BYTES:],
+                self._associated_data(owner),
+            )
+            return plaintext.decode("utf-8")
+        except (binascii.Error, InvalidTag, UnicodeDecodeError, ValueError):
+            raise ChatRequestError(
+                "compaction encrypted_content was not issued by this server"
+            ) from None
 
 
 def _extract_compaction_trigger(items: Sequence[dict]) -> bool:
@@ -116,7 +142,12 @@ def _extract_compaction_trigger(items: Sequence[dict]) -> bool:
     return bool(items) and items[-1]["type"] == "compaction_trigger"
 
 
-def _compaction_output_from_message(message: dict) -> list[dict]:
+def _compaction_output_from_message(
+    message: dict,
+    *,
+    compaction_codec: _CompactionCodec,
+    owner: str,
+) -> list[dict]:
     content = message.get("content") or ""
     if isinstance(content, list):
         content = "".join(
@@ -128,7 +159,7 @@ def _compaction_output_from_message(message: dict) -> list[dict]:
         {
             "type": "compaction",
             "id": f"cmp_{uuid.uuid4().hex[:24]}",
-            "encrypted_content": _encode_compaction(content),
+            "encrypted_content": compaction_codec.encode(content, owner=owner),
             "status": "completed",
         }
     ]
@@ -277,7 +308,12 @@ def _validate_request_surface(request: ResponsesRequest) -> None:
             raise ChatRequestError("stream obfuscation is not supported")
 
 
-def _canonical_input(payload: str | list[dict]) -> list[dict]:
+def _canonical_input(
+    payload: str | list[dict],
+    *,
+    compaction_codec: _CompactionCodec,
+    owner: str,
+) -> list[dict]:
     if isinstance(payload, str):
         return [{"type": "message", "role": "user", "content": payload}]
     if not isinstance(payload, list):
@@ -427,8 +463,8 @@ def _canonical_input(payload: str | list[dict]) -> list[dict]:
                     f"input[{index}] has unsupported fields: "
                     + ", ".join(sorted(unknown))
                 )
-            # Fail-fast on foreign tokens; the summary is re-decoded at render.
-            _decode_compaction(item.get("encrypted_content"))
+            # Fail-fast on foreign or cross-tenant tokens; render re-decodes it.
+            compaction_codec.decode(item.get("encrypted_content"), owner=owner)
             items.append(
                 {
                     "type": "compaction",
@@ -523,7 +559,12 @@ def _validate_function_outputs(items: Sequence[dict]) -> None:
             consumed.add(call_id)
 
 
-def _items_to_messages(items: Sequence[dict]) -> list[dict]:
+def _items_to_messages(
+    items: Sequence[dict],
+    *,
+    compaction_codec: _CompactionCodec,
+    owner: str,
+) -> list[dict]:
     messages: list[dict] = []
     buffered_calls: list[dict] = []
 
@@ -568,7 +609,9 @@ def _items_to_messages(items: Sequence[dict]) -> list[dict]:
                     "role": "user",
                     "content": (
                         "Summary of the earlier conversation (compacted):\n"
-                        + _decode_compaction(item["encrypted_content"])
+                        + compaction_codec.decode(
+                            item["encrypted_content"], owner=owner
+                        )
                     ),
                 }
             )
@@ -809,8 +852,13 @@ def _response_format(text: dict | None) -> dict | None:
 def _to_chat_request(
     request: ResponsesRequest,
     items: Sequence[dict],
+    *,
+    compaction_codec: _CompactionCodec,
+    owner: str,
 ) -> ChatCompletionRequest:
-    messages = _items_to_messages(items)
+    messages = _items_to_messages(
+        items, compaction_codec=compaction_codec, owner=owner
+    )
     if request.instructions:
         messages.insert(0, {"role": "system", "content": request.instructions})
     verbosity = request.text.get("verbosity") if request.text else None
@@ -1681,6 +1729,7 @@ async def _orchestrated_response(
     stored_items: list[dict],
     store: ResponseStore,
     owner: str,
+    compaction_codec: _CompactionCodec,
     compaction_request: bool = False,
 ):
     """Serve an AUTO model by delegating to the Chat Completions handler.
@@ -1715,7 +1764,10 @@ async def _orchestrated_response(
         message = (choices[0].get("message") if choices else None) or {}
         usage = _usage_payload_from_wire(payload.get("usage"))
         if compaction_request:
-            return _compaction_output_from_message(message), usage, "completed", None
+            output = _compaction_output_from_message(
+                message, compaction_codec=compaction_codec, owner=owner
+            )
+            return output, usage, "completed", None
         output = _output_items_from_message(request, message) if choices else []
         status, incomplete_details = _terminal_status_for(
             choice.get("finish_reason") for choice in choices
@@ -1790,9 +1842,11 @@ def add_responses_route(
     legacy_chat_models: AbstractSet[str] | None = None,
     orchestrated_models: AbstractSet[str] | None = None,
     chat_dispatch=None,
+    compaction_key: bytes,
 ) -> ResponseStore:
     store = ResponseStore()
     app.state.response_store = store
+    compaction_codec = _CompactionCodec(compaction_key)
 
     @app.get("/v1/responses")
     async def responses_upgrade_required() -> JSONResponse:
@@ -1850,7 +1904,9 @@ def add_responses_route(
             context.extend(previous)
         validation_started_ns = time.perf_counter_ns()
         try:
-            current_items = _canonical_input(request.input)
+            current_items = _canonical_input(
+                request.input, compaction_codec=compaction_codec, owner=owner
+            )
             all_items = context + current_items
             compaction_request = _extract_compaction_trigger(all_items)
             work_items = (
@@ -1864,7 +1920,9 @@ def add_responses_route(
                 if compaction_request
                 else work_items
             )
-            chat_request = _to_chat_request(request, prompt_items)
+            chat_request = _to_chat_request(
+                request, prompt_items, compaction_codec=compaction_codec, owner=owner
+            )
             if compaction_request:
                 # The summary is a plain text turn: tools cannot help it and a
                 # tool call in its place would break the client's compaction
@@ -1930,6 +1988,7 @@ def add_responses_route(
                 stored_items=work_items,
                 store=store,
                 owner=owner,
+                compaction_codec=compaction_codec,
                 compaction_request=compaction_request,
             )
         prepare_started_ns = time.perf_counter_ns()
@@ -2057,7 +2116,10 @@ def add_responses_route(
                     if execution.response.choices
                     else {}
                 )
-                return _compaction_output_from_message(message), usage, "completed", None
+                output = _compaction_output_from_message(
+                    message, compaction_codec=compaction_codec, owner=owner
+                )
+                return output, usage, "completed", None
             output = _output_items(request, execution)
             status, incomplete_details = _terminal_status(execution)
             _apply_terminal_item_status(output, status)

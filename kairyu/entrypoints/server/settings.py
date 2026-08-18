@@ -6,7 +6,9 @@ metrics on) so existing callers of ``create_app(engines)`` are unchanged.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -19,6 +21,13 @@ class ServerSettings(BaseModel):
         description=(
             "Env var holding comma-separated API keys; None disables auth "
             "(keyless node-to-node replicas, design m6 D2 / m7 D5)."
+        ),
+    )
+    responses_compaction_secret_env: str | None = Field(
+        default=None,
+        description=(
+            "Env var holding a secret used to encrypt Responses compaction tokens; "
+            "None uses a process-local ephemeral key."
         ),
     )
     max_concurrency: int | None = Field(
@@ -86,6 +95,22 @@ class ServerSettings(BaseModel):
                 "admission_wait_timeout_s requires max_concurrency"
             )
         return self
+
+    def resolve_responses_compaction_key(self) -> bytes:
+        """Resolve a 256-bit AEAD key without exposing the configured secret."""
+        env_var = self.responses_compaction_secret_env
+        if env_var is None:
+            return secrets.token_bytes(32)
+        raw = os.environ.get(env_var, "")
+        secret = raw.encode("utf-8")
+        if len(secret) < 32:
+            raise ValueError(
+                f"Responses compaction secret env var {env_var!r} must contain "
+                "at least 32 UTF-8 bytes"
+            )
+        return hashlib.sha256(
+            b"kairyu.responses.compaction.key.v1\0" + secret
+        ).digest()
 
     def resolve_api_keys(self) -> frozenset[str]:
         """Read keys from the configured env var; fail loud on an empty var."""

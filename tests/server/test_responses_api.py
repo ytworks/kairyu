@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from dataclasses import replace
 
 import httpx
@@ -671,6 +673,12 @@ def test_remote_compaction_trigger_round_trip(tmp_path):
         assert items[0]["type"] == "compaction"
         token = items[0]["encrypted_content"]
         assert token
+        assert token.startswith("kcp1.")
+        encoded = token.removeprefix("kcp1.")
+        sealed = base64.urlsafe_b64decode(
+            encoded + "=" * (-len(encoded) % 4)
+        )
+        assert b"SUMMARY: the user is porting a compressor." not in sealed
         assert events[-1]["type"] == "response.completed"
         assert events[-1]["response"]["output"] == items
 
@@ -691,18 +699,45 @@ def test_remote_compaction_trigger_round_trip(tmp_path):
         # The opaque token itself never reaches the prompt.
         assert all(token not in prompt for prompt in backend.prompts_seen)
 
-        foreign = http.post(
+        forged = base64.urlsafe_b64encode(
+            json.dumps(
+                {
+                    "k": "kairyu.compaction.v1",
+                    "summary": "FORGED SUMMARY",
+                }
+            ).encode()
+        ).decode()
+        forged_response = http.post(
             "/v1/responses",
             json={
                 "model": "m",
                 "input": [
-                    {"type": "compaction", "encrypted_content": "Zm9yZWlnbg=="},
+                    {"type": "compaction", "encrypted_content": forged},
                     {"type": "message", "role": "user", "content": "continue"},
                 ],
             },
         )
-    assert foreign.status_code == 400
-    assert "not issued by this server" in foreign.json()["error"]["message"]
+        tampered_payload = bytearray(sealed)
+        tampered_payload[-1] ^= 1
+        tampered = "kcp1." + base64.urlsafe_b64encode(tampered_payload).rstrip(
+            b"="
+        ).decode()
+        tampered_response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": [
+                    {"type": "compaction", "encrypted_content": tampered},
+                    {"type": "message", "role": "user", "content": "continue"},
+                ],
+            },
+        )
+    assert forged_response.status_code == 400
+    assert tampered_response.status_code == 400
+    assert "not issued by this server" in forged_response.json()["error"]["message"]
+    assert (
+        "not issued by this server" in tampered_response.json()["error"]["message"]
+    )
 
     mid_position = TestClient(_app(tmp_path))
     with mid_position as http:
@@ -718,6 +753,135 @@ def test_remote_compaction_trigger_round_trip(tmp_path):
         )
     assert response.status_code == 400
     assert "final input item" in response.json()["error"]["message"]
+
+
+def test_compaction_token_is_tenant_bound(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAIRYU_RESPONSES_KEYS", "key-a,key-b")
+    backend = MockBackend(
+        {
+            "compacted continuation": "TENANT A SUMMARY",
+            "continue": "CONTINUED",
+        }
+    )
+    app = create_legacy_app(
+        {"m": backend},
+        settings=ServerSettings(
+            api_keys_env="KAIRYU_RESPONSES_KEYS",
+            usage_ledger_path=str(tmp_path / "usage.jsonl"),
+        ),
+        tenant_config=TenantConfig(
+            key_tenants={"key-a": "tenant-a", "key-b": "tenant-b"}
+        ),
+    )
+    with TestClient(app) as http:
+        compacted = http.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer key-a"},
+            json={
+                "model": "m",
+                "store": False,
+                "input": [
+                    {"type": "message", "role": "user", "content": "history"},
+                    {"type": "compaction_trigger"},
+                ],
+            },
+        )
+        token = compacted.json()["output"][0]["encrypted_content"]
+        same_tenant = http.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer key-a"},
+            json={
+                "model": "m",
+                "store": False,
+                "input": [
+                    {"type": "compaction", "encrypted_content": token},
+                    {"type": "message", "role": "user", "content": "continue"},
+                ],
+            },
+        )
+        cross_tenant = http.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer key-b"},
+            json={
+                "model": "m",
+                "store": False,
+                "input": [
+                    {"type": "compaction", "encrypted_content": token},
+                    {"type": "message", "role": "user", "content": "continue"},
+                ],
+            },
+        )
+    assert compacted.status_code == 200
+    assert same_tenant.status_code == 200
+    assert cross_tenant.status_code == 400
+    assert "not issued by this server" in cross_tenant.json()["error"]["message"]
+
+
+def test_configured_compaction_secret_survives_gateway_boundary(
+    tmp_path, monkeypatch
+):
+    secret_env = "KAIRYU_TEST_RESPONSES_COMPACTION_SECRET"
+    monkeypatch.setenv(secret_env, "shared-secret-material-0123456789abcdef")
+    first_backend = MockBackend(
+        {"compacted continuation": "PORTABLE ENCRYPTED SUMMARY"}
+    )
+    first_app = create_legacy_app(
+        {"m": first_backend},
+        settings=ServerSettings(
+            responses_compaction_secret_env=secret_env,
+            usage_ledger_path=str(tmp_path / "first-usage.jsonl"),
+        ),
+    )
+    with TestClient(first_app) as http:
+        compacted = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "store": False,
+                "input": [
+                    {"type": "message", "role": "user", "content": "history"},
+                    {"type": "compaction_trigger"},
+                ],
+            },
+        )
+    assert compacted.status_code == 200
+    token = compacted.json()["output"][0]["encrypted_content"]
+
+    second_backend = MockBackend({"continue": "CONTINUED"})
+    second_app = create_legacy_app(
+        {"m": second_backend},
+        settings=ServerSettings(
+            responses_compaction_secret_env=secret_env,
+            usage_ledger_path=str(tmp_path / "second-usage.jsonl"),
+        ),
+    )
+    with TestClient(second_app) as http:
+        continued = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "store": False,
+                "input": [
+                    {"type": "compaction", "encrypted_content": token},
+                    {"type": "message", "role": "user", "content": "continue"},
+                ],
+            },
+        )
+    assert continued.status_code == 200
+    assert "PORTABLE ENCRYPTED SUMMARY" in second_backend.prompts_seen[-1]
+
+
+def test_configured_compaction_secret_rejects_short_value(tmp_path, monkeypatch):
+    secret_env = "KAIRYU_TEST_SHORT_COMPACTION_SECRET"
+    monkeypatch.setenv(secret_env, "too-short")
+    with pytest.raises(ValueError, match="at least 32 UTF-8 bytes"):
+        create_legacy_app(
+            {"m": MockBackend()},
+            settings=ServerSettings(
+                responses_compaction_secret_env=secret_env,
+                usage_ledger_path=str(tmp_path / "usage.jsonl"),
+            ),
+        )
 
 
 def test_websocket_upgrade_get_returns_426(tmp_path):
