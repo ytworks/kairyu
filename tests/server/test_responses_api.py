@@ -555,6 +555,45 @@ def test_function_call_output_accepts_codex_content_item_arrays(tmp_path):
     assert "text tool output only" in image_output.json()["error"]["message"]
 
 
+def test_codex_internal_passthrough_fields_are_accepted_and_dropped(tmp_path):
+    # Codex scrubs internal_chat_message_metadata_passthrough /
+    # encrypted_function_args for custom providers but sends them verbatim
+    # when it targets an OpenAI-shaped base URL (the Harbor/Terminal-Bench
+    # setup); observed live against codex-cli 0.147.0.
+    backend = ToolLoopBackend()
+    with TestClient(_app(tmp_path, backend)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "tools": [_tool()],
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": "Add 2 and 3.",
+                        "internal_chat_message_metadata_passthrough": {"x": 1},
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "add",
+                        "arguments": "{}",
+                        "encrypted_function_args": "opaque",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "tool: 5",
+                        "internal_chat_message_metadata_passthrough": {"x": 2},
+                    },
+                ],
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["output"][0]["content"][0]["text"] == "The sum is 5."
+
+
 def test_reasoning_input_items_are_accepted_and_dropped(tmp_path):
     # Codex echoes prior reasoning items back with the full history
     # (store:false); they must not fail the request and must not reach the

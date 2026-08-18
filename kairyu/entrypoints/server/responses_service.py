@@ -56,6 +56,10 @@ logger = logging.getLogger(__name__)
 _ALLOWED_INCLUDE = {"reasoning.encrypted_content"}
 _SUPPORTED_ROLES = {"user", "assistant", "system", "developer"}
 _NAMESPACE_SEPARATOR = "__"
+_CODEX_INTERNAL_ITEM_FIELDS = {
+    "internal_chat_message_metadata_passthrough",
+    "encrypted_function_args",
+}
 # Buffered generation can run for minutes on orchestrated models while the
 # strictest known client budget (Codex) closes idle SSE streams at 300s.
 _BUFFERED_KEEPALIVE_SECONDS = 15.0
@@ -285,6 +289,15 @@ def _canonical_input(payload: str | list[dict]) -> list[dict]:
         kind = item.get("type")
         if kind is None and "role" in item:
             kind = "message"
+        # Codex-internal passthrough metadata rides input items verbatim when
+        # Codex addresses an OpenAI-shaped base URL (the Harbor/Terminal-Bench
+        # setup); it scrubs them for custom providers. Accepted and dropped on
+        # every item kind.
+        item = {
+            key: value
+            for key, value in item.items()
+            if key not in _CODEX_INTERNAL_ITEM_FIELDS
+        }
         if kind == "message":
             unknown = set(item) - {
                 "type",
