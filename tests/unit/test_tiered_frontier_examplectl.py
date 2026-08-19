@@ -143,7 +143,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         assert _option(service["command"], "--limit-mm-per-prompt.video") == "0"
         assert json.loads(
             _option(service["command"], "--default-chat-template-kwargs")
-        ) == {"enable_thinking": False}
+        ) == {"reasoning_effort": "low"}
         assert _option(service["command"], "--max-num-seqs") == "32"
         assert _option(service["command"], "--max-num-batched-tokens") == "32768"
         assert _option(service["command"], "--kv-cache-dtype") == "fp8"

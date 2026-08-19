@@ -39,13 +39,18 @@ router:
 # until an emitted `</think>`. A prompt ending `<｜Assistant｜></think>`
 # yields an immediate public answer (measured); `<｜Assistant｜><think>`
 # yields deliberate-then-answer. Qwen roles need no scaffold: their vLLM
-# service applies the real Qwen chat template.
+# service applies the real Qwen chat template, which always runs in thinking
+# mode at effort low (the service's default chat-template kwargs inject
+# reasoning_effort=low and the template clamps any client effort to low).
 roles:
   # The head runs on Qwen: its vLLM service applies the real Qwen chat
-  # template with thinking disabled, so the public opening starts
-  # deterministically at Qwen's small-prompt TTFT (~0.3 s at c1). DeepSeek
-  # public roles pay a nondeterministic <think> tax under the identity-
-  # template/parser contract, which is fatal for the head's TTFT gate.
+  # template. Qwen thinking at low effort is mandatory for orchestration, so
+  # the head pays a short low-effort <think> span out of its own max_tokens
+  # before the public opening; the empty-final-output re-dispatch (one spare
+  # step under budget.max_steps) is the backstop if a role burns its whole
+  # cap inside <think>. DeepSeek public roles would instead pay a
+  # nondeterministic <think> tax under the identity-template/parser contract,
+  # which is fatal for the head's TTFT gate.
   # Qwen role prompts put the shared conversation FIRST and the role
   # instruction after it. Keeping the leading REQUEST byte-identical permits
   # replica-local native prefix-cache reuse when a later role lands on a

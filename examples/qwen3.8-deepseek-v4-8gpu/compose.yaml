@@ -60,8 +60,12 @@ x-qwen: &qwen
     - vllm
     - --chat-template
     - /etc/kairyu/qwen3.8-chat.jinja
+    # Every request through the L2 orchestrator runs Qwen in thinking mode at
+    # effort low: the default injects reasoning_effort=low (the template turns
+    # thinking on for any effort), and the template clamps client-supplied
+    # high/max to low.
     - --default-chat-template-kwargs
-    - '{"enable_thinking":false}'
+    - '{"reasoning_effort":"low"}'
     - --reasoning-parser
     - qwen3
     - --enable-auto-tool-choice
