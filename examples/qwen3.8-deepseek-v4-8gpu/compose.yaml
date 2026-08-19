@@ -214,7 +214,7 @@ services:
       - type: bind
         source: ${DEEPSEEK_CACHE_PATH}
         target: /root/.cache
-      - ../deepseek-v4-flash-0731-8gpu/identity-chat.jinja:/etc/kairyu/identity-chat.jinja:ro
+      - ./deepseek-role-effort.jinja:/etc/kairyu/deepseek-role-effort.jinja:ro
     command:
       - /models/deepseek-v4-flash-0731
       - --served-model-name
@@ -242,8 +242,10 @@ services:
       - --enable-auto-tool-choice
       - --tool-call-parser
       - deepseek_v4
+      # Passthrough plus inherited-effort preamble injection for thinking
+      # role calls (see deepseek-role-effort.jinja and auto-max.yaml).
       - --chat-template
-      - /etc/kairyu/identity-chat.jinja
+      - /etc/kairyu/deepseek-role-effort.jinja
       - --enable-prefix-caching
       - --gpu-memory-utilization
       - "0.95"

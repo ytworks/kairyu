@@ -34,26 +34,27 @@ router:
   target_mode: auto-max
 
 # DeepSeek role prompts carry their chat scaffold inline: the DeepSeek vLLM
-# service runs an identity chat template (Kairyu owns templating), and its
+# service runs a passthrough chat template (Kairyu owns templating), and its
 # deepseek_v4 reasoning parser classifies generated text as private reasoning
 # until an emitted `</think>`. A prompt ending `<｜Assistant｜></think>`
 # yields an immediate public answer (measured); `<｜Assistant｜><think>`
-# yields deliberate-then-answer. Qwen roles need no scaffold: their vLLM
-# service applies the real Qwen chat template. Every Qwen role declares
-# `reasoning_effort: low` — orchestration policy fixed in this spec, not
-# derived from the caller's request: the template enables thinking for any
-# explicit effort and clamps the level to low, so Qwen roles always think at
-# low effort.
+# yields deliberate-then-answer. DeepSeek roles declare `reasoning_effort:
+# inherit`: the caller's L3 effort (or `default_reasoning_effort` below when
+# the caller sent none) travels on their requests, and the DeepSeek service's
+# chat template (deepseek-role-effort.jinja) injects the graded high/max
+# reasoning preamble only into thinking-scaffold calls. Qwen roles need no
+# scaffold: their vLLM service applies the real Qwen chat template. draft and
+# answer_1..4 declare `reasoning_effort: low` — fixed orchestration policy,
+# never derived from the caller's request: the template enables thinking for
+# any explicit effort and clamps the level to low. The head declares no
+# effort, so it stays non-thinking.
 roles:
-  # The head runs on Qwen: its vLLM service applies the real Qwen chat
-  # template. Qwen thinking at low effort is mandatory for orchestration
-  # (role-declared reasoning_effort below), so the head pays a short
-  # low-effort <think> span out of its own max_tokens before the public
-  # opening; the empty-final-output re-dispatch (one spare step under
-  # budget.max_steps) is the backstop if a role burns its whole cap inside
-  # <think>. DeepSeek public roles would instead pay a nondeterministic
-  # <think> tax under the identity-template/parser contract, which is fatal
-  # for the head's TTFT gate.
+  # The head runs on Qwen with no effort declared: its vLLM service applies
+  # the real Qwen chat template with thinking disabled, so the public opening
+  # starts deterministically at Qwen's small-prompt TTFT. DeepSeek public
+  # roles would instead pay a nondeterministic <think> tax under the
+  # passthrough-template/parser contract, which is fatal for the head's TTFT
+  # gate. Temperature 0.7 is owner-specified.
   # Qwen role prompts put the shared conversation FIRST and the role
   # instruction after it. Keeping the leading REQUEST byte-identical permits
   # replica-local native prefix-cache reuse when a later role lands on a
@@ -64,8 +65,7 @@ roles:
   - name: head
     worker: tier1
     role_type: head
-    reasoning_effort: low
-    sampling: {temperature: 0.3, max_tokens: 256}
+    sampling: {temperature: 0.7, max_tokens: 256}
     prompt: |
       --- REQUEST ---
       {query}
@@ -82,12 +82,13 @@ roles:
   # the thinking DeepSeek critique consumes it, so speed matters more than
   # polish (1024-token cap: measured Qwen drafts end naturally below 512 on
   # this prompt shape, and the cap bounds wave-1 latency, which gates the
-  # Track A fan-out under the barrier scheduler).
+  # Track A fan-out under the barrier scheduler). Thinking at fixed low
+  # effort; temperature 1.0 is owner-specified.
   - name: draft
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 0.5, max_tokens: 1024, seed_offset: 5}
+    sampling: {temperature: 1.0, max_tokens: 1024, seed_offset: 5}
     prompt: |
       --- REQUEST ---
       {query}
@@ -111,6 +112,7 @@ roles:
   - name: policies
     worker: tier2-direct
     role_type: planner
+    reasoning_effort: inherit
     sampling: {temperature: 0.9, top_p: 0.95, max_tokens: 1024, seed_offset: 6}
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[policies] Read the request below and
@@ -141,7 +143,7 @@ roles:
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 0.7, max_tokens: 2048, seed_offset: 1}
+    sampling: {temperature: 1.0, max_tokens: 2048, seed_offset: 1}
     depends_on: [policies]
     prompt: |
       --- REQUEST ---
@@ -164,7 +166,7 @@ roles:
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 0.7, max_tokens: 2048, seed_offset: 2}
+    sampling: {temperature: 1.0, max_tokens: 2048, seed_offset: 2}
     depends_on: [policies]
     prompt: |
       --- REQUEST ---
@@ -187,7 +189,7 @@ roles:
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 0.7, max_tokens: 2048, seed_offset: 3}
+    sampling: {temperature: 1.0, max_tokens: 2048, seed_offset: 3}
     depends_on: [policies]
     prompt: |
       --- REQUEST ---
@@ -210,7 +212,7 @@ roles:
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 0.7, max_tokens: 2048, seed_offset: 4}
+    sampling: {temperature: 1.0, max_tokens: 2048, seed_offset: 4}
     depends_on: [policies]
     prompt: |
       --- REQUEST ---
@@ -240,6 +242,7 @@ roles:
     worker: tier2
     role_type: synthesizer
     depends_on: [draft]
+    reasoning_effort: inherit
     sampling: {temperature: 0.6, top_p: 0.95, max_tokens: 4096, seed_offset: 7}
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[critique] Below are a request and an
@@ -271,6 +274,7 @@ roles:
     worker: tier2-direct
     role_type: publisher
     depends_on: [head, critique, answer_1, answer_2, answer_3, answer_4]
+    reasoning_effort: inherit
     reasoning_closed: true
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[compose] Stream the remainder of the
@@ -350,6 +354,11 @@ roles:
     prompt_suffix: "<｜Assistant｜></think>"
 
 moa_samples: 0
+# L3 requests that carry no reasoning_effort run as high (owner-specified
+# default). An explicit client effort (low|high|max) overrides it; the value
+# reaches the inherit-declared DeepSeek roles, while Qwen roles keep their
+# fixed per-role declarations.
+default_reasoning_effort: high
 # 4096, not 2048: the thinking critique deliberates privately inside <think>
 # before any public byte, and composite deliberative prompts were measured
 # overrunning 2048 entirely inside the thinking span, leaving an empty public

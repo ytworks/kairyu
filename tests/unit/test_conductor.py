@@ -235,8 +235,14 @@ async def test_linear_dag_passes_upstream_output_downstream():
     assert result.final_text == result.outputs["worker"]
 
 
-async def test_role_declared_reasoning_effort_reaches_every_engine_request():
-    backend = ScriptedBackend(["plan", "answer"])
+@pytest.mark.parametrize(
+    ("request_effort", "inherited"),
+    [("max", "max"), (None, None)],
+)
+async def test_role_reasoning_effort_fixed_or_inherited_reaches_engine_requests(
+    request_effort, inherited
+):
+    backend = ScriptedBackend(["plan", "judged", "answer"])
     roles = (
         RoleSpec(
             name="planner",
@@ -245,13 +251,24 @@ async def test_role_declared_reasoning_effort_reaches_every_engine_request():
             reasoning_effort="low",
         ),
         RoleSpec(
+            name="critic",
+            worker="w",
+            prompt="[critic] judge: {planner}",
+            depends_on=("planner",),
+            reasoning_effort="inherit",
+        ),
+        RoleSpec(
             name="worker",
             worker="w",
-            prompt="[worker] execute: {planner}",
-            depends_on=("planner",),
+            prompt="[worker] execute: {critic}",
+            depends_on=("critic",),
         ),
     )
-    conductor = Conductor(roles=roles, workers={"w": backend})
+    conductor = Conductor(
+        roles=roles,
+        workers={"w": backend},
+        reasoning_effort=request_effort,
+    )
 
     await conductor.run("build a cli")
 
@@ -259,7 +276,7 @@ async def test_role_declared_reasoning_effort_reaches_every_engine_request():
         request.request_id.rsplit("-", 2)[-2]: request.reasoning_effort
         for request in backend.requests_seen
     }
-    assert by_role == {"planner": "low", "worker": None}
+    assert by_role == {"planner": "low", "critic": inherited, "worker": None}
 
 
 async def test_multimodal_media_reaches_only_capable_role_workers():

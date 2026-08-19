@@ -30,13 +30,16 @@ design; only TTFT is gated.
 
 Three waves under the level-synchronous Conductor scheduler:
 
-- **Wave 1 (dependency-free)**: `head` (Qwen, T=0.3, 256 tokens) streams the
-  committed public opening from t=0; `draft` (Qwen, T=0.5, 1024 tokens)
-  writes a quick complete internal draft (Track B input); `policies`
-  (DeepSeek direct, T=0.9/top_p 0.95, 1024 tokens) writes four maximally
-  different answer policies in one call (Track A source).
-- **Wave 2 (two tracks in parallel)**: `answer_1..answer_4` (Qwen, T=0.7,
-  2048 tokens, seed_offset 1..4) each answer following one policy — the four
+- **Wave 1 (dependency-free)**: `head` (Qwen, non-thinking, T=0.7, 256
+  tokens; sampling amended 2026-08-19, DTO-D6) streams the committed public
+  opening from t=0; `draft` (Qwen, thinking at low effort, T=1.0, 1024
+  tokens; amended 2026-08-19, DTO-D6) writes a quick complete internal draft
+  (Track B input); `policies` (DeepSeek direct, T=0.9/top_p 0.95, 1024
+  tokens) writes four maximally different answer policies in one call
+  (Track A source).
+- **Wave 2 (two tracks in parallel)**: `answer_1..answer_4` (Qwen, thinking
+  at low effort, T=1.0, 2048 tokens, seed_offset 1..4; amended 2026-08-19,
+  DTO-D6) each answer following one policy — the four
   concurrent tier1 roles spread one-per-replica through
   `queue_depth_threshold: 0`; `critique` (DeepSeek thinking, T=0.6/top_p
   0.95, 4096 tokens) critically analyzes the UNTRUSTED draft and emits one
@@ -98,10 +101,12 @@ calls, issue #509).
 The first public byte must come from the dependency-free Qwen `head`
 (DeepSeek-first public bytes pay a nondeterministic `<think>` tax that
 forfeits the gate — ECO-D4 measurement). The head role, its prompt, its
-sampling (T=0.3, 256 tokens), the committed-opening/`NO_CONTINUATION`
+sampling (256-token cap), the committed-opening/`NO_CONTINUATION`
 continuation contract, and the `serving-auto-max-coding` TTFT gate
 (≤ 2× paired DeepSeek-direct per concurrency, pinned fallbacks) are carried
-over byte-compatibly; only the continuation node is now named `compose`.
+over byte-compatibly (head sampling later amended to T=0.7 by DTO-D6,
+2026-08-19; the head stays non-thinking); only the continuation node is now
+named `compose`.
 c32 remains the binding row: 1.87× on the previous DAG, measured 0.67× on
 the dual-track DAG (run `20260818T025710Z`) — wave 1 places only two small
 Qwen calls and the serial pre-admission judge call is gone, so head TTFT
@@ -128,6 +133,33 @@ fails spec validation). Execution grounding can be re-adopted by a future
 DAG without redeploying. `verification.py` no longer asserts execution
 stages; the deployment-spec unit test continues to pin the registry, and
 compose health-gating keeps the service proven at startup.
+
+### DTO-D6 — Reasoning-effort policy (owner amendment, 2026-08-19)
+
+Owner-specified sampling and effort contract, replacing DTO-D1's original
+Qwen sampling:
+
+- The L2 DSL gains role-level `reasoning_effort` (`low|high|max` fixed, or
+  `inherit` = the caller's L3 effort) and a spec-level
+  `default_reasoning_effort` applied when the caller sends none. The
+  orchestrator resolves the effective effort once per call and the Conductor
+  sends it on every attempt of an `inherit` role.
+- Qwen roles are fixed policy, never caller-derived: `draft` and
+  `answer_1..4` declare `low` (thinking at low effort; the shared Qwen
+  template clamps any level to low) with T=1.0; `head` declares no effort and
+  stays non-thinking with T=0.7, preserving the DTO-D3 TTFT mechanism.
+- DeepSeek roles (`policies`, `critique`, `compose`) declare `inherit`, and
+  the example sets `default_reasoning_effort: high`. The DeepSeek vLLM
+  service's chat template (`deepseek-role-effort.jinja`) is a scaffold
+  passthrough that splices the graded high/max reasoning preamble (the
+  deepseek-thinking.jinja texts) after `<｜begin▁of▁sentence｜>` only for
+  thinking-scaffold calls — effectively grading `critique`; `low`/absent
+  effort and non-thinking scaffolds pass through byte-identically.
+
+Rationale: owner decision (2026-08-19) — expose one L3 effort knob
+(defaulting to high, settable per request from the API or the Chat UI's
+Reasoning Effort advanced parameter) that grades the DeepSeek quality-control
+stage, while Qwen's role economics stay pinned in the spec.
 
 ## Acceptance
 

@@ -144,8 +144,10 @@ class RoleSpec:
     # span: reasoning-classified output alongside empty public text is the
     # answer itself and is reclaimed as the role's output (issue #496).
     reasoning_closed: bool = False
-    # Fixed reasoning effort sent on every attempt of this role. Deployment
-    # policy, independent of the caller's request-level effort.
+    # Reasoning effort sent on every attempt of this role. A level value
+    # (low|high|max) is fixed deployment policy, independent of the caller's
+    # request-level effort; "inherit" forwards the caller's request-level
+    # effort (None when the caller sent none).
     reasoning_effort: str | None = None
 
     def __post_init__(self) -> None:
@@ -155,9 +157,10 @@ class RoleSpec:
                 "chat prompts; provide a plain derivation template"
             )
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
-        if self.reasoning_effort not in {None, "low", "high", "max"}:
+        if self.reasoning_effort not in {None, "low", "high", "max", "inherit"}:
             raise ValueError(
-                f"role {self.name!r}: reasoning_effort must be low, high, max, or null"
+                f"role {self.name!r}: reasoning_effort must be low, high, max, "
+                "inherit, or null"
             )
         if (self.role_type == "executor") != (self.executor is not None):
             raise ValueError(
@@ -445,6 +448,7 @@ class Conductor:
         multimodal_prompt: MultimodalPrompt | None = None,
         chat_template_kwargs: Mapping[str, object] | None = None,
         execution_workers: Mapping[str, ExecutionBackend] | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -475,6 +479,8 @@ class Conductor:
         self._chat_template_kwargs = (
             None if chat_template_kwargs is None else dict(chat_template_kwargs)
         )
+        # The caller's request-level effort, consumed by "inherit" roles only.
+        self._reasoning_effort = reasoning_effort
         self._execution_workers = dict(execution_workers or {})
         supplied_trace = dict(worker_trace or {})
         self._worker_trace = {
@@ -878,6 +884,11 @@ class Conductor:
             )
         return self._chat_template_kwargs
 
+    def _role_reasoning_effort(self, spec: RoleSpec) -> str | None:
+        if spec.reasoning_effort == "inherit":
+            return self._reasoning_effort
+        return spec.reasoning_effort
+
     def _cache_hint(self, session: str, *, multimodal: bool = False) -> CacheHint:
         # A conversation-derived affinity key keeps consecutive agent turns on
         # the replica holding the warm KV prefix (issue #495); the per-request
@@ -957,7 +968,7 @@ class Conductor:
                         tools_in_prompt=tools_in_prompt,
                         parallel_tool_calls=parallel_tool_calls,
                         tool_call_protocol=tool_call_protocol,
-                        reasoning_effort=spec.reasoning_effort,
+                        reasoning_effort=self._role_reasoning_effort(spec),
                     ),
                 )
             )
@@ -1001,7 +1012,7 @@ class Conductor:
             tools_in_prompt=tools_in_prompt,
             parallel_tool_calls=parallel_tool_calls,
             tool_call_protocol=tool_call_protocol,
-            reasoning_effort=spec.reasoning_effort,
+            reasoning_effort=self._role_reasoning_effort(spec),
         )
         if attempt != 0:
             return candidate

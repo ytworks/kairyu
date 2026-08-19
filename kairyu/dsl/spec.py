@@ -108,10 +108,11 @@ class RoleNodeSpec(BaseModel):
     # private-reasoning span, so upstream reasoning-classified output with an
     # empty public text is the answer itself, not hidden deliberation.
     reasoning_closed: bool = False
-    # Pins the reasoning effort sent on every attempt of this role. A role
-    # declaration is fixed deployment policy: it is independent of (and never
-    # overridden by) the caller's request-level effort.
-    reasoning_effort: Literal["low", "high", "max"] | None = None
+    # Reasoning effort sent on every attempt of this role. A level value is
+    # fixed deployment policy: it is independent of (and never overridden by)
+    # the caller's request-level effort. "inherit" forwards the caller's
+    # request-level effort instead (None when the caller sent none).
+    reasoning_effort: Literal["low", "high", "max", "inherit"] | None = None
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
@@ -231,6 +232,10 @@ class OrchestratorSpec(BaseModel):
     # Completed pre-final stage outputs may be surfaced separately from the
     # answer. Hidden is the safe and backward-compatible default.
     expose_intermediate_outputs: bool = False
+    # Effort assumed for a request whose caller sent no reasoning_effort.
+    # Consumed by "inherit" roles (and the direct/MoA routes); an explicit
+    # request-level effort always overrides it.
+    default_reasoning_effort: Literal["low", "high", "max"] | None = None
 
     @model_validator(mode="after")
     def _roles_reference_known_workers(self) -> OrchestratorSpec:

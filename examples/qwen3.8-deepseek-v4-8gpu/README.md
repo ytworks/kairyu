@@ -90,13 +90,21 @@ Design notes (see
   the whole fan-out under the level-synchronous scheduler, and thinking roles
   were measured nondeterministically burning entire caps inside `<think>` on
   composite prompts.
-- Every Qwen role runs in thinking mode at a fixed low effort: each Qwen role
-  in `auto-max.yaml` declares `reasoning_effort: low` (fixed L2 policy, never
-  derived from the caller's request), the L2 conductor sends that effort on
-  every attempt of the role, and the shared Qwen template enables thinking
-  for it while clamping any `high`/`max` to `low`. Orchestration therefore
-  always pays one short low-effort `<think>` span per Qwen call out of that
-  role's `max_tokens`.
+- Qwen sampling and thinking are fixed per role in `auto-max.yaml`, never
+  derived from the caller's request: `draft` and `answer_1..4` declare
+  `reasoning_effort: low` (T=1.0), so they think at low effort — the shared
+  Qwen template enables thinking for any explicit effort and clamps
+  `high`/`max` to `low` — while `head` (T=0.7) declares no effort and stays
+  non-thinking so the public opening streams immediately.
+- The caller's L3 `reasoning_effort` reaches the DeepSeek roles: `policies`,
+  `critique`, and `compose` declare `reasoning_effort: inherit`, and a
+  request without an explicit effort runs at the spec's
+  `default_reasoning_effort: high`. The DeepSeek service's chat template
+  (`deepseek-role-effort.jinja`) is a scaffold passthrough that splices the
+  graded high/max reasoning preamble after `<｜begin▁of▁sentence｜>` only for
+  thinking-scaffold calls — in this DAG, the `critique` role — so `low`
+  yields plain thinking and `high`/`max` strengthen it; non-thinking
+  scaffolds pass through byte-identically.
 - There is no PASS/FAIL verifier and no refinement loop
   (`max_refine_depth: 0`): the critique stage is the DAG's quality control
   (DTO-D4). Budget: `max_steps: 10` (9 generation calls + 1 headroom for the
@@ -183,6 +191,23 @@ inventory, the explicit nine-role dual-track DAG (including the streamed head,
 the single-profile policy, and the `{max_steps: 10, max_refine_depth: 0}`
 budget), and two ordered finite 384-dimensional embedding vectors with
 positive usage before printing the URL.
+
+### Choosing the reasoning effort from the Chat UI
+
+Requests default to `reasoning_effort: high` (`default_reasoning_effort` in
+`auto-max.yaml`). To pick a different level per chat, open Open WebUI's Chat
+Controls → Advanced Params and set **Reasoning Effort** to `low`, `high`, or
+`max` — Open WebUI forwards the value as the OpenAI-compatible
+`reasoning_effort` body field, and Kairyu L3 rejects anything else with a 422.
+The chosen level flows through the `inherit`-declared DeepSeek roles and
+grades the thinking `critique` stage; the Qwen roles keep their fixed
+per-role declarations regardless of the UI setting. The API equivalent:
+
+```sh
+curl -sS http://127.0.0.1:8003/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  --data '{"model":"kairyu-auto-max","reasoning_effort":"max","messages":[{"role":"user","content":"Prove it."}]}'
+```
 
 The embedding model is the truthfully named
 `sentence-transformers/all-MiniLM-L6-v2` FastEmbed deployment, not an alias for

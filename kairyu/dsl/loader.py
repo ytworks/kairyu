@@ -220,4 +220,5 @@ def build_orchestrator(
         execution_workers=execution_workers,
         executor_descriptors=executor_descriptors,
         profile_judge=profile_judge,
+        default_reasoning_effort=spec.default_reasoning_effort,
     )

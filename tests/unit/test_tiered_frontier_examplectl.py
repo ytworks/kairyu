@@ -10,6 +10,7 @@ import yaml
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.dsl.loader import load_spec
 from kairyu.engine.config_validation import validate_backend_options
+from kairyu.entrypoints.chat_template import ChatTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "examples/qwen3.8-deepseek-v4-8gpu"
@@ -176,6 +177,14 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     assert "--enable-auto-tool-choice" in deepseek["command"]
     assert _option(deepseek["command"], "--tool-call-parser") == "deepseek_v4"
     assert _option(deepseek["command"], "--max-num-batched-tokens") == "16384"
+    # Scaffold passthrough plus inherited-effort preamble injection (DTO-D6).
+    assert _option(deepseek["command"], "--chat-template") == (
+        "/etc/kairyu/deepseek-role-effort.jinja"
+    )
+    assert (
+        "./deepseek-role-effort.jinja:/etc/kairyu/deepseek-role-effort.jinja:ro"
+        in deepseek["volumes"]
+    )
     assert deepseek["volumes"][1]["target"] == "/root/.cache"
     assert deepseek["environment"] | {
         "XDG_CACHE_HOME": "/root/.cache",
@@ -288,6 +297,38 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert deployment.server.max_chat_body_bytes == 16_777_216
 
 
+def test_deepseek_role_effort_template_grades_only_thinking_scaffolds() -> None:
+    template = ChatTemplate.load(str(EXAMPLE / "deepseek-role-effort.jinja"))
+    thinking = (
+        "<｜begin▁of▁sentence｜><｜User｜>[critique] judge<｜Assistant｜><think>"
+    )
+    direct = (
+        "<｜begin▁of▁sentence｜><｜User｜>[policies] write<｜Assistant｜></think>"
+    )
+
+    def render(content: str, effort: str | None) -> str:
+        return template.render(
+            [{"role": "user", "content": content}],
+            template_kwargs=(
+                {"reasoning_effort": effort} if effort is not None else None
+            ),
+        )
+
+    assert render(thinking, None) == thinking
+    assert render(thinking, "low") == thinking
+    assert render(direct, "max") == direct
+    high = render(thinking, "high")
+    assert high.startswith(
+        "<｜begin▁of▁sentence｜>Reason privately and carefully"
+    )
+    assert high.endswith("<｜Assistant｜><think>")
+    maxed = render(thinking, "max")
+    assert maxed.startswith(
+        "<｜begin▁of▁sentence｜>Use rigorous private reasoning"
+    )
+    assert maxed.endswith("<｜User｜>[critique] judge<｜Assistant｜><think>")
+
+
 def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcript() -> None:
     template = (EXAMPLE / "deepseek-thinking.jinja").read_text()
 
@@ -341,19 +382,23 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
         "compose",
     ]
     by_name = {role.name: role for role in maximum.roles}
-    # Qwen roles are pinned to low-effort thinking by the spec itself: fixed
-    # L2 policy, never derived from the caller's request-level effort.
-    # DeepSeek roles carry their scaffold inline and declare no effort.
-    qwen_roles = [role for role in maximum.roles if role.worker == "tier1"]
-    assert {role.name for role in qwen_roles} == {
-        "head", "draft", "answer_1", "answer_2", "answer_3", "answer_4"
+    # Effort policy (DTO-D6): Qwen roles are fixed spec policy — draft and
+    # the answerers think at low, the head declares no effort and stays
+    # non-thinking. DeepSeek roles inherit the caller's L3 effort, and an
+    # effortless request runs at the spec default of high.
+    assert maximum.default_reasoning_effort == "high"
+    efforts = {role.name: role.reasoning_effort for role in maximum.roles}
+    assert efforts == {
+        "head": None,
+        "draft": "low",
+        "answer_1": "low",
+        "answer_2": "low",
+        "answer_3": "low",
+        "answer_4": "low",
+        "policies": "inherit",
+        "critique": "inherit",
+        "compose": "inherit",
     }
-    assert all(role.reasoning_effort == "low" for role in qwen_roles)
-    assert all(
-        role.reasoning_effort is None
-        for role in maximum.roles
-        if role.worker != "tier1"
-    )
     head = by_name["head"]
     assert head.role_type == "head" and head.worker == "tier1"
     assert head.depends_on == ()

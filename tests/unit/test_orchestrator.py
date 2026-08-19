@@ -17,6 +17,7 @@ from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
+from kairyu.orchestration.conductor import RoleSpec
 from kairyu.orchestration.moa import MoAEvent, MoAResult
 from kairyu.orchestration.orchestrator import (
     EngineDescriptor,
@@ -309,6 +310,50 @@ def test_auto_admission_bound_accounts_for_final_tool_and_response_schemas() -> 
     # Both final schemas are serialized into each of the three candidate
     # prefills, so their 8,192-byte growth must be charged three times.
     assert large - small >= 3 * 8_192
+
+
+async def test_spec_default_reasoning_effort_backs_inherit_roles() -> None:
+    backend = _PreparingBackend("tier1", [])
+    roles = (
+        RoleSpec(
+            name="planner",
+            worker="tier1",
+            prompt="[planner] {query}",
+            reasoning_effort="inherit",
+        ),
+        RoleSpec(
+            name="worker",
+            worker="tier1",
+            prompt="[worker] {planner}",
+            depends_on=("planner",),
+        ),
+    )
+    orchestrator = _orchestrator(
+        engines={"tier1": backend},
+        roles=roles,
+        default_reasoning_effort="high",
+    )
+
+    await orchestrator.run(COMPLEX)
+    efforts = {
+        request.request_id.rsplit("-", 2)[-2]: request.reasoning_effort
+        for request in backend.generated
+    }
+    assert efforts == {"planner": "high", "worker": None}
+
+    backend.generated.clear()
+    await orchestrator.run(
+        OrchestrationRequest(
+            prompt=COMPLEX,
+            sampling_params=SamplingParams(max_tokens=32),
+            reasoning_effort="low",
+        )
+    )
+    efforts = {
+        request.request_id.rsplit("-", 2)[-2]: request.reasoning_effort
+        for request in backend.generated
+    }
+    assert efforts == {"planner": "low", "worker": None}
 
 
 async def test_async_prepare_binds_one_route_and_preserves_final_intent() -> None:

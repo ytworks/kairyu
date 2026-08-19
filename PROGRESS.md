@@ -98,17 +98,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
-### 2026-08-19 — [design] Role-level reasoning_effort; auto-max Qwen pinned to low thinking
-- What: L2 role specs gain an optional `reasoning_effort` (low|high|max) that
-  the Conductor sends on every attempt of the role, independent of the
-  caller's request effort; all six auto-max Qwen roles declare `low` (the
-  tiered Qwen vLLM default `enable_thinking:false` is dropped), and the
-  shared Qwen example template clamps any effort to `low` before its
-  effort-enables-thinking toggle.
-- Why: owner decision — orchestration must always run Qwen thinking at low
-  effort, declared in the role definitions; Qwen never grades by level.
-- Refs: kairyu/{dsl/spec.py,dsl/loader.py,orchestration/conductor.py,deploy/validation.py};
-  examples/qwen3.8-27b-1gpu/; examples/qwen3.8-deepseek-v4-8gpu/
+### 2026-08-19 — [design] Role/default reasoning_effort in L2; auto-max effort policy (DTO-D6)
+- What: role specs gain `reasoning_effort` (fixed low|high|max, or `inherit`
+  = the caller's L3 effort) and orchestrator specs `default_reasoning_effort`.
+  auto-max: Qwen draft/answers think at fixed low (T=1.0), head non-thinking
+  (T=0.7); DeepSeek roles inherit (default high) and the new passthrough
+  template splices the high/max preamble into thinking calls; the shared
+  Qwen template clamps any effort to low.
+- Why: owner — one L3 effort knob (default high, API/Chat UI settable) grades
+  the DeepSeek critique; Qwen role economics stay pinned in the spec.
+- Refs: DTO-D6; kairyu/{dsl,orchestration}; examples/qwen3.8-deepseek-v4-8gpu/
 
 ### 2026-08-18 — [amendment] Compaction hardening from the #531 review
 - What: adopted all three review fixes — a successful compaction stores only
