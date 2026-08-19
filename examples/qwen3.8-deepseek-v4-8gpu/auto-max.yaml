@@ -107,15 +107,16 @@ roles:
   # output-splitting mechanism, so each answerer receives the whole list and
   # is bound to its own policy by prompt (DTO-D2). Thinking DeepSeek (owner
   # decision, DTO-D7): the call deliberates privately before emitting the
-  # list, and the 1024-token cap bounds think + list together — the earlier
-  # measured cap-burning risk of thinking on composite prompts is accepted.
-  # High temperature buys inter-policy diversity; answer diversity itself
-  # comes from the policies plus distinct answerer seeds.
+  # list, so the cap bounds think + list together. 4096, not 1024, for the
+  # same reason as critique: composite deliberative prompts were measured
+  # overrunning 2048 entirely inside the thinking span, leaving an empty
+  # output. High temperature buys inter-policy diversity; answer diversity
+  # itself comes from the policies plus distinct answerer seeds.
   - name: policies
     worker: tier2
     role_type: planner
     reasoning_effort: inherit
-    sampling: {temperature: 0.9, top_p: 0.95, max_tokens: 1024, seed_offset: 6}
+    sampling: {temperature: 0.9, top_p: 0.95, max_tokens: 4096, seed_offset: 6}
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[policies] Read the request below and
       write four policies for answering it that are as different from one

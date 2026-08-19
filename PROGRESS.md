@@ -102,8 +102,8 @@ in `.claude/rules/progress-log.md`).
 - What: role specs gain `reasoning_effort` (fixed low|high|max, or `inherit`
   = the caller's L3 effort) and orchestrator specs `default_reasoning_effort`.
   auto-max: Qwen draft/answers think at fixed low (T=1.0), head non-thinking
-  (T=0.7); every DeepSeek role (policies/critique/compose) runs thinking on
-  tier2 (tier2-direct removed), inherits effort (default high), and the new
+  (T=0.7); every DeepSeek role runs thinking on tier2 (tier2-direct removed,
+  policies cap 1024→4096), inherits effort (default high), and the new
   passthrough template splices the high/max preamble; Qwen clamps to low.
 - Why: owner — DeepSeek v4 flash was always meant to think; one L3 effort
   knob (default high, API/Chat UI settable) grades every DeepSeek stage.

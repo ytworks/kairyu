@@ -34,9 +34,9 @@ Three waves under the level-synchronous Conductor scheduler:
   tokens; sampling amended 2026-08-19, DTO-D6) streams the committed public
   opening from t=0; `draft` (Qwen, thinking at low effort, T=1.0, 1024
   tokens; amended 2026-08-19, DTO-D6) writes a quick complete internal draft
-  (Track B input); `policies` (DeepSeek thinking, T=0.9/top_p 0.95, 1024
-  tokens) writes four maximally different answer policies in one call
-  (Track A source).
+  (Track B input); `policies` (DeepSeek thinking, T=0.9/top_p 0.95, 4096
+  tokens; cap amended 2026-08-19, DTO-D7) writes four maximally different
+  answer policies in one call (Track A source).
 - **Wave 2 (two tracks in parallel)**: `answer_1..answer_4` (Qwen, thinking
   at low effort, T=1.0, 2048 tokens, seed_offset 1..4; amended 2026-08-19,
   DTO-D6) each answer following one policy — the four
@@ -175,7 +175,9 @@ wave-1 latency ahead of the fan-out and cap burning inside `<think>` on
 composite prompts (each role's token cap now bounds think + output together,
 and compose's span shares the caller's public allowance) — are explicitly
 accepted, with the bounded empty-final-output re-dispatch as the compose
-backstop. Combined with DTO-D6, the inherited L3 effort (default high) now
+backstop; for `policies`, the cap-burning risk is resolved by raising its
+cap from 1024 to 4096 (owner instruction), the same allowance and rationale
+as `critique`. Combined with DTO-D6, the inherited L3 effort (default high) now
 grades every DeepSeek deliberation, not only `critique`.
 
 ## Acceptance
