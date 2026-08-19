@@ -98,15 +98,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
-### 2026-08-19 — [design] Qwen examples: effort clamped to low, auto-max always thinks at low
-- What: the shared Qwen example template clamps any `reasoning_effort` to
-  `low` (the effort-enables-thinking toggle stays); the tiered example's Qwen
-  vLLM default kwargs change `enable_thinking:false` → `reasoning_effort:"low"`,
-  so every L2 Qwen role always runs thinking at low effort.
-- Why: owner decision — Qwen never grades by effort level, and orchestration
-  must run Qwen thinking at low; the head accepts the `<think>` span.
-- Refs: examples/qwen3.8-27b-1gpu/{chat_template.jinja,README.md};
-  examples/qwen3.8-deepseek-v4-8gpu/{compose.yaml,auto-max.yaml,README.md}
+### 2026-08-19 — [design] Role-level reasoning_effort; auto-max Qwen pinned to low thinking
+- What: L2 role specs gain an optional `reasoning_effort` (low|high|max) that
+  the Conductor sends on every attempt of the role, independent of the
+  caller's request effort; all six auto-max Qwen roles declare `low` (the
+  tiered Qwen vLLM default `enable_thinking:false` is dropped), and the
+  shared Qwen example template clamps any effort to `low` before its
+  effort-enables-thinking toggle.
+- Why: owner decision — orchestration must always run Qwen thinking at low
+  effort, declared in the role definitions; Qwen never grades by level.
+- Refs: kairyu/{dsl/spec.py,dsl/loader.py,orchestration/conductor.py,deploy/validation.py};
+  examples/qwen3.8-27b-1gpu/; examples/qwen3.8-deepseek-v4-8gpu/
 
 ### 2026-08-18 — [amendment] Compaction hardening from the #531 review
 - What: adopted all three review fixes — a successful compaction stores only

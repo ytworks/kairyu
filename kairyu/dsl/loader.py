@@ -168,6 +168,7 @@ def build_orchestrator(
             prompt_suffix=role.prompt_suffix,
             prompt_headless=role.prompt_headless,
             reasoning_closed=role.reasoning_closed,
+            reasoning_effort=role.reasoning_effort,
         )
 
     roles = tuple(_role_spec(role) for role in spec.roles) or None

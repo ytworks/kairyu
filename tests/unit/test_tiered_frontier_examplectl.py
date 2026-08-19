@@ -141,9 +141,9 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         }
         assert _option(service["command"], "--limit-mm-per-prompt.image") == "1"
         assert _option(service["command"], "--limit-mm-per-prompt.video") == "0"
-        assert json.loads(
-            _option(service["command"], "--default-chat-template-kwargs")
-        ) == {"reasoning_effort": "low"}
+        # Low-effort thinking is declared per role in auto-max.yaml, not via
+        # a service-wide default.
+        assert "--default-chat-template-kwargs" not in service["command"]
         assert _option(service["command"], "--max-num-seqs") == "32"
         assert _option(service["command"], "--max-num-batched-tokens") == "32768"
         assert _option(service["command"], "--kv-cache-dtype") == "fp8"
@@ -341,9 +341,19 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
         "compose",
     ]
     by_name = {role.name: role for role in maximum.roles}
-    # Qwen head: server-side template + thinking disabled makes the public
-    # opening deterministic from t=0; DeepSeek public roles pay a
-    # nondeterministic <think> tax that forfeits the TTFT gate.
+    # Qwen roles are pinned to low-effort thinking by the spec itself: fixed
+    # L2 policy, never derived from the caller's request-level effort.
+    # DeepSeek roles carry their scaffold inline and declare no effort.
+    qwen_roles = [role for role in maximum.roles if role.worker == "tier1"]
+    assert {role.name for role in qwen_roles} == {
+        "head", "draft", "answer_1", "answer_2", "answer_3", "answer_4"
+    }
+    assert all(role.reasoning_effort == "low" for role in qwen_roles)
+    assert all(
+        role.reasoning_effort is None
+        for role in maximum.roles
+        if role.worker != "tier1"
+    )
     head = by_name["head"]
     assert head.role_type == "head" and head.worker == "tier1"
     assert head.depends_on == ()

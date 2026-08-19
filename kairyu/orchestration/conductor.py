@@ -144,6 +144,9 @@ class RoleSpec:
     # span: reasoning-classified output alongside empty public text is the
     # answer itself and is reclaimed as the role's output (issue #496).
     reasoning_closed: bool = False
+    # Fixed reasoning effort sent on every attempt of this role. Deployment
+    # policy, independent of the caller's request-level effort.
+    reasoning_effort: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, TemplatedPrompt):
@@ -152,6 +155,10 @@ class RoleSpec:
                 "chat prompts; provide a plain derivation template"
             )
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
+        if self.reasoning_effort not in {None, "low", "high", "max"}:
+            raise ValueError(
+                f"role {self.name!r}: reasoning_effort must be low, high, max, or null"
+            )
         if (self.role_type == "executor") != (self.executor is not None):
             raise ValueError(
                 f"role {self.name!r}: role_type 'executor' and executor config "
@@ -163,6 +170,10 @@ class RoleSpec:
             raise ValueError(
                 f"executor role {self.name!r} cannot declare prompt_headless "
                 "or reasoning_closed"
+            )
+        if self.executor is not None and self.reasoning_effort is not None:
+            raise ValueError(
+                f"executor role {self.name!r} cannot declare reasoning_effort"
             )
 
 
@@ -946,6 +957,7 @@ class Conductor:
                         tools_in_prompt=tools_in_prompt,
                         parallel_tool_calls=parallel_tool_calls,
                         tool_call_protocol=tool_call_protocol,
+                        reasoning_effort=spec.reasoning_effort,
                     ),
                 )
             )
@@ -989,6 +1001,7 @@ class Conductor:
             tools_in_prompt=tools_in_prompt,
             parallel_tool_calls=parallel_tool_calls,
             tool_call_protocol=tool_call_protocol,
+            reasoning_effort=spec.reasoning_effort,
         )
         if attempt != 0:
             return candidate

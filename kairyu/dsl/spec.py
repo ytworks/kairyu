@@ -108,6 +108,10 @@ class RoleNodeSpec(BaseModel):
     # private-reasoning span, so upstream reasoning-classified output with an
     # empty public text is the answer itself, not hidden deliberation.
     reasoning_closed: bool = False
+    # Pins the reasoning effort sent on every attempt of this role. A role
+    # declaration is fixed deployment policy: it is independent of (and never
+    # overridden by) the caller's request-level effort.
+    reasoning_effort: Literal["low", "high", "max"] | None = None
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
@@ -123,6 +127,10 @@ class RoleNodeSpec(BaseModel):
                 raise ValueError(
                     f"executor role {self.name!r} cannot declare prompt_headless "
                     "or reasoning_closed"
+                )
+            if self.reasoning_effort is not None:
+                raise ValueError(
+                    f"executor role {self.name!r} cannot declare reasoning_effort"
                 )
             deps = set(self.depends_on)
             missing = (set(self.executor.code_from) | set(self.executor.tests_from)) - deps

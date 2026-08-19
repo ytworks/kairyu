@@ -39,18 +39,21 @@ router:
 # until an emitted `</think>`. A prompt ending `<｜Assistant｜></think>`
 # yields an immediate public answer (measured); `<｜Assistant｜><think>`
 # yields deliberate-then-answer. Qwen roles need no scaffold: their vLLM
-# service applies the real Qwen chat template, which always runs in thinking
-# mode at effort low (the service's default chat-template kwargs inject
-# reasoning_effort=low and the template clamps any client effort to low).
+# service applies the real Qwen chat template. Every Qwen role declares
+# `reasoning_effort: low` — orchestration policy fixed in this spec, not
+# derived from the caller's request: the template enables thinking for any
+# explicit effort and clamps the level to low, so Qwen roles always think at
+# low effort.
 roles:
   # The head runs on Qwen: its vLLM service applies the real Qwen chat
-  # template. Qwen thinking at low effort is mandatory for orchestration, so
-  # the head pays a short low-effort <think> span out of its own max_tokens
-  # before the public opening; the empty-final-output re-dispatch (one spare
-  # step under budget.max_steps) is the backstop if a role burns its whole
-  # cap inside <think>. DeepSeek public roles would instead pay a
-  # nondeterministic <think> tax under the identity-template/parser contract,
-  # which is fatal for the head's TTFT gate.
+  # template. Qwen thinking at low effort is mandatory for orchestration
+  # (role-declared reasoning_effort below), so the head pays a short
+  # low-effort <think> span out of its own max_tokens before the public
+  # opening; the empty-final-output re-dispatch (one spare step under
+  # budget.max_steps) is the backstop if a role burns its whole cap inside
+  # <think>. DeepSeek public roles would instead pay a nondeterministic
+  # <think> tax under the identity-template/parser contract, which is fatal
+  # for the head's TTFT gate.
   # Qwen role prompts put the shared conversation FIRST and the role
   # instruction after it. Keeping the leading REQUEST byte-identical permits
   # replica-local native prefix-cache reuse when a later role lands on a
@@ -61,6 +64,7 @@ roles:
   - name: head
     worker: tier1
     role_type: head
+    reasoning_effort: low
     sampling: {temperature: 0.3, max_tokens: 256}
     prompt: |
       --- REQUEST ---
@@ -82,6 +86,7 @@ roles:
   - name: draft
     worker: tier1
     role_type: proposal
+    reasoning_effort: low
     sampling: {temperature: 0.5, max_tokens: 1024, seed_offset: 5}
     prompt: |
       --- REQUEST ---
@@ -135,6 +140,7 @@ roles:
   - name: answer_1
     worker: tier1
     role_type: proposal
+    reasoning_effort: low
     sampling: {temperature: 0.7, max_tokens: 2048, seed_offset: 1}
     depends_on: [policies]
     prompt: |
@@ -157,6 +163,7 @@ roles:
   - name: answer_2
     worker: tier1
     role_type: proposal
+    reasoning_effort: low
     sampling: {temperature: 0.7, max_tokens: 2048, seed_offset: 2}
     depends_on: [policies]
     prompt: |
@@ -179,6 +186,7 @@ roles:
   - name: answer_3
     worker: tier1
     role_type: proposal
+    reasoning_effort: low
     sampling: {temperature: 0.7, max_tokens: 2048, seed_offset: 3}
     depends_on: [policies]
     prompt: |
@@ -201,6 +209,7 @@ roles:
   - name: answer_4
     worker: tier1
     role_type: proposal
+    reasoning_effort: low
     sampling: {temperature: 0.7, max_tokens: 2048, seed_offset: 4}
     depends_on: [policies]
     prompt: |

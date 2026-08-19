@@ -90,11 +90,13 @@ Design notes (see
   the whole fan-out under the level-synchronous scheduler, and thinking roles
   were measured nondeterministically burning entire caps inside `<think>` on
   composite prompts.
-- Every Qwen role runs in thinking mode at a fixed low effort: the Qwen vLLM
-  services default `reasoning_effort=low` via chat-template kwargs, and the
-  shared Qwen template clamps any client-supplied `high`/`max` to `low`, so
-  orchestration always pays exactly one short low-effort `<think>` span per
-  Qwen call out of that role's `max_tokens`.
+- Every Qwen role runs in thinking mode at a fixed low effort: each Qwen role
+  in `auto-max.yaml` declares `reasoning_effort: low` (fixed L2 policy, never
+  derived from the caller's request), the L2 conductor sends that effort on
+  every attempt of the role, and the shared Qwen template enables thinking
+  for it while clamping any `high`/`max` to `low`. Orchestration therefore
+  always pays one short low-effort `<think>` span per Qwen call out of that
+  role's `max_tokens`.
 - There is no PASS/FAIL verifier and no refinement loop
   (`max_refine_depth: 0`): the critique stage is the DAG's quality control
   (DTO-D4). Budget: `max_steps: 10` (9 generation calls + 1 headroom for the
