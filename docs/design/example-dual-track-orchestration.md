@@ -34,7 +34,7 @@ Three waves under the level-synchronous Conductor scheduler:
   tokens; sampling amended 2026-08-19, DTO-D6) streams the committed public
   opening from t=0; `draft` (Qwen, thinking at low effort, T=1.0, 1024
   tokens; amended 2026-08-19, DTO-D6) writes a quick complete internal draft
-  (Track B input); `policies` (DeepSeek direct, T=0.9/top_p 0.95, 1024
+  (Track B input); `policies` (DeepSeek thinking, T=0.9/top_p 0.95, 1024
   tokens) writes four maximally different answer policies in one call
   (Track A source).
 - **Wave 2 (two tracks in parallel)**: `answer_1..answer_4` (Qwen, thinking
@@ -44,9 +44,9 @@ Three waves under the level-synchronous Conductor scheduler:
   `queue_depth_threshold: 0`; `critique` (DeepSeek thinking, T=0.6/top_p
   0.95, 4096 tokens) critically analyzes the UNTRUSTED draft and emits one
   improved complete answer.
-- **Wave 3 (merge)**: `compose` (DeepSeek direct, `role_type: publisher`,
-  `reasoning_closed: true`, no sampling — it carries the caller's public
-  intent) builds the best final answer from the refined answer plus the four
+- **Wave 3 (merge)**: `compose` (DeepSeek thinking, `role_type: publisher`,
+  no sampling — it carries the caller's public intent; amended 2026-08-19,
+  DTO-D7) builds the best final answer from the refined answer plus the four
   UNTRUSTED candidates and streams the remainder after the committed
   opening; `prompt_headless` covers head-disabled (tool/format) turns.
 
@@ -88,11 +88,11 @@ policy-list content that conflicts with the request or is not answer
 guidance (prompt-injection hygiene: policies are derived from untrusted
 conversation text).
 
-`policies` runs on the **non-thinking** DeepSeek endpoint: wave-1 latency
-delays the whole fan-out under the barrier scheduler, and thinking DeepSeek
-was measured nondeterministically burning entire caps inside `<think>` on
-composite deliberative prompts (ECO measurements). Thinking is reserved for
-`critique`, whose T=0.6/top_p=0.95 sampling keeps the measured anti-looping
+`policies` originally ran on the non-thinking DeepSeek endpoint for wave-1
+latency and the measured cap-burning risk of thinking on composite
+deliberative prompts (ECO measurements); DTO-D7 (owner amendment,
+2026-08-19) supersedes that split — every DeepSeek role now thinks.
+`critique`'s T=0.6/top_p=0.95 sampling keeps the measured anti-looping
 rationale (greedy thinking burned the full cap before any verdict on 52% of
 calls, issue #509).
 
@@ -153,13 +153,30 @@ Qwen sampling:
   service's chat template (`deepseek-role-effort.jinja`) is a scaffold
   passthrough that splices the graded high/max reasoning preamble (the
   deepseek-thinking.jinja texts) after `<｜begin▁of▁sentence｜>` only for
-  thinking-scaffold calls — effectively grading `critique`; `low`/absent
-  effort and non-thinking scaffolds pass through byte-identically.
+  thinking-scaffold calls — under DTO-D7, every DeepSeek role; `low`/absent
+  effort passes through byte-identically.
 
 Rationale: owner decision (2026-08-19) — expose one L3 effort knob
 (defaulting to high, settable per request from the API or the Chat UI's
 Reasoning Effort advanced parameter) that grades the DeepSeek quality-control
 stage, while Qwen's role economics stay pinned in the spec.
+
+### DTO-D7 — Every DeepSeek v4 flash role thinks (owner amendment, 2026-08-19)
+
+Owner decision: DeepSeek v4 flash was always intended to run in thinking
+mode, so `policies` and `compose` join `critique` on the thinking worker
+(`tier2`; the `tier2-direct` worker is removed) and all three role scaffolds
+end `<｜Assistant｜><think>`. `compose` drops `reasoning_closed`: its private
+deliberation is separated by the deepseek_v4 reasoning parser and the public
+remainder streams after it, behind the committed head opening, so the DTO-D3
+TTFT gate is unaffected. This supersedes DTO-D2's non-thinking `policies`
+placement and DTO-D1's direct `compose`; the previously measured risks —
+wave-1 latency ahead of the fan-out and cap burning inside `<think>` on
+composite prompts (each role's token cap now bounds think + output together,
+and compose's span shares the caller's public allowance) — are explicitly
+accepted, with the bounded empty-final-output re-dispatch as the compose
+backstop. Combined with DTO-D6, the inherited L3 effort (default high) now
+grades every DeepSeek deliberation, not only `critique`.
 
 ## Acceptance
 
@@ -167,8 +184,8 @@ stage, while Qwen's role economics stay pinned in the spec.
   (`tests/unit/test_tiered_frontier_examplectl.py`): worker list without
   `sandbox`, the ordered nine-role dual-track list cross-checked against
   `example.json`, no `general_roles`/`profile_judge`, budget `{10, 0}`,
-  `compose` on tier2-direct with `reasoning_closed` + non-empty
-  `prompt_headless`, UNTRUSTED delimiters in `critique`/`compose`, per-policy
+  `compose` on the thinking `tier2` worker with non-empty
+  `prompt_headless` (DTO-D7), UNTRUSTED delimiters in `critique`/`compose`, per-policy
   binding (`POLICY n` in `answer_n`), distinct answerer seed offsets.
 - Launcher `_validate_ready` requires the nine-role dual-track DAG,
   `stream_head: head`, exactly one role profile (no served general profile or

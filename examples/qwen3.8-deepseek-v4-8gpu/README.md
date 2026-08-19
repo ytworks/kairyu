@@ -10,7 +10,7 @@ Open WebUI
                      4 Qwen replicas answer in parallel, one policy each
             Track B: a Qwen quick draft, critically refined by thinking
                      DeepSeek — concurrently with Track A
-            Merge:   direct DeepSeek composes the final answer from the
+            Merge:   thinking DeepSeek composes the final answer from the
                      refined answer + the 4 policy answers
         -> deployment-owned L1 pools: 4 x Qwen3.8-27B-FP8 TP1 (GPU 0-3),
            DeepSeek-V4-Flash-0731 TP4+EP4 (GPU 4-7)
@@ -36,19 +36,19 @@ profile selection, and no LLM profile judge.**
 ```mermaid
 flowchart LR
     subgraph W1["Wave 1 — dependency-free"]
-        H["head (Qwen, T=0.3)<br/>streams public opening at t=0"]
-        DR["draft (Qwen, T=0.5)<br/>quick internal draft"]
-        PO["policies (DeepSeek direct, T=0.9)<br/>4 maximally different answer policies"]
+        H["head (Qwen non-thinking, T=0.7)<br/>streams public opening at t=0"]
+        DR["draft (Qwen thinking-low, T=1.0)<br/>quick internal draft"]
+        PO["policies (DeepSeek thinking, T=0.9)<br/>4 maximally different answer policies"]
     end
     subgraph W2["Wave 2 — two tracks in parallel"]
-        A1["answer_1 (Qwen, T=0.7)<br/>follows POLICY 1"]
-        A2["answer_2 (Qwen, T=0.7)<br/>follows POLICY 2"]
-        A3["answer_3 (Qwen, T=0.7)<br/>follows POLICY 3"]
-        A4["answer_4 (Qwen, T=0.7)<br/>follows POLICY 4"]
+        A1["answer_1 (Qwen thinking-low, T=1.0)<br/>follows POLICY 1"]
+        A2["answer_2 (Qwen thinking-low, T=1.0)<br/>follows POLICY 2"]
+        A3["answer_3 (Qwen thinking-low, T=1.0)<br/>follows POLICY 3"]
+        A4["answer_4 (Qwen thinking-low, T=1.0)<br/>follows POLICY 4"]
         CR["critique (DeepSeek thinking, T=0.6)<br/>critical analysis of the draft<br/>-> improved answer"]
     end
     subgraph W3["Wave 3 — merge"]
-        CO["compose (DeepSeek direct)<br/>best final answer from the refined<br/>answer + 4 candidates; streams the<br/>remainder after the committed opening"]
+        CO["compose (DeepSeek thinking)<br/>best final answer from the refined<br/>answer + 4 candidates; streams the<br/>remainder after the committed opening"]
     end
     PO --> A1
     PO --> A2
@@ -69,10 +69,10 @@ Role contracts:
 |---|---|---|
 | `head` | Qwen TP1 | dependency-free; streams the committed public opening from t=0 (the TTFT gate) |
 | `draft` | Qwen TP1 | quick complete internal draft — Track B's input, never published |
-| `policies` | DeepSeek direct | ONE call emitting POLICY 1..4, each a substantively different angle/method/priority set |
+| `policies` | DeepSeek thinking | ONE call emitting POLICY 1..4, each a substantively different angle/method/priority set |
 | `answer_1..4` | Qwen TP1 x4 | four policy-bound answers in parallel, one per replica; the policy list steers HOW, the request alone defines WHAT |
 | `critique` | DeepSeek thinking | deliberates privately over the UNTRUSTED draft with critical thinking, then emits one improved complete answer |
-| `compose` | DeepSeek direct | the selected final unit: merges the refined answer with the best correct material from the four UNTRUSTED candidates and streams the remainder after the committed opening |
+| `compose` | DeepSeek thinking | the selected final unit: merges the refined answer with the best correct material from the four UNTRUSTED candidates and streams the remainder after the committed opening |
 
 Design notes (see
 [`docs/design/example-dual-track-orchestration.md`](../../docs/design/example-dual-track-orchestration.md)):
@@ -86,10 +86,11 @@ Design notes (see
   unset, placement follows session affinity and the queue-depth valve rather
   than `prefix_index`; only the leading REQUEST block may receive
   replica-local reuse from a preceding `head` or `draft` call.
-- `policies` runs on the non-thinking DeepSeek endpoint: wave-1 latency gates
-  the whole fan-out under the level-synchronous scheduler, and thinking roles
-  were measured nondeterministically burning entire caps inside `<think>` on
-  composite prompts.
+- Every DeepSeek v4 flash role thinks (owner decision, DTO-D7): `policies`,
+  `critique`, and `compose` all end their scaffolds with
+  `<｜Assistant｜><think>` and deliberate privately before their public text.
+  The TTFT gate stays on the non-thinking Qwen head, and each role's token
+  cap now bounds its `<think>` span plus its output together.
 - Qwen sampling and thinking are fixed per role in `auto-max.yaml`, never
   derived from the caller's request: `draft` and `answer_1..4` declare
   `reasoning_effort: low` (T=1.0), so they think at low effort — the shared
@@ -101,10 +102,9 @@ Design notes (see
   request without an explicit effort runs at the spec's
   `default_reasoning_effort: high`. The DeepSeek service's chat template
   (`deepseek-role-effort.jinja`) is a scaffold passthrough that splices the
-  graded high/max reasoning preamble after `<｜begin▁of▁sentence｜>` only for
-  thinking-scaffold calls — in this DAG, the `critique` role — so `low`
-  yields plain thinking and `high`/`max` strengthen it; non-thinking
-  scaffolds pass through byte-identically.
+  graded high/max reasoning preamble after `<｜begin▁of▁sentence｜>` into
+  thinking-scaffold calls — all three DeepSeek roles — so `low` yields plain
+  thinking and `high`/`max` strengthen every DeepSeek deliberation.
 - There is no PASS/FAIL verifier and no refinement loop
   (`max_refine_depth: 0`): the critique stage is the DAG's quality control
   (DTO-D4). Budget: `max_steps: 10` (9 generation calls + 1 headroom for the
@@ -200,8 +200,9 @@ Controls → Advanced Params and set **Reasoning Effort** to `low`, `high`, or
 `max` — Open WebUI forwards the value as the OpenAI-compatible
 `reasoning_effort` body field, and Kairyu L3 rejects anything else with a 422.
 The chosen level flows through the `inherit`-declared DeepSeek roles and
-grades the thinking `critique` stage; the Qwen roles keep their fixed
-per-role declarations regardless of the UI setting. The API equivalent:
+grades every DeepSeek deliberation (`policies`, `critique`, `compose`); the
+Qwen roles keep their fixed per-role declarations regardless of the UI
+setting. The API equivalent:
 
 ```sh
 curl -sS http://127.0.0.1:8003/v1/chat/completions \

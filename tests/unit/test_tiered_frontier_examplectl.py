@@ -343,17 +343,11 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
 
-    assert [worker.name for worker in maximum.workers] == [
-        "tier1",
-        "tier2",
-        "tier2-direct",
-    ]
+    assert [worker.name for worker in maximum.workers] == ["tier1", "tier2"]
     assert maximum.workers[0].engine_ref == "qwen3.8-27b"
+    # Every DeepSeek v4 flash role thinks (DTO-D7): one thinking worker, no
+    # tier2-direct.
     assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
-    # The public head/compose stream and the policy call must use the
-    # NON-thinking DeepSeek policy: <think> deliberation was measured
-    # consuming the entire public token budget before the first visible byte.
-    assert maximum.workers[2].engine_ref == "deepseek-v4-flash-0731"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
@@ -412,7 +406,7 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     # Track A: one non-thinking DeepSeek policy call fans out to four Qwen
     # answerers, one per replica, each bound to its policy by prompt.
     policies = by_name["policies"]
-    assert policies.worker == "tier2-direct" and policies.depends_on == ()
+    assert policies.worker == "tier2" and policies.depends_on == ()
     answerers = [by_name[f"answer_{index}"] for index in range(1, 5)]
     assert all(role.worker == "tier1" for role in answerers)
     assert all(role.depends_on == ("policies",) for role in answerers)
@@ -423,7 +417,7 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     # intent (no sampling override), continues the committed head opening,
     # and renders prompt_headless on head-disabled (tool/format) turns.
     compose = by_name["compose"]
-    assert compose.worker == "tier2-direct"
+    assert compose.worker == "tier2"
     assert compose.depends_on == (
         "head",
         "critique",
@@ -432,8 +426,14 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
         "answer_3",
         "answer_4",
     )
-    assert compose.reasoning_closed is True
+    # A thinking compose must not pre-close its reasoning span: with
+    # reasoning_closed the private deliberation would be reclaimed as the
+    # public answer.
+    assert compose.reasoning_closed is False
     assert compose.prompt_headless
+    # DTO-D7: every DeepSeek role deliberates — all scaffolds end open.
+    for role_name in ("policies", "critique", "compose"):
+        assert by_name[role_name].prompt_suffix == "<｜Assistant｜><think>"
     # Untrusted-data delimiters (MoA pattern) guard every cross-role payload.
     for role_name in ("critique", "compose"):
         assert "UNTRUSTED" in by_name[role_name].prompt
@@ -537,7 +537,6 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
                         "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
-                        "tier2-direct": {"model": "deepseek-v4-flash-0731"},
                     },
                 }
             }
@@ -566,60 +565,6 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
             {"model": "deepseek-v4-flash-0731", "prompt": "kairyu"},
         ),
     ]
-
-
-@pytest.mark.parametrize(
-    ("direct_model", "case"),
-    [
-        (None, "missing"),
-        ("deepseek-v4-flash-0731-thinking", "wrong"),
-    ],
-)
-def test_tiered_readiness_rejects_invalid_direct_deepseek_binding(
-    direct_model: str | None,
-    case: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    control = _load(EXAMPLE / "control.py", f"tiered_direct_readiness_{case}")
-    configured_engines = {
-        "tier1": {"model": "qwen3.8-27b"},
-        "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
-    }
-    if direct_model is not None:
-        configured_engines["tier2-direct"] = {"model": direct_model}
-
-    def fake_json(url: str) -> dict:
-        if url.endswith("/readyz"):
-            return {"status": "ready"}
-        if url.endswith("/v1/models"):
-            return {"data": [{"id": "kairyu-auto-max"}, {"id": "embed-small"}]}
-        assert url.endswith("/routing")
-        return {
-            "models": {
-                "kairyu-auto-max": {
-                    "roles": [
-                        {"name": name}
-                        for name in control.SPEC["orchestration"]["roles"]
-                    ],
-                    "stream_head": "head",
-                    "moa_samples": 0,
-                    "budget": {"max_steps": 10, "max_refine_depth": 0},
-                    "expose_intermediate_outputs": True,
-                    "configured_engines": configured_engines,
-                }
-            }
-        }
-
-    def fake_post(url: str, _payload: dict) -> dict:
-        if url.endswith("/v1/embeddings"):
-            return _embedding_response()
-        return {"count": 1}
-
-    monkeypatch.setattr(control, "_json_url", fake_json)
-    monkeypatch.setattr(control, "_post_json_url", fake_post)
-
-    with pytest.raises(SystemExit, match="Tier2-direct"):
-        control._validate_ready("http://api.test", "http://tokenizer.test/tokenize")
 
 
 @pytest.mark.parametrize(

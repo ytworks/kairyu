@@ -477,13 +477,8 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         configured.get("tier2", {}).get("model")
         != "deepseek-v4-flash-0731-thinking"
     ):
-        raise SystemExit("Kairyu Tier2 L2 worker is not bound to the DeepSeek L1 pool")
-    if (
-        configured.get("tier2-direct", {}).get("model")
-        != "deepseek-v4-flash-0731"
-    ):
         raise SystemExit(
-            "Kairyu Tier2-direct L2 worker is not bound to the non-thinking DeepSeek L1 pool"
+            "Kairyu Tier2 L2 worker is not bound to the thinking DeepSeek L1 pool"
         )
 
 

@@ -684,6 +684,7 @@ def _served_config_sha256() -> str:
         "auto-max.yaml",
         "router.json",
         "deepseek-thinking.jinja",
+        "deepseek-role-effort.jinja",
         "sandbox/Dockerfile",
         "sandbox/runner.py",
     ):

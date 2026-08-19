@@ -1,13 +1,13 @@
 {#
   Passthrough chat template for the L2 role scaffolds, plus inherited L3
   reasoning effort. Kairyu owns templating: each role call arrives as one
-  user message whose content already carries the full DeepSeek scaffold
-  (`<｜begin▁of▁sentence｜>…<｜Assistant｜><think>` or `…</think>`). When the
-  request carries a reasoning_effort, thinking-scaffold calls (the critique
-  role) get the graded high/max reasoning preamble spliced directly after
-  `<｜begin▁of▁sentence｜>` — the same text deepseek-thinking.jinja renders on
-  the direct L3 path. low, absent effort, and non-thinking scaffolds pass
-  through byte-identically.
+  user message whose content already carries the full DeepSeek scaffold —
+  always ending `<｜Assistant｜><think>`, since every DeepSeek v4 flash role
+  thinks (DTO-D7). When the request carries a reasoning_effort, these
+  thinking-scaffold calls get the graded high/max reasoning preamble spliced
+  directly after `<｜begin▁of▁sentence｜>` — the same text
+  deepseek-thinking.jinja renders on the direct L3 path. low and absent
+  effort pass through byte-identically, as would any non-thinking scaffold.
 #}
 {%- set body = messages[0]['content'] -%}
 {%- if reasoning_effort is defined and reasoning_effort is not none -%}

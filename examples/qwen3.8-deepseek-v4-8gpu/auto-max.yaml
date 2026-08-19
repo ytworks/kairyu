@@ -7,7 +7,7 @@
 #   Track B (draft refinement): one Qwen writes a quick internal draft
 #   concurrently with the policy call; thinking DeepSeek critiques it and
 #   produces an improved answer while Track A's answers are being written.
-#   Merge: non-thinking DeepSeek composes the final public answer from the
+#   Merge: thinking DeepSeek composes the final public answer from the
 #   refined answer plus the four policy answers.
 #
 # The head role streams the public answer opening from t=0 (DTO-D3, inherited
@@ -18,14 +18,14 @@
 workers:
   - name: tier1
     engine_ref: qwen3.8-27b
+  # DeepSeek v4 flash always thinks (owner decision, DTO-D7): policies,
+  # critique, and compose all run on the thinking pool with the
+  # `<｜Assistant｜><think>` scaffold. The public first byte still comes from
+  # the non-thinking Qwen head (DTO-D3), so the TTFT gate does not depend on
+  # DeepSeek; compose's public remainder streams after its private
+  # deliberation.
   - name: tier2
     engine_ref: deepseek-v4-flash-0731-thinking
-  # The public stream (head + compose) and the policy call use the ordinary
-  # non-thinking DeepSeek policy: private <think> deliberation would consume
-  # the budget before the first visible byte — fatal for the head's TTFT gate
-  # and measured burning whole caps on deliberative prompts (issue #509).
-  - name: tier2-direct
-    engine_ref: deepseek-v4-flash-0731
 
 router:
   kind: calibrated
@@ -36,13 +36,14 @@ router:
 # DeepSeek role prompts carry their chat scaffold inline: the DeepSeek vLLM
 # service runs a passthrough chat template (Kairyu owns templating), and its
 # deepseek_v4 reasoning parser classifies generated text as private reasoning
-# until an emitted `</think>`. A prompt ending `<｜Assistant｜></think>`
-# yields an immediate public answer (measured); `<｜Assistant｜><think>`
-# yields deliberate-then-answer. DeepSeek roles declare `reasoning_effort:
-# inherit`: the caller's L3 effort (or `default_reasoning_effort` below when
-# the caller sent none) travels on their requests, and the DeepSeek service's
-# chat template (deepseek-role-effort.jinja) injects the graded high/max
-# reasoning preamble only into thinking-scaffold calls. Qwen roles need no
+# until an emitted `</think>`. Every DeepSeek role prompt ends
+# `<｜Assistant｜><think>` — DeepSeek v4 flash always deliberates privately
+# before its public text (owner decision, DTO-D7). DeepSeek roles declare
+# `reasoning_effort: inherit`: the caller's L3 effort (or
+# `default_reasoning_effort` below when the caller sent none) travels on
+# their requests, and the DeepSeek service's chat template
+# (deepseek-role-effort.jinja) injects the graded high/max reasoning preamble
+# into these thinking-scaffold calls. Qwen roles need no
 # scaffold: their vLLM service applies the real Qwen chat template. draft and
 # answer_1..4 declare `reasoning_effort: low` — fixed orchestration policy,
 # never derived from the caller's request: the template enables thinking for
@@ -104,13 +105,14 @@ roles:
 
   # Track A source: ONE call emits all four policies. The L2 DSL has no
   # output-splitting mechanism, so each answerer receives the whole list and
-  # is bound to its own policy by prompt (DTO-D2). Non-thinking DeepSeek:
-  # wave-1 latency delays the whole fan-out, and thinking roles were measured
-  # nondeterministically burning their caps inside <think> on composite
-  # prompts. High temperature buys inter-policy diversity; answer diversity
-  # itself comes from the policies plus distinct answerer seeds.
+  # is bound to its own policy by prompt (DTO-D2). Thinking DeepSeek (owner
+  # decision, DTO-D7): the call deliberates privately before emitting the
+  # list, and the 1024-token cap bounds think + list together — the earlier
+  # measured cap-burning risk of thinking on composite prompts is accepted.
+  # High temperature buys inter-policy diversity; answer diversity itself
+  # comes from the policies plus distinct answerer seeds.
   - name: policies
-    worker: tier2-direct
+    worker: tier2
     role_type: planner
     reasoning_effort: inherit
     sampling: {temperature: 0.9, top_p: 0.95, max_tokens: 1024, seed_offset: 6}
@@ -127,7 +129,7 @@ roles:
       --- REQUEST ---
       {query}
       --- END REQUEST ---
-    prompt_suffix: "<｜Assistant｜></think>"
+    prompt_suffix: "<｜Assistant｜><think>"
 
   # Track A fan-out: four policy-bound answers on four Qwen replicas
   # (queue_depth_threshold: 0 spreads concurrent tier1 roles one-per-replica;
@@ -267,15 +269,17 @@ roles:
     prompt_suffix: "<｜Assistant｜><think>"
 
   # Merge: the selected final unit. It carries the caller's public intent, so
-  # it declares no sampling; `reasoning_closed` marks the in-prompt `</think>`
-  # so a direct answer with no emitted terminator is public text and Kairyu
-  # reclaims it (issue #496).
+  # it declares no sampling. Thinking DeepSeek (owner decision, DTO-D7):
+  # compose deliberates privately, the deepseek_v4 parser separates that
+  # reasoning, and the public remainder streams after it — the committed head
+  # opening already covers the TTFT gate. The private span shares the
+  # caller's public token allowance; the bounded empty-final-output
+  # re-dispatch is the backstop if deliberation consumes the whole cap.
   - name: compose
-    worker: tier2-direct
+    worker: tier2
     role_type: publisher
     depends_on: [head, critique, answer_1, answer_2, answer_3, answer_4]
     reasoning_effort: inherit
-    reasoning_closed: true
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[compose] Stream the remainder of the
       final answer. The user has already seen the COMMITTED OPENING on their
@@ -351,7 +355,7 @@ roles:
       --- UNTRUSTED CANDIDATE 4 ---
       {answer_4}
       --- END UNTRUSTED CANDIDATE 4 ---
-    prompt_suffix: "<｜Assistant｜></think>"
+    prompt_suffix: "<｜Assistant｜><think>"
 
 moa_samples: 0
 # L3 requests that carry no reasoning_effort run as high (owner-specified
