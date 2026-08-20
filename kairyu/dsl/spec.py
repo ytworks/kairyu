@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from string import Formatter
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -104,6 +105,34 @@ class ExecutorRoleSpec(BaseModel):
     limits: ExecutionLimitsSpec = ExecutionLimitsSpec()
 
 
+def _check_prompt_placeholders(role: str, field_name: str, template: str) -> None:
+    """Reject a prompt template the Conductor cannot render.
+
+    Role prompts are rendered with ``str.format_map`` over ``{query}`` and the
+    dependency outputs; a literal brace pair such as ``{...}`` is a positional
+    field that raises at request time — after the stage's dependencies already
+    ran. Fail at load so ``kairyu validate`` and startup catch it.
+    """
+
+    try:
+        fields = [
+            name
+            for _literal, name, _format_spec, _conversion in Formatter().parse(template)
+            if name is not None
+        ]
+    except ValueError as error:
+        raise ValueError(
+            f"role {role!r} {field_name} is not a valid template ({error}); "
+            "escape literal braces as '{{' and '}}'"
+        ) from error
+    bad = [name for name in fields if not name.isidentifier()]
+    if bad:
+        raise ValueError(
+            f"role {role!r} {field_name} contains positional or non-identifier "
+            f"placeholder(s) {bad}; escape literal braces as '{{' and '}}'"
+        )
+
+
 class RoleNodeSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -176,6 +205,8 @@ class RoleNodeSpec(BaseModel):
                 )
         elif not self.prompt:
             raise ValueError(f"role {self.name!r} requires a prompt")
+        for field_name in ("prompt", "prompt_headless"):
+            _check_prompt_placeholders(self.name, field_name, getattr(self, field_name))
         if self.requires is not None and self.role_type in {"verifier", "executor"}:
             raise ValueError(
                 f"role {self.name!r}: a {self.role_type} role cannot declare requires"

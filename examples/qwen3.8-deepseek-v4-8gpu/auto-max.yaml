@@ -477,7 +477,7 @@ roles:
       structured-format turns) followed directly by the CANDIDATE REMAINDER.
       A remainder of exactly NO_CONTINUATION claims that the opening alone
       answers the request completely: judge that claim. A tool call appears
-      as <tool_call>{...}</tool_call>: judge whether that tool and its
+      as <tool_call>{{...}}</tool_call>: judge whether that tool and its
       arguments are the correct next action, and never FAIL a correct call
       for lacking prose. Deliberate privately: check the combined answer for
       factual and logical correctness, completeness against every part of
