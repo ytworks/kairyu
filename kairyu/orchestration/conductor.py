@@ -180,6 +180,11 @@ class RoleSpec:
     # config like prompt_suffix; the public-output floor (issue #542) forces
     # it into the empty-output re-dispatch prompt to end deliberation.
     reasoning_close_tag: str = ""
+    # Request condition for dispatch: "image" runs the role only when the
+    # request carries image input; otherwise it is skipped entirely (no model
+    # call, no step), dependents run as if it were absent, and its template
+    # slot renders as "" (DTO-D11).
+    requires: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, TemplatedPrompt):
@@ -226,6 +231,12 @@ class RoleSpec:
             raise ValueError(
                 f"role {self.name!r}: max_tokens_by_effort requires "
                 "reasoning_effort 'inherit'"
+            )
+        if self.requires not in {None, "image"}:
+            raise ValueError(f"role {self.name!r}: requires must be 'image' or null")
+        if self.requires is not None and self.role_type in {"verifier", "executor"}:
+            raise ValueError(
+                f"role {self.name!r}: a {self.role_type} role cannot declare requires"
             )
 
 
@@ -888,17 +899,17 @@ class Conductor:
                     f"the final unit {final.name!r} carries the caller's public "
                     "intent and cannot declare sampling overrides"
                 )
+            if final.requires is not None:
+                raise ValueError(
+                    f"the final unit {final.name!r} publishes every request and "
+                    "cannot declare requires"
+                )
             if self._public_output_floor is not None and not final.reasoning_close_tag:
                 # A floor with no close tag would silently never reserve
                 # anything — fail the deployment loudly instead (issue #542).
                 raise ValueError(
                     "public_output_floor requires the final unit "
                     f"{final.name!r} to declare reasoning_close_tag"
-                )
-            if self._public_output_floor is not None and final.name in self._verifier_for:
-                raise ValueError(
-                    "public_output_floor cannot be combined with a verifier on "
-                    f"the final unit {final.name!r}"
                 )
 
     def _validate_head(self) -> None:
@@ -912,6 +923,8 @@ class Conductor:
             raise ValueError(f"head role {head.name!r} cannot declare dependencies")
         if head.name in self._verifier_for:
             raise ValueError(f"head role {head.name!r} cannot have a verifier")
+        if head.requires is not None:
+            raise ValueError(f"head role {head.name!r} cannot declare requires")
         if len(self._units) < 2:
             raise ValueError("a head role requires at least one downstream unit")
 
@@ -1050,8 +1063,18 @@ class Conductor:
         session = self.preflight_session(request_id_suffix)
         requests: list[tuple[RoleSpec, GenerationRequest]] = []
         head_enabled = self._head_enabled()
+        conditional_excluded = {
+            spec.name
+            for spec in self._units
+            if spec.requires == "image" and self._multimodal_prompt is None
+        }
         for spec in self._units:
-            if self._unit_deps[spec.name]:
+            if spec.name in conditional_excluded:
+                continue
+            # Execution removes inactive units from every dependency set. A
+            # dependent whose only prerequisites are inactive therefore joins
+            # the first wave and needs the same exact preflight as a root.
+            if self._unit_deps[spec.name] - conditional_excluded:
                 continue
             if spec.role_type == "executor":
                 continue
@@ -1907,6 +1930,21 @@ class Conductor:
         prompt = rendered
         depth = 0
         is_final_unit = spec.name == self._selected_final_unit().name
+        if verifier is not None and is_final_unit and self._final_sampling_params.n != 1:
+            # One verdict cannot judge independent choices, and one refinement
+            # prompt cannot continue them (same boundary as the n>1 floor
+            # rule): the multi-choice final publishes unverified.
+            run.trace.append(
+                self._trace_event(
+                    verifier,
+                    "skipped:intent",
+                    operation="verification",
+                    status="skipped",
+                    attempt=0,
+                    metadata={"reason": "intent", "n": self._final_sampling_params.n},
+                )
+            )
+            verifier = None
         empty_retry_used = False
         dispatch_spec = spec
         retry_max_tokens: int | None = None
@@ -1964,10 +2002,13 @@ class Conductor:
             )
             if (
                 is_final_unit
-                and verifier is None
                 and not empty_retry_used
                 and not self._has_public_output(text, completions)
-                and not self._head_committed_text(run)
+                # A committed head makes an empty continuation a legitimate
+                # head-only answer (EO-D7) — unless a verifier is about to
+                # judge the text, when the bounded retry is strictly cheaper
+                # than a FAIL/refine round on nothing.
+                and (verifier is not None or not self._head_committed_text(run))
             ):
                 # One bounded re-dispatch before the run is declared unusable
                 # (issue #496): an empty public answer must never surface as
@@ -1981,7 +2022,9 @@ class Conductor:
                     # with the reserved public tokens; parser-classified
                     # reasoning on the closed span is reclaimed as public.
                     reasoning = self._model_reasoning(observed.completions) or ""
-                    prompt = f"{rendered}{reasoning}{spec.reasoning_close_tag}\n\n"
+                    # Continue the attempt that ran dry — the refined prompt
+                    # on a refinement attempt, not attempt 0's scaffold.
+                    prompt = f"{prompt}{reasoning}{spec.reasoning_close_tag}\n\n"
                     dispatch_spec = replace(
                         spec, reasoning_closed=True, reasoning_close_tag=""
                     )
@@ -2213,6 +2256,11 @@ class Conductor:
                 verdict,
             )
             prompt = f"{refined}{spec.prompt_suffix}"
+            # A refinement reopens the scaffold with the role's own budget;
+            # a prior think-close retry must not leak its closed span or
+            # reserve-sized cap into this attempt.
+            dispatch_spec = spec
+            retry_max_tokens = None
         if (
             is_final_unit
             and not self._has_public_output(
@@ -2277,11 +2325,18 @@ class Conductor:
         keeps its best-so-far contract (EO-D7).
         """
 
-        if (
-            spec.name == self._selected_final_unit().name
-            and spec.name not in run.outputs
-            and not self._head_committed_text(run)
-        ):
+        if spec.name != self._selected_final_unit().name:
+            return
+        if spec.name in self._verifier_for:
+            # A verify/refine-loop failure may happen after an earlier attempt
+            # was stored in outputs. That attempt is either unverified or was
+            # explicitly rejected, so it cannot become the public fallback.
+            # A re-verification failure handled inside _run_unit never reaches
+            # this path and retains the documented inconclusive best-so-far.
+            run.outputs.pop(spec.name, None)
+            run.final_completions = ()
+            run.final_unit_completion_tokens = None
+        if spec.name not in run.outputs and not self._head_committed_text(run):
             run.final_unit_unusable = True
 
     def _final_text(self, run: _RunState) -> str:
@@ -2349,6 +2404,26 @@ class Conductor:
             )
         )
         return frozenset({self._head.name})
+
+    def _conditional_exclusions(self, run: _RunState) -> frozenset[str]:
+        """Skip image-conditional roles when the request carries no image (DTO-D11)."""
+
+        if self._multimodal_prompt is not None:
+            return frozenset()
+        excluded = frozenset(unit.name for unit in self._units if unit.requires == "image")
+        for name in sorted(excluded):
+            run.trace.append(
+                self._trace_event(
+                    self._by_name[name],
+                    "skipped:condition",
+                    operation="generation",
+                    status="skipped",
+                    attempt=0,
+                    budget=TraceBudget.between(run.budget, run.budget),
+                    metadata={"reason": "no_image", "requires": "image"},
+                )
+            )
+        return excluded
 
     def _head_committed_text(self, run: _RunState) -> str:
         """Committed head bytes for this run; empty when absent or disabled."""
@@ -2443,15 +2518,6 @@ class Conductor:
         for deps in self._unit_deps.values():
             dependents.update(deps)
         return [unit for unit in self._units if unit.name not in dependents]
-
-    def _stream_final_unit(self) -> RoleSpec:
-        final = self._selected_final_unit()
-        if final.name in self._verifier_for:
-            raise ValueError(
-                "the final streamed role cannot have a post-generation verifier; "
-                "verify a draft before an unverified final synthesizer"
-            )
-        return final
 
     async def _run_pending(
         self,
@@ -2738,6 +2804,52 @@ class Conductor:
             latest_usage.completion_tokens if latest_usage is not None else None
         )
 
+    async def _deferred_final_events(
+        self,
+        run: _RunState,
+        session: str,
+        query: str,
+        final: RoleSpec,
+        *,
+        head_text: str,
+        bare_deltas: bool,
+    ) -> AsyncIterator[ConductorEvent]:
+        """Verified final unit: finish the verdict loop, then publish once.
+
+        Nothing of the final unit is streamed while its verifier may still
+        reject it (OpenAI SSE cannot retract bytes); the unary verify/refine
+        loop runs to PASS, refinement exhaustion, or budget, and the text it
+        left in ``run.outputs`` is emitted as one delta deduplicated against
+        the committed head exactly like the live continuation stream.
+        Verdict reasoning sections collected during the loop are emitted
+        first. Failure handling is unary parity: a failed final attempt marks
+        the run unusable instead of raising ``ConductorStreamError``.
+        """
+
+        pending: list[ConductorEvent] = []
+
+        async def sink(event: ConductorEvent) -> None:
+            pending.append(event)
+
+        await self._run_unit_safe(run, session, query, final, event_sink=sink)
+        for event in pending:
+            yield event
+        continuation = run.outputs.get(final.name)
+        if continuation is None:
+            # Skipped (budget, public budget, verified-complete head) or
+            # failed before any attempt completed: nothing to publish.
+            return
+        if bare_deltas:
+            text = dedup_public_continuation(head_text, continuation)
+            if text:
+                yield ConductorEvent(kind="delta", text=text)
+        elif continuation:
+            yield ConductorEvent(
+                kind="delta",
+                text=continuation,
+                completions=run.final_completions,
+            )
+
     async def run(
         self,
         query: str,
@@ -2758,7 +2870,12 @@ class Conductor:
             prepared_initial_requests=dict(prepared_initial_requests or {}),
         )
         session = session or uuid.uuid4().hex[:12]
-        await self._run_pending(run, session, query, exclude=self._head_exclusions(run))
+        await self._run_pending(
+            run,
+            session,
+            query,
+            exclude=self._head_exclusions(run) | self._conditional_exclusions(run),
+        )
         public_text = self._public_text(run)
         return ConductorResult(
             final_text=public_text,
@@ -2784,9 +2901,11 @@ class Conductor:
         """Run pre-final DAG waves, then pull final backend deltas directly.
 
         A verifier attached to the final role would make early deltas
-        provisional and therefore impossible to retract in OpenAI SSE.  Such a
-        DAG is rejected explicitly; the supported shape verifies drafts before
-        an unverified final worker/synthesizer.
+        provisional, and OpenAI SSE cannot retract bytes.  Such a final unit is
+        therefore never streamed live: it runs the unary verify/refine loop to
+        completion and its public text is published once afterwards (the head,
+        when enabled, still streams from t=0).  An unverified final unit keeps
+        the live pull-through stream.
         """
 
         if isinstance(query, TemplatedPrompt):
@@ -2801,9 +2920,26 @@ class Conductor:
             prepared_initial_requests=dict(prepared_initial_requests or {}),
         )
         session = session or uuid.uuid4().hex[:12]
-        final = self._stream_final_unit()
+        final = self._selected_final_unit()
+        final_verifier = self._verifier_for.get(final.name)
+        deferred_final = final_verifier is not None and self._final_sampling_params.n == 1
+        if final_verifier is not None and not deferred_final:
+            run.trace.append(
+                self._trace_event(
+                    final_verifier,
+                    "skipped:intent",
+                    operation="verification",
+                    status="skipped",
+                    attempt=0,
+                    metadata={"reason": "intent", "n": self._final_sampling_params.n},
+                )
+            )
         head_active = self._head is not None and self._head_enabled()
-        exclude = frozenset({final.name}) | self._head_exclusions(run)
+        exclude = (
+            frozenset({final.name})
+            | self._head_exclusions(run)
+            | self._conditional_exclusions(run)
+        )
 
         def partial_result(final_text: str) -> ConductorResult:
             return ConductorResult(
@@ -2880,66 +3016,101 @@ class Conductor:
                 ) from error
             raise
 
-        # Phase B: pull the continuation directly from its backend iterator.
+        # Phase B: pull the continuation directly from its backend iterator —
+        # or, for a verified final unit, run the verdict loop to completion and
+        # publish its public text once.
         head_text = (
             run.outputs.get(self._head.name, "")
             if head_active and self._head is not None
             else ""
         )
-        final_attempts = (
-            ()
-            if self._skip_verified_complete_head(run, final)
-            else range(2)
-        )
         try:
-            for final_attempt in final_attempts:
-                think_continuation = None
-                if final_attempt and self._think_close_floor() is not None:
-                    think_continuation = (
-                        self._model_reasoning(run.final_completions) or ""
-                    )
-                async for event in self._stream_unit(
+            if deferred_final:
+                async for event in self._deferred_final_events(
                     run,
                     session,
                     query,
                     final,
-                    dedupe_against=head_text,
+                    head_text=head_text,
                     bare_deltas=head_active,
-                    attempt=final_attempt,
-                    think_continuation=think_continuation,
                 ):
                     if event.kind == "delta":
                         emitted_text += event.text
                     yield event
+            else:
+                final_attempts = (
+                    ()
+                    if self._skip_verified_complete_head(run, final)
+                    else range(2)
+                )
+                for final_attempt in final_attempts:
+                    think_continuation = None
+                    if final_attempt and self._think_close_floor() is not None:
+                        think_continuation = (
+                            self._model_reasoning(run.final_completions) or ""
+                        )
+                    async for event in self._stream_unit(
+                        run,
+                        session,
+                        query,
+                        final,
+                        dedupe_against=head_text,
+                        bare_deltas=head_active,
+                        attempt=final_attempt,
+                        think_continuation=think_continuation,
+                    ):
+                        if event.kind == "delta":
+                            emitted_text += event.text
+                        yield event
+                    if (
+                        self._has_public_output(
+                            run.outputs.get(final.name, ""),
+                            run.final_completions,
+                        )
+                        or final.name not in run.outputs
+                        or self._head_committed_text(run)
+                    ):
+                        # Non-empty answer, budget-skip (no dispatch), or a
+                        # committed head-only answer: no empty-output retry.
+                        break
+                    if final_attempt == 0:
+                        retry_metadata: dict[str, object] = {"reason": "empty_output"}
+                        floor = self._think_close_floor()
+                        if floor is not None:
+                            retry_metadata.update(
+                                continuation="think_close",
+                                reserved_tokens=floor,
+                            )
+                        run.trace.append(
+                            self._trace_event(
+                                final,
+                                "retry:empty_output",
+                                operation="generation",
+                                status="retried",
+                                attempt=0,
+                                detail="empty public output",
+                                budget=TraceBudget.between(run.budget, run.budget),
+                                metadata=retry_metadata,
+                            )
+                        )
                 if (
-                    self._has_public_output(
+                    not self._has_public_output(
                         run.outputs.get(final.name, ""),
                         run.final_completions,
                     )
-                    or final.name not in run.outputs
-                    or self._head_committed_text(run)
+                    and final.name in run.outputs
+                    and not self._head_committed_text(run)
                 ):
-                    # Non-empty answer, budget-skip (no dispatch), or a
-                    # committed head-only answer: no empty-output retry.
-                    break
-                if final_attempt == 0:
-                    retry_metadata: dict[str, object] = {"reason": "empty_output"}
-                    floor = self._think_close_floor()
-                    if floor is not None:
-                        retry_metadata.update(
-                            continuation="think_close",
-                            reserved_tokens=floor,
-                        )
+                    run.final_unit_unusable = True
                     run.trace.append(
                         self._trace_event(
                             final,
-                            "retry:empty_output",
+                            "failed",
                             operation="generation",
-                            status="retried",
-                            attempt=0,
-                            detail="empty public output",
-                            budget=TraceBudget.between(run.budget, run.budget),
-                            metadata=retry_metadata,
+                            status="failed",
+                            attempt=1,
+                            detail="empty_output",
+                            error=TraceError(type="EmptyFinalOutput"),
                         )
                     )
         except Exception as error:
@@ -2947,26 +3118,6 @@ class Conductor:
                 error,
                 partial_result(emitted_text if head_active else self._final_text(run)),
             ) from error
-        if (
-            not self._has_public_output(
-                run.outputs.get(final.name, ""),
-                run.final_completions,
-            )
-            and final.name in run.outputs
-            and not self._head_committed_text(run)
-        ):
-            run.final_unit_unusable = True
-            run.trace.append(
-                self._trace_event(
-                    final,
-                    "failed",
-                    operation="generation",
-                    status="failed",
-                    attempt=1,
-                    detail="empty_output",
-                    error=TraceError(type="EmptyFinalOutput"),
-                )
-            )
         final_text = self._public_text(run)
         if final_text != emitted_text:
             if not final_text.startswith(emitted_text):

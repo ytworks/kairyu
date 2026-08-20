@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end, including AUTO models over /v1/responses (#530)
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example serves one dual-track policy-ensemble L2 DAG for every request (DTO-D1..D5) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one thinking DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; thinking DeepSeek composes the remainder after the committed opening. No general profile, judge, or verifier/refine loop; the sandbox executor stays deployed but unreferenced. Both verify.sh gates green (run 20260818T025710Z: TTFT PASS c1/8/16/32, c32 1.87×→0.67×), measured before the DTO-D8 sampling/budget amendment (vendor-official sampling, L3-effort-graded DeepSeek caps 16384/65536/131072, internal ceiling 131072) — GPU re-verification pending. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example serves one dual-track policy-ensemble L2 DAG for every request (DTO-D1..D12) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one thinking DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; thinking DeepSeek `synthesis` weighs the 5 candidates as peers and writes one better answer, and an inline thinking-DeepSeek `audit` (PASS/FAIL, ≤2 refinements, last attempt published on exhaustion) gates the streamed remainder (DTO-D10); a Qwen `image_description` stage runs on image requests only and feeds the text-only DeepSeek roles (DTO-D11); DeepSeek budgets halved to 8192/32768/65536 with a 65536 ceiling and Chat UI default for the Terminal-Bench 900 s turn envelope (DTO-D12). No general profile or judge; the sandbox executor stays deployed but unreferenced. Last green verify.sh run 20260818T025710Z (TTFT PASS c1/8/16/32, c32 1.87×→0.67×) predates DTO-D8..D12 — GPU re-verification pending. Composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,29 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-20 — [design] Peer synthesis + audit loop, image_description, halved DeepSeek budgets (DTO-D10..D12)
+- What: tiered example `compose` → `synthesis` weighing critique + 4 policy
+  answers as peers; new thinking-DeepSeek `audit` verifier on the final unit
+  (PASS/FAIL, `max_refine_depth: 2`, remainder published after the verdict);
+  Qwen `image_description` (`requires: image`) feeds the DeepSeek roles on
+  image requests only; DeepSeek tiers 16384/65536/131072 → 8192/32768/65536,
+  ceiling/Chat UI/harness cap 131072 → 65536; budget `{19, 2}`; 11 roles.
+- Why: owner decisions (2026-08-20); Terminal-Bench turns timing out against
+  the 900 s agent budget on the serial DeepSeek chain. GPU gates not re-run.
+- Refs: DTO-D10..D12; examples/qwen3.8-deepseek-v4-8gpu/; tests/unit/test_tiered_frontier_examplectl.py
+
+### 2026-08-20 — [design] Verified final unit streams deferred; image-conditional roles
+- What: a verifier on the final unit is accepted in `Conductor.stream`: the
+  unary verify/refine loop runs first and the text is published once after
+  the committed head (n>1 skips the verifier, `skipped:intent`); the DTO-D9
+  floor retry runs before the verdict and refinements reopen the scaffold.
+  Roles gain `requires: image`: skipped entirely (`skipped:condition`) on
+  text requests, dependents render the slot as ""; head/final/verifier/
+  executor cannot be conditional; the worker must accept images.
+- Why: owner decision for the tiered example (synthesis audit loop, image
+  description stage — DTO-D10/D11); amends m11 A5 and DTO-D9 (#547).
+- Refs: kairyu/{orchestration,dsl,deploy}; docs/design/m11-product.md
 
 ### 2026-08-20 — [design] Public-output floor for the thinking final unit (DTO-D9)
 - What: spec-level `public_output_floor` + role `reasoning_close_tag`: the
@@ -150,51 +173,3 @@ in `.claude/rules/progress-log.md`).
   sampling stays effort-invariant; T=1.0 stays anti-greedy (#509 rationale).
 - Refs: DTO-D8; PR #536; kairyu/{dsl,orchestration,entrypoints/server};
   examples/qwen3.8-deepseek-v4-8gpu/
-
-### 2026-08-19 — [design] L2 effort policy: inherit/default effort, all-thinking DeepSeek (DTO-D6/D7)
-- What: role specs gain `reasoning_effort` (fixed low|high|max, or `inherit`
-  = the caller's L3 effort) and orchestrator specs `default_reasoning_effort`.
-  auto-max: Qwen draft/answers think at fixed low (T=1.0), head non-thinking
-  (T=0.7); every DeepSeek role runs thinking on tier2 (tier2-direct removed,
-  policies cap 1024→4096), inherits effort (default high), and the new
-  passthrough template splices the high/max preamble; Qwen clamps to low.
-- Why: owner — DeepSeek v4 flash was always meant to think; one L3 effort
-  knob (default high, API/Chat UI settable) grades every DeepSeek stage.
-- Refs: DTO-D6/D7; kairyu/{dsl,orchestration}; examples/qwen3.8-deepseek-v4-8gpu/
-
-### 2026-08-18 — [amendment] Compaction hardening from the #531 review
-- What: adopted all three review fixes — a successful compaction stores only
-  the compaction item (history replaced, not duplicated); truncated summaries
-  return response.incomplete without a compaction item (and are not
-  continuable), empty ones fail as 502 compaction_failed; tokens are now
-  AES-256-GCM sealed and tenant-bound (`responses_compaction_secret_env`,
-  ephemeral per-process key when unset). Example gateway wires the secret.
-- Why: #531 review — stored history defeated compaction, truncated/empty
-  summaries silently replaced long sessions, and marker-only tokens were
-  forgeable, contradicting the opaque/self-issued contract.
-- Refs: #531 review, #532–#534; m11 D4 2026-08-18 review amendment;
-  `kairyu/entrypoints/server/responses_service.py`; `examples/qwen3.8-deepseek-v4-8gpu/`
-
-### 2026-08-18 — [amendment] AUTO models on /v1/responses + Codex contract (issue #530)
-- What: /v1/responses resolves everything /v1/models advertises — AUTO models
-  delegate to the chat orchestration contract (metering exactly once); a
-  codex-rs 0.147.0 field-level audit added buffered-stream keep-alives,
-  426 on WS upgrades, remote compaction v2, and tolerant input parsing
-  (reasoning echoes, output-part arrays, Codex passthrough fields, disabled
-  web_search config). Verified with real codex-cli 0.147.0 (custom-provider
-  and Harbor-shaped smokes) against the issue's all-engines-hidden topology.
-- Why: the Terminal-Bench Codex run failed — /v1/responses only knew public
-  L1 engines, and the audit showed the 404 was one of several turn-killers.
-- Refs: #530; m11 D4 2026-08-18 amendment; `docs/deployment.md`;
-  `kairyu/entrypoints/server/{responses_service,extra_routes,app}.py`
-
-### 2026-08-18 — [design] Dual-track policy-ensemble DAG replaces the example L2
-- What: the example's coding/general two-profile L2 (judge, verifier/refine,
-  sandbox stages) is replaced by one 9-role dual-track DAG: 4 DeepSeek-written
-  policies → 4 parallel policy-bound Qwen answers, ∥ thinking-DeepSeek
-  critique of a quick Qwen draft, merged by direct DeepSeek; head/TTFT gate
-  inherited; sandbox deployed but unreferenced. No L2 core change; both
-  verify.sh gates green (20260818T025710Z, c32 1.87×→0.67×).
-- Why: owner-specified new process; latency/throughput requirements unchanged.
-- Refs: DTO-D1..D5 `docs/design/example-dual-track-orchestration.md`;
-  `examples/qwen3.8-deepseek-v4-8gpu/`; supersedes ECO-D2/D3/D5/D6

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dual-track L2 product serving verification (head/compose stream, TTFT gate)."""
+"""Dual-track L2 product serving verification (head/synthesis stream, TTFT gate)."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
 
+# Generation nodes every text request must trace (image_description is
+# skipped without an image, DTO-D11; synthesis is the expected_route).
 _DUAL_TRACK_INTERNAL_NODES = (
     "draft",
     "policies",
@@ -25,6 +27,9 @@ _DUAL_TRACK_INTERNAL_NODES = (
     "answer_4",
     "critique",
 )
+# Verification nodes every request must trace: the audit verdict on the
+# synthesis final unit (DTO-D10).
+_DUAL_TRACK_VERIFICATION_NODES = ("audit",)
 
 
 def _nvme_root() -> Path:
@@ -148,6 +153,7 @@ def _validate_serving_row(
     public_tokens: bool = False,
     require_head: bool = False,
     expected_generation_nodes: tuple[str, ...] = (),
+    expected_verification_nodes: tuple[str, ...] = (),
 ) -> int:
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -214,6 +220,16 @@ def _validate_serving_row(
                 for node in expected_generation_nodes
             ):
                 return False
+            if any(
+                not any(
+                    stage.get("node") == node
+                    and stage.get("kind") == "verification"
+                    and stage.get("status") == "success"
+                    for stage in stages
+                )
+                for node in expected_verification_nodes
+            ):
+                return False
             return True
 
         complete = all(stage_ok(sample) for sample in samples)
@@ -236,6 +252,7 @@ def _serving(
     natural_completion: bool = False,
     require_head: bool = False,
     expected_generation_nodes: tuple[str, ...] = (),
+    expected_verification_nodes: tuple[str, ...] = (),
 ) -> int:
     config = SPEC["verification"]["serving"]
     requests = int(config["requests_per_concurrency"])
@@ -374,6 +391,7 @@ def _serving(
                 public_tokens=natural_completion,
                 require_head=require_head,
                 expected_generation_nodes=expected_generation_nodes,
+                expected_verification_nodes=expected_verification_nodes,
             )
         if code:
             return code
@@ -381,21 +399,23 @@ def _serving(
 
 
 def serving_auto_max(run_dir: Path) -> int:
-    """Generic-workload regression envelope: the head/compose split public
-    stream stays intact across the dual-track DAG."""
+    """Generic-workload regression envelope: the head/synthesis split public
+    stream stays intact across the dual-track DAG and the audit verdict
+    fires on every request."""
 
     return _serving(
         SPEC["orchestration"]["auto_max_model"],
         run_dir,
         tensor_parallel=4,
         replicas=1,
-        expected_route="compose",
+        expected_route="synthesis",
         expected_role="publisher",
         expected_kind="generation",
         warmup_requests=4,
         natural_completion=True,
         require_head=True,
         expected_generation_nodes=_DUAL_TRACK_INTERNAL_NODES,
+        expected_verification_nodes=_DUAL_TRACK_VERIFICATION_NODES,
     )
 
 _CODING_TASKS = (
@@ -605,12 +625,13 @@ def serving_auto_max_coding(run_dir: Path) -> int:
                 row_dir,
                 requests,
                 0,
-                expected_route="compose",
+                expected_route="synthesis",
                 expected_role="publisher",
                 expected_kind="generation",
                 public_tokens=True,
                 require_head=True,
                 expected_generation_nodes=_DUAL_TRACK_INTERNAL_NODES,
+                expected_verification_nodes=_DUAL_TRACK_VERIFICATION_NODES,
             )
         if code:
             return code
@@ -699,7 +720,7 @@ def _served_config_sha256() -> str:
 _VERIFICATIONS = {
     "serving-auto-max": (
         serving_auto_max,
-        "generic-workload product DAG serving matrix (head/compose stream)",
+        "generic-workload product DAG serving matrix (head/synthesis stream)",
     ),
     "serving-auto-max-coding": (
         serving_auto_max_coding,

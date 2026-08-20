@@ -471,25 +471,6 @@ async def test_final_stream_failure_is_not_converted_to_false_success():
         await anext(stream)
 
 
-async def test_stream_rejects_provisional_final_with_post_verifier():
-    backend = MockBackend()
-    roles = (
-        RoleSpec(name="final", worker="w", prompt="{query}"),
-        RoleSpec(
-            name="check",
-            worker="w",
-            prompt="{final}",
-            role_type="verifier",
-            verifies="final",
-            depends_on=("final",),
-        ),
-    )
-    conductor = Conductor(roles=roles, workers={"w": backend})
-
-    with pytest.raises(ValueError, match="cannot have a post-generation verifier"):
-        await anext(conductor.stream("q"))
-
-
 async def test_unit_backend_failure_does_not_destroy_the_run():
     # O4: a transient backend error on one unit must not raise out of run() and
     # discard every completed output — the Conductor returns best-so-far.
