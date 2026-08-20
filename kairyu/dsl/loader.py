@@ -178,6 +178,7 @@ def build_orchestrator(
             prompt_headless=role.prompt_headless,
             reasoning_closed=role.reasoning_closed,
             reasoning_effort=role.reasoning_effort,
+            reasoning_close_tag=role.reasoning_close_tag,
         )
 
     roles = tuple(_role_spec(role) for role in spec.roles) or None
@@ -230,4 +231,5 @@ def build_orchestrator(
         executor_descriptors=executor_descriptors,
         profile_judge=profile_judge,
         default_reasoning_effort=spec.default_reasoning_effort,
+        public_output_floor=spec.public_output_floor,
     )

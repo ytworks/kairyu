@@ -1066,3 +1066,150 @@ async def test_committed_head_exempts_empty_continuation_from_failure():
     assert result.final_text == "Intro. "
     assert result.final_unit_ok
     assert len(continuation.requests_seen) == 1
+
+
+class ThinkExhaustedBackend:
+    """Reasoning-parser view of a thinking role: text empty, thinking kept.
+
+    Returns the queued reasoning strings one call at a time, so attempt 0
+    models deliberation that ate the whole budget and attempt 1 models the
+    forced-close continuation whose output the parser still classifies as
+    reasoning (issue #542).
+    """
+
+    def __init__(self, reasonings: list[str]) -> None:
+        self._reasonings = list(reasonings)
+        self.requests_seen: list[GenerationRequest] = []
+
+    def _result(self, request):
+        reasoning = self._reasonings.pop(0)
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=(),
+                    finish_reason="length",
+                    reasoning_content=reasoning or None,
+                ),
+            ),
+            usage=GenerationUsage(prompt_tokens=3, completion_tokens=4),
+            finished=True,
+        )
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests_seen.append(request)
+        return self._result(request)
+
+    async def stream(self, request):
+        self.requests_seen.append(request)
+        yield self._result(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
+def _floor_roles() -> tuple[RoleSpec, ...]:
+    return (
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[cont] {query}",
+            prompt_suffix="<THINK>",
+            reasoning_close_tag="</THINK>",
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("caller_cap", "expected_attempt0_max", "expected_retry_max"),
+    [
+        (512, 448, 64),  # floor reserved out of the thinking budget
+        (32, 32, 32),  # at or below the floor: unclamped, retry gets it all
+    ],
+)
+async def test_public_output_floor_reserves_answer_budget_and_closes_think(
+    caller_cap, expected_attempt0_max, expected_retry_max
+):
+    """Issue #542: a small public cap must not 502 on think exhaustion."""
+
+    backend = ThinkExhaustedBackend(["deliberating...", "The answer is 5."])
+    conductor = Conductor(
+        _floor_roles(),
+        {"cw": backend},
+        final_sampling_params=SamplingParams(max_tokens=caller_cap),
+        public_output_floor=64,
+    )
+    result = await conductor.run("task")
+
+    assert result.final_text == "The answer is 5."
+    assert result.final_unit_ok
+    first, retry = backend.requests_seen
+    assert first.prompt == "[cont] task<THINK>"
+    assert first.sampling_params.max_tokens == expected_attempt0_max
+    assert retry.prompt == "[cont] task<THINK>deliberating...</THINK>\n\n"
+    assert retry.sampling_params.max_tokens == expected_retry_max
+    retry_events = [e for e in result.trace if e.kind == "retry:empty_output"]
+    assert [e.metadata.get("continuation") for e in retry_events] == ["think_close"]
+
+
+async def test_public_output_floor_streaming_retry_streams_reclaimed_answer():
+    backend = ThinkExhaustedBackend(["deliberating...", "The answer is 5."])
+    conductor = Conductor(
+        _floor_roles(),
+        {"cw": backend},
+        final_sampling_params=SamplingParams(max_tokens=512),
+        public_output_floor=64,
+    )
+    events = await _collect(conductor.stream("task"))
+
+    stream_result = events[-1].result
+    assert stream_result is not None
+    assert stream_result.final_text == "The answer is 5."
+    assert stream_result.final_unit_ok
+    first, retry = backend.requests_seen
+    assert first.sampling_params.max_tokens == 448
+    assert retry.prompt == "[cont] task<THINK>deliberating...</THINK>\n\n"
+    assert retry.sampling_params.max_tokens == 64
+    assert (
+        "".join(e.text for e in events if e.kind == "delta") == "The answer is 5."
+    )
+
+
+async def test_public_output_floor_second_empty_still_marks_run_unusable():
+    backend = ThinkExhaustedBackend(["deliberating...", ""])
+    conductor = Conductor(
+        _floor_roles(),
+        {"cw": backend},
+        final_sampling_params=SamplingParams(max_tokens=512),
+        public_output_floor=64,
+    )
+    result = await conductor.run("task")
+
+    assert result.final_text == ""
+    assert not result.final_unit_ok
+    assert len(backend.requests_seen) == 2
+    assert any(
+        e.kind == "failed" and e.detail == "empty_output" for e in result.trace
+    )
+
+
+def test_public_output_floor_requires_final_reasoning_close_tag():
+    roles = (
+        RoleSpec(
+            name="continuation",
+            worker="cw",
+            role_type="publisher",
+            prompt="[cont] {query}",
+            prompt_suffix="<THINK>",
+        ),
+    )
+    with pytest.raises(ValueError, match="reasoning_close_tag"):
+        Conductor(
+            roles,
+            {"cw": ThinkExhaustedBackend([""])},
+            public_output_floor=64,
+        )

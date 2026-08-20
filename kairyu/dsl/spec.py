@@ -132,6 +132,11 @@ class RoleNodeSpec(BaseModel):
     # the caller's request-level effort. "inherit" forwards the caller's
     # request-level effort instead (None when the caller sent none).
     reasoning_effort: Literal["low", "high", "max", "inherit"] | None = None
+    # The literal that closes the private-reasoning span this role's
+    # prompt_suffix opens (e.g. "</think>"). Scaffold knowledge, declared as
+    # config; public_output_floor uses it to force-close deliberation in the
+    # final unit's empty-output re-dispatch (issue #542).
+    reasoning_close_tag: str = ""
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
@@ -147,6 +152,10 @@ class RoleNodeSpec(BaseModel):
                 raise ValueError(
                     f"executor role {self.name!r} cannot declare prompt_headless "
                     "or reasoning_closed"
+                )
+            if self.reasoning_close_tag:
+                raise ValueError(
+                    f"executor role {self.name!r} cannot declare reasoning_close_tag"
                 )
             if self.reasoning_effort is not None:
                 raise ValueError(
@@ -171,6 +180,11 @@ class RoleNodeSpec(BaseModel):
             raise ValueError(
                 f"role {self.name!r}: max_tokens_by_effort requires "
                 "reasoning_effort: inherit"
+            )
+        if self.reasoning_close_tag and self.reasoning_closed:
+            raise ValueError(
+                f"role {self.name!r}: reasoning_close_tag declares an open "
+                "reasoning span and cannot combine with reasoning_closed"
             )
         return self
 
@@ -256,6 +270,12 @@ class OrchestratorSpec(BaseModel):
     # from the caller's public final-answer allowance.  Keeping this in the
     # orchestration policy makes latency/cost tuning portable across backends.
     internal_max_tokens: int = Field(default=1024, ge=1, le=131072)
+    # Public-answer tokens reserved for the always-thinking final unit
+    # (issue #542): its attempt-0 thinking is capped at the caller's budget
+    # minus this floor, and the bounded empty-output re-dispatch answers with
+    # the reserve after a forced reasoning close. Requires the final unit to
+    # declare reasoning_close_tag. None keeps today's behavior.
+    public_output_floor: int | None = Field(default=None, ge=1, le=131072)
     # Zero keeps the standard Conductor route. A positive value turns the
     # multi-agent route into that many parallel MoA proposals plus synthesis.
     moa_samples: int = Field(default=0, ge=0, le=16)

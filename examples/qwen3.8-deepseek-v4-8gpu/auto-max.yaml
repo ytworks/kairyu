@@ -294,8 +294,11 @@ roles:
   # compose deliberates privately, the deepseek_v4 parser separates that
   # reasoning, and the public remainder streams after it — the committed head
   # opening already covers the TTFT gate. The private span shares the
-  # caller's public token allowance; the bounded empty-final-output
-  # re-dispatch is the backstop if deliberation consumes the whole cap.
+  # caller's public token allowance, guarded by public_output_floor
+  # (DTO-D9): attempt-0 thinking is capped at the caller's budget minus the
+  # floor, and if deliberation still consumes the whole cap, the bounded
+  # empty-final-output re-dispatch continues the captured thinking after a
+  # forced reasoning_close_tag close and answers with the reserved tokens.
   - name: compose
     worker: tier2
     role_type: publisher
@@ -377,6 +380,7 @@ roles:
       {answer_4}
       --- END UNTRUSTED CANDIDATE 4 ---
     prompt_suffix: "<｜Assistant｜><think>"
+    reasoning_close_tag: "</think>"
 
 moa_samples: 0
 # L3 requests that carry no reasoning_effort run as high (owner-specified
@@ -395,6 +399,13 @@ default_reasoning_effort: high
 # same-concurrency DeepSeek-direct denominator, so DeepSeek budget growth
 # does not move the committed gate.
 internal_max_tokens: 131072
+# Public tokens reserved for compose's answer (DTO-D9, issue #542): a caller
+# cap small enough to be eaten whole by thinking (e.g. 512) no longer 502s —
+# attempt-0 thinking gets budget-256 and the bounded re-dispatch answers with
+# the reserve after a forced </think>. 256 matches the head opener's sizing
+# of a meaningful public chunk; at the Chat UI default cap (131072) it
+# perturbs the thinking budget by 0.2%.
+public_output_floor: 256
 expose_intermediate_outputs: true
 
 # One profile, three waves under the level-synchronous scheduler:

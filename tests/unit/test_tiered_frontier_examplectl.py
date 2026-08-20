@@ -352,6 +352,7 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
     assert maximum.internal_max_tokens == 131072
+    assert maximum.public_output_floor == 256
     assert maximum.expose_intermediate_outputs is True
     assert config["orchestration"]["internal_max_output_tokens"] == 131072
     assert (
@@ -430,6 +431,9 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     # reasoning_closed the private deliberation would be reclaimed as the
     # public answer.
     assert compose.reasoning_closed is False
+    # DTO-D9: the public-output floor force-closes compose's deliberation in
+    # the empty-output re-dispatch via this tag.
+    assert compose.reasoning_close_tag == "</think>"
     assert compose.prompt_headless
     # DTO-D7: every DeepSeek role deliberates — all scaffolds end open.
     for role_name in ("policies", "critique", "compose"):
