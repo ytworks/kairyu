@@ -98,6 +98,14 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-20 — [amendment] Chat effort aliases match the pinned UI
+- What: /v1/chat/completions now accepts the same OpenAI-style aliases as
+  Responses and normalizes minimal/low→low, medium/high→high, xhigh/max→max.
+  This corrects the native-level-only Chat contract in the DTO-D8 entry below.
+- Why: pinned Open WebUI v0.11.0 initializes Reasoning Effort to medium;
+  the prior strict low|high|max schema rejected its default request with 422.
+- Refs: DTO-D8 (revised); PR #536 review; kairyu/entrypoints/server/protocol.py
+
 ### 2026-08-20 — [amendment] DTO-D8 budgets raised to the vendor starting values
 - What: DeepSeek effort tiers 4096/16384/32768 → 16384/65536/131072
   (fallback = high tier), internal_max_tokens → 131072, DSL token bounds

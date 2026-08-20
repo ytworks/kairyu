@@ -49,8 +49,9 @@ against the checkpoint's FP4 bytes directly on SM120; single-GPU kernel and
 two-rank NCCL dispatch smokes are green. Full-checkpoint numerical and 1M
 evidence remains a separate gate.
 
-The L3 API carries `reasoning_effort: low|high|max`, preserves
-`reasoning_content` in complete and streamed responses, and parses the pinned
+The L3 API normalizes OpenAI-style reasoning_effort aliases
+(minimal/low→low, medium/high→high, xhigh/max→max), preserves
+reasoning_content in complete and streamed responses, and parses the pinned
 DeepSeek DSML tool-call envelope. OpenAI-compatible replica gateways render the
 checkpoint chat template before sending an identity-wrapped request; Kairyu
 does not use legacy role concatenation.

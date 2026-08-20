@@ -222,6 +222,28 @@ class ChoiceLogprobs(BaseModel):
     content: list[LogprobEntry] | None = None
 
 
+_ReasoningEffort = Literal["low", "high", "max"]
+_ReasoningEffortInput = Literal["minimal", "low", "medium", "high", "xhigh", "max"]
+_REASONING_EFFORT_LEVELS: dict[str, _ReasoningEffort] = {
+    "minimal": "low",
+    "low": "low",
+    "medium": "high",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max",
+}
+
+
+def normalize_reasoning_effort(effort: object) -> _ReasoningEffort | None:
+    """Normalize OpenAI-style effort aliases onto Kairyu L3 levels."""
+
+    if effort is None:
+        return None
+    if not isinstance(effort, str) or effort not in _REASONING_EFFORT_LEVELS:
+        raise ValueError(f"reasoning effort {effort!r} is not supported")
+    return _REASONING_EFFORT_LEVELS[effort]
+
+
 class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -259,10 +281,15 @@ class ChatCompletionRequest(BaseModel):
     response_format: dict | None = None
     extra_args: dict[str, object] | None = None
     user: str | None = None
-    reasoning_effort: Literal["low", "high", "max"] | None = None
+    reasoning_effort: _ReasoningEffortInput | None = None
     # vLLM-compatible scheduling priority. A configured gateway replaces this
     # untrusted client value with the authenticated tenant's class.
     priority: int = Field(default=0, ge=-(2**63), le=2**63 - 1)
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: object) -> object:
+        return normalize_reasoning_effort(value)
 
     @model_validator(mode="wrap")
     @classmethod

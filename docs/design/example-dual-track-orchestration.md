@@ -242,8 +242,8 @@ private thinking and the answer together.
   dropped): OpenAI-style levels are normalized onto the L3 knob —
   minimal/low→low, medium/high→high, xhigh/max→max — so Codex can grade the
   DeepSeek stages, including the max tier via `xhigh`; unknown levels are
-  rejected 400. `/v1/chat/completions` continues to accept exactly
-  low|high|max.
+  rejected 400. /v1/chat/completions accepts the same aliases and
+  normalizes them onto low|high|max before L3 dispatch.
 - The caller's public `max_tokens` still min()s over every internal budget
   (existing product semantics): a client sending 4096 clamps the high/max
   tiers back to 4096. The Chat UI default (32768 → 131072) and the
