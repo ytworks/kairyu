@@ -926,14 +926,21 @@ class Conductor:
     ) -> Mapping[str, object] | None:
         if not isinstance(prompt, MultimodalPrompt):
             return None
-        if self._chat_template_kwargs is not None and not backend_supports_chat_template_kwargs(
+        kwargs = self._chat_template_kwargs
+        if (
+            kwargs is not None
+            and self._role_reasoning_effort(spec) is not None
+            and "enable_thinking" in kwargs
+        ):
+            kwargs = {**kwargs, "enable_thinking": True}
+        if kwargs is not None and not backend_supports_chat_template_kwargs(
             self._workers[spec.worker],
-            frozenset(self._chat_template_kwargs),
+            frozenset(kwargs),
         ):
             raise ValueError(
                 f"worker {spec.worker!r} does not support chat_template_kwargs"
             )
-        return self._chat_template_kwargs
+        return kwargs
 
     def _role_reasoning_effort(self, spec: RoleSpec) -> str | None:
         if spec.reasoning_effort == "inherit":
