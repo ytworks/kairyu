@@ -416,18 +416,11 @@ class Orchestrator:
                     execution_workers=self._execution_workers,
                     public_output_floor=self._public_output_floor,
                 )
-                for role in profile_roles:
-                    # An image-conditional role only ever runs with an image
-                    # attached, so its worker must accept one (DTO-D11); the
-                    # Conductor cannot check this — `kairyu validate` builds it
-                    # with placeholder workers.
-                    if role.requires == "image" and not backend_supports_prompt_kind(
-                        workers[role.worker], "multimodal"
-                    ):
-                        raise ValueError(
-                            f"role {role.name!r} requires image input but worker "
-                            f"{role.worker!r} does not accept multimodal prompts"
-                        )
+                # Whether an image-conditional role's worker accepts images is
+                # a live capability (a replica pool publishes the intersection
+                # of its currently placeable replicas, which is empty before
+                # the first health probe), so it is checked per image request
+                # in _validate_call, not here.
 
     def generation_defaults_snapshot(
         self,
@@ -899,6 +892,20 @@ class Orchestrator:
                     raise ValueError(
                         "multimodal orchestration requires at least one image-capable worker"
                     )
+                for role in self._generation_roles(self._roles_for(call)):
+                    # An image-conditional role only ever runs with an image
+                    # attached, so its worker must accept one (DTO-D11) — a
+                    # text-only rendering would silently drop the image.
+                    if role.requires == "image" and not backend_supports_prompt_kind(
+                        self._engines[
+                            role.worker if role.worker in self._engines else fallback
+                        ],
+                        "multimodal",
+                    ):
+                        raise ValueError(
+                            f"role {role.name!r} requires image input but worker "
+                            f"{role.worker!r} does not accept multimodal prompts"
+                        )
                 media_keys = tuple(
                     key
                     for key in role_keys
