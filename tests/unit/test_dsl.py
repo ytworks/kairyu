@@ -248,6 +248,20 @@ public_output_floor: {value}
         )
 
 
+def test_public_output_floor_rejects_moa_mode():
+    with pytest.raises(
+        ValidationError,
+        match="public_output_floor cannot be combined with moa_samples > 0",
+    ):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+moa_samples: 2
+public_output_floor: 64
+"""
+        )
+
+
 async def test_public_output_floor_clamps_final_unit_dispatch():
     """DTO-D9: the DSL floor must reach the final unit's dispatched budget."""
 
