@@ -3,7 +3,11 @@ from pydantic import ValidationError
 
 from kairyu.dsl.decorators import AgentPool
 from kairyu.dsl.loader import build_orchestrator, load_spec
+from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
+from kairyu.orchestration.request import OrchestrationRequest
+from kairyu.outputs import CompletionOutput
+from kairyu.sampling_params import SamplingParams
 
 YAML_SPEC = """
 shared_prefix: "SYS\\n"
@@ -231,6 +235,92 @@ def test_internal_max_tokens_rejects_unsafe_values(value):
         load_spec(
             YAML_SPEC.replace("internal_max_tokens: 512", f"internal_max_tokens: {value}")
         )
+
+
+@pytest.mark.parametrize("value", [0, 131073])
+def test_public_output_floor_rejects_unsafe_values(value):
+    with pytest.raises(ValidationError, match="public_output_floor"):
+        load_spec(
+            f"""
+workers: [{{name: tier1, backend: mock}}]
+public_output_floor: {value}
+"""
+        )
+
+
+def test_public_output_floor_rejects_moa_mode():
+    with pytest.raises(
+        ValidationError,
+        match="public_output_floor cannot be combined with moa_samples > 0",
+    ):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+moa_samples: 2
+public_output_floor: 64
+"""
+        )
+
+
+async def test_public_output_floor_clamps_final_unit_dispatch():
+    """DTO-D9: the DSL floor must reach the final unit's dispatched budget."""
+
+    class RecordingBackend:
+        def __init__(self) -> None:
+            self.requests_seen = []
+
+        async def generate(self, request):
+            self.requests_seen.append(request)
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0, text="done", token_ids=(), finish_reason="stop"
+                    ),
+                ),
+                usage=GenerationUsage(prompt_tokens=1, completion_tokens=1),
+                finished=True,
+            )
+
+        async def stream(self, request):
+            yield await self.generate(request)
+
+        async def shutdown(self) -> None:
+            return None
+
+    backend = RecordingBackend()
+    spec = load_spec(
+        """
+workers:
+  - {name: tier1, backend: mock}
+  - {name: tier2, engine_ref: recorder}
+public_output_floor: 64
+roles:
+  - name: planner
+    worker: tier1
+    prompt: "plan: {query}"
+  - name: publisher
+    worker: tier2
+    role_type: publisher
+    prompt: "answer: {planner}"
+    prompt_suffix: "<THINK>"
+    reasoning_close_tag: "</THINK>"
+    depends_on: [planner]
+"""
+    )
+    orchestrator = build_orchestrator(spec, engine_refs={"recorder": backend})
+    result = await orchestrator.run(
+        OrchestrationRequest(
+            prompt=(
+                "First, plan the work. Then execute it. "
+                "Finally, summarize the outcome."
+            ),
+            sampling_params=SamplingParams(max_tokens=512),
+        )
+    )
+    assert result.route.target == "multi_agent"
+    assert backend.requests_seen[-1].sampling_params.max_tokens == 448  # 512 - 64
 
 
 def test_build_openai_worker_preserves_keyless_auth(monkeypatch):

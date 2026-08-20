@@ -98,6 +98,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-20 — [design] Public-output floor for the thinking final unit (DTO-D9)
+- What: spec-level `public_output_floor` + role `reasoning_close_tag`: the
+  final unit's attempt 0 thinks within budget−floor, and the existing bounded
+  empty-output re-dispatch continues the captured reasoning after a forced
+  close with the reserve, reclaimed as public. Example: floor 256 on compose.
+  Fixes #546–#549: direct-API bounds; verified-final/MoA rejected; n>1 no floor.
+- Why: issue #542 — a small caller max_tokens was eaten whole by thinking
+  and 502'd after full DAG cost; owner chose option 1. GPU gates not re-run
+  (floor is 0.2% of the recorded 131072-cap runs).
+- Refs: DTO-D9; issue #542; kairyu/{dsl,orchestration}; examples/qwen3.8-deepseek-v4-8gpu/
+
 ### 2026-08-20 — [progress] Chat UI reasoning-effort dropdown provisioned by the launcher
 - What: the tiered example's `up` installs and self-verifies a globally
   active Open WebUI filter whose enum user valve renders Reasoning Effort as

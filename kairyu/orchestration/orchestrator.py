@@ -314,12 +314,26 @@ class Orchestrator:
         executor_descriptors: Mapping[str, ExecutorDescriptor] | None = None,
         profile_judge: ProfileJudge | None = None,
         default_reasoning_effort: str | None = None,
+        public_output_floor: int | None = None,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
                 "orchestration shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
+            )
+        if public_output_floor is not None and (
+            isinstance(public_output_floor, bool)
+            or not isinstance(public_output_floor, int)
+            or not 1 <= public_output_floor <= 131_072
+        ):
+            raise ValueError(
+                "public_output_floor must be an integer between 1 and 131072"
+            )
+        if public_output_floor is not None and moa_samples > 0:
+            raise ValueError(
+                "public_output_floor cannot be combined with moa_samples > 0; "
+                "the floor applies only to the Conductor final unit"
             )
         if general_roles and moa_samples > 0:
             raise ValueError(
@@ -373,6 +387,7 @@ class Orchestrator:
         # Effort assumed when a call carries none; an explicit request-level
         # effort always overrides it.
         self._default_reasoning_effort = default_reasoning_effort
+        self._public_output_floor = public_output_floor
         self._expose_intermediate_outputs = expose_intermediate_outputs
         # Serving-layer hook for aggregate per-stage latency attribution
         # (issue #495); set after construction because the deploy builder,
@@ -398,6 +413,7 @@ class Orchestrator:
                     shared_prefix=self._shared_prefix,
                     sampling_params=self._sampling_params,
                     execution_workers=self._execution_workers,
+                    public_output_floor=self._public_output_floor,
                 )
 
     def generation_defaults_snapshot(
@@ -1613,6 +1629,7 @@ class Orchestrator:
             chat_template_kwargs=call.chat_template_kwargs,
             execution_workers=self._execution_workers,
             reasoning_effort=self._effective_reasoning_effort(call),
+            public_output_floor=self._public_output_floor,
         )
 
     def _effective_reasoning_effort(self, call: OrchestrationRequest) -> str | None:

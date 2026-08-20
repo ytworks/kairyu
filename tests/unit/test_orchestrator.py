@@ -180,6 +180,20 @@ def test_orchestrator_rejects_templated_shared_prefix_at_construction():
         _orchestrator(shared_prefix=TemplatedPrompt("<BOS>already rendered"))
 
 
+def test_orchestrator_rejects_public_output_floor_in_moa_mode():
+    with pytest.raises(
+        ValueError,
+        match="public_output_floor cannot be combined with moa_samples > 0",
+    ):
+        _orchestrator(moa_samples=2, public_output_floor=64)
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 131_073, 1.5, "64"])
+def test_orchestrator_rejects_invalid_public_output_floor(value):
+    with pytest.raises(ValueError, match="integer between 1 and 131072"):
+        _orchestrator(public_output_floor=value)
+
+
 def test_preview_route_is_non_dispatching_and_describes_effective_fallback():
     only = MockBackend()
     orchestrator = Orchestrator(

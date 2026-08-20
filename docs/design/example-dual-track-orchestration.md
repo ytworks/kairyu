@@ -256,6 +256,50 @@ private thinking and the answer together.
   window. Accepted by the owner (2026-08-20) together with the
   research-scale tiers.
 
+### DTO-D9 — Public-output floor for the always-thinking final unit (owner amendment, 2026-08-20)
+
+Status: accepted (issue #542, option 1 chosen by the owner)
+
+The DTO-D7/D8 interaction left a hard failure at small caller caps: the
+caller's public `max_tokens` min()s onto `compose`'s combined think+answer
+budget, an all-thinking compose can spend the whole clamp inside `<think>`,
+and the byte-identical empty-output re-dispatch (issue #496) fails the same
+way — a 502 after paying full dual-track cost (reproduced at `max_tokens:
+512`). The fix reserves a floor of public-answer tokens:
+
+- **Config**: spec-level `public_output_floor` (the final unit cannot declare
+  sampling), plus role-level `reasoning_close_tag` — the literal that closes
+  the span the role's `prompt_suffix` opens. A floor fails Conductor
+  validation at deployment startup when the final unit has no close tag,
+  when a verifier is attached to the final unit (the unary retry would skip
+  phase B), or in MoA mode (`moa_samples > 0` never consumes it); direct
+  `Conductor`/`Orchestrator` construction enforces the DSL `1..131072`
+  bounds (review fixes #546–#549). The example sets floor 256 (the head opener's sizing of a meaningful public
+  chunk; 0.2% of the Chat UI default cap) and `</think>` on `compose`.
+- **Phase A**: the final unit's attempt 0 dispatches with `max_tokens =
+  B − floor` (B = caller cap minus committed-head spend), capping thinking.
+- **Phase B**: on empty public output, the existing single bounded
+  re-dispatch — not a new retry slot — re-prompts with the rendered scaffold
+  plus the captured attempt-0 reasoning plus the forced close tag, at
+  `max_tokens = min(floor, B)`, dispatched as a `reasoning_closed` role so
+  parser-classified output is reclaimed as public (issue #496 mechanism).
+  The trace keeps `retry:empty_output` with metadata `continuation:
+  think_close`.
+- **Boundary**: at `B ≤ floor` attempt 0 runs unclamped and phase B gets the
+  whole remaining budget; worst-case spend stays within the pre-existing
+  ≤2× bounded-retry envelope. Unlimited caller budget, floor-unset specs,
+  the committed-head exemption, and internal roles (which tolerate empty
+  output) are unchanged.
+  Multi-choice calls (`n > 1`) also retain the byte-identical retry without a
+  floor: one continuation prompt cannot preserve independent per-choice
+  reasoning branches.
+- **Trade-off**: an answer that finishes thinking inside phase A may
+  truncate up to `floor` tokens earlier than before (public output exists,
+  so no retry). Accepted; bounded by the floor.
+- GPU consequences: none re-run — recorded gates run at cap 131072 where
+  the floor shifts the thinking budget 0.2%; behavior changes only for
+  small caller caps and the empty-output retry path.
+
 ## Acceptance
 
 - CPU suite green with the rewritten example pinning test
