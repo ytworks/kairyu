@@ -50,16 +50,35 @@ class WorkerSpec(BaseModel):
         return self
 
 
+class EffortMaxTokensSpec(BaseModel):
+    """Token budget (private thinking + answer together) per resolved
+    reasoning effort (DTO-D8). All three tiers are required so the map is
+    total over every resolvable level; the plain ``max_tokens`` remains the
+    fallback when the resolved effort is null."""
+
+    model_config = ConfigDict(frozen=True)
+
+    low: int = Field(ge=1, le=32768)
+    high: int = Field(ge=1, le=32768)
+    max: int = Field(ge=1, le=32768)
+
+
 class RoleSamplingSpec(BaseModel):
     """Per-role sampling overrides (EO-D9). The selected final unit carries the
     caller's public intent and must not declare overrides; internal roles are
-    still capped by ``internal_max_tokens``."""
+    still capped by ``internal_max_tokens``. Omitted fields keep the caller's
+    or engine's defaults."""
 
     model_config = ConfigDict(frozen=True)
 
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
+    top_k: int | None = Field(default=None, ge=1)
+    min_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    repetition_penalty: float | None = Field(default=None, gt=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, ge=1, le=32768)
+    max_tokens_by_effort: EffortMaxTokensSpec | None = None
     seed_offset: int | None = Field(default=None, ge=0)
     stop: tuple[str, ...] = ()
 
@@ -142,6 +161,17 @@ class RoleNodeSpec(BaseModel):
                 )
         elif not self.prompt:
             raise ValueError(f"role {self.name!r} requires a prompt")
+        if (
+            self.sampling is not None
+            and self.sampling.max_tokens_by_effort is not None
+            and self.reasoning_effort != "inherit"
+        ):
+            # A fixed-level role has a constant effort (use max_tokens) and an
+            # effort-less role never consults the map — both are dead config.
+            raise ValueError(
+                f"role {self.name!r}: max_tokens_by_effort requires "
+                "reasoning_effort: inherit"
+            )
         return self
 
 

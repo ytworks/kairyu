@@ -51,7 +51,16 @@ def _role_sampling(role: RoleNodeSpec) -> RoleSamplingOverrides | None:
     return RoleSamplingOverrides(
         temperature=role.sampling.temperature,
         top_p=role.sampling.top_p,
+        top_k=role.sampling.top_k,
+        min_p=role.sampling.min_p,
+        presence_penalty=role.sampling.presence_penalty,
+        repetition_penalty=role.sampling.repetition_penalty,
         max_tokens=role.sampling.max_tokens,
+        max_tokens_by_effort=(
+            None
+            if role.sampling.max_tokens_by_effort is None
+            else role.sampling.max_tokens_by_effort.model_dump()
+        ),
         seed_offset=role.sampling.seed_offset,
         stop=role.sampling.stop,
     )

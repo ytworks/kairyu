@@ -487,6 +487,10 @@ async def test_per_role_sampling_overrides_reach_backend_requests():
             depends_on=("head",),
             sampling=RoleSamplingOverrides(
                 temperature=0.9,
+                top_k=20,
+                min_p=0.05,
+                presence_penalty=1.5,
+                repetition_penalty=1.05,
                 max_tokens=9000,
                 seed_offset=2,
             ),
@@ -514,6 +518,10 @@ async def test_per_role_sampling_overrides_reach_backend_requests():
     assert head_params.n == 1
     draft_params = draft.requests_seen[0].sampling_params
     assert draft_params.temperature == 0.9
+    assert draft_params.top_k == 20
+    assert draft_params.min_p == 0.05
+    assert draft_params.presence_penalty == 1.5
+    assert draft_params.repetition_penalty == 1.05
     # Internal ceiling caps the override (m11 #208).
     assert draft_params.max_tokens == 1024
     assert draft_params.seed == 9

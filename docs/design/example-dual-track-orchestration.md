@@ -2,6 +2,9 @@
 
 Status: **Accepted; implemented and GPU-verified** (2026-08-18; run
 `20260818T025710Z` — TTFT gate PASS at c1/8/16/32, binding c32 row 0.67×).
+The DTO-D8 sampling/budget amendments (2026-08-20) change the served config
+digest and are **not yet GPU re-verified**; re-verification is deferred to
+the next GPU window.
 Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes.
 Supersedes the ECO-D2/D3/D5/D6 role graphs, profiles, and profile judge in
@@ -31,18 +34,21 @@ design; only TTFT is gated.
 Three waves under the level-synchronous Conductor scheduler:
 
 - **Wave 1 (dependency-free)**: `head` (Qwen, non-thinking, T=0.7, 256
-  tokens; sampling amended 2026-08-19, DTO-D6) streams the committed public
+  tokens; sampling amended 2026-08-19, DTO-D6, and completed to the official
+  non-thinking values 2026-08-20, DTO-D8) streams the committed public
   opening from t=0; `draft` (Qwen, thinking at low effort, T=1.0, 1024
-  tokens; amended 2026-08-19, DTO-D6) writes a quick complete internal draft
-  (Track B input); `policies` (DeepSeek thinking, T=0.9/top_p 0.95, 4096
-  tokens; cap amended 2026-08-19, DTO-D7) writes four maximally different
+  tokens; amended 2026-08-19, DTO-D6, and 2026-08-20, DTO-D8) writes a quick
+  complete internal draft (Track B input); `policies` (DeepSeek thinking,
+  T=0.9/top_p 0.95, 4096 tokens; cap amended 2026-08-19, DTO-D7; T=1.0 and
+  effort-graded caps 2026-08-20, DTO-D8) writes four maximally different
   answer policies in one call (Track A source).
 - **Wave 2 (two tracks in parallel)**: `answer_1..answer_4` (Qwen, thinking
   at low effort, T=1.0, 2048 tokens, seed_offset 1..4; amended 2026-08-19,
-  DTO-D6) each answer following one policy — the four
+  DTO-D6, and 2026-08-20, DTO-D8) each answer following one policy — the four
   concurrent tier1 roles spread one-per-replica through
   `queue_depth_threshold: 0`; `critique` (DeepSeek thinking, T=0.6/top_p
-  0.95, 4096 tokens) critically analyzes the UNTRUSTED draft and emits one
+  0.95, 4096 tokens; T=1.0 and effort-graded caps 2026-08-20, DTO-D8)
+  critically analyzes the UNTRUSTED draft and emits one
   improved complete answer.
 - **Wave 3 (merge)**: `compose` (DeepSeek thinking, `role_type: publisher`,
   no sampling — it carries the caller's public intent; amended 2026-08-19,
@@ -59,7 +65,8 @@ obedience — is carried by draft/answers/critique/compose).
 
 Budget: `max_steps: 10` (9 generation calls + 1 headroom for the bounded
 empty-final-output re-dispatch), `moa_samples: 0`,
-`internal_max_tokens: 4096`, `expose_intermediate_outputs: true`.
+`internal_max_tokens: 4096` (raised to 32768 by DTO-D8, 2026-08-20),
+`expose_intermediate_outputs: true`.
 
 Rationale: owner-specified process (2026-08-18) — diversity through four
 policy-differentiated answers, plus a critically refined quick draft, merged
@@ -94,7 +101,8 @@ deliberative prompts (ECO measurements); DTO-D7 (owner amendment,
 2026-08-19) supersedes that split — every DeepSeek role now thinks.
 `critique`'s T=0.6/top_p=0.95 sampling keeps the measured anti-looping
 rationale (greedy thinking burned the full cap before any verdict on 52% of
-calls, issue #509).
+calls, issue #509). Amended by DTO-D8 (2026-08-20): T=1.0 — even further
+from greedy — with the same rationale preserved.
 
 ### DTO-D3 — TTFT gate and head streaming inherited unchanged
 
@@ -148,6 +156,8 @@ Qwen sampling:
   `answer_1..4` declare `low` (thinking at low effort; the shared Qwen
   template clamps any level to low) with T=1.0; `head` declares no effort and
   stays non-thinking with T=0.7, preserving the DTO-D3 TTFT mechanism.
+  (Qwen sampling completed to the official per-mode values by DTO-D8,
+  2026-08-20; the effort/thinking policy itself is unchanged.)
 - DeepSeek roles (`policies`, `critique`, `compose`) declare `inherit`, and
   the example sets `default_reasoning_effort: high`. The DeepSeek vLLM
   service's chat template (`deepseek-role-effort.jinja`) is a scaffold
@@ -177,8 +187,67 @@ and compose's span shares the caller's public allowance) — are explicitly
 accepted, with the bounded empty-final-output re-dispatch as the compose
 backstop; for `policies`, the cap-burning risk is resolved by raising its
 cap from 1024 to 4096 (owner instruction), the same allowance and rationale
-as `critique`. Combined with DTO-D6, the inherited L3 effort (default high) now
+as `critique` (both caps effort-graded by DTO-D8, 2026-08-20). Combined with
+DTO-D6, the inherited L3 effort (default high) now
 grades every DeepSeek deliberation, not only `critique`.
+
+### DTO-D8 — Vendor-official sampling and effort-graded token budgets (owner amendment, 2026-08-20)
+
+Owner decision, based on model-vendor research (Qwen3.8-27B official
+sampling values; DeepSeek-V4-Flash local-serving recommendations; per-effort
+token budgets). Sampling is effort-invariant for both models; the parameter
+that varies with the resolved L3 effort is the token budget, which bounds
+private thinking and the answer together.
+
+- **Qwen sampling completed to the official per-mode values.** Thinking
+  roles (`draft`, `answer_1..4`): T=1.0, top_p=0.95, top_k=20. Non-thinking
+  `head`: T=0.7, top_p=0.8, top_k=20, presence_penalty=1.5 (the penalty
+  applies only to the ≤256-token opener). min_p 0.0 and repetition_penalty
+  1.0 equal the engine defaults and stay omitted from the spec. DTO-D6's
+  Qwen effort/thinking policy is **unchanged**: fixed `low` thinking on
+  draft/answers, effort-less non-thinking head, clamp template intact.
+- **DeepSeek roles move to the official local recommendation** T=1.0 /
+  top_p=0.95 (the official DeepSeek API ignores T/top_p in thinking mode,
+  but this deployment serves the checkpoint locally on vLLM, where they
+  apply). For `critique` this replaces the 0.6 chosen against greedy-looping
+  (issue #509); T=1.0 sits even further from greedy, so that rationale is
+  preserved, not contradicted.
+- **Effort-graded token budgets.** The L2 DSL gains
+  `RoleSamplingSpec.max_tokens_by_effort` (`{low, high, max}`, all tiers
+  required, valid only on `reasoning_effort: inherit` roles — fixed levels
+  are constants and effort-less roles never consult the map; this
+  deliberately forecloses caller-graded budgets on the fixed-low Qwen roles
+  unless the rule is relaxed later). The Conductor resolves the role's
+  effort as before and selects the tier, still min()'d against
+  `internal_max_tokens` and the caller's public `max_tokens`; the plain
+  `max_tokens` is the null-effort fallback. `policies` and `critique`
+  declare `{low: 4096, high: 16384, max: 32768}` (fallback 16384 = the
+  default-effort tier). New DSL sampling knobs `top_k`, `min_p`,
+  `presence_penalty`, `repetition_penalty` thread through the existing
+  role-override path (the engine and OpenAI-compat backend already forward
+  them).
+- **`internal_max_tokens` 4096 → 32768** — the ceiling must admit the max
+  tier; grading stays per-role. Consequence: `admission_upper_bound` charges
+  the internal ceiling per private step, so the AUTO admission bound grows
+  ~8× and admission under tenant quotas/SLO becomes markedly more
+  conservative for every request regardless of effort. Accepted.
+- **`/v1/responses` forwards `reasoning.effort`** (previously silently
+  dropped): OpenAI-style levels are normalized onto the L3 knob —
+  minimal/low→low, medium/high→high, xhigh/max→max — so Codex can grade the
+  DeepSeek stages, including the max tier via `xhigh`; unknown levels are
+  rejected 400. `/v1/chat/completions` continues to accept exactly
+  low|high|max.
+- The caller's public `max_tokens` still min()s over every internal budget
+  (existing product semantics): a client sending 4096 clamps the high/max
+  tiers back to 4096. The Chat UI default (32768) and the verification
+  harness (`auto_max_combined_max_tokens` 4096 → 32768) are sized so the
+  tiers are reachable on the product paths.
+- GPU consequences: the recorded green gates (run `20260818T025710Z`) bind
+  to the previous served-config digest; the default-effort (`high`) budget
+  doubles the previous 4096 allowance and head sampling changed, so the
+  TTFT/goodput gates and opener quality must be re-verified in the next GPU
+  window. Accepted by the owner (2026-08-20) together with the
+  research-scale tiers.
 
 ## Acceptance
 

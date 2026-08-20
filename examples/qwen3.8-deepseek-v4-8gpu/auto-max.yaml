@@ -55,7 +55,9 @@ roles:
   # starts deterministically at Qwen's small-prompt TTFT. DeepSeek public
   # roles would instead pay a nondeterministic <think> tax under the
   # passthrough-template/parser contract, which is fatal for the head's TTFT
-  # gate. Temperature 0.7 is owner-specified.
+  # gate. T=0.7/top_p=0.8/top_k=20/presence_penalty=1.5 are Qwen3.8's official
+  # non-thinking sampling values (DTO-D8); the presence penalty applies only
+  # to this <=256-token opener.
   # Qwen role prompts put the shared conversation FIRST and the role
   # instruction after it. Keeping the leading REQUEST byte-identical permits
   # replica-local native prefix-cache reuse when a later role lands on a
@@ -66,7 +68,7 @@ roles:
   - name: head
     worker: tier1
     role_type: head
-    sampling: {temperature: 0.7, max_tokens: 256}
+    sampling: {temperature: 0.7, top_p: 0.8, top_k: 20, presence_penalty: 1.5, max_tokens: 256}
     prompt: |
       --- REQUEST ---
       {query}
@@ -84,12 +86,14 @@ roles:
   # polish (1024-token cap: measured Qwen drafts end naturally below 512 on
   # this prompt shape, and the cap bounds wave-1 latency, which gates the
   # Track A fan-out under the barrier scheduler). Thinking at fixed low
-  # effort; temperature 1.0 is owner-specified.
+  # effort; T=1.0/top_p=0.95/top_k=20 are Qwen3.8's official thinking-mode
+  # sampling values (DTO-D8). min_p 0.0 and repetition_penalty 1.0 equal the
+  # engine defaults and stay omitted here and on every Qwen role.
   - name: draft
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 1.0, max_tokens: 1024, seed_offset: 5}
+    sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 1024, seed_offset: 5}
     prompt: |
       --- REQUEST ---
       {query}
@@ -107,16 +111,23 @@ roles:
   # output-splitting mechanism, so each answerer receives the whole list and
   # is bound to its own policy by prompt (DTO-D2). Thinking DeepSeek (owner
   # decision, DTO-D7): the call deliberates privately before emitting the
-  # list, so the cap bounds think + list together. 4096, not 1024, for the
-  # same reason as critique: composite deliberative prompts were measured
-  # overrunning 2048 entirely inside the thinking span, leaving an empty
-  # output. High temperature buys inter-policy diversity; answer diversity
+  # list, so the cap bounds think + list together. max_tokens_by_effort
+  # grades that combined budget by the resolved L3 effort (DTO-D8); the
+  # request's public max_tokens and internal_max_tokens still min() over it,
+  # and the plain max_tokens is the null-effort fallback. T=1.0/top_p=0.95 is
+  # DeepSeek's official local-serving recommendation for agent workloads
+  # (DTO-D8); T=1.0 also buys inter-policy diversity, and answer diversity
   # itself comes from the policies plus distinct answerer seeds.
   - name: policies
     worker: tier2
     role_type: planner
     reasoning_effort: inherit
-    sampling: {temperature: 0.9, top_p: 0.95, max_tokens: 4096, seed_offset: 6}
+    sampling:
+      temperature: 1.0
+      top_p: 0.95
+      max_tokens: 16384
+      max_tokens_by_effort: {low: 4096, high: 16384, max: 32768}
+      seed_offset: 6
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[policies] Read the request below and
       write four policies for answering it that are as different from one
@@ -146,7 +157,7 @@ roles:
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 1.0, max_tokens: 2048, seed_offset: 1}
+    sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 2048, seed_offset: 1}
     depends_on: [policies]
     prompt: |
       --- REQUEST ---
@@ -169,7 +180,7 @@ roles:
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 1.0, max_tokens: 2048, seed_offset: 2}
+    sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 2048, seed_offset: 2}
     depends_on: [policies]
     prompt: |
       --- REQUEST ---
@@ -192,7 +203,7 @@ roles:
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 1.0, max_tokens: 2048, seed_offset: 3}
+    sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 2048, seed_offset: 3}
     depends_on: [policies]
     prompt: |
       --- REQUEST ---
@@ -215,7 +226,7 @@ roles:
     worker: tier1
     role_type: proposal
     reasoning_effort: low
-    sampling: {temperature: 1.0, max_tokens: 2048, seed_offset: 4}
+    sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 2048, seed_offset: 4}
     depends_on: [policies]
     prompt: |
       --- REQUEST ---
@@ -236,17 +247,26 @@ roles:
 
   # Track B refinement, and the DAG's quality control (DTO-D4: no separate
   # PASS/FAIL verifier — critical analysis is folded into this stage).
-  # T=0.6/top_p=0.95, never greedy: greedy decoding on a thinking model is a
-  # documented cause of looping deliberation, measured burning the full cap
-  # inside <think> before any verdict on 52% of calls (issue #509). 4096, not
-  # 2048: composite deliberative prompts were measured overrunning 2048
-  # entirely inside the thinking span, leaving an empty public output.
+  # T=1.0/top_p=0.95 is DeepSeek's official local-serving recommendation for
+  # agent workloads (DTO-D8), and never greedy: greedy decoding on a thinking
+  # model is a documented cause of looping deliberation, measured burning the
+  # full cap inside <think> before any verdict on 52% of calls (issue #509);
+  # T=1.0 sits even further from greedy than the 0.6 that fixed that looping,
+  # so the anti-looping rationale is preserved. max_tokens_by_effort grades
+  # the think+answer budget by the resolved L3 effort (DTO-D8), min()'d over
+  # by the public cap and internal_max_tokens; plain max_tokens is the
+  # null-effort fallback.
   - name: critique
     worker: tier2
     role_type: synthesizer
     depends_on: [draft]
     reasoning_effort: inherit
-    sampling: {temperature: 0.6, top_p: 0.95, max_tokens: 4096, seed_offset: 7}
+    sampling:
+      temperature: 1.0
+      top_p: 0.95
+      max_tokens: 16384
+      max_tokens_by_effort: {low: 4096, high: 16384, max: 32768}
+      seed_offset: 7
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[critique] Below are a request and an
       UNTRUSTED internal draft answer. Deliberate privately and briefly with
@@ -364,11 +384,14 @@ moa_samples: 0
 # reaches the inherit-declared DeepSeek roles, while Qwen roles keep their
 # fixed per-role declarations.
 default_reasoning_effort: high
-# 4096, not 2048: the thinking critique deliberates privately inside <think>
-# before any public byte, and composite deliberative prompts were measured
-# overrunning 2048 entirely inside the thinking span, leaving an empty public
-# output. E2E latency is unconstrained by design; only TTFT is.
-internal_max_tokens: 4096
+# The internal ceiling equals the max effort tier (DTO-D8): the thinking
+# DeepSeek roles' max_tokens_by_effort does the per-effort grading and is
+# min()'d against this ceiling and the caller's public max_tokens, so the
+# ceiling must admit the largest tier (32768). Thinking spans need the room:
+# composite deliberative prompts were measured overrunning 2048 entirely
+# inside the thinking span, leaving an empty public output. E2E latency is
+# unconstrained by design; only TTFT is.
+internal_max_tokens: 32768
 expose_intermediate_outputs: true
 
 # One profile, three waves under the level-synchronous scheduler:

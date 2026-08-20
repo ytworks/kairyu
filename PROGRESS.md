@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end, including AUTO models over /v1/responses (#530)
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example serves one dual-track policy-ensemble L2 DAG for every request (DTO-D1..D5) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one direct-DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; direct DeepSeek composes the remainder after the committed opening. No general profile, judge, or verifier/refine loop; the sandbox executor stays deployed but unreferenced. Both verify.sh gates green (run 20260818T025710Z: TTFT PASS c1/8/16/32, c32 1.87×→0.67×). Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example serves one dual-track policy-ensemble L2 DAG for every request (DTO-D1..D5) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one direct-DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; direct DeepSeek composes the remainder after the committed opening. No general profile, judge, or verifier/refine loop; the sandbox executor stays deployed but unreferenced. Both verify.sh gates green (run 20260818T025710Z: TTFT PASS c1/8/16/32, c32 1.87×→0.67×), measured before the DTO-D8 sampling/budget amendment (vendor-official sampling, L3-effort-graded DeepSeek caps 4096/16384/32768, internal ceiling 32768) — GPU re-verification pending. Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -97,6 +97,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-20 — [design] Vendor-official sampling + effort-graded token budgets (DTO-D8)
+- What: RoleSamplingSpec gains top_k/min_p/presence/repetition penalties and
+  `max_tokens_by_effort` {low,high,max} (inherit roles; think+answer budget,
+  min()'d vs public cap/internal ceiling). auto-max: official Qwen sampling,
+  DeepSeek T→1.0 + caps 4096/16384/32768 per L3 effort, internal_max_tokens
+  →32768; /v1/responses maps reasoning.effort (minimal..xhigh normalized).
+  GPU gates not re-run — re-verify next window.
+- Why: owner + vendor research — effort scales the token budget while
+  sampling stays effort-invariant; T=1.0 stays anti-greedy (#509 rationale).
+- Refs: DTO-D8; PR #536; kairyu/{dsl,orchestration,entrypoints/server};
+  examples/qwen3.8-deepseek-v4-8gpu/
 
 ### 2026-08-19 — [design] L2 effort policy: inherit/default effort, all-thinking DeepSeek (DTO-D6/D7)
 - What: role specs gain `reasoning_effort` (fixed low|high|max, or `inherit`

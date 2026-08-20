@@ -104,7 +104,13 @@ Design notes (see
   (`deepseek-role-effort.jinja`) is a scaffold passthrough that splices the
   graded high/max reasoning preamble after `<｜begin▁of▁sentence｜>` into
   thinking-scaffold calls — all three DeepSeek roles — so `low` yields plain
-  thinking and `high`/`max` strengthen every DeepSeek deliberation.
+  thinking and `high`/`max` strengthen every DeepSeek deliberation. The
+  effort also grades the DeepSeek token budgets (DTO-D8): `policies` and
+  `critique` declare `max_tokens_by_effort` `{low: 4096, high: 16384,
+  max: 32768}` bounding thinking + answer together, still clamped by
+  `internal_max_tokens` and the request's public `max_tokens` — send a
+  generous public `max_tokens` (the Chat UI default is 32768) or the higher
+  tiers are clamped away.
 - There is no PASS/FAIL verifier and no refinement loop
   (`max_refine_depth: 0`): the critique stage is the DAG's quality control
   (DTO-D4). Budget: `max_steps: 10` (9 generation calls + 1 headroom for the
@@ -200,7 +206,9 @@ Controls → Advanced Params and set **Reasoning Effort** to `low`, `high`, or
 `max` — Open WebUI forwards the value as the OpenAI-compatible
 `reasoning_effort` body field, and Kairyu L3 rejects anything else with a 422.
 The chosen level flows through the `inherit`-declared DeepSeek roles and
-grades every DeepSeek deliberation (`policies`, `critique`, `compose`); the
+grades every DeepSeek deliberation (`policies`, `critique`, `compose`) as
+well as their thinking+answer token budgets (`max_tokens_by_effort`,
+DTO-D8); the
 Qwen roles keep their fixed per-role declarations regardless of the UI
 setting. The API equivalent:
 
@@ -209,6 +217,11 @@ curl -sS http://127.0.0.1:8003/v1/chat/completions \
   -H 'Content-Type: application/json' \
   --data '{"model":"kairyu-auto-max","reasoning_effort":"max","messages":[{"role":"user","content":"Prove it."}]}'
 ```
+
+`/v1/responses` clients (Codex among them) set the same knob through
+`reasoning.effort`; OpenAI-style levels are normalized onto Kairyu's —
+`minimal`/`low`→`low`, `medium`/`high`→`high`, `xhigh`/`max`→`max` — so a
+Codex `xhigh` profile reaches the max tier.
 
 The embedding model is the truthfully named
 `sentence-transformers/all-MiniLM-L6-v2` FastEmbed deployment, not an alias for

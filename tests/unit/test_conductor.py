@@ -14,10 +14,11 @@ from kairyu.engine.backend import (
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt, TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
-from kairyu.orchestration.conductor import Conductor, RoleSpec
+from kairyu.orchestration.conductor import Conductor, RoleSamplingOverrides, RoleSpec
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
 from kairyu.orchestration.trace import WorkerTraceIdentity
 from kairyu.outputs import CompletionOutput
+from kairyu.sampling_params import SamplingParams
 
 
 class ScriptedBackend:
@@ -277,6 +278,50 @@ async def test_role_reasoning_effort_fixed_or_inherited_reaches_engine_requests(
         for request in backend.requests_seen
     }
     assert by_role == {"planner": "low", "critic": inherited, "worker": None}
+
+
+@pytest.mark.parametrize(
+    ("request_effort", "internal_cap", "expected_max_tokens"),
+    [
+        ("low", 4096, 2048),
+        ("high", 4096, 4096),
+        ("max", 4096, 4096),  # tier 8192 min()'d against the internal ceiling
+        (None, 4096, 4096),  # no resolved effort: plain max_tokens fallback
+        ("max", 8192, 8192),
+    ],
+)
+def test_effort_graded_max_tokens_selects_tier_and_respects_internal_cap(
+    request_effort, internal_cap, expected_max_tokens
+):
+    roles = (
+        RoleSpec(
+            name="planner",
+            worker="w",
+            prompt="[planner] plan for: {query}",
+            reasoning_effort="inherit",
+            sampling=RoleSamplingOverrides(
+                max_tokens=4096,
+                max_tokens_by_effort={"low": 2048, "high": 4096, "max": 8192},
+            ),
+        ),
+        RoleSpec(
+            name="worker",
+            worker="w",
+            prompt="[worker] execute: {planner}",
+            depends_on=("planner",),
+        ),
+    )
+    conductor = Conductor(
+        roles=roles,
+        workers={"w": ScriptedBackend(["plan", "answer"])},
+        sampling_params=SamplingParams(max_tokens=internal_cap),
+        reasoning_effort=request_effort,
+    )
+
+    requests = conductor.initial_requests("build a cli", request_id_suffix="s")
+
+    by_role = {spec.name: request for spec, request in requests}
+    assert by_role["planner"].sampling_params.max_tokens == expected_max_tokens
 
 
 async def test_multimodal_media_reaches_only_capable_role_workers():

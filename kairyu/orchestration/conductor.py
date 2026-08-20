@@ -95,12 +95,38 @@ class RoleSamplingOverrides:
 
     temperature: float | None = None
     top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float | None = None
+    repetition_penalty: float | None = None
     max_tokens: int | None = None
+    # Token budget (private thinking + answer together) selected by the
+    # resolved reasoning effort; max_tokens stays the null-effort fallback.
+    # Only inherit-effort roles may grade — fixed levels are constants
+    # (DTO-D8). Normalized to sorted (level, tokens) pairs so the frozen
+    # dataclass stays hashable and eq-stable.
+    max_tokens_by_effort: Mapping[str, int] | tuple[tuple[str, int], ...] | None = None
     seed_offset: int | None = None
     stop: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "stop", tuple(self.stop))
+        if self.max_tokens_by_effort is not None and not isinstance(
+            self.max_tokens_by_effort, tuple
+        ):
+            object.__setattr__(
+                self,
+                "max_tokens_by_effort",
+                tuple(sorted(self.max_tokens_by_effort.items())),
+            )
+
+    def max_tokens_for(self, effort: str | None) -> int | None:
+        """The token budget under the resolved effort (think + answer)."""
+        if effort is not None and self.max_tokens_by_effort:
+            for level, tokens in self.max_tokens_by_effort:
+                if level == effort:
+                    return tokens
+        return self.max_tokens
 
 
 @dataclass(frozen=True)
@@ -177,6 +203,15 @@ class RoleSpec:
         if self.executor is not None and self.reasoning_effort is not None:
             raise ValueError(
                 f"executor role {self.name!r} cannot declare reasoning_effort"
+            )
+        if (
+            self.sampling is not None
+            and self.sampling.max_tokens_by_effort
+            and self.reasoning_effort != "inherit"
+        ):
+            raise ValueError(
+                f"role {self.name!r}: max_tokens_by_effort requires "
+                "reasoning_effort 'inherit'"
             )
 
 
@@ -577,13 +612,19 @@ class Conductor:
             max_tokens=base_max,
             extra_args=extra_args,
         )
-        return self._apply_overrides(params, self._head.sampling, cap=public_cap)
+        return self._apply_overrides(
+            params,
+            self._head.sampling,
+            cap=public_cap,
+            effort=self._role_reasoning_effort(self._head),
+        )
 
     def _role_sampling_params(self, spec: RoleSpec) -> SamplingParams:
         return self._apply_overrides(
             self._sampling_params,
             spec.sampling,
             cap=self._sampling_params.max_tokens,
+            effort=self._role_reasoning_effort(spec),
         )
 
     @staticmethod
@@ -592,6 +633,7 @@ class Conductor:
         overrides: RoleSamplingOverrides | None,
         *,
         cap: int | None,
+        effort: str | None = None,
     ) -> SamplingParams:
         if overrides is None:
             return params
@@ -600,9 +642,18 @@ class Conductor:
             updates["temperature"] = overrides.temperature
         if overrides.top_p is not None:
             updates["top_p"] = overrides.top_p
-        if overrides.max_tokens is not None:
+        if overrides.top_k is not None:
+            updates["top_k"] = overrides.top_k
+        if overrides.min_p is not None:
+            updates["min_p"] = overrides.min_p
+        if overrides.presence_penalty is not None:
+            updates["presence_penalty"] = overrides.presence_penalty
+        if overrides.repetition_penalty is not None:
+            updates["repetition_penalty"] = overrides.repetition_penalty
+        max_tokens = overrides.max_tokens_for(effort)
+        if max_tokens is not None:
             updates["max_tokens"] = (
-                overrides.max_tokens if cap is None else min(overrides.max_tokens, cap)
+                max_tokens if cap is None else min(max_tokens, cap)
             )
         if overrides.seed_offset is not None:
             # Mirrors MoA proposal seed derivation for diversity under a fixed
