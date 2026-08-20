@@ -50,7 +50,11 @@ from kairyu.entrypoints.server.metering import (
     resolve_usage_counts,
     stream_usage_owner_from_state,
 )
-from kairyu.entrypoints.server.protocol import ChatCompletionRequest, StreamOptions
+from kairyu.entrypoints.server.protocol import (
+    ChatCompletionRequest,
+    StreamOptions,
+    normalize_reasoning_effort,
+)
 from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
 from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.sse import escape_json_line_separators
@@ -858,31 +862,16 @@ def _response_format(text: dict | None) -> dict | None:
     raise ChatRequestError(f"text.format.type {kind!r} is not supported")
 
 
-# OpenAI-style Responses efforts normalized onto Kairyu's L3 levels
-# (low|high|max). Clients such as Codex send minimal..xhigh; Kairyu-native
-# levels pass through verbatim, and xhigh grants the max tier.
-_REASONING_EFFORT_LEVELS = {
-    "minimal": "low",
-    "low": "low",
-    "medium": "high",
-    "high": "high",
-    "xhigh": "max",
-    "max": "max",
-}
-
-
 def _reasoning_effort(reasoning: dict | None) -> str | None:
     if not reasoning:
         return None
     effort = reasoning.get("effort")
-    if effort is None:
-        return None
-    normalized = (
-        _REASONING_EFFORT_LEVELS.get(effort) if isinstance(effort, str) else None
-    )
-    if normalized is None:
-        raise ChatRequestError(f"reasoning.effort {effort!r} is not supported")
-    return normalized
+    try:
+        return normalize_reasoning_effort(effort)
+    except ValueError:
+        raise ChatRequestError(
+            f"reasoning.effort {effort!r} is not supported"
+        ) from None
 
 
 def _to_chat_request(
