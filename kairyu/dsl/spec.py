@@ -137,6 +137,12 @@ class RoleNodeSpec(BaseModel):
     # config; public_output_floor uses it to force-close deliberation in the
     # final unit's empty-output re-dispatch (issue #542).
     reasoning_close_tag: str = ""
+    # Dispatch condition. "image": the role runs only when the request carries
+    # image input; on text requests it is skipped entirely (no model call, no
+    # budget step), its dependents run as if it were absent, and its template
+    # slot renders as "" (DTO-D11). Head, final, verifier, and executor roles
+    # cannot be conditional.
+    requires: Literal["image"] | None = None
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
@@ -170,6 +176,10 @@ class RoleNodeSpec(BaseModel):
                 )
         elif not self.prompt:
             raise ValueError(f"role {self.name!r} requires a prompt")
+        if self.requires is not None and self.role_type in {"verifier", "executor"}:
+            raise ValueError(
+                f"role {self.name!r}: a {self.role_type} role cannot declare requires"
+            )
         if (
             self.sampling is not None
             and self.sampling.max_tokens_by_effort is not None
@@ -341,6 +351,10 @@ class OrchestratorSpec(BaseModel):
                     )
                 if any(role.verifies == head.name for role in roles):
                     raise ValueError(f"{profile}: head role {head.name!r} cannot be verified")
+                if head.requires is not None:
+                    raise ValueError(
+                        f"{profile}: head role {head.name!r} cannot declare requires"
+                    )
                 if not any(head.name in role.depends_on for role in roles):
                     raise ValueError(
                         f"{profile}: head role {head.name!r} must feed at least one "

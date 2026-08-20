@@ -98,6 +98,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-20 — [design] Verified final unit streams deferred; image-conditional roles
+- What: a verifier on the final unit is accepted in `Conductor.stream`: the
+  unary verify/refine loop runs first and the text is published once after
+  the committed head (n>1 skips the verifier, `skipped:intent`); the DTO-D9
+  floor retry runs before the verdict and refinements reopen the scaffold.
+  Roles gain `requires: image`: skipped entirely (`skipped:condition`) on
+  text requests, dependents render the slot as ""; head/final/verifier/
+  executor cannot be conditional; the worker must accept images.
+- Why: owner decision for the tiered example (synthesis audit loop, image
+  description stage — DTO-D10/D11); amends m11 A5 and DTO-D9 (#547).
+- Refs: kairyu/{orchestration,dsl,deploy}; docs/design/m11-product.md
+
 ### 2026-08-20 — [design] Public-output floor for the thinking final unit (DTO-D9)
 - What: spec-level `public_output_floor` + role `reasoning_close_tag`: the
   final unit's attempt 0 thinks within budget−floor, and the existing bounded

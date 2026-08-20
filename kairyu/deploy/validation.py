@@ -908,6 +908,8 @@ def _validate_orchestrator_topology(
                 prompt_headless=role.prompt_headless,
                 reasoning_closed=role.reasoning_closed,
                 reasoning_effort=role.reasoning_effort,
+                reasoning_close_tag=role.reasoning_close_tag,
+                requires=role.requires,
             )
             for role in node_specs
         )

@@ -5,6 +5,7 @@ from kairyu.dsl.decorators import AgentPool
 from kairyu.dsl.loader import build_orchestrator, load_spec
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt
 from kairyu.orchestration.request import OrchestrationRequest
 from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
@@ -485,4 +486,161 @@ workers: [{name: tier1, backend: mock}]
 general_roles:
   - {name: g_final, worker: tier1, prompt: "g: {query}"}
 """
+        )
+
+
+class _RecordingBackend:
+    """Returns one scripted text per call; optionally advertises image support."""
+
+    def __init__(self, text: str = "done", *, vision: bool = False) -> None:
+        self._text = text
+        self._vision = vision
+        self.requests_seen = []
+
+    def supports_prompt_kind(self, kind: str) -> bool:
+        return kind in ({"text", "multimodal"} if self._vision else {"text"})
+
+    def supports_chat_template_kwargs(self, keys: frozenset[str]) -> bool:
+        return True
+
+    async def generate(self, request):
+        self.requests_seen.append(request)
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(index=0, text=self._text, token_ids=(), finish_reason="stop"),
+            ),
+            usage=GenerationUsage(prompt_tokens=1, completion_tokens=1),
+            finished=True,
+        )
+
+    async def stream(self, request):
+        yield await self.generate(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
+_IMAGE_CONDITIONAL_SPEC = """
+workers:
+  - {name: vision, engine_ref: vision}
+  - {name: text, engine_ref: text}
+roles:
+  - name: image_description
+    worker: vision
+    requires: image
+    prompt: "describe: {query}"
+  - name: policies
+    worker: text
+    prompt: "policies: {query} | {image_description}"
+    depends_on: [image_description]
+  - name: final
+    worker: text
+    role_type: synthesizer
+    prompt: "final: {policies}"
+    depends_on: [policies]
+"""
+_DAG_QUERY = "First, plan the work. Then execute it. Finally, summarize the outcome."
+
+
+def _image_conditional_orchestrator():
+    vision = _RecordingBackend("seen: a chart", vision=True)
+    text = _RecordingBackend("done")
+    orchestrator = build_orchestrator(
+        load_spec(_IMAGE_CONDITIONAL_SPEC), engine_refs={"vision": vision, "text": text}
+    )
+    return orchestrator, vision, text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_image_conditional_role_is_skipped_without_image(stream):
+    """DTO-D11: a `requires: image` role never runs on a text request."""
+
+    orchestrator, vision, text = _image_conditional_orchestrator()
+    request = OrchestrationRequest(prompt=_DAG_QUERY, sampling_params=SamplingParams())
+
+    if stream:
+        events = [event async for event in await orchestrator.run_chat(request, stream=True)]
+        result = events[-1].result
+    else:
+        result = await orchestrator.run(request)
+
+    assert result.route.target == "multi_agent"
+    assert vision.requests_seen == []
+    assert text.requests_seen[0].prompt == f"policies: {_DAG_QUERY} | "
+    assert result.text == "done"
+    skipped = [
+        event for event in result.structured_trace.events if event.kind == "skipped:condition"
+    ]
+    assert [(event.node, event.metadata["reason"]) for event in skipped] == [
+        ("image_description", "no_image")
+    ]
+
+
+async def test_image_conditional_role_runs_first_with_image():
+    orchestrator, vision, text = _image_conditional_orchestrator()
+    request = OrchestrationRequest(
+        prompt=_DAG_QUERY,
+        sampling_params=SamplingParams(),
+        multimodal_prompt=MultimodalPrompt(
+            _DAG_QUERY, (MultimodalItem("image", "uri", "data:image/png;base64,AAAA"),)
+        ),
+    )
+
+    result = await orchestrator.run(request)
+
+    assert result.route.target == "multi_agent"
+    assert len(vision.requests_seen) == 1
+    assert isinstance(vision.requests_seen[0].prompt, MultimodalPrompt)
+    assert text.requests_seen[0].prompt == f"policies: {_DAG_QUERY} | seen: a chart"
+    assert not any(
+        event.kind == "skipped:condition" for event in result.structured_trace.events
+    )
+
+
+def test_image_conditional_head_is_rejected_at_load():
+    with pytest.raises(ValidationError, match="head role 'head' cannot declare requires"):
+        load_spec(
+            """
+workers: [{name: vision, engine_ref: vision}]
+roles:
+  - {name: head, worker: vision, role_type: head, requires: image, prompt: "h: {query}"}
+  - {name: final, worker: vision, prompt: "f: {head}", depends_on: [head]}
+"""
+        )
+
+
+@pytest.mark.parametrize(
+    ("spec_text", "match"),
+    [
+        (
+            """
+workers: [{name: vision, engine_ref: vision}]
+roles:
+  - {name: final, worker: vision, requires: image, prompt: "f: {query}"}
+""",
+            "cannot declare requires",
+        ),
+        (
+            """
+workers:
+  - {name: vision, engine_ref: vision}
+  - {name: text, engine_ref: text}
+roles:
+  - {name: look, worker: text, requires: image, prompt: "l: {query}"}
+  - {name: final, worker: vision, prompt: "f: {look}", depends_on: [look]}
+""",
+            "does not accept multimodal prompts",
+        ),
+    ],
+)
+def test_image_conditional_final_or_text_only_worker_is_rejected_at_build(spec_text, match):
+    with pytest.raises(ValueError, match=match):
+        build_orchestrator(
+            load_spec(spec_text),
+            engine_refs={
+                "vision": _RecordingBackend(vision=True),
+                "text": _RecordingBackend(),
+            },
         )

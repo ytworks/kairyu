@@ -1282,25 +1282,6 @@ def test_public_output_floor_requires_final_reasoning_close_tag():
         )
 
 
-def test_public_output_floor_rejects_verifier_on_final_unit():
-    roles = _floor_roles() + (
-        RoleSpec(
-            name="check",
-            worker="cw",
-            role_type="verifier",
-            verifies="continuation",
-            prompt="[check] {continuation}",
-            depends_on=("continuation",),
-        ),
-    )
-    with pytest.raises(ValueError, match="verifier on the final unit"):
-        Conductor(
-            roles,
-            {"cw": ThinkExhaustedBackend([""])},
-            public_output_floor=64,
-        )
-
-
 @pytest.mark.parametrize("value", [True, 0, -1, 131_073, 1.5, "64"])
 def test_public_output_floor_rejects_invalid_direct_values(value):
     with pytest.raises(ValueError, match="integer between 1 and 131072"):
@@ -1309,3 +1290,234 @@ def test_public_output_floor_rejects_invalid_direct_values(value):
             {"cw": ThinkExhaustedBackend([""])},
             public_output_floor=value,
         )
+
+
+class ScriptedFinalBackend:
+    """Per-call script: ("text", s) answers, ("think", r) exhausts thinking."""
+
+    def __init__(self, items: list[tuple[str, str]]) -> None:
+        self._items = list(items)
+        self.requests_seen: list[GenerationRequest] = []
+
+    def _result(self, request):
+        kind, value = self._items.pop(0)
+        if kind == "think":
+            completion = CompletionOutput(
+                index=0,
+                text="",
+                token_ids=(),
+                finish_reason="length",
+                reasoning_content=value,
+            )
+        else:
+            completion = CompletionOutput(
+                index=0, text=value, token_ids=(), finish_reason="stop"
+            )
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(completion,),
+            usage=GenerationUsage(prompt_tokens=3, completion_tokens=4),
+            finished=True,
+        )
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests_seen.append(request)
+        return self._result(request)
+
+    async def stream(self, request):
+        self.requests_seen.append(request)
+        yield self._result(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
+def _verified_final_roles(
+    *, prompt_suffix: str = "", reasoning_close_tag: str = ""
+) -> tuple[RoleSpec, ...]:
+    return (
+        RoleSpec(name="head", worker="hw", role_type="head", prompt="[head] {query}"),
+        RoleSpec(
+            name="synthesis",
+            worker="cw",
+            role_type="publisher",
+            prompt="[syn] {query} :: {head}",
+            depends_on=("head",),
+            prompt_suffix=prompt_suffix,
+            reasoning_close_tag=reasoning_close_tag,
+        ),
+        RoleSpec(
+            name="audit",
+            worker="vw",
+            role_type="verifier",
+            verifies="synthesis",
+            prompt="[audit] {head} :: {synthesis}",
+            depends_on=("synthesis", "head"),
+        ),
+    )
+
+
+def _verified_floor_roles() -> tuple[RoleSpec, ...]:
+    return _floor_roles() + (
+        RoleSpec(
+            name="check",
+            worker="vw",
+            role_type="verifier",
+            verifies="continuation",
+            prompt="[check] {continuation}",
+            depends_on=("continuation",),
+        ),
+    )
+
+
+async def test_stream_defers_verified_final_until_pass():
+    """A verified final unit is published once, after its verdict (DTO-D10)."""
+
+    head = StreamScriptedBackend(["Intro. "])
+    final = ScriptedFinalBackend([("text", "continuation text")])
+    audit = ScriptedFinalBackend([("text", "PASS")])
+    conductor = Conductor(
+        _verified_final_roles(),
+        {"hw": head, "cw": final, "vw": audit},
+    )
+
+    events = await _collect(conductor.stream("task"))
+
+    assert [e.text for e in events if e.kind == "delta"] == ["Intro. ", "continuation text"]
+    result = events[-1].result
+    assert result is not None
+    assert result.final_text == "Intro. continuation text"
+    assert result.final_unit_ok
+    assert "continuation text" in audit.requests_seen[0].prompt
+    generated = next(
+        e for e in result.trace if e.node == "synthesis" and e.kind == "generated"
+    )
+    assert "streamed" not in generated.metadata
+    verified = next(e for e in result.trace if e.kind == "verified")
+    assert verified.metadata["pass"] is True
+
+
+async def test_stream_verified_final_fail_refines_and_emits_only_passed_text():
+    head = StreamScriptedBackend(["Intro. "])
+    final = ScriptedFinalBackend([("text", "v1"), ("text", "v2")])
+    audit = ScriptedFinalBackend([("text", "FAIL: missing x"), ("text", "PASS")])
+    conductor = Conductor(
+        _verified_final_roles(),
+        {"hw": head, "cw": final, "vw": audit},
+    )
+
+    events = await _collect(conductor.stream("task"))
+
+    assert [e.text for e in events if e.kind == "delta"] == ["Intro. ", "v2"]
+    result = events[-1].result
+    assert result is not None
+    assert result.final_text == "Intro. v2"
+    refine_prompt = final.requests_seen[1].prompt
+    assert "Previous attempt:\nv1" in refine_prompt
+    assert "Verifier feedback:\nFAIL: missing x" in refine_prompt
+    assert [r.prompt.split(" :: ")[-1] for r in audit.requests_seen] == ["v1", "v2"]
+    assert result.budget_state.steps_used == 5
+
+
+async def test_stream_verified_final_exhaustion_publishes_last_attempt():
+    head = StreamScriptedBackend(["Intro. "])
+    final = ScriptedFinalBackend([("text", "v1"), ("text", "v2")])
+    audit = ScriptedFinalBackend([("text", "FAIL: a"), ("text", "FAIL: b")])
+    conductor = Conductor(
+        _verified_final_roles(),
+        {"hw": head, "cw": final, "vw": audit},
+    )
+
+    events = await _collect(conductor.stream("task", Budget(max_refine_depth=1)))
+
+    assert [e.text for e in events if e.kind == "delta"] == ["Intro. ", "v2"]
+    result = events[-1].result
+    assert result is not None
+    assert result.final_unit_ok
+    verified = [e for e in result.trace if e.kind == "verified"]
+    assert verified[-1].metadata["pass"] is False
+    assert verified[-1].metadata["refinement_exhausted"] is True
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_public_output_floor_retries_before_verifying_final(stream):
+    """Think exhaustion is continued with the reserve before any verdict."""
+
+    final = ScriptedFinalBackend(
+        [("think", "deliberating..."), ("text", "v1"), ("text", "v2")]
+    )
+    audit = ScriptedFinalBackend([("text", "FAIL: wrong"), ("text", "PASS")])
+    conductor = Conductor(
+        _verified_floor_roles(),
+        {"cw": final, "vw": audit},
+        final_sampling_params=SamplingParams(max_tokens=512),
+        public_output_floor=64,
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+        assert [e.text for e in events if e.kind == "delta"] == ["v2"]
+    else:
+        result = await conductor.run("task")
+
+    assert result.final_text == "v2"
+    assert result.final_unit_ok
+    first, retry, refine = final.requests_seen
+    assert first.prompt == "[cont] task<THINK>"
+    assert first.sampling_params.max_tokens == 448
+    assert retry.prompt == "[cont] task<THINK>deliberating...</THINK>\n\n"
+    assert retry.sampling_params.max_tokens == 64
+    assert refine.prompt.endswith("<THINK>")
+    assert "Verifier feedback:\nFAIL: wrong" in refine.prompt
+    assert refine.sampling_params.max_tokens == 448
+    assert [r.prompt for r in audit.requests_seen] == ["[check] v1", "[check] v2"]
+    kinds = [e.kind for e in result.trace if e.node in {"continuation", "check"}]
+    assert kinds.index("retry:empty_output") < kinds.index("verified")
+    retry_event = next(e for e in result.trace if e.kind == "retry:empty_output")
+    assert retry_event.metadata["continuation"] == "think_close"
+
+
+async def test_verified_final_floor_retry_runs_with_committed_head():
+    head = StreamScriptedBackend(["Intro. "])
+    final = ScriptedFinalBackend(
+        [("think", "deliberating..."), ("text", "The answer is 5.")]
+    )
+    audit = ScriptedFinalBackend([("text", "PASS")])
+    conductor = Conductor(
+        _verified_final_roles(prompt_suffix="<THINK>", reasoning_close_tag="</THINK>"),
+        {"hw": head, "cw": final, "vw": audit},
+        final_sampling_params=SamplingParams(max_tokens=512),
+        public_output_floor=64,
+    )
+
+    result = await conductor.run("task")
+
+    assert result.final_text == "Intro. The answer is 5."
+    assert result.final_unit_ok
+    assert final.requests_seen[1].prompt.endswith("deliberating...</THINK>\n\n")
+    assert "The answer is 5." in audit.requests_seen[0].prompt
+    retries = [e for e in result.trace if e.kind == "retry:empty_output"]
+    assert [e.metadata.get("continuation") for e in retries] == ["think_close"]
+
+
+async def test_verified_final_skips_verifier_for_multiple_choices():
+    final = MultiChoiceThinkBackend()
+    audit = ScriptedFinalBackend([("text", "PASS")])
+    conductor = Conductor(
+        _verified_floor_roles(),
+        {"cw": final, "vw": audit},
+        final_sampling_params=SamplingParams(n=2, max_tokens=64),
+        public_output_floor=16,
+    )
+
+    result = await conductor.run("task")
+
+    assert result.final_unit_ok
+    assert [choice.text for choice in result.completions] == ["answer-0", "answer-1"]
+    assert audit.requests_seen == []
+    skipped = next(e for e in result.trace if e.kind == "skipped:intent")
+    assert skipped.node == "check"
+    assert skipped.metadata == {"reason": "intent", "n": 2}

@@ -407,14 +407,27 @@ class Orchestrator:
             # final-unit overrides) at construction instead of per request —
             # for every configured profile.
             for profile_roles in filter(None, (self._roles, self._general_roles)):
+                workers = self._conductor_workers(profile_roles, [])
                 Conductor(
                     roles=profile_roles,
-                    workers=self._conductor_workers(profile_roles, []),
+                    workers=workers,
                     shared_prefix=self._shared_prefix,
                     sampling_params=self._sampling_params,
                     execution_workers=self._execution_workers,
                     public_output_floor=self._public_output_floor,
                 )
+                for role in profile_roles:
+                    # An image-conditional role only ever runs with an image
+                    # attached, so its worker must accept one (DTO-D11); the
+                    # Conductor cannot check this — `kairyu validate` builds it
+                    # with placeholder workers.
+                    if role.requires == "image" and not backend_supports_prompt_kind(
+                        workers[role.worker], "multimodal"
+                    ):
+                        raise ValueError(
+                            f"role {role.name!r} requires image input but worker "
+                            f"{role.worker!r} does not accept multimodal prompts"
+                        )
 
     def generation_defaults_snapshot(
         self,
@@ -906,19 +919,9 @@ class Orchestrator:
                 )
         if call.sampling_params.n <= 1:
             return
-        roles = self._roles_for(call)
-        final_role = self._conductor_final_role(roles)
-        if (
-            (decision is None or decision.target == "multi_agent")
-            and self._moa_samples == 0
-            and any(
-                role.role_type == "verifier" and role.verifies == final_role.name for role in roles
-            )
-        ):
-            raise ValueError(
-                "n > 1 is not supported when the final orchestration role has "
-                "a post-generation verifier"
-            )
+        # A verifier on the final role is skipped for n > 1 inside the
+        # Conductor (one verdict cannot judge independent choices), so only
+        # engine support for n gates the call here.
         unsupported = [
             key
             for key in self._final_engine_keys(call, decision)
