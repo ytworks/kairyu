@@ -38,14 +38,14 @@ flowchart LR
     subgraph W1["Wave 1 — dependency-free"]
         H["head (Qwen non-thinking, T=0.7)<br/>streams public opening at t=0"]
         DR["draft (Qwen thinking-low, T=1.0)<br/>quick internal draft"]
-        PO["policies (DeepSeek thinking, T=0.9)<br/>4 maximally different answer policies"]
+        PO["policies (DeepSeek thinking, T=1.0)<br/>4 maximally different answer policies"]
     end
     subgraph W2["Wave 2 — two tracks in parallel"]
         A1["answer_1 (Qwen thinking-low, T=1.0)<br/>follows POLICY 1"]
         A2["answer_2 (Qwen thinking-low, T=1.0)<br/>follows POLICY 2"]
         A3["answer_3 (Qwen thinking-low, T=1.0)<br/>follows POLICY 3"]
         A4["answer_4 (Qwen thinking-low, T=1.0)<br/>follows POLICY 4"]
-        CR["critique (DeepSeek thinking, T=0.6)<br/>critical analysis of the draft<br/>-> improved answer"]
+        CR["critique (DeepSeek thinking, T=1.0)<br/>critical analysis of the draft<br/>-> improved answer"]
     end
     subgraph W3["Wave 3 — merge"]
         CO["compose (DeepSeek thinking)<br/>best final answer from the refined<br/>answer + 4 candidates; streams the<br/>remainder after the committed opening"]
