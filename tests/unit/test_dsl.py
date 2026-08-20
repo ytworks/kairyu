@@ -630,36 +630,61 @@ roles:
         )
 
 
-@pytest.mark.parametrize(
-    ("spec_text", "match"),
-    [
-        (
-            """
+def test_image_conditional_final_is_rejected_at_build():
+    with pytest.raises(ValueError, match="cannot declare requires"):
+        build_orchestrator(
+            load_spec(
+                """
 workers: [{name: vision, engine_ref: vision}]
 roles:
   - {name: final, worker: vision, requires: image, prompt: "f: {query}"}
-""",
-            "cannot declare requires",
-        ),
-        (
+"""
+            ),
+            engine_refs={"vision": _RecordingBackend(vision=True)},
+        )
+
+
+async def test_image_conditional_worker_capability_is_checked_per_image_request():
+    """The image-capability of a conditional role's worker is a live property.
+
+    A replica pool publishes the intersection of its currently placeable
+    replicas, which is empty before the first health probe: build must not
+    probe it (the tiered example could not boot), each image request must.
+    """
+
+    look_worker = _RecordingBackend("seen: a chart", vision=False)
+    final_worker = _RecordingBackend("done", vision=True)
+    orchestrator = build_orchestrator(
+        load_spec(
             """
 workers:
-  - {name: vision, engine_ref: vision}
-  - {name: text, engine_ref: text}
+  - {name: look_worker, engine_ref: look_worker}
+  - {name: final_worker, engine_ref: final_worker}
 roles:
-  - {name: look, worker: text, requires: image, prompt: "l: {query}"}
-  - {name: final, worker: vision, prompt: "f: {look}", depends_on: [look]}
-""",
-            "does not accept multimodal prompts",
+  - {name: look, worker: look_worker, requires: image, prompt: "l: {query}"}
+  - {name: final, worker: final_worker, prompt: "f: {look}", depends_on: [look]}
+"""
         ),
-    ],
-)
-def test_image_conditional_final_or_text_only_worker_is_rejected_at_build(spec_text, match):
-    with pytest.raises(ValueError, match=match):
-        build_orchestrator(
-            load_spec(spec_text),
-            engine_refs={
-                "vision": _RecordingBackend(vision=True),
-                "text": _RecordingBackend(),
-            },
-        )
+        engine_refs={"look_worker": look_worker, "final_worker": final_worker},
+    )
+    text_request = OrchestrationRequest(prompt=_DAG_QUERY, sampling_params=SamplingParams())
+    image_request = OrchestrationRequest(
+        prompt=_DAG_QUERY,
+        sampling_params=SamplingParams(),
+        multimodal_prompt=MultimodalPrompt(
+            _DAG_QUERY, (MultimodalItem("image", "uri", "data:image/png;base64,AAAA"),)
+        ),
+    )
+
+    # Text requests never touch the conditional role's worker.
+    assert (await orchestrator.run(text_request)).text == "done"
+    assert look_worker.requests_seen == []
+
+    with pytest.raises(ValueError, match="'look' requires image input but worker 'look_worker'"):
+        await orchestrator.run(image_request)
+    assert look_worker.requests_seen == []
+
+    look_worker._vision = True
+    result = await orchestrator.run(image_request)
+    assert result.text == "done"
+    assert isinstance(look_worker.requests_seen[0].prompt, MultimodalPrompt)
