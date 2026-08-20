@@ -1115,6 +1115,8 @@ class MultiChoiceThinkBackend:
 
     def __init__(self) -> None:
         self.requests_seen: list[GenerationRequest] = []
+        self.generate_calls = 0
+        self.stream_calls = 0
 
     def _result(self, request):
         if len(self.requests_seen) == 1:
@@ -1139,10 +1141,12 @@ class MultiChoiceThinkBackend:
         )
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.generate_calls += 1
         self.requests_seen.append(request)
         return self._result(request)
 
     async def stream(self, request):
+        self.stream_calls += 1
         self.requests_seen.append(request)
         yield self._result(request)
 
@@ -1503,7 +1507,8 @@ async def test_verified_final_floor_retry_runs_with_committed_head():
     assert [e.metadata.get("continuation") for e in retries] == ["think_close"]
 
 
-async def test_verified_final_skips_verifier_for_multiple_choices():
+@pytest.mark.parametrize("stream", [False, True])
+async def test_verified_final_skips_verifier_for_multiple_choices(stream):
     final = MultiChoiceThinkBackend()
     audit = ScriptedFinalBackend([("text", "PASS")])
     conductor = Conductor(
@@ -1513,7 +1518,16 @@ async def test_verified_final_skips_verifier_for_multiple_choices():
         public_output_floor=16,
     )
 
-    result = await conductor.run("task")
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+        assert final.generate_calls == 0
+        assert final.stream_calls == 2
+    else:
+        result = await conductor.run("task")
+        assert final.generate_calls == 2
+        assert final.stream_calls == 0
 
     assert result.final_unit_ok
     assert [choice.text for choice in result.completions] == ["answer-0", "answer-1"]
