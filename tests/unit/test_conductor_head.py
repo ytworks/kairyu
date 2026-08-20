@@ -1213,3 +1213,22 @@ def test_public_output_floor_requires_final_reasoning_close_tag():
             {"cw": ThinkExhaustedBackend([""])},
             public_output_floor=64,
         )
+
+
+def test_public_output_floor_rejects_verifier_on_final_unit():
+    roles = _floor_roles() + (
+        RoleSpec(
+            name="check",
+            worker="cw",
+            role_type="verifier",
+            verifies="continuation",
+            prompt="[check] {continuation}",
+            depends_on=("continuation",),
+        ),
+    )
+    with pytest.raises(ValueError, match="verifier on the final unit"):
+        Conductor(
+            roles,
+            {"cw": ThinkExhaustedBackend([""])},
+            public_output_floor=64,
+        )
