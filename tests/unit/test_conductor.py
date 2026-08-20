@@ -324,7 +324,13 @@ def test_effort_graded_max_tokens_selects_tier_and_respects_internal_cap(
     assert by_role["planner"].sampling_params.max_tokens == expected_max_tokens
 
 
-async def test_multimodal_media_reaches_only_capable_role_workers():
+@pytest.mark.parametrize(
+    ("role_effort", "expected_thinking"),
+    [(None, False), ("low", True)],
+)
+async def test_multimodal_media_reaches_only_capable_role_workers(
+    role_effort, expected_thinking
+):
     text = ScriptedBackend(["plan", "final"])
     vision = VisionScriptedBackend(["chart evidence"])
     roles = (
@@ -334,6 +340,7 @@ async def test_multimodal_media_reaches_only_capable_role_workers():
             worker="vision",
             prompt="inspect: {query}; plan: {planner}",
             depends_on=("planner",),
+            reasoning_effort=role_effort,
         ),
         RoleSpec(
             name="publisher",
@@ -364,8 +371,9 @@ async def test_multimodal_media_reaches_only_capable_role_workers():
     assert vision_prompt.messages[0].content[0].text.startswith("inspect:")
     assert vision_prompt.messages[0].content[1].item_index == 0
     assert vision.requests_seen[0].chat_template_kwargs == {
-        "enable_thinking": False
+        "enable_thinking": expected_thinking
     }
+    assert vision.requests_seen[0].reasoning_effort == role_effort
     assert all(request.chat_template_kwargs is None for request in text.requests_seen)
     assert result.final_text == "final"
 
