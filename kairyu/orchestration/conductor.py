@@ -505,6 +505,14 @@ class Conductor:
                 "Conductor shared_prefix cannot be a tokenizer-owned pre-rendered "
                 "chat prompt"
             )
+        if public_output_floor is not None and (
+            isinstance(public_output_floor, bool)
+            or not isinstance(public_output_floor, int)
+            or not 1 <= public_output_floor <= 131_072
+        ):
+            raise ValueError(
+                "public_output_floor must be an integer between 1 and 131072"
+            )
         self._roles = tuple(roles)
         self._workers = dict(workers)
         self._shared_prefix = shared_prefix
