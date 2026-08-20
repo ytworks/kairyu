@@ -2921,7 +2921,19 @@ class Conductor:
         )
         session = session or uuid.uuid4().hex[:12]
         final = self._selected_final_unit()
-        deferred_final = final.name in self._verifier_for
+        final_verifier = self._verifier_for.get(final.name)
+        deferred_final = final_verifier is not None and self._final_sampling_params.n == 1
+        if final_verifier is not None and not deferred_final:
+            run.trace.append(
+                self._trace_event(
+                    final_verifier,
+                    "skipped:intent",
+                    operation="verification",
+                    status="skipped",
+                    attempt=0,
+                    metadata={"reason": "intent", "n": self._final_sampling_params.n},
+                )
+            )
         head_active = self._head is not None and self._head_enabled()
         exclude = (
             frozenset({final.name})
