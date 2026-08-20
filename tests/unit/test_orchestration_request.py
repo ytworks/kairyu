@@ -70,13 +70,15 @@ def test_parallel_tool_fields_preserve_existing_public_positional_abi():
         "execution_workers",
         "reasoning_effort",
     ]
-    assert list(inspect.signature(run_moa).parameters)[-2:] == [
+    assert list(inspect.signature(run_moa).parameters)[-3:] == [
         "final_parallel_tool_calls",
         "final_tool_call_protocol",
+        "reasoning_effort",
     ]
-    assert list(inspect.signature(stream_moa).parameters)[-2:] == [
+    assert list(inspect.signature(stream_moa).parameters)[-3:] == [
         "final_parallel_tool_calls",
         "final_tool_call_protocol",
+        "reasoning_effort",
     ]
 
 
