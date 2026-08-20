@@ -287,6 +287,9 @@ way — a 502 after paying full dual-track cost (reproduced at `max_tokens:
   ≤2× bounded-retry envelope. Unlimited caller budget, floor-unset specs,
   the committed-head exemption, and internal roles (which tolerate empty
   output) are unchanged.
+  Multi-choice calls (`n > 1`) also retain the byte-identical retry without a
+  floor: one continuation prompt cannot preserve independent per-choice
+  reasoning branches.
 - **Trade-off**: an answer that finishes thinking inside phase A may
   truncate up to `floor` tokens earlier than before (public output exists,
   so no retry). Accepted; bounded by the floor.

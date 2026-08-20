@@ -1110,6 +1110,45 @@ class ThinkExhaustedBackend:
     async def shutdown(self) -> None:
         return None
 
+class MultiChoiceThinkBackend:
+    """Returns two independent reasoning branches, then two public answers."""
+
+    def __init__(self) -> None:
+        self.requests_seen: list[GenerationRequest] = []
+
+    def _result(self, request):
+        if len(self.requests_seen) == 1:
+            choices = (("", "choice-0 thought"), ("", "choice-1 thought"))
+        else:
+            choices = (("answer-0", None), ("answer-1", None))
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=tuple(
+                CompletionOutput(
+                    index=index,
+                    text=text,
+                    token_ids=(),
+                    finish_reason="length" if reasoning else "stop",
+                    reasoning_content=reasoning,
+                )
+                for index, (text, reasoning) in enumerate(choices)
+            ),
+            usage=GenerationUsage(prompt_tokens=3, completion_tokens=4),
+            finished=True,
+        )
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests_seen.append(request)
+        return self._result(request)
+
+    async def stream(self, request):
+        self.requests_seen.append(request)
+        yield self._result(request)
+
+    async def shutdown(self) -> None:
+        return None
+
 
 def _floor_roles() -> tuple[RoleSpec, ...]:
     return (
@@ -1154,6 +1193,34 @@ async def test_public_output_floor_reserves_answer_budget_and_closes_think(
     assert retry.sampling_params.max_tokens == expected_retry_max
     retry_events = [e for e in result.trace if e.kind == "retry:empty_output"]
     assert [e.metadata.get("continuation") for e in retry_events] == ["think_close"]
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_public_output_floor_uses_legacy_retry_for_multiple_choices(stream):
+    backend = MultiChoiceThinkBackend()
+    conductor = Conductor(
+        _floor_roles(),
+        {"cw": backend},
+        final_sampling_params=SamplingParams(n=2, max_tokens=64),
+        public_output_floor=16,
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task"))
+        result = events[-1].result
+        assert result is not None
+    else:
+        result = await conductor.run("task")
+
+    assert result.final_unit_ok
+    assert [(choice.index, choice.text) for choice in result.completions] == [
+        (0, "answer-0"),
+        (1, "answer-1"),
+    ]
+    first, retry = backend.requests_seen
+    assert first.prompt == retry.prompt == "[cont] task<THINK>"
+    assert [request.sampling_params.max_tokens for request in (first, retry)] == [64, 64]
+    retry_event = next(event for event in result.trace if event.kind == "retry:empty_output")
+    assert retry_event.metadata.get("continuation") is None
 
 
 async def test_public_output_floor_streaming_retry_streams_reclaimed_answer():

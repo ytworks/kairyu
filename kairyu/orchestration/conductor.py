@@ -757,6 +757,9 @@ class Conductor:
             return None
         if self._final_sampling_params.max_tokens is None:
             return None
+        if self._final_sampling_params.n != 1:
+            # One prompt cannot continue multiple independent reasoning branches.
+            return None
         return self._public_output_floor
 
     def _public_budget_remaining(self, run: _RunState) -> int | None:
