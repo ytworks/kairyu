@@ -59,3 +59,37 @@ def test_parse_trace_rejects_unsafe_execution_status(
             _execution_trace(execution_status),
             response_id="req-1",
         )
+
+
+def test_parse_trace_omits_skipped_event_without_timing() -> None:
+    """A conditional role skipped on a text request traces `timing: null`;
+    the envelope stays valid and only observed stages are retained."""
+
+    trace = _execution_trace("ok")
+    trace["events"] = [
+        {
+            "seq": 1,
+            "node": "image_description",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "skipped",
+            "attempt": 0,
+            "timing": None,
+            "usage": None,
+            "detail": {"reason": "no_image", "requires": "image"},
+        },
+        {**trace["events"][0], "seq": 2},
+    ]
+
+    version, stages = serving_bench._parse_trace(trace, response_id="req-1")
+
+    assert version == "2.0"
+    assert [stage.node for stage in stages] == ["exec_matrix"]
+
+
+def test_parse_trace_still_rejects_successful_event_without_timing() -> None:
+    trace = _execution_trace("ok")
+    trace["events"][0]["timing"] = None
+
+    with pytest.raises(ValueError, match="event.timing must be an object"):
+        serving_bench._parse_trace(trace, response_id="req-1")
