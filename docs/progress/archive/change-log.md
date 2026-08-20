@@ -11,6 +11,51 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-17 — [amendment] Profile judge work obeys tenant accounting
+- What: profile-judge GPU work is reserved before dispatch, included in
+  cumulative orchestration usage and metering, and emitted as a structured
+  trace event; the reservation covers the judge plus the larger profile DAG.
+- Why: PR #516 review found that the pre-admission judge call bypassed tenant
+  token quotas and discarded backend-reported usage.
+- Refs: PR #516 review; `kairyu/orchestration/`;
+  `kairyu/entrypoints/server/app.py`
+
+### 2026-08-17 — [amendment] Tiered Qwen MTP remains candidate-only
+- What: removed MTP-3 from the selected four-replica Qwen deployment while
+  retaining its c1/c4/c8 measurements as candidate evidence; compose, metadata,
+  tests, and operator docs now agree on no speculation.
+- Why: the public product admits 256 requests and gates c16/c32, but the new
+  role-shaped run stopped at c8; the matching Qwen TP1 c16/c32 rows regressed,
+  so the deployed high-concurrency envelope was not proven safe.
+- Refs: #509; ECO-D4 2026-08-17 Qwen MTP concurrency amendment;
+  `examples/qwen3.8-deepseek-v4-8gpu/`
+
+### 2026-08-17 — [design] General ensemble profile and Terminal-Bench latency fixes
+- What: `general_roles` — a second full-ensemble DAG under one served model,
+  deterministically selected (tools/format-demand/non-code → general; code
+  authoring keeps the coding DAG; never a single-engine route); example gains a
+  7-role all-model general profile; verifier T 0.0→0.6/top_p 0.95 (greedy
+  thinking looped: 52% of verdicts burned the 4096 cap → reverify); Qwen
+  prompts lead with a shared REQUEST block (prefix reuse); measured MTP-3
+  adopted on Qwen workers (c1 +43.9%, c4/c8 +26%, lossless).
+- Why: issue #509 — 12/27 Terminal-Bench trials hit the 900 s agent timeout at
+  p50 63.9 s/request; coding contracts idled on agent JSON turns.
+- Refs: #509; ECO-D6 + ECO-D4 2026-08-17 amendment; `kairyu/orchestration/`;
+  `examples/qwen3.8-deepseek-v4-8gpu/`; its MEASUREMENTS.md
+
+### 2026-08-17 — [amendment] LLM profile judge for the coding/general split
+- What: the code-authoring half of profile selection is judged by an optional
+  `profile_judge` worker (example: direct DeepSeek, greedy, ≤8 tokens, 5 s
+  timeout); the verdict is attached to the call at the serving boundary before
+  preflight/admission so selection stays a pure function; head-disable signals
+  stay deterministic and are never judged; on judge failure the keyword
+  code-task signal decides as before.
+- Why: owner review of #510 — keyword heuristics misroute incidental code
+  vocabulary into the sandbox coding DAG and miss unlisted languages; the
+  split is a semantic judgment and belongs to an LLM.
+- Refs: #509, #510 review; ECO-D6 2026-08-17 LLM-profile-judge amendment;
+  `kairyu/orchestration/`; `examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml`
+
 ### 2026-08-16 — [amendment] Agent tool-turn latency and cancellation (issue #495)
 - What: tool-turn FAIL/refine loop removed (verifier/synthesis prompts declare
   the publisher emits the tool call; inconclusive verdicts re-verify once,
