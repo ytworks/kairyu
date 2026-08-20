@@ -37,6 +37,8 @@ class Filter:
     def inlet(self, body: dict, __user__: dict | None = None) -> dict:
         valves = (__user__ or {}).get("valves")
         effort = getattr(valves, "reasoning_effort", None) if valves else None
-        if effort and effort != "default":
+        if effort == "default":
+            body.pop("reasoning_effort", None)
+        elif effort:
             body["reasoning_effort"] = effort
         return body

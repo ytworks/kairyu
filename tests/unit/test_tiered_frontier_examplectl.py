@@ -636,6 +636,23 @@ class _FakeWebUI:
         }
 
 
+def test_tiered_chat_ui_effort_filter_controls_request_body() -> None:
+    module = _load(
+        EXAMPLE / "webui-reasoning-effort-filter.py",
+        "tiered_chat_ui_effort_filter",
+    )
+    selector = module.Filter()
+
+    for effort in ("low", "high", "max"):
+        body = {"reasoning_effort": "stale"}
+        user = {"valves": selector.UserValves(reasoning_effort=effort)}
+        assert selector.inlet(body, user) == {"reasoning_effort": effort}
+
+    body = {"reasoning_effort": "max"}
+    user = {"valves": selector.UserValves(reasoning_effort="default")}
+    assert selector.inlet(body, user) == {}
+
+
 def test_tiered_chat_ui_effort_selector_provision_is_idempotent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
