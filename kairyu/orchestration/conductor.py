@@ -1063,14 +1063,22 @@ class Conductor:
         session = self.preflight_session(request_id_suffix)
         requests: list[tuple[RoleSpec, GenerationRequest]] = []
         head_enabled = self._head_enabled()
+        conditional_excluded = {
+            spec.name
+            for spec in self._units
+            if spec.requires == "image" and self._multimodal_prompt is None
+        }
         for spec in self._units:
-            if self._unit_deps[spec.name]:
+            if spec.name in conditional_excluded:
+                continue
+            # Execution removes inactive units from every dependency set. A
+            # dependent whose only prerequisites are inactive therefore joins
+            # the first wave and needs the same exact preflight as a root.
+            if self._unit_deps[spec.name] - conditional_excluded:
                 continue
             if spec.role_type == "executor":
                 continue
             if spec.role_type == "head" and not head_enabled:
-                continue
-            if spec.requires == "image" and self._multimodal_prompt is None:
                 continue
             (
                 sampling_params,
