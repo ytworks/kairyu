@@ -496,12 +496,16 @@ class _RecordingBackend:
         self._text = text
         self._vision = vision
         self.requests_seen = []
+        self.prepared_requests = []
 
     def supports_prompt_kind(self, kind: str) -> bool:
         return kind in ({"text", "multimodal"} if self._vision else {"text"})
 
     def supports_chat_template_kwargs(self, keys: frozenset[str]) -> bool:
         return True
+
+    async def prepare_request(self, request):
+        self.prepared_requests.append(request)
 
     async def generate(self, request):
         self.requests_seen.append(request)
@@ -576,6 +580,21 @@ async def test_image_conditional_role_is_skipped_without_image(stream):
     assert [(event.node, event.metadata["reason"]) for event in skipped] == [
         ("image_description", "no_image")
     ]
+
+
+async def test_image_conditional_dependent_is_exactly_prepared_for_text_request():
+    orchestrator, _vision, text = _image_conditional_orchestrator()
+    request = OrchestrationRequest(prompt=_DAG_QUERY, sampling_params=SamplingParams())
+
+    prepared = await orchestrator.prepare_request(request)
+    expected = f"policies: {_DAG_QUERY} | "
+    prepared_policy = next(
+        item for item in text.prepared_requests if item.prompt == expected
+    )
+    result = await orchestrator.run(request, prepared=prepared)
+
+    assert result.route.target == "multi_agent"
+    assert text.requests_seen[0] is prepared_policy
 
 
 async def test_image_conditional_role_runs_first_with_image():
