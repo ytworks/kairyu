@@ -65,7 +65,7 @@ obedience — is carried by draft/answers/critique/compose).
 
 Budget: `max_steps: 10` (9 generation calls + 1 headroom for the bounded
 empty-final-output re-dispatch), `moa_samples: 0`,
-`internal_max_tokens: 4096` (raised to 32768 by DTO-D8, 2026-08-20),
+`internal_max_tokens: 4096` (raised to 131072 by DTO-D8, 2026-08-20),
 `expose_intermediate_outputs: true`.
 
 Rationale: owner-specified process (2026-08-18) — diversity through four
@@ -221,16 +221,23 @@ private thinking and the answer together.
   effort as before and selects the tier, still min()'d against
   `internal_max_tokens` and the caller's public `max_tokens`; the plain
   `max_tokens` is the null-effort fallback. `policies` and `critique`
-  declare `{low: 4096, high: 16384, max: 32768}` (fallback 16384 = the
-  default-effort tier). New DSL sampling knobs `top_k`, `min_p`,
+  declare the vendor-recommended starting budgets
+  `{low: 16384, high: 65536, max: 131072}` (fallback 65536 = the
+  default-effort tier; owner decision 2026-08-20, superseding an initial
+  4096/16384/32768 grading — the TTFT gate is head-based with a paired
+  same-concurrency DeepSeek-direct denominator and E2E latency is
+  unconstrained by design, so the "≤2× DeepSeek-direct" budget does not
+  constrain DeepSeek role budgets). New DSL sampling knobs `top_k`, `min_p`,
   `presence_penalty`, `repetition_penalty` thread through the existing
   role-override path (the engine and OpenAI-compat backend already forward
   them).
-- **`internal_max_tokens` 4096 → 32768** — the ceiling must admit the max
-  tier; grading stays per-role. Consequence: `admission_upper_bound` charges
-  the internal ceiling per private step, so the AUTO admission bound grows
-  ~8× and admission under tenant quotas/SLO becomes markedly more
-  conservative for every request regardless of effort. Accepted.
+- **`internal_max_tokens` 4096 → 131072** — the ceiling must admit the max
+  tier; grading stays per-role (the DSL bounds on `max_tokens`,
+  `max_tokens_by_effort`, and `internal_max_tokens` rise 32768 → 131072
+  accordingly). Consequence: `admission_upper_bound` charges the internal
+  ceiling per private step, so the AUTO admission bound grows ~32× and
+  admission under tenant quotas/SLO becomes markedly more conservative for
+  every request regardless of effort. Accepted.
 - **`/v1/responses` forwards `reasoning.effort`** (previously silently
   dropped): OpenAI-style levels are normalized onto the L3 knob —
   minimal/low→low, medium/high→high, xhigh/max→max — so Codex can grade the
@@ -239,12 +246,12 @@ private thinking and the answer together.
   low|high|max.
 - The caller's public `max_tokens` still min()s over every internal budget
   (existing product semantics): a client sending 4096 clamps the high/max
-  tiers back to 4096. The Chat UI default (32768) and the verification
-  harness (`auto_max_combined_max_tokens` 4096 → 32768) are sized so the
-  tiers are reachable on the product paths.
+  tiers back to 4096. The Chat UI default (32768 → 131072) and the
+  verification harness (`auto_max_combined_max_tokens` 4096 → 131072) are
+  sized so every tier is reachable on the product paths.
 - GPU consequences: the recorded green gates (run `20260818T025710Z`) bind
   to the previous served-config digest; the default-effort (`high`) budget
-  doubles the previous 4096 allowance and head sampling changed, so the
+  grows 16× over the previous 4096 allowance and head sampling changed, so the
   TTFT/goodput gates and opener quality must be re-verified in the next GPU
   window. Accepted by the owner (2026-08-20) together with the
   research-scale tiers.

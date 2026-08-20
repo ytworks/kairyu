@@ -125,8 +125,8 @@ roles:
     sampling:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 16384
-      max_tokens_by_effort: {low: 4096, high: 16384, max: 32768}
+      max_tokens: 65536
+      max_tokens_by_effort: {low: 16384, high: 65536, max: 131072}
       seed_offset: 6
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[policies] Read the request below and
@@ -264,8 +264,8 @@ roles:
     sampling:
       temperature: 1.0
       top_p: 0.95
-      max_tokens: 16384
-      max_tokens_by_effort: {low: 4096, high: 16384, max: 32768}
+      max_tokens: 65536
+      max_tokens_by_effort: {low: 16384, high: 65536, max: 131072}
       seed_offset: 7
     prompt: |-
       <｜begin▁of▁sentence｜><｜User｜>[critique] Below are a request and an
@@ -387,11 +387,14 @@ default_reasoning_effort: high
 # The internal ceiling equals the max effort tier (DTO-D8): the thinking
 # DeepSeek roles' max_tokens_by_effort does the per-effort grading and is
 # min()'d against this ceiling and the caller's public max_tokens, so the
-# ceiling must admit the largest tier (32768). Thinking spans need the room:
-# composite deliberative prompts were measured overrunning 2048 entirely
-# inside the thinking span, leaving an empty public output. E2E latency is
-# unconstrained by design; only TTFT is.
-internal_max_tokens: 32768
+# ceiling must admit the largest tier (131072 — the vendor-recommended max
+# starting budget). Thinking spans need the room: composite deliberative
+# prompts were measured overrunning 2048 entirely inside the thinking span,
+# leaving an empty public output. E2E latency is unconstrained by design;
+# only TTFT is — and the TTFT gate is head-based with a paired
+# same-concurrency DeepSeek-direct denominator, so DeepSeek budget growth
+# does not move the committed gate.
+internal_max_tokens: 131072
 expose_intermediate_outputs: true
 
 # One profile, three waves under the level-synchronous scheduler:

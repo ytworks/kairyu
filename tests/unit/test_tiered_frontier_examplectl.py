@@ -73,7 +73,7 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "minimum_vram_mib": 90000,
     }
     assert spec["deepseek_l1_loopback_port"] == 8005
-    assert spec["verification"]["serving"]["auto_max_combined_max_tokens"] == 32768
+    assert spec["verification"]["serving"]["auto_max_combined_max_tokens"] == 131072
     assert spec["allocation"] == {
         "tier1": {
             "model": "qwen3.8-27b",
@@ -351,9 +351,9 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
-    assert maximum.internal_max_tokens == 32768
+    assert maximum.internal_max_tokens == 131072
     assert maximum.expose_intermediate_outputs is True
-    assert config["orchestration"]["internal_max_output_tokens"] == 32768
+    assert config["orchestration"]["internal_max_output_tokens"] == 131072
     assert (
         config["orchestration"]["product_policy"]
         == "dual-track-policy-ensemble-dag"
@@ -453,7 +453,7 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
     ui = compose["services"]["chat-ui"]
     assert ui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
     assert json.loads(ui["environment"]["DEFAULT_MODEL_PARAMS"]) == {
-        "max_tokens": 32768,
+        "max_tokens": 131072,
         "stream_response": False,
     }
     assert ui["environment"] | {

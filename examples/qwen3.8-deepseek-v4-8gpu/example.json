@@ -92,7 +92,7 @@
   },
   "orchestration": {
     "auto_max_model": "kairyu-auto-max",
-    "internal_max_output_tokens": 32768,
+    "internal_max_output_tokens": 131072,
     "product_policy": "dual-track-policy-ensemble-dag",
     "roles": [
       "head",
@@ -132,13 +132,13 @@
     "serving": {
       "prompt_tokens_approx": 8192,
       "output_tokens": 256,
-      "auto_max_combined_max_tokens": 32768,
+      "auto_max_combined_max_tokens": 131072,
       "concurrency": [1, 8, 16, 32],
       "requests_per_concurrency": 32
     },
     "coding": {
       "prompt_tokens_approx": 1536,
-      "auto_max_combined_max_tokens": 32768,
+      "auto_max_combined_max_tokens": 131072,
       "concurrency": [1, 8, 16, 32],
       "requests_per_concurrency": 32,
       "ttft_multiplier_vs_deepseek_direct": 2.0,

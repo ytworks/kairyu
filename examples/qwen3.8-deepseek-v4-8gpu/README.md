@@ -106,11 +106,11 @@ Design notes (see
   thinking-scaffold calls — all three DeepSeek roles — so `low` yields plain
   thinking and `high`/`max` strengthen every DeepSeek deliberation. The
   effort also grades the DeepSeek token budgets (DTO-D8): `policies` and
-  `critique` declare `max_tokens_by_effort` `{low: 4096, high: 16384,
-  max: 32768}` bounding thinking + answer together, still clamped by
-  `internal_max_tokens` and the request's public `max_tokens` — send a
-  generous public `max_tokens` (the Chat UI default is 32768) or the higher
-  tiers are clamped away.
+  `critique` declare `max_tokens_by_effort` `{low: 16384, high: 65536,
+  max: 131072}` — the vendor-recommended starting budgets — bounding
+  thinking + answer together, still clamped by `internal_max_tokens` and
+  the request's public `max_tokens` — send a generous public `max_tokens`
+  (the Chat UI default is 131072) or the higher tiers are clamped away.
 - There is no PASS/FAIL verifier and no refinement loop
   (`max_refine_depth: 0`): the critique stage is the DAG's quality control
   (DTO-D4). Budget: `max_steps: 10` (9 generation calls + 1 headroom for the

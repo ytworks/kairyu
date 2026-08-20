@@ -225,7 +225,7 @@ def test_moa_samples_rejects_unsafe_values(value):
         load_spec(YAML_SPEC.replace("moa_samples: 3", f"moa_samples: {value}"))
 
 
-@pytest.mark.parametrize("value", [0, 32769])
+@pytest.mark.parametrize("value", [0, 131073])
 def test_internal_max_tokens_rejects_unsafe_values(value):
     with pytest.raises(ValidationError, match="internal_max_tokens"):
         load_spec(
