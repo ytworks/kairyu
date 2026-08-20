@@ -73,7 +73,8 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "minimum_vram_mib": 90000,
     }
     assert spec["deepseek_l1_loopback_port"] == 8005
-    assert spec["verification"]["serving"]["auto_max_combined_max_tokens"] == 131072
+    assert spec["verification"]["serving"]["auto_max_combined_max_tokens"] == 65536
+    assert spec["verification"]["coding"]["auto_max_combined_max_tokens"] == 65536
     assert spec["allocation"] == {
         "tier1": {
             "model": "qwen3.8-27b",
@@ -351,30 +352,36 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
-    assert maximum.internal_max_tokens == 131072
+    # DTO-D12: DeepSeek budgets halved for the Terminal-Bench turn envelope;
+    # the ceiling admits the max tier.
+    assert maximum.internal_max_tokens == 65536
     assert maximum.public_output_floor == 256
     assert maximum.expose_intermediate_outputs is True
-    assert config["orchestration"]["internal_max_output_tokens"] == 131072
+    assert config["orchestration"]["internal_max_output_tokens"] == 65536
     assert (
         config["orchestration"]["product_policy"]
         == "dual-track-policy-ensemble-dag"
     )
-    assert config["orchestration"]["product_normal_calls"] == 9
-    assert config["orchestration"]["product_max_calls"] == 10
-    assert config["orchestration"]["product_max_refinements"] == 0
-    assert maximum.budget.max_steps == 10
-    assert maximum.budget.max_refine_depth == 0
+    # DTO-D10 budget: 10 generation units + 1 empty-output re-dispatch
+    # + 3 audit verdicts + 3 inconclusive re-verifies + 2 refinements.
+    assert config["orchestration"]["product_normal_calls"] == 10
+    assert config["orchestration"]["product_max_calls"] == 19
+    assert config["orchestration"]["product_max_refinements"] == 2
+    assert maximum.budget.max_steps == 19
+    assert maximum.budget.max_refine_depth == 2
     expected_roles = list(config["orchestration"]["roles"])
     assert [role.name for role in maximum.roles] == expected_roles == [
         "head",
         "draft",
+        "image_description",
         "policies",
         "answer_1",
         "answer_2",
         "answer_3",
         "answer_4",
         "critique",
-        "compose",
+        "synthesis",
+        "audit",
     ]
     by_name = {role.name: role for role in maximum.roles}
     # Effort policy (DTO-D6): Qwen roles are fixed spec policy — draft and
@@ -386,13 +393,15 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert efforts == {
         "head": None,
         "draft": "low",
+        "image_description": "low",
         "answer_1": "low",
         "answer_2": "low",
         "answer_3": "low",
         "answer_4": "low",
         "policies": "inherit",
         "critique": "inherit",
-        "compose": "inherit",
+        "synthesis": "inherit",
+        "audit": "inherit",
     }
     head = by_name["head"]
     assert head.role_type == "head" and head.worker == "tier1"
@@ -403,11 +412,20 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert draft.worker == "tier1" and draft.depends_on == ()
     critique = by_name["critique"]
     assert critique.worker == "tier2"
-    assert critique.depends_on == ("draft",)
-    # Track A: one non-thinking DeepSeek policy call fans out to four Qwen
+    assert critique.depends_on == ("draft", "image_description")
+    # DTO-D11: the Qwen image_description stage runs only on image requests
+    # and feeds every text-only DeepSeek role; the Qwen answerers see the
+    # image natively.
+    image_description = by_name["image_description"]
+    assert image_description.worker == "tier1"
+    assert image_description.requires == "image"
+    assert image_description.depends_on == ()
+    for role_name in ("policies", "critique", "synthesis", "audit"):
+        assert "{image_description}" in by_name[role_name].prompt
+    # Track A: one thinking DeepSeek policy call fans out to four Qwen
     # answerers, one per replica, each bound to its policy by prompt.
     policies = by_name["policies"]
-    assert policies.worker == "tier2" and policies.depends_on == ()
+    assert policies.worker == "tier2" and policies.depends_on == ("image_description",)
     answerers = [by_name[f"answer_{index}"] for index in range(1, 5)]
     assert all(role.worker == "tier1" for role in answerers)
     assert all(role.depends_on == ("policies",) for role in answerers)
@@ -416,30 +434,42 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
         assert f"POLICY {index}" in role.prompt
     # The merge is the selected final unit: it carries the caller's public
     # intent (no sampling override), continues the committed head opening,
-    # and renders prompt_headless on head-disabled (tool/format) turns.
-    compose = by_name["compose"]
-    assert compose.worker == "tier2"
-    assert compose.depends_on == (
+    # weighs the five candidates as peers (DTO-D10), and renders
+    # prompt_headless on head-disabled (tool/format) turns.
+    synthesis = by_name["synthesis"]
+    assert synthesis.worker == "tier2" and synthesis.role_type == "publisher"
+    assert synthesis.depends_on == (
         "head",
         "critique",
         "answer_1",
         "answer_2",
         "answer_3",
         "answer_4",
+        "image_description",
     )
-    # A thinking compose must not pre-close its reasoning span: with
+    assert "UNTRUSTED CANDIDATE 5" in synthesis.prompt
+    assert "REFINED ANSWER" not in synthesis.prompt
+    # A thinking synthesis must not pre-close its reasoning span: with
     # reasoning_closed the private deliberation would be reclaimed as the
     # public answer.
-    assert compose.reasoning_closed is False
-    # DTO-D9: the public-output floor force-closes compose's deliberation in
-    # the empty-output re-dispatch via this tag.
-    assert compose.reasoning_close_tag == "</think>"
-    assert compose.prompt_headless
+    assert synthesis.reasoning_closed is False
+    # DTO-D9: the public-output floor force-closes synthesis's deliberation
+    # in the empty-output re-dispatch via this tag.
+    assert synthesis.reasoning_close_tag == "</think>"
+    assert synthesis.prompt_headless
+    # DTO-D10: the audit verifier gates publication of the final unit with
+    # the first-line PASS/FAIL protocol; never greedy (issue #509).
+    audit = by_name["audit"]
+    assert audit.role_type == "verifier" and audit.worker == "tier2"
+    assert audit.verifies == "synthesis"
+    assert audit.depends_on == ("synthesis", "head", "image_description")
+    assert audit.sampling.temperature > 0.0
+    assert "PASS" in audit.prompt and "FAIL" in audit.prompt
     # DTO-D7: every DeepSeek role deliberates — all scaffolds end open.
-    for role_name in ("policies", "critique", "compose"):
+    for role_name in ("policies", "critique", "synthesis", "audit"):
         assert by_name[role_name].prompt_suffix == "<｜Assistant｜><think>"
     # Untrusted-data delimiters (MoA pattern) guard every cross-role payload.
-    for role_name in ("critique", "compose"):
+    for role_name in ("critique", "synthesis"):
         assert "UNTRUSTED" in by_name[role_name].prompt
     # One profile for every turn: no general ensemble, no profile judge, no
     # sandbox stages (the executor service stays deployed but unreferenced).
@@ -457,7 +487,7 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
     ui = compose["services"]["chat-ui"]
     assert ui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
     assert json.loads(ui["environment"]["DEFAULT_MODEL_PARAMS"]) == {
-        "max_tokens": 131072,
+        "max_tokens": 65536,
         "stream_response": False,
     }
     assert ui["environment"] | {
@@ -525,18 +555,20 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                         for name in (
                             "head",
                             "draft",
+                            "image_description",
                             "policies",
                             "answer_1",
                             "answer_2",
                             "answer_3",
                             "answer_4",
                             "critique",
-                            "compose",
+                            "synthesis",
+                            "audit",
                         )
                     ],
                     "stream_head": "head",
                     "moa_samples": 0,
-                    "budget": {"max_steps": 10, "max_refine_depth": 0},
+                    "budget": {"max_steps": 19, "max_refine_depth": 2},
                     "expose_intermediate_outputs": True,
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
@@ -740,7 +772,7 @@ def test_tiered_verification_rejects_storage_outside_nvme(
 
 
 
-def test_tiered_product_serving_requires_head_and_compose_trace(
+def test_tiered_product_serving_requires_head_and_synthesis_trace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     benchmark = _load(EXAMPLE / "verification.py", "tiered_example_product_verification")
@@ -759,7 +791,7 @@ def test_tiered_product_serving_requires_head_and_compose_trace(
             {
                 "tensor_parallel": 4,
                 "replicas": 1,
-                "expected_route": "compose",
+                "expected_route": "synthesis",
                 "expected_role": "publisher",
                 "expected_kind": "generation",
                 "warmup_requests": 4,
@@ -774,6 +806,7 @@ def test_tiered_product_serving_requires_head_and_compose_trace(
                     "answer_4",
                     "critique",
                 ),
+                "expected_verification_nodes": ("audit",),
             },
         )
     ]
@@ -806,10 +839,11 @@ def _write_product_serving_result(row_dir: Path, stages: list[dict]) -> None:
         "answer_3",
         "answer_4",
         "critique",
+        "audit",
     ],
 )
 @pytest.mark.parametrize("failure_mode", ["missing", "failed"])
-def test_tiered_product_serving_requires_every_internal_generation_stage(
+def test_tiered_product_serving_requires_every_internal_stage(
     node: str,
     failure_mode: str,
     tmp_path: Path,
@@ -821,7 +855,7 @@ def test_tiered_product_serving_requires_every_internal_generation_stage(
     stages = [
         {"node": "head", "kind": "generation", "status": "success"},
         {
-            "node": "compose",
+            "node": "synthesis",
             "role": "publisher",
             "kind": "generation",
             "status": "success",
@@ -830,6 +864,10 @@ def test_tiered_product_serving_requires_every_internal_generation_stage(
             {"node": name, "kind": "generation", "status": "success"}
             for name in benchmark._DUAL_TRACK_INTERNAL_NODES
         ],
+        *[
+            {"node": name, "role": "verifier", "kind": "verification", "status": "success"}
+            for name in benchmark._DUAL_TRACK_VERIFICATION_NODES
+        ],
     ]
 
     def validate() -> int:
@@ -837,10 +875,11 @@ def test_tiered_product_serving_requires_every_internal_generation_stage(
             tmp_path,
             1,
             32,
-            expected_route="compose",
+            expected_route="synthesis",
             expected_role="publisher",
             require_head=True,
             expected_generation_nodes=benchmark._DUAL_TRACK_INTERNAL_NODES,
+            expected_verification_nodes=benchmark._DUAL_TRACK_VERIFICATION_NODES,
         )
 
     _write_product_serving_result(tmp_path, stages)
@@ -896,8 +935,12 @@ def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
     gate = json.loads((tmp_path / "fallback" / "ttft-gate.json").read_text())
     assert gate["gates"]["1"]["denominator_source"] == "pinned_fallback"
     assert validations
-    assert all(row["expected_route"] == "compose" for row in validations)
+    assert all(row["expected_route"] == "synthesis" for row in validations)
     assert all(
         row["expected_generation_nodes"] == benchmark._DUAL_TRACK_INTERNAL_NODES
+        for row in validations
+    )
+    assert all(
+        row["expected_verification_nodes"] == benchmark._DUAL_TRACK_VERIFICATION_NODES
         for row in validations
     )

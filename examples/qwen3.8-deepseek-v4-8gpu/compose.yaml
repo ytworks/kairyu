@@ -324,7 +324,7 @@ services:
       OPENAI_API_KEY: sk-local-kairyu
       OPENAI_API_CONFIGS: '{"0":{"model_ids":["kairyu-auto-max"]}}'
       DEFAULT_MODELS: kairyu-auto-max
-      DEFAULT_MODEL_PARAMS: '{"max_tokens":131072,"stream_response":false}'
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":65536,"stream_response":false}'
       ENABLE_PERSISTENT_CONFIG: "false"
       RESET_CONFIG_ON_START: "true"
       ENABLE_SIGNUP: "false"

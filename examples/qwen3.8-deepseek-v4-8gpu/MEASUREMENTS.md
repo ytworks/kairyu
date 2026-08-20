@@ -9,6 +9,12 @@
 > DeepSeek-direct denominators remain the pinned `example.json` fallbacks),
 > and the older sections informed the unchanged L1 topology selection
 > (TP1×4 Qwen, DSpark-5/16K DeepSeek).
+>
+> **Scope note (2026-08-20):** the DTO-D10..D12 changes (synthesis weighs
+> five peer candidates and an inline DeepSeek audit gates publication, the
+> image-only `image_description` stage, DeepSeek budgets halved to
+> 8192/32768/65536 with a 65536 ceiling) are **not yet measured**; the
+> matrices below bind to the pre-DTO-D8 served-config digest.
 
 ## Dual-track DAG serving matrices (current deployment)
 

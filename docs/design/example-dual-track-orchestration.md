@@ -4,7 +4,10 @@ Status: **Accepted; implemented and GPU-verified** (2026-08-18; run
 `20260818T025710Z` — TTFT gate PASS at c1/8/16/32, binding c32 row 0.67×).
 The DTO-D8 sampling/budget amendments (2026-08-20) change the served config
 digest and are **not yet GPU re-verified**; re-verification is deferred to
-the next GPU window.
+the next GPU window. DTO-D10..D12 (2026-08-20: peer synthesis + audit loop
+on the final unit, the image-only `image_description` stage, halved DeepSeek
+budgets) are accepted and implemented, change the served-config digest
+again, and are likewise **not yet GPU-verified**.
 Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes.
 Supersedes the ECO-D2/D3/D5/D6 role graphs, profiles, and profile judge in
@@ -55,6 +58,10 @@ Three waves under the level-synchronous Conductor scheduler:
   DTO-D7) builds the best final answer from the refined answer plus the four
   UNTRUSTED candidates and streams the remainder after the committed
   opening; `prompt_headless` covers head-disabled (tool/format) turns.
+  Amended 2026-08-20 (DTO-D10): renamed `synthesis`, weighs the five
+  candidates as peers, and is verified inline by the `audit` role before
+  its remainder is published; wave 1 additionally runs `image_description`
+  on image requests only (DTO-D11).
 
 There is no general profile and no profile judge: dropping `general_roles`
 requires dropping `profile_judge` (spec validation), removes a serial
@@ -65,8 +72,9 @@ obedience — is carried by draft/answers/critique/compose).
 
 Budget: `max_steps: 10` (9 generation calls + 1 headroom for the bounded
 empty-final-output re-dispatch), `moa_samples: 0`,
-`internal_max_tokens: 4096` (raised to 131072 by DTO-D8, 2026-08-20),
-`expose_intermediate_outputs: true`.
+`internal_max_tokens: 4096` (raised to 131072 by DTO-D8, 2026-08-20, then
+halved to 65536 by DTO-D12), `expose_intermediate_outputs: true`. DTO-D10
+raises the budget to `{max_steps: 19, max_refine_depth: 2}`.
 
 Rationale: owner-specified process (2026-08-18) — diversity through four
 policy-differentiated answers, plus a critically refined quick draft, merged
@@ -121,6 +129,8 @@ Qwen calls and the serial pre-admission judge call is gone, so head TTFT
 stays clear of Qwen TP1 saturation.
 
 ### DTO-D4 — No verifier, no refinement loop; critique is the quality control
+
+**Superseded by DTO-D10 (owner decision, 2026-08-20).** Kept for the record.
 
 The owner's process has no PASS/FAIL verification stage:
 `max_refine_depth: 0` and no `verifies:` role. Track B's `critique` performs
@@ -304,23 +314,122 @@ way — a 502 after paying full dual-track cost (reproduced at `max_tokens:
   the floor shifts the thinking budget 0.2%; behavior changes only for
   small caller caps and the empty-output retry path.
 
+### DTO-D10 — Peer synthesis + inline audit loop on the final unit (owner amendment, 2026-08-20)
+
+Status: accepted; implemented; not GPU-verified.
+
+- `compose` → `synthesis`: the final unit no longer anchors on critique's
+  refined answer. It examines five UNTRUSTED CANDIDATE answers as peers —
+  `answer_1..4` and `critique` (CANDIDATE 5) — compares them, verifies their
+  claims independently, and writes one answer that is better than every
+  candidate. The committed-opening contract (never repeat the opening,
+  `NO_CONTINUATION`, blank-line continuation, reply-format obedience, no
+  pipeline mention), `prompt_headless`, the thinking scaffold, and
+  `reasoning_close_tag` are unchanged.
+- New `audit` role: `role_type: verifier`, `verifies: synthesis`, DeepSeek
+  thinking (tier2, `reasoning_effort: inherit`), T=1.0/top_p 0.95 — never
+  greedy (issue #509) — with the same effort-graded budget as
+  policies/critique, `depends_on: [synthesis, head, image_description]` so
+  it judges the committed opening plus the candidate remainder as one public
+  answer. Verdict protocol is the Conductor's: first line `PASS` or `FAIL`;
+  anything else is inconclusive and triggers one bounded re-verification; a
+  FAIL verdict is appended verbatim to the synthesis re-dispatch as
+  "Verifier feedback:" (`max_refine_depth: 2`); exhaustion publishes the
+  last attempt. `n > 1` skips the audit (one verdict cannot judge
+  independent choices).
+- Engine prerequisite (same day, `kairyu/orchestration`): a verified final
+  unit is published *deferred* in `Conductor.stream` — the head still
+  streams from t=0, the verify/refine loop runs to completion, and the
+  remainder is emitted once; the DTO-D9 floor retry runs before the verdict
+  (also with a committed head) and refinements reopen the scaffold.
+  Consequence: time-to-remainder grows by one DeepSeek verdict plus any
+  refinement rounds; TTFT (head) is unaffected; the remainder arrives as one
+  burst rather than progressively.
+- Budget arithmetic (image request, worst case; every `_generate` reserves
+  one step): 10 generation units + 1 empty-output re-dispatch + 3 audit
+  verdicts + 3 bounded inconclusive re-verifies + 2 refinements = 19 →
+  `budget: {max_steps: 19, max_refine_depth: 2}`; text requests leave one
+  spare step. `example.json`: `product_normal_calls: 10`,
+  `product_max_calls: 19`, `product_max_refinements: 2`.
+- Gates: `expected_route: synthesis`; the serving rows additionally require
+  an `audit` stage of kind `verification` (`expected_verification_nodes`).
+- Rationale: owner decision — audit the synthesized answer before the user
+  sees it, bounded; supersedes DTO-D4.
+
+### DTO-D11 — Image-only `image_description` stage (owner amendment, 2026-08-20)
+
+Status: accepted; implemented; not GPU-verified.
+
+- New Qwen role `image_description` (tier1 — the vision-capable pool,
+  `requires: image`, `reasoning_effort: low`, Qwen thinking-mode sampling,
+  2048 tokens, REQUEST-first framing): describes every attached image in
+  precise objective text (verbatim on-image text, diagrams, UI, layout,
+  anything the request refers to) and never answers the request.
+- `policies`, `critique`, `synthesis`, and `audit` (all text-only DeepSeek
+  roles, which otherwise see only `<image:N>` placeholders) depend on it and
+  render an `IMAGE DESCRIPTION (empty when the request has no image)` block;
+  the Qwen answerers see the image natively and are unchanged. Under the
+  level-synchronous scheduler only wave 1 grows by one Qwen call, on image
+  requests only.
+- Engine prerequisite (`requires: image`, same day): on text requests the
+  role is excluded entirely — no model call, no budget step, trace
+  `skipped:condition` (`reason: no_image`) — dependents run as if it were
+  absent and the slot renders as ""; head/final/verifier/executor roles
+  cannot be conditional; the Orchestrator rejects a conditional role on a
+  worker that does not accept images. The serving gates' expected
+  generation nodes therefore exclude it (text datasets); admission keeps
+  charging it (conservative).
+- Rationale: owner decision — give the text-only DeepSeek stages a faithful
+  textual view of the image without touching text-request latency.
+
+### DTO-D12 — DeepSeek budgets halved for the Terminal-Bench turn envelope (owner amendment, 2026-08-20; supersedes part of DTO-D8)
+
+Status: accepted; implemented; not GPU-verified.
+
+- `max_tokens_by_effort` on `policies`/`critique`/`audit`: `{16384, 65536,
+  131072}` → `{8192, 32768, 65536}` (fallback `max_tokens` 65536 → 32768);
+  `internal_max_tokens` 131072 → 65536 (the ceiling still admits the max
+  tier); Chat UI `DEFAULT_MODEL_PARAMS.max_tokens` and the harness
+  `auto_max_combined_max_tokens` 131072 → 65536; `public_output_floor` 256
+  unchanged (0.4% of the new default cap); Qwen role caps unchanged.
+- Rationale: Terminal-Bench turns increasingly time out before completion
+  against the 900 s agent budget; the serial thinking-DeepSeek chain is now
+  policies → critique → synthesis → audit plus refinement rounds, and the
+  harness calls with `max_output_tokens: 32768`, so the DeepSeek tiers — not
+  the Qwen caps — are the lever. `/v1/responses` still defaults
+  `max_output_tokens` to 1024 when a client omits it (pre-existing, not
+  changed here). Admission upper bound halves accordingly.
+- GPU consequences: the served-config digest changes; both `verify.sh` gates
+  and the Terminal-Bench-style Codex run must be re-measured in the next GPU
+  window.
+
 ## Acceptance
 
 - CPU suite green with the rewritten example pinning test
   (`tests/unit/test_tiered_frontier_examplectl.py`): worker list without
-  `sandbox`, the ordered nine-role dual-track list cross-checked against
-  `example.json`, no `general_roles`/`profile_judge`, budget `{10, 0}`,
-  `compose` on the thinking `tier2` worker with non-empty
-  `prompt_headless` (DTO-D7), UNTRUSTED delimiters in `critique`/`compose`, per-policy
-  binding (`POLICY n` in `answer_n`), distinct answerer seed offsets.
-- Launcher `_validate_ready` requires the nine-role dual-track DAG,
+  `sandbox`, the ordered eleven-role dual-track list (DTO-D10/D11)
+  cross-checked against `example.json`, no `general_roles`/`profile_judge`,
+  budget `{19, 2}`, `synthesis` on the thinking `tier2` worker with
+  non-empty `prompt_headless` (DTO-D7) and CANDIDATE 5 = critique, `audit`
+  verifying `synthesis` with a non-greedy PASS/FAIL prompt,
+  `image_description` on `tier1` with `requires: image` feeding every
+  DeepSeek role, UNTRUSTED delimiters in `critique`/`synthesis`, per-policy
+  binding (`POLICY n` in `answer_n`), distinct answerer seed offsets,
+  ceiling/Chat UI/harness caps 65536 (DTO-D12).
+- Launcher `_validate_ready` requires the eleven-role dual-track DAG,
   `stream_head: head`, exactly one role profile (no served general profile or
-  judge), `max_steps: 10`, `max_refine_depth: 0`, and the tier1/tier2 engine
+  judge), `max_steps: 19`, `max_refine_depth: 2`, and the tier1/tier2 engine
   bindings.
-- `serving-auto-max` passes end-to-end with the head/compose public stream
-  traced (`expected_route: compose`, `require_head`).
+- `serving-auto-max` passes end-to-end with the head/synthesis public stream
+  and the audit verdict traced (`expected_route: synthesis`, `require_head`,
+  `expected_verification_nodes: audit`).
 - `serving-auto-max-coding` passes its TTFT gate at every concurrency row
   (c32 is the watch row); results recorded in the example's MEASUREMENTS.md.
+- GPU re-verification list for DTO-D10..D12 (next window): both `verify.sh`
+  gates, a manual image chat (the `image_description` stage appears in the
+  internal-work item; `skipped:condition` on a text chat), and a
+  Terminal-Bench-style Codex run over `/v1/responses` checking per-turn time
+  against 900 s and that tool-call turns PASS the audit.
 - Test-policy accounting: the executor-status gate tests and the
   general/judge assertions were deleted with the features they protected;
   base→head collection counts reported in the change.
