@@ -770,12 +770,14 @@ async def test_async_prepare_reuses_exact_moa_proposal_requests(stream) -> None:
     orchestrator = _orchestrator(
         engines={"tier1": tier1, "tier2": tier2},
         moa_samples=2,
+        default_reasoning_effort="high",
     )
 
     prepared = await orchestrator.prepare_request(COMPLEX)
     proposals = tuple(tier1.prepared)
     assert len(proposals) == 2
     assert [request.sampling_params.seed for request in proposals] == [0, 1]
+    assert [request.reasoning_effort for request in proposals] == ["high", "high"]
 
     if stream:
         result_stream = await orchestrator.run_chat(
@@ -789,6 +791,8 @@ async def test_async_prepare_reuses_exact_moa_proposal_requests(stream) -> None:
         assert result.completions
 
     assert tuple(tier1.generated) == proposals
+    synthesis_requests = tier2.streamed if stream else tier2.generated
+    assert [request.reasoning_effort for request in synthesis_requests] == ["high"]
 
 
 async def test_async_prepare_rejects_exact_moa_seed_before_dispatch() -> None:

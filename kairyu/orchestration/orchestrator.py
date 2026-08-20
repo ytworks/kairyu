@@ -1005,6 +1005,7 @@ class Orchestrator:
                 call.sampling_params,
                 self._shared_prefix,
                 session="validation-moa",
+                reasoning_effort=self._effective_reasoning_effort(call),
             )
             key = self._internal_engine_keys(call, decision)[0]
             return tuple(_IntentRequest(key, request) for request in setup.proposal_requests)
@@ -1188,6 +1189,7 @@ class Orchestrator:
                 call.sampling_params,
                 self._shared_prefix,
                 session=f"preflight-moa-{suffix}",
+                reasoning_effort=self._effective_reasoning_effort(call),
             )
             proposal_key = self._internal_engine_keys(call, decision)[0]
             internal_requests = tuple(
@@ -1876,6 +1878,7 @@ class Orchestrator:
                             final_parallel_tool_calls=call.parallel_tool_calls,
                             final_tool_call_protocol=call.tool_call_protocol,
                             shared_prefix=self._shared_prefix,
+                            reasoning_effort=self._effective_reasoning_effort(call),
                         )
                     # M3: the deep MoA tier was invisible to the cost model / budget.
                     # Reconcile proposals + synthesis with the actual result cost;
@@ -2682,6 +2685,7 @@ class Orchestrator:
                         final_tool_call_protocol=call.tool_call_protocol,
                         shared_prefix=self._shared_prefix,
                         usage_observer=observe_moa_usage,
+                        reasoning_effort=self._effective_reasoning_effort(call),
                     )
                 async for event in self._with_initial_keepalives(moa_stream):
                     if event is None:
