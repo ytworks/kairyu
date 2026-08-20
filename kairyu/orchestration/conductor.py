@@ -2317,11 +2317,18 @@ class Conductor:
         keeps its best-so-far contract (EO-D7).
         """
 
-        if (
-            spec.name == self._selected_final_unit().name
-            and spec.name not in run.outputs
-            and not self._head_committed_text(run)
-        ):
+        if spec.name != self._selected_final_unit().name:
+            return
+        if spec.name in self._verifier_for:
+            # A verify/refine-loop failure may happen after an earlier attempt
+            # was stored in outputs. That attempt is either unverified or was
+            # explicitly rejected, so it cannot become the public fallback.
+            # A re-verification failure handled inside _run_unit never reaches
+            # this path and retains the documented inconclusive best-so-far.
+            run.outputs.pop(spec.name, None)
+            run.final_completions = ()
+            run.final_unit_completion_tokens = None
+        if spec.name not in run.outputs and not self._head_committed_text(run):
             run.final_unit_unusable = True
 
     def _final_text(self, run: _RunState) -> str:

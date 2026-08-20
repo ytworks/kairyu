@@ -1333,6 +1333,16 @@ class ScriptedFinalBackend:
         return None
 
 
+class FailingRefinementBackend(ScriptedFinalBackend):
+    """Produce one candidate, then fail its requested refinement."""
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        if self.requests_seen:
+            self.requests_seen.append(request)
+            raise RuntimeError("refinement failed")
+        return await super().generate(request)
+
+
 def _verified_final_roles(
     *, prompt_suffix: str = "", reasoning_close_tag: str = ""
 ) -> tuple[RoleSpec, ...]:
@@ -1438,6 +1448,29 @@ async def test_stream_verified_final_exhaustion_publishes_last_attempt():
     verified = [e for e in result.trace if e.kind == "verified"]
     assert verified[-1].metadata["pass"] is False
     assert verified[-1].metadata["refinement_exhausted"] is True
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_verified_final_refinement_failure_drops_rejected_attempt(stream):
+    final = FailingRefinementBackend([("text", "known-bad")])
+    audit = ScriptedFinalBackend([("text", "FAIL: wrong answer")])
+    conductor = Conductor(
+        _verified_floor_roles(),
+        {"cw": final, "vw": audit},
+    )
+
+    if stream:
+        events = await _collect(conductor.stream("task", Budget(max_refine_depth=1)))
+        result = events[-1].result
+        assert result is not None
+        assert [event.text for event in events if event.kind == "delta"] == []
+    else:
+        result = await conductor.run("task", Budget(max_refine_depth=1))
+
+    assert result.final_text == ""
+    assert not result.final_unit_ok
+    assert "continuation" not in result.outputs
+    assert any(event.kind == "failed" for event in result.trace)
 
 
 @pytest.mark.parametrize("stream", [False, True])
