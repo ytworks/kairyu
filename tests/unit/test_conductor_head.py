@@ -1299,3 +1299,13 @@ def test_public_output_floor_rejects_verifier_on_final_unit():
             {"cw": ThinkExhaustedBackend([""])},
             public_output_floor=64,
         )
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 131_073, 1.5, "64"])
+def test_public_output_floor_rejects_invalid_direct_values(value):
+    with pytest.raises(ValueError, match="integer between 1 and 131072"):
+        Conductor(
+            _floor_roles(),
+            {"cw": ThinkExhaustedBackend([""])},
+            public_output_floor=value,
+        )

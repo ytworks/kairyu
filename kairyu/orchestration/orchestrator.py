@@ -322,6 +322,14 @@ class Orchestrator:
             raise ValueError(
                 "orchestration shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
             )
+        if public_output_floor is not None and (
+            isinstance(public_output_floor, bool)
+            or not isinstance(public_output_floor, int)
+            or not 1 <= public_output_floor <= 131_072
+        ):
+            raise ValueError(
+                "public_output_floor must be an integer between 1 and 131072"
+            )
         if public_output_floor is not None and moa_samples > 0:
             raise ValueError(
                 "public_output_floor cannot be combined with moa_samples > 0; "
