@@ -618,6 +618,20 @@ async def test_image_conditional_role_runs_first_with_image():
     )
 
 
+def test_role_prompt_with_literal_brace_pair_is_rejected_at_load():
+    """A literal `{...}` is a positional format field: it raised only at request
+    time, after the stage's dependencies had run (tiered-example audit outage)."""
+
+    with pytest.raises(ValidationError, match="escape literal braces"):
+        load_spec(
+            """
+workers: [{name: w, engine_ref: w}]
+roles:
+  - {name: final, worker: w, prompt: "tool call like <tool_call>{...}</tool_call> for {query}"}
+"""
+        )
+
+
 def test_image_conditional_head_is_rejected_at_load():
     with pytest.raises(ValidationError, match="head role 'head' cannot declare requires"):
         load_spec(
