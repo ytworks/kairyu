@@ -103,6 +103,7 @@ in `.claude/rules/progress-log.md`).
   final unit's attempt 0 thinks within budget−floor, and the existing bounded
   empty-output re-dispatch continues the captured reasoning after a forced
   close with the reserve, reclaimed as public. Example: floor 256 on compose.
+  Fixes #546–#549: direct-API bounds; verified-final/MoA rejected; n>1 no floor.
 - Why: issue #542 — a small caller max_tokens was eaten whole by thinking
   and 502'd after full DAG cost; owner chose option 1. GPU gates not re-run
   (floor is 0.2% of the recorded 131072-cap runs).

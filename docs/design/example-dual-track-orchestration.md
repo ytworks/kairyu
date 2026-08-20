@@ -269,9 +269,12 @@ way — a 502 after paying full dual-track cost (reproduced at `max_tokens:
 
 - **Config**: spec-level `public_output_floor` (the final unit cannot declare
   sampling), plus role-level `reasoning_close_tag` — the literal that closes
-  the span the role's `prompt_suffix` opens. A floor without the final
-  unit's close tag fails Conductor validation at deployment startup. The
-  example sets floor 256 (the head opener's sizing of a meaningful public
+  the span the role's `prompt_suffix` opens. A floor fails Conductor
+  validation at deployment startup when the final unit has no close tag,
+  when a verifier is attached to the final unit (the unary retry would skip
+  phase B), or in MoA mode (`moa_samples > 0` never consumes it); direct
+  `Conductor`/`Orchestrator` construction enforces the DSL `1..131072`
+  bounds (review fixes #546–#549). The example sets floor 256 (the head opener's sizing of a meaningful public
   chunk; 0.2% of the Chat UI default cap) and `</think>` on `compose`.
 - **Phase A**: the final unit's attempt 0 dispatches with `max_tokens =
   B − floor` (B = caller cap minus committed-head spend), capping thinking.
