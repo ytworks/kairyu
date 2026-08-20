@@ -858,6 +858,33 @@ def _response_format(text: dict | None) -> dict | None:
     raise ChatRequestError(f"text.format.type {kind!r} is not supported")
 
 
+# OpenAI-style Responses efforts normalized onto Kairyu's L3 levels
+# (low|high|max). Clients such as Codex send minimal..xhigh; Kairyu-native
+# levels pass through verbatim, and xhigh grants the max tier.
+_REASONING_EFFORT_LEVELS = {
+    "minimal": "low",
+    "low": "low",
+    "medium": "high",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max",
+}
+
+
+def _reasoning_effort(reasoning: dict | None) -> str | None:
+    if not reasoning:
+        return None
+    effort = reasoning.get("effort")
+    if effort is None:
+        return None
+    normalized = (
+        _REASONING_EFFORT_LEVELS.get(effort) if isinstance(effort, str) else None
+    )
+    if normalized is None:
+        raise ChatRequestError(f"reasoning.effort {effort!r} is not supported")
+    return normalized
+
+
 def _to_chat_request(
     request: ResponsesRequest,
     items: Sequence[dict],
@@ -885,6 +912,9 @@ def _to_chat_request(
         values["temperature"] = request.temperature
     if request.top_p is not None:
         values["top_p"] = request.top_p
+    reasoning_effort = _reasoning_effort(request.reasoning)
+    if reasoning_effort is not None:
+        values["reasoning_effort"] = reasoning_effort
     return ChatCompletionRequest(
         model=request.model,
         messages=messages,

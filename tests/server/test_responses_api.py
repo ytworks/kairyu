@@ -623,6 +623,46 @@ def test_reasoning_input_items_are_accepted_and_dropped(tmp_path):
     assert "thinking" not in backend.prompts_seen[0]
 
 
+def test_reasoning_effort_is_normalized_onto_l3_levels(tmp_path):
+    # Codex sends OpenAI-style efforts (minimal..xhigh); /v1/responses must
+    # map them onto Kairyu's L3 levels instead of silently dropping them.
+    class RecordingBackend(MockBackend):
+        def __init__(self):
+            super().__init__({"hello": "hi there"})
+            self.requests = []
+
+        async def generate(self, request):
+            self.requests.append(request)
+            return await super().generate(request)
+
+    backend = RecordingBackend()
+    with TestClient(_app(tmp_path, backend)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": "hello",
+                "reasoning": {"effort": "medium"},
+            },
+        )
+    assert response.status_code == 200
+    assert backend.requests[-1].reasoning_effort == "high"
+
+
+def test_unknown_reasoning_effort_is_rejected(tmp_path):
+    with TestClient(_app(tmp_path)) as http:
+        response = http.post(
+            "/v1/responses",
+            json={
+                "model": "m",
+                "input": "hello",
+                "reasoning": {"effort": "ultra"},
+            },
+        )
+    assert response.status_code == 400
+    assert "reasoning.effort" in response.json()["error"]["message"]
+
+
 def test_remote_compaction_trigger_round_trip(tmp_path):
     # Remote compaction v2 (Codex against an OpenAI-shaped provider): a
     # terminal compaction_trigger input item must yield exactly one
