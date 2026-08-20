@@ -598,6 +598,73 @@ def test_tiered_embedding_smoke_rejects_malformed_contract(
         control._validate_embedding_smoke(response)
 
 
+class _FakeWebUI:
+    """Model the pinned Open WebUI function API, including flip-only toggles."""
+
+    def __init__(self) -> None:
+        self.functions: dict[str, dict] = {}
+        self.calls: list[str] = []
+        self.role = "admin"
+
+    def __call__(self, ui_url, path, *, token=None, payload=None, method=None):
+        self.calls.append(path)
+        if path == "/api/v1/auths/signin":
+            return {"role": self.role, "token": "session-token"}
+        assert token == "session-token"
+        if path == "/api/v1/functions/":
+            return [dict(row) for row in self.functions.values()]
+        if path == "/api/v1/functions/create":
+            row = {**payload, "is_active": False, "is_global": False}
+            self.functions[payload["id"]] = row
+            return dict(row)
+        prefix = "/api/v1/functions/id/"
+        assert path.startswith(prefix)
+        function_id, _, action = path[len(prefix) :].partition("/")
+        row = self.functions[function_id]
+        if action == "update":
+            row.update(payload)
+            return dict(row)
+        if action in {"toggle", "toggle/global"}:
+            key = "is_active" if action == "toggle" else "is_global"
+            row[key] = not row[key]
+            return dict(row)
+        assert action == "valves/user/spec"
+        return {
+            "properties": {
+                "reasoning_effort": {"enum": ["default", "low", "high", "max"]}
+            }
+        }
+
+
+def test_tiered_chat_ui_effort_selector_provision_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _load(EXAMPLE / "control.py", "tiered_chat_ui_effort_selector")
+    webui = _FakeWebUI()
+    monkeypatch.setattr(control, "_webui_api", webui)
+
+    control._provision_chat_ui_effort_selector("http://127.0.0.1:3000")
+    row = webui.functions["reasoning_effort"]
+    assert row["is_active"] and row["is_global"]
+    assert "class Filter" in row["content"]
+    assert webui.calls.count("/api/v1/functions/create") == 1
+    toggles = [call for call in webui.calls if call.endswith(("toggle", "toggle/global"))]
+    assert len(toggles) == 2
+
+    # Re-provisioning must refresh content without flipping activation off.
+    webui.calls.clear()
+    control._provision_chat_ui_effort_selector("http://127.0.0.1:3000")
+    assert webui.functions["reasoning_effort"]["is_active"]
+    assert webui.functions["reasoning_effort"]["is_global"]
+    assert "/api/v1/functions/create" not in webui.calls
+    assert "/api/v1/functions/id/reasoning_effort/update" in webui.calls
+    assert not [call for call in webui.calls if call.endswith(("toggle", "toggle/global"))]
+
+    webui.role = "user"
+    with pytest.raises(SystemExit, match="admin"):
+        control._provision_chat_ui_effort_selector("http://127.0.0.1:3000")
+
+
 def test_tiered_control_requires_exact_eight_gpu_inventory() -> None:
     control = _load(EXAMPLE / "control.py", "tiered_example_control")
     text = "\n".join(

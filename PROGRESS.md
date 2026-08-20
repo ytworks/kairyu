@@ -98,6 +98,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-20 — [progress] Chat UI reasoning-effort dropdown provisioned by the launcher
+- What: the tiered example's `up` installs and self-verifies a globally
+  active Open WebUI filter whose enum user valve renders Reasoning Effort as
+  a Chat Controls dropdown (default/low/high/max) forwarded as
+  `reasoning_effort`; re-up refreshes content without flipping activation off.
+- Why: owner — the DTO-D6 Chat UI knob must be selectable, and the pinned
+  Open WebUI v0.11.0 (and upstream main) only offers a free-text field.
+- Refs: DTO-D6; examples/qwen3.8-deepseek-v4-8gpu/{control.py,
+  webui-reasoning-effort-filter.py,README.md}
+
 ### 2026-08-20 — [amendment] Chat effort aliases match the pinned UI
 - What: /v1/chat/completions now accepts the same OpenAI-style aliases as
   Responses and normalizes minimal/low→low, medium/high→high, xhigh/max→max.

@@ -202,9 +202,14 @@ positive usage before printing the URL.
 
 Requests default to `reasoning_effort: high` (`default_reasoning_effort` in
 `auto-max.yaml`). To pick a different level per chat, open Open WebUI's Chat
-Controls → Advanced Params and set **Reasoning Effort** to `low`, `high`, or
-`max` — Open WebUI forwards the value as the OpenAI-compatible
-`reasoning_effort` body field, and Kairyu L3 rejects anything else with a 422.
+Controls → Valves and choose **Reasoning Effort** from the dropdown
+(`default`/`low`/`high`/`max`; `default` leaves the server default in
+charge). The dropdown is a globally active Open WebUI filter
+(`webui-reasoning-effort-filter.py`) that the launcher installs and
+self-verifies on every `up` — the stock v0.11.0 Advanced Params field is a
+free-text input and stays available, but the selectable valve is the
+supported product surface. The selection is forwarded as the
+OpenAI-compatible `reasoning_effort` body field.
 The chosen level flows through the `inherit`-declared DeepSeek roles and
 grades every DeepSeek deliberation (`policies`, `critique`, `compose`) as
 well as their thinking+answer token budgets (`max_tokens_by_effort`,
