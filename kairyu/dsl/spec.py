@@ -303,6 +303,11 @@ class OrchestratorSpec(BaseModel):
                 "general_roles cannot be combined with moa_samples > 0; "
                 "choose role DAG profiles or MoA mode"
             )
+        if self.public_output_floor is not None and self.moa_samples > 0:
+            raise ValueError(
+                "public_output_floor cannot be combined with moa_samples > 0; "
+                "the floor applies only to the Conductor final unit"
+            )
         if self.profile_judge is not None:
             if not self.general_roles:
                 raise ValueError("profile_judge requires general_roles")

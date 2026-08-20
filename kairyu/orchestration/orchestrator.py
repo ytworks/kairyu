@@ -322,6 +322,11 @@ class Orchestrator:
             raise ValueError(
                 "orchestration shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
             )
+        if public_output_floor is not None and moa_samples > 0:
+            raise ValueError(
+                "public_output_floor cannot be combined with moa_samples > 0; "
+                "the floor applies only to the Conductor final unit"
+            )
         if general_roles and moa_samples > 0:
             raise ValueError(
                 "general_roles cannot be combined with moa_samples > 0; "
