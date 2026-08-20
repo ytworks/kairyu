@@ -884,6 +884,11 @@ class Conductor:
                     "public_output_floor requires the final unit "
                     f"{final.name!r} to declare reasoning_close_tag"
                 )
+            if self._public_output_floor is not None and final.name in self._verifier_for:
+                raise ValueError(
+                    "public_output_floor cannot be combined with a verifier on "
+                    f"the final unit {final.name!r}"
+                )
 
     def _validate_head(self) -> None:
         heads = [role for role in self._roles if role.role_type == "head"]
