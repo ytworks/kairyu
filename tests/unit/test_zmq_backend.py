@@ -1835,6 +1835,25 @@ async def test_native_process_layouts_accept_response_format_extension():
         await process_split.shutdown()
 
 
+async def test_native_process_layouts_reject_chat_template_kwargs():
+    request = GenerationRequest(
+        request_id="template-kwargs-parity",
+        prompt="surface parity",
+        sampling_params=SamplingParams(max_tokens=1),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    in_process = KairyuBackend(num_pages=64)
+    process_split = ZmqEngineBackend(num_pages=64)
+    try:
+        for backend in (in_process, process_split):
+            with pytest.raises(ValueError, match="chat_template_kwargs"):
+                backend.validate_request(request)
+        assert process_split._process is None
+    finally:
+        await in_process.shutdown()
+        await process_split.shutdown()
+
+
 async def test_process_sync_validation_rejects_malformed_grammar_without_context_limit():
     tokenizer = ToyTokenizer()
     tokenizer.eos_token_id = 0

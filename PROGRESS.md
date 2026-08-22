@@ -98,6 +98,16 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-22 — [amendment] Non-thinking L2 calls declare enable_thinking=false (DTO-D13 live fix)
+- What: live check showed the route judge's verdict arriving empty on the
+  deployed vLLM v0.23 Qwen service (Qwen3 parser drops non-streamed output
+  without an explicit `enable_thinking=false`), so every request fell back
+  to the ensemble. Judge requests and effort-less roles on workers that
+  accept `enable_thinking` now send it; `GenerationRequest` allows template
+  kwargs on text chat prompts (still not on pre-rendered/token prompts).
+- Why: vendor/vLLM contract for Qwen3 non-thinking calls; amends the entry below.
+- Refs: DTO-D13 amendment; kairyu/{engine/backend.py,orchestration/conductor.py,orchestration/orchestrator.py}
+
 ### 2026-08-22 — [design] Qwen-judged five-route selection for the tiered example (DTO-D13)
 - What: L2 DSL `general_roles`/`CODE|GENERAL` judge generalized to N named
   `profiles` + `profile_judge {choices: [{profile,label,criteria}], fallback}`

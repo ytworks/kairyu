@@ -482,6 +482,18 @@ are judged too; judge failure falls back to the ensemble.
   `profile_judge`, `profile_final_roles`, `direct_route_max_tokens`,
   `ttft_gated_profiles`; `control.py::_validate_ready` asserts the profiles,
   judge choices, and `tier2-direct` binding.
+- **Amendment (2026-08-22, live verification)**: on the deployed vLLM
+  v0.23 Qwen service the judge returned an empty verdict on every request
+  and 100% of traffic fell back to the ensemble — vLLM's Qwen3 reasoning
+  parser defaults to "thinking enabled" and drops a non-streamed answer that
+  never emits `</think>` unless the request carries
+  `chat_template_kwargs: {enable_thinking: false}` (the head survived only
+  because it streams). Fix: the judge and every effort-less role whose worker
+  accepts `enable_thinking` now send that switch explicitly (Conductor
+  `_worker_chat_template_kwargs`, judge request, and the exact final
+  preflight intent); `GenerationRequest` accepts template kwargs on any
+  upstream-templated chat prompt (text or multimodal; still rejected on
+  pre-rendered/token prompts). No example-config change.
 - **Supersedes**: ECO-D6's "there is no single-engine route in auto-max"
   and its head-disable profile short-circuit; DTO-D1's "one DAG for every
   request" now describes the `primary` profile.

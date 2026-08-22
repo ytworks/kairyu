@@ -2014,3 +2014,84 @@ async def test_judged_call_preflight_matches_execution():
     prompts = tier1.prompts_seen + tier2.prompts_seen
     assert any("[g_prop]" in prompt for prompt in prompts)
     assert not any("[c_final" in prompt for prompt in prompts)
+
+
+async def test_judge_and_non_thinking_final_disable_thinking_explicitly():
+    """DTO-D13 amendment: the judge (non-streamed, non-thinking) and an
+    effort-less final unit tell a capable worker enable_thinking=False; the
+    preflight final intent carries the same kwargs as the dispatch."""
+    from kairyu.orchestration.conductor import RoleSpec
+
+    class ThinkingSwitchBackend(MockBackend):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.validated: list[GenerationRequest] = []
+            self.generated: list[GenerationRequest] = []
+
+        def supports_chat_template_kwargs(self, keys: frozenset[str]) -> bool:
+            return keys <= {"enable_thinking"}
+
+        def validate_request(self, request: GenerationRequest) -> None:
+            self.validated.append(request)
+            super().validate_request(request)
+
+        async def generate(self, request: GenerationRequest) -> GenerationResult:
+            self.generated.append(request)
+            return await super().generate(request)
+
+    class MultiAgentRouter:
+        def preview(self, query, context=None):
+            return RuleRouter().route(COMPLEX)
+
+        def route(self, query, context=None):
+            return RuleRouter().route(COMPLEX)
+
+    tier1 = ThinkingSwitchBackend()
+    tier2 = MockBackend()
+    judge = ThinkingSwitchBackend(responses={"Reply with exactly one word": "FAST"})
+    from kairyu.orchestration.orchestrator import ProfileChoice, ProfileJudge
+
+    orchestrator = Orchestrator(
+        engines={"tier1": tier1, "tier2": tier2, "judge": judge},
+        router=MultiAgentRouter(),
+        roles=(
+            RoleSpec(name="prop", worker="tier2", prompt="[prop] {query}"),
+            RoleSpec(
+                name="final",
+                worker="tier1",
+                role_type="publisher",
+                depends_on=("prop",),
+                prompt="[final] {query} {prop}",
+            ),
+        ),
+        profiles={
+            "fast": (
+                RoleSpec(
+                    name="fast", worker="tier1", role_type="publisher", prompt="[fast] {query}"
+                ),
+            ),
+        },
+        profile_judge=ProfileJudge(
+            worker="judge",
+            choices=(
+                ProfileChoice("fast", "FAST", "trivial"),
+                ProfileChoice("primary", "SLOW", "rest"),
+            ),
+        ),
+        default_reasoning_effort="high",
+    )
+    call = OrchestrationRequest(prompt="hello there", sampling_params=SamplingParams(max_tokens=32))
+
+    judged = await orchestrator.judge_role_profile(call)
+    assert judged.role_profile_judgment == "fast"
+    assert judge.generated[0].chat_template_kwargs == {"enable_thinking": False}
+
+    # Primary (non-initial final on the capable worker): preflight and
+    # dispatch agree on the explicit non-thinking switch.
+    primary_call = replace(judged, role_profile_judgment="primary")
+    orchestrator.validate_request(primary_call)
+    assert tier1.validated[-1].chat_template_kwargs == {"enable_thinking": False}
+    assert tier1.validated[-1].reasoning_effort is None
+    await orchestrator.run(primary_call)
+    assert tier1.generated[-1].chat_template_kwargs == {"enable_thinking": False}
+    assert tier1.generated[-1].reasoning_effort is None

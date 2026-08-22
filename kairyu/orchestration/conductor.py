@@ -759,6 +759,21 @@ class Conductor:
             effort=self._role_reasoning_effort(final),
         )
 
+    def final_intent_chat_template_kwargs(self, prompt: object) -> Mapping[str, object] | None:
+        """The template variables the final unit's dispatch will carry for
+        ``prompt`` — for an exact preflight contract."""
+
+        if not self._units:
+            return None
+        return self._worker_chat_template_kwargs(self._selected_final_unit(), prompt)
+
+    def final_intent_reasoning_effort(self) -> str | None:
+        """The resolved reasoning effort the final unit will dispatch."""
+
+        if not self._units:
+            return None
+        return self._role_reasoning_effort(self._selected_final_unit())
+
     def final_intent_sampling_params(self) -> SamplingParams:
         """Effective final-unit params before run-local budget deductions.
 
@@ -1035,14 +1050,22 @@ class Conductor:
         spec: RoleSpec,
         prompt: object,
     ) -> Mapping[str, object] | None:
-        if not isinstance(prompt, MultimodalPrompt):
+        if isinstance(prompt, TemplatedPrompt):
+            # Pre-rendered scaffolds bypass the upstream template.
             return None
-        kwargs = self._chat_template_kwargs
-        if (
-            kwargs is not None
-            and self._role_reasoning_effort(spec) is not None
-            and "enable_thinking" in kwargs
-        ):
+        kwargs = self._chat_template_kwargs if isinstance(prompt, MultimodalPrompt) else None
+        effort = self._role_reasoning_effort(spec)
+        if effort is None:
+            # A non-thinking role must say so explicitly: upstream reasoning
+            # parsers (vLLM's Qwen3 parser) default to "thinking enabled" and
+            # drop a non-streamed answer that never emits </think> unless the
+            # request carries enable_thinking=False (DTO-D13 amendment).
+            if backend_supports_chat_template_kwargs(
+                self._workers[spec.worker],
+                frozenset({"enable_thinking"}),
+            ):
+                kwargs = {**(kwargs or {}), "enable_thinking": False}
+        elif kwargs is not None and "enable_thinking" in kwargs:
             kwargs = {**kwargs, "enable_thinking": True}
         if kwargs is not None and not backend_supports_chat_template_kwargs(
             self._workers[spec.worker],

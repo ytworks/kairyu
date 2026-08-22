@@ -821,6 +821,19 @@ class Orchestrator:
         )
         if self._profile_judge.prompt_prefix or self._profile_judge.prompt_suffix:
             prompt = TemplatedPrompt(prompt)
+        # The judge never thinks; an upstream reasoning parser must be told so
+        # explicitly or it drops the non-streamed verdict (vLLM Qwen3 parser
+        # contract, DTO-D13 amendment). Pre-rendered scaffolds carry no
+        # template variables.
+        chat_template_kwargs = (
+            {"enable_thinking": False}
+            if not isinstance(prompt, TemplatedPrompt)
+            and backend_supports_chat_template_kwargs(
+                self._engines[self._profile_judge.worker],
+                frozenset({"enable_thinking"}),
+            )
+            else None
+        )
         return GenerationRequest(
             request_id=f"profile-judge-{uuid.uuid4().hex[:12]}",
             prompt=prompt,
@@ -828,6 +841,7 @@ class Orchestrator:
                 max_tokens=self._profile_judge.max_tokens,
                 temperature=0.0,
             ),
+            chat_template_kwargs=chat_template_kwargs,
         )
 
     @staticmethod
@@ -1078,21 +1092,31 @@ class Orchestrator:
         decision: RouteDecision | None,
     ) -> tuple[_IntentRequest, ...]:
         sampling_params = call.sampling_params
+        reasoning_effort = self._effective_reasoning_effort(call)
+        conductor = None
         if (
             decision is not None
             and decision.target == "multi_agent"
             and self._moa_samples == 0
         ):
-            sampling_params = self._new_conductor(
-                call,
-                [],
-            ).final_intent_sampling_params()
+            conductor = self._new_conductor(call, [])
+            sampling_params = conductor.final_intent_sampling_params()
+            reasoning_effort = conductor.final_intent_reasoning_effort()
         requests: list[_IntentRequest] = []
         for key in self._final_engine_keys(call, decision):
             prompt = self._engine_prompt(
                 key,
                 call,
                 f"{self._shared_prefix}{call.prompt}",
+            )
+            chat_template_kwargs = (
+                conductor.final_intent_chat_template_kwargs(prompt)
+                if conductor is not None
+                else (
+                    call.chat_template_kwargs
+                    if isinstance(prompt, MultimodalPrompt)
+                    else None
+                )
             )
             requests.append(
                 _IntentRequest(
@@ -1106,12 +1130,8 @@ class Orchestrator:
                         tools_in_prompt=call.tools_in_prompt,
                         parallel_tool_calls=call.parallel_tool_calls,
                         tool_call_protocol=call.tool_call_protocol,
-                        reasoning_effort=self._effective_reasoning_effort(call),
-                        chat_template_kwargs=(
-                            call.chat_template_kwargs
-                            if isinstance(prompt, MultimodalPrompt)
-                            else None
-                        ),
+                        reasoning_effort=reasoning_effort,
+                        chat_template_kwargs=chat_template_kwargs,
                     ),
                 )
             )
