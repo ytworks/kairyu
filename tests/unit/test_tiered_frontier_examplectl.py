@@ -344,11 +344,12 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
 
-    assert [worker.name for worker in maximum.workers] == ["tier1", "tier2"]
+    assert [worker.name for worker in maximum.workers] == ["tier1", "tier2", "tier2-direct"]
     assert maximum.workers[0].engine_ref == "qwen3.8-27b"
-    # Every DeepSeek v4 flash role thinks (DTO-D7): one thinking worker, no
-    # tier2-direct.
+    # Every primary-profile DeepSeek role thinks (DTO-D7) on tier2; the
+    # non-thinking pool serves only the deepseek_direct route (DTO-D13).
     assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
+    assert maximum.workers[2].engine_ref == "deepseek-v4-flash-0731"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
@@ -358,10 +359,7 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert maximum.public_output_floor == 256
     assert maximum.expose_intermediate_outputs is True
     assert config["orchestration"]["internal_max_output_tokens"] == 65536
-    assert (
-        config["orchestration"]["product_policy"]
-        == "dual-track-policy-ensemble-dag"
-    )
+    assert config["orchestration"]["product_policy"] == "judged-five-route-dual-track"
     # DTO-D10 budget: 10 generation units + 1 empty-output re-dispatch
     # + 3 audit verdicts + 3 inconclusive re-verifies + 2 refinements.
     assert config["orchestration"]["product_normal_calls"] == 10
@@ -471,13 +469,78 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     # Untrusted-data delimiters (MoA pattern) guard every cross-role payload.
     for role_name in ("critique", "synthesis"):
         assert "UNTRUSTED" in by_name[role_name].prompt
-    # One profile for every turn: no general ensemble, no profile judge, no
-    # sandbox stages (the executor service stays deployed but unreferenced).
-    assert maximum.general_roles == ()
-    assert maximum.profile_judge is None
+    # DTO-D13: a Qwen non-thinking route judge selects one of five profiles
+    # per request; the four direct routes are single publisher roles with the
+    # official per-mode sampling fixed on the final unit and the
+    # vendor-official output caps. No sandbox stages anywhere.
     assert not any(role.role_type == "executor" for role in maximum.roles)
-    assert "general_roles" not in config["orchestration"]
-    assert "profile_judge_worker" not in config["orchestration"]
+    judge = maximum.profile_judge
+    assert judge is not None
+    assert judge.worker == "tier1" and judge.fallback == "primary"
+    assert judge.timeout_seconds == 5.0 and judge.max_tokens == 8
+    assert judge.prompt_prefix == "" and judge.prompt_suffix == ""
+    expected_judge = config["orchestration"]["profile_judge"]
+    assert expected_judge["worker"] == "tier1" and expected_judge["fallback"] == "primary"
+    assert [
+        {"label": choice.label, "profile": choice.profile} for choice in judge.choices
+    ] == expected_judge["choices"] == [
+        {"label": "QWEN", "profile": "qwen_direct"},
+        {"label": "QWEN_THINK", "profile": "qwen_think_low"},
+        {"label": "DEEPSEEK", "profile": "deepseek_direct"},
+        {"label": "DEEPSEEK_THINK", "profile": "deepseek_think"},
+        {"label": "ENSEMBLE", "profile": "primary"},
+    ]
+    assert all(choice.criteria.strip() for choice in judge.choices)
+    profiles = {profile.name: profile.roles for profile in maximum.profiles}
+    assert {name: [role.name for role in roles] for name, roles in profiles.items()} == {
+        name: list(roles) for name, roles in config["orchestration"]["profiles"].items()
+    }
+    assert all(len(roles) == 1 and roles[0].role_type == "publisher" for roles in profiles.values())
+    finals = {name: roles[0] for name, roles in profiles.items()}
+    assert config["orchestration"]["profile_final_roles"] == {
+        "primary": "synthesis",
+        **{name: role.name for name, role in finals.items()},
+    }
+    caps = config["orchestration"]["direct_route_max_tokens"]
+    assert {name: role.sampling.max_tokens for name, role in finals.items()} == caps == {
+        "qwen_direct": 131072,
+        "qwen_think_low": 131072,
+        "deepseek_direct": 393216,
+        "deepseek_think": 393216,
+    }
+    sampling = {
+        name: {
+            key: value
+            for key, value in role.sampling.model_dump().items()
+            if value not in (None, ())
+        }
+        for name, role in finals.items()
+    }
+    assert sampling == config["orchestration"]["direct_route_sampling"]
+    qwen_answer = finals["qwen_direct"]
+    assert qwen_answer.worker == "tier1" and qwen_answer.reasoning_effort is None
+    assert (qwen_answer.sampling.temperature, qwen_answer.sampling.top_p) == (0.7, 0.8)
+    assert qwen_answer.sampling.top_k == 20 and qwen_answer.sampling.presence_penalty == 1.5
+    qwen_think = finals["qwen_think_low"]
+    assert qwen_think.worker == "tier1" and qwen_think.reasoning_effort == "low"
+    assert (qwen_think.sampling.temperature, qwen_think.sampling.top_p) == (1.0, 0.95)
+    assert qwen_think.sampling.top_k == 20 and qwen_think.sampling.presence_penalty is None
+    deepseek_answer = finals["deepseek_direct"]
+    assert deepseek_answer.worker == "tier2-direct"
+    assert deepseek_answer.reasoning_effort is None
+    assert deepseek_answer.reasoning_closed is True
+    assert deepseek_answer.prompt_suffix == "<｜Assistant｜></think>"
+    deepseek_think = finals["deepseek_think"]
+    assert deepseek_think.worker == "tier2" and deepseek_think.reasoning_effort == "inherit"
+    assert deepseek_think.prompt_suffix == "<｜Assistant｜><think>"
+    assert deepseek_think.reasoning_close_tag == "</think>"
+    assert deepseek_think.reasoning_closed is False
+    for role in (deepseek_answer, deepseek_think):
+        assert (role.sampling.temperature, role.sampling.top_p) == (1.0, 0.95)
+        assert role.prompt.startswith("<｜begin▁of▁sentence｜><｜User｜>")
+    for role in finals.values():
+        assert "{query}" in role.prompt and role.depends_on == ()
+        assert "reply format the conversation demands" in " ".join(role.prompt.split())
     assert sorted(path.name for path in EXAMPLE.glob("auto*.yaml")) == ["auto-max.yaml"]
     assert "base_url: http://kairyu:8000/v1" not in (EXAMPLE / "auto-max.yaml").read_text()
 
@@ -566,6 +629,33 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                             "audit",
                         )
                     ],
+                    "profiles": {
+                        profile: [
+                            {
+                                "name": roles[0],
+                                "sampling": control.SPEC["orchestration"][
+                                    "direct_route_sampling"
+                                ][profile],
+                            }
+                        ]
+                        for profile, roles in control.SPEC["orchestration"][
+                            "profiles"
+                        ].items()
+                    },
+                    "profile_judge": {
+                        "worker": "tier1",
+                        "fallback": "primary",
+                        "choices": [
+                            {"label": label, "profile": profile, "criteria": "x"}
+                            for label, profile in (
+                                ("QWEN", "qwen_direct"),
+                                ("QWEN_THINK", "qwen_think_low"),
+                                ("DEEPSEEK", "deepseek_direct"),
+                                ("DEEPSEEK_THINK", "deepseek_think"),
+                                ("ENSEMBLE", "primary"),
+                            )
+                        ],
+                    },
                     "stream_head": "head",
                     "moa_samples": 0,
                     "budget": {"max_steps": 19, "max_refine_depth": 2},
@@ -573,6 +663,7 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
                         "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
+                        "tier2-direct": {"model": "deepseek-v4-flash-0731"},
                     },
                 }
             }
@@ -807,6 +898,7 @@ def test_tiered_product_serving_requires_head_and_synthesis_trace(
                     "critique",
                 ),
                 "expected_verification_nodes": ("audit",),
+                "judged_routes": True,
             },
         )
     ]
@@ -894,6 +986,63 @@ def test_tiered_product_serving_requires_every_internal_stage(
     assert validate() == 1
 
 
+def test_tiered_product_serving_judged_routes_accept_one_direct_final(
+    tmp_path: Path,
+) -> None:
+    """DTO-D13: with judged routes every sample must trace the judge and
+    exactly one profile's final unit; direct routes carry no head/internal
+    stage contract, while primary keeps the full dual-track contract."""
+
+    benchmark = _load(EXAMPLE / "verification.py", "tiered_product_judged_routes")
+    judge = {"node": "profile_judge", "kind": "classification", "status": "success"}
+    direct = {
+        "node": "qwen_think_answer",
+        "role": "publisher",
+        "kind": "generation",
+        "status": "success",
+    }
+    primary = [
+        {"node": "head", "kind": "generation", "status": "success"},
+        {"node": "synthesis", "role": "publisher", "kind": "generation", "status": "success"},
+        *[
+            {"node": name, "kind": "generation", "status": "success"}
+            for name in benchmark._DUAL_TRACK_INTERNAL_NODES
+        ],
+        *[
+            {"node": name, "role": "verifier", "kind": "verification", "status": "success"}
+            for name in benchmark._DUAL_TRACK_VERIFICATION_NODES
+        ],
+    ]
+
+    def validate() -> int:
+        return benchmark._validate_serving_row(
+            tmp_path,
+            1,
+            32,
+            expected_route="synthesis",
+            expected_role="publisher",
+            require_head=True,
+            expected_generation_nodes=benchmark._DUAL_TRACK_INTERNAL_NODES,
+            expected_verification_nodes=benchmark._DUAL_TRACK_VERIFICATION_NODES,
+            judged_routes=True,
+        )
+
+    _write_product_serving_result(tmp_path, [judge, direct])
+    assert validate() == 0
+    routes = json.loads((tmp_path / "routes.json").read_text())
+    assert routes["routes"] == {"qwen_think_low": {"requests": 1, "ttft_p50_ms": None}}
+    _write_product_serving_result(tmp_path, [judge, *primary])
+    assert validate() == 0
+    # No judge stage, an ambiguous pair of finals, or a primary sample missing
+    # its internal contract all fail the row.
+    _write_product_serving_result(tmp_path, [direct])
+    assert validate() == 1
+    _write_product_serving_result(tmp_path, [judge, direct, primary[1]])
+    assert validate() == 1
+    _write_product_serving_result(tmp_path, [judge, *primary[:-1]])
+    assert validate() == 1
+
+
 def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -935,6 +1084,7 @@ def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
     gate = json.loads((tmp_path / "fallback" / "ttft-gate.json").read_text())
     assert gate["gates"]["1"]["denominator_source"] == "pinned_fallback"
     assert validations
+    assert all(row["judged_routes"] is True for row in validations)
     assert all(row["expected_route"] == "synthesis" for row in validations)
     assert all(
         row["expected_generation_nodes"] == benchmark._DUAL_TRACK_INTERNAL_NODES
@@ -944,3 +1094,28 @@ def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
         row["expected_verification_nodes"] == benchmark._DUAL_TRACK_VERIFICATION_NODES
         for row in validations
     )
+
+    # DTO-D13: with a per-row route report the gate measures only the
+    # TTFT-gated routes; a thinking direct route is reported, not gated.
+    summaries["deepseek-direct-c1"] = {"ttft_p50_ms": 800.0}
+    reports: dict[str, dict] = {}
+    monkeypatch.setattr(benchmark, "_row_routes", lambda row_dir: reports.get(row_dir.name))
+    reports["coding-c1"] = {
+        "routes": {
+            "primary": {"requests": 2, "ttft_p50_ms": 1500.0},
+            "deepseek_think": {"requests": 30, "ttft_p50_ms": 9000.0},
+        },
+        "judge_total_ms_p50": 120.0,
+    }
+    assert benchmark.serving_auto_max_coding(tmp_path / "routed") == 0
+    gate = json.loads((tmp_path / "routed" / "ttft-gate.json").read_text())["gates"]["1"]
+    assert gate["product_semantic_ttft_p50_ms"] == 1500.0
+    assert gate["status"] == "gated" and gate["passed"] is True
+    assert gate["routes"]["deepseek_think"]["requests"] == 30
+    reports["coding-c1"] = {
+        "routes": {"deepseek_think": {"requests": 32, "ttft_p50_ms": 9000.0}},
+        "judge_total_ms_p50": 120.0,
+    }
+    assert benchmark.serving_auto_max_coding(tmp_path / "na") == 0
+    gate = json.loads((tmp_path / "na" / "ttft-gate.json").read_text())["gates"]["1"]
+    assert gate["status"] == "not_applicable" and gate["passed"] is None

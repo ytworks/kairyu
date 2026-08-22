@@ -167,6 +167,10 @@ class VLLMBackend:
     @staticmethod
     def _validated_prompt(request: GenerationRequest) -> PromptInput:
         prompt = request.prompt
+        if request.chat_template_kwargs is not None:
+            raise ValueError(
+                "vLLM backend does not support request field chat_template_kwargs"
+            )
         if isinstance(prompt, MultimodalPrompt):
             raise ValueError(
                 "vLLM backend does not support multimodal prompts through "

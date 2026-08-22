@@ -391,7 +391,7 @@ workers:
         )
 
 
-GENERAL_PROFILE_SPEC = """
+PROFILES_SPEC = """
 workers:
   - name: tier1
     backend: mock
@@ -402,45 +402,69 @@ roles:
     worker: tier1
     role_type: synthesizer
     prompt: "code draft: {query}"
-general_roles:
-  - name: g_prop
-    worker: tier1
-    prompt: "general proposal: {query}"
-  - name: g_final
-    worker: tier2
-    role_type: synthesizer
-    depends_on: [g_prop]
-    prompt: "general final: {query} {g_prop}"
+profiles:
+  - name: general
+    roles:
+      - name: g_prop
+        worker: tier1
+        prompt: "general proposal: {query}"
+      - name: g_final
+        worker: tier2
+        role_type: synthesizer
+        depends_on: [g_prop]
+        prompt: "general final: {query} {g_prop}"
+  - name: fast
+    roles:
+      - name: f_final
+        worker: tier1
+        role_type: publisher
+        sampling: {temperature: 0.7, top_p: 0.8, max_tokens: 131072}
+        prompt: "fast: {query}"
+"""
+
+JUDGE_SPEC = """
+profile_judge:
+  worker: tier2
+  prompt_prefix: "<u>"
+  prompt_suffix: "<a>"
+  fallback: general
+  choices:
+    - {profile: fast, label: FAST, criteria: "trivial"}
+    - {profile: primary, label: CODE, criteria: "code authoring"}
+    - {profile: general, label: GENERAL, criteria: "everything else"}
 """
 
 
-def test_general_roles_profile_loads_and_builds():
-    spec = load_spec(GENERAL_PROFILE_SPEC)
-    assert [role.name for role in spec.general_roles] == ["g_prop", "g_final"]
+def test_profiles_load_and_build():
+    spec = load_spec(PROFILES_SPEC)
+    assert [profile.name for profile in spec.profiles] == ["general", "fast"]
+    assert [role.name for role in spec.profiles[0].roles] == ["g_prop", "g_final"]
+    # A single-role direct profile may declare sampling on its final unit
+    # (DTO-D13): the style fields are policy and max_tokens a cap.
+    assert spec.profiles[1].roles[0].sampling.max_tokens == 131072
     descriptor = build_orchestrator(spec).describe_routing()
-    assert [role["name"] for role in descriptor["general_roles"]] == [
-        "g_prop",
-        "g_final",
-    ]
+    described = {
+        name: [role["name"] for role in roles]
+        for name, roles in descriptor["profiles"].items()
+    }
+    assert described == {"general": ["g_prop", "g_final"], "fast": ["f_final"]}
+    assert descriptor["profiles"]["fast"][0]["sampling"]["max_tokens"] == 131072
     assert "profile_selector" in descriptor
 
 
-def test_general_roles_reject_moa_mode():
+def test_profiles_reject_moa_mode():
     with pytest.raises(
         ValidationError,
-        match="general_roles cannot be combined with moa_samples > 0",
+        match="profiles cannot be combined with moa_samples > 0",
     ):
-        load_spec(GENERAL_PROFILE_SPEC + "\nmoa_samples: 2\n")
+        load_spec(PROFILES_SPEC + "\nmoa_samples: 2\n")
 
 
 def test_profile_judge_loads_and_is_described():
-    spec = load_spec(
-        GENERAL_PROFILE_SPEC
-        + "\nprofile_judge: {worker: tier2, prompt_prefix: '<u>', prompt_suffix: '<a>'}\n"
-    )
+    spec = load_spec(PROFILES_SPEC + JUDGE_SPEC)
     assert spec.profile_judge.worker == "tier2"
-    assert spec.profile_judge.prompt_prefix == "<u>"
-    assert spec.profile_judge.prompt_suffix == "<a>"
+    assert spec.profile_judge.fallback == "general"
+    assert [choice.label for choice in spec.profile_judge.choices] == ["FAST", "CODE", "GENERAL"]
     descriptor = build_orchestrator(spec).describe_routing()
     assert descriptor["profile_judge"] == {
         "worker": "tier2",
@@ -448,43 +472,95 @@ def test_profile_judge_loads_and_is_described():
         "max_tokens": 8,
         "prompt_prefix": "<u>",
         "prompt_suffix": "<a>",
+        "fallback": "general",
+        "choices": [
+            {"profile": "fast", "label": "FAST", "criteria": "trivial"},
+            {"profile": "primary", "label": "CODE", "criteria": "code authoring"},
+            {"profile": "general", "label": "GENERAL", "criteria": "everything else"},
+        ],
     }
     assert "profile-judge verdict" in descriptor["profile_selector"]
 
 
-def test_profile_judge_is_validated():
-    with pytest.raises(ValidationError, match="profile_judge references unknown"):
-        load_spec(
-            GENERAL_PROFILE_SPEC + "\nprofile_judge: {worker: missing}\n"
-        )
-    with pytest.raises(ValidationError, match="profile_judge requires general_roles"):
+@pytest.mark.parametrize(
+    ("tail", "message"),
+    [
+        (
+            JUDGE_SPEC.replace("worker: tier2", "worker: missing"),
+            "profile_judge references unknown worker",
+        ),
+        (
+            JUDGE_SPEC.replace("profile: fast,", "profile: nope,"),
+            "references unknown profile 'nope'",
+        ),
+        (
+            JUDGE_SPEC.replace("fallback: general", "fallback: nope"),
+            "fallback references unknown profile",
+        ),
+        (
+            JUDGE_SPEC.replace("label: FAST", "label: CODE"),
+            "choice labels must be unique",
+        ),
+        (
+            JUDGE_SPEC.replace("label: FAST", "label: fast"),
+            "String should match pattern",
+        ),
+    ],
+)
+def test_profile_judge_is_validated(tail, message):
+    with pytest.raises(ValidationError, match=message):
+        load_spec(PROFILES_SPEC + tail)
+
+
+def test_profile_judge_requires_profiles():
+    with pytest.raises(ValidationError, match="profile_judge requires at least one profile"):
         load_spec(
             """
 workers: [{name: tier1, backend: mock}]
 roles:
   - {name: draft, worker: tier1, prompt: "d: {query}"}
-profile_judge: {worker: tier1}
+profile_judge:
+  worker: tier1
+  choices:
+    - {profile: primary, label: A, criteria: a}
+    - {profile: other, label: B, criteria: b}
 """
         )
 
 
-def test_general_roles_are_validated_like_primary_roles():
-    with pytest.raises(ValidationError, match="general_roles.*unknown worker"):
+def test_profiles_are_validated_like_primary_roles():
+    with pytest.raises(ValidationError, match="profiles.general.*unknown worker"):
         load_spec(
             """
 workers: [{name: tier1, backend: mock}]
 roles:
   - {name: draft, worker: tier1, prompt: "d: {query}"}
-general_roles:
-  - {name: g_final, worker: missing, prompt: "g: {query}"}
+profiles:
+  - name: general
+    roles:
+      - {name: g_final, worker: missing, prompt: "g: {query}"}
 """
         )
-    with pytest.raises(ValidationError, match="general_roles requires a primary"):
+    with pytest.raises(ValidationError, match="profiles require a primary"):
         load_spec(
             """
 workers: [{name: tier1, backend: mock}]
-general_roles:
-  - {name: g_final, worker: tier1, prompt: "g: {query}"}
+profiles:
+  - name: general
+    roles:
+      - {name: g_final, worker: tier1, prompt: "g: {query}"}
+"""
+        )
+    with pytest.raises(ValidationError, match="other than 'primary'"):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+roles:
+  - {name: draft, worker: tier1, prompt: "d: {query}"}
+profiles:
+  - name: primary
+    roles:
+      - {name: g_final, worker: tier1, prompt: "g: {query}"}
 """
         )
 

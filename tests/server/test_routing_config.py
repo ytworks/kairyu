@@ -71,15 +71,32 @@ roles:
     worker: tier1
     role_type: synthesizer
     prompt: "code draft: {query}"
-general_roles:
-  - name: g_final
-    worker: tier2
-    role_type: synthesizer
-    prompt: "general final: {query}"
+profiles:
+  - name: general
+    roles:
+      - name: g_final
+        worker: tier2
+        role_type: synthesizer
+        prompt: "general final: {query}"
+        reasoning_effort: inherit
+        sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          min_p: 0.05
+          presence_penalty: 1.5
+          repetition_penalty: 1.1
+          max_tokens: 131072
+          max_tokens_by_effort: {low: 8192, high: 32768, max: 393216}
+          seed_offset: 9
+          stop: [END]
 profile_judge:
   worker: tier2
   prompt_prefix: "<u>"
   prompt_suffix: "<a>"
+  choices:
+    - {profile: primary, label: CODE, criteria: "code authoring"}
+    - {profile: general, label: GENERAL, criteria: "everything else"}
 """
     )
     app = create_app(
@@ -98,6 +115,25 @@ profile_judge:
         "max_tokens": 8,
         "prompt_prefix": "<u>",
         "prompt_suffix": "<a>",
+        "fallback": "primary",
+        "choices": [
+            {"profile": "primary", "label": "CODE", "criteria": "code authoring"},
+            {"profile": "general", "label": "GENERAL", "criteria": "everything else"},
+        ],
+    }
+    role = descriptor["profiles"]["general"][0]
+    assert role["name"] == "g_final"
+    assert role["sampling"] == {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "min_p": 0.05,
+        "presence_penalty": 1.5,
+        "repetition_penalty": 1.1,
+        "max_tokens": 131072,
+        "max_tokens_by_effort": {"low": 8192, "high": 32768, "max": 393216},
+        "seed_offset": 9,
+        "stop": ["END"],
     }
 
 

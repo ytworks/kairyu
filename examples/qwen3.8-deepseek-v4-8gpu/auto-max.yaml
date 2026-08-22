@@ -1,5 +1,23 @@
-# Dual-track policy-ensemble quality policy (DTO-D1). One L3 request enters
-# this explicit L2 DAG, which runs two parallel tracks and merges them:
+# Judged five-route policy (DTO-D13). Every L3 request first pays one bounded
+# Qwen non-thinking judge call (profile_judge below) that reads the latest
+# user turn and picks the route expected to answer correctly and well at the
+# lowest latency and cost:
+#
+#   ENSEMBLE       -> primary        the dual-track 3-wave ensemble (below)
+#   QWEN           -> qwen_direct    one Qwen3.8 non-thinking call
+#   QWEN_THINK     -> qwen_think_low one Qwen3.8 call thinking at low effort
+#   DEEPSEEK       -> deepseek_direct one DeepSeek non-thinking call
+#   DEEPSEEK_THINK -> deepseek_think one DeepSeek call thinking at the L3 effort
+#
+# Judge timeout / backend error / unparseable verdict fall back to `primary`.
+# Image requests are only offered image-capable profiles (the Qwen pool
+# sees images natively; the DeepSeek-only routes are withheld). Tool and
+# format-constrained turns are judged like every other turn: the direct
+# routes have no head and answer headless by construction.
+#
+# The primary profile is the dual-track policy-ensemble quality policy
+# (DTO-D1). One L3 request enters this explicit L2 DAG, which runs two
+# parallel tracks and merges them:
 #
 #   Track A (diversity): one DeepSeek call writes four maximally different
 #   answer policies; four Qwen replicas then answer in parallel, one policy
@@ -31,6 +49,11 @@ workers:
   # deliberation and the audit verdict.
   - name: tier2
     engine_ref: deepseek-v4-flash-0731-thinking
+  # Non-thinking DeepSeek pool for the deepseek_direct route (DTO-D13): the
+  # same vLLM service, reached through a `</think>`-closed scaffold that the
+  # deepseek-role-effort.jinja passthrough leaves byte-identical.
+  - name: tier2-direct
+    engine_ref: deepseek-v4-flash-0731
 
 router:
   kind: calibrated
@@ -508,6 +531,176 @@ roles:
       --- END CANDIDATE REMAINDER ---
     prompt_suffix: "<｜Assistant｜><think>"
 
+
+# Route judge (DTO-D13): one bounded, greedy, verdict-only call on the Qwen
+# pool. No scaffold and no reasoning_effort, so the Qwen vLLM chat template
+# runs it non-thinking; <=8 output tokens over a 4,000-character head+tail
+# view of the latest user turn, 5 s timeout. The choices are listed fastest
+# -> most thorough and their criteria text is the routing policy the judge
+# reads; `fallback: primary` keeps quality on any judge failure.
+profile_judge:
+  worker: tier1
+  timeout_seconds: 5.0
+  max_tokens: 8
+  fallback: primary
+  choices:
+    - profile: qwen_direct
+      label: QWEN
+      criteria: >-
+        a small fast model answers it correctly at once: greetings and
+        chit-chat, short factual questions, rewording, translation or
+        formatting of short text, simple lookups or unit conversions,
+        trivial code or shell one-liners, and exact fixed outputs.
+    - profile: qwen_think_low
+      label: QWEN_THINK
+      criteria: >-
+        moderate reasoning a small model handles with brief thinking: short
+        math or logic, small well-specified coding or debugging tasks,
+        step-by-step explanations, and routine agent tool-call turns whose
+        next action is clear from the conversation.
+    - profile: deepseek_direct
+      label: DEEPSEEK
+      criteria: >-
+        needs frontier knowledge, breadth, or long-context comprehension but
+        not deep deliberation: summarizing or answering over long documents
+        or large code, nuanced writing, domain expertise, and open-ended
+        analysis where a direct expert answer suffices.
+    - profile: deepseek_think
+      label: DEEPSEEK_THINK
+      criteria: >-
+        hard problems where careful deliberation decides correctness:
+        competition-level math, complex algorithms, multi-file coding or
+        debugging, proofs, planning, and any task where a subtle mistake is
+        costly.
+    - profile: primary
+      label: ENSEMBLE
+      criteria: >-
+        the hardest, highest-stakes open-ended work where comparing several
+        independent approaches and auditing the merged answer materially
+        improves quality: research-level questions, ambiguous
+        multi-constraint design, or an explicit request for the most thorough
+        possible answer. By far the slowest and most expensive route; never
+        choose it when DEEPSEEK_THINK would already be correct.
+
+# Direct routes (DTO-D13): each profile is one publisher role — the selected
+# final unit — so the Conductor's streaming, effort resolution, trace/usage,
+# reasoning_closed reclaim, DTO-D9 floor (deepseek_think), and the bounded
+# empty-output re-dispatch are reused unchanged. Sampling is the example's
+# official per-mode policy (DTO-D8) fixed on the final unit: the caller's
+# temperature/top_p are overridden, while n/logprobs/response_format/tools
+# and the public max_tokens still apply (the role max_tokens is a cap that is
+# min()'d with the caller's allowance). The caps are the vendor-official
+# output lengths: Qwen3.8 "Final Response: 131,072"; DeepSeek-V4-Flash-0731
+# "maximum output length 384K" (393,216) — from the Chat UI (default 65536)
+# the caller cap binds first. The spec-level budget {19, 2} applies; a direct
+# route spends one step plus the bounded re-dispatch.
+profiles:
+  # Qwen non-thinking: no reasoning_effort, so the Qwen template disables
+  # thinking; T=0.7/top_p=0.8/top_k=20/presence_penalty=1.5 (DTO-D8).
+  - name: qwen_direct
+    roles:
+      - name: qwen_answer
+        worker: tier1
+        role_type: publisher
+        sampling: {temperature: 0.7, top_p: 0.8, top_k: 20, presence_penalty: 1.5, max_tokens: 131072}
+        prompt: |
+          --- REQUEST ---
+          {query}
+          --- END REQUEST ---
+          [qwen_answer] Write the complete final answer to the request above, in
+          exactly the reply format the conversation demands: if it requires
+          a specific structure (for example a JSON envelope with fixed
+          fields), produce precisely that structure and nothing else; if it
+          asks for an exact, fixed, or trivially short output, write exactly
+          that output. If the conversation context ends with a tool result,
+          answer the user's request using that result directly. If the
+          conversation requires calling an external tool or function next,
+          emit exactly that call in the format the conversation specifies.
+          Output only the answer itself and do not describe any internal
+          pipeline.
+
+  # Qwen thinking at fixed low effort (the template clamps any level to
+  # low); T=1.0/top_p=0.95/top_k=20 (DTO-D8). One cap bounds think + answer.
+  - name: qwen_think_low
+    roles:
+      - name: qwen_think_answer
+        worker: tier1
+        role_type: publisher
+        reasoning_effort: low
+        sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 131072}
+        prompt: |
+          --- REQUEST ---
+          {query}
+          --- END REQUEST ---
+          [qwen_think_answer] Write the complete final answer to the request above, in
+          exactly the reply format the conversation demands: if it requires
+          a specific structure (for example a JSON envelope with fixed
+          fields), produce precisely that structure and nothing else; if it
+          asks for an exact, fixed, or trivially short output, write exactly
+          that output. If the conversation context ends with a tool result,
+          answer the user's request using that result directly. If the
+          conversation requires calling an external tool or function next,
+          emit exactly that call in the format the conversation specifies.
+          Output only the answer itself and do not describe any internal
+          pipeline.
+
+  # DeepSeek non-thinking: the scaffold closes the reasoning span in the
+  # prompt and reasoning_closed reclaims parser-classified text as the
+  # public answer (issue #496); T=1.0/top_p=0.95 (DTO-D8).
+  - name: deepseek_direct
+    roles:
+      - name: deepseek_answer
+        worker: tier2-direct
+        role_type: publisher
+        reasoning_closed: true
+        sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 393216}
+        prompt: |-
+          <｜begin▁of▁sentence｜><｜User｜>[deepseek_answer] Write the complete final
+          answer to the request below, in exactly the reply format the
+          conversation demands: if it requires a specific structure (for
+          example a JSON envelope with fixed fields), produce precisely that
+          structure and nothing else; if it asks for an exact, fixed, or
+          trivially short output, write exactly that output. If the
+          conversation context ends with a tool result, answer the user's
+          request using that result directly. If the conversation requires
+          calling an external tool or function next, emit exactly that call
+          in the format the conversation specifies. Output only the answer
+          itself and do not describe any internal pipeline.
+          --- REQUEST ---
+          {query}
+          --- END REQUEST ---
+        prompt_suffix: "<｜Assistant｜></think>"
+
+  # DeepSeek thinking at the caller's L3 effort (default high): the
+  # deepseek-role-effort.jinja preamble grades high/max; the deepseek_v4
+  # parser separates the private span and the public answer streams after
+  # it. reasoning_close_tag lets the DTO-D9 floor (256) reserve public
+  # tokens behind the think span. T=1.0/top_p=0.95 (DTO-D8).
+  - name: deepseek_think
+    roles:
+      - name: deepseek_think_answer
+        worker: tier2
+        role_type: publisher
+        reasoning_effort: inherit
+        sampling: {temperature: 1.0, top_p: 0.95, max_tokens: 393216}
+        prompt: |-
+          <｜begin▁of▁sentence｜><｜User｜>[deepseek_think_answer] Write the complete final
+          answer to the request below, in exactly the reply format the
+          conversation demands: if it requires a specific structure (for
+          example a JSON envelope with fixed fields), produce precisely that
+          structure and nothing else; if it asks for an exact, fixed, or
+          trivially short output, write exactly that output. If the
+          conversation context ends with a tool result, answer the user's
+          request using that result directly. If the conversation requires
+          calling an external tool or function next, emit exactly that call
+          in the format the conversation specifies. Output only the answer
+          itself and do not describe any internal pipeline.
+          --- REQUEST ---
+          {query}
+          --- END REQUEST ---
+        prompt_suffix: "<｜Assistant｜><think>"
+        reasoning_close_tag: "</think>"
+
 moa_samples: 0
 # L3 requests that carry no reasoning_effort run as high (owner-specified
 # default). An explicit client effort (low|high|max) overrides it; the value
@@ -536,7 +729,7 @@ internal_max_tokens: 65536
 public_output_floor: 256
 expose_intermediate_outputs: true
 
-# One profile, three waves under the level-synchronous scheduler:
+# Primary profile: three waves under the level-synchronous scheduler:
 # wave 1 = head + draft + policies (+ image_description on image requests,
 # DTO-D11), wave 2 = answer_1..4 + critique, wave 3 = synthesis verified
 # inline by audit (DTO-D10). max_steps 19 = 10 generation units + 1

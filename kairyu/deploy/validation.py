@@ -891,8 +891,8 @@ def _validate_orchestrator_topology(
         worker.name for worker in spec.workers if worker.executor_ref is not None
     }
     profiles: tuple[tuple[str, tuple[RoleNodeSpec, ...]], ...] = (("roles", spec.roles),)
-    if spec.general_roles:
-        profiles += (("general_roles", spec.general_roles),)
+    for profile in spec.profiles:
+        profiles += ((f"profiles.{profile.name}", profile.roles),)
     for field_name, node_specs in profiles:
         roles = tuple(
             RoleSpec(

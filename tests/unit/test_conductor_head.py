@@ -533,13 +533,42 @@ async def test_per_role_sampling_overrides_reach_backend_requests():
     assert continuation_params.temperature == 0.6
 
 
-def test_final_role_sampling_override_rejected():
+@pytest.mark.parametrize(
+    ("role_cap", "expected_max"),
+    [
+        (131072, 4096),  # the role cap only shrinks the caller's allowance
+        (2000, 2000),
+    ],
+)
+async def test_final_role_sampling_override_is_policy_capped_by_caller(role_cap, expected_max):
+    """DTO-D13: a final-unit sampling block sets the style fields and caps
+    max_tokens by the caller's public limit; the caller's n stays."""
+
+    backend = StreamScriptedBackend(["x"])
     roles = (
-        RoleSpec(name="solo", worker="w", prompt="{query}",
-                 sampling=RoleSamplingOverrides(temperature=0.1)),
+        RoleSpec(
+            name="solo",
+            worker="w",
+            role_type="publisher",
+            prompt="{query}",
+            sampling=RoleSamplingOverrides(
+                temperature=0.7, top_p=0.8, presence_penalty=1.5, max_tokens=role_cap
+            ),
+        ),
     )
-    with pytest.raises(ValueError, match="public"):
-        Conductor(roles, {"w": StreamScriptedBackend(["x"])})
+    conductor = Conductor(
+        roles,
+        {"w": backend},
+        final_sampling_params=SamplingParams(max_tokens=4096, temperature=0.2, top_p=1.0),
+    )
+    await _collect(conductor.stream("task"))
+
+    params = backend.requests_seen[0].sampling_params
+    assert params.temperature == 0.7
+    assert params.top_p == 0.8
+    assert params.presence_penalty == 1.5
+    assert params.max_tokens == expected_max
+    assert params.n == 1
 
 
 def test_head_dag_shape_validation():
