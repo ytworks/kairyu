@@ -593,11 +593,17 @@ class Orchestrator:
                 "verifies": role.verifies,
             }
             if role.sampling is not None:
-                payload["sampling"] = {
+                sampling = {
                     key: value
                     for key, value in asdict(role.sampling).items()
                     if value not in (None, ())
                 }
+                max_tokens_by_effort = sampling.get("max_tokens_by_effort")
+                if max_tokens_by_effort is not None:
+                    sampling["max_tokens_by_effort"] = dict(
+                        max_tokens_by_effort
+                    )
+                payload["sampling"] = sampling
             if role.executor is not None:
                 payload["executor"] = {
                     "code_from": list(role.executor.code_from),

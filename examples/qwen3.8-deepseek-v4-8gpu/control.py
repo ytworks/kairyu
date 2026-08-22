@@ -564,6 +564,19 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
             "Kairyu L2 does not report the required direct-route profiles "
             f"{sorted(expected_profiles)!r}, got {sorted(served_profiles)!r}"
         )
+    expected_sampling = orchestration["direct_route_sampling"]
+    served_sampling = {
+        name: {
+            key: value
+            for key, value in (roles[0].get("sampling") or {}).items()
+            if value not in (None, [], {})
+        }
+        for name, roles in (policy.get("profiles") or {}).items()
+    }
+    if served_sampling != expected_sampling:
+        raise SystemExit(
+            "Kairyu L2 does not report the required direct-route sampling policy"
+        )
     expected_judge = orchestration["profile_judge"]
     judge = policy.get("profile_judge") or {}
     served_choices = [

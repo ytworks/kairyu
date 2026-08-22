@@ -134,7 +134,12 @@ class TargetResolutionPayload(BaseModel):
 class RoleSamplingPayload(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float | None = None
+    repetition_penalty: float | None = None
     max_tokens: int | None = None
+    max_tokens_by_effort: dict[str, int] | None = None
     seed_offset: int | None = None
     stop: list[str] = Field(default_factory=list)
 
