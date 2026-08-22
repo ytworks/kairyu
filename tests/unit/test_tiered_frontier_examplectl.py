@@ -508,6 +508,15 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
         "deepseek_direct": 393216,
         "deepseek_think": 393216,
     }
+    sampling = {
+        name: {
+            key: value
+            for key, value in role.sampling.model_dump().items()
+            if value not in (None, ())
+        }
+        for name, role in finals.items()
+    }
+    assert sampling == config["orchestration"]["direct_route_sampling"]
     qwen_answer = finals["qwen_direct"]
     assert qwen_answer.worker == "tier1" and qwen_answer.reasoning_effort is None
     assert (qwen_answer.sampling.temperature, qwen_answer.sampling.top_p) == (0.7, 0.8)
@@ -621,10 +630,17 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                         )
                     ],
                     "profiles": {
-                        "qwen_direct": [{"name": "qwen_answer"}],
-                        "qwen_think_low": [{"name": "qwen_think_answer"}],
-                        "deepseek_direct": [{"name": "deepseek_answer"}],
-                        "deepseek_think": [{"name": "deepseek_think_answer"}],
+                        profile: [
+                            {
+                                "name": roles[0],
+                                "sampling": control.SPEC["orchestration"][
+                                    "direct_route_sampling"
+                                ][profile],
+                            }
+                        ]
+                        for profile, roles in control.SPEC["orchestration"][
+                            "profiles"
+                        ].items()
                     },
                     "profile_judge": {
                         "worker": "tier1",

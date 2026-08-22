@@ -78,6 +78,18 @@ profiles:
         worker: tier2
         role_type: synthesizer
         prompt: "general final: {query}"
+        reasoning_effort: inherit
+        sampling:
+          temperature: 0.7
+          top_p: 0.8
+          top_k: 20
+          min_p: 0.05
+          presence_penalty: 1.5
+          repetition_penalty: 1.1
+          max_tokens: 131072
+          max_tokens_by_effort: {low: 8192, high: 32768, max: 393216}
+          seed_offset: 9
+          stop: [END]
 profile_judge:
   worker: tier2
   prompt_prefix: "<u>"
@@ -109,7 +121,20 @@ profile_judge:
             {"profile": "general", "label": "GENERAL", "criteria": "everything else"},
         ],
     }
-    assert [role["name"] for role in descriptor["profiles"]["general"]] == ["g_final"]
+    role = descriptor["profiles"]["general"][0]
+    assert role["name"] == "g_final"
+    assert role["sampling"] == {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "min_p": 0.05,
+        "presence_penalty": 1.5,
+        "repetition_penalty": 1.1,
+        "max_tokens": 131072,
+        "max_tokens_by_effort": {"low": 8192, "high": 32768, "max": 393216},
+        "seed_offset": 9,
+        "stop": ["END"],
+    }
 
 
 async def test_routing_config_is_explicitly_empty_without_orchestrators():
