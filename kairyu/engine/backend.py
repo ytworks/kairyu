@@ -548,6 +548,8 @@ def validate_native_request_surface_before_prepare(
         unsupported.append("best_of")
     if params.prompt_logprobs is not None:
         unsupported.append("prompt_logprobs")
+    if request.chat_template_kwargs is not None:
+        unsupported.append("chat_template_kwargs")
     if not isinstance(params.extra_args, Mapping):
         unsupported.append("extra_args")
     if unsupported:
