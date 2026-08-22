@@ -42,7 +42,7 @@ from kairyu.orchestration.conductor import (
     zero_cost,
 )
 from kairyu.orchestration.execution import ExecutionBackend, ExecutorDescriptor
-from kairyu.orchestration.features import code_task_signal, latest_user_view
+from kairyu.orchestration.features import latest_user_view
 from kairyu.orchestration.moa import _build_moa_setup, _MoASetup
 from kairyu.orchestration.request import (
     OrchestrationRequest,
@@ -186,12 +186,23 @@ class EngineDescriptor:
 
 
 @dataclass(frozen=True)
-class ProfileJudge:
-    """LLM judgment policy for the coding/general profile split (issue #509).
+class ProfileChoice:
+    """One route the profile judge may answer with (DTO-D13)."""
 
-    The judged question is only "does this turn ask for code authoring";
-    the head-disable signals (tools, response_format, plain-text format
-    demands) stay deterministic and never reach the judge.
+    profile: str
+    label: str
+    criteria: str
+
+
+@dataclass(frozen=True)
+class ProfileJudge:
+    """LLM route selection among the configured role profiles (issue #509,
+    generalized by DTO-D13).
+
+    The judge answers exactly one choice label over the latest user turn and
+    the selected profile's DAG serves the call. Timeout, backend error, and an
+    unparseable verdict fall back to ``fallback``; profile selection itself
+    stays a pure function of the attached verdict.
     """
 
     worker: str
@@ -199,18 +210,29 @@ class ProfileJudge:
     max_tokens: int = 8
     prompt_prefix: str = ""
     prompt_suffix: str = ""
+    choices: tuple[ProfileChoice, ...] = ()
+    fallback: str = "primary"
+
+    def __post_init__(self) -> None:
+        if len(self.choices) < 2:
+            raise ValueError("profile_judge requires at least two choices")
+        labels = [choice.label for choice in self.choices]
+        if len(set(labels)) != len(labels):
+            raise ValueError("profile_judge choice labels must be unique")
+        profiles = [choice.profile for choice in self.choices]
+        if len(set(profiles)) != len(profiles):
+            raise ValueError("profile_judge choices must reference distinct profiles")
 
 
-# Verdict-only classification for a non-thinking direct engine. The judge can
-# only pick between the two full Conductor ensembles; it never routes to a
-# single engine.
-_PROFILE_JUDGE_PROMPT = (
-    "You route requests inside an inference product. Decide whether the "
-    "user's request asks you to author or modify computer code (write, "
-    "implement, fix, debug, refactor, or test a program). Mentioning "
-    "code-adjacent vocabulary without asking for code authoring does not "
-    "count. Reply with exactly one word: CODE or GENERAL.\n\n"
-    "USER REQUEST:\n{request}\n\nAnswer:"
+# Verdict-only classification for a non-thinking engine: the judge picks one
+# route label; the deployment spec owns the labels and their criteria.
+_PROFILE_JUDGE_PROMPT_HEADER = (
+    "You route requests inside an inference product. Choose the route that "
+    "answers the user's request correctly and with high quality at the lowest "
+    "latency and cost: pick the fastest route you are confident will still "
+    "give a correct and complete answer, and escalate only when the request "
+    "genuinely needs it. Routes, from fastest and cheapest to slowest and "
+    "most thorough:\n"
 )
 # Bound the judged view so a long agent conversation cannot inflate the
 # judge's prefill beyond a fixed latency envelope.
@@ -233,12 +255,40 @@ def _bounded_profile_judge_view(prompt: str) -> str:
     )
 
 
-def _parse_profile_verdict(text: str) -> str | None:
-    verdict = text.strip().casefold()
-    if verdict == "code":
-        return "code"
-    if verdict == "general":
-        return "general"
+def _profile_judge_prompt(
+    choices: tuple[ProfileChoice, ...],
+    request_view: str,
+    *,
+    tools: bool,
+    image: bool,
+) -> str:
+    labels = ", ".join(choice.label for choice in choices)
+    return (
+        _PROFILE_JUDGE_PROMPT_HEADER
+        + "".join(f"- {choice.label}: {choice.criteria}\n" for choice in choices)
+        + "\nRequest context: tool calling "
+        + ("yes" if tools else "no")
+        + "; image attached "
+        + ("yes" if image else "no")
+        + ".\n"
+        + f"Reply with exactly one word: {labels}.\n\n"
+        + f"USER REQUEST:\n{request_view}\n\nAnswer:"
+    )
+
+
+def _parse_profile_verdict(
+    text: str,
+    choices: tuple[ProfileChoice, ...],
+) -> str | None:
+    """The chosen profile, or None when the verdict is not exactly one offered label."""
+
+    verdict = text.strip()
+    if verdict.endswith("."):
+        verdict = verdict[:-1]
+    verdict = verdict.casefold()
+    for choice in choices:
+        if verdict == choice.label.casefold():
+            return choice.profile
     return None
 
 
@@ -301,7 +351,7 @@ class Orchestrator:
         engines: Mapping[str, EngineBackend],
         router: Router | None = None,
         roles: tuple[RoleSpec, ...] | None = None,
-        general_roles: tuple[RoleSpec, ...] | None = None,
+        profiles: Mapping[str, tuple[RoleSpec, ...]] | None = None,
         budget: Budget | None = None,
         shared_prefix: str = "",
         sampling_params: SamplingParams | None = None,
@@ -335,9 +385,9 @@ class Orchestrator:
                 "public_output_floor cannot be combined with moa_samples > 0; "
                 "the floor applies only to the Conductor final unit"
             )
-        if general_roles and moa_samples > 0:
+        if profiles and moa_samples > 0:
             raise ValueError(
-                "general_roles cannot be combined with moa_samples > 0; "
+                "profiles cannot be combined with moa_samples > 0; "
                 "choose role DAG profiles or MoA mode"
             )
         self._engines = dict(engines)
@@ -359,20 +409,44 @@ class Orchestrator:
         self._router = router or RuleRouter()
         self._router_gate = asyncio.Lock()
         self._roles = roles or _DEFAULT_ROLES
-        # Optional second ensemble DAG (issue #509): selected per request for
-        # calls outside the primary DAG's task specialization. Never a direct
-        # single-engine route — both profiles run the full Conductor.
-        self._general_roles = general_roles
-        # Optional LLM verdict for the coding/general split (issue #509
-        # amendment). Judgment is attached to the call at the serving
-        # boundary; profile selection itself stays a pure function.
+        # Named alternative role DAGs (issue #509, generalized by DTO-D13):
+        # one profile is selected per request; every profile runs the
+        # Conductor, whether it is a full ensemble or a single-role route.
+        # "primary" is always the roles DAG above.
+        extra_profiles = dict(profiles or {})
+        if "primary" in extra_profiles:
+            raise ValueError("profile name 'primary' is reserved for the roles DAG")
+        self._extra_profiles: dict[str, tuple[RoleSpec, ...]] | None = (
+            extra_profiles or None
+        )
+        self._profiles: dict[str, tuple[RoleSpec, ...]] = {
+            "primary": self._roles,
+            **extra_profiles,
+        }
+        # Optional LLM verdict selecting the profile (issue #509 amendment).
+        # Judgment is attached to the call at the serving boundary; profile
+        # selection itself stays a pure function of the call.
         self._profile_judge = profile_judge
         if profile_judge is not None:
-            if general_roles is None:
-                raise ValueError("profile_judge requires general_roles")
+            if self._extra_profiles is None:
+                raise ValueError("profile_judge requires at least one alternative profile")
             if profile_judge.worker not in self._engines:
                 raise ValueError(
                     f"profile_judge references unknown worker {profile_judge.worker!r}"
+                )
+            unknown = [
+                choice.profile
+                for choice in profile_judge.choices
+                if choice.profile not in self._profiles
+            ]
+            if unknown:
+                raise ValueError(
+                    f"profile_judge choices reference unknown profiles {unknown}"
+                )
+            if profile_judge.fallback not in self._profiles:
+                raise ValueError(
+                    f"profile_judge fallback references unknown profile "
+                    f"{profile_judge.fallback!r}"
                 )
         self._budget = budget or Budget()
         self._shared_prefix = shared_prefix
@@ -406,7 +480,7 @@ class Orchestrator:
             # Fail fast on an invalid role DAG (head shape, executor bindings,
             # final-unit overrides) at construction instead of per request —
             # for every configured profile.
-            for profile_roles in filter(None, (self._roles, self._general_roles)):
+            for profile_roles in self._profiles.values():
                 workers = self._conductor_workers(profile_roles, [])
                 Conductor(
                     roles=profile_roles,
@@ -414,7 +488,17 @@ class Orchestrator:
                     shared_prefix=self._shared_prefix,
                     sampling_params=self._sampling_params,
                     execution_workers=self._execution_workers,
-                    public_output_floor=self._public_output_floor,
+                    public_output_floor=self._profile_output_floor(profile_roles),
+                )
+            if self._public_output_floor is not None and not any(
+                self._profile_output_floor(profile_roles) is not None
+                for profile_roles in self._profiles.values()
+            ):
+                # A floor no profile can consume would silently never reserve
+                # anything — fail the deployment loudly instead (issue #542).
+                raise ValueError(
+                    "public_output_floor requires the final unit of at least one "
+                    "profile to declare reasoning_close_tag"
                 )
                 # Whether an image-conditional role's worker accepts images is
                 # a live capability (a replica pool publishes the intersection
@@ -489,7 +573,7 @@ class Orchestrator:
         role_workers = tuple(
             dict.fromkeys(
                 role.worker
-                for roles in filter(None, (self._roles, self._general_roles))
+                for roles in self._profiles.values()
                 for role in self._generation_roles(roles)
             )
         )
@@ -523,19 +607,20 @@ class Orchestrator:
             return payload
 
         head = self._conductor_head_role(self._roles)
-        general_payload = (
+        profile_payload = (
             {
-                "general_roles": [role_payload(role) for role in self._general_roles],
+                "profiles": {
+                    name: [role_payload(role) for role in profile_roles]
+                    for name, profile_roles in self._extra_profiles.items()
+                },
                 "profile_selector": (
-                    "general on tools/tools_in_prompt/response_format/"
-                    "structured_format_in_prompt "
-                    + (
-                        "or per the attached LLM profile-judge verdict "
-                        "(deterministic code-task signal as fallback); "
-                        if self._profile_judge is not None
-                        else "or when the latest user turn carries no code-task signal; "
-                    )
-                    + "both profiles are Conductor ensembles (issue #509)"
+                    "per the attached LLM profile-judge verdict over the latest "
+                    "user turn (fallback "
+                    f"{self._profile_judge.fallback!r} on timeout, backend "
+                    "error, or an unparseable verdict); every profile is a "
+                    "Conductor DAG (issue #509, DTO-D13)"
+                    if self._profile_judge is not None
+                    else "primary; no profile judge is configured"
                 ),
                 **(
                     {
@@ -545,19 +630,28 @@ class Orchestrator:
                             "max_tokens": self._profile_judge.max_tokens,
                             "prompt_prefix": self._profile_judge.prompt_prefix,
                             "prompt_suffix": self._profile_judge.prompt_suffix,
+                            "fallback": self._profile_judge.fallback,
+                            "choices": [
+                                {
+                                    "profile": choice.profile,
+                                    "label": choice.label,
+                                    "criteria": choice.criteria,
+                                }
+                                for choice in self._profile_judge.choices
+                            ],
                         }
                     }
                     if self._profile_judge is not None
                     else {}
                 ),
             }
-            if self._general_roles is not None
+            if self._extra_profiles is not None
             else {}
         )
         return {
             "router": router,
             "targets": ["tier1", "tier2", "multi_agent"],
-            **general_payload,
+            **profile_payload,
             "configured_engines": {
                 name: descriptor.as_dict() for name, descriptor in self._engine_descriptors.items()
             },
@@ -628,37 +722,66 @@ class Orchestrator:
             max_tokens_cap=self._sampling_params.max_tokens,
         )
 
-    def _role_profile(self, call: OrchestrationRequest) -> str:
-        """Deterministic per-request DAG profile (issue #509).
+    def _profile_output_floor(self, roles: tuple[RoleSpec, ...]) -> int | None:
+        """The public-output floor this profile can consume (issue #542).
 
-        Pure function of the call so preflight, admission, and execution
-        always agree. Agent/format-constrained turns (the head-disable
-        signals) and non-code requests take the general ensemble; plain code
-        authoring keeps the specialized coding ensemble. Both profiles are
-        full Conductor DAGs — never a direct single-engine route.
+        The floor reserves answer tokens behind a final unit whose scaffold
+        opens a reasoning span (``reasoning_close_tag``); a profile whose
+        final unit has no such span cannot consume it and runs without one.
         """
 
-        if self._general_roles is None:
+        if self._public_output_floor is None or self._moa_samples > 0:
+            return None
+        final = self._conductor_final_role(roles)
+        if not final.reasoning_close_tag or final.reasoning_closed:
+            return None
+        return self._public_output_floor
+
+    def _fallback_profile(self) -> str:
+        return self._profile_judge.fallback if self._profile_judge is not None else "primary"
+
+    def _role_profile(self, call: OrchestrationRequest) -> str:
+        """Deterministic per-request DAG profile (issue #509, DTO-D13).
+
+        Pure function of the call so preflight, admission, and execution
+        always agree: the attached judge verdict names the profile; without
+        one (no judge, judge failure, unparseable verdict) the fallback
+        profile serves. Every profile is a Conductor DAG.
+        """
+
+        if self._extra_profiles is None:
             return "primary"
-        if (
-            call.tools
-            or call.tools_in_prompt
-            or call.response_format is not None
-            or call.structured_format_in_prompt
-        ):
-            return "general"
-        if call.role_profile_judgment is not None:
-            return "primary" if call.role_profile_judgment == "code" else "general"
-        prompt = call.prompt
-        if isinstance(prompt, str) and code_task_signal(latest_user_view(prompt)):
-            return "primary"
-        return "general"
+        judgment = call.role_profile_judgment
+        if judgment is not None and judgment in self._profiles:
+            return judgment
+        return self._fallback_profile()
 
     def _roles_for(self, call: OrchestrationRequest) -> tuple[RoleSpec, ...]:
-        if self._role_profile(call) == "general":
-            assert self._general_roles is not None
-            return self._general_roles
-        return self._roles
+        return self._profiles[self._role_profile(call)]
+
+    def _profile_accepts_images(self, name: str) -> bool:
+        fallback = next(iter(self._engines))
+        return any(
+            backend_supports_prompt_kind(
+                self._engines[role.worker if role.worker in self._engines else fallback],
+                "multimodal",
+            )
+            for role in self._generation_roles(self._profiles[name])
+        )
+
+    def _offered_choices(self, call: OrchestrationRequest) -> tuple[ProfileChoice, ...]:
+        """The judge's choices for this call: image requests are offered only
+        profiles with an image-capable worker (the same live capability
+        ``_validate_call`` enforces), so a verdict can never select a DAG that
+        would drop the image."""
+
+        assert self._profile_judge is not None
+        choices = self._profile_judge.choices
+        if call.multimodal_prompt is None:
+            return choices
+        return tuple(
+            choice for choice in choices if self._profile_accepts_images(choice.profile)
+        )
 
     def will_judge_role_profile(
         self,
@@ -669,15 +792,12 @@ class Orchestrator:
         call = self._request(request)
         return not (
             self._profile_judge is None
-            or self._general_roles is None
+            or self._extra_profiles is None
             or self._moa_samples > 0
             or call.role_profile_judgment is not None
             or call.role_profile_judge_event is not None
             or not isinstance(call.prompt, str)
-            or call.tools
-            or call.tools_in_prompt
-            or call.response_format is not None
-            or call.structured_format_in_prompt
+            or len(self._offered_choices(call)) < 2
         )
 
     def _profile_judge_request(self, call: OrchestrationRequest) -> GenerationRequest:
@@ -685,7 +805,12 @@ class Orchestrator:
         view = _bounded_profile_judge_view(call.prompt)
         prompt = (
             self._profile_judge.prompt_prefix
-            + _PROFILE_JUDGE_PROMPT.format(request=view)
+            + _profile_judge_prompt(
+                self._offered_choices(call),
+                view,
+                tools=bool(call.tools or call.tools_in_prompt),
+                image=call.multimodal_prompt is not None,
+            )
             + self._profile_judge.prompt_suffix
         )
         if self._profile_judge.prompt_prefix or self._profile_judge.prompt_suffix:
@@ -726,7 +851,7 @@ class Orchestrator:
         self,
         request: str | OrchestrationRequest,
     ) -> OrchestrationRequest:
-        """Attach one accounted coding/general verdict before preflight."""
+        """Attach one accounted profile verdict before preflight."""
 
         call = self._request(request)
         if not self.will_judge_role_profile(call):
@@ -746,7 +871,7 @@ class Orchestrator:
             event = TraceEvent(
                 node="profile_judge",
                 kind="fallback",
-                detail="backend failure; deterministic signal applies",
+                detail="backend failure; fallback profile applies",
                 operation="classification",
                 status="failed",
                 role="profile_judge",
@@ -764,7 +889,8 @@ class Orchestrator:
             if self._stage_observer is not None:
                 self._stage_observer(event)
             return replace(call, role_profile_judge_event=event)
-        verdict = _parse_profile_verdict(result.text)
+        offered = self._offered_choices(call)
+        verdict = _parse_profile_verdict(result.text, offered)
         trace_usage = (
             TraceUsage(
                 prompt_tokens=result.usage.prompt_tokens,
@@ -780,7 +906,7 @@ class Orchestrator:
             detail=(
                 f"profile: {verdict}"
                 if verdict is not None
-                else "unparseable verdict; deterministic signal applies"
+                else "unparseable verdict; fallback profile applies"
             ),
             operation="classification",
             status="success" if verdict is not None else "failed",
@@ -796,6 +922,7 @@ class Orchestrator:
             usage=trace_usage,
             metadata={
                 "verdict": verdict,
+                "offered": [choice.label for choice in offered],
                 "fallback": None if verdict is not None else "unparseable_verdict",
             },
         )
@@ -1484,7 +1611,7 @@ class Orchestrator:
             )
             profile_bounds = (
                 self.admission_upper_bound(replace(call, role_profile_judgment=profile))
-                for profile in ("code", "general")
+                for profile in self._profiles
             )
             return AdmissionUpperBound(
                 tokens=judge_bound.tokens + max(bound.tokens for bound in profile_bounds),
@@ -1639,7 +1766,7 @@ class Orchestrator:
             chat_template_kwargs=call.chat_template_kwargs,
             execution_workers=self._execution_workers,
             reasoning_effort=self._effective_reasoning_effort(call),
-            public_output_floor=self._public_output_floor,
+            public_output_floor=self._profile_output_floor(roles),
         )
 
     def _effective_reasoning_effort(self, call: OrchestrationRequest) -> str | None:
@@ -1805,7 +1932,7 @@ class Orchestrator:
                 route_span.set_attribute("kairyu.route.confidence", decision.confidence)
         route_completed_at = utc_now_iso()
         notes: list[str] = [f"route: {decision.target} ({decision.reason})"]
-        if self._general_roles is not None and decision.target == "multi_agent":
+        if self._extra_profiles is not None and decision.target == "multi_agent":
             notes.append(f"role profile: {self._role_profile(call)}")
             if call.role_profile_judgment is not None:
                 notes.append(f"profile judge: {call.role_profile_judgment}")
@@ -2315,7 +2442,7 @@ class Orchestrator:
                 route_span.set_attribute("kairyu.route.confidence", decision.confidence)
         route_completed_at = utc_now_iso()
         notes = [f"route: {decision.target} ({decision.reason})"]
-        if self._general_roles is not None and decision.target == "multi_agent":
+        if self._extra_profiles is not None and decision.target == "multi_agent":
             notes.append(f"role profile: {self._role_profile(call)}")
             if call.role_profile_judgment is not None:
                 notes.append(f"profile judge: {call.role_profile_judgment}")

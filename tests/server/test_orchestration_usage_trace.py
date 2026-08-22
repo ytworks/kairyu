@@ -727,16 +727,27 @@ async def test_moa_cancellation_observer_keeps_completed_proposal_usage():
     )
 
 
+def _judge_policy():
+    from kairyu.orchestration.orchestrator import ProfileChoice, ProfileJudge
+
+    return ProfileJudge(
+        worker="judge",
+        choices=(
+            ProfileChoice("primary", "CODE", "code authoring"),
+            ProfileChoice("general", "GENERAL", "everything else"),
+        ),
+    )
+
+
 def test_chat_endpoint_attaches_profile_judge_verdict(tmp_path):
-    # Issue #509 amendment: the serving boundary judges the coding/general
-    # split once before preflight/admission, so a turn whose keyword signal
-    # says "code" still executes the general DAG when the LLM verdict says so.
+    # Issue #509 amendment / DTO-D13: the serving boundary judges the
+    # profile once before preflight/admission, and the verdict selects the
+    # executed DAG.
     from kairyu.engine.mock import MockBackend
     from kairyu.orchestration.conductor import RoleSpec
-    from kairyu.orchestration.orchestrator import ProfileJudge
 
     engine = MockBackend()
-    judge = MockBackend(responses={"Reply with exactly one word: CODE or GENERAL.": "GENERAL"})
+    judge = MockBackend(responses={"Reply with exactly one word: CODE, GENERAL.": "GENERAL"})
     orchestrator = Orchestrator(
         {"tier1": engine, "tier2": engine, "judge": judge},
         roles=(
@@ -747,15 +758,17 @@ def test_chat_endpoint_attaches_profile_judge_verdict(tmp_path):
                 prompt="[c_final] {query}",
             ),
         ),
-        general_roles=(
-            RoleSpec(
-                name="g_final",
-                worker="tier1",
-                role_type="synthesizer",
-                prompt="[g_final] {query}",
-            ),
-        ),
-        profile_judge=ProfileJudge(worker="judge"),
+        profiles={
+            "general": (
+                RoleSpec(
+                    name="g_final",
+                    worker="tier1",
+                    role_type="synthesizer",
+                    prompt="[g_final] {query}",
+                ),
+            )
+        },
+        profile_judge=_judge_policy(),
     )
     app = create_legacy_app(
         {"plain": engine},
@@ -807,10 +820,9 @@ def test_profile_judge_quota_is_reserved_before_dispatch():
     from kairyu.engine.mock import MockBackend
     from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
     from kairyu.orchestration.conductor import RoleSpec
-    from kairyu.orchestration.orchestrator import ProfileJudge
 
     engine = MockBackend()
-    judge = MockBackend(responses={"Reply with exactly one word: CODE or GENERAL.": "GENERAL"})
+    judge = MockBackend(responses={"Reply with exactly one word: CODE, GENERAL.": "GENERAL"})
     final_role = RoleSpec(
         name="final",
         worker="tier1",
@@ -820,8 +832,8 @@ def test_profile_judge_quota_is_reserved_before_dispatch():
     orchestrator = Orchestrator(
         {"tier1": engine, "judge": judge},
         roles=(final_role,),
-        general_roles=(final_role,),
-        profile_judge=ProfileJudge(worker="judge"),
+        profiles={"general": (final_role,)},
+        profile_judge=_judge_policy(),
     )
     app = create_legacy_app(
         {"plain": engine},
@@ -857,12 +869,11 @@ def test_profile_judge_usage_settles_when_later_preflight_rejects(tmp_path):
     from kairyu.engine.mock import MockBackend
     from kairyu.entrypoints.server.tenancy import TenantConfig, TenantLimits
     from kairyu.orchestration.conductor import RoleSpec
-    from kairyu.orchestration.orchestrator import ProfileJudge
 
     class UsageJudge(MockBackend):
         def __init__(self):
             super().__init__(
-                responses={"Reply with exactly one word: CODE or GENERAL.": "GENERAL"}
+                responses={"Reply with exactly one word: CODE, GENERAL.": "GENERAL"}
             )
             self.reported_usage = None
 
@@ -886,8 +897,8 @@ def test_profile_judge_usage_settles_when_later_preflight_rejects(tmp_path):
     orchestrator = Orchestrator(
         {"tier1": engine, "judge": judge},
         roles=(final_role,),
-        general_roles=(final_role,),
-        profile_judge=ProfileJudge(worker="judge"),
+        profiles={"general": (final_role,)},
+        profile_judge=_judge_policy(),
     )
     token_budget = 100_000
     app = create_legacy_app(

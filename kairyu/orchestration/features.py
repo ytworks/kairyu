@@ -59,31 +59,6 @@ def extract_features(query: str) -> QueryFeatures:
     )
 
 
-# Role-profile selection (issue #509) is a separate helper rather than a new
-# QueryFeatures field: the dataclass doubles as the M4 training corpus schema
-# and must not drift when serving-side signals are added.
-_CODE_TASK_KEYWORDS = (
-    "code",
-    "coding",
-    "program",
-    "python",
-    "function",
-    "script",
-    "implement",
-    "algorithm",
-    "compile",
-    "debug",
-    "refactor",
-    "unit test",
-    "コード",
-    "プログラム",
-    "実装",
-    "関数",
-    "スクリプト",
-    "アルゴリズム",
-    "デバッグ",
-)
-
 # Mirrors the L2 conversation rendering in
 # kairyu/entrypoints/server/chat_service.py: the rendered prompt's fixed
 # preamble mentions code/JSON/tool vocabulary, so profile keywords must be
@@ -104,11 +79,3 @@ def latest_user_view(query: str) -> str:
     end = body.rfind(_LATEST_USER_END)
     return body if end < 0 else body[:end]
 
-
-def code_task_signal(query: str) -> bool:
-    """True when the text plainly asks for code authoring (profile hint)."""
-
-    if _CODE_FENCE in query:
-        return True
-    lowered = query.lower()
-    return any(keyword in lowered for keyword in _CODE_TASK_KEYWORDS)

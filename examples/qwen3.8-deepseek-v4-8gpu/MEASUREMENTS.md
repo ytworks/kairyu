@@ -15,6 +15,13 @@
 > image-only `image_description` stage, DeepSeek budgets halved to
 > 8192/32768/65536 with a 65536 ceiling) are **not yet measured**; the
 > matrices below bind to the pre-DTO-D8 served-config digest.
+>
+> **Scope note (2026-08-22):** DTO-D13 puts a Qwen non-thinking route judge
+> in front of five profiles (four single-call direct routes + the ensemble).
+> Nothing below measures the judged policy: the judge's per-turn latency,
+> the route distribution of the harness datasets, per-route TTFT/E2E, and
+> the re-defined TTFT gate (gated routes only; thinking direct routes
+> reported) are all **not yet measured** and land with the next GPU window.
 
 ## Dual-track DAG serving matrices (current deployment)
 

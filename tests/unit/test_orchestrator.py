@@ -1534,19 +1534,22 @@ def test_requires_at_least_one_engine():
         Orchestrator(engines={})
 
 
-def test_direct_general_roles_reject_moa_mode():
+def test_direct_profiles_reject_moa_mode():
     from kairyu.orchestration.conductor import RoleSpec
 
     with pytest.raises(
         ValueError,
-        match="general_roles cannot be combined with moa_samples > 0",
+        match="profiles cannot be combined with moa_samples > 0",
     ):
         _orchestrator(
-            general_roles=(
-                RoleSpec(name="general", worker="tier1", prompt="{query}"),
-            ),
+            profiles={"fast": (RoleSpec(name="fast", worker="tier1", prompt="{query}"),)},
             moa_samples=2,
         )
+
+
+class _VisionMockBackend(MockBackend):
+    def supports_prompt_kind(self, kind: str) -> bool:
+        return kind in {"text", "multimodal"}
 
 
 def _profiled_orchestrator(
@@ -1556,12 +1559,14 @@ def _profiled_orchestrator(
     *,
     judge_prompt_prefix="",
     judge_prompt_suffix="",
+    fallback="primary",
 ):
-    # Issue #509: one served model, two ensemble DAGs. The coding profile is
-    # a single synthesizer; the general profile fans out before its final.
-    # An optional judge engine enables the LLM coding/general verdict.
+    # Issue #509 / DTO-D13: one served model, several role profiles selected
+    # per request by an optional LLM judge. The primary profile is a single
+    # synthesizer; `ensemble` fans out before its final; `fast` is a direct
+    # single-role route on tier1.
     from kairyu.orchestration.conductor import RoleSpec
-    from kairyu.orchestration.orchestrator import ProfileJudge
+    from kairyu.orchestration.orchestrator import ProfileChoice, ProfileJudge
 
     class MultiAgentRouter:
         def preview(self, query, context=None):
@@ -1570,7 +1575,7 @@ def _profiled_orchestrator(
         def route(self, query, context=None):
             return RuleRouter().route(COMPLEX)
 
-    coding_roles = (
+    primary_roles = (
         RoleSpec(
             name="c_final",
             worker="tier1",
@@ -1579,7 +1584,7 @@ def _profiled_orchestrator(
             prompt_headless="[c_final_headless] {query}",
         ),
     )
-    general_roles = (
+    ensemble_roles = (
         RoleSpec(name="g_prop", worker="tier1", prompt="[g_prop] {query}"),
         RoleSpec(
             name="g_final",
@@ -1590,20 +1595,34 @@ def _profiled_orchestrator(
             prompt_headless="[g_final_headless] {query} {g_prop}",
         ),
     )
+    fast_roles = (
+        RoleSpec(
+            name="f_final",
+            worker="tier2",
+            role_type="publisher",
+            prompt="[f_final] {query}",
+        ),
+    )
     engines = {"tier1": tier1, "tier2": tier2}
     if judge is not None:
         engines["judge"] = judge
     return Orchestrator(
         engines=engines,
         router=MultiAgentRouter(),
-        roles=coding_roles,
-        general_roles=general_roles,
+        roles=primary_roles,
+        profiles={"ensemble": ensemble_roles, "fast": fast_roles},
         profile_judge=(
             ProfileJudge(
                 worker="judge",
                 timeout_seconds=0.05,
                 prompt_prefix=judge_prompt_prefix,
                 prompt_suffix=judge_prompt_suffix,
+                choices=(
+                    ProfileChoice("fast", "FAST", "trivial requests"),
+                    ProfileChoice("primary", "CODE", "code authoring"),
+                    ProfileChoice("ensemble", "GENERAL", "everything else"),
+                ),
+                fallback=fallback,
             )
             if judge is not None
             else None
@@ -1611,24 +1630,10 @@ def _profiled_orchestrator(
     )
 
 
-async def test_structured_format_turn_runs_general_profile():
-    tier1 = MockBackend()
-    tier2 = MockBackend()
-    orchestrator = _profiled_orchestrator(tier1, tier2)
-    call = OrchestrationRequest(
-        prompt="Summarize the latest terminal output. Format your reply as JSON.",
-        sampling_params=SamplingParams(max_tokens=64),
-        structured_format_in_prompt=True,
-    )
-    result = await orchestrator.run(call)
-    assert "role profile: general" in result.trace
-    prompts = tier1.prompts_seen + tier2.prompts_seen
-    assert any("[g_prop]" in prompt for prompt in prompts)
-    assert any("[g_final" in prompt for prompt in prompts)
-    assert not any("[c_final" in prompt for prompt in prompts)
+_JUDGE_PROMPT_MARKER = "Reply with exactly one word: FAST, CODE, GENERAL."
 
 
-async def test_response_format_turn_runs_general_profile():
+async def test_without_judge_every_turn_runs_primary_profile():
     tier1 = MockBackend()
     tier2 = MockBackend()
     orchestrator = _profiled_orchestrator(tier1, tier2)
@@ -1642,29 +1647,10 @@ async def test_response_format_turn_runs_general_profile():
         response_format=response_format,
     )
     result = await orchestrator.run(call)
-    assert "role profile: general" in result.trace
-    prompts = tier1.prompts_seen + tier2.prompts_seen
-    assert any("[g_prop]" in prompt for prompt in prompts)
-    assert any("[g_final" in prompt for prompt in prompts)
-    assert not any("[c_final" in prompt for prompt in prompts)
-
-
-async def test_code_task_turn_keeps_primary_profile():
-    tier1 = MockBackend()
-    tier2 = MockBackend()
-    orchestrator = _profiled_orchestrator(tier1, tier2)
-    call = OrchestrationRequest(
-        prompt="Implement a python function that reverses a list.",
-        sampling_params=SamplingParams(max_tokens=64),
-    )
-    result = await orchestrator.run(call)
     assert "role profile: primary" in result.trace
     prompts = tier1.prompts_seen + tier2.prompts_seen
-    assert any("[c_final" in prompt for prompt in prompts)
-    assert not any("[g_" in prompt for prompt in prompts)
-
-
-_JUDGE_PROMPT_MARKER = "Reply with exactly one word: CODE or GENERAL."
+    assert any("[c_final_headless]" in prompt for prompt in prompts)
+    assert not any("[g_" in prompt or "[f_final" in prompt for prompt in prompts)
 
 
 def test_bounded_profile_judge_view_preserves_request_intent_and_tail():
@@ -1684,19 +1670,28 @@ def test_bounded_profile_judge_view_preserves_request_intent_and_tail():
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("CODE", "code"),
-        (" code\n", "code"),
-        ("GENERAL", "general"),
-        ("\tgeneral ", "general"),
+        ("CODE", "primary"),
+        (" code\n", "primary"),
+        ("GENERAL", "ensemble"),
+        ("\tgeneral ", "ensemble"),
+        ("FAST.", "fast"),
         ("not CODE", None),
         ("The answer is CODE.", None),
         ("GENERAL explanation", None),
         ("CODE or GENERAL", None),
+        ("ENSEMBLE", None),
         ("", None),
     ],
 )
-def test_parse_profile_verdict_requires_exact_word(text, expected):
-    assert _parse_profile_verdict(text) == expected
+def test_parse_profile_verdict_requires_exact_offered_label(text, expected):
+    from kairyu.orchestration.orchestrator import ProfileChoice
+
+    choices = (
+        ProfileChoice("fast", "FAST", "trivial"),
+        ProfileChoice("primary", "CODE", "code"),
+        ProfileChoice("ensemble", "GENERAL", "rest"),
+    )
+    assert _parse_profile_verdict(text, choices) == expected
 
 
 def test_profile_judge_admission_reserves_judge_and_worst_profile():
@@ -1712,7 +1707,7 @@ def test_profile_judge_admission_reserves_judge_and_worst_profile():
     combined = orchestrator.admission_upper_bound(call)
     profile_bounds = [
         orchestrator.admission_upper_bound(replace(call, role_profile_judgment=profile)).tokens
-        for profile in ("code", "general")
+        for profile in ("primary", "ensemble", "fast")
     ]
 
     assert combined.tokens > max(profile_bounds)
@@ -1744,6 +1739,11 @@ async def test_judge_applies_configured_worker_prompt_scaffold():
     assert prompt.startswith("<bos><user>")
     assert prompt.endswith("<assistant></think>")
     assert _JUDGE_PROMPT_MARKER in prompt
+    # The spec's choices and criteria are the routing policy the judge reads,
+    # fastest first, plus the deterministic request flags.
+    assert prompt.index("- FAST: trivial requests") < prompt.index("- CODE: code authoring")
+    assert "- GENERAL: everything else" in prompt
+    assert "tool calling no; image attached no" in prompt
 
 
 async def test_judge_scaffold_dispatches_over_vllm_completions_wire():
@@ -1796,7 +1796,7 @@ async def test_judge_scaffold_dispatches_over_vllm_completions_wire():
     )
     await judge.shutdown()
 
-    assert call.role_profile_judgment == "general"
+    assert call.role_profile_judgment == "ensemble"
     assert captured["path"] == "/v1/completions"
     body = captured["body"]
     assert isinstance(body, dict)
@@ -1805,10 +1805,23 @@ async def test_judge_scaffold_dispatches_over_vllm_completions_wire():
     assert "messages" not in body
 
 
-async def test_judge_overrides_code_vocabulary_to_general():
+@pytest.mark.parametrize(
+    ("verdict", "profile", "expected_marker", "absent_markers"),
+    [
+        ("GENERAL", "ensemble", "[g_prop]", ("[c_final", "[f_final")),
+        ("CODE", "primary", "[c_final", ("[g_", "[f_final")),
+        ("FAST", "fast", "[f_final", ("[g_", "[c_final")),
+    ],
+)
+async def test_judge_verdict_selects_the_profile(
+    verdict,
+    profile,
+    expected_marker,
+    absent_markers,
+):
     tier1 = MockBackend()
     tier2 = MockBackend()
-    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: verdict})
     orchestrator = _profiled_orchestrator(tier1, tier2, judge)
     call = await orchestrator.judge_role_profile(
         OrchestrationRequest(
@@ -1816,38 +1829,21 @@ async def test_judge_overrides_code_vocabulary_to_general():
             sampling_params=SamplingParams(max_tokens=64),
         )
     )
-    assert call.role_profile_judgment == "general"
+    assert call.role_profile_judgment == profile
     result = await orchestrator.run(call)
-    assert "role profile: general" in result.trace
-    assert "profile judge: general" in result.trace
+    assert f"role profile: {profile}" in result.trace
+    assert f"profile judge: {profile}" in result.trace
     prompts = tier1.prompts_seen + tier2.prompts_seen
-    assert any("[g_prop]" in prompt for prompt in prompts)
-    assert not any("[c_final" in prompt for prompt in prompts)
+    assert any(expected_marker in prompt for prompt in prompts)
+    assert not any(marker in prompt for prompt in prompts for marker in absent_markers)
 
 
-async def test_judge_keeps_coding_profile_without_keyword_signal():
+async def test_tool_and_format_turns_are_judged_too():
+    # DTO-D13: head-disable signals no longer pin a profile; the judge sees
+    # the turn (with its tool flag) and a head-less direct route answers.
     tier1 = MockBackend()
     tier2 = MockBackend()
-    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "CODE"})
-    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
-    call = await orchestrator.judge_role_profile(
-        OrchestrationRequest(
-            prompt="Write a Rust CLI that reverses its arguments.",
-            sampling_params=SamplingParams(max_tokens=64),
-        )
-    )
-    assert call.role_profile_judgment == "code"
-    result = await orchestrator.run(call)
-    assert "role profile: primary" in result.trace
-    prompts = tier1.prompts_seen + tier2.prompts_seen
-    assert any("[c_final" in prompt for prompt in prompts)
-    assert not any("[g_" in prompt for prompt in prompts)
-
-
-async def test_head_disable_signals_skip_the_judge():
-    tier1 = MockBackend()
-    tier2 = MockBackend()
-    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "CODE"})
+    judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "FAST"})
     orchestrator = _profiled_orchestrator(tier1, tier2, judge)
     response_format = {"type": "json_object"}
     call = await orchestrator.judge_role_profile(
@@ -1858,22 +1854,58 @@ async def test_head_disable_signals_skip_the_judge():
                 extra_args={"response_format": response_format},
             ),
             response_format=response_format,
+            tools_in_prompt=True,
         )
     )
-    assert call.role_profile_judgment is None
-    assert not judge.prompts_seen
+    assert call.role_profile_judgment == "fast"
+    assert len(judge.prompts_seen) == 1
+    assert "tool calling yes" in judge.prompts_seen[0]
     result = await orchestrator.run(call)
-    assert "role profile: general" in result.trace
+    assert "role profile: fast" in result.trace
+    assert any("[f_final" in prompt for prompt in tier2.prompts_seen)
 
 
-async def test_judge_failure_falls_back_to_code_task_signal():
+async def test_image_request_is_offered_only_image_capable_profiles():
+    # The DeepSeek-style `fast` route (tier2, text-only) must never be
+    # selected for an image request: it is withheld from the judge and an
+    # out-of-set verdict falls back.
+    from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt
+
+    tier1 = _VisionMockBackend()
+    tier2 = MockBackend()
+    judge = MockBackend(responses={"Reply with exactly one word: CODE, GENERAL.": "CODE"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge)
+    query = "What is on this slide?"
+    call = OrchestrationRequest(
+        prompt=query,
+        sampling_params=SamplingParams(max_tokens=64),
+        multimodal_prompt=MultimodalPrompt(
+            query, (MultimodalItem("image", "uri", "data:image/png;base64,AAAA"),)
+        ),
+    )
+    judged = await orchestrator.judge_role_profile(call)
+    assert judged.role_profile_judgment == "primary"
+    prompt = judge.prompts_seen[0]
+    assert "- FAST:" not in prompt
+    assert "image attached yes" in prompt
+
+    # A verdict naming the withheld route is unparseable, not a selection.
+    judge_fast = MockBackend(responses={"Reply with exactly one word: CODE, GENERAL.": "FAST"})
+    orchestrator = _profiled_orchestrator(tier1, tier2, judge_fast)
+    judged = await orchestrator.judge_role_profile(call)
+    assert judged.role_profile_judgment is None
+    assert judged.role_profile_judge_event is not None
+    assert judged.role_profile_judge_event.status == "failed"
+
+
+async def test_judge_failure_falls_back_to_configured_profile():
     tier1 = MockBackend()
     tier2 = MockBackend()
     slow_judge = MockBackend(
         responses={_JUDGE_PROMPT_MARKER: "GENERAL"},
         latency_s=5.0,
     )
-    orchestrator = _profiled_orchestrator(tier1, tier2, slow_judge)
+    orchestrator = _profiled_orchestrator(tier1, tier2, slow_judge, fallback="ensemble")
     call = await orchestrator.judge_role_profile(
         OrchestrationRequest(
             prompt="Implement a python function that reverses a list.",
@@ -1882,8 +1914,10 @@ async def test_judge_failure_falls_back_to_code_task_signal():
     )
     assert call.role_profile_judgment is None
     result = await orchestrator.run(call)
-    assert "role profile: primary" in result.trace
+    assert "role profile: ensemble" in result.trace
     assert "profile judge:" not in result.trace
+    prompts = tier1.prompts_seen + tier2.prompts_seen
+    assert any("[g_prop]" in prompt for prompt in prompts)
 
 
 async def test_unparseable_judge_verdict_falls_back():
@@ -1904,11 +1938,13 @@ async def test_unparseable_judge_verdict_falls_back():
     repeated = await orchestrator.judge_role_profile(call)
     assert repeated is call
     assert len(judge.prompts_seen) == 1
+    result = await orchestrator.run(call)
+    assert "role profile: primary" in result.trace
 
 
 async def test_judged_call_preflight_matches_execution():
     # The judged verdict travels with the call, so preflight, admission, and
-    # execution agree even when the verdict contradicts the keyword signal.
+    # execution agree on the selected profile.
     tier1 = MockBackend()
     tier2 = MockBackend()
     judge = MockBackend(responses={_JUDGE_PROMPT_MARKER: "GENERAL"})
@@ -1922,26 +1958,7 @@ async def test_judged_call_preflight_matches_execution():
     prepared = await orchestrator.prepare_request(call)
     await orchestrator.admission_upper_bound_async(call)
     result = await orchestrator.run(call, prepared=prepared)
-    assert "role profile: general" in result.trace
-    assert result.completions
-    prompts = tier1.prompts_seen + tier2.prompts_seen
-    assert any("[g_prop]" in prompt for prompt in prompts)
-    assert not any("[c_final" in prompt for prompt in prompts)
-
-
-async def test_general_profile_preflight_matches_execution():
-    # The prepared-request contract must pre-render the same profile the run
-    # executes, or the exact-request identity check rejects the dispatch.
-    tier1 = MockBackend()
-    tier2 = MockBackend()
-    orchestrator = _profiled_orchestrator(tier1, tier2)
-    call = OrchestrationRequest(
-        prompt="What should I cook tonight with rice and eggs?",
-        sampling_params=SamplingParams(max_tokens=64),
-    )
-    prepared = await orchestrator.prepare_request(call)
-    result = await orchestrator.run(call, prepared=prepared)
-    assert "role profile: general" in result.trace
+    assert "role profile: ensemble" in result.trace
     assert result.completions
     prompts = tier1.prompts_seen + tier2.prompts_seen
     assert any("[g_prop]" in prompt for prompt in prompts)

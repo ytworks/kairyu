@@ -71,15 +71,20 @@ roles:
     worker: tier1
     role_type: synthesizer
     prompt: "code draft: {query}"
-general_roles:
-  - name: g_final
-    worker: tier2
-    role_type: synthesizer
-    prompt: "general final: {query}"
+profiles:
+  - name: general
+    roles:
+      - name: g_final
+        worker: tier2
+        role_type: synthesizer
+        prompt: "general final: {query}"
 profile_judge:
   worker: tier2
   prompt_prefix: "<u>"
   prompt_suffix: "<a>"
+  choices:
+    - {profile: primary, label: CODE, criteria: "code authoring"}
+    - {profile: general, label: GENERAL, criteria: "everything else"}
 """
     )
     app = create_app(
@@ -98,7 +103,13 @@ profile_judge:
         "max_tokens": 8,
         "prompt_prefix": "<u>",
         "prompt_suffix": "<a>",
+        "fallback": "primary",
+        "choices": [
+            {"profile": "primary", "label": "CODE", "criteria": "code authoring"},
+            {"profile": "general", "label": "GENERAL", "criteria": "everything else"},
+        ],
     }
+    assert [role["name"] for role in descriptor["profiles"]["general"]] == ["g_final"]
 
 
 async def test_routing_config_is_explicitly_empty_without_orchestrators():

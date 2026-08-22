@@ -8,6 +8,9 @@ the next GPU window. DTO-D10..D12 (2026-08-20: peer synthesis + audit loop
 on the final unit, the image-only `image_description` stage, halved DeepSeek
 budgets) are accepted and implemented, change the served-config digest
 again, and are likewise **not yet GPU-verified**.
+DTO-D13 (2026-08-22: a Qwen non-thinking route judge selecting among four
+single-call direct routes and the ensemble) is accepted and implemented,
+changes the served-config digest again, and is **not yet GPU-verified**.
 Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes.
 Supersedes the ECO-D2/D3/D5/D6 role graphs, profiles, and profile judge in
@@ -403,12 +406,101 @@ Status: accepted; implemented; not GPU-verified.
   and the Terminal-Bench-style Codex run must be re-measured in the next GPU
   window.
 
+### DTO-D13 — Qwen-judged five-route selection (owner amendment, 2026-08-22)
+
+Status: accepted; implemented; not GPU-verified.
+
+Owner decision (2026-08-22): every request first pays one bounded Qwen
+non-thinking judge call that reads the request and picks the route expected
+to answer correctly and well at the lowest latency and cost, among five
+routes: (1) the dual-track ensemble (unchanged; highest cost, best quality),
+(2) Qwen3.8 non-thinking direct, (3) Qwen3.8 thinking at fixed `low`, (4)
+DeepSeek-V4-Flash-0731 non-thinking direct, (5) DeepSeek thinking at the
+caller's L3 effort. Decisions taken with the owner in planning: routes 2–5
+fix the example's official per-mode sampling (DTO-D8) on their final unit;
+their `max_tokens` are the vendor-official output lengths (Qwen 131,072 —
+the Qwen3.8 card's "Final Response: 131,072"; DeepSeek 393,216 — the
+DeepSeek-V4-Flash-0731 card's / API's "maximum output length 384K"); the
+ensemble route and everything it owns (DeepSeek tiers, `internal_max_tokens`
+65536, Chat UI default 65536, floor 256) are untouched; tool/format turns
+are judged too; judge failure falls back to the ensemble.
+
+- **Mechanism (engine prerequisite, same day, `kairyu/dsl` +
+  `kairyu/orchestration`)**: the issue #509 two-way profile judge
+  (`general_roles`, verdicts `CODE|GENERAL`, keyword fallback, head-disable
+  short-circuit) is generalized to N named **profiles**
+  (`OrchestratorSpec.profiles: [{name, roles}]`, the primary `roles` DAG is
+  the implicit profile `primary`) and a judge with spec-defined
+  `choices: [{profile, label, criteria}]` and `fallback`. Kairyu builds the
+  verdict prompt from the choices (fastest → most thorough, plus a
+  deterministic `tool calling yes/no; image attached yes/no` context line;
+  bounded 4,000-character latest-user view; ≤8 tokens, T=0). The verdict is
+  attached to the immutable request at the serving boundary before
+  preflight/admission (pure-function selection preserved); admission
+  reserves the judge plus the most expensive profile. Image requests are
+  offered only profiles with an image-capable worker; a verdict outside the
+  offered set is unparseable → fallback. Head-disable signals no longer pin a
+  profile and the keyword `code_task_signal` fallback is deleted. `/routing`
+  reports `profiles` and the judge (`choices`, `fallback`); the trace notes
+  `role profile: …` / `profile judge: …` and the `profile_judge`
+  classification event are unchanged, and `verification/…/serving_bench.py`
+  now retains `classification` stages.
+- **Final-unit sampling** (Conductor): a final-unit `sampling` block is
+  accepted — style fields (temperature/top_p/top_k/penalties/seed/stop) are
+  deployment policy layered over the caller's public params, `max_tokens`
+  (or the effort tier) is a cap min()'d with the caller's allowance; the
+  caller's `n`/`logprobs`/`response_format`/tools still apply (same pattern
+  as the head). The DTO-D9 floor is passed only to profiles whose final unit
+  declares `reasoning_close_tag`; a floor no profile can consume still fails
+  startup. DSL `max_tokens` / `max_tokens_by_effort` bounds rise 131072 →
+  393216.
+- **Example config**: worker `tier2-direct` (`deepseek-v4-flash-0731`, the
+  non-thinking pool; passthrough template leaves the `</think>`-closed
+  scaffold byte-identical); `profile_judge` on `tier1` (`QWEN`/`QWEN_THINK`/
+  `DEEPSEEK`/`DEEPSEEK_THINK`/`ENSEMBLE`, fallback `primary`); profiles
+  `qwen_direct` (`qwen_answer`: no effort, T=0.7/top_p 0.8/top_k 20/
+  presence 1.5, 131072), `qwen_think_low` (`qwen_think_answer`: `low`,
+  T=1.0/top_p 0.95/top_k 20, 131072), `deepseek_direct` (`deepseek_answer`
+  on `tier2-direct`, `reasoning_closed`, `<｜Assistant｜></think>`, T=1.0/
+  top_p 0.95, 393216), `deepseek_think` (`deepseek_think_answer` on `tier2`,
+  `inherit`, `<｜Assistant｜><think>` + `reasoning_close_tag`, T=1.0/top_p
+  0.95, 393216). Each direct role is one publisher with REQUEST-first (Qwen)
+  or scaffold-inline (DeepSeek) framing that writes the complete answer in
+  the demanded reply format, uses a trailing tool result directly, and emits
+  the actual tool call when required. Budget `{19, 2}` is spec-level; a
+  direct route spends 1 step + the bounded re-dispatch.
+- **Gates**: `serving-auto-max` / `serving-auto-max-coding` are
+  route-aware: every sample must trace the `profile_judge` classification
+  stage and exactly one profile's final unit; ensemble samples keep the
+  head/internal/audit contract; each row writes `routes.json` (route
+  distribution, per-route TTFT p50, judge latency p50). The TTFT gate
+  measures the TTFT-gated routes (`primary`, `qwen_direct`,
+  `deepseek_direct`; the conservative max of their per-route p50s) against
+  2× the paired DeepSeek-direct row; thinking direct routes are reported,
+  and a row with no gated sample records `not_applicable`. `example.json`:
+  `product_policy: judged-five-route-dual-track`, `profiles`,
+  `profile_judge`, `profile_final_roles`, `direct_route_max_tokens`,
+  `ttft_gated_profiles`; `control.py::_validate_ready` asserts the profiles,
+  judge choices, and `tier2-direct` binding.
+- **Supersedes**: ECO-D6's "there is no single-engine route in auto-max"
+  and its head-disable profile short-circuit; DTO-D1's "one DAG for every
+  request" now describes the `primary` profile.
+- **Known limits / GPU consequences**: the judge is a serial pre-head Qwen
+  call on every turn and lands on the DTO-D3 TTFT path; the direct routes
+  render the role-tagged conversation inside one user turn like every other
+  role; from the Chat UI the 65536 caller cap binds before the official
+  route caps; vLLM's behavior for `max_tokens` exceeding the remaining
+  context with the 131072/393216 caps must be confirmed (clamp follow-up if
+  it 400s). Both `verify.sh` gates, a manual per-route Chat UI pass, and the
+  judge-latency measurement are due in the next GPU window.
+
 ## Acceptance
 
 - CPU suite green with the rewritten example pinning test
-  (`tests/unit/test_tiered_frontier_examplectl.py`): worker list without
-  `sandbox`, the ordered eleven-role dual-track list (DTO-D10/D11)
-  cross-checked against `example.json`, no `general_roles`/`profile_judge`,
+  (`tests/unit/test_tiered_frontier_examplectl.py`): workers `tier1`,
+  `tier2`, `tier2-direct`, the ordered eleven-role dual-track primary list
+  (DTO-D10/D11) cross-checked against `example.json`, the four direct-route
+  profiles and the Qwen judge with its five choices (DTO-D13),
   budget `{19, 2}`, `synthesis` on the thinking `tier2` worker with
   non-empty `prompt_headless` (DTO-D7) and CANDIDATE 5 = critique, `audit`
   verifying `synthesis` with a non-greedy PASS/FAIL prompt,

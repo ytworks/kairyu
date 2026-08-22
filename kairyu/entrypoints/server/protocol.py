@@ -166,12 +166,20 @@ class BudgetDescriptorPayload(BaseModel):
     max_cost_usd: float | None = None
 
 
+class ProfileChoicePayload(BaseModel):
+    profile: str
+    label: str
+    criteria: str
+
+
 class ProfileJudgePayload(BaseModel):
     worker: str
     timeout_seconds: float
     max_tokens: int
     prompt_prefix: str = ""
     prompt_suffix: str = ""
+    fallback: str = "primary"
+    choices: list[ProfileChoicePayload] = Field(default_factory=list)
 
 
 class RoutingModelDescriptorPayload(BaseModel):
@@ -183,12 +191,12 @@ class RoutingModelDescriptorPayload(BaseModel):
     )
     target_resolution: dict[str, TargetResolutionPayload]
     roles: list[RoleDescriptorPayload]
-    # Second ensemble DAG selected per request (issue #509); empty when the
-    # orchestrator serves a single profile.
-    general_roles: list[RoleDescriptorPayload] = Field(default_factory=list)
+    # Named alternative role DAGs selected per request (issue #509, DTO-D13);
+    # empty when the orchestrator serves the primary profile only.
+    profiles: dict[str, list[RoleDescriptorPayload]] = Field(default_factory=dict)
     profile_selector: str | None = None
-    # LLM verdict configuration for the coding/general split (issue #509
-    # amendment); null when the deterministic code-task signal decides.
+    # LLM verdict configuration selecting among the profiles; null when the
+    # primary profile always serves.
     profile_judge: ProfileJudgePayload | None = None
     stream_head: str | None = None
     budget: BudgetDescriptorPayload

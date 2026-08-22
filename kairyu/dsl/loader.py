@@ -26,6 +26,7 @@ from kairyu.orchestration.execution import (
 from kairyu.orchestration.orchestrator import (
     EngineDescriptor,
     Orchestrator,
+    ProfileChoice,
     ProfileJudge,
 )
 from kairyu.orchestration.router import RouteThresholds, RuleRouter, load_calibrated_router
@@ -183,7 +184,13 @@ def build_orchestrator(
         )
 
     roles = tuple(_role_spec(role) for role in spec.roles) or None
-    general_roles = tuple(_role_spec(role) for role in spec.general_roles) or None
+    profiles = (
+        {
+            profile.name: tuple(_role_spec(role) for role in profile.roles)
+            for profile in spec.profiles
+        }
+        or None
+    )
     profile_judge = (
         ProfileJudge(
             worker=spec.profile_judge.worker,
@@ -191,6 +198,15 @@ def build_orchestrator(
             max_tokens=spec.profile_judge.max_tokens,
             prompt_prefix=spec.profile_judge.prompt_prefix,
             prompt_suffix=spec.profile_judge.prompt_suffix,
+            choices=tuple(
+                ProfileChoice(
+                    profile=choice.profile,
+                    label=choice.label,
+                    criteria=choice.criteria,
+                )
+                for choice in spec.profile_judge.choices
+            ),
+            fallback=spec.profile_judge.fallback,
         )
         if spec.profile_judge is not None
         else None
@@ -219,7 +235,7 @@ def build_orchestrator(
         engines=engines,
         router=router,
         roles=roles,
-        general_roles=general_roles,
+        profiles=profiles,
         budget=budget,
         shared_prefix=spec.shared_prefix,
         sampling_params=SamplingParams(max_tokens=spec.internal_max_tokens),
