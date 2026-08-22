@@ -767,6 +767,13 @@ class Conductor:
             return None
         return self._worker_chat_template_kwargs(self._selected_final_unit(), prompt)
 
+    def final_intent_reasoning_effort(self) -> str | None:
+        """The resolved reasoning effort the final unit will dispatch."""
+
+        if not self._units:
+            return None
+        return self._role_reasoning_effort(self._selected_final_unit())
+
     def final_intent_sampling_params(self) -> SamplingParams:
         """Effective final-unit params before run-local budget deductions.
 
