@@ -506,22 +506,28 @@ are judged too; judge failure falls back to the ensemble.
   verifying `synthesis` with a non-greedy PASS/FAIL prompt,
   `image_description` on `tier1` with `requires: image` feeding every
   DeepSeek role, UNTRUSTED delimiters in `critique`/`synthesis`, per-policy
-  binding (`POLICY n` in `answer_n`), distinct answerer seed offsets,
-  ceiling/Chat UI/harness caps 65536 (DTO-D12).
-- Launcher `_validate_ready` requires the eleven-role dual-track DAG,
-  `stream_head: head`, exactly one role profile (no served general profile or
-  judge), `max_steps: 19`, `max_refine_depth: 2`, and the tier1/tier2 engine
-  bindings.
-- `serving-auto-max` passes end-to-end with the head/synthesis public stream
-  and the audit verdict traced (`expected_route: synthesis`, `require_head`,
-  `expected_verification_nodes: audit`).
-- `serving-auto-max-coding` passes its TTFT gate at every concurrency row
-  (c32 is the watch row); results recorded in the example's MEASUREMENTS.md.
-- GPU re-verification list for DTO-D10..D12 (next window): both `verify.sh`
-  gates, a manual image chat (the `image_description` stage appears in the
-  internal-work item; `skipped:condition` on a text chat), and a
-  Terminal-Bench-style Codex run over `/v1/responses` checking per-turn time
-  against 900 s and that tool-call turns PASS the audit.
-- Test-policy accounting: the executor-status gate tests and the
-  general/judge assertions were deleted with the features they protected;
-  base→head collection counts reported in the change.
+  binding (`POLICY n` in `answer_n`), distinct answerer seed offsets, ensemble
+  ceiling/Chat UI/harness caps 65536 (DTO-D12), and direct-route official
+  sampling/output caps 131072/393216 (DTO-D13).
+- Launcher `_validate_ready` requires the eleven-role dual-track primary DAG,
+  `stream_head: head`, the four named direct-route profiles, the Qwen judge's
+  five choices with fallback `primary`, `max_steps: 19`,
+  `max_refine_depth: 2`, and the tier1/tier2/tier2-direct engine bindings.
+- Both serving gates are route-aware: every sample traces the `profile_judge`
+  classification and exactly one profile's final unit; primary samples retain
+  the head/synthesis public stream and audit contract: `require_head`,
+  `expected_route: synthesis`, and `expected_verification_nodes: audit`.
+- `serving-auto-max-coding` passes its TTFT gate at every concurrency row that
+  contains a TTFT-gated profile (c32 is the watch row); thinking-direct-only
+  rows report `not_applicable`. Results are recorded in the example's
+  MEASUREMENTS.md.
+- GPU re-verification list for DTO-D10..D13 (next window): both `verify.sh`
+  gates; a manual image chat (the `image_description` stage appears in the
+  internal-work item; `skipped:condition` on a text chat); a manual Chat UI
+  pass for every route; judge-latency measurement; and a Terminal-Bench-style
+  Codex run over `/v1/responses` checking per-turn time against 900 s and that
+  tool-call turns PASS the audit.
+- Test-policy accounting: the executor-status gate tests and retired general
+  profile assertions were deleted with the features they protected; DTO-D13
+  reintroduced profile/judge assertions and route-aware gate tests;
+  base→head collection counts are reported in the change.
