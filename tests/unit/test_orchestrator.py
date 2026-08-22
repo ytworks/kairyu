@@ -2078,6 +2078,7 @@ async def test_judge_and_non_thinking_final_disable_thinking_explicitly():
                 ProfileChoice("primary", "SLOW", "rest"),
             ),
         ),
+        default_reasoning_effort="high",
     )
     call = OrchestrationRequest(prompt="hello there", sampling_params=SamplingParams(max_tokens=32))
 
@@ -2090,5 +2091,7 @@ async def test_judge_and_non_thinking_final_disable_thinking_explicitly():
     primary_call = replace(judged, role_profile_judgment="primary")
     orchestrator.validate_request(primary_call)
     assert tier1.validated[-1].chat_template_kwargs == {"enable_thinking": False}
+    assert tier1.validated[-1].reasoning_effort is None
     await orchestrator.run(primary_call)
     assert tier1.generated[-1].chat_template_kwargs == {"enable_thinking": False}
+    assert tier1.generated[-1].reasoning_effort is None

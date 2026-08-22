@@ -1092,6 +1092,7 @@ class Orchestrator:
         decision: RouteDecision | None,
     ) -> tuple[_IntentRequest, ...]:
         sampling_params = call.sampling_params
+        reasoning_effort = self._effective_reasoning_effort(call)
         conductor = None
         if (
             decision is not None
@@ -1100,6 +1101,7 @@ class Orchestrator:
         ):
             conductor = self._new_conductor(call, [])
             sampling_params = conductor.final_intent_sampling_params()
+            reasoning_effort = conductor.final_intent_reasoning_effort()
         requests: list[_IntentRequest] = []
         for key in self._final_engine_keys(call, decision):
             prompt = self._engine_prompt(
@@ -1128,7 +1130,7 @@ class Orchestrator:
                         tools_in_prompt=call.tools_in_prompt,
                         parallel_tool_calls=call.parallel_tool_calls,
                         tool_call_protocol=call.tool_call_protocol,
-                        reasoning_effort=self._effective_reasoning_effort(call),
+                        reasoning_effort=reasoning_effort,
                         chat_template_kwargs=chat_template_kwargs,
                     ),
                 )
