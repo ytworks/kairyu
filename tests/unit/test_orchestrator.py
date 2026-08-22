@@ -17,7 +17,7 @@ from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
-from kairyu.orchestration.conductor import RoleSpec
+from kairyu.orchestration.conductor import RoleSamplingOverrides, RoleSpec
 from kairyu.orchestration.moa import MoAEvent, MoAResult
 from kairyu.orchestration.orchestrator import (
     EngineDescriptor,
@@ -651,6 +651,57 @@ async def test_async_prepare_covers_every_multi_agent_final_and_internal_intent(
     )
     assert initial_planner.sampling_params.n == 1
     assert initial_planner.sampling_params.max_tokens == 5
+
+
+async def test_async_prepare_rejects_noninitial_final_sampling_policy() -> None:
+    events: list[tuple[str, str]] = []
+
+    class RejectTopKBackend(_PreparingBackend):
+        def validate_request(self, request: GenerationRequest) -> None:
+            super().validate_request(request)
+            if request.sampling_params.top_k == 20:
+                raise ValueError("top_k policy rejected")
+
+    tier1 = _PreparingBackend("tier1", events)
+    tier2 = RejectTopKBackend("tier2", events)
+    roles = (
+        RoleSpec(
+            name="draft",
+            worker="tier1",
+            role_type="proposer",
+            prompt="[draft] {query}",
+        ),
+        RoleSpec(
+            name="final",
+            worker="tier2",
+            role_type="publisher",
+            depends_on=("draft",),
+            prompt="[final] {query} {draft}",
+            sampling=RoleSamplingOverrides(top_k=20),
+        ),
+    )
+    orchestrator = _orchestrator(
+        engines={"tier1": tier1, "tier2": tier2},
+        roles=roles,
+    )
+    call = OrchestrationRequest(
+        prompt=COMPLEX,
+        sampling_params=SamplingParams(max_tokens=64),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^final orchestration intent is unsupported: "
+            r"tier2: top_k policy rejected$"
+        ),
+    ):
+        await orchestrator.prepare_request(call)
+
+    assert tier2.validated
+    assert tier2.validated[0].sampling_params.top_k == 20
+    assert tier1.generated == []
+    assert tier2.generated == []
 
 
 async def test_async_prepare_rejects_exact_initial_role_prompt_before_dispatch() -> None:

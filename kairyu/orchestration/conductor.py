@@ -759,6 +759,16 @@ class Conductor:
             effort=self._role_reasoning_effort(final),
         )
 
+    def final_intent_sampling_params(self) -> SamplingParams:
+        """Effective final-unit params before run-local budget deductions.
+
+        Orchestration preflight uses this same deployment-policy overlay as
+        the eventual final dispatch. Head usage and the public-output floor
+        may only shrink ``max_tokens`` later in the request.
+        """
+
+        return self._final_public_params()
+
     def _final_unit_sampling_params(self, run: _RunState | None) -> SamplingParams:
         """The caller's public intent (plus final-unit policy overrides),
         minus tokens the head already spent.

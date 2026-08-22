@@ -1071,6 +1071,16 @@ class Orchestrator:
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> tuple[_IntentRequest, ...]:
+        sampling_params = call.sampling_params
+        if (
+            decision is not None
+            and decision.target == "multi_agent"
+            and self._moa_samples == 0
+        ):
+            sampling_params = self._new_conductor(
+                call,
+                [],
+            ).final_intent_sampling_params()
         requests: list[_IntentRequest] = []
         for key in self._final_engine_keys(call, decision):
             prompt = self._engine_prompt(
@@ -1084,7 +1094,7 @@ class Orchestrator:
                     GenerationRequest(
                         request_id=f"preflight-{key}",
                         prompt=prompt,
-                        sampling_params=call.sampling_params,
+                        sampling_params=sampling_params,
                         tools=call.tools,
                         tool_choice=call.tool_choice,
                         tools_in_prompt=call.tools_in_prompt,
