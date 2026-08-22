@@ -867,6 +867,19 @@ def test_validate_request_rejects_native_unsupported_intent(field, params):
         backend.validate_request(request)
 
 
+def test_validate_request_rejects_native_chat_template_kwargs():
+    backend = KairyuBackend()
+    request = GenerationRequest(
+        request_id="unsupported-template-kwargs",
+        prompt="hello",
+        sampling_params=SamplingParams(max_tokens=1),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    with pytest.raises(ValueError, match="chat_template_kwargs"):
+        backend.validate_request(request)
+
+
 def test_validate_request_accepts_explicit_special_token_output_policy():
     backend = KairyuBackend()
     request = GenerationRequest(

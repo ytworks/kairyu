@@ -203,6 +203,20 @@ async def test_vllm_backend_forwards_text_variants_as_strings(monkeypatch, promp
     assert "tokenization_kwargs" not in engine.calls[0]
 
 
+async def test_vllm_backend_rejects_chat_template_kwargs_before_dispatch(monkeypatch):
+    backend, engine = _capturing_backend(monkeypatch)
+    request = GenerationRequest(
+        request_id="template-kwargs",
+        prompt="hello",
+        sampling_params=SamplingParams(max_tokens=1),
+        chat_template_kwargs={"enable_thinking": False},
+    )
+
+    with pytest.raises(ValueError, match="chat_template_kwargs"):
+        await backend.generate(request)
+    assert engine.calls == []
+
+
 async def test_vllm_backend_disables_special_tokens_only_for_templated_text(
     monkeypatch,
 ):
