@@ -92,24 +92,26 @@
   },
   "orchestration": {
     "auto_max_model": "kairyu-auto-max",
-    "internal_max_output_tokens": 4096,
+    "internal_max_output_tokens": 65536,
     "product_policy": "dual-track-policy-ensemble-dag",
     "roles": [
       "head",
       "draft",
+      "image_description",
       "policies",
       "answer_1",
       "answer_2",
       "answer_3",
       "answer_4",
       "critique",
-      "compose"
+      "synthesis",
+      "audit"
     ],
     "stream_head": "head",
-    "max_steps": 10,
-    "product_normal_calls": 9,
-    "product_max_calls": 10,
-    "product_max_refinements": 0,
+    "max_steps": 19,
+    "product_normal_calls": 10,
+    "product_max_calls": 19,
+    "product_max_refinements": 2,
     "product_exposes_intermediate_outputs": true
   },
   "executor": {
@@ -132,13 +134,13 @@
     "serving": {
       "prompt_tokens_approx": 8192,
       "output_tokens": 256,
-      "auto_max_combined_max_tokens": 4096,
+      "auto_max_combined_max_tokens": 65536,
       "concurrency": [1, 8, 16, 32],
       "requests_per_concurrency": 32
     },
     "coding": {
       "prompt_tokens_approx": 1536,
-      "auto_max_combined_max_tokens": 4096,
+      "auto_max_combined_max_tokens": 65536,
       "concurrency": [1, 8, 16, 32],
       "requests_per_concurrency": 32,
       "ttft_multiplier_vs_deepseek_direct": 2.0,

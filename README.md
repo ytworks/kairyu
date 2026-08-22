@@ -654,6 +654,10 @@ topology pins Open WebUI v0.11.0 by immutable linux/amd64 digest; its named data
 volume stores an automatically generated secret, while its mock backends are for
 this local demo only. Replace the deployment and orchestrator specs and
 authentication policy for production.
+
+The advanced Reasoning Effort selector is wire-compatible: its medium default
+maps to Kairyu high (minimal/low→low, xhigh/max→max).
+
 `scripts/webui_smoke.sh` starts the complete topology and uses a separately
 pinned Playwright image to prove fresh-user setup, model selection, streaming,
 reload persistence, visible gateway failure, and recovery without restarting

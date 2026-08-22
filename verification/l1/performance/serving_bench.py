@@ -339,6 +339,12 @@ def _parse_trace(
             )
             continue
         timing = event.get("timing")
+        if timing is None and status != "success":
+            # A stage skipped before dispatch (budget, caller intent, an
+            # image-conditional role on a text request — DTO-D11) or failed
+            # before any observation has no wall timestamps: nothing to
+            # retain, and it must not invalidate an otherwise valid envelope.
+            continue
         if not isinstance(timing, dict):
             raise ValueError("event.timing must be an object")
         started = _parse_utc_timestamp(timing.get("started_at"), "event.started_at")

@@ -51,7 +51,16 @@ def _role_sampling(role: RoleNodeSpec) -> RoleSamplingOverrides | None:
     return RoleSamplingOverrides(
         temperature=role.sampling.temperature,
         top_p=role.sampling.top_p,
+        top_k=role.sampling.top_k,
+        min_p=role.sampling.min_p,
+        presence_penalty=role.sampling.presence_penalty,
+        repetition_penalty=role.sampling.repetition_penalty,
         max_tokens=role.sampling.max_tokens,
+        max_tokens_by_effort=(
+            None
+            if role.sampling.max_tokens_by_effort is None
+            else role.sampling.max_tokens_by_effort.model_dump()
+        ),
         seed_offset=role.sampling.seed_offset,
         stop=role.sampling.stop,
     )
@@ -168,6 +177,9 @@ def build_orchestrator(
             prompt_suffix=role.prompt_suffix,
             prompt_headless=role.prompt_headless,
             reasoning_closed=role.reasoning_closed,
+            reasoning_effort=role.reasoning_effort,
+            reasoning_close_tag=role.reasoning_close_tag,
+            requires=role.requires,
         )
 
     roles = tuple(_role_spec(role) for role in spec.roles) or None
@@ -219,4 +231,6 @@ def build_orchestrator(
         execution_workers=execution_workers,
         executor_descriptors=executor_descriptors,
         profile_judge=profile_judge,
+        default_reasoning_effort=spec.default_reasoning_effort,
+        public_output_floor=spec.public_output_floor,
     )

@@ -1703,6 +1703,41 @@ class TemplatedStubBackend(StubBackend):
 
 
 @pytest.mark.parametrize(
+    ("wire_effort", "normalized_effort"),
+    [
+        ("minimal", "low"),
+        ("low", "low"),
+        ("medium", "high"),
+        ("high", "high"),
+        ("xhigh", "max"),
+        ("max", "max"),
+    ],
+)
+async def test_chat_reasoning_effort_aliases_are_normalized(
+    wire_effort, normalized_effort
+):
+    class RecordingBackend(MockBackend):
+        def __init__(self):
+            super().__init__({"reason": "answer"})
+            self.requests = []
+
+        async def generate(self, request):
+            self.requests.append(request)
+            return await super().generate(request)
+
+    backend = RecordingBackend()
+    app = create_legacy_app(engines={"stub": backend})
+    async with _client(app) as client:
+        response = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("reason", model="stub", reasoning_effort=wire_effort),
+        )
+
+    assert response.status_code == 200
+    assert backend.requests[-1].reasoning_effort == normalized_effort
+
+
+@pytest.mark.parametrize(
     ("generated", "reasoning", "content"),
     [
         ("plain answer", None, "plain answer"),

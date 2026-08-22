@@ -14,10 +14,11 @@ from kairyu.engine.backend import (
 from kairyu.engine.mock import MockBackend
 from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt, TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
-from kairyu.orchestration.conductor import Conductor, RoleSpec
+from kairyu.orchestration.conductor import Conductor, RoleSamplingOverrides, RoleSpec
 from kairyu.orchestration.prefix_index import prefix_root_fingerprint
 from kairyu.orchestration.trace import WorkerTraceIdentity
 from kairyu.outputs import CompletionOutput
+from kairyu.sampling_params import SamplingParams
 
 
 class ScriptedBackend:
@@ -235,7 +236,101 @@ async def test_linear_dag_passes_upstream_output_downstream():
     assert result.final_text == result.outputs["worker"]
 
 
-async def test_multimodal_media_reaches_only_capable_role_workers():
+@pytest.mark.parametrize(
+    ("request_effort", "inherited"),
+    [("max", "max"), (None, None)],
+)
+async def test_role_reasoning_effort_fixed_or_inherited_reaches_engine_requests(
+    request_effort, inherited
+):
+    backend = ScriptedBackend(["plan", "judged", "answer"])
+    roles = (
+        RoleSpec(
+            name="planner",
+            worker="w",
+            prompt="[planner] plan for: {query}",
+            reasoning_effort="low",
+        ),
+        RoleSpec(
+            name="critic",
+            worker="w",
+            prompt="[critic] judge: {planner}",
+            depends_on=("planner",),
+            reasoning_effort="inherit",
+        ),
+        RoleSpec(
+            name="worker",
+            worker="w",
+            prompt="[worker] execute: {critic}",
+            depends_on=("critic",),
+        ),
+    )
+    conductor = Conductor(
+        roles=roles,
+        workers={"w": backend},
+        reasoning_effort=request_effort,
+    )
+
+    await conductor.run("build a cli")
+
+    by_role = {
+        request.request_id.rsplit("-", 2)[-2]: request.reasoning_effort
+        for request in backend.requests_seen
+    }
+    assert by_role == {"planner": "low", "critic": inherited, "worker": None}
+
+
+@pytest.mark.parametrize(
+    ("request_effort", "internal_cap", "expected_max_tokens"),
+    [
+        ("low", 4096, 2048),
+        ("high", 4096, 4096),
+        ("max", 4096, 4096),  # tier 8192 min()'d against the internal ceiling
+        (None, 4096, 4096),  # no resolved effort: plain max_tokens fallback
+        ("max", 8192, 8192),
+    ],
+)
+def test_effort_graded_max_tokens_selects_tier_and_respects_internal_cap(
+    request_effort, internal_cap, expected_max_tokens
+):
+    roles = (
+        RoleSpec(
+            name="planner",
+            worker="w",
+            prompt="[planner] plan for: {query}",
+            reasoning_effort="inherit",
+            sampling=RoleSamplingOverrides(
+                max_tokens=4096,
+                max_tokens_by_effort={"low": 2048, "high": 4096, "max": 8192},
+            ),
+        ),
+        RoleSpec(
+            name="worker",
+            worker="w",
+            prompt="[worker] execute: {planner}",
+            depends_on=("planner",),
+        ),
+    )
+    conductor = Conductor(
+        roles=roles,
+        workers={"w": ScriptedBackend(["plan", "answer"])},
+        sampling_params=SamplingParams(max_tokens=internal_cap),
+        reasoning_effort=request_effort,
+    )
+
+    requests = conductor.initial_requests("build a cli", request_id_suffix="s")
+
+    by_role = {spec.name: request for spec, request in requests}
+    assert by_role["planner"].sampling_params.max_tokens == expected_max_tokens
+
+
+@pytest.mark.parametrize(
+    ("role_effort", "expected_thinking"),
+    [(None, False), ("low", True)],
+)
+async def test_multimodal_media_reaches_only_capable_role_workers(
+    role_effort, expected_thinking
+):
     text = ScriptedBackend(["plan", "final"])
     vision = VisionScriptedBackend(["chart evidence"])
     roles = (
@@ -245,6 +340,7 @@ async def test_multimodal_media_reaches_only_capable_role_workers():
             worker="vision",
             prompt="inspect: {query}; plan: {planner}",
             depends_on=("planner",),
+            reasoning_effort=role_effort,
         ),
         RoleSpec(
             name="publisher",
@@ -275,8 +371,9 @@ async def test_multimodal_media_reaches_only_capable_role_workers():
     assert vision_prompt.messages[0].content[0].text.startswith("inspect:")
     assert vision_prompt.messages[0].content[1].item_index == 0
     assert vision.requests_seen[0].chat_template_kwargs == {
-        "enable_thinking": False
+        "enable_thinking": expected_thinking
     }
+    assert vision.requests_seen[0].reasoning_effort == role_effort
     assert all(request.chat_template_kwargs is None for request in text.requests_seen)
     assert result.final_text == "final"
 
@@ -372,25 +469,6 @@ async def test_final_stream_failure_is_not_converted_to_false_success():
     backend.release.set()
     with pytest.raises(RuntimeError, match="final stream failed"):
         await anext(stream)
-
-
-async def test_stream_rejects_provisional_final_with_post_verifier():
-    backend = MockBackend()
-    roles = (
-        RoleSpec(name="final", worker="w", prompt="{query}"),
-        RoleSpec(
-            name="check",
-            worker="w",
-            prompt="{final}",
-            role_type="verifier",
-            verifies="final",
-            depends_on=("final",),
-        ),
-    )
-    conductor = Conductor(roles=roles, workers={"w": backend})
-
-    with pytest.raises(ValueError, match="cannot have a post-generation verifier"):
-        await anext(conductor.stream("q"))
 
 
 async def test_unit_backend_failure_does_not_destroy_the_run():

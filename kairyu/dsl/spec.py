@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from string import Formatter
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -50,16 +51,35 @@ class WorkerSpec(BaseModel):
         return self
 
 
+class EffortMaxTokensSpec(BaseModel):
+    """Token budget (private thinking + answer together) per resolved
+    reasoning effort (DTO-D8). All three tiers are required so the map is
+    total over every resolvable level; the plain ``max_tokens`` remains the
+    fallback when the resolved effort is null."""
+
+    model_config = ConfigDict(frozen=True)
+
+    low: int = Field(ge=1, le=131072)
+    high: int = Field(ge=1, le=131072)
+    max: int = Field(ge=1, le=131072)
+
+
 class RoleSamplingSpec(BaseModel):
     """Per-role sampling overrides (EO-D9). The selected final unit carries the
     caller's public intent and must not declare overrides; internal roles are
-    still capped by ``internal_max_tokens``."""
+    still capped by ``internal_max_tokens``. Omitted fields keep the caller's
+    or engine's defaults."""
 
     model_config = ConfigDict(frozen=True)
 
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
-    max_tokens: int | None = Field(default=None, ge=1, le=32768)
+    top_k: int | None = Field(default=None, ge=1)
+    min_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    repetition_penalty: float | None = Field(default=None, gt=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1, le=131072)
+    max_tokens_by_effort: EffortMaxTokensSpec | None = None
     seed_offset: int | None = Field(default=None, ge=0)
     stop: tuple[str, ...] = ()
 
@@ -85,6 +105,34 @@ class ExecutorRoleSpec(BaseModel):
     limits: ExecutionLimitsSpec = ExecutionLimitsSpec()
 
 
+def _check_prompt_placeholders(role: str, field_name: str, template: str) -> None:
+    """Reject a prompt template the Conductor cannot render.
+
+    Role prompts are rendered with ``str.format_map`` over ``{query}`` and the
+    dependency outputs; a literal brace pair such as ``{...}`` is a positional
+    field that raises at request time — after the stage's dependencies already
+    ran. Fail at load so ``kairyu validate`` and startup catch it.
+    """
+
+    try:
+        fields = [
+            name
+            for _literal, name, _format_spec, _conversion in Formatter().parse(template)
+            if name is not None
+        ]
+    except ValueError as error:
+        raise ValueError(
+            f"role {role!r} {field_name} is not a valid template ({error}); "
+            "escape literal braces as '{{' and '}}'"
+        ) from error
+    bad = [name for name in fields if not name.isidentifier()]
+    if bad:
+        raise ValueError(
+            f"role {role!r} {field_name} contains positional or non-identifier "
+            f"placeholder(s) {bad}; escape literal braces as '{{' and '}}'"
+        )
+
+
 class RoleNodeSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -108,6 +156,22 @@ class RoleNodeSpec(BaseModel):
     # private-reasoning span, so upstream reasoning-classified output with an
     # empty public text is the answer itself, not hidden deliberation.
     reasoning_closed: bool = False
+    # Reasoning effort sent on every attempt of this role. A level value is
+    # fixed deployment policy: it is independent of (and never overridden by)
+    # the caller's request-level effort. "inherit" forwards the caller's
+    # request-level effort instead (None when the caller sent none).
+    reasoning_effort: Literal["low", "high", "max", "inherit"] | None = None
+    # The literal that closes the private-reasoning span this role's
+    # prompt_suffix opens (e.g. "</think>"). Scaffold knowledge, declared as
+    # config; public_output_floor uses it to force-close deliberation in the
+    # final unit's empty-output re-dispatch (issue #542).
+    reasoning_close_tag: str = ""
+    # Dispatch condition. "image": the role runs only when the request carries
+    # image input; on text requests it is skipped entirely (no model call, no
+    # budget step), its dependents run as if it were absent, and its template
+    # slot renders as "" (DTO-D11). Head, final, verifier, and executor roles
+    # cannot be conditional.
+    requires: Literal["image"] | None = None
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
@@ -124,6 +188,14 @@ class RoleNodeSpec(BaseModel):
                     f"executor role {self.name!r} cannot declare prompt_headless "
                     "or reasoning_closed"
                 )
+            if self.reasoning_close_tag:
+                raise ValueError(
+                    f"executor role {self.name!r} cannot declare reasoning_close_tag"
+                )
+            if self.reasoning_effort is not None:
+                raise ValueError(
+                    f"executor role {self.name!r} cannot declare reasoning_effort"
+                )
             deps = set(self.depends_on)
             missing = (set(self.executor.code_from) | set(self.executor.tests_from)) - deps
             if missing:
@@ -133,6 +205,28 @@ class RoleNodeSpec(BaseModel):
                 )
         elif not self.prompt:
             raise ValueError(f"role {self.name!r} requires a prompt")
+        for field_name in ("prompt", "prompt_headless"):
+            _check_prompt_placeholders(self.name, field_name, getattr(self, field_name))
+        if self.requires is not None and self.role_type in {"verifier", "executor"}:
+            raise ValueError(
+                f"role {self.name!r}: a {self.role_type} role cannot declare requires"
+            )
+        if (
+            self.sampling is not None
+            and self.sampling.max_tokens_by_effort is not None
+            and self.reasoning_effort != "inherit"
+        ):
+            # A fixed-level role has a constant effort (use max_tokens) and an
+            # effort-less role never consults the map — both are dead config.
+            raise ValueError(
+                f"role {self.name!r}: max_tokens_by_effort requires "
+                "reasoning_effort: inherit"
+            )
+        if self.reasoning_close_tag and self.reasoning_closed:
+            raise ValueError(
+                f"role {self.name!r}: reasoning_close_tag declares an open "
+                "reasoning span and cannot combine with reasoning_closed"
+            )
         return self
 
 
@@ -216,13 +310,23 @@ class OrchestratorSpec(BaseModel):
     # Private planning/proposal/verification output is bounded independently
     # from the caller's public final-answer allowance.  Keeping this in the
     # orchestration policy makes latency/cost tuning portable across backends.
-    internal_max_tokens: int = Field(default=1024, ge=1, le=32768)
+    internal_max_tokens: int = Field(default=1024, ge=1, le=131072)
+    # Public-answer tokens reserved for the always-thinking final unit
+    # (issue #542): its attempt-0 thinking is capped at the caller's budget
+    # minus this floor, and the bounded empty-output re-dispatch answers with
+    # the reserve after a forced reasoning close. Requires the final unit to
+    # declare reasoning_close_tag. None keeps today's behavior.
+    public_output_floor: int | None = Field(default=None, ge=1, le=131072)
     # Zero keeps the standard Conductor route. A positive value turns the
     # multi-agent route into that many parallel MoA proposals plus synthesis.
     moa_samples: int = Field(default=0, ge=0, le=16)
     # Completed pre-final stage outputs may be surfaced separately from the
     # answer. Hidden is the safe and backward-compatible default.
     expose_intermediate_outputs: bool = False
+    # Effort assumed for a request whose caller sent no reasoning_effort.
+    # Consumed by "inherit" roles (and the direct/MoA routes); an explicit
+    # request-level effort always overrides it.
+    default_reasoning_effort: Literal["low", "high", "max"] | None = None
 
     @model_validator(mode="after")
     def _roles_reference_known_workers(self) -> OrchestratorSpec:
@@ -239,6 +343,11 @@ class OrchestratorSpec(BaseModel):
             raise ValueError(
                 "general_roles cannot be combined with moa_samples > 0; "
                 "choose role DAG profiles or MoA mode"
+            )
+        if self.public_output_floor is not None and self.moa_samples > 0:
+            raise ValueError(
+                "public_output_floor cannot be combined with moa_samples > 0; "
+                "the floor applies only to the Conductor final unit"
             )
         if self.profile_judge is not None:
             if not self.general_roles:
@@ -273,6 +382,10 @@ class OrchestratorSpec(BaseModel):
                     )
                 if any(role.verifies == head.name for role in roles):
                     raise ValueError(f"{profile}: head role {head.name!r} cannot be verified")
+                if head.requires is not None:
+                    raise ValueError(
+                        f"{profile}: head role {head.name!r} cannot declare requires"
+                    )
                 if not any(head.name in role.depends_on for role in roles):
                     raise ValueError(
                         f"{profile}: head role {head.name!r} must feed at least one "

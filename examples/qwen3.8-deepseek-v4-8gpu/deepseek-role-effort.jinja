@@ -1,0 +1,25 @@
+{#
+  Passthrough chat template for the L2 role scaffolds, plus inherited L3
+  reasoning effort. Kairyu owns templating: each role call arrives as one
+  user message whose content already carries the full DeepSeek scaffold —
+  always ending `<｜Assistant｜><think>`, since every DeepSeek v4 flash role
+  thinks (DTO-D7). When the request carries a reasoning_effort, these
+  thinking-scaffold calls get the graded high/max reasoning preamble spliced
+  directly after `<｜begin▁of▁sentence｜>` — the same text
+  deepseek-thinking.jinja renders on the direct L3 path. low and absent
+  effort pass through byte-identically, as would any non-thinking scaffold.
+#}
+{%- set body = messages[0]['content'] -%}
+{%- if reasoning_effort is defined and reasoning_effort is not none -%}
+  {%- if reasoning_effort not in ['low', 'high', 'max'] -%}
+    {{- raise_exception('reasoning_effort must be low, high, or max') -}}
+  {%- endif -%}
+  {%- if body.endswith('<｜Assistant｜><think>') -%}
+    {%- if reasoning_effort == 'high' -%}
+      {%- set body = body | replace('<｜begin▁of▁sentence｜>', '<｜begin▁of▁sentence｜>' ~ 'Reason privately and carefully before answering. Check the important facts, constraints, and likely failure modes, then converge on a clear final response. Keep the private scratchpad proportional to the difficulty: be concise for straightforward requests and use deeper verification only when the task requires it. Preserve enough token budget to finish the answer. The completion is invalid unless a non-empty final answer immediately follows </think>; never stop at the marker.\n\n', 1) -%}
+    {%- elif reasoning_effort == 'max' -%}
+      {%- set body = body | replace('<｜begin▁of▁sentence｜>', '<｜begin▁of▁sentence｜>' ~ 'Use rigorous private reasoning to maximize answer quality. Independently verify consequential claims, preserve every explicit requirement, and test the chosen solution against relevant edge cases. Allocate effort in proportion to the task rather than narrating every possible path, converge promptly once the answer is supported, and always preserve enough token budget to emit the complete final response. The completion is invalid unless a non-empty final answer immediately follows </think>; never stop at the marker.\n\n', 1) -%}
+    {%- endif -%}
+  {%- endif -%}
+{%- endif -%}
+{{- body -}}

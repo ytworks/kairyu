@@ -50,7 +50,11 @@ from kairyu.entrypoints.server.metering import (
     resolve_usage_counts,
     stream_usage_owner_from_state,
 )
-from kairyu.entrypoints.server.protocol import ChatCompletionRequest, StreamOptions
+from kairyu.entrypoints.server.protocol import (
+    ChatCompletionRequest,
+    StreamOptions,
+    normalize_reasoning_effort,
+)
 from kairyu.entrypoints.server.sse_encode import ResponsesTextDeltaSSEEncoder
 from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.sse import escape_json_line_separators
@@ -858,6 +862,18 @@ def _response_format(text: dict | None) -> dict | None:
     raise ChatRequestError(f"text.format.type {kind!r} is not supported")
 
 
+def _reasoning_effort(reasoning: dict | None) -> str | None:
+    if not reasoning:
+        return None
+    effort = reasoning.get("effort")
+    try:
+        return normalize_reasoning_effort(effort)
+    except ValueError:
+        raise ChatRequestError(
+            f"reasoning.effort {effort!r} is not supported"
+        ) from None
+
+
 def _to_chat_request(
     request: ResponsesRequest,
     items: Sequence[dict],
@@ -885,6 +901,9 @@ def _to_chat_request(
         values["temperature"] = request.temperature
     if request.top_p is not None:
         values["top_p"] = request.top_p
+    reasoning_effort = _reasoning_effort(request.reasoning)
+    if reasoning_effort is not None:
+        values["reasoning_effort"] = reasoning_effort
     return ChatCompletionRequest(
         model=request.model,
         messages=messages,

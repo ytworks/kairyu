@@ -10,6 +10,7 @@ import yaml
 from kairyu.deploy.spec import load_deployment_spec
 from kairyu.dsl.loader import load_spec
 from kairyu.engine.config_validation import validate_backend_options
+from kairyu.entrypoints.chat_template import ChatTemplate
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "examples/qwen3.8-deepseek-v4-8gpu"
@@ -72,7 +73,8 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "minimum_vram_mib": 90000,
     }
     assert spec["deepseek_l1_loopback_port"] == 8005
-    assert spec["verification"]["serving"]["auto_max_combined_max_tokens"] == 4096
+    assert spec["verification"]["serving"]["auto_max_combined_max_tokens"] == 65536
+    assert spec["verification"]["coding"]["auto_max_combined_max_tokens"] == 65536
     assert spec["allocation"] == {
         "tier1": {
             "model": "qwen3.8-27b",
@@ -141,9 +143,9 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         }
         assert _option(service["command"], "--limit-mm-per-prompt.image") == "1"
         assert _option(service["command"], "--limit-mm-per-prompt.video") == "0"
-        assert json.loads(
-            _option(service["command"], "--default-chat-template-kwargs")
-        ) == {"enable_thinking": False}
+        # Low-effort thinking is declared per role in auto-max.yaml, not via
+        # a service-wide default.
+        assert "--default-chat-template-kwargs" not in service["command"]
         assert _option(service["command"], "--max-num-seqs") == "32"
         assert _option(service["command"], "--max-num-batched-tokens") == "32768"
         assert _option(service["command"], "--kv-cache-dtype") == "fp8"
@@ -176,6 +178,14 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
     assert "--enable-auto-tool-choice" in deepseek["command"]
     assert _option(deepseek["command"], "--tool-call-parser") == "deepseek_v4"
     assert _option(deepseek["command"], "--max-num-batched-tokens") == "16384"
+    # Scaffold passthrough plus inherited-effort preamble injection (DTO-D6).
+    assert _option(deepseek["command"], "--chat-template") == (
+        "/etc/kairyu/deepseek-role-effort.jinja"
+    )
+    assert (
+        "./deepseek-role-effort.jinja:/etc/kairyu/deepseek-role-effort.jinja:ro"
+        in deepseek["volumes"]
+    )
     assert deepseek["volumes"][1]["target"] == "/root/.cache"
     assert deepseek["environment"] | {
         "XDG_CACHE_HOME": "/root/.cache",
@@ -288,6 +298,38 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert deployment.server.max_chat_body_bytes == 16_777_216
 
 
+def test_deepseek_role_effort_template_grades_only_thinking_scaffolds() -> None:
+    template = ChatTemplate.load(str(EXAMPLE / "deepseek-role-effort.jinja"))
+    thinking = (
+        "<｜begin▁of▁sentence｜><｜User｜>[critique] judge<｜Assistant｜><think>"
+    )
+    direct = (
+        "<｜begin▁of▁sentence｜><｜User｜>[policies] write<｜Assistant｜></think>"
+    )
+
+    def render(content: str, effort: str | None) -> str:
+        return template.render(
+            [{"role": "user", "content": content}],
+            template_kwargs=(
+                {"reasoning_effort": effort} if effort is not None else None
+            ),
+        )
+
+    assert render(thinking, None) == thinking
+    assert render(thinking, "low") == thinking
+    assert render(direct, "max") == direct
+    high = render(thinking, "high")
+    assert high.startswith(
+        "<｜begin▁of▁sentence｜>Reason privately and carefully"
+    )
+    assert high.endswith("<｜Assistant｜><think>")
+    maxed = render(thinking, "max")
+    assert maxed.startswith(
+        "<｜begin▁of▁sentence｜>Use rigorous private reasoning"
+    )
+    assert maxed.endswith("<｜User｜>[critique] judge<｜Assistant｜><think>")
+
+
 def test_tiered_private_reasoning_prompt_converges_without_requesting_a_transcript() -> None:
     template = (EXAMPLE / "deepseek-thinking.jinja").read_text()
 
@@ -302,48 +344,65 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     config = json.loads((EXAMPLE / "example.json").read_text())
     maximum = load_spec(EXAMPLE / "auto-max.yaml")
 
-    assert [worker.name for worker in maximum.workers] == [
-        "tier1",
-        "tier2",
-        "tier2-direct",
-    ]
+    assert [worker.name for worker in maximum.workers] == ["tier1", "tier2"]
     assert maximum.workers[0].engine_ref == "qwen3.8-27b"
+    # Every DeepSeek v4 flash role thinks (DTO-D7): one thinking worker, no
+    # tier2-direct.
     assert maximum.workers[1].engine_ref == "deepseek-v4-flash-0731-thinking"
-    # The public head/compose stream and the policy call must use the
-    # NON-thinking DeepSeek policy: <think> deliberation was measured
-    # consuming the entire public token budget before the first visible byte.
-    assert maximum.workers[2].engine_ref == "deepseek-v4-flash-0731"
     assert maximum.router.kind == "calibrated"
     assert maximum.router.target_mode == "auto-max"
     assert maximum.moa_samples == 0
-    assert maximum.internal_max_tokens == 4096
+    # DTO-D12: DeepSeek budgets halved for the Terminal-Bench turn envelope;
+    # the ceiling admits the max tier.
+    assert maximum.internal_max_tokens == 65536
+    assert maximum.public_output_floor == 256
     assert maximum.expose_intermediate_outputs is True
-    assert config["orchestration"]["internal_max_output_tokens"] == 4096
+    assert config["orchestration"]["internal_max_output_tokens"] == 65536
     assert (
         config["orchestration"]["product_policy"]
         == "dual-track-policy-ensemble-dag"
     )
-    assert config["orchestration"]["product_normal_calls"] == 9
-    assert config["orchestration"]["product_max_calls"] == 10
-    assert config["orchestration"]["product_max_refinements"] == 0
-    assert maximum.budget.max_steps == 10
-    assert maximum.budget.max_refine_depth == 0
+    # DTO-D10 budget: 10 generation units + 1 empty-output re-dispatch
+    # + 3 audit verdicts + 3 inconclusive re-verifies + 2 refinements.
+    assert config["orchestration"]["product_normal_calls"] == 10
+    assert config["orchestration"]["product_max_calls"] == 19
+    assert config["orchestration"]["product_max_refinements"] == 2
+    assert maximum.budget.max_steps == 19
+    assert maximum.budget.max_refine_depth == 2
     expected_roles = list(config["orchestration"]["roles"])
     assert [role.name for role in maximum.roles] == expected_roles == [
         "head",
         "draft",
+        "image_description",
         "policies",
         "answer_1",
         "answer_2",
         "answer_3",
         "answer_4",
         "critique",
-        "compose",
+        "synthesis",
+        "audit",
     ]
     by_name = {role.name: role for role in maximum.roles}
-    # Qwen head: server-side template + thinking disabled makes the public
-    # opening deterministic from t=0; DeepSeek public roles pay a
-    # nondeterministic <think> tax that forfeits the TTFT gate.
+    # Effort policy (DTO-D6): Qwen roles are fixed spec policy — draft and
+    # the answerers think at low, the head declares no effort and stays
+    # non-thinking. DeepSeek roles inherit the caller's L3 effort, and an
+    # effortless request runs at the spec default of high.
+    assert maximum.default_reasoning_effort == "high"
+    efforts = {role.name: role.reasoning_effort for role in maximum.roles}
+    assert efforts == {
+        "head": None,
+        "draft": "low",
+        "image_description": "low",
+        "answer_1": "low",
+        "answer_2": "low",
+        "answer_3": "low",
+        "answer_4": "low",
+        "policies": "inherit",
+        "critique": "inherit",
+        "synthesis": "inherit",
+        "audit": "inherit",
+    }
     head = by_name["head"]
     assert head.role_type == "head" and head.worker == "tier1"
     assert head.depends_on == ()
@@ -353,11 +412,20 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert draft.worker == "tier1" and draft.depends_on == ()
     critique = by_name["critique"]
     assert critique.worker == "tier2"
-    assert critique.depends_on == ("draft",)
-    # Track A: one non-thinking DeepSeek policy call fans out to four Qwen
+    assert critique.depends_on == ("draft", "image_description")
+    # DTO-D11: the Qwen image_description stage runs only on image requests
+    # and feeds every text-only DeepSeek role; the Qwen answerers see the
+    # image natively.
+    image_description = by_name["image_description"]
+    assert image_description.worker == "tier1"
+    assert image_description.requires == "image"
+    assert image_description.depends_on == ()
+    for role_name in ("policies", "critique", "synthesis", "audit"):
+        assert "{image_description}" in by_name[role_name].prompt
+    # Track A: one thinking DeepSeek policy call fans out to four Qwen
     # answerers, one per replica, each bound to its policy by prompt.
     policies = by_name["policies"]
-    assert policies.worker == "tier2-direct" and policies.depends_on == ()
+    assert policies.worker == "tier2" and policies.depends_on == ("image_description",)
     answerers = [by_name[f"answer_{index}"] for index in range(1, 5)]
     assert all(role.worker == "tier1" for role in answerers)
     assert all(role.depends_on == ("policies",) for role in answerers)
@@ -366,21 +434,42 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
         assert f"POLICY {index}" in role.prompt
     # The merge is the selected final unit: it carries the caller's public
     # intent (no sampling override), continues the committed head opening,
-    # and renders prompt_headless on head-disabled (tool/format) turns.
-    compose = by_name["compose"]
-    assert compose.worker == "tier2-direct"
-    assert compose.depends_on == (
+    # weighs the five candidates as peers (DTO-D10), and renders
+    # prompt_headless on head-disabled (tool/format) turns.
+    synthesis = by_name["synthesis"]
+    assert synthesis.worker == "tier2" and synthesis.role_type == "publisher"
+    assert synthesis.depends_on == (
         "head",
         "critique",
         "answer_1",
         "answer_2",
         "answer_3",
         "answer_4",
+        "image_description",
     )
-    assert compose.reasoning_closed is True
-    assert compose.prompt_headless
+    assert "UNTRUSTED CANDIDATE 5" in synthesis.prompt
+    assert "REFINED ANSWER" not in synthesis.prompt
+    # A thinking synthesis must not pre-close its reasoning span: with
+    # reasoning_closed the private deliberation would be reclaimed as the
+    # public answer.
+    assert synthesis.reasoning_closed is False
+    # DTO-D9: the public-output floor force-closes synthesis's deliberation
+    # in the empty-output re-dispatch via this tag.
+    assert synthesis.reasoning_close_tag == "</think>"
+    assert synthesis.prompt_headless
+    # DTO-D10: the audit verifier gates publication of the final unit with
+    # the first-line PASS/FAIL protocol; never greedy (issue #509).
+    audit = by_name["audit"]
+    assert audit.role_type == "verifier" and audit.worker == "tier2"
+    assert audit.verifies == "synthesis"
+    assert audit.depends_on == ("synthesis", "head", "image_description")
+    assert audit.sampling.temperature > 0.0
+    assert "PASS" in audit.prompt and "FAIL" in audit.prompt
+    # DTO-D7: every DeepSeek role deliberates — all scaffolds end open.
+    for role_name in ("policies", "critique", "synthesis", "audit"):
+        assert by_name[role_name].prompt_suffix == "<｜Assistant｜><think>"
     # Untrusted-data delimiters (MoA pattern) guard every cross-role payload.
-    for role_name in ("critique", "compose"):
+    for role_name in ("critique", "synthesis"):
         assert "UNTRUSTED" in by_name[role_name].prompt
     # One profile for every turn: no general ensemble, no profile judge, no
     # sandbox stages (the executor service stays deployed but unreferenced).
@@ -398,7 +487,7 @@ def test_tiered_chat_ui_calls_kairyu_l3() -> None:
     ui = compose["services"]["chat-ui"]
     assert ui["environment"]["OPENAI_API_BASE_URL"] == "http://kairyu:8000/v1"
     assert json.loads(ui["environment"]["DEFAULT_MODEL_PARAMS"]) == {
-        "max_tokens": 32768,
+        "max_tokens": 65536,
         "stream_response": False,
     }
     assert ui["environment"] | {
@@ -466,23 +555,24 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                         for name in (
                             "head",
                             "draft",
+                            "image_description",
                             "policies",
                             "answer_1",
                             "answer_2",
                             "answer_3",
                             "answer_4",
                             "critique",
-                            "compose",
+                            "synthesis",
+                            "audit",
                         )
                     ],
                     "stream_head": "head",
                     "moa_samples": 0,
-                    "budget": {"max_steps": 10, "max_refine_depth": 0},
+                    "budget": {"max_steps": 19, "max_refine_depth": 2},
                     "expose_intermediate_outputs": True,
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
                         "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
-                        "tier2-direct": {"model": "deepseek-v4-flash-0731"},
                     },
                 }
             }
@@ -514,60 +604,6 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
 
 
 @pytest.mark.parametrize(
-    ("direct_model", "case"),
-    [
-        (None, "missing"),
-        ("deepseek-v4-flash-0731-thinking", "wrong"),
-    ],
-)
-def test_tiered_readiness_rejects_invalid_direct_deepseek_binding(
-    direct_model: str | None,
-    case: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    control = _load(EXAMPLE / "control.py", f"tiered_direct_readiness_{case}")
-    configured_engines = {
-        "tier1": {"model": "qwen3.8-27b"},
-        "tier2": {"model": "deepseek-v4-flash-0731-thinking"},
-    }
-    if direct_model is not None:
-        configured_engines["tier2-direct"] = {"model": direct_model}
-
-    def fake_json(url: str) -> dict:
-        if url.endswith("/readyz"):
-            return {"status": "ready"}
-        if url.endswith("/v1/models"):
-            return {"data": [{"id": "kairyu-auto-max"}, {"id": "embed-small"}]}
-        assert url.endswith("/routing")
-        return {
-            "models": {
-                "kairyu-auto-max": {
-                    "roles": [
-                        {"name": name}
-                        for name in control.SPEC["orchestration"]["roles"]
-                    ],
-                    "stream_head": "head",
-                    "moa_samples": 0,
-                    "budget": {"max_steps": 10, "max_refine_depth": 0},
-                    "expose_intermediate_outputs": True,
-                    "configured_engines": configured_engines,
-                }
-            }
-        }
-
-    def fake_post(url: str, _payload: dict) -> dict:
-        if url.endswith("/v1/embeddings"):
-            return _embedding_response()
-        return {"count": 1}
-
-    monkeypatch.setattr(control, "_json_url", fake_json)
-    monkeypatch.setattr(control, "_post_json_url", fake_post)
-
-    with pytest.raises(SystemExit, match="Tier2-direct"):
-        control._validate_ready("http://api.test", "http://tokenizer.test/tokenize")
-
-
-@pytest.mark.parametrize(
     ("mutation", "message"),
     [
         ("model", "model identity"),
@@ -596,6 +632,90 @@ def test_tiered_embedding_smoke_rejects_malformed_contract(
 
     with pytest.raises(SystemExit, match=message):
         control._validate_embedding_smoke(response)
+
+
+class _FakeWebUI:
+    """Model the pinned Open WebUI function API, including flip-only toggles."""
+
+    def __init__(self) -> None:
+        self.functions: dict[str, dict] = {}
+        self.calls: list[str] = []
+        self.role = "admin"
+
+    def __call__(self, ui_url, path, *, token=None, payload=None, method=None):
+        self.calls.append(path)
+        if path == "/api/v1/auths/signin":
+            return {"role": self.role, "token": "session-token"}
+        assert token == "session-token"
+        if path == "/api/v1/functions/":
+            return [dict(row) for row in self.functions.values()]
+        if path == "/api/v1/functions/create":
+            row = {**payload, "is_active": False, "is_global": False}
+            self.functions[payload["id"]] = row
+            return dict(row)
+        prefix = "/api/v1/functions/id/"
+        assert path.startswith(prefix)
+        function_id, _, action = path[len(prefix) :].partition("/")
+        row = self.functions[function_id]
+        if action == "update":
+            row.update(payload)
+            return dict(row)
+        if action in {"toggle", "toggle/global"}:
+            key = "is_active" if action == "toggle" else "is_global"
+            row[key] = not row[key]
+            return dict(row)
+        assert action == "valves/user/spec"
+        return {
+            "properties": {
+                "reasoning_effort": {"enum": ["default", "low", "high", "max"]}
+            }
+        }
+
+
+def test_tiered_chat_ui_effort_filter_controls_request_body() -> None:
+    module = _load(
+        EXAMPLE / "webui-reasoning-effort-filter.py",
+        "tiered_chat_ui_effort_filter",
+    )
+    selector = module.Filter()
+
+    for effort in ("low", "high", "max"):
+        body = {"reasoning_effort": "stale"}
+        user = {"valves": selector.UserValves(reasoning_effort=effort)}
+        assert selector.inlet(body, user) == {"reasoning_effort": effort}
+
+    body = {"reasoning_effort": "max"}
+    user = {"valves": selector.UserValves(reasoning_effort="default")}
+    assert selector.inlet(body, user) == {}
+
+
+def test_tiered_chat_ui_effort_selector_provision_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    control = _load(EXAMPLE / "control.py", "tiered_chat_ui_effort_selector")
+    webui = _FakeWebUI()
+    monkeypatch.setattr(control, "_webui_api", webui)
+
+    control._provision_chat_ui_effort_selector("http://127.0.0.1:3000")
+    row = webui.functions["reasoning_effort"]
+    assert row["is_active"] and row["is_global"]
+    assert "class Filter" in row["content"]
+    assert webui.calls.count("/api/v1/functions/create") == 1
+    toggles = [call for call in webui.calls if call.endswith(("toggle", "toggle/global"))]
+    assert len(toggles) == 2
+
+    # Re-provisioning must refresh content without flipping activation off.
+    webui.calls.clear()
+    control._provision_chat_ui_effort_selector("http://127.0.0.1:3000")
+    assert webui.functions["reasoning_effort"]["is_active"]
+    assert webui.functions["reasoning_effort"]["is_global"]
+    assert "/api/v1/functions/create" not in webui.calls
+    assert "/api/v1/functions/id/reasoning_effort/update" in webui.calls
+    assert not [call for call in webui.calls if call.endswith(("toggle", "toggle/global"))]
+
+    webui.role = "user"
+    with pytest.raises(SystemExit, match="admin"):
+        control._provision_chat_ui_effort_selector("http://127.0.0.1:3000")
 
 
 def test_tiered_control_requires_exact_eight_gpu_inventory() -> None:
@@ -652,7 +772,7 @@ def test_tiered_verification_rejects_storage_outside_nvme(
 
 
 
-def test_tiered_product_serving_requires_head_and_compose_trace(
+def test_tiered_product_serving_requires_head_and_synthesis_trace(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     benchmark = _load(EXAMPLE / "verification.py", "tiered_example_product_verification")
@@ -671,7 +791,7 @@ def test_tiered_product_serving_requires_head_and_compose_trace(
             {
                 "tensor_parallel": 4,
                 "replicas": 1,
-                "expected_route": "compose",
+                "expected_route": "synthesis",
                 "expected_role": "publisher",
                 "expected_kind": "generation",
                 "warmup_requests": 4,
@@ -686,6 +806,7 @@ def test_tiered_product_serving_requires_head_and_compose_trace(
                     "answer_4",
                     "critique",
                 ),
+                "expected_verification_nodes": ("audit",),
             },
         )
     ]
@@ -718,10 +839,11 @@ def _write_product_serving_result(row_dir: Path, stages: list[dict]) -> None:
         "answer_3",
         "answer_4",
         "critique",
+        "audit",
     ],
 )
 @pytest.mark.parametrize("failure_mode", ["missing", "failed"])
-def test_tiered_product_serving_requires_every_internal_generation_stage(
+def test_tiered_product_serving_requires_every_internal_stage(
     node: str,
     failure_mode: str,
     tmp_path: Path,
@@ -733,7 +855,7 @@ def test_tiered_product_serving_requires_every_internal_generation_stage(
     stages = [
         {"node": "head", "kind": "generation", "status": "success"},
         {
-            "node": "compose",
+            "node": "synthesis",
             "role": "publisher",
             "kind": "generation",
             "status": "success",
@@ -742,6 +864,10 @@ def test_tiered_product_serving_requires_every_internal_generation_stage(
             {"node": name, "kind": "generation", "status": "success"}
             for name in benchmark._DUAL_TRACK_INTERNAL_NODES
         ],
+        *[
+            {"node": name, "role": "verifier", "kind": "verification", "status": "success"}
+            for name in benchmark._DUAL_TRACK_VERIFICATION_NODES
+        ],
     ]
 
     def validate() -> int:
@@ -749,10 +875,11 @@ def test_tiered_product_serving_requires_every_internal_generation_stage(
             tmp_path,
             1,
             32,
-            expected_route="compose",
+            expected_route="synthesis",
             expected_role="publisher",
             require_head=True,
             expected_generation_nodes=benchmark._DUAL_TRACK_INTERNAL_NODES,
+            expected_verification_nodes=benchmark._DUAL_TRACK_VERIFICATION_NODES,
         )
 
     _write_product_serving_result(tmp_path, stages)
@@ -808,8 +935,12 @@ def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
     gate = json.loads((tmp_path / "fallback" / "ttft-gate.json").read_text())
     assert gate["gates"]["1"]["denominator_source"] == "pinned_fallback"
     assert validations
-    assert all(row["expected_route"] == "compose" for row in validations)
+    assert all(row["expected_route"] == "synthesis" for row in validations)
     assert all(
         row["expected_generation_nodes"] == benchmark._DUAL_TRACK_INTERNAL_NODES
+        for row in validations
+    )
+    assert all(
+        row["expected_verification_nodes"] == benchmark._DUAL_TRACK_VERIFICATION_NODES
         for row in validations
     )

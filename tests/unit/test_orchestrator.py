@@ -17,6 +17,7 @@ from kairyu.engine.mock import MockBackend
 from kairyu.engine.openai_backend import OpenAICompatBackend
 from kairyu.engine.prompt import TemplatedPrompt
 from kairyu.orchestration.budget import Budget, BudgetState
+from kairyu.orchestration.conductor import RoleSpec
 from kairyu.orchestration.moa import MoAEvent, MoAResult
 from kairyu.orchestration.orchestrator import (
     EngineDescriptor,
@@ -179,6 +180,20 @@ def test_orchestrator_rejects_templated_shared_prefix_at_construction():
         _orchestrator(shared_prefix=TemplatedPrompt("<BOS>already rendered"))
 
 
+def test_orchestrator_rejects_public_output_floor_in_moa_mode():
+    with pytest.raises(
+        ValueError,
+        match="public_output_floor cannot be combined with moa_samples > 0",
+    ):
+        _orchestrator(moa_samples=2, public_output_floor=64)
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 131_073, 1.5, "64"])
+def test_orchestrator_rejects_invalid_public_output_floor(value):
+    with pytest.raises(ValueError, match="integer between 1 and 131072"):
+        _orchestrator(public_output_floor=value)
+
+
 def test_preview_route_is_non_dispatching_and_describes_effective_fallback():
     only = MockBackend()
     orchestrator = Orchestrator(
@@ -309,6 +324,50 @@ def test_auto_admission_bound_accounts_for_final_tool_and_response_schemas() -> 
     # Both final schemas are serialized into each of the three candidate
     # prefills, so their 8,192-byte growth must be charged three times.
     assert large - small >= 3 * 8_192
+
+
+async def test_spec_default_reasoning_effort_backs_inherit_roles() -> None:
+    backend = _PreparingBackend("tier1", [])
+    roles = (
+        RoleSpec(
+            name="planner",
+            worker="tier1",
+            prompt="[planner] {query}",
+            reasoning_effort="inherit",
+        ),
+        RoleSpec(
+            name="worker",
+            worker="tier1",
+            prompt="[worker] {planner}",
+            depends_on=("planner",),
+        ),
+    )
+    orchestrator = _orchestrator(
+        engines={"tier1": backend},
+        roles=roles,
+        default_reasoning_effort="high",
+    )
+
+    await orchestrator.run(COMPLEX)
+    efforts = {
+        request.request_id.rsplit("-", 2)[-2]: request.reasoning_effort
+        for request in backend.generated
+    }
+    assert efforts == {"planner": "high", "worker": None}
+
+    backend.generated.clear()
+    await orchestrator.run(
+        OrchestrationRequest(
+            prompt=COMPLEX,
+            sampling_params=SamplingParams(max_tokens=32),
+            reasoning_effort="low",
+        )
+    )
+    efforts = {
+        request.request_id.rsplit("-", 2)[-2]: request.reasoning_effort
+        for request in backend.generated
+    }
+    assert efforts == {"planner": "low", "worker": None}
 
 
 async def test_async_prepare_binds_one_route_and_preserves_final_intent() -> None:
@@ -725,12 +784,14 @@ async def test_async_prepare_reuses_exact_moa_proposal_requests(stream) -> None:
     orchestrator = _orchestrator(
         engines={"tier1": tier1, "tier2": tier2},
         moa_samples=2,
+        default_reasoning_effort="high",
     )
 
     prepared = await orchestrator.prepare_request(COMPLEX)
     proposals = tuple(tier1.prepared)
     assert len(proposals) == 2
     assert [request.sampling_params.seed for request in proposals] == [0, 1]
+    assert [request.reasoning_effort for request in proposals] == ["high", "high"]
 
     if stream:
         result_stream = await orchestrator.run_chat(
@@ -744,6 +805,8 @@ async def test_async_prepare_reuses_exact_moa_proposal_requests(stream) -> None:
         assert result.completions
 
     assert tuple(tier1.generated) == proposals
+    synthesis_requests = tier2.streamed if stream else tier2.generated
+    assert [request.reasoning_effort for request in synthesis_requests] == ["high"]
 
 
 async def test_async_prepare_rejects_exact_moa_seed_before_dispatch() -> None:

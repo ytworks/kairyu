@@ -313,12 +313,27 @@ class Orchestrator:
         execution_workers: Mapping[str, ExecutionBackend] | None = None,
         executor_descriptors: Mapping[str, ExecutorDescriptor] | None = None,
         profile_judge: ProfileJudge | None = None,
+        default_reasoning_effort: str | None = None,
+        public_output_floor: int | None = None,
     ) -> None:
         if not engines:
             raise ValueError("Orchestrator requires at least one engine")
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
                 "orchestration shared_prefix cannot be a tokenizer-owned pre-rendered chat prompt"
+            )
+        if public_output_floor is not None and (
+            isinstance(public_output_floor, bool)
+            or not isinstance(public_output_floor, int)
+            or not 1 <= public_output_floor <= 131_072
+        ):
+            raise ValueError(
+                "public_output_floor must be an integer between 1 and 131072"
+            )
+        if public_output_floor is not None and moa_samples > 0:
+            raise ValueError(
+                "public_output_floor cannot be combined with moa_samples > 0; "
+                "the floor applies only to the Conductor final unit"
             )
         if general_roles and moa_samples > 0:
             raise ValueError(
@@ -365,6 +380,14 @@ class Orchestrator:
         self._cost_model = cost_model
         # m11 A4: >0 routes multi_agent through MoA (the deep kairyu-auto-max tier)
         self._moa_samples = moa_samples
+        if default_reasoning_effort not in {None, "low", "high", "max"}:
+            raise ValueError(
+                "default_reasoning_effort must be low, high, max, or null"
+            )
+        # Effort assumed when a call carries none; an explicit request-level
+        # effort always overrides it.
+        self._default_reasoning_effort = default_reasoning_effort
+        self._public_output_floor = public_output_floor
         self._expose_intermediate_outputs = expose_intermediate_outputs
         # Serving-layer hook for aggregate per-stage latency attribution
         # (issue #495); set after construction because the deploy builder,
@@ -384,13 +407,20 @@ class Orchestrator:
             # final-unit overrides) at construction instead of per request —
             # for every configured profile.
             for profile_roles in filter(None, (self._roles, self._general_roles)):
+                workers = self._conductor_workers(profile_roles, [])
                 Conductor(
                     roles=profile_roles,
-                    workers=self._conductor_workers(profile_roles, []),
+                    workers=workers,
                     shared_prefix=self._shared_prefix,
                     sampling_params=self._sampling_params,
                     execution_workers=self._execution_workers,
+                    public_output_floor=self._public_output_floor,
                 )
+                # Whether an image-conditional role's worker accepts images is
+                # a live capability (a replica pool publishes the intersection
+                # of its currently placeable replicas, which is empty before
+                # the first health probe), so it is checked per image request
+                # in _validate_call, not here.
 
     def generation_defaults_snapshot(
         self,
@@ -862,6 +892,20 @@ class Orchestrator:
                     raise ValueError(
                         "multimodal orchestration requires at least one image-capable worker"
                     )
+                for role in self._generation_roles(self._roles_for(call)):
+                    # An image-conditional role only ever runs with an image
+                    # attached, so its worker must accept one (DTO-D11) — a
+                    # text-only rendering would silently drop the image.
+                    if role.requires == "image" and not backend_supports_prompt_kind(
+                        self._engines[
+                            role.worker if role.worker in self._engines else fallback
+                        ],
+                        "multimodal",
+                    ):
+                        raise ValueError(
+                            f"role {role.name!r} requires image input but worker "
+                            f"{role.worker!r} does not accept multimodal prompts"
+                        )
                 media_keys = tuple(
                     key
                     for key in role_keys
@@ -882,19 +926,9 @@ class Orchestrator:
                 )
         if call.sampling_params.n <= 1:
             return
-        roles = self._roles_for(call)
-        final_role = self._conductor_final_role(roles)
-        if (
-            (decision is None or decision.target == "multi_agent")
-            and self._moa_samples == 0
-            and any(
-                role.role_type == "verifier" and role.verifies == final_role.name for role in roles
-            )
-        ):
-            raise ValueError(
-                "n > 1 is not supported when the final orchestration role has "
-                "a post-generation verifier"
-            )
+        # A verifier on the final role is skipped for n > 1 inside the
+        # Conductor (one verdict cannot judge independent choices), so only
+        # engine support for n gates the call here.
         unsupported = [
             key
             for key in self._final_engine_keys(call, decision)
@@ -929,7 +963,7 @@ class Orchestrator:
                         tools_in_prompt=call.tools_in_prompt,
                         parallel_tool_calls=call.parallel_tool_calls,
                         tool_call_protocol=call.tool_call_protocol,
-                        reasoning_effort=call.reasoning_effort,
+                        reasoning_effort=self._effective_reasoning_effort(call),
                         chat_template_kwargs=(
                             call.chat_template_kwargs
                             if isinstance(prompt, MultimodalPrompt)
@@ -964,7 +998,7 @@ class Orchestrator:
             tools_in_prompt=call.tools_in_prompt,
             parallel_tool_calls=call.parallel_tool_calls,
             tool_call_protocol=call.tool_call_protocol,
-            reasoning_effort=call.reasoning_effort,
+            reasoning_effort=self._effective_reasoning_effort(call),
             chat_template_kwargs=(
                 call.chat_template_kwargs if isinstance(prompt, MultimodalPrompt) else None
             ),
@@ -997,6 +1031,7 @@ class Orchestrator:
                 call.sampling_params,
                 self._shared_prefix,
                 session="validation-moa",
+                reasoning_effort=self._effective_reasoning_effort(call),
             )
             key = self._internal_engine_keys(call, decision)[0]
             return tuple(_IntentRequest(key, request) for request in setup.proposal_requests)
@@ -1014,7 +1049,7 @@ class Orchestrator:
                         request_id=f"preflight-internal-{key}",
                         prompt=prompt,
                         sampling_params=sampling_params,
-                        reasoning_effort=call.reasoning_effort,
+                        reasoning_effort=self._effective_reasoning_effort(call),
                         chat_template_kwargs=(
                             call.chat_template_kwargs
                             if isinstance(prompt, MultimodalPrompt)
@@ -1180,6 +1215,7 @@ class Orchestrator:
                 call.sampling_params,
                 self._shared_prefix,
                 session=f"preflight-moa-{suffix}",
+                reasoning_effort=self._effective_reasoning_effort(call),
             )
             proposal_key = self._internal_engine_keys(call, decision)[0]
             internal_requests = tuple(
@@ -1503,7 +1539,7 @@ class Orchestrator:
                 tools_in_prompt=call.tools_in_prompt,
                 parallel_tool_calls=call.parallel_tool_calls,
                 tool_call_protocol=call.tool_call_protocol,
-                reasoning_effort=call.reasoning_effort,
+                reasoning_effort=self._effective_reasoning_effort(call),
             ),
             fallback_output_tokens=public_output_fallback,
         )
@@ -1602,7 +1638,14 @@ class Orchestrator:
             multimodal_prompt=call.multimodal_prompt,
             chat_template_kwargs=call.chat_template_kwargs,
             execution_workers=self._execution_workers,
+            reasoning_effort=self._effective_reasoning_effort(call),
+            public_output_floor=self._public_output_floor,
         )
+
+    def _effective_reasoning_effort(self, call: OrchestrationRequest) -> str | None:
+        if call.reasoning_effort is not None:
+            return call.reasoning_effort
+        return self._default_reasoning_effort
 
     def _conductor_worker_trace(
         self,
@@ -1862,6 +1905,7 @@ class Orchestrator:
                             final_parallel_tool_calls=call.parallel_tool_calls,
                             final_tool_call_protocol=call.tool_call_protocol,
                             shared_prefix=self._shared_prefix,
+                            reasoning_effort=self._effective_reasoning_effort(call),
                         )
                     # M3: the deep MoA tier was invisible to the cost model / budget.
                     # Reconcile proposals + synthesis with the actual result cost;
@@ -1876,7 +1920,7 @@ class Orchestrator:
                             tools_in_prompt=call.tools_in_prompt,
                             parallel_tool_calls=call.parallel_tool_calls,
                             tool_call_protocol=call.tool_call_protocol,
-                            reasoning_effort=call.reasoning_effort,
+                            reasoning_effort=self._effective_reasoning_effort(call),
                         ),
                         GenerationResult(
                             request_id="moa",
@@ -2668,6 +2712,7 @@ class Orchestrator:
                         final_tool_call_protocol=call.tool_call_protocol,
                         shared_prefix=self._shared_prefix,
                         usage_observer=observe_moa_usage,
+                        reasoning_effort=self._effective_reasoning_effort(call),
                     )
                 async for event in self._with_initial_keepalives(moa_stream):
                     if event is None:
@@ -2696,7 +2741,7 @@ class Orchestrator:
                         tools_in_prompt=call.tools_in_prompt,
                         parallel_tool_calls=call.parallel_tool_calls,
                         tool_call_protocol=call.tool_call_protocol,
-                        reasoning_effort=call.reasoning_effort,
+                        reasoning_effort=self._effective_reasoning_effort(call),
                     ),
                     GenerationResult(
                         request_id="moa",

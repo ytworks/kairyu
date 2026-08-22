@@ -11,6 +11,99 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-08-19 — [design] L2 effort policy: inherit/default effort, all-thinking DeepSeek (DTO-D6/D7)
+- What: role specs gain `reasoning_effort` (fixed low|high|max, or `inherit`
+  = the caller's L3 effort) and orchestrator specs `default_reasoning_effort`.
+  auto-max: Qwen draft/answers think at fixed low (T=1.0), head non-thinking
+  (T=0.7); every DeepSeek role runs thinking on tier2 (tier2-direct removed,
+  policies cap 1024→4096), inherits effort (default high), and the new
+  passthrough template splices the high/max preamble; Qwen clamps to low.
+- Why: owner — DeepSeek v4 flash was always meant to think; one L3 effort
+  knob (default high, API/Chat UI settable) grades every DeepSeek stage.
+- Refs: DTO-D6/D7; kairyu/{dsl,orchestration}; examples/qwen3.8-deepseek-v4-8gpu/
+
+### 2026-08-18 — [amendment] Compaction hardening from the #531 review
+- What: adopted all three review fixes — a successful compaction stores only
+  the compaction item (history replaced, not duplicated); truncated summaries
+  return response.incomplete without a compaction item (and are not
+  continuable), empty ones fail as 502 compaction_failed; tokens are now
+  AES-256-GCM sealed and tenant-bound (`responses_compaction_secret_env`,
+  ephemeral per-process key when unset). Example gateway wires the secret.
+- Why: #531 review — stored history defeated compaction, truncated/empty
+  summaries silently replaced long sessions, and marker-only tokens were
+  forgeable, contradicting the opaque/self-issued contract.
+- Refs: #531 review, #532–#534; m11 D4 2026-08-18 review amendment;
+  `kairyu/entrypoints/server/responses_service.py`; `examples/qwen3.8-deepseek-v4-8gpu/`
+
+### 2026-08-18 — [amendment] AUTO models on /v1/responses + Codex contract (issue #530)
+- What: /v1/responses resolves everything /v1/models advertises — AUTO models
+  delegate to the chat orchestration contract (metering exactly once); a
+  codex-rs 0.147.0 field-level audit added buffered-stream keep-alives,
+  426 on WS upgrades, remote compaction v2, and tolerant input parsing
+  (reasoning echoes, output-part arrays, Codex passthrough fields, disabled
+  web_search config). Verified with real codex-cli 0.147.0 (custom-provider
+  and Harbor-shaped smokes) against the issue's all-engines-hidden topology.
+- Why: the Terminal-Bench Codex run failed — /v1/responses only knew public
+  L1 engines, and the audit showed the 404 was one of several turn-killers.
+- Refs: #530; m11 D4 2026-08-18 amendment; `docs/deployment.md`;
+  `kairyu/entrypoints/server/{responses_service,extra_routes,app}.py`
+
+### 2026-08-18 — [design] Dual-track policy-ensemble DAG replaces the example L2
+- What: the example's coding/general two-profile L2 (judge, verifier/refine,
+  sandbox stages) is replaced by one 9-role dual-track DAG: 4 DeepSeek-written
+  policies → 4 parallel policy-bound Qwen answers, ∥ thinking-DeepSeek
+  critique of a quick Qwen draft, merged by direct DeepSeek; head/TTFT gate
+  inherited; sandbox deployed but unreferenced. No L2 core change; both
+  verify.sh gates green (20260818T025710Z, c32 1.87×→0.67×).
+- Why: owner-specified new process; latency/throughput requirements unchanged.
+- Refs: DTO-D1..D5 `docs/design/example-dual-track-orchestration.md`;
+  `examples/qwen3.8-deepseek-v4-8gpu/`; supersedes ECO-D2/D3/D5/D6
+
+### 2026-08-17 — [amendment] Profile judge work obeys tenant accounting
+- What: profile-judge GPU work is reserved before dispatch, included in
+  cumulative orchestration usage and metering, and emitted as a structured
+  trace event; the reservation covers the judge plus the larger profile DAG.
+- Why: PR #516 review found that the pre-admission judge call bypassed tenant
+  token quotas and discarded backend-reported usage.
+- Refs: PR #516 review; `kairyu/orchestration/`;
+  `kairyu/entrypoints/server/app.py`
+
+### 2026-08-17 — [amendment] Tiered Qwen MTP remains candidate-only
+- What: removed MTP-3 from the selected four-replica Qwen deployment while
+  retaining its c1/c4/c8 measurements as candidate evidence; compose, metadata,
+  tests, and operator docs now agree on no speculation.
+- Why: the public product admits 256 requests and gates c16/c32, but the new
+  role-shaped run stopped at c8; the matching Qwen TP1 c16/c32 rows regressed,
+  so the deployed high-concurrency envelope was not proven safe.
+- Refs: #509; ECO-D4 2026-08-17 Qwen MTP concurrency amendment;
+  `examples/qwen3.8-deepseek-v4-8gpu/`
+
+### 2026-08-17 — [design] General ensemble profile and Terminal-Bench latency fixes
+- What: `general_roles` — a second full-ensemble DAG under one served model,
+  deterministically selected (tools/format-demand/non-code → general; code
+  authoring keeps the coding DAG; never a single-engine route); example gains a
+  7-role all-model general profile; verifier T 0.0→0.6/top_p 0.95 (greedy
+  thinking looped: 52% of verdicts burned the 4096 cap → reverify); Qwen
+  prompts lead with a shared REQUEST block (prefix reuse); measured MTP-3
+  adopted on Qwen workers (c1 +43.9%, c4/c8 +26%, lossless).
+- Why: issue #509 — 12/27 Terminal-Bench trials hit the 900 s agent timeout at
+  p50 63.9 s/request; coding contracts idled on agent JSON turns.
+- Refs: #509; ECO-D6 + ECO-D4 2026-08-17 amendment; `kairyu/orchestration/`;
+  `examples/qwen3.8-deepseek-v4-8gpu/`; its MEASUREMENTS.md
+
+### 2026-08-17 — [amendment] LLM profile judge for the coding/general split
+- What: the code-authoring half of profile selection is judged by an optional
+  `profile_judge` worker (example: direct DeepSeek, greedy, ≤8 tokens, 5 s
+  timeout); the verdict is attached to the call at the serving boundary before
+  preflight/admission so selection stays a pure function; head-disable signals
+  stay deterministic and are never judged; on judge failure the keyword
+  code-task signal decides as before.
+- Why: owner review of #510 — keyword heuristics misroute incidental code
+  vocabulary into the sandbox coding DAG and miss unlisted languages; the
+  split is a semantic judgment and belongs to an LLM.
+- Refs: #509, #510 review; ECO-D6 2026-08-17 LLM-profile-judge amendment;
+  `kairyu/orchestration/`; `examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml`
+
 ### 2026-08-16 — [amendment] Agent tool-turn latency and cancellation (issue #495)
 - What: tool-turn FAIL/refine loop removed (verifier/synthesis prompts declare
   the publisher emits the tool call; inconclusive verdicts re-verify once,

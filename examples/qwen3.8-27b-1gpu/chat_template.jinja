@@ -3,8 +3,12 @@
   Adapted from Qwen/Qwen3.8-27B-FP8 chat_template.jinja at revision
   017b9c7af6b5689d5dd426a76e0bc077eb5ca20a. Kairyu defaults interactive
   requests to direct answers, while an explicit reasoning_effort enables
-  Qwen's thinking mode for reasoning benchmarks.
+  Qwen's thinking mode. The effort level is pinned to low: high/max are
+  clamped and must never change the rendered prompt.
 #}
+{%- if reasoning_effort is defined and reasoning_effort is not none %}
+    {%- set reasoning_effort = 'low' %}
+{%- endif %}
 {%- if enable_thinking is not defined %}
     {%- if reasoning_effort is defined and reasoning_effort is not none %}
         {%- set enable_thinking = true %}

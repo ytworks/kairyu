@@ -40,9 +40,13 @@ stream, while `stream_moa` runs proposals then consumes its synthesizer stream.
 Orchestrator owns route/trace assembly and multiplexes keep-alive timers only
 until the first final event; after that, deltas are pulled in the caller task
 without a task/queue bridge. The HTTP layer only converts typed events to
-OpenAI SSE. A post-generation verifier on the final role is rejected because
-SSE cannot retract provisional deltas; supported DAGs verify a draft before an
-unverified final worker/synthesizer. This boundary was selected by measurement,
+OpenAI SSE. A post-generation verifier on the final role originally made
+such a DAG a rejected shape because SSE cannot retract provisional deltas;
+**amended 2026-08-20 (DTO-D10, owner decision)**: a verified final unit is now
+supported by *deferring* its publication — `Conductor.stream` runs the unary
+verify/refine loop to completion and emits the final text once, while the
+head (when enabled) still streams from t=0; unverified final units keep the
+live pull-through stream. This boundary was selected by measurement,
 not implementation parity: a seven-round 100,000-event A/B measured 161.14
 ns/event pull-through versus 7,045.2 ns/event through a bounded queue (43.721x).
 
@@ -656,12 +660,13 @@ quality-proxy), scoreboard JSON+md; offline unit test with mock targets.
   wire a ``moa`` route (tier option); run_chat receives the PRE-RENDERED
   prompt string (app.py renders; orchestrator engines have no template
   knowledge) plus messages only for future vision routing.
-- **A5 (D1, amended by Issue #195)**: every supported direct, Conductor, and
-  MoA route streams the final backend iterator live. A final role with its own
-  post-generation verifier is not a supported streaming shape and fails
-  explicitly; buffering or streaming a provisional answer would violate the
-  product contract. Put verification on the draft before an unverified final
-  worker/synthesizer. Pre-final verifier failures/refinement remain supported.
+- **A5 (D1, amended by Issue #195; amended 2026-08-20 by DTO-D10)**: every
+  supported direct, Conductor, and MoA route streams the final backend
+  iterator live when the final role is unverified. A final role with its own
+  post-generation verifier is published deferred: nothing provisional is ever
+  streamed, the verify/refine loop completes first, and the accepted (or
+  refinement-exhausted last) text is emitted once after the committed head.
+  Pre-final verifier failures/refinement remain supported.
 - **A6 (D3)**: AuthMiddleware stores the matched key hash in scope state;
   TenantLimitMiddleware runs INSIDE auth (added before it) so 401 wins over
   429 and unauthenticated requests never drain buckets; keyless mode →

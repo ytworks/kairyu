@@ -14,7 +14,8 @@ one inline PNG/JPEG/WebP image up to 8 MiB and 2,097,152 pixels, then preserves
 the OpenAI content parts for the checkpoint-owned processor and the example's
 adapted Qwen chat template (`chat_template.jinja`, mounted into vLLM); ordinary
 requests default to direct answers, and an explicit `reasoning_effort` enables
-Qwen's thinking mode. The committed batching, cache-state, graph, and
+Qwen's thinking mode at a fixed low effort level (the template clamps `high`
+and `max` to `low`). The committed batching, cache-state, graph, and
 speculative-decoding values are selected by the local Qwen3.8 tuning run in
 [MEASUREMENTS.md](MEASUREMENTS.md). Open WebUI always talks to Kairyu L3 rather
 than directly to L1.

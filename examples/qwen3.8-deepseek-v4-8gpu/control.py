@@ -363,6 +363,106 @@ def _json_url(url: str) -> dict:
         return json.loads(response.read())
 
 
+_CHAT_UI_EFFORT_FILTER_ID = "reasoning_effort"
+_CHAT_UI_EFFORT_LEVELS = ["default", "low", "high", "max"]
+
+
+def _webui_api(
+    ui_url: str,
+    path: str,
+    *,
+    token: str | None = None,
+    payload: dict | None = None,
+    method: str | None = None,
+):
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        f"{ui_url}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers=headers,
+        method=method or ("POST" if payload is not None else "GET"),
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.loads(response.read())
+
+
+def _provision_chat_ui_effort_selector(ui_url: str) -> None:
+    """Install the Reasoning Effort dropdown into the pinned Open WebUI.
+
+    The stock v0.11.0 Advanced Params control is a free-text field; the
+    product knob (DTO-D6) must be selectable. A global filter whose
+    enum-typed user valve renders as a dropdown in Chat Controls forwards
+    the selection as the OpenAI-compatible ``reasoning_effort`` body field.
+    """
+
+    filter_source = (HERE / "webui-reasoning-effort-filter.py").read_text(encoding="utf-8")
+    try:
+        signin = _webui_api(
+            ui_url, "/api/v1/auths/signin", payload={"email": "", "password": ""}
+        )
+        if not isinstance(signin, dict) or not signin.get("token"):
+            raise SystemExit("Chat UI signin did not return an auth-disabled session token")
+        if signin.get("role") != "admin":
+            raise SystemExit("Chat UI auth-disabled session must be the admin user")
+        token = signin["token"]
+        listed = _webui_api(ui_url, "/api/v1/functions/", token=token)
+        existing = next(
+            (row for row in listed if row.get("id") == _CHAT_UI_EFFORT_FILTER_ID), None
+        )
+        body = {
+            "id": _CHAT_UI_EFFORT_FILTER_ID,
+            "name": "Reasoning Effort",
+            "content": filter_source,
+            "meta": {
+                "description": "Select the Kairyu reasoning effort from a dropdown."
+            },
+        }
+        if existing is None:
+            state = _webui_api(ui_url, "/api/v1/functions/create", token=token, payload=body)
+        else:
+            state = _webui_api(
+                ui_url,
+                f"/api/v1/functions/id/{_CHAT_UI_EFFORT_FILTER_ID}/update",
+                token=token,
+                payload=body,
+            )
+            # /update keeps the stored activation flags; carry them over.
+            state = {**existing, **(state or {})}
+        # The /toggle endpoints FLIP state, so only call them while the flag
+        # is off — calling unconditionally would deactivate on every re-up.
+        if not state.get("is_active"):
+            state = _webui_api(
+                ui_url,
+                f"/api/v1/functions/id/{_CHAT_UI_EFFORT_FILTER_ID}/toggle",
+                token=token,
+                payload={},
+            )
+        if not state.get("is_global"):
+            state = _webui_api(
+                ui_url,
+                f"/api/v1/functions/id/{_CHAT_UI_EFFORT_FILTER_ID}/toggle/global",
+                token=token,
+                payload={},
+            )
+        if not (state.get("is_active") and state.get("is_global")):
+            raise SystemExit("Chat UI effort selector could not be activated globally")
+        spec = _webui_api(
+            ui_url,
+            f"/api/v1/functions/id/{_CHAT_UI_EFFORT_FILTER_ID}/valves/user/spec",
+            token=token,
+        )
+        enum = spec.get("properties", {}).get("reasoning_effort", {}).get("enum")
+    except (KeyError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
+        raise SystemExit(f"Chat UI effort selector provisioning failed: {error}") from error
+    if enum != _CHAT_UI_EFFORT_LEVELS:
+        raise SystemExit(
+            "Chat UI effort selector must expose exactly "
+            f"{_CHAT_UI_EFFORT_LEVELS!r}, got {enum!r}"
+        )
+
+
 def _post_json_url(url: str, payload: dict) -> dict:
     request = urllib.request.Request(
         url,
@@ -477,13 +577,8 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         configured.get("tier2", {}).get("model")
         != "deepseek-v4-flash-0731-thinking"
     ):
-        raise SystemExit("Kairyu Tier2 L2 worker is not bound to the DeepSeek L1 pool")
-    if (
-        configured.get("tier2-direct", {}).get("model")
-        != "deepseek-v4-flash-0731"
-    ):
         raise SystemExit(
-            "Kairyu Tier2-direct L2 worker is not bound to the non-thinking DeepSeek L1 pool"
+            "Kairyu Tier2 L2 worker is not bound to the thinking DeepSeek L1 pool"
         )
 
 
@@ -545,11 +640,20 @@ def up() -> None:
     )
     tokenizer_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}/tokenize"
     _validate_ready(api_url, tokenizer_url)
+    validation_ui_host = (
+        "127.0.0.1"
+        if env["CHAT_UI_BIND_ADDRESS"] == "0.0.0.0"
+        else env["CHAT_UI_BIND_ADDRESS"]
+    )
+    _provision_chat_ui_effort_selector(
+        f"http://{validation_ui_host}:{env['CHAT_UI_PORT']}"
+    )
     print("\nEnvironment is ready.")
     print(f"OpenAI API: http://{advertised_api_host}:{env['API_PORT']}/v1")
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
     print("Chat model:      kairyu-auto-max (the only Chat UI model)")
     print("Embedding model: embed-small")
+    print("Reasoning effort: Chat Controls -> Valves -> Reasoning Effort (default/low/high/max)")
 
 
 def main() -> None:

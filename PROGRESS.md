@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end, including AUTO models over /v1/responses (#530)
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example serves one dual-track policy-ensemble L2 DAG for every request (DTO-D1..D5) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one direct-DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; direct DeepSeek composes the remainder after the committed opening. No general profile, judge, or verifier/refine loop; the sandbox executor stays deployed but unreferenced. Both verify.sh gates green (run 20260818T025710Z: TTFT PASS c1/8/16/32, c32 1.87×→0.67×). Image chat still reaches only Qwen roles; composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example serves one dual-track policy-ensemble L2 DAG for every request (DTO-D1..D12) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one thinking DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; thinking DeepSeek `synthesis` weighs the 5 candidates as peers and writes one better answer, and an inline thinking-DeepSeek `audit` (PASS/FAIL, ≤2 refinements, last attempt published on exhaustion) gates the streamed remainder (DTO-D10); a Qwen `image_description` stage runs on image requests only and feeds the text-only DeepSeek roles (DTO-D11); DeepSeek budgets halved to 8192/32768/65536 with a 65536 ceiling and Chat UI default for the Terminal-Bench 900 s turn envelope (DTO-D12). No general profile or judge; the sandbox executor stays deployed but unreferenced. Last green verify.sh run 20260818T025710Z (TTFT PASS c1/8/16/32, c32 1.87×→0.67×) predates DTO-D8..D12 — GPU re-verification pending. Composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -98,84 +98,78 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
-### 2026-08-18 — [amendment] Compaction hardening from the #531 review
-- What: adopted all three review fixes — a successful compaction stores only
-  the compaction item (history replaced, not duplicated); truncated summaries
-  return response.incomplete without a compaction item (and are not
-  continuable), empty ones fail as 502 compaction_failed; tokens are now
-  AES-256-GCM sealed and tenant-bound (`responses_compaction_secret_env`,
-  ephemeral per-process key when unset). Example gateway wires the secret.
-- Why: #531 review — stored history defeated compaction, truncated/empty
-  summaries silently replaced long sessions, and marker-only tokens were
-  forgeable, contradicting the opaque/self-issued contract.
-- Refs: #531 review, #532–#534; m11 D4 2026-08-18 review amendment;
-  `kairyu/entrypoints/server/responses_service.py`; `examples/qwen3.8-deepseek-v4-8gpu/`
+### 2026-08-20 — [design] Peer synthesis + audit loop, image_description, halved DeepSeek budgets (DTO-D10..D12)
+- What: tiered example `compose` → `synthesis` weighing critique + 4 policy
+  answers as peers; new thinking-DeepSeek `audit` verifier on the final unit
+  (PASS/FAIL, `max_refine_depth: 2`, remainder published after the verdict);
+  Qwen `image_description` (`requires: image`) feeds the DeepSeek roles on
+  image requests only; DeepSeek tiers 16384/65536/131072 → 8192/32768/65536,
+  ceiling/Chat UI/harness cap 131072 → 65536; budget `{19, 2}`; 11 roles.
+- Why: owner decisions (2026-08-20); Terminal-Bench turns timing out against
+  the 900 s agent budget on the serial DeepSeek chain. GPU gates not re-run.
+- Refs: DTO-D10..D12; examples/qwen3.8-deepseek-v4-8gpu/; tests/unit/test_tiered_frontier_examplectl.py
 
-### 2026-08-18 — [amendment] AUTO models on /v1/responses + Codex contract (issue #530)
-- What: /v1/responses resolves everything /v1/models advertises — AUTO models
-  delegate to the chat orchestration contract (metering exactly once); a
-  codex-rs 0.147.0 field-level audit added buffered-stream keep-alives,
-  426 on WS upgrades, remote compaction v2, and tolerant input parsing
-  (reasoning echoes, output-part arrays, Codex passthrough fields, disabled
-  web_search config). Verified with real codex-cli 0.147.0 (custom-provider
-  and Harbor-shaped smokes) against the issue's all-engines-hidden topology.
-- Why: the Terminal-Bench Codex run failed — /v1/responses only knew public
-  L1 engines, and the audit showed the 404 was one of several turn-killers.
-- Refs: #530; m11 D4 2026-08-18 amendment; `docs/deployment.md`;
-  `kairyu/entrypoints/server/{responses_service,extra_routes,app}.py`
+### 2026-08-20 — [design] Verified final unit streams deferred; image-conditional roles
+- What: a verifier on the final unit is accepted in `Conductor.stream`: the
+  unary verify/refine loop runs first and the text is published once after
+  the committed head (n>1 skips the verifier, `skipped:intent`); the DTO-D9
+  floor retry runs before the verdict and refinements reopen the scaffold.
+  Roles gain `requires: image`: skipped entirely (`skipped:condition`) on
+  text requests, dependents render the slot as ""; head/final/verifier/
+  executor cannot be conditional; the worker must accept images.
+- Why: owner decision for the tiered example (synthesis audit loop, image
+  description stage — DTO-D10/D11); amends m11 A5 and DTO-D9 (#547).
+- Refs: kairyu/{orchestration,dsl,deploy}; docs/design/m11-product.md
 
-### 2026-08-18 — [design] Dual-track policy-ensemble DAG replaces the example L2
-- What: the example's coding/general two-profile L2 (judge, verifier/refine,
-  sandbox stages) is replaced by one 9-role dual-track DAG: 4 DeepSeek-written
-  policies → 4 parallel policy-bound Qwen answers, ∥ thinking-DeepSeek
-  critique of a quick Qwen draft, merged by direct DeepSeek; head/TTFT gate
-  inherited; sandbox deployed but unreferenced. No L2 core change; both
-  verify.sh gates green (20260818T025710Z, c32 1.87×→0.67×).
-- Why: owner-specified new process; latency/throughput requirements unchanged.
-- Refs: DTO-D1..D5 `docs/design/example-dual-track-orchestration.md`;
-  `examples/qwen3.8-deepseek-v4-8gpu/`; supersedes ECO-D2/D3/D5/D6
+### 2026-08-20 — [design] Public-output floor for the thinking final unit (DTO-D9)
+- What: spec-level `public_output_floor` + role `reasoning_close_tag`: the
+  final unit's attempt 0 thinks within budget−floor, and the existing bounded
+  empty-output re-dispatch continues the captured reasoning after a forced
+  close with the reserve, reclaimed as public. Example: floor 256 on compose.
+  Fixes #546–#549: direct-API bounds; verified-final/MoA rejected; n>1 no floor.
+- Why: issue #542 — a small caller max_tokens was eaten whole by thinking
+  and 502'd after full DAG cost; owner chose option 1. GPU gates not re-run
+  (floor is 0.2% of the recorded 131072-cap runs).
+- Refs: DTO-D9; issue #542; kairyu/{dsl,orchestration}; examples/qwen3.8-deepseek-v4-8gpu/
 
-### 2026-08-17 — [amendment] Profile judge work obeys tenant accounting
-- What: profile-judge GPU work is reserved before dispatch, included in
-  cumulative orchestration usage and metering, and emitted as a structured
-  trace event; the reservation covers the judge plus the larger profile DAG.
-- Why: PR #516 review found that the pre-admission judge call bypassed tenant
-  token quotas and discarded backend-reported usage.
-- Refs: PR #516 review; `kairyu/orchestration/`;
-  `kairyu/entrypoints/server/app.py`
+### 2026-08-20 — [progress] Chat UI reasoning-effort dropdown provisioned by the launcher
+- What: the tiered example's `up` installs and self-verifies a globally
+  active Open WebUI filter whose enum user valve renders Reasoning Effort as
+  a Chat Controls dropdown (default/low/high/max) forwarded as
+  `reasoning_effort`; re-up refreshes content without flipping activation off.
+- Why: owner — the DTO-D6 Chat UI knob must be selectable, and the pinned
+  Open WebUI v0.11.0 (and upstream main) only offers a free-text field.
+- Refs: DTO-D6; examples/qwen3.8-deepseek-v4-8gpu/{control.py,
+  webui-reasoning-effort-filter.py,README.md}
 
-### 2026-08-17 — [amendment] Tiered Qwen MTP remains candidate-only
-- What: removed MTP-3 from the selected four-replica Qwen deployment while
-  retaining its c1/c4/c8 measurements as candidate evidence; compose, metadata,
-  tests, and operator docs now agree on no speculation.
-- Why: the public product admits 256 requests and gates c16/c32, but the new
-  role-shaped run stopped at c8; the matching Qwen TP1 c16/c32 rows regressed,
-  so the deployed high-concurrency envelope was not proven safe.
-- Refs: #509; ECO-D4 2026-08-17 Qwen MTP concurrency amendment;
-  `examples/qwen3.8-deepseek-v4-8gpu/`
+### 2026-08-20 — [amendment] Chat effort aliases match the pinned UI
+- What: /v1/chat/completions now accepts the same OpenAI-style aliases as
+  Responses and normalizes minimal/low→low, medium/high→high, xhigh/max→max.
+  This corrects the native-level-only Chat contract in the DTO-D8 entry below.
+- Why: pinned Open WebUI v0.11.0 initializes Reasoning Effort to medium;
+  the prior strict low|high|max schema rejected its default request with 422.
+- Refs: DTO-D8 (revised); PR #536 review; kairyu/entrypoints/server/protocol.py
 
-### 2026-08-17 — [design] General ensemble profile and Terminal-Bench latency fixes
-- What: `general_roles` — a second full-ensemble DAG under one served model,
-  deterministically selected (tools/format-demand/non-code → general; code
-  authoring keeps the coding DAG; never a single-engine route); example gains a
-  7-role all-model general profile; verifier T 0.0→0.6/top_p 0.95 (greedy
-  thinking looped: 52% of verdicts burned the 4096 cap → reverify); Qwen
-  prompts lead with a shared REQUEST block (prefix reuse); measured MTP-3
-  adopted on Qwen workers (c1 +43.9%, c4/c8 +26%, lossless).
-- Why: issue #509 — 12/27 Terminal-Bench trials hit the 900 s agent timeout at
-  p50 63.9 s/request; coding contracts idled on agent JSON turns.
-- Refs: #509; ECO-D6 + ECO-D4 2026-08-17 amendment; `kairyu/orchestration/`;
-  `examples/qwen3.8-deepseek-v4-8gpu/`; its MEASUREMENTS.md
+### 2026-08-20 — [amendment] DTO-D8 budgets raised to the vendor starting values
+- What: DeepSeek effort tiers 4096/16384/32768 → 16384/65536/131072
+  (fallback = high tier), internal_max_tokens → 131072, DSL token bounds
+  32768 → 131072, Chat UI default and harness public max_tokens → 131072.
+  Corrects the entry below; admission upper bound now ~32× the pre-DTO-D8
+  ceiling.
+- Why: owner — the TTFT gate is head-based with a paired same-concurrency
+  DeepSeek-direct denominator and E2E is unconstrained by design, so the
+  ≤2×-DeepSeek budget never constrained DeepSeek role budgets; use the
+  vendor-recommended starting values outright.
+- Refs: DTO-D8 (revised); examples/qwen3.8-deepseek-v4-8gpu/; kairyu/dsl/spec.py
 
-### 2026-08-17 — [amendment] LLM profile judge for the coding/general split
-- What: the code-authoring half of profile selection is judged by an optional
-  `profile_judge` worker (example: direct DeepSeek, greedy, ≤8 tokens, 5 s
-  timeout); the verdict is attached to the call at the serving boundary before
-  preflight/admission so selection stays a pure function; head-disable signals
-  stay deterministic and are never judged; on judge failure the keyword
-  code-task signal decides as before.
-- Why: owner review of #510 — keyword heuristics misroute incidental code
-  vocabulary into the sandbox coding DAG and miss unlisted languages; the
-  split is a semantic judgment and belongs to an LLM.
-- Refs: #509, #510 review; ECO-D6 2026-08-17 LLM-profile-judge amendment;
-  `kairyu/orchestration/`; `examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml`
+### 2026-08-20 — [design] Vendor-official sampling + effort-graded token budgets (DTO-D8)
+- What: RoleSamplingSpec gains top_k/min_p/presence/repetition penalties and
+  `max_tokens_by_effort` {low,high,max} (inherit roles; think+answer budget,
+  min()'d vs public cap/internal ceiling). auto-max: official Qwen sampling,
+  DeepSeek T→1.0 + caps 4096/16384/32768 per L3 effort, internal_max_tokens
+  →32768; /v1/responses maps reasoning.effort (minimal..xhigh normalized).
+  GPU gates not re-run — re-verify next window.
+- Why: owner + vendor research — effort scales the token budget while
+  sampling stays effort-invariant; T=1.0 stays anti-greedy (#509 rationale).
+- Refs: DTO-D8; PR #536; kairyu/{dsl,orchestration,entrypoints/server};
+  examples/qwen3.8-deepseek-v4-8gpu/

@@ -3,7 +3,12 @@ from pydantic import ValidationError
 
 from kairyu.dsl.decorators import AgentPool
 from kairyu.dsl.loader import build_orchestrator, load_spec
+from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
+from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt
+from kairyu.orchestration.request import OrchestrationRequest
+from kairyu.outputs import CompletionOutput
+from kairyu.sampling_params import SamplingParams
 
 YAML_SPEC = """
 shared_prefix: "SYS\\n"
@@ -225,12 +230,98 @@ def test_moa_samples_rejects_unsafe_values(value):
         load_spec(YAML_SPEC.replace("moa_samples: 3", f"moa_samples: {value}"))
 
 
-@pytest.mark.parametrize("value", [0, 32769])
+@pytest.mark.parametrize("value", [0, 131073])
 def test_internal_max_tokens_rejects_unsafe_values(value):
     with pytest.raises(ValidationError, match="internal_max_tokens"):
         load_spec(
             YAML_SPEC.replace("internal_max_tokens: 512", f"internal_max_tokens: {value}")
         )
+
+
+@pytest.mark.parametrize("value", [0, 131073])
+def test_public_output_floor_rejects_unsafe_values(value):
+    with pytest.raises(ValidationError, match="public_output_floor"):
+        load_spec(
+            f"""
+workers: [{{name: tier1, backend: mock}}]
+public_output_floor: {value}
+"""
+        )
+
+
+def test_public_output_floor_rejects_moa_mode():
+    with pytest.raises(
+        ValidationError,
+        match="public_output_floor cannot be combined with moa_samples > 0",
+    ):
+        load_spec(
+            """
+workers: [{name: tier1, backend: mock}]
+moa_samples: 2
+public_output_floor: 64
+"""
+        )
+
+
+async def test_public_output_floor_clamps_final_unit_dispatch():
+    """DTO-D9: the DSL floor must reach the final unit's dispatched budget."""
+
+    class RecordingBackend:
+        def __init__(self) -> None:
+            self.requests_seen = []
+
+        async def generate(self, request):
+            self.requests_seen.append(request)
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0, text="done", token_ids=(), finish_reason="stop"
+                    ),
+                ),
+                usage=GenerationUsage(prompt_tokens=1, completion_tokens=1),
+                finished=True,
+            )
+
+        async def stream(self, request):
+            yield await self.generate(request)
+
+        async def shutdown(self) -> None:
+            return None
+
+    backend = RecordingBackend()
+    spec = load_spec(
+        """
+workers:
+  - {name: tier1, backend: mock}
+  - {name: tier2, engine_ref: recorder}
+public_output_floor: 64
+roles:
+  - name: planner
+    worker: tier1
+    prompt: "plan: {query}"
+  - name: publisher
+    worker: tier2
+    role_type: publisher
+    prompt: "answer: {planner}"
+    prompt_suffix: "<THINK>"
+    reasoning_close_tag: "</THINK>"
+    depends_on: [planner]
+"""
+    )
+    orchestrator = build_orchestrator(spec, engine_refs={"recorder": backend})
+    result = await orchestrator.run(
+        OrchestrationRequest(
+            prompt=(
+                "First, plan the work. Then execute it. "
+                "Finally, summarize the outcome."
+            ),
+            sampling_params=SamplingParams(max_tokens=512),
+        )
+    )
+    assert result.route.target == "multi_agent"
+    assert backend.requests_seen[-1].sampling_params.max_tokens == 448  # 512 - 64
 
 
 def test_build_openai_worker_preserves_keyless_auth(monkeypatch):
@@ -396,3 +487,218 @@ general_roles:
   - {name: g_final, worker: tier1, prompt: "g: {query}"}
 """
         )
+
+
+class _RecordingBackend:
+    """Returns one scripted text per call; optionally advertises image support."""
+
+    def __init__(self, text: str = "done", *, vision: bool = False) -> None:
+        self._text = text
+        self._vision = vision
+        self.requests_seen = []
+        self.prepared_requests = []
+
+    def supports_prompt_kind(self, kind: str) -> bool:
+        return kind in ({"text", "multimodal"} if self._vision else {"text"})
+
+    def supports_chat_template_kwargs(self, keys: frozenset[str]) -> bool:
+        return True
+
+    async def prepare_request(self, request):
+        self.prepared_requests.append(request)
+
+    async def generate(self, request):
+        self.requests_seen.append(request)
+        return GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(index=0, text=self._text, token_ids=(), finish_reason="stop"),
+            ),
+            usage=GenerationUsage(prompt_tokens=1, completion_tokens=1),
+            finished=True,
+        )
+
+    async def stream(self, request):
+        yield await self.generate(request)
+
+    async def shutdown(self) -> None:
+        return None
+
+
+_IMAGE_CONDITIONAL_SPEC = """
+workers:
+  - {name: vision, engine_ref: vision}
+  - {name: text, engine_ref: text}
+roles:
+  - name: image_description
+    worker: vision
+    requires: image
+    prompt: "describe: {query}"
+  - name: policies
+    worker: text
+    prompt: "policies: {query} | {image_description}"
+    depends_on: [image_description]
+  - name: final
+    worker: text
+    role_type: synthesizer
+    prompt: "final: {policies}"
+    depends_on: [policies]
+"""
+_DAG_QUERY = "First, plan the work. Then execute it. Finally, summarize the outcome."
+
+
+def _image_conditional_orchestrator():
+    vision = _RecordingBackend("seen: a chart", vision=True)
+    text = _RecordingBackend("done")
+    orchestrator = build_orchestrator(
+        load_spec(_IMAGE_CONDITIONAL_SPEC), engine_refs={"vision": vision, "text": text}
+    )
+    return orchestrator, vision, text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_image_conditional_role_is_skipped_without_image(stream):
+    """DTO-D11: a `requires: image` role never runs on a text request."""
+
+    orchestrator, vision, text = _image_conditional_orchestrator()
+    request = OrchestrationRequest(prompt=_DAG_QUERY, sampling_params=SamplingParams())
+
+    if stream:
+        events = [event async for event in await orchestrator.run_chat(request, stream=True)]
+        result = events[-1].result
+    else:
+        result = await orchestrator.run(request)
+
+    assert result.route.target == "multi_agent"
+    assert vision.requests_seen == []
+    assert text.requests_seen[0].prompt == f"policies: {_DAG_QUERY} | "
+    assert result.text == "done"
+    skipped = [
+        event for event in result.structured_trace.events if event.kind == "skipped:condition"
+    ]
+    assert [(event.node, event.metadata["reason"]) for event in skipped] == [
+        ("image_description", "no_image")
+    ]
+
+
+async def test_image_conditional_dependent_is_exactly_prepared_for_text_request():
+    orchestrator, _vision, text = _image_conditional_orchestrator()
+    request = OrchestrationRequest(prompt=_DAG_QUERY, sampling_params=SamplingParams())
+
+    prepared = await orchestrator.prepare_request(request)
+    expected = f"policies: {_DAG_QUERY} | "
+    prepared_policy = next(
+        item for item in text.prepared_requests if item.prompt == expected
+    )
+    result = await orchestrator.run(request, prepared=prepared)
+
+    assert result.route.target == "multi_agent"
+    assert text.requests_seen[0] is prepared_policy
+
+
+async def test_image_conditional_role_runs_first_with_image():
+    orchestrator, vision, text = _image_conditional_orchestrator()
+    request = OrchestrationRequest(
+        prompt=_DAG_QUERY,
+        sampling_params=SamplingParams(),
+        multimodal_prompt=MultimodalPrompt(
+            _DAG_QUERY, (MultimodalItem("image", "uri", "data:image/png;base64,AAAA"),)
+        ),
+    )
+
+    result = await orchestrator.run(request)
+
+    assert result.route.target == "multi_agent"
+    assert len(vision.requests_seen) == 1
+    assert isinstance(vision.requests_seen[0].prompt, MultimodalPrompt)
+    assert text.requests_seen[0].prompt == f"policies: {_DAG_QUERY} | seen: a chart"
+    assert not any(
+        event.kind == "skipped:condition" for event in result.structured_trace.events
+    )
+
+
+def test_role_prompt_with_literal_brace_pair_is_rejected_at_load():
+    """A literal `{...}` is a positional format field: it raised only at request
+    time, after the stage's dependencies had run (tiered-example audit outage)."""
+
+    with pytest.raises(ValidationError, match="escape literal braces"):
+        load_spec(
+            """
+workers: [{name: w, engine_ref: w}]
+roles:
+  - {name: final, worker: w, prompt: "tool call like <tool_call>{...}</tool_call> for {query}"}
+"""
+        )
+
+
+def test_image_conditional_head_is_rejected_at_load():
+    with pytest.raises(ValidationError, match="head role 'head' cannot declare requires"):
+        load_spec(
+            """
+workers: [{name: vision, engine_ref: vision}]
+roles:
+  - {name: head, worker: vision, role_type: head, requires: image, prompt: "h: {query}"}
+  - {name: final, worker: vision, prompt: "f: {head}", depends_on: [head]}
+"""
+        )
+
+
+def test_image_conditional_final_is_rejected_at_build():
+    with pytest.raises(ValueError, match="cannot declare requires"):
+        build_orchestrator(
+            load_spec(
+                """
+workers: [{name: vision, engine_ref: vision}]
+roles:
+  - {name: final, worker: vision, requires: image, prompt: "f: {query}"}
+"""
+            ),
+            engine_refs={"vision": _RecordingBackend(vision=True)},
+        )
+
+
+async def test_image_conditional_worker_capability_is_checked_per_image_request():
+    """The image-capability of a conditional role's worker is a live property.
+
+    A replica pool publishes the intersection of its currently placeable
+    replicas, which is empty before the first health probe: build must not
+    probe it (the tiered example could not boot), each image request must.
+    """
+
+    look_worker = _RecordingBackend("seen: a chart", vision=False)
+    final_worker = _RecordingBackend("done", vision=True)
+    orchestrator = build_orchestrator(
+        load_spec(
+            """
+workers:
+  - {name: look_worker, engine_ref: look_worker}
+  - {name: final_worker, engine_ref: final_worker}
+roles:
+  - {name: look, worker: look_worker, requires: image, prompt: "l: {query}"}
+  - {name: final, worker: final_worker, prompt: "f: {look}", depends_on: [look]}
+"""
+        ),
+        engine_refs={"look_worker": look_worker, "final_worker": final_worker},
+    )
+    text_request = OrchestrationRequest(prompt=_DAG_QUERY, sampling_params=SamplingParams())
+    image_request = OrchestrationRequest(
+        prompt=_DAG_QUERY,
+        sampling_params=SamplingParams(),
+        multimodal_prompt=MultimodalPrompt(
+            _DAG_QUERY, (MultimodalItem("image", "uri", "data:image/png;base64,AAAA"),)
+        ),
+    )
+
+    # Text requests never touch the conditional role's worker.
+    assert (await orchestrator.run(text_request)).text == "done"
+    assert look_worker.requests_seen == []
+
+    with pytest.raises(ValueError, match="'look' requires image input but worker 'look_worker'"):
+        await orchestrator.run(image_request)
+    assert look_worker.requests_seen == []
+
+    look_worker._vision = True
+    result = await orchestrator.run(image_request)
+    assert result.text == "done"
+    assert isinstance(look_worker.requests_seen[0].prompt, MultimodalPrompt)
