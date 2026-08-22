@@ -43,77 +43,103 @@ routes answer from t=0 and share the gate; the thinking direct routes pay a
 deliberate think tax before their first public byte and are reported, not
 gated.
 
-## Routing: one Qwen judge, five routes (DTO-D13)
+## Routing: one Qwen judge picks exactly one of five routes (DTO-D13)
 
-Every request first pays one bounded **route judge** call on the Qwen pool:
-non-thinking (no `reasoning_effort`, so the Qwen template disables thinking),
-greedy, at most 8 output tokens, a 4,000-character head+tail view of the
-latest user turn, 5 s timeout. The judge answers exactly one of the labels
-below and the named **profile** — a complete Conductor DAG — serves the
-request; nothing else runs. The labels, their order (fastest → most
-thorough), and the criteria text the judge reads are the routing policy in
-`auto-max.yaml` (`profile_judge.choices`) and can be tuned without touching
-code. The verdict is attached to the request once, before preflight and
-admission, so preflight, admission, and execution always agree; admission
-reserves the judge plus the most expensive profile.
+**In one sentence:** every request is first shown to a small, fast Qwen call
+(the *route judge*), which answers with one of five labels; the profile named
+by that label is the **only** thing that runs for the request — the other
+four routes do not execute at all.
 
-| label | profile | what runs | thinking | sampling (DTO-D8) | max_tokens (vendor-official cap) |
+How a request flows:
+
+1. **Judge** — one non-thinking Qwen3.8 call (greedy, ≤8 output tokens,
+   5 s timeout) reads the latest user turn (a 4,000-character head+tail
+   view) plus a one-line context flag (`tool calling yes/no; image attached
+   yes/no`) and answers exactly one label: `QWEN`, `QWEN_THINK`, `DEEPSEEK`,
+   `DEEPSEEK_THINK`, or `ENSEMBLE`.
+2. **Dispatch** — Kairyu attaches the verdict to the request once (before
+   preflight and admission, so all three agree) and builds the Conductor DAG
+   of that profile only. Four of the profiles are a single model call; the
+   fifth is the eleven-role ensemble below.
+3. **Fallback** — if the judge times out, errors, or answers anything that is
+   not exactly one offered label, the request runs the ensemble (`primary`),
+   i.e. the quality-safe route.
+
+| label | profile | what runs | thinking | sampling (fixed, DTO-D8) | max_tokens cap (vendor-official) |
 |---|---|---|---|---|---|
 | `QWEN` | `qwen_direct` | one Qwen3.8 call (`qwen_answer`) | no | T=0.7, top_p=0.8, top_k=20, presence_penalty=1.5 | 131,072 |
 | `QWEN_THINK` | `qwen_think_low` | one Qwen3.8 call (`qwen_think_answer`) | fixed `low` | T=1.0, top_p=0.95, top_k=20 | 131,072 |
-| `DEEPSEEK` | `deepseek_direct` | one DeepSeek call on the non-thinking pool (`deepseek_answer`, `</think>`-closed scaffold, `reasoning_closed`) | no | T=1.0, top_p=0.95 | 393,216 (384K) |
-| `DEEPSEEK_THINK` | `deepseek_think` | one DeepSeek call on the thinking pool (`deepseek_think_answer`, `<think>` scaffold, DTO-D9 floor) | caller's L3 effort (`inherit`; default `high`) | T=1.0, top_p=0.95 | 393,216 (384K) |
+| `DEEPSEEK` | `deepseek_direct` | one DeepSeek call on the non-thinking pool (`deepseek_answer`) | no | T=1.0, top_p=0.95 | 393,216 (384K) |
+| `DEEPSEEK_THINK` | `deepseek_think` | one DeepSeek call on the thinking pool (`deepseek_think_answer`) | caller's L3 effort (default `high`) | T=1.0, top_p=0.95 | 393,216 (384K) |
 | `ENSEMBLE` | `primary` | the eleven-role dual-track DAG below | as before | as before | as before |
 
-Routing criteria (the judge reads them verbatim from `auto-max.yaml`):
-`QWEN` for requests a small fast model answers correctly at once (chit-chat,
-short facts, rewording/translation/formatting, simple lookups, trivial
-one-liners, exact fixed outputs); `QWEN_THINK` for moderate reasoning a small
-model handles with brief thinking (short math/logic, small well-specified
-coding tasks, step-by-step explanations, routine agent tool-call turns);
-`DEEPSEEK` for requests that need frontier knowledge, breadth, or
-long-context comprehension but not deep deliberation; `DEEPSEEK_THINK` for
-hard problems where careful deliberation decides correctness; `ENSEMBLE`
-only for the hardest, highest-stakes open-ended work where comparing several
-independent approaches and auditing the merged answer materially improves
-quality — by far the slowest and most expensive route.
+### What the judge optimizes — and what it is not
 
-Contract details:
+The judge is asked, in plain words, to pick *the fastest and cheapest route
+that will still answer correctly and completely, escalating only when the
+request genuinely needs it*. The routes are presented to it fastest → most
+thorough, each with a short description of the kind of request it is for:
 
-- **Fallback**: judge timeout, backend error, or a verdict that is not
-  exactly one offered label fall back to `primary` (quality-safe). The
-  verdict, the offered labels, and the judge's usage are traced
-  (`profile_judge` classification stage; `role profile: …` / `profile judge:
-  …` notes) and `/routing` reports the profiles and judge configuration.
-- **Images**: image requests are offered only image-capable profiles — the
-  Qwen routes and the ensemble (whose `image_description` stage feeds the
-  text-only DeepSeek roles); the DeepSeek-only routes are withheld, and a
-  verdict naming one is treated as unparseable.
+- `QWEN` — a small fast model answers correctly at once: chit-chat, short
+  facts, rewording/translation/formatting, simple lookups, trivial one-liners,
+  exact fixed outputs.
+- `QWEN_THINK` — moderate reasoning a small model handles with brief
+  thinking: short math/logic, small well-specified coding tasks, step-by-step
+  explanations, routine agent tool-call turns.
+- `DEEPSEEK` — needs frontier knowledge, breadth, or long-context
+  comprehension but not deep deliberation.
+- `DEEPSEEK_THINK` — hard problems where careful deliberation decides
+  correctness (competition math, complex algorithms, multi-file coding or
+  debugging, proofs, planning).
+- `ENSEMBLE` — the hardest, highest-stakes open-ended work where comparing
+  several independent approaches and auditing the merged answer materially
+  improves quality; by far the slowest and most expensive route.
+
+This is a **prompt-driven heuristic**, not a measured cost model or a learned
+router: there is no latency/price table behind the decision, only the
+instruction above and the per-route descriptions, which live in
+`auto-max.yaml` (`profile_judge.choices[*].criteria`) and can be re-tuned
+without code changes. The judge's verdict, the labels it was offered, and its
+token usage are recorded in every trace (`profile_judge` classification
+stage; `role profile: …` / `profile judge: …` notes), and `/routing`
+reports the profiles and judge configuration, so the route mix can be
+measured and the criteria adjusted from evidence.
+
+### Contract details
+
+- **Images**: image requests are offered only image-capable profiles (the two
+  Qwen routes and the ensemble); the DeepSeek-only routes are withheld, and a
+  verdict naming one is treated as unparseable (→ fallback).
 - **Agent turns**: tool-calling, `response_format`, and plain-text
-  structured-format turns are judged like every other turn (the judge sees
-  a `tool calling yes/no; image attached yes/no` context line). The direct
+  structured-format turns are judged like every other turn. The direct
   routes have no head, so they answer headless by construction: the one
   publisher role writes the complete answer in the demanded reply format and
   emits the actual tool call when the conversation requires one; the
   ensemble keeps its `prompt_headless` behavior.
 - **Sampling on the direct routes is fixed deployment policy** on the final
-  unit (the example's official per-mode values): the caller's
-  `temperature`/`top_p` are overridden for those routes, while the caller's
-  `n`, `logprobs`, `response_format`, tools, and public `max_tokens` still
-  apply. The route `max_tokens` is a **cap** min()'d with the caller's public
-  allowance: Qwen3.8's official "Final Response: 131,072" and
-  DeepSeek-V4-Flash-0731's official "maximum output length 384K" (393,216).
+  unit: the caller's `temperature`/`top_p` are overridden for those routes,
+  while the caller's `n`, `logprobs`, `response_format`, tools, and public
+  `max_tokens` still apply. The route `max_tokens` is a **cap** min()'d with
+  the caller's public allowance (Qwen3.8's official "Final Response:
+  131,072"; DeepSeek-V4-Flash-0731's official "maximum output length 384K").
   From the Chat UI (default `max_tokens` 65536, unchanged by DTO-D13) the
   caller cap binds first; send a larger `max_tokens` over the API to reach the
   official caps.
+- **Non-thinking calls are declared explicitly**: the judge and every
+  effort-less role on a worker that accepts `enable_thinking` (the Qwen pool)
+  are sent with `chat_template_kwargs: {enable_thinking: false}`. vLLM's Qwen3
+  reasoning parser defaults to "thinking enabled" and drops a non-streamed
+  answer that never emits `</think>` unless told otherwise — without this the
+  judge's verdict arrived empty and every request fell back to the ensemble.
 - **The ensemble is unchanged**: its roles, budgets (DeepSeek tiers
   8192/32768/65536, `internal_max_tokens` 65536, floor 256), head streaming,
   and audit loop are exactly DTO-D1..D12. The spec-level `budget {19, 2}`
   applies to every profile; a direct route spends one step plus the bounded
   empty-output re-dispatch.
-- **Cost**: the judge is one serial small Qwen call (≤8 tokens, greedy) on
-  every turn; the next GPU window measures its TTFT contribution on the
-  ensemble route and the route distribution of the harness datasets.
+- **Cost**: the judge is one serial small Qwen call on every turn (~0.2 s
+  measured on this deployment for a short turn); the next GPU window
+  measures its TTFT contribution on the ensemble route and the route
+  distribution of the harness datasets.
 
 ## The ensemble profile: the dual-track DAG (DTO-D1)
 

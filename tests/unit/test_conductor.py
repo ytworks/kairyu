@@ -1105,3 +1105,41 @@ async def test_verifier_budget_refusal_preserves_completed_target():
     assert skipped.operation == "verification"
     assert skipped.status == "skipped"
     assert skipped.metadata == {"reason": "budget"}
+
+
+async def test_non_thinking_text_roles_disable_thinking_on_capable_workers():
+    """DTO-D13 amendment: an effort-less role on a worker that accepts
+    enable_thinking sends enable_thinking=False (upstream Qwen3 parsers drop a
+    non-streamed answer otherwise); thinking roles and workers without the
+    capability send no template variables."""
+
+    capable = VisionScriptedBackend(["quick", "thought", "final"])
+    plain = ScriptedBackend(["draft"])
+    roles = (
+        RoleSpec(name="draft", worker="plain", prompt="draft: {query}"),
+        RoleSpec(name="quick", worker="capable", prompt="quick: {query}"),
+        RoleSpec(
+            name="think",
+            worker="capable",
+            prompt="think: {query}",
+            reasoning_effort="low",
+        ),
+        RoleSpec(
+            name="final",
+            worker="capable",
+            role_type="synthesizer",
+            prompt="final: {draft} {quick} {think}",
+            depends_on=("draft", "quick", "think"),
+        ),
+    )
+    conductor = Conductor(roles=roles, workers={"capable": capable, "plain": plain})
+
+    result = await conductor.run("question")
+
+    by_prompt = {str(r.prompt).split(":")[0]: r for r in capable.requests_seen}
+    assert by_prompt["quick"].chat_template_kwargs == {"enable_thinking": False}
+    assert by_prompt["final"].chat_template_kwargs == {"enable_thinking": False}
+    assert by_prompt["think"].chat_template_kwargs is None
+    assert by_prompt["think"].reasoning_effort == "low"
+    assert all(r.chat_template_kwargs is None for r in plain.requests_seen)
+    assert result.final_text == "final"

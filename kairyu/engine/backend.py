@@ -197,7 +197,8 @@ class GenerationRequest:
     # string instead of importing the L3 enum.
     tool_call_protocol: str = "generic"
     reasoning_effort: str | None = None
-    # Per-request variables for an upstream-owned multimodal HF chat template.
+    # Per-request variables for an upstream-owned HF chat template (text or
+    # multimodal chat prompts; never pre-rendered or token prompts).
     chat_template_kwargs: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
@@ -230,9 +231,14 @@ class GenerationRequest:
                 dict(self.chat_template_kwargs),
             )
         kind = prompt_kind(self.prompt)
-        if self.chat_template_kwargs is not None and kind != "multimodal":
+        if self.chat_template_kwargs is not None and (
+            kind == "tokens" or isinstance(self.prompt, TemplatedPrompt)
+        ):
+            # Pre-rendered and token prompts bypass the upstream chat template,
+            # so template variables would be silently ignored.
             raise ValueError(
-                "chat_template_kwargs require an upstream-owned multimodal prompt"
+                "chat_template_kwargs require an upstream-templated chat prompt "
+                "(text or multimodal), not a pre-rendered or token prompt"
             )
         if (
             kind != "text"
