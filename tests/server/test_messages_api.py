@@ -126,6 +126,16 @@ class ParallelToolBackend(MockBackend):
         )
 
 
+class ReasoningRecordingBackend(MockBackend):
+    def __init__(self):
+        super().__init__({"hello": "reasoned"})
+        self.requests = []
+
+    async def generate(self, request):
+        self.requests.append(request)
+        return await super().generate(request)
+
+
 # ---------------------------------------------------------------------------
 # Non-streaming envelope
 
@@ -177,6 +187,38 @@ def test_length_maps_to_max_tokens_stop_reason(tmp_path):
     response = client.post("/v1/messages", json=_body())
     assert response.status_code == 200
     assert response.json()["stop_reason"] == "max_tokens"
+
+
+@pytest.mark.parametrize(
+    ("effort", "expected"),
+    [
+        ("minimal", "low"),
+        ("medium", "high"),
+        ("xhigh", "max"),
+    ],
+)
+def test_output_config_effort_reaches_backend(tmp_path, effort, expected):
+    backend = ReasoningRecordingBackend()
+    client = TestClient(_app(tmp_path, backend))
+    response = client.post(
+        "/v1/messages",
+        json=_body(output_config={"effort": effort}),
+    )
+
+    assert response.status_code == 200
+    assert backend.requests[-1].reasoning_effort == expected
+
+
+@pytest.mark.parametrize("thinking_type", ["adaptive", "disabled"])
+def test_compatible_thinking_modes_are_accepted_as_noops(tmp_path, thinking_type):
+    backend = ReasoningRecordingBackend()
+    response = TestClient(_app(tmp_path, backend)).post(
+        "/v1/messages",
+        json=_body(thinking={"type": thinking_type}),
+    )
+
+    assert response.status_code == 200
+    assert backend.requests[-1].reasoning_effort is None
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +518,14 @@ def test_orchestrated_unknown_model_is_anthropic_404(tmp_path):
             _body(thinking={"type": "enabled", "budget_tokens": 2048}),
             400,
             "adaptive",
+        ),
+        (
+            _body(
+                thinking={"type": "disabled"},
+                output_config={"effort": "medium"},
+            ),
+            400,
+            "conflicts with output_config.effort",
         ),
         (_body(output_config={"format": {"type": "json_schema"}}), 400, "output_config"),
         (_body(context_management={"edits": []}), 400, "context_management"),

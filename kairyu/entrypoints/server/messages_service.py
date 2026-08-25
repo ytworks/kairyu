@@ -479,6 +479,7 @@ def _chat_tool_choice(choice: dict | None) -> tuple[str | dict | None, bool | No
 
 def _reasoning_effort_from(request: MessagesRequest) -> str | None:
     thinking = request.thinking
+    thinking_kind: str | None = None
     if thinking is not None:
         if not isinstance(thinking, dict):
             raise ChatRequestError("thinking must be an object")
@@ -498,9 +499,11 @@ def _reasoning_effort_from(request: MessagesRequest) -> str | None:
             raise ChatRequestError(
                 "thinking has unsupported fields: " + ", ".join(sorted(unknown))
             )
-        # adaptive maps to Kairyu's default reasoning behavior and disabled is
-        # a no-op: this adapter never emits Anthropic thinking blocks either
-        # way, so the client-visible contract is identical.
+        thinking_kind = kind
+        # Anthropic's current adaptive semantics are also the default when
+        # thinking is omitted. Accepting adaptive therefore preserves Claude
+        # Code compatibility without changing this adapter's visible blocks.
+        # disabled remains a no-op unless it conflicts with an explicit effort.
     output_config = request.output_config
     if output_config is None:
         return None
@@ -516,6 +519,10 @@ def _reasoning_effort_from(request: MessagesRequest) -> str | None:
     effort = output_config.get("effort")
     if effort is None:
         return None
+    if thinking_kind == "disabled":
+        raise ChatRequestError(
+            "thinking.type 'disabled' conflicts with output_config.effort"
+        )
     try:
         return normalize_reasoning_effort(effort)
     except ValueError:
