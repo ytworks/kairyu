@@ -461,9 +461,16 @@ def _reasoning_effort_from(request: MessagesRequest) -> str | None:
             raise ChatRequestError(
                 "thinking has unsupported fields: " + ", ".join(sorted(unknown))
             )
-        # adaptive maps to Kairyu's default reasoning behavior and disabled is
-        # a no-op: this adapter never emits Anthropic thinking blocks either
-        # way, so the client-visible contract is identical.
+        if kind == "adaptive":
+            raise ChatRequestError(
+                "thinking.type 'adaptive' cannot be represented without "
+                "Anthropic thinking blocks; use output_config.effort for "
+                "Kairyu hidden reasoning"
+            )
+        raise ChatRequestError(
+            "thinking.type 'disabled' cannot be guaranteed across direct and "
+            "AUTO models; omit thinking only when the model policy disables reasoning"
+        )
     output_config = request.output_config
     if output_config is None:
         return None
