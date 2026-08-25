@@ -737,8 +737,56 @@ class Conductor:
             )
         return self._role_sampling_params(spec), (), None, False, None, "generic"
 
+    def _final_public_params(self) -> SamplingParams:
+        """The caller's public params with the final unit's policy overrides.
+
+        Style fields declared on the final unit (temperature, top_p, top_k,
+        penalties, seed offset, stop) are deployment policy; its ``max_tokens``
+        (or effort tier) is a cap that only shrinks the caller's public
+        allowance (DTO-D13). Without a sampling block this is the caller's
+        intent unchanged.
+        """
+
+        if not self._units:
+            return self._final_sampling_params
+        final = self._selected_final_unit()
+        if final.sampling is None:
+            return self._final_sampling_params
+        return self._apply_overrides(
+            self._final_sampling_params,
+            final.sampling,
+            cap=self._final_sampling_params.max_tokens,
+            effort=self._role_reasoning_effort(final),
+        )
+
+    def final_intent_chat_template_kwargs(self, prompt: object) -> Mapping[str, object] | None:
+        """The template variables the final unit's dispatch will carry for
+        ``prompt`` — for an exact preflight contract."""
+
+        if not self._units:
+            return None
+        return self._worker_chat_template_kwargs(self._selected_final_unit(), prompt)
+
+    def final_intent_reasoning_effort(self) -> str | None:
+        """The resolved reasoning effort the final unit will dispatch."""
+
+        if not self._units:
+            return None
+        return self._role_reasoning_effort(self._selected_final_unit())
+
+    def final_intent_sampling_params(self) -> SamplingParams:
+        """Effective final-unit params before run-local budget deductions.
+
+        Orchestration preflight uses this same deployment-policy overlay as
+        the eventual final dispatch. Head usage and the public-output floor
+        may only shrink ``max_tokens`` later in the request.
+        """
+
+        return self._final_public_params()
+
     def _final_unit_sampling_params(self, run: _RunState | None) -> SamplingParams:
-        """The caller's public intent, minus tokens the head already spent.
+        """The caller's public intent (plus final-unit policy overrides),
+        minus tokens the head already spent.
 
         The public answer is head + continuation, so a finite caller limit is
         one budget across the seam (issue #496). The head's completed usage is
@@ -746,7 +794,7 @@ class Conductor:
         on the head (EO-D7).
         """
 
-        params = self._final_sampling_params
+        params = self._final_public_params()
         if params.max_tokens is None:
             return params
         budget = params.max_tokens
@@ -774,7 +822,7 @@ class Conductor:
         final = self._selected_final_unit()
         if not final.reasoning_close_tag or final.reasoning_closed:
             return None
-        if self._final_sampling_params.max_tokens is None:
+        if self._final_public_params().max_tokens is None:
             return None
         if self._final_sampling_params.n != 1:
             # One prompt cannot continue multiple independent reasoning branches.
@@ -784,7 +832,7 @@ class Conductor:
     def _public_budget_remaining(self, run: _RunState) -> int | None:
         """Tokens the final unit may still generate; ``None`` when unlimited."""
 
-        limit = self._final_sampling_params.max_tokens
+        limit = self._final_public_params().max_tokens
         if limit is None:
             return None
         return limit - (run.head_completion_tokens or 0)
@@ -894,11 +942,10 @@ class Conductor:
         self._validate_inline_executors()
         if self._units:
             final = self._selected_final_unit()
-            if final.sampling is not None:
-                raise ValueError(
-                    f"the final unit {final.name!r} carries the caller's public "
-                    "intent and cannot declare sampling overrides"
-                )
+            # A final-unit sampling block is deployment policy layered over
+            # the caller's public params (DTO-D13): style fields override,
+            # max_tokens only caps the caller's allowance; the caller's intent
+            # carriers (n, logprobs, response_format, tools) always apply.
             if final.requires is not None:
                 raise ValueError(
                     f"the final unit {final.name!r} publishes every request and "
@@ -1003,14 +1050,22 @@ class Conductor:
         spec: RoleSpec,
         prompt: object,
     ) -> Mapping[str, object] | None:
-        if not isinstance(prompt, MultimodalPrompt):
+        if isinstance(prompt, TemplatedPrompt):
+            # Pre-rendered scaffolds bypass the upstream template.
             return None
-        kwargs = self._chat_template_kwargs
-        if (
-            kwargs is not None
-            and self._role_reasoning_effort(spec) is not None
-            and "enable_thinking" in kwargs
-        ):
+        kwargs = self._chat_template_kwargs if isinstance(prompt, MultimodalPrompt) else None
+        effort = self._role_reasoning_effort(spec)
+        if effort is None:
+            # A non-thinking role must say so explicitly: upstream reasoning
+            # parsers (vLLM's Qwen3 parser) default to "thinking enabled" and
+            # drop a non-streamed answer that never emits </think> unless the
+            # request carries enable_thinking=False (DTO-D13 amendment).
+            if backend_supports_chat_template_kwargs(
+                self._workers[spec.worker],
+                frozenset({"enable_thinking"}),
+            ):
+                kwargs = {**(kwargs or {}), "enable_thinking": False}
+        elif kwargs is not None and "enable_thinking" in kwargs:
             kwargs = {**kwargs, "enable_thinking": True}
         if kwargs is not None and not backend_supports_chat_template_kwargs(
             self._workers[spec.worker],

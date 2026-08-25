@@ -2978,3 +2978,47 @@ async def test_usage_completion_tokens_populate_token_ids():
     result = await backend.generate(_request())
     assert len(result.completions[0].token_ids) == 5
     await backend.shutdown()
+
+
+async def test_text_chat_forwards_allowlisted_template_kwargs():
+    # DTO-D13 amendment: a non-thinking text role/judge must be able to tell
+    # the upstream Qwen3 reasoning parser enable_thinking=False; the kwargs
+    # ride the chat payload exactly like the multimodal case.
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "QWEN"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 12, "completion_tokens": 1, "total_tokens": 13},
+            },
+        )
+
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1",
+        model="qwen",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+        capabilities={"allow_chat_template_kwargs": ["enable_thinking"]},
+    )
+    result = await backend.generate(
+        _request("route me", chat_template_kwargs={"enable_thinking": False})
+    )
+
+    assert captured["body"]["messages"] == [{"role": "user", "content": "route me"}]
+    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert result.text == "QWEN"
+
+
+def test_template_kwargs_rejected_on_pre_rendered_prompt():
+    with pytest.raises(ValueError, match="pre-rendered or token prompt"):
+        _request(TemplatedPrompt("<bos>route me"), chat_template_kwargs={"enable_thinking": False})

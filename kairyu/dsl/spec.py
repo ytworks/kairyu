@@ -59,16 +59,19 @@ class EffortMaxTokensSpec(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    low: int = Field(ge=1, le=131072)
-    high: int = Field(ge=1, le=131072)
-    max: int = Field(ge=1, le=131072)
+    low: int = Field(ge=1, le=393216)
+    high: int = Field(ge=1, le=393216)
+    max: int = Field(ge=1, le=393216)
 
 
 class RoleSamplingSpec(BaseModel):
-    """Per-role sampling overrides (EO-D9). The selected final unit carries the
-    caller's public intent and must not declare overrides; internal roles are
-    still capped by ``internal_max_tokens``. Omitted fields keep the caller's
-    or engine's defaults."""
+    """Per-role sampling overrides (EO-D9). Internal roles are capped by
+    ``internal_max_tokens``. On the selected final unit the style fields are
+    deployment policy layered over the caller's public params, and
+    ``max_tokens`` is a cap that is min()'d with the caller's public allowance
+    (DTO-D13); the caller's intent carriers (n, logprobs, response_format,
+    tools) always apply. Omitted fields keep the caller's or engine's
+    defaults."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -78,7 +81,7 @@ class RoleSamplingSpec(BaseModel):
     min_p: float | None = Field(default=None, ge=0.0, le=1.0)
     presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
     repetition_penalty: float | None = Field(default=None, gt=0.0, le=2.0)
-    max_tokens: int | None = Field(default=None, ge=1, le=131072)
+    max_tokens: int | None = Field(default=None, ge=1, le=393216)
     max_tokens_by_effort: EffortMaxTokensSpec | None = None
     seed_offset: int | None = Field(default=None, ge=0)
     stop: tuple[str, ...] = ()
@@ -273,13 +276,26 @@ class RouterSpec(BaseModel):
         return self
 
 
-class ProfileJudgeSpec(BaseModel):
-    """LLM judgment for the coding/general profile split (issue #509).
+class ProfileChoiceSpec(BaseModel):
+    """One route the profile judge may pick (DTO-D13): the label the judge
+    answers with, the role profile it selects, and the routing criteria shown
+    to the judge."""
 
-    A bounded verdict-only call on a configured generation worker decides
-    whether a turn asks for code authoring. Head-disable signals stay
-    deterministic and are never judged; on judge timeout or an unparseable
-    verdict the deterministic code-task signal applies.
+    model_config = ConfigDict(frozen=True)
+
+    profile: str = Field(min_length=1)
+    label: str = Field(pattern=r"^[A-Z][A-Z0-9_]*$", max_length=32)
+    criteria: str = Field(min_length=1)
+
+
+class ProfileJudgeSpec(BaseModel):
+    """LLM route selection among the role profiles (issue #509, generalized by
+    DTO-D13).
+
+    A bounded verdict-only call on a configured generation worker answers one
+    of the choice labels over the latest user turn; the selected profile's
+    DAG then serves the request. On judge timeout, backend error, or an
+    unparseable verdict the ``fallback`` profile applies.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -289,6 +305,36 @@ class ProfileJudgeSpec(BaseModel):
     max_tokens: int = Field(default=8, ge=1, le=64)
     prompt_prefix: str = ""
     prompt_suffix: str = ""
+    choices: tuple[ProfileChoiceSpec, ...] = Field(min_length=2)
+    fallback: str = "primary"
+
+    @model_validator(mode="after")
+    def _choices_are_distinct(self) -> ProfileJudgeSpec:
+        labels = [choice.label for choice in self.choices]
+        if len(set(labels)) != len(labels):
+            raise ValueError("profile_judge choice labels must be unique")
+        profiles = [choice.profile for choice in self.choices]
+        if len(set(profiles)) != len(profiles):
+            raise ValueError("profile_judge choices must reference distinct profiles")
+        return self
+
+
+class RoleProfileSpec(BaseModel):
+    """A named alternative role DAG served under the same model (DTO-D13).
+    The primary ``roles`` DAG is the implicit profile ``primary``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(min_length=1)
+    roles: tuple[RoleNodeSpec, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _name_is_identifier(self) -> RoleProfileSpec:
+        if not self.name.isidentifier() or self.name == "primary":
+            raise ValueError(
+                f"profile name {self.name!r} must be an identifier other than 'primary'"
+            )
+        return self
 
 
 class OrchestratorSpec(BaseModel):
@@ -296,13 +342,13 @@ class OrchestratorSpec(BaseModel):
 
     workers: tuple[WorkerSpec, ...] = Field(min_length=1)
     roles: tuple[RoleNodeSpec, ...] = ()
-    # Optional second role DAG for requests outside the primary DAG's task
-    # specialization (issue #509). Both profiles are full ensembles served
-    # under the same model name; the orchestrator selects per request and no
-    # profile ever routes to a single engine directly.
-    general_roles: tuple[RoleNodeSpec, ...] = ()
-    # Optional LLM verdict for the coding/general split (issue #509
-    # amendment). Without it the deterministic code-task signal decides.
+    # Optional named alternative role DAGs served under the same model name
+    # (issue #509, generalized by DTO-D13). The orchestrator selects one
+    # profile per request; a profile may be a full ensemble or a single-role
+    # direct route.
+    profiles: tuple[RoleProfileSpec, ...] = ()
+    # Optional LLM verdict selecting among the profiles. Without it the
+    # primary DAG always serves.
     profile_judge: ProfileJudgeSpec | None = None
     budget: BudgetSpec = BudgetSpec()
     router: RouterSpec = RouterSpec()
@@ -337,11 +383,14 @@ class OrchestratorSpec(BaseModel):
         executor_workers = {
             worker.name for worker in self.workers if worker.executor_ref is not None
         }
-        if self.general_roles and not self.roles:
-            raise ValueError("general_roles requires a primary roles DAG")
-        if self.general_roles and self.moa_samples > 0:
+        profile_names = [profile.name for profile in self.profiles]
+        if len(set(profile_names)) != len(profile_names):
+            raise ValueError("profile names must be unique")
+        if self.profiles and not self.roles:
+            raise ValueError("profiles require a primary roles DAG")
+        if self.profiles and self.moa_samples > 0:
             raise ValueError(
-                "general_roles cannot be combined with moa_samples > 0; "
+                "profiles cannot be combined with moa_samples > 0; "
                 "choose role DAG profiles or MoA mode"
             )
         if self.public_output_floor is not None and self.moa_samples > 0:
@@ -350,8 +399,20 @@ class OrchestratorSpec(BaseModel):
                 "the floor applies only to the Conductor final unit"
             )
         if self.profile_judge is not None:
-            if not self.general_roles:
-                raise ValueError("profile_judge requires general_roles")
+            if not self.profiles:
+                raise ValueError("profile_judge requires at least one profile")
+            known_profiles = {"primary", *profile_names}
+            for choice in self.profile_judge.choices:
+                if choice.profile not in known_profiles:
+                    raise ValueError(
+                        f"profile_judge choice {choice.label!r} references unknown "
+                        f"profile {choice.profile!r}"
+                    )
+            if self.profile_judge.fallback not in known_profiles:
+                raise ValueError(
+                    f"profile_judge fallback references unknown profile "
+                    f"{self.profile_judge.fallback!r}"
+                )
             if self.profile_judge.worker not in known:
                 raise ValueError(
                     f"profile_judge references unknown worker "
@@ -359,7 +420,10 @@ class OrchestratorSpec(BaseModel):
                 )
             if self.profile_judge.worker in executor_workers:
                 raise ValueError("profile_judge worker must be a generation worker")
-        for profile, roles in (("roles", self.roles), ("general_roles", self.general_roles)):
+        for profile, roles in (
+            ("roles", self.roles),
+            *((f"profiles.{spec.name}", spec.roles) for spec in self.profiles),
+        ):
             for role in roles:
                 if role.worker not in known:
                     raise ValueError(

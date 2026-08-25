@@ -549,12 +549,49 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
             "Kairyu L2 does not report the required "
             f"{len(expected_roles)}-role dual-track product DAG"
         )
-    # The dual-track DAG is the single profile: every turn runs it, so a
-    # served general profile or profile judge means the wrong policy is live.
-    if policy.get("general_roles"):
-        raise SystemExit("Kairyu product policy must serve exactly one role profile")
-    if policy.get("profile_judge"):
-        raise SystemExit("Kairyu product policy must not configure a profile judge")
+    # DTO-D13: the dual-track DAG is the primary profile behind a Qwen route
+    # judge that selects among four single-role direct routes and the
+    # ensemble; a missing profile or judge means the wrong policy is live.
+    expected_profiles = {
+        name: list(roles) for name, roles in orchestration["profiles"].items()
+    }
+    served_profiles = {
+        name: [role.get("name") for role in roles]
+        for name, roles in (policy.get("profiles") or {}).items()
+    }
+    if served_profiles != expected_profiles:
+        raise SystemExit(
+            "Kairyu L2 does not report the required direct-route profiles "
+            f"{sorted(expected_profiles)!r}, got {sorted(served_profiles)!r}"
+        )
+    expected_sampling = orchestration["direct_route_sampling"]
+    served_sampling = {
+        name: {
+            key: value
+            for key, value in (roles[0].get("sampling") or {}).items()
+            if value not in (None, [], {})
+        }
+        for name, roles in (policy.get("profiles") or {}).items()
+    }
+    if served_sampling != expected_sampling:
+        raise SystemExit(
+            "Kairyu L2 does not report the required direct-route sampling policy"
+        )
+    expected_judge = orchestration["profile_judge"]
+    judge = policy.get("profile_judge") or {}
+    served_choices = [
+        {"label": choice.get("label"), "profile": choice.get("profile")}
+        for choice in judge.get("choices", ())
+    ]
+    if (
+        judge.get("worker") != expected_judge["worker"]
+        or judge.get("fallback") != expected_judge["fallback"]
+        or served_choices != expected_judge["choices"]
+    ):
+        raise SystemExit(
+            "Kairyu product policy must judge routes on the Qwen worker with the "
+            f"{len(expected_judge['choices'])} configured choices"
+        )
     if policy.get("stream_head") != orchestration["stream_head"]:
         raise SystemExit("Kairyu product policy must stream the head role publicly")
     if policy.get("moa_samples") != 0:
@@ -579,6 +616,10 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
     ):
         raise SystemExit(
             "Kairyu Tier2 L2 worker is not bound to the thinking DeepSeek L1 pool"
+        )
+    if configured.get("tier2-direct", {}).get("model") != "deepseek-v4-flash-0731":
+        raise SystemExit(
+            "Kairyu tier2-direct L2 worker is not bound to the non-thinking DeepSeek L1 pool"
         )
 
 

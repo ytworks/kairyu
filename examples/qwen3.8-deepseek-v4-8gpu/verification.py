@@ -16,8 +16,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
 
-# Generation nodes every text request must trace (image_description is
-# skipped without an image, DTO-D11; synthesis is the expected_route).
+# Generation nodes every text request routed to the primary (ensemble)
+# profile must trace (image_description is skipped without an image,
+# DTO-D11; synthesis is that profile's final unit).
 _DUAL_TRACK_INTERNAL_NODES = (
     "draft",
     "policies",
@@ -27,9 +28,18 @@ _DUAL_TRACK_INTERNAL_NODES = (
     "answer_4",
     "critique",
 )
-# Verification nodes every request must trace: the audit verdict on the
-# synthesis final unit (DTO-D10).
+# Verification nodes every primary-profile request must trace: the audit
+# verdict on the synthesis final unit (DTO-D10).
 _DUAL_TRACK_VERIFICATION_NODES = ("audit",)
+# DTO-D13: the Qwen route judge selects one profile per request; every
+# sample must trace the judge classification stage and exactly one profile's
+# final unit. Direct routes have no head and no internal stages.
+_ROUTE_FINAL_NODES: dict[str, str] = dict(SPEC["orchestration"]["profile_final_roles"])
+_JUDGE_NODE = "profile_judge"
+# The public-TTFT gate (DTO-D3) applies to the head-streamed ensemble and the
+# non-thinking direct routes; the thinking direct routes pay a deliberate
+# think tax before their first public byte and are reported, not gated.
+_TTFT_GATED_PROFILES = tuple(SPEC["orchestration"]["ttft_gated_profiles"])
 
 
 def _nvme_root() -> Path:
@@ -142,6 +152,60 @@ def _row_summary(row_dir: Path) -> dict | None:
     return summary if isinstance(summary, dict) else None
 
 
+def _sample_route(sample: dict) -> str | None:
+    """The profile a traced sample ran: the unique route whose final unit
+    succeeded as a publisher generation stage; None when ambiguous."""
+
+    stages = sample.get("trace", {}).get("stages", [])
+    routes = [
+        profile
+        for profile, node in _ROUTE_FINAL_NODES.items()
+        if any(
+            stage.get("node") == node
+            and stage.get("role") == "publisher"
+            and stage.get("kind") == "generation"
+            and stage.get("status") == "success"
+            for stage in stages
+        )
+    ]
+    return routes[0] if len(routes) == 1 else None
+
+
+def _route_report(samples: list[dict]) -> dict:
+    """Route distribution, per-route TTFT p50, and judge latency for one row."""
+
+    by_route: dict[str, list[float]] = {}
+    requests_by_route: dict[str, int] = {}
+    judge_ms: list[float] = []
+    for sample in samples:
+        route = _sample_route(sample) or "unresolved"
+        requests_by_route[route] = requests_by_route.get(route, 0) + 1
+        by_route.setdefault(route, [])
+        ttft = sample.get("ttft_ms")
+        if isinstance(ttft, (int, float)):
+            by_route[route].append(float(ttft))
+        for stage in sample.get("trace", {}).get("stages", []):
+            if stage.get("node") == _JUDGE_NODE and isinstance(
+                stage.get("total_ms"), (int, float)
+            ):
+                judge_ms.append(float(stage["total_ms"]))
+
+    def p50(values: list[float]) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        return round(ordered[(len(ordered) + 1) // 2 - 1], 2)
+
+    return {
+        "routes": {
+            route: {"requests": requests_by_route[route], "ttft_p50_ms": p50(values)}
+            for route, values in sorted(by_route.items())
+        },
+        "judge_total_ms_p50": p50(judge_ms),
+        "judged_samples": len(judge_ms),
+    }
+
+
 def _validate_serving_row(
     row_dir: Path,
     requests: int,
@@ -154,6 +218,7 @@ def _validate_serving_row(
     require_head: bool = False,
     expected_generation_nodes: tuple[str, ...] = (),
     expected_verification_nodes: tuple[str, ...] = (),
+    judged_routes: bool = False,
 ) -> int:
     artifacts = list(row_dir.glob("*-serving.json"))
     if len(artifacts) != 1:
@@ -195,6 +260,22 @@ def _validate_serving_row(
             stages = sample.get("trace", {}).get("stages", [])
             if sample.get("trace", {}).get("status") != "valid":
                 return False
+            if judged_routes:
+                # DTO-D13: the judge stage must be traced and exactly one
+                # profile's final unit must have published. Only the primary
+                # (ensemble) route carries the head, internal, and audit
+                # stage contracts below.
+                if not any(
+                    stage.get("node") == _JUDGE_NODE
+                    and stage.get("kind") == "classification"
+                    for stage in stages
+                ):
+                    return False
+                route = _sample_route(sample)
+                if route is None:
+                    return False
+                if route != "primary":
+                    return True
             if not any(
                 stage.get("node") == expected_route
                 and stage.get("role") == expected_role
@@ -233,6 +314,14 @@ def _validate_serving_row(
             return True
 
         complete = all(stage_ok(sample) for sample in samples)
+        if judged_routes:
+            report = _route_report(samples)
+            (row_dir / "routes.json").write_text(
+                json.dumps({"schema_version": 1, **report}, indent=2, sort_keys=True)
+                + "\n",
+                encoding="utf-8",
+            )
+            print(f"{row_dir.name}: routes {json.dumps(report['routes'], sort_keys=True)}")
     if not complete:
         print("serving row did not produce complete fixed-token evidence", file=sys.stderr)
         return 1
@@ -253,6 +342,7 @@ def _serving(
     require_head: bool = False,
     expected_generation_nodes: tuple[str, ...] = (),
     expected_verification_nodes: tuple[str, ...] = (),
+    judged_routes: bool = False,
 ) -> int:
     config = SPEC["verification"]["serving"]
     requests = int(config["requests_per_concurrency"])
@@ -392,6 +482,7 @@ def _serving(
                 require_head=require_head,
                 expected_generation_nodes=expected_generation_nodes,
                 expected_verification_nodes=expected_verification_nodes,
+                judged_routes=judged_routes,
             )
         if code:
             return code
@@ -399,9 +490,10 @@ def _serving(
 
 
 def serving_auto_max(run_dir: Path) -> int:
-    """Generic-workload regression envelope: the head/synthesis split public
-    stream stays intact across the dual-track DAG and the audit verdict
-    fires on every request."""
+    """Generic-workload regression envelope: every request traces the route
+    judge and exactly one profile's final unit; requests the judge sends to
+    the primary ensemble keep the head/synthesis split public stream and
+    the audit verdict (DTO-D13)."""
 
     return _serving(
         SPEC["orchestration"]["auto_max_model"],
@@ -416,6 +508,7 @@ def serving_auto_max(run_dir: Path) -> int:
         require_head=True,
         expected_generation_nodes=_DUAL_TRACK_INTERNAL_NODES,
         expected_verification_nodes=_DUAL_TRACK_VERIFICATION_NODES,
+        judged_routes=True,
     )
 
 _CODING_TASKS = (
@@ -563,10 +656,13 @@ def serving_auto_max_coding(run_dir: Path) -> int:
 
     Every concurrency row runs the same deterministic coding dataset through
     the L3 product path AND directly against the DeepSeek L1 loopback
-    endpoint; the row passes only when the product's semantic TTFT p50 stays
-    within ``ttft_multiplier_vs_deepseek_direct`` times the paired direct row
-    (pinned example.json denominators are the fallback when the paired row
-    fails to produce a summary).
+    endpoint; the row passes only when the product's semantic TTFT p50 over
+    the TTFT-gated routes (the head-streamed ensemble and the non-thinking
+    direct routes, DTO-D13) stays within ``ttft_multiplier_vs_deepseek_direct``
+    times the paired direct row (pinned example.json denominators are the
+    fallback when the paired row fails to produce a summary). Samples the
+    judge sent to a thinking direct route are reported per route but not
+    gated; a row with no gated-route sample records ``not_applicable``.
     """
 
     config = SPEC["verification"]["coding"]
@@ -632,6 +728,7 @@ def serving_auto_max_coding(run_dir: Path) -> int:
                 require_head=True,
                 expected_generation_nodes=_DUAL_TRACK_INTERNAL_NODES,
                 expected_verification_nodes=_DUAL_TRACK_VERIFICATION_NODES,
+                judged_routes=True,
             )
         if code:
             return code
@@ -652,14 +749,36 @@ def serving_auto_max_coding(run_dir: Path) -> int:
         )
         product = _row_summary(row_dir)
         direct = _row_summary(direct_dir) if direct_code == 0 else None
+        routes = _row_routes(row_dir)
+        gated_ttft = _gated_ttft_p50(routes)
         product_ttft = (
-            product.get("ttft_p50_ms") if isinstance(product, dict) else None
+            gated_ttft
+            if routes is not None
+            else (product.get("ttft_p50_ms") if isinstance(product, dict) else None)
         )
         direct_ttft = direct.get("ttft_p50_ms") if isinstance(direct, dict) else None
         denominator_source = "paired_direct"
         if not isinstance(direct_ttft, (int, float)):
             direct_ttft = fallback.get(str(concurrency))
             denominator_source = "pinned_fallback"
+        if routes is not None and gated_ttft is None:
+            # Every sample took a thinking direct route: nothing to gate.
+            gates[str(concurrency)] = {
+                "product_semantic_ttft_p50_ms": None,
+                "deepseek_direct_ttft_p50_ms": direct_ttft,
+                "denominator_source": denominator_source,
+                "multiplier": multiplier,
+                "passed": None,
+                "status": "not_applicable",
+                "routes": routes.get("routes"),
+            }
+            print(
+                f"c{concurrency}: no TTFT-gated route sample "
+                f"(routes {json.dumps(routes.get('routes'), sort_keys=True)}) -> N/A",
+                flush=True,
+            )
+            _write_ttft_gate(run_dir, gates)
+            continue
         if not isinstance(product_ttft, (int, float)) or not isinstance(
             direct_ttft, (int, float)
         ):
@@ -674,6 +793,12 @@ def serving_auto_max_coding(run_dir: Path) -> int:
             "denominator_source": denominator_source,
             "multiplier": multiplier,
             "passed": passed,
+            "status": "gated",
+            "gated_profiles": list(_TTFT_GATED_PROFILES),
+            "routes": routes.get("routes") if routes is not None else None,
+            "judge_total_ms_p50": (
+                routes.get("judge_total_ms_p50") if routes is not None else None
+            ),
         }
         print(
             f"c{concurrency}: product TTFT p50 {product_ttft:.2f} ms vs "
@@ -681,18 +806,52 @@ def serving_auto_max_coding(run_dir: Path) -> int:
             f"{'PASS' if passed else 'FAIL'}",
             flush=True,
         )
-        (run_dir / "ttft-gate.json").write_text(
-            json.dumps(
-                {"schema_version": 1, "gates": gates},
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+        _write_ttft_gate(run_dir, gates)
         if not passed:
             return 1
     return 0
+
+
+def _write_ttft_gate(run_dir: Path, gates: dict) -> None:
+    (run_dir / "ttft-gate.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "gates": gates},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _row_routes(row_dir: Path) -> dict | None:
+    """The per-row route report written by ``_validate_serving_row``."""
+
+    path = row_dir / "routes.json"
+    if not path.is_file():
+        return None
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return report if isinstance(report, dict) else None
+
+
+def _gated_ttft_p50(routes: dict | None) -> float | None:
+    """Request-weighted TTFT p50 proxy over the gated routes: the largest
+    per-route p50 among gated routes that served at least one request
+    (conservative — the slowest gated route must still clear the gate)."""
+
+    if routes is None:
+        return None
+    values = [
+        entry.get("ttft_p50_ms")
+        for profile, entry in (routes.get("routes") or {}).items()
+        if profile in _TTFT_GATED_PROFILES
+        and isinstance(entry, dict)
+        and isinstance(entry.get("ttft_p50_ms"), (int, float))
+    ]
+    return max(values) if values else None
 
 
 

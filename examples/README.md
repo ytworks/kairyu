@@ -6,7 +6,7 @@
 |---|---|---|
 | [`qwen3.8-27b-1gpu`](qwen3.8-27b-1gpu/README.md) | one selected RTX PRO 6000 Blackwell | official FP8, 262,144 tokens |
 | [`deepseek-v4-flash-0731-8gpu`](deepseek-v4-flash-0731-8gpu/README.md) | TP8 + EP8 on eight RTX PRO 6000 Blackwell cards | mixed FP4/FP8, 1,048,576 tokens |
-| [`qwen3.8-deepseek-v4-8gpu`](qwen3.8-deepseek-v4-8gpu/README.md) | Qwen TP1 x 4 replicas + DeepSeek TP4/EP4 | verifier-gated Kairyu L2 role DAG |
+| [`qwen3.8-deepseek-v4-8gpu`](qwen3.8-deepseek-v4-8gpu/README.md) | Qwen TP1 x 4 replicas + DeepSeek TP4/EP4 | Qwen-judged five-route Kairyu L2 (four direct routes + verifier-gated ensemble DAG) |
 
 All three use Kairyu as L3, vLLM as L1, and Open WebUI as the public chat surface.
 Each `run.sh` command prints its API and Chat UI URLs when the stack is ready.

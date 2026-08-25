@@ -329,6 +329,13 @@ not resurrected; `verification/` continues to gate serving behavior only.
 
 ### ECO-D6 — General ensemble profile with automatic per-request selection (issue #509)
 
+**Superseded in part by DTO-D13 (2026-08-22,
+`example-dual-track-orchestration.md`):** the two-way `general_roles` /
+`CODE|GENERAL` judge, its keyword fallback, its head-disable short-circuit,
+and the "no single-engine route in auto-max" constraint are replaced by N
+named profiles with a spec-defined choice list; single-call direct routes are
+now regular profiles. Kept for the record.
+
 The coding DAG's role contracts are Python-module/pytest-specialized by
 design (ECO-D2). The Terminal-Bench window showed those contracts idling on
 agent-loop turns: Terminus demands shell-command batches in a JSON envelope,

@@ -1,11 +1,19 @@
-# Qwen3.8 + DeepSeek V4 dual-track policy ensemble on 8 x RTX PRO 6000
+# Qwen3.8 + DeepSeek V4 judged five-route orchestration on 8 x RTX PRO 6000
 
 This example starts one layered quality-first product path with one command:
 
 ```text
 Open WebUI
     -> Kairyu L3 product API (:8003; model kairyu-auto-max)
-        -> Kairyu L2: ONE dual-track ensemble DAG for every request
+        -> Kairyu L2 route judge: ONE bounded Qwen non-thinking call reads the
+           request and picks the fastest route expected to answer correctly
+           and well (DTO-D13):
+             QWEN           -> qwen_direct     Qwen3.8 non-thinking, one call
+             QWEN_THINK     -> qwen_think_low  Qwen3.8 thinking (low), one call
+             DEEPSEEK       -> deepseek_direct DeepSeek non-thinking, one call
+             DEEPSEEK_THINK -> deepseek_think  DeepSeek thinking at the L3 effort
+             ENSEMBLE       -> primary         the dual-track ensemble DAG below
+        -> Kairyu L2 primary profile: the dual-track ensemble DAG
            (11 roles: 10 generation + 1 audit verifier)
             Track A: DeepSeek writes 4 maximally different answer policies;
                      4 Qwen replicas answer in parallel, one policy each
@@ -26,17 +34,118 @@ Embedding clients
         -> pinned offline FastEmbed MiniLM bundle (384 dimensions)
 ```
 
-The head role commits the public answer opening within a small-prompt Qwen
-TTFT (~0.3 s measured at c1), so the product's semantic TTFT (first public
-`content` token) is gated at **<= 2x the DeepSeek L1 direct row at the same
-concurrency** while both tracks run behind the committed opening
-(DTO-D3, inherited from ECO-D4).
+On the ensemble route the head role commits the public answer opening within
+a small-prompt Qwen TTFT (~0.3 s measured at c1), so the product's semantic
+TTFT (first public `content` token) is gated at **<= 2x the DeepSeek L1
+direct row at the same concurrency** while both tracks run behind the
+committed opening (DTO-D3, inherited from ECO-D4). The non-thinking direct
+routes answer from t=0 and share the gate; the thinking direct routes pay a
+deliberate think tax before their first public byte and are reported, not
+gated.
 
-## The dual-track DAG (DTO-D1)
+## Routing: one Qwen judge picks exactly one of five routes (DTO-D13)
 
-One served model, one profile, three waves. **Every request runs the complete
-Conductor DAG: there is no route that hits a single L1 engine directly, no
-profile selection, and no LLM profile judge.**
+**In one sentence:** every request is first shown to a small, fast Qwen call
+(the *route judge*), which answers with one of five labels; the profile named
+by that label is the **only** thing that runs for the request — the other
+four routes do not execute at all.
+
+How a request flows:
+
+1. **Judge** — one non-thinking Qwen3.8 call (greedy, ≤8 output tokens,
+   5 s timeout) reads the latest user turn (a 4,000-character head+tail
+   view) plus a one-line context flag (`tool calling yes/no; image attached
+   yes/no`) and answers exactly one label: `QWEN`, `QWEN_THINK`, `DEEPSEEK`,
+   `DEEPSEEK_THINK`, or `ENSEMBLE`.
+2. **Dispatch** — Kairyu attaches the verdict to the request once (before
+   preflight and admission, so all three agree) and builds the Conductor DAG
+   of that profile only. Four of the profiles are a single model call; the
+   fifth is the eleven-role ensemble below.
+3. **Fallback** — if the judge times out, errors, or answers anything that is
+   not exactly one offered label, the request runs the ensemble (`primary`),
+   i.e. the quality-safe route.
+
+| label | profile | what runs | thinking | sampling (fixed, DTO-D8) | max_tokens cap (vendor-official) |
+|---|---|---|---|---|---|
+| `QWEN` | `qwen_direct` | one Qwen3.8 call (`qwen_answer`) | no | T=0.7, top_p=0.8, top_k=20, presence_penalty=1.5 | 131,072 |
+| `QWEN_THINK` | `qwen_think_low` | one Qwen3.8 call (`qwen_think_answer`) | fixed `low` | T=1.0, top_p=0.95, top_k=20 | 131,072 |
+| `DEEPSEEK` | `deepseek_direct` | one DeepSeek call on the non-thinking pool (`deepseek_answer`) | no | T=1.0, top_p=0.95 | 393,216 (384K) |
+| `DEEPSEEK_THINK` | `deepseek_think` | one DeepSeek call on the thinking pool (`deepseek_think_answer`) | caller's L3 effort (default `high`) | T=1.0, top_p=0.95 | 393,216 (384K) |
+| `ENSEMBLE` | `primary` | the eleven-role dual-track DAG below | as before | as before | as before |
+
+### What the judge optimizes — and what it is not
+
+The judge is asked, in plain words, to pick *the fastest and cheapest route
+that will still answer correctly and completely, escalating only when the
+request genuinely needs it*. The routes are presented to it fastest → most
+thorough, each with a short description of the kind of request it is for:
+
+- `QWEN` — a small fast model answers correctly at once: chit-chat, short
+  facts, rewording/translation/formatting, simple lookups, trivial one-liners,
+  exact fixed outputs.
+- `QWEN_THINK` — moderate reasoning a small model handles with brief
+  thinking: short math/logic, small well-specified coding tasks, step-by-step
+  explanations, routine agent tool-call turns.
+- `DEEPSEEK` — needs frontier knowledge, breadth, or long-context
+  comprehension but not deep deliberation.
+- `DEEPSEEK_THINK` — hard problems where careful deliberation decides
+  correctness (competition math, complex algorithms, multi-file coding or
+  debugging, proofs, planning).
+- `ENSEMBLE` — the hardest, highest-stakes open-ended work where comparing
+  several independent approaches and auditing the merged answer materially
+  improves quality; by far the slowest and most expensive route.
+
+This is a **prompt-driven heuristic**, not a measured cost model or a learned
+router: there is no latency/price table behind the decision, only the
+instruction above and the per-route descriptions, which live in
+`auto-max.yaml` (`profile_judge.choices[*].criteria`) and can be re-tuned
+without code changes. The judge's verdict, the labels it was offered, and its
+token usage are recorded in every trace (`profile_judge` classification
+stage; `role profile: …` / `profile judge: …` notes), and `/routing`
+reports the profiles and judge configuration, so the route mix can be
+measured and the criteria adjusted from evidence.
+
+### Contract details
+
+- **Images**: image requests are offered only image-capable profiles (the two
+  Qwen routes and the ensemble); the DeepSeek-only routes are withheld, and a
+  verdict naming one is treated as unparseable (→ fallback).
+- **Agent turns**: tool-calling, `response_format`, and plain-text
+  structured-format turns are judged like every other turn. The direct
+  routes have no head, so they answer headless by construction: the one
+  publisher role writes the complete answer in the demanded reply format and
+  emits the actual tool call when the conversation requires one; the
+  ensemble keeps its `prompt_headless` behavior.
+- **Sampling on the direct routes is fixed deployment policy** on the final
+  unit: the caller's `temperature`/`top_p` are overridden for those routes,
+  while the caller's `n`, `logprobs`, `response_format`, tools, and public
+  `max_tokens` still apply. The route `max_tokens` is a **cap** min()'d with
+  the caller's public allowance (Qwen3.8's official "Final Response:
+  131,072"; DeepSeek-V4-Flash-0731's official "maximum output length 384K").
+  From the Chat UI (default `max_tokens` 65536, unchanged by DTO-D13) the
+  caller cap binds first; send a larger `max_tokens` over the API to reach the
+  official caps.
+- **Non-thinking calls are declared explicitly**: the judge and every
+  effort-less role on a worker that accepts `enable_thinking` (the Qwen pool)
+  are sent with `chat_template_kwargs: {enable_thinking: false}`. vLLM's Qwen3
+  reasoning parser defaults to "thinking enabled" and drops a non-streamed
+  answer that never emits `</think>` unless told otherwise — without this the
+  judge's verdict arrived empty and every request fell back to the ensemble.
+- **The ensemble is unchanged**: its roles, budgets (DeepSeek tiers
+  8192/32768/65536, `internal_max_tokens` 65536, floor 256), head streaming,
+  and audit loop are exactly DTO-D1..D12. The spec-level `budget {19, 2}`
+  applies to every profile; a direct route spends one step plus the bounded
+  empty-output re-dispatch.
+- **Cost**: the judge is one serial small Qwen call on every turn (~0.2 s
+  measured on this deployment for a short turn); the next GPU window
+  measures its TTFT contribution on the ensemble route and the route
+  distribution of the harness datasets.
+
+## The ensemble profile: the dual-track DAG (DTO-D1)
+
+The `primary` profile is the full eleven-role ensemble in three waves. It runs
+only when the judge answers `ENSEMBLE` (or as the fallback); **inside the
+profile no role is skipped** except the image-only stage on text requests.
 
 ```mermaid
 flowchart LR
@@ -224,10 +333,12 @@ Open WebUI listens on all host interfaces, requires no login, calls only
 Kairyu L3, and is explicitly limited to `kairyu-auto-max`. The public
 `/v1/models` endpoint additionally returns `embed-small`; the L1 pools are not
 public IDs or Chat UI choices. The launcher validates that exact public
-inventory, the explicit eleven-role dual-track DAG (including the streamed
-head, the single-profile policy, and the `{max_steps: 19, max_refine_depth: 2}`
-budget), and two ordered finite 384-dimensional embedding vectors with
-positive usage before printing the URL.
+inventory, the explicit eleven-role dual-track primary DAG (including the
+streamed head and the `{max_steps: 19, max_refine_depth: 2}` budget), the
+four direct-route profiles and the Qwen route judge with its five choices
+(DTO-D13), the `tier1`/`tier2`/`tier2-direct` engine bindings, and two
+ordered finite 384-dimensional embedding vectors with positive usage before
+printing the URL.
 
 ### Choosing the reasoning effort from the Chat UI
 
@@ -246,9 +357,10 @@ applies. The selection is forwarded as the OpenAI-compatible
 The chosen level flows through the `inherit`-declared DeepSeek roles and
 grades every DeepSeek deliberation (`policies`, `critique`, `synthesis`,
 `audit`) as well as their thinking+answer token budgets
-(`max_tokens_by_effort`, DTO-D8/D12); the
-Qwen roles keep their fixed per-role declarations regardless of the UI
-setting. The API equivalent:
+(`max_tokens_by_effort`, DTO-D8/D12), and it is the effort of the
+`deepseek_think` direct route (DTO-D13); the Qwen roles and routes keep
+their fixed per-role declarations regardless of the UI setting. The API
+equivalent:
 
 ```sh
 curl -sS http://127.0.0.1:8003/v1/chat/completions \
@@ -298,17 +410,26 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ```
 
 `serving-auto-max` records the generic-workload product serving matrix and
-proves the head/synthesis public stream plus the audit verdict end-to-end.
+proves, for every request, the route judge classification stage and exactly
+one profile's final unit; requests the judge sends to the ensemble must
+additionally trace the head/synthesis public stream, every internal stage,
+and the audit verdict (DTO-D13). Each row writes `routes.json` (route
+distribution, per-route TTFT p50, judge latency p50).
 `serving-auto-max-coding`
 runs a deterministic self-contained Python-task dataset at c1/8/16/32,
 measures the paired DeepSeek-direct row on the same dataset through the
 loopback L1 endpoint, and
-**fails unless the product's semantic TTFT p50 stays within 2x the direct
-row** (pinned `example.json` denominators are the fallback ceiling). The
+**fails unless the product's semantic TTFT p50 over the TTFT-gated routes
+(ensemble, `qwen_direct`, `deepseek_direct`) stays within 2x the direct
+row** (pinned `example.json` denominators are the fallback ceiling); samples
+the judge sent to a thinking direct route are reported per route but not
+gated, and a row with no gated-route sample records `not_applicable` in
+`ttft-gate.json`. The
 last green run is the dated 2026-08-18 section of `MEASUREMENTS.md` (run
 `20260818T025710Z`: TTFT gate PASS at every concurrency, binding c32 row
 0.67×), measured on the previous DAG; the DTO-D10..D12 DAG (synthesis +
-audit loop, image_description, halved DeepSeek budgets) is **not yet
+audit loop, image_description, halved DeepSeek budgets) and the DTO-D13
+judged five-route policy are **not yet
 GPU-measured** and every older section does not transfer. ChatUI continues
 to call only Kairyu
 L3. Raw artifacts go to the configured NVMe

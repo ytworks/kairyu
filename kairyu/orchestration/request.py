@@ -42,10 +42,11 @@ class OrchestrationRequest:
     chat_template_kwargs: Mapping[str, object] | None = None
     # Appended to preserve the positional constructor contract above.
     conversation_affinity_key: str | None = None
-    # LLM-judged coding/general profile verdict (issue #509 amendment).
-    # Attached at most once, before preflight/admission, so every consumer of
-    # the pure profile function reads the same decision. None means no
-    # judgment was made and the deterministic code-task signal applies.
+    # LLM-judged role-profile verdict (issue #509 amendment, generalized by
+    # DTO-D13): the selected profile name. Attached at most once, before
+    # preflight/admission, so every consumer of the pure profile function
+    # reads the same decision. None means no judgment was made and the
+    # orchestrator's fallback profile applies.
     role_profile_judgment: str | None = None
     # One request-local observation of the optional judge call. Carrying the
     # exact event with the immutable call lets pre-admission judgment remain
@@ -67,8 +68,10 @@ class OrchestrationRequest:
             raise ValueError("tool_call_protocol must be generic, llama, qwen or deepseek_v4")
         if self.reasoning_effort not in {None, "low", "high", "max"}:
             raise ValueError("reasoning_effort must be low, high, max, or null")
-        if self.role_profile_judgment not in {None, "code", "general"}:
-            raise ValueError("role_profile_judgment must be code, general, or null")
+        if self.role_profile_judgment is not None and (
+            not isinstance(self.role_profile_judgment, str) or not self.role_profile_judgment
+        ):
+            raise ValueError("role_profile_judgment must be a non-empty profile name or null")
         if self.role_profile_judge_event is not None and not isinstance(
             self.role_profile_judge_event,
             TraceEvent,
