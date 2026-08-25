@@ -22,6 +22,10 @@ Documented divergences from the OpenAI-wire parse (``_parse_tool_calls``):
   committed a call; the unary fold keeps today's silent downgrade to text.
 - Mixed generic/native envelopes are decided per envelope rather than
   all-or-nothing; only pathological model output can observe the difference.
+- A canonical generic envelope that turns invalid AFTER its early commit
+  (progressive streaming) invalidates the whole parse: the stream errors and
+  the unary fold downgrades everything to text, where pre-progressive
+  behavior flushed only that envelope. Pathological output only.
 """
 
 from __future__ import annotations
