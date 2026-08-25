@@ -36,6 +36,11 @@ _ASGIApp = Callable[..., Awaitable[None]]
 _OPEN_PATHS = ("/health", "/readyz", "/backends", "/api/hello")
 _GUARDED_PREFIX = "/v1/"
 _SLO_ADMISSION_LEASE_STATE_KEY = "slo_admission_lease"
+# In-process sentinel (#573): the Anthropic Messages adapter sets this on the
+# request state before an AUTO chat dispatch so tool-bearing requests stream
+# raw; it is unreachable from the wire, so the public /v1/chat/completions
+# contract (including its pre-SSE tool gates) is unchanged.
+_ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY = "kairyu_internal_anthropic_tool_stream"
 
 # collapse per-object id path segments (file-…, batch_…, uuids, long hex/digits)
 # to {id} so a Prometheus path label cannot explode in cardinality (M1)
@@ -306,7 +311,11 @@ class ChatBodyLimitMiddleware:
     ``/v1/chat/completions`` route and the Anthropic ``/v1/messages`` route.
     """
 
-    _PATHS = ("/v1/chat/completions", "/v1/messages")
+    _PATHS = (
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+    )
 
     def __init__(self, app: _ASGIApp, *, limit: int) -> None:
         self.app = app

@@ -93,6 +93,11 @@ class MockBackend:
             continuation,
         )
 
+    async def count_prompt_tokens_async(self, prompt: str) -> int:
+        """Match this backend's billed prompt accounting (word split)."""
+
+        return len(prompt.split())
+
     def _result_for(self, request: GenerationRequest) -> GenerationResult:
         execution_text = self._execution_text(request)
         forced_token_ids = request.sampling_params.forced_token_ids

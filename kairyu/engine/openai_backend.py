@@ -924,6 +924,42 @@ class OpenAICompatBackend:
             ]
         return payload
 
+    async def count_prompt_tokens_async(
+        self, prompt: str, *, timeout_s: float = 2.0
+    ) -> int | None:
+        """Best-effort exact count via a vLLM upstream's ``POST /tokenize``.
+
+        Mirrors ``fetch_backends``: pooled client, keyless/auth headers, and a
+        fail-soft ``None`` on any transport or shape problem — the caller then
+        falls back to the same approximation billing uses when an upstream
+        omits usage. Only a vLLM upstream is known to expose the endpoint.
+        """
+
+        if self._capabilities.upstream != "vllm":
+            return None
+        root = (
+            self._base_url[: -len("/v1")]
+            if self._base_url.endswith("/v1")
+            else self._base_url
+        )
+        try:
+            response = await self._get_client().post(
+                f"{root}/tokenize",
+                json={"model": self._model, "prompt": prompt},
+                headers=self._headers(),
+                timeout=timeout_s,
+            )
+        except (httpx.HTTPError, RuntimeError):  # RuntimeError: missing api key
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        count = payload.get("count") if isinstance(payload, dict) else None
+        return count if type(count) is int and count >= 0 else None
+
     def _api_key(self) -> str:
         assert self._api_key_env is not None
         key = os.environ.get(self._api_key_env)
