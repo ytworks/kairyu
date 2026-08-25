@@ -20,12 +20,20 @@ from functools import lru_cache
 
 from starlette.requests import ClientDisconnect
 
+from kairyu.entrypoints.server.messages_protocol import (
+    anthropic_error_payload,
+    anthropic_error_type_for_status,
+    wants_anthropic_envelope,
+)
+
 _ASGIApp = Callable[..., Awaitable[None]]
 
 # /backends is an open introspection endpoint (kept out of /v1/ so the
 # concurrency cap and per-model metrics labeling don't apply); its disclosure
 # level matches the already-open /readyz and /metrics.
-_OPEN_PATHS = ("/health", "/readyz", "/backends")
+# /api/hello is Claude Code's best-effort connection-warming probe (issue
+# #508): a credential-free empty 200 whose disclosure level matches /health.
+_OPEN_PATHS = ("/health", "/readyz", "/backends", "/api/hello")
 _GUARDED_PREFIX = "/v1/"
 _SLO_ADMISSION_LEASE_STATE_KEY = "slo_admission_lease"
 
@@ -56,6 +64,33 @@ def _state(scope: dict) -> dict:
     return scope.setdefault("state", {})
 
 
+async def _send_error(
+    send: Callable,
+    scope: dict,
+    *,
+    status: int,
+    message: str,
+    openai_type: str,
+    code: str,
+    headers: dict[str, str] | None = None,
+) -> None:
+    """Render one middleware error in the envelope the route's dialect expects.
+
+    ``/v1/messages`` (Anthropic Messages, issue #508) must never receive the
+    OpenAI ``{"error": ...}`` envelope; every other route keeps it unchanged.
+    """
+
+    if wants_anthropic_envelope(scope.get("path", "")):
+        payload = anthropic_error_payload(
+            message,
+            error_type=anthropic_error_type_for_status(status),
+            request_id=_state(scope).get("request_id"),
+        )
+    else:
+        payload = {"error": {"message": message, "type": openai_type, "code": code}}
+    await _send_json(send, status, payload, headers or {})
+
+
 class AuthMiddleware:
     """Static API keys (env-sourced), constant-time compare; /health and /readyz open."""
 
@@ -73,9 +108,15 @@ class AuthMiddleware:
         self._protect_metrics = protect_metrics
 
     def _authorized(self, scope: dict) -> bool:
-        header = dict(scope.get("headers") or ()).get(b"authorization", b"")
+        headers = dict(scope.get("headers") or ())
+        header = headers.get(b"authorization", b"")
         prefix, _, token = header.decode("latin-1").partition(" ")
         if prefix.lower() != "bearer" or not token:
+            # Anthropic-format clients (Claude Code, issue #508) send the same
+            # gateway credential in x-api-key; both headers feed the identical
+            # key sets and tenant policy. Bearer wins when both are present.
+            token = headers.get(b"x-api-key", b"").decode("latin-1")
+        if not token:
             return False
         # hmac.compare_digest rejects non-ASCII strings with TypeError; a
         # non-ASCII token can never match an ASCII key, so 401 not 500 (M5)
@@ -106,32 +147,25 @@ class AuthMiddleware:
             return
         if self._authorized(scope):
             if path.startswith(_GUARDED_PREFIX) and not _state(scope)["is_data_plane"]:
-                await _send_json(
+                await _send_error(
                     send,
-                    403,
-                    {
-                        "error": {
-                            "message": "data-plane API key required",
-                            "type": "invalid_request_error",
-                            "code": "data_plane_required",
-                        }
-                    },
-                    {},
+                    scope,
+                    status=403,
+                    message="data-plane API key required",
+                    openai_type="invalid_request_error",
+                    code="data_plane_required",
                 )
                 return
             await self.app(scope, receive, send)
             return
-        await _send_json(
+        await _send_error(
             send,
-            401,
-            {
-                "error": {
-                    "message": "missing or invalid API key",
-                    "type": "invalid_request_error",
-                    "code": "invalid_api_key",
-                }
-            },
-            {"www-authenticate": "Bearer"},
+            scope,
+            status=401,
+            message="missing or invalid API key",
+            openai_type="invalid_request_error",
+            code="invalid_api_key",
+            headers={"www-authenticate": "Bearer"},
         )
 
 
@@ -195,18 +229,15 @@ class ConcurrencyLimitMiddleware:
         self._active -= 1
         self._publish_depth()
 
-    async def _reject(self, send: Callable, message: str) -> None:
-        await _send_json(
+    async def _reject(self, scope: dict, send: Callable, message: str) -> None:
+        await _send_error(
             send,
-            429,
-            {
-                "error": {
-                    "message": message,
-                    "type": "rate_limit_error",
-                    "code": "concurrency_exceeded",
-                }
-            },
-            {"retry-after": "1"},
+            scope,
+            status=429,
+            message=message,
+            openai_type="rate_limit_error",
+            code="concurrency_exceeded",
+            headers={"retry-after": "1"},
         )
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
@@ -223,6 +254,7 @@ class ConcurrencyLimitMiddleware:
                 )
                 self._record_rejection("overflow")
                 await self._reject(
+                    scope,
                     send,
                     message,
                 )
@@ -244,6 +276,7 @@ class ConcurrencyLimitMiddleware:
                     self._discard_waiter(waiter)
                     self._record_rejection("timeout")
                     await self._reject(
+                        scope,
                         send,
                         "server admission queue wait timed out",
                     )
@@ -267,36 +300,36 @@ class ConcurrencyLimitMiddleware:
 
 
 class ChatBodyLimitMiddleware:
-    """Bound Chat Completions JSON before Starlette materializes the body."""
+    """Bound chat-shaped JSON before Starlette materializes the body.
 
-    _PATH = "/v1/chat/completions"
+    Covers both dialect front doors intentionally (issue #508): the OpenAI
+    ``/v1/chat/completions`` route and the Anthropic ``/v1/messages`` route.
+    """
+
+    _PATHS = ("/v1/chat/completions", "/v1/messages")
 
     def __init__(self, app: _ASGIApp, *, limit: int) -> None:
         self.app = app
         self._limit = limit
 
-    async def _reject(self, send: Callable) -> None:
-        await _send_json(
+    async def _reject(self, scope: dict, send: Callable) -> None:
+        await _send_error(
             send,
-            413,
-            {
-                "error": {
-                    "message": (
-                        "chat request body exceeds the configured "
-                        f"{self._limit}-byte limit"
-                    ),
-                    "type": "invalid_request_error",
-                    "code": "request_too_large",
-                }
-            },
-            {},
+            scope,
+            status=413,
+            message=(
+                "chat request body exceeds the configured "
+                f"{self._limit}-byte limit"
+            ),
+            openai_type="invalid_request_error",
+            code="request_too_large",
         )
 
     async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
         if (
             scope["type"] != "http"
             or scope.get("method") != "POST"
-            or scope.get("path") != self._PATH
+            or scope.get("path") not in self._PATHS
         ):
             await self.app(scope, receive, send)
             return
@@ -308,7 +341,7 @@ class ChatBodyLimitMiddleware:
             except ValueError:
                 content_length = None
             if content_length is not None and content_length > self._limit:
-                await self._reject(send)
+                await self._reject(scope, send)
                 return
 
         received = 0
@@ -323,7 +356,7 @@ class ChatBodyLimitMiddleware:
                 received += len(message.get("body", b""))
                 if received > self._limit:
                     rejected = True
-                    await self._reject(send)
+                    await self._reject(scope, send)
                     return {"type": "http.disconnect"}
             return message
 

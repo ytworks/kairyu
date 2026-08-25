@@ -22,6 +22,10 @@ from pathlib import Path
 from typing import IO
 
 from kairyu.audit_io import BoundedJsonlWriter
+from kairyu.entrypoints.server.messages_protocol import (
+    anthropic_error_payload,
+    wants_anthropic_envelope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -503,18 +507,26 @@ class TenantLimitMiddleware:
                 reason=admission.reason,
             )
         if not admission.admitted:
-            body = json.dumps(
-                {
+            message = (
+                f"tenant {tenant!r} admission limit exceeded "
+                f"({admission.reason})"
+            )
+            if wants_anthropic_envelope(path):
+                # /v1/messages speaks the Anthropic error envelope (issue #508)
+                payload = anthropic_error_payload(
+                    message,
+                    error_type="rate_limit_error",
+                    request_id=state.get("request_id"),
+                )
+            else:
+                payload = {
                     "error": {
-                        "message": (
-                            f"tenant {tenant!r} admission limit exceeded "
-                            f"({admission.reason})"
-                        ),
+                        "message": message,
                         "type": "rate_limit_error",
                         "code": "tenant_rate_limited",
                     }
                 }
-            ).encode()
+            body = json.dumps(payload).encode()
             await send(
                 {
                     "type": "http.response.start",

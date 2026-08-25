@@ -25,6 +25,10 @@ from kairyu.engine.embedding import (
     MockEmbeddingBackend,
 )
 from kairyu.entrypoints.server.errors import model_not_found, upstream_error
+from kairyu.entrypoints.server.messages_service import (
+    add_hello_probe,
+    add_messages_route,
+)
 from kairyu.entrypoints.server.metering import record_state_usage
 from kairyu.entrypoints.server.responses_service import (
     ResponsesRequest,
@@ -85,6 +89,16 @@ def add_extra_routes(
         chat_dispatch=chat_dispatch,
         compaction_key=responses_compaction_key,
     )
+
+    add_messages_route(
+        app,
+        engines,
+        chat_templates=chat_templates,
+        legacy_chat_models=legacy_chat_models,
+        orchestrated_models=orchestrated_models,
+        chat_dispatch=chat_dispatch,
+    )
+    add_hello_probe(app)
 
     if embedding_backends:
 

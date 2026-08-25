@@ -57,6 +57,7 @@ from kairyu.engine.prompt import PromptInput, TokensPrompt
 from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
+    ReasoningDeltaParser,
     _logprob_entries,
     _wire_usage,
     chat_error_from_upstream_client_error,
@@ -918,44 +919,6 @@ async def _stream_engine(
     want_trace = generation_request.trace_requested
     if want_trace and trace_started_at is None:
         trace_started_at = utc_now_iso()
-
-    class ReasoningDeltaParser:
-        marker = "</think>"
-
-        def __init__(self) -> None:
-            self.pending = ""
-            self.reasoning: bool | None = None
-
-        def feed(self, delta: str, *, final: bool) -> tuple[str, str]:
-            if self.reasoning is False:
-                return "", delta
-            self.pending += delta
-            if self.reasoning is None:
-                opening = "<think>"
-                if opening.startswith(self.pending) and not final:
-                    return "", ""
-                if self.pending.startswith(opening):
-                    self.pending = self.pending[len(opening) :]
-                    self.reasoning = True
-                else:
-                    content, self.pending = self.pending, ""
-                    self.reasoning = False
-                    return "", content
-            marker_at = self.pending.find(self.marker)
-            if marker_at >= 0:
-                reasoning = self.pending[:marker_at]
-                content = self.pending[marker_at + len(self.marker) :]
-                self.pending = ""
-                self.reasoning = False
-                return reasoning, content
-            if final:
-                reasoning, self.pending = self.pending, ""
-                return reasoning, ""
-            keep = len(self.marker) - 1
-            if len(self.pending) <= keep:
-                return "", ""
-            reasoning, self.pending = self.pending[:-keep], self.pending[-keep:]
-            return reasoning, ""
 
     reasoning_parsers: dict[int, ReasoningDeltaParser] = {}
 

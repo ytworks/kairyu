@@ -170,3 +170,31 @@ class ResponsesTextDeltaSSEEncoder:
                 self._suffix,
             )
         )
+
+
+class AnthropicTextDeltaSSEEncoder:
+    """Encode the dominant Anthropic ``text_delta`` event shape."""
+
+    __slots__ = ("_prefixes", "_suffix")
+
+    def __init__(self) -> None:
+        self._suffix = b"}}\n\n"
+        self._prefixes = {0: self._prefix(0)}
+
+    def _prefix(self, index: int) -> bytes:
+        return b"".join(
+            (
+                b"event: content_block_delta\n"
+                b'data: {"type":"content_block_delta","index":',
+                _integer_bytes(index),
+                b',"delta":{"type":"text_delta","text":',
+            )
+        )
+
+    def encode(self, index: int, text: str) -> bytes:
+        _require_integer(index)
+        prefix = self._prefixes.get(index)
+        if prefix is None:
+            prefix = self._prefix(index)
+            self._prefixes[index] = prefix
+        return b"".join((prefix, _json_string_bytes(text), self._suffix))

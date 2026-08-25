@@ -191,3 +191,67 @@ async def test_admin_only_configuration_installs_auth(monkeypatch):
                 "/admin/drain", headers={"Authorization": "Bearer admin"}
             )
         ).status_code == 200
+
+
+def _messages_body() -> dict:
+    return {
+        "model": "m",
+        "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+
+
+async def test_x_api_key_is_accepted_on_both_dialects(app):
+    # Claude Code sends the gateway credential in x-api-key (issue #508); it
+    # feeds the same key set and tenant policy as the Bearer header.
+    async with _client(app) as client:
+        chat = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("hi"),
+            headers={"x-api-key": "secret-1"},
+        )
+        messages = await client.post(
+            "/v1/messages", json=_messages_body(), headers={"x-api-key": "secret-1"}
+        )
+    assert chat.status_code == 200
+    assert messages.status_code == 200
+
+
+async def test_wrong_x_api_key_is_401_and_bearer_takes_precedence(app):
+    async with _client(app) as client:
+        wrong = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("hi"),
+            headers={"x-api-key": "nope"},
+        )
+        both_good_bearer = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("hi"),
+            headers={"Authorization": "Bearer secret-1", "x-api-key": "nope"},
+        )
+        bad_bearer_wins = await client.post(
+            "/v1/chat/completions",
+            json=_chat_body("hi"),
+            headers={"Authorization": "Bearer nope", "x-api-key": "secret-1"},
+        )
+    assert wrong.status_code == 401
+    assert both_good_bearer.status_code == 200
+    assert bad_bearer_wins.status_code == 401
+
+
+async def test_messages_401_uses_anthropic_envelope(app):
+    # /v1/messages must never receive the OpenAI error envelope; the OpenAI
+    # routes keep theirs unchanged.
+    async with _client(app) as client:
+        messages = await client.post("/v1/messages", json=_messages_body())
+        chat = await client.post("/v1/chat/completions", json=_chat_body("hi"))
+    assert messages.status_code == 401
+    payload = messages.json()
+    assert payload["type"] == "error"
+    assert payload["error"] == {
+        "type": "authentication_error",
+        "message": "missing or invalid API key",
+    }
+    assert messages.headers["www-authenticate"] == "Bearer"
+    assert chat.status_code == 401
+    assert chat.json()["error"]["code"] == "invalid_api_key"
