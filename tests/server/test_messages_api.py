@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 import httpx
@@ -224,7 +223,7 @@ def test_two_turn_tool_loop(tmp_path):
     assert final["content"] == [{"type": "text", "text": "The sum is 5."}]
 
 
-def test_parallel_tool_calls_keep_ids_and_stream_indices(tmp_path):
+def test_parallel_tool_calls_keep_ids(tmp_path):
     client = TestClient(_app(tmp_path, ParallelToolBackend()))
     request = _body(tools=[_tool()], messages=[{"role": "user", "content": "add"}])
     unary = client.post("/v1/messages", json=request)
@@ -235,31 +234,6 @@ def test_parallel_tool_calls_keep_ids_and_stream_indices(tmp_path):
     assert blocks[1]["input"] == {"a": 3, "b": 4}
     assert blocks[0]["id"] != blocks[1]["id"]
 
-    streamed = client.post("/v1/messages", json={**request, "stream": True})
-    assert streamed.status_code == 200
-    events = _events(streamed.text)
-    starts = [
-        (payload["index"], payload["content_block"])
-        for name, payload in events
-        if name == "content_block_start"
-    ]
-    assert [index for index, _block in starts] == [0, 1]
-    assert all(block["type"] == "tool_use" for _index, block in starts)
-    deltas = [
-        (payload["index"], payload["delta"]["partial_json"])
-        for name, payload in events
-        if name == "content_block_delta"
-    ]
-    assert [json.loads(partial) for _index, partial in deltas] == [
-        {"a": 1, "b": 2},
-        {"a": 3, "b": 4},
-    ]
-    # streamed and unary requests reconstruct to the same tool calls
-    assert [index for index, _partial in deltas] == [0, 1]
-    (delta_payload,) = [
-        payload for name, payload in events if name == "message_delta"
-    ]
-    assert delta_payload["delta"]["stop_reason"] == "tool_use"
 
 
 def test_disable_parallel_tool_use_violation_is_anthropic_error(tmp_path):
@@ -300,43 +274,56 @@ def test_live_stream_event_order_and_unary_equivalence(tmp_path):
     assert delta_payload["usage"]["output_tokens"] > 0
 
 
-def test_buffered_tool_stream_opens_immediately_and_pings(tmp_path, monkeypatch):
-    # Claude Code aborts a stream that goes silent for 300s; the buffered path
-    # must flush message_start before generation completes and keep the byte
-    # watchdog fed with protocol-valid ping events while generation runs.
-    monkeypatch.setattr(
-        "kairyu.entrypoints.server.messages_service._KEEPALIVE_SECONDS", 0.02
-    )
-
-    class SlowToolBackend(ToolLoopBackend):
-        async def generate(self, request):
-            await asyncio.sleep(0.2)
-            return await super().generate(request)
-
-    client = TestClient(_app(tmp_path, SlowToolBackend()))
-    response = client.post(
+@pytest.mark.parametrize("orchestrated", [False, True])
+def test_executable_tool_stream_fails_closed_before_dispatch(
+    tmp_path, orchestrated
+):
+    backend = MockBackend({"add": "must not run"})
+    app = _auto_app(tmp_path, backend) if orchestrated else _app(tmp_path, backend)
+    model = "kairyu-auto" if orchestrated else "m"
+    response = TestClient(app).post(
         "/v1/messages",
         json=_body(
+            model=model,
             stream=True,
             tools=[_tool()],
             messages=[{"role": "user", "content": "add"}],
         ),
     )
+
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["type"] == "error"
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert "streaming tool use is not supported" in payload["error"]["message"]
+    assert backend.prompts_seen == ()
+
+
+@pytest.mark.parametrize("orchestrated", [False, True])
+def test_tool_choice_none_with_tools_uses_live_text_stream(
+    tmp_path, orchestrated
+):
+    backend = MockBackend({"hello": "live hello"})
+    app = _auto_app(tmp_path, backend) if orchestrated else _app(tmp_path, backend)
+    model = "kairyu-auto" if orchestrated else "m"
+    response = TestClient(app).post(
+        "/v1/messages",
+        json=_body(
+            model=model,
+            stream=True,
+            tools=[_tool()],
+            tool_choice={"type": "none"},
+        ),
+    )
+
     assert response.status_code == 200
     _assert_sse_response_headers(response)
     events = _events(response.text)
-    names = [name for name, _payload in events]
-    assert names[0] == "message_start"
-    assert "ping" in names
-    assert names.index("ping") < names.index("content_block_start")
-    tool_starts = [
-        payload["content_block"]
-        for name, payload in events
-        if name == "content_block_start"
-    ]
-    assert tool_starts[0]["type"] == "tool_use"
-    assert tool_starts[0]["input"] == {}
-    assert names[-1] == "message_stop"
+    assert _text_from_events(events) == "live hello"
+    assert all(
+        payload.get("content_block", {}).get("type") != "tool_use"
+        for _name, payload in events
+    )
 
 
 def test_mid_stream_failure_emits_anthropic_error_event(tmp_path):

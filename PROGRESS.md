@@ -101,8 +101,10 @@ in `.claude/rules/progress-log.md`).
 ### 2026-08-25 — [progress] Anthropic Messages endpoint for Claude Code (L3, #508)
 - What: `POST /v1/messages` (+`?beta=true`) as an L3 adapter over the same
   validated chat/orchestration path as `/v1/chat/completions` (AUTO via
-  `chat_dispatch`): text/tool_use/tool_result subset, Anthropic SSE with ping
-  keep-alives, Anthropic error envelope on the route (incl. middleware 401/413/
+  `chat_dispatch`): text plus unary tool_use/tool_result, live Anthropic SSE
+  for text (including tool_choice none), and fail-closed executable tool
+  streams until an incremental argument parser lands; ping keep-alives,
+  Anthropic error envelope on the route (incl. middleware 401/413/
   429), `x-api-key` auth fallback, `HEAD /api/hello`; `reasoning_content`
   never leaks into text blocks. count_tokens is an Anthropic-shaped 404
   (client falls back); stop_sequence attribution unavailable (`end_turn`).
