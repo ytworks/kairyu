@@ -890,10 +890,6 @@ def _direct_metadata_chunk(
     return f"data: {serialized}\n\n"
 
 
-def _text_stream_finish_reason(reason: str | None) -> str:
-    return "stop" if reason in {None, "tool_calls"} else reason
-
-
 async def _stream_engine(
     engine: EngineBackend,
     generation_request: GenerationRequest,
@@ -1049,7 +1045,7 @@ async def _stream_engine(
                 model,
                 completion.index,
                 ChunkDelta(),
-                finish_reason=_text_stream_finish_reason(completion.finish_reason),
+                finish_reason=completion.finish_reason or "stop",
                 include_usage=include_usage,
             )
             if write_started_ns is not None:
@@ -1330,7 +1326,7 @@ async def _stream_orchestrator(
                 request.model,
                 completion.index,
                 ChunkDelta(),
-                finish_reason=_text_stream_finish_reason(completion.finish_reason),
+                finish_reason=completion.finish_reason or "stop",
                 include_usage=include_usage,
             )
         if final_result is not None:
@@ -2457,7 +2453,7 @@ def create_app(
             # Tool choices must be validated across every final choice before
             # any bytes become irrevocable SSE output. Indexed alternatives
             # and logprobs otherwise stay on the low-latency pull-through path.
-            buffered_stream = bool(request.tools) and normalized_tool_choice.mode != "none"
+            buffered_stream = bool(request.tools)
             if request.stream and not buffered_stream:
                 return sse_response(
                     _stream_orchestrator(
@@ -2779,9 +2775,7 @@ def create_app(
                 validated.generation_request.scheduling_class,
                 source="http",
             )
-        if request.stream and (
-            not request.tools or validated.input.normalized_tool_choice.mode == "none"
-        ):
+        if request.stream and not request.tools:
             return sse_response(
                 _stream_engine(
                     validated.engine,

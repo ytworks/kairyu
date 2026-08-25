@@ -101,13 +101,14 @@ in `.claude/rules/progress-log.md`).
 ### 2026-08-25 — [progress] Anthropic Messages endpoint for Claude Code (L3, #508)
 - What: `POST /v1/messages` (+`?beta=true`) as an L3 adapter over the same
   validated chat/orchestration path as `/v1/chat/completions` (AUTO via
-  `chat_dispatch`): text plus unary tool_use/tool_result, live Anthropic SSE
-  for text (including tool_choice none), and fail-closed executable tool
-  streams until an incremental argument parser lands; ping keep-alives,
-  Anthropic error envelope on the route (incl. middleware 401/413/
-  429), `x-api-key` auth fallback, `HEAD /api/hello`; `reasoning_content`
-  never leaks into text blocks. count_tokens is an Anthropic-shaped 404
-  (client falls back); stop_sequence attribution unavailable (`end_turn`).
+  `chat_dispatch`): text/tool_use/tool_result subset, live text SSE, Anthropic
+  error envelope on the route (incl. middleware 401/413/429), `x-api-key` auth
+  fallback, `HEAD /api/hello`; `reasoning_content` never leaks into text blocks.
+  Executable-tool streams temporarily buffer inference and emit ping keep-alives
+  before replaying canonical blocks; this preserves Claude Code compatibility but
+  is a known exception to the gateway's incremental-streaming requirement (#573).
+  count_tokens is an Anthropic-shaped 404 (client falls back); stop_sequence
+  attribution is unavailable (`end_turn`).
 - Refs: #508; kairyu/entrypoints/server/{messages_protocol,messages_service,
   middleware,tenancy,metrics,sse_encode,extra_routes}.py; tests/server/test_messages_api.py
 

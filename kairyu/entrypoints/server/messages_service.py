@@ -10,6 +10,8 @@ adapter uses (issue #530 pattern).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -734,6 +736,100 @@ def _error_event(message: str, error_type: str = "api_error") -> str:
     )
 
 
+def _replay_block_events(blocks: list[dict]) -> list[str]:
+    """Render final content blocks as the canonical Anthropic event sequence.
+
+    Each block keeps one stable index: the text block (if any) is index 0 and
+    every tool call occupies its own subsequent index, so parallel calls stay
+    distinguishable.
+    """
+
+    events: list[str] = []
+    for index, block in enumerate(blocks):
+        if block["type"] == "text":
+            events.append(
+                _content_block_start_event(index, {"type": "text", "text": ""})
+            )
+            if block["text"]:
+                events.append(
+                    _sse(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": index,
+                            "delta": {"type": "text_delta", "text": block["text"]},
+                        },
+                    )
+                )
+        else:
+            events.append(
+                _content_block_start_event(
+                    index,
+                    {
+                        "type": "tool_use",
+                        "id": block["id"],
+                        "name": block["name"],
+                        "input": {},
+                    },
+                )
+            )
+            events.append(
+                _sse(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": json.dumps(
+                                block["input"], ensure_ascii=False
+                            ),
+                        },
+                    },
+                )
+            )
+        events.append(_content_block_stop_event(index))
+    return events
+
+
+async def _buffered_message_events(
+    request: MessagesRequest,
+    produce,
+    *,
+    message_id: str,
+) -> AsyncIterator[str]:
+    """Stream buffered generation as Anthropic SSE without going silent.
+
+    ``produce`` runs the whole generation and returns
+    ``(blocks, stop_reason, usage)`` or raises ``_MessagesFailure``. The
+    opening event flushes immediately and ping events cover the generation
+    window. Client disconnect throws into this generator (StreamingResponse
+    contract) and cancels the underlying work — the same cancellation path the
+    existing streaming endpoints use.
+    """
+
+    task = asyncio.ensure_future(produce())
+    try:
+        yield _message_start_event(request, message_id)
+        while True:
+            done, _pending = await asyncio.wait({task}, timeout=_KEEPALIVE_SECONDS)
+            if done:
+                break
+            yield _PING_EVENT
+    except BaseException:
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        raise
+    try:
+        blocks, stop_reason, usage = task.result()
+    except _MessagesFailure as failure:
+        yield _error_event(failure.message, failure.error_type)
+        return
+    for event in _replay_block_events(blocks):
+        yield event
+    yield _message_delta_event(stop_reason, usage)
+    yield _message_stop_event()
 
 
 async def _live_text_events(
@@ -744,7 +840,7 @@ async def _live_text_events(
     http_request: Request,
     owner: str,
 ) -> AsyncIterator[str | bytes]:
-    """Stream a direct-engine text turn live (no executable tools)."""
+    """Stream a direct-engine text turn live (no tools declared)."""
 
     encoder = AnthropicTextDeltaSSEEncoder()
     reasoning_parser = (
@@ -947,7 +1043,7 @@ async def _orchestrated_message(
     itself.
     """
 
-    if request.stream:
+    if request.stream and not request.tools:
         live_request = chat_request.model_copy(
             update={"stream": True, "stream_options": StreamOptions(include_usage=True)}
         )
@@ -982,6 +1078,10 @@ async def _orchestrated_message(
             _usage_from_wire(payload.get("usage")),
         )
 
+    if request.stream:
+        return sse_response(
+            _buffered_message_events(request, produce, message_id=message_id)
+        )
     try:
         blocks, stop_reason, usage = await produce()
     except _MessagesFailure as failure:
@@ -1074,15 +1174,6 @@ def add_messages_route(
         try:
             _validate_surface(request)
             chat_request = _to_chat_request(request)
-            if (
-                request.stream
-                and request.tools
-                and chat_request.tool_choice != "none"
-            ):
-                raise ChatRequestError(
-                    "streaming tool use is not supported; set stream=false "
-                    "or tool_choice.type to 'none'"
-                )
             if not orchestrated:
                 # The Claude Code session id keeps one session's turns on one
                 # replica (prefix-cache affinity); it is tracing metadata and
@@ -1205,7 +1296,7 @@ def add_messages_route(
                 source="http",
             )
 
-        if request.stream:
+        if request.stream and not request.tools:
             return sse_response(
                 _live_text_events(
                     request,
@@ -1233,6 +1324,10 @@ def add_messages_route(
             _record_execution(http_request, request.model, execution)
             return _outcome_from_execution(execution)
 
+        if request.stream:
+            return sse_response(
+                _buffered_message_events(request, produce, message_id=message_id)
+            )
         try:
             blocks, stop_reason, usage = await produce()
         except _MessagesFailure as failure:
