@@ -224,6 +224,55 @@ def test_two_turn_tool_loop(tmp_path):
     assert final["content"] == [{"type": "text", "text": "The sum is 5."}]
 
 
+@pytest.mark.parametrize(
+    ("is_error", "expected_tool_line"),
+    [
+        (True, "tool: [tool_result_error]\nboom"),
+        (False, "tool: boom"),
+    ],
+)
+def test_tool_result_error_semantics_reach_model(
+    tmp_path, is_error, expected_tool_line
+):
+    backend = MockBackend({"boom": "handled"})
+    client = TestClient(_app(tmp_path, backend))
+    response = client.post(
+        "/v1/messages",
+        json=_body(
+            tools=[_tool()],
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_test",
+                            "name": "add",
+                            "input": {"a": 1, "b": 2},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_test",
+                            "content": "boom",
+                            "is_error": is_error,
+                        }
+                    ],
+                },
+            ],
+        ),
+    )
+
+    assert response.status_code == 200
+    prompt = backend.prompts_seen[-1]
+    assert expected_tool_line in prompt
+    assert ("[tool_result_error]" in prompt) is is_error
+
+
 def test_parallel_tool_calls_keep_ids_and_stream_indices(tmp_path):
     client = TestClient(_app(tmp_path, ParallelToolBackend()))
     request = _body(tools=[_tool()], messages=[{"role": "user", "content": "add"}])
