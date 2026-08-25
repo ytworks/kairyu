@@ -428,13 +428,13 @@ row** (pinned `example.json` denominators are the fallback ceiling); samples
 the judge sent to a thinking direct route are reported per route but not
 gated, and a row with no gated-route sample records `not_applicable` in
 `ttft-gate.json`. The
-last green run is the dated 2026-08-18 section of `MEASUREMENTS.md` (run
-`20260818T025710Z`: TTFT gate PASS at every concurrency, binding c32 row
-0.67×), measured on the previous DAG; the DTO-D10..D12 DAG (synthesis +
-audit loop, image_description, halved DeepSeek budgets), the DTO-D13
-judged five-route policy, and the DTO-D14 Qwen medium tier with the audit
-on Qwen are **not yet
-GPU-measured** and every older section does not transfer. ChatUI continues
+last green runs are the dated 2026-08-25 section of `MEASUREMENTS.md`
+(`20260825T161729Z` coding + `20260825T173343Z` generic, both gates green
+on the DTO-D8..D14 served config): the judge routed every coding request
+to `qwen_think_medium`, so all coding TTFT rows record `not_applicable`,
+and the generic matrix passed its route-aware stage validation at every
+concurrency. Every older section predates this config and does not
+transfer. ChatUI continues
 to call only Kairyu
 L3. Raw artifacts go to the configured NVMe
 `verification-results/<UTC-run-id>/` directory. Model and product evaluations

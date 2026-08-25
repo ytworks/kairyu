@@ -1,13 +1,15 @@
 # Tiered Example Dual-Track Policy-Ensemble Orchestration
 
-Status: **Accepted; implemented and GPU-verified** (2026-08-18; run
-`20260818T025710Z` — TTFT gate PASS at c1/8/16/32, binding c32 row 0.67×).
-The DTO-D8 sampling/budget amendments (2026-08-20) change the served config
-digest and are **not yet GPU re-verified**; re-verification is deferred to
-the next GPU window. DTO-D10..D12 (2026-08-20: peer synthesis + audit loop
-on the final unit, the image-only `image_description` stage, halved DeepSeek
-budgets) are accepted and implemented, change the served-config digest
-again, and are likewise **not yet GPU-verified**.
+Status: **Accepted; implemented and GPU-verified** (2026-08-25; runs
+`20260825T161729Z` coding + `20260825T173343Z` generic — both `verify.sh`
+serving gates green on the DTO-D8..D14 served config, digest
+`69702ab5af0ab3c0…`). The judge routes every coding-gate request to the
+ungated `qwen_think_medium` route (all coding TTFT rows `not_applicable`);
+the generic matrix passes its route-aware stage validation, including
+primary samples with the full internal DAG and the audit verdict. Manual
+Chat UI and Terminal-Bench passes remain on the next-window list. The
+previous green run (2026-08-18, `20260818T025710Z`) measured the pre-DTO-D8
+nine-role DAG.
 DTO-D13 (2026-08-22: a Qwen non-thinking route judge selecting among four
 single-call direct routes and the ensemble) is accepted and implemented,
 changes the served-config digest again, and is **not yet GPU-verified**.
@@ -319,7 +321,7 @@ way — a 502 after paying full dual-track cost (reproduced at `max_tokens:
 
 ### DTO-D10 — Peer synthesis + inline audit loop on the final unit (owner amendment, 2026-08-20)
 
-Status: accepted; implemented; not GPU-verified.
+Status: accepted; implemented; serving gates GPU-verified (2026-08-25, runs 20260825T161729Z/20260825T173343Z).
 
 - `compose` → `synthesis`: the final unit no longer anchors on critique's
   refined answer. It examines five UNTRUSTED CANDIDATE answers as peers —
@@ -362,7 +364,7 @@ Status: accepted; implemented; not GPU-verified.
 
 ### DTO-D11 — Image-only `image_description` stage (owner amendment, 2026-08-20)
 
-Status: accepted; implemented; not GPU-verified.
+Status: accepted; implemented; serving gates GPU-verified (2026-08-25, runs 20260825T161729Z/20260825T173343Z).
 
 - New Qwen role `image_description` (tier1 — the vision-capable pool,
   `requires: image`, `reasoning_effort: low`, Qwen thinking-mode sampling,
@@ -389,7 +391,7 @@ Status: accepted; implemented; not GPU-verified.
 
 ### DTO-D12 — DeepSeek budgets halved for the Terminal-Bench turn envelope (owner amendment, 2026-08-20; supersedes part of DTO-D8)
 
-Status: accepted; implemented; not GPU-verified.
+Status: accepted; implemented; serving gates GPU-verified (2026-08-25, runs 20260825T161729Z/20260825T173343Z).
 
 - `max_tokens_by_effort` on `policies`/`critique`/`audit` (audit until
   DTO-D14 moved it to Qwen with a single cap): `{16384, 65536,
@@ -411,7 +413,7 @@ Status: accepted; implemented; not GPU-verified.
 
 ### DTO-D13 — Qwen-judged five-route selection (owner amendment, 2026-08-22)
 
-Status: accepted; implemented; not GPU-verified.
+Status: accepted; implemented; serving gates GPU-verified (2026-08-25, runs 20260825T161729Z/20260825T173343Z).
 
 Owner decision (2026-08-22): every request first pays one bounded Qwen
 non-thinking judge call that reads the request and picks the route expected
@@ -512,7 +514,7 @@ are judged too; judge failure falls back to the ensemble.
 
 ### DTO-D14 — Qwen medium tier and audit on Qwen (owner amendment, 2026-08-25; amends the Qwen side of DTO-D6/D8 and the audit worker of DTO-D10)
 
-Status: accepted; implemented; not GPU-verified.
+Status: accepted; implemented; serving gates GPU-verified (2026-08-25, runs 20260825T161729Z/20260825T173343Z).
 
 - Owner decision (2026-08-25): the Qwen thinking roles move from the fixed
   `low` tier to a medium tier, and the audit verifier moves from DeepSeek to
