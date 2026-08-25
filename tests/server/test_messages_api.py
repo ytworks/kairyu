@@ -1042,6 +1042,28 @@ def test_count_tokens_matches_billed_usage_direct(tmp_path):
     assert counted.json()["input_tokens"] > lower["input_tokens"]
 
 
+def test_count_tokens_does_not_substitute_a_non_authoritative_estimate(tmp_path):
+    class NoAuthoritativeCountBackend(MockBackend):
+        async def count_prompt_tokens_async(self, prompt: str) -> None:
+            return None
+
+    client = TestClient(
+        _app(tmp_path, backend=NoAuthoritativeCountBackend({"hello": "hi"}))
+    )
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello there friend"}],
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["type"] == "not_found_error"
+    assert "authoritative token counting" in response.json()["error"]["message"]
+
+
 def test_count_tokens_orchestrated_pins_multi_stage_billing_definition(
     tmp_path,
 ):

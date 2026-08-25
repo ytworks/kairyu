@@ -930,9 +930,8 @@ class OpenAICompatBackend:
         """Best-effort exact count via a vLLM upstream's ``POST /tokenize``.
 
         Mirrors ``fetch_backends``: pooled client, keyless/auth headers, and a
-        fail-soft ``None`` on any transport or shape problem — the caller then
-        falls back to the same approximation billing uses when an upstream
-        omits usage. Only a vLLM upstream is known to expose the endpoint.
+        fail-soft ``None`` on any transport or shape problem. Only a vLLM
+        upstream is known to expose the endpoint.
         """
 
         if self._capabilities.upstream != "vllm":
