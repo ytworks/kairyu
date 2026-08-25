@@ -2095,3 +2095,23 @@ async def test_judge_and_non_thinking_final_disable_thinking_explicitly():
     await orchestrator.run(primary_call)
     assert tier1.generated[-1].chat_template_kwargs == {"enable_thinking": False}
     assert tier1.generated[-1].reasoning_effort is None
+def test_trace_envelope_starts_at_judge_queued_at() -> None:
+    """A judge event queued one clock-millisecond before its started_at must
+    stay inside the trace envelope (serving_bench rejects the whole trace
+    otherwise)."""
+    from kairyu.orchestration.orchestrator import _trace_started_at_from
+    from kairyu.orchestration.trace import TraceEvent, TraceTiming
+
+    event = TraceEvent(
+        node="profile_judge",
+        kind="judged",
+        operation="classification",
+        role="profile_judge",
+        timing=TraceTiming(
+            queued_at="2026-08-25T13:28:04.528Z",
+            started_at="2026-08-25T13:28:04.529Z",
+            completed_at="2026-08-25T13:28:04.813Z",
+        ),
+    )
+    assert _trace_started_at_from(event) == "2026-08-25T13:28:04.528Z"
+    assert _trace_started_at_from(None)  # falls back to a fresh timestamp

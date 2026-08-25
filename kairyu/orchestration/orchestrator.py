@@ -345,6 +345,22 @@ class _OrchestrationPreparationPlan:
     moa_setup: _MoASetup | None
 
 
+def _trace_started_at_from(judge_event: TraceEvent | None) -> str:
+    """Trace envelope start for a judged request.
+
+    The judge event is the earliest event in the envelope and stamps
+    ``queued_at`` one clock read before ``started_at``; deriving the envelope
+    from ``started_at`` let a millisecond boundary between the two reads put
+    the judge's ``queued_at`` outside the envelope (serving_bench rejects the
+    whole trace). Anchor on the earliest stamp the event carries.
+    """
+
+    if judge_event is not None and judge_event.timing is not None:
+        timing = judge_event.timing
+        return timing.queued_at or timing.started_at or utc_now_iso()
+    return utc_now_iso()
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -1947,11 +1963,7 @@ class Orchestrator:
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
         judge_event = call.role_profile_judge_event
         judge_usage = self._profile_judge_usage(call)
-        trace_started_at = (
-            judge_event.timing.started_at
-            if judge_event is not None and judge_event.timing is not None
-            else utc_now_iso()
-        )
+        trace_started_at = _trace_started_at_from(judge_event)
         route_started_at = utc_now_iso()
         from kairyu.telemetry import traced_span
 
@@ -2448,11 +2460,7 @@ class Orchestrator:
         request_id = f"orch-{uuid.uuid4().hex[:16]}"
         judge_event = call.role_profile_judge_event
         judge_usage = self._profile_judge_usage(call)
-        trace_started_at = (
-            judge_event.timing.started_at
-            if judge_event is not None and judge_event.timing is not None
-            else utc_now_iso()
-        )
+        trace_started_at = _trace_started_at_from(judge_event)
         external_usage_observer = usage_observer
         if external_usage_observer is not None:
             if judge_usage.prompt_tokens or judge_usage.completion_tokens:
