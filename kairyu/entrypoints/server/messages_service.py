@@ -84,6 +84,7 @@ _PING_EVENT = 'event: ping\ndata: {"type": "ping"}\n\n'
 _SUPPORTED_BLOCKS_HINT = (
     "this endpoint currently supports text, tool_use, and tool_result blocks"
 )
+_TOOL_RESULT_ERROR_MARKER = "[tool_result_error]"
 
 # finish_reason (OpenAI) -> stop_reason (Anthropic). Which stop sequence
 # matched is not observable on the chat wire, so stop-sequence hits report
@@ -292,12 +293,17 @@ def _user_blocks(blocks: list, m_index: int) -> list[dict]:
             is_error = block.get("is_error")
             if is_error is not None and not isinstance(is_error, bool):
                 raise ChatRequestError(f"{path}.is_error must be a boolean")
-            # is_error content passes through verbatim: the error text itself
-            # must reach the model.
+            content = _tool_result_text(block.get("content"), path=path)
+            if is_error:
+                content = (
+                    f"{_TOOL_RESULT_ERROR_MARKER}\n{content}"
+                    if content
+                    else _TOOL_RESULT_ERROR_MARKER
+                )
             out.append(
                 {
                     "role": "tool",
-                    "content": _tool_result_text(block.get("content"), path=path),
+                    "content": content,
                     "tool_call_id": tool_use_id,
                 }
             )
