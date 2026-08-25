@@ -18,6 +18,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from collections.abc import Set as AbstractSet
+from dataclasses import replace
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -28,7 +29,9 @@ from kairyu.engine.backend import (
     GenerationResult,
     UpstreamClientError,
     backend_admission_upper_bound_async,
+    backend_supports_slo_defer,
     prepare_backend_request,
+    validate_backend_request_before_prepare,
 )
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
@@ -53,6 +56,9 @@ from kairyu.entrypoints.server.metering import (
     resolve_usage_counts,
     stream_usage_owner_from_state,
 )
+from kairyu.entrypoints.server.middleware import (
+    _SLO_ADMISSION_LEASE_STATE_KEY,
+)
 from kairyu.entrypoints.server.protocol import (
     ChatCompletionRequest,
     StreamOptions,
@@ -63,6 +69,9 @@ from kairyu.entrypoints.server.sse_response import sse_response
 from kairyu.sse import escape_json_line_separators
 
 logger = logging.getLogger(__name__)
+
+_LOWEST_SCHEDULER_PRIORITY = 2**63 - 1
+_SLO_INTERACTIVE_PRIORITY_CEILING = _LOWEST_SCHEDULER_PRIORITY - 1
 
 # Claude Code counts every relayed byte (including ping events) and aborts a
 # stream that goes silent for 300 seconds; protocol-valid pings every 15s keep
@@ -111,6 +120,28 @@ class _MessagesFailure(Exception):
             error_type=self.error_type,
             request_id=request_id,
         )
+
+
+def _slo_shed_response(request_id: str | None) -> JSONResponse:
+    return anthropic_error_response(
+        "predicted TTFT exceeds the configured SLO",
+        status_code=429,
+        request_id=request_id,
+        headers={"Retry-After": "1"},
+    )
+
+
+def _slo_defer_to_shed_response(
+    http_request: Request,
+    lease,
+    request_id: str | None,
+) -> JSONResponse:
+    state = http_request.scope.setdefault("state", {})
+    if state.get(_SLO_ADMISSION_LEASE_STATE_KEY) is lease:
+        state.pop(_SLO_ADMISSION_LEASE_STATE_KEY)
+    if lease.active:
+        lease.completed()
+    return _slo_shed_response(request_id)
 
 
 # ---------------------------------------------------------------------------
@@ -851,6 +882,10 @@ async def _live_text_events(
     sent = 0
     last: GenerationResult | None = None
     last_activity = time.monotonic()
+    slo_lease = getattr(
+        http_request.state, _SLO_ADMISSION_LEASE_STATE_KEY, None
+    )
+    first_token_observed = False
     usage_owner = stream_usage_owner_from_state(
         http_request.app.state,
         tenant=owner,
@@ -894,6 +929,9 @@ async def _live_text_events(
                             "delta": {"type": "text_delta", "text": delta},
                         },
                     )
+                if slo_lease is not None and not first_token_observed:
+                    slo_lease.finished_first_token()
+                    first_token_observed = True
                 last_activity = time.monotonic()
         except Exception as error:
             logger.exception("Anthropic Messages upstream stream failed")
@@ -1226,6 +1264,59 @@ def add_messages_route(
                 message_id=message_id,
                 request_id=request_id,
             )
+        slo_lease = None
+        slo_admission = getattr(http_request.app.state, "slo_admission", None)
+        if (
+            slo_admission is not None
+            and validated.generation_request.scheduling_class == "interactive"
+        ):
+            ingress_ns = getattr(http_request.state, "placement_started_ns", None)
+            elapsed_s = (
+                max(0, time.perf_counter_ns() - ingress_ns) / 1_000_000_000
+                if type(ingress_ns) is int
+                else 0.0
+            )
+            lease = slo_admission.begin(elapsed_s=elapsed_s)
+            if lease.decision.action == "shed":
+                return _slo_shed_response(request_id)
+            slo_lease = lease
+            http_request.scope.setdefault("state", {})[
+                _SLO_ADMISSION_LEASE_STATE_KEY
+            ] = lease
+            generation_request = validated.generation_request
+            if lease.decision.action == "defer":
+                admission_request = replace(
+                    generation_request,
+                    priority=_LOWEST_SCHEDULER_PRIORITY,
+                    scheduling_class="batch",
+                )
+                if not backend_supports_slo_defer(
+                    validated.engine,
+                    admission_request,
+                ):
+                    return _slo_defer_to_shed_response(
+                        http_request, lease, request_id
+                    )
+            elif generation_request.priority > _SLO_INTERACTIVE_PRIORITY_CEILING:
+                admission_request = replace(
+                    generation_request,
+                    priority=_SLO_INTERACTIVE_PRIORITY_CEILING,
+                )
+            else:
+                admission_request = generation_request
+            if admission_request is not generation_request:
+                try:
+                    validate_backend_request_before_prepare(
+                        validated.engine,
+                        admission_request,
+                    )
+                except ValueError as error:
+                    return request_error(str(error))
+                validated = replace(
+                    validated,
+                    generation_request=admission_request,
+                )
+
         prepare_started_ns = time.perf_counter_ns()
         try:
             await prepare_backend_request(
@@ -1249,6 +1340,18 @@ def add_messages_route(
                     "backend_prepare",
                     max(0, time.perf_counter_ns() - prepare_started_ns),
                 )
+        if (
+            slo_lease is not None
+            and slo_lease.decision.action == "defer"
+            and not backend_supports_slo_defer(
+                validated.engine,
+                validated.generation_request,
+            )
+        ):
+            return _slo_defer_to_shed_response(
+                http_request, slo_lease, request_id
+            )
+
         admission_started_ns = time.perf_counter_ns()
         try:
             bound = await backend_admission_upper_bound_async(
@@ -1322,7 +1425,13 @@ def add_messages_route(
                     f"upstream backend error ({type(error).__name__})", 502
                 ) from error
             _record_execution(http_request, request.model, execution)
-            return _outcome_from_execution(execution)
+            blocks, stop_reason, usage = _outcome_from_execution(execution)
+            if slo_lease is not None and any(
+                block["type"] == "tool_use" or block.get("text")
+                for block in blocks
+            ):
+                slo_lease.finished_first_token()
+            return blocks, stop_reason, usage
 
         if request.stream:
             return sse_response(

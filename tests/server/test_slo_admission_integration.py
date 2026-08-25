@@ -139,6 +139,74 @@ def test_direct_chat_applies_slo_admit_defer_and_shed(
         assert name in metrics
 
 
+@pytest.mark.parametrize(
+    ("ema", "expected_status", "expected_class", "expected_priority"),
+    [
+        pytest.param(0.01, 200, "interactive", 0, id="admit"),
+        pytest.param(
+            1.25,
+            200,
+            "batch",
+            _LOWEST_SCHEDULER_PRIORITY,
+            id="defer",
+        ),
+        pytest.param(2.25, 429, None, None, id="shed"),
+    ],
+)
+def test_messages_applies_slo_admit_defer_and_shed(
+    ema,
+    expected_status,
+    expected_class,
+    expected_priority,
+):
+    backend = _RecordingBackend()
+    tenant_config = TenantConfig(
+        limits={
+            "default": TenantLimits(
+                interactive_priority=-4 if expected_class == "batch" else 0,
+                batch_priority=7 if expected_class == "batch" else 1,
+            )
+        }
+    )
+    app = create_legacy_app(
+        {"m": backend},
+        settings=ServerSettings(ttft_slo_s=1.0),
+        tenant_config=tenant_config,
+    )
+    app.state.slo_admission._ttft_per_unit_ema = ema
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "m",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 4,
+                "stream": True,
+            },
+        )
+
+    assert response.status_code == expected_status
+    if expected_status == 429:
+        assert response.headers["retry-after"] == "1"
+        payload = response.json()
+        assert payload["type"] == "error"
+        assert payload["error"]["type"] == "rate_limit_error"
+        assert "predicted TTFT" in payload["error"]["message"]
+        assert backend.prepared == []
+        assert backend.dispatched == []
+    else:
+        assert len(backend.prepared) == len(backend.dispatched) == 1
+        assert backend.prepared[0] is backend.dispatched[0]
+        assert backend.dispatched[0].scheduling_class == expected_class
+        assert backend.dispatched[0].priority == expected_priority
+
+    snapshot = app.state.slo_admission.snapshot()
+    assert snapshot.in_flight == 0
+    assert snapshot.interactive_in_flight == 0
+    assert snapshot.deferred_in_flight == 0
+
+
 def test_defer_sheds_when_backend_cannot_isolate_running_batch():
     backend = MockBackend()
     app = create_legacy_app(
