@@ -332,7 +332,8 @@ Status: accepted; implemented; not GPU-verified.
 - New `audit` role: `role_type: verifier`, `verifies: synthesis`, DeepSeek
   thinking (tier2, `reasoning_effort: inherit`), T=1.0/top_p 0.95 — never
   greedy (issue #509) — with the same effort-graded budget as
-  policies/critique, `depends_on: [synthesis, head, image_description]` so
+  policies/critique — amended 2026-08-25 (DTO-D14): the audit now runs on
+  Qwen tier1 at fixed medium effort (spec `high`) with one 16384-token cap — `depends_on: [synthesis, head, image_description]` so
   it judges the committed opening plus the candidate remainder as one public
   answer. Verdict protocol is the Conductor's: first line `PASS` or `FAIL`;
   anything else is inconclusive and triggers one bounded re-verification; a
@@ -365,7 +366,8 @@ Status: accepted; implemented; not GPU-verified.
 
 - New Qwen role `image_description` (tier1 — the vision-capable pool,
   `requires: image`, `reasoning_effort: low`, Qwen thinking-mode sampling,
-  2048 tokens, REQUEST-first framing): describes every attached image in
+  2048 tokens, REQUEST-first framing — amended 2026-08-25 (DTO-D14): fixed
+  medium effort, spec `high`, 4096 tokens): describes every attached image in
   precise objective text (verbatim on-image text, diagrams, UI, layout,
   anything the request refers to) and never answers the request.
 - `policies`, `critique`, `synthesis`, and `audit` (all text-only DeepSeek
@@ -389,7 +391,8 @@ Status: accepted; implemented; not GPU-verified.
 
 Status: accepted; implemented; not GPU-verified.
 
-- `max_tokens_by_effort` on `policies`/`critique`/`audit`: `{16384, 65536,
+- `max_tokens_by_effort` on `policies`/`critique`/`audit` (audit until
+  DTO-D14 moved it to Qwen with a single cap): `{16384, 65536,
   131072}` → `{8192, 32768, 65536}` (fallback `max_tokens` 65536 → 32768);
   `internal_max_tokens` 131072 → 65536 (the ceiling still admits the max
   tier); Chat UI `DEFAULT_MODEL_PARAMS.max_tokens` and the harness
@@ -459,7 +462,8 @@ are judged too; judge failure falls back to the ensemble.
   scaffold byte-identical); `profile_judge` on `tier1` (`QWEN`/`QWEN_THINK`/
   `DEEPSEEK`/`DEEPSEEK_THINK`/`ENSEMBLE`, fallback `primary`); profiles
   `qwen_direct` (`qwen_answer`: no effort, T=0.7/top_p 0.8/top_k 20/
-  presence 1.5, 131072), `qwen_think_low` (`qwen_think_answer`: `low`,
+  presence 1.5, 131072), `qwen_think_low` (`qwen_think_answer`: `low`;
+  amended 2026-08-25 (DTO-D14): renamed `qwen_think_medium`, spec `high`,
   T=1.0/top_p 0.95/top_k 20, 131072), `deepseek_direct` (`deepseek_answer`
   on `tier2-direct`, `reasoning_closed`, `<｜Assistant｜></think>`, T=1.0/
   top_p 0.95, 393216), `deepseek_think` (`deepseek_think_answer` on `tier2`,
@@ -505,6 +509,41 @@ are judged too; judge failure falls back to the ensemble.
   context with the 131072/393216 caps must be confirmed (clamp follow-up if
   it 400s). Both `verify.sh` gates, a manual per-route Chat UI pass, and the
   judge-latency measurement are due in the next GPU window.
+
+### DTO-D14 — Qwen medium tier and audit on Qwen (owner amendment, 2026-08-25; amends the Qwen side of DTO-D6/D8 and the audit worker of DTO-D10)
+
+Status: accepted; implemented; not GPU-verified.
+
+- Owner decision (2026-08-25): the Qwen thinking roles move from the fixed
+  `low` tier to a medium tier, and the audit verifier moves from DeepSeek to
+  Qwen. Non-thinking Qwen surfaces (head, `qwen_direct`, the route judge)
+  and every DeepSeek generation role are unchanged.
+- The L2 ladder stays `low|high|max` (no core change): medium is expressed
+  as spec level `high`, mirroring the L3 alias normalization (medium→high).
+  `draft`, `image_description`, `answer_1..4`, and the renamed
+  `qwen_think_medium` route (ex-`qwen_think_low`) declare
+  `reasoning_effort: high`.
+- The example gets a local Qwen chat template (`qwen3.8-chat.jinja`; the
+  compose mounts leave `../qwen3.8-27b-1gpu/chat_template.jinja`, which is
+  untouched): `low` renders byte-identically to the shared template, `high`
+  prepends a medium reasoning instruction to the system prompt, and `max`
+  clamps to `high`.
+- Sampling stays effort-invariant (DTO-D8). Qwen thinking budgets double for
+  the medium tier: draft 1024→2048, image_description 2048→4096, answers
+  2048→4096 (DeepSeek's low→high ladder is 4x; medium takes the log
+  midpoint).
+- The audit (DTO-D10) now runs on `tier1` at fixed medium effort with a
+  Qwen-native prompt (REQUEST-first plain text, no DeepSeek scaffold, no
+  `prompt_suffix`), T=1.0/top_p=0.95/top_k=20, never greedy (issue #509). A
+  fixed level cannot carry `max_tokens_by_effort` (DTO-D8 rule), so one
+  16384-token cap (the geometric midpoint of the halved DTO-D12 low/high
+  ladder) bounds think + verdict. The verdict leaves the serial DeepSeek
+  chain; `synthesis` stays on tier2 and the caller's effort still grades
+  `policies`/`critique`/`synthesis`.
+- Risk accepted by the owner: a 27B Qwen now audits a frontier DeepSeek
+  synthesis (previously peer-strength). GPU re-verification (both verify.sh
+  gates and a served-config digest re-pin) is due in the next window.
+
 
 ## Acceptance
 

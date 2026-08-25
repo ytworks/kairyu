@@ -22,6 +22,11 @@
 > the route distribution of the harness datasets, per-route TTFT/E2E, and
 > the re-defined TTFT gate (gated routes only; thinking direct routes
 > reported) are all **not yet measured** and land with the next GPU window.
+>
+> **Scope note (2026-08-25):** DTO-D14 moves the Qwen thinking roles to the
+> medium tier (spec `high`, example-local graded template, doubled budgets)
+> and the audit verifier to Qwen tier1 (fixed medium, one 16384-token cap);
+> the matrices below predate this served-config change.
 
 ## Dual-track DAG serving matrices (current deployment)
 
