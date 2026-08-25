@@ -2190,6 +2190,89 @@ async def test_stream_parses_sse_into_cumulative_partials(monkeypatch):
     await backend.shutdown()
 
 
+async def test_stream_reassembles_native_tool_call_deltas():
+    tools = (
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {"type": "object"},
+            },
+        },
+    )
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_sse_chunks_transport(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_upstream",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "look",
+                                        "arguments": "{\"city\":",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {
+                                        "name": "up",
+                                        "arguments": "\"Tokyo\"}",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ),
+    )
+    request = GenerationRequest(
+        request_id="tools",
+        prompt="weather",
+        sampling_params=SamplingParams().with_generation_config_omitted(
+            GENERATION_CONFIG_SAMPLING_FIELDS
+        ),
+        tools=tools,
+        tool_choice="required",
+    )
+
+    results = [result async for result in backend.stream(request)]
+
+    expected = '<tool_call>{"name":"lookup","arguments":{"city":"Tokyo"}}</tool_call>'
+    assert [result.text for result in results] == [expected, expected]
+    assert [result.text_delta for result in results] == [expected, ""]
+    assert results[-1].completions[0].finish_reason == "tool_calls"
+    await backend.shutdown()
+
+
 async def test_vllm_templated_prompt_streams_completion_text():
     backend = OpenAICompatBackend(
         base_url="http://vllm:8000/v1",
