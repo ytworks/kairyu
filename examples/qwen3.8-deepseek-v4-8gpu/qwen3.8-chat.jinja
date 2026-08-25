@@ -16,7 +16,7 @@
 {%- endif %}
 {%- set reasoning_preamble = '' %}
 {%- if reasoning_effort is defined and reasoning_effort == 'high' %}
-    {%- set reasoning_preamble = 'Reason privately and carefully before answering. Check the important facts, constraints, and likely failure modes, then converge on a clear final response. Keep the private scratchpad proportional to the difficulty: be concise for straightforward requests and use deeper verification only when the task requires it. Preserve enough token budget to finish the answer.' %}
+    {%- set reasoning_preamble = 'Reason privately and carefully before answering. Check the important facts, constraints, and likely failure modes, then converge on a clear final response. Keep the private scratchpad proportional to the difficulty: be concise for straightforward requests and use deeper verification only when the task requires it. Preserve enough token budget to finish the answer. The completion is invalid unless a non-empty final answer immediately follows </think>; never stop at the marker.' %}
 {%- endif %}
 {%- if enable_thinking is not defined %}
     {%- if reasoning_effort is defined and reasoning_effort is not none %}
