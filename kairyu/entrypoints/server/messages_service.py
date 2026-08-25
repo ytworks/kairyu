@@ -954,8 +954,23 @@ class _AnthropicBlockEmitter:
         index, self._text_index = self._text_index, None
         return [_content_block_stop_event(index)]
 
-    def finish(self) -> list[str]:
-        return self._close_text()
+    def finish(self) -> list[str | bytes]:
+        out: list[str | bytes] = self._close_text()
+        if self._next_index:
+            return out
+        index = self._next_index
+        self._next_index += 1
+        out.append(
+            _content_block_start_event(
+                index, {"type": "text", "text": ""}
+            )
+        )
+        if self._pending_ws:
+            out.append(self._encoder.encode(index, self._pending_ws))
+            self._pending_ws = ""
+            self.deltas_emitted += 1
+        out.append(_content_block_stop_event(index))
+        return out
 
 
 async def _iter_with_pings(stream) -> AsyncIterator[object]:

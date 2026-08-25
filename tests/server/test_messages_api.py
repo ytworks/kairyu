@@ -857,6 +857,28 @@ def test_text_and_tool_use_coexist_stream_unary_equivalence(tmp_path):
     assert delta_payload["delta"]["stop_reason"] == "tool_use"
 
 
+@pytest.mark.parametrize("text", ["", "   ", "\n\t"])
+def test_empty_tool_aware_stream_emits_unary_equivalent_text_block(tmp_path, text):
+    request = _body(
+        tools=[_tool()],
+        tool_choice={"type": "auto"},
+        messages=[{"role": "user", "content": "say nothing"}],
+    )
+    client = TestClient(_app(tmp_path, _canned_backend(text)))
+    unary = client.post("/v1/messages", json=request)
+    streamed = client.post("/v1/messages", json={**request, "stream": True})
+
+    assert unary.status_code == 200
+    assert unary.json()["content"] == [{"type": "text", "text": text}]
+    events = _events(streamed.text)
+    assert _blocks_from_events(events) == unary.json()["content"]
+    names = [name for name, _payload in events]
+    assert names.count("content_block_start") == 1
+    assert names.count("content_block_stop") == 1
+    assert names.index("content_block_start") < names.index("content_block_stop")
+    assert names[-2:] == ["message_delta", "message_stop"]
+
+
 @pytest.mark.parametrize(
     ("template", "canned"),
     [
