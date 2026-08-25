@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -11,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from kairyu.engine.backend import GenerationResult, GenerationUsage
 from kairyu.engine.mock import MockBackend
+from kairyu.entrypoints.chat_template import ChatTemplate
 from kairyu.entrypoints.server.settings import ServerSettings
 from kairyu.entrypoints.server.tenancy import UsageLedger
 from kairyu.orchestration.orchestrator import Orchestrator
@@ -336,17 +338,20 @@ def test_parallel_tool_calls_keep_ids_and_stream_indices(tmp_path):
     ]
     assert [index for index, _block in starts] == [0, 1]
     assert all(block["type"] == "tool_use" for _index, block in starts)
-    deltas = [
-        (payload["index"], payload["delta"]["partial_json"])
+    deltas: dict[int, str] = {}
+    for payload in [
+        payload
         for name, payload in events
         if name == "content_block_delta"
-    ]
-    assert [json.loads(partial) for _index, partial in deltas] == [
+    ]:
+        index = payload["index"]
+        deltas[index] = deltas.get(index, "") + payload["delta"]["partial_json"]
+    assert [json.loads(partial) for partial in deltas.values()] == [
         {"a": 1, "b": 2},
         {"a": 3, "b": 4},
     ]
     # streamed and unary requests reconstruct to the same tool calls
-    assert [index for index, _partial in deltas] == [0, 1]
+    assert list(deltas) == [0, 1]
     (delta_payload,) = [
         payload for name, payload in events if name == "message_delta"
     ]
@@ -591,13 +596,21 @@ def test_usage_ledger_records_public_usage(tmp_path):
     response = client.post("/v1/messages", json=_body())
     assert response.status_code == 200
     usage = response.json()["usage"]
-    totals = UsageLedger(tmp_path / "usage.jsonl").totals()["default"]
+    # The app's bounded async writer flushes in the background; poll briefly
+    # so the read side never races the accepted record.
+    deadline = time.monotonic() + 5.0
+    while True:
+        all_totals = UsageLedger(tmp_path / "usage.jsonl").totals()
+        if "default" in all_totals or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
+    totals = all_totals["default"]
     assert totals["requests"] == 1
     assert totals["prompt_tokens"] == usage["input_tokens"]
     assert totals["completion_tokens"] == usage["output_tokens"]
 
 
-def test_hello_probe_is_open_and_count_tokens_is_anthropic_404(
+def test_hello_probe_is_open_and_count_tokens_is_served(
     tmp_path, monkeypatch
 ):
     monkeypatch.setenv("KAIRYU_API_KEYS", "sk-good")
@@ -611,15 +624,14 @@ def test_hello_probe_is_open_and_count_tokens_is_anthropic_404(
     client = TestClient(app)
     # best-effort startup probe: succeeds without credentials
     assert client.head("/api/hello").status_code == 200
-    # optional endpoint: an Anthropic-shaped 404 triggers Claude Code's
-    # client-side token-counting fallback
+    # count_tokens is served (behind the same auth) and returns a count
     response = client.post(
         "/v1/messages/count_tokens",
         json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
         headers={"x-api-key": "sk-good"},
     )
-    assert response.status_code == 404
-    assert response.json()["error"]["type"] == "not_found_error"
+    assert response.status_code == 200
+    assert type(response.json()["input_tokens"]) is int
 
 
 def test_body_limit_413_uses_anthropic_envelope(tmp_path):
@@ -689,3 +701,551 @@ def test_mid_conversation_system_messages_are_accepted(tmp_path):
     )
     assert response.status_code == 200
     assert response.json()["content"][0]["type"] == "text"
+
+
+# ---------------------------------------------------------------------------
+# #573: incremental tool streaming
+
+
+_QWEN_TEMPLATE = (
+    "{{ '<function=n><parameter=v></parameter></function>' if false }}"
+    "{{ messages[0].content }}"
+)
+_DSML_TEMPLATE = (
+    "{{ '<｜DSML｜tool_calls>' if false }}{{ messages[0].content }}"
+)
+_LLAMA_TEMPLATE = "{{ '<|python_tag|>' if false }}{{ messages[0].content }}"
+_QWEN_CALL = (
+    "<tool_call>\n<function=add>\n<parameter=a>\n1\n</parameter>\n"
+    "<parameter=b>\n2\n</parameter>\n</function>\n</tool_call>"
+)
+_DSML_CALL = (
+    '<｜DSML｜tool_calls><｜DSML｜invoke name="add">'
+    '<｜DSML｜parameter name="a" string="false">1</｜DSML｜parameter>'
+    '<｜DSML｜parameter name="b" string="false">2</｜DSML｜parameter>'
+    "</｜DSML｜invoke></｜DSML｜tool_calls>"
+)
+
+
+def _canned_backend(text: str):
+    class CannedBackend(MockBackend):
+        async def generate(self, request):
+            return GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0, text=text, token_ids=(1, 2), finish_reason="stop"
+                    ),
+                ),
+                usage=GenerationUsage(prompt_tokens=5, completion_tokens=5),
+            )
+
+    return CannedBackend()
+
+
+def _blocks_from_events(events: list[tuple[str, dict]]) -> list[dict]:
+    """Reconstruct Anthropic content blocks from streamed events."""
+
+    blocks: dict[int, dict] = {}
+    for name, payload in events:
+        if name == "content_block_start":
+            block = dict(payload["content_block"])
+            blocks[payload["index"]] = block
+            if block["type"] == "tool_use":
+                block["_json"] = ""
+        elif name == "content_block_delta":
+            delta = payload["delta"]
+            block = blocks[payload["index"]]
+            if delta["type"] == "text_delta":
+                block["text"] += delta["text"]
+            else:
+                block["_json"] += delta["partial_json"]
+    out = []
+    for index in sorted(blocks):
+        block = blocks[index]
+        if block["type"] == "tool_use":
+            block["input"] = json.loads(block.pop("_json") or "{}")
+        out.append(block)
+    return out
+
+
+class StagedArgumentsBackend(MockBackend):
+    """Pauses after a declared tool's argument object has started."""
+
+    async def stream(self, request):
+        prefix = '<tool_call>{"name":"add","arguments":{"a":1'
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0, text=prefix, token_ids=(1,), finish_reason=None
+                ),
+            ),
+            finished=False,
+        )
+        await asyncio.sleep(0.2)
+        complete = prefix + ',"b":2}}</tool_call>'
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text=complete,
+                    token_ids=(1, 2),
+                    finish_reason="stop",
+                ),
+            ),
+            usage=GenerationUsage(prompt_tokens=5, completion_tokens=5),
+        )
+
+
+class StagedParallelBackend(MockBackend):
+    """Emits one committed call, sleeps, then a second call."""
+
+    async def stream(self, request):
+        first = '<tool_call>{"name":"add","arguments":{"a":1,"b":2}}</tool_call>'
+        second = '<tool_call>{"name":"add","arguments":{"a":3,"b":4}}</tool_call>'
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0, text=first, token_ids=(1,), finish_reason=None
+                ),
+            ),
+            finished=False,
+        )
+        await asyncio.sleep(0.2)
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text=first + second,
+                    token_ids=(1, 2),
+                    finish_reason="stop",
+                ),
+            ),
+            usage=GenerationUsage(prompt_tokens=5, completion_tokens=5),
+        )
+
+
+def test_tool_arguments_stream_before_generation_completes(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "kairyu.entrypoints.server.messages_service._KEEPALIVE_SECONDS", 0.02
+    )
+    client = TestClient(_app(tmp_path, StagedArgumentsBackend()))
+    response = client.post(
+        "/v1/messages",
+        json=_body(
+            stream=True, tools=[_tool()], messages=[{"role": "user", "content": "add"}]
+        ),
+    )
+
+    events = _events(response.text)
+    names = [name for name, _payload in events]
+    start = names.index("content_block_start")
+    first_delta = names.index("content_block_delta")
+    ping = names.index("ping")
+    stop = names.index("content_block_stop")
+    assert start < first_delta < ping < stop
+    argument_fragments = [
+        payload["delta"]["partial_json"]
+        for name, payload in events
+        if name == "content_block_delta"
+        and payload["delta"]["type"] == "input_json_delta"
+    ]
+    assert len(argument_fragments) >= 2
+    assert json.loads("".join(argument_fragments)) == {"a": 1, "b": 2}
+    assert names[-1] == "message_stop"
+
+
+def test_invalid_tool_arguments_after_early_commit_end_stream_with_error(tmp_path):
+    class InvalidArgumentsBackend(StagedArgumentsBackend):
+        async def stream(self, request):
+            prefix = '<tool_call>{"name":"add","arguments":{"a":1'
+            yield GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0, text=prefix, token_ids=(1,), finish_reason=None
+                    ),
+                ),
+                finished=False,
+            )
+            complete = prefix + ',"b":oops}}</tool_call>'
+            yield GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0,
+                        text=complete,
+                        token_ids=(1, 2),
+                        finish_reason="stop",
+                    ),
+                ),
+                usage=GenerationUsage(prompt_tokens=5, completion_tokens=5),
+            )
+
+    response = TestClient(_app(tmp_path, InvalidArgumentsBackend())).post(
+        "/v1/messages",
+        json=_body(
+            stream=True, tools=[_tool()], messages=[{"role": "user", "content": "add"}]
+        ),
+    )
+
+    names = [name for name, _payload in _events(response.text)]
+    assert "content_block_start" in names
+    assert "content_block_stop" not in names
+    assert names[-1] == "error"
+    assert "message_stop" not in names
+
+
+def test_tool_fragments_are_emitted_before_generation_completes(
+    tmp_path, monkeypatch
+):
+    # The incrementality contract itself (#573): the first call's blocks are
+    # emitted while the model is still generating. Proven by body order: the
+    # idle pings generated during the inter-yield sleep must appear AFTER the
+    # first call's content_block_stop and BEFORE the second call's
+    # content_block_start (a buffered implementation would replay every block
+    # after the last ping instead).
+    monkeypatch.setattr(
+        "kairyu.entrypoints.server.messages_service._KEEPALIVE_SECONDS", 0.02
+    )
+    client = TestClient(_app(tmp_path, StagedParallelBackend()))
+    response = client.post(
+        "/v1/messages",
+        json=_body(
+            stream=True, tools=[_tool()], messages=[{"role": "user", "content": "add"}]
+        ),
+    )
+    names = [name for name, _payload in _events(response.text)]
+    first_stop = names.index("content_block_stop")
+    second_start = names.index("content_block_start", first_stop)
+    pings_between = [
+        name for name in names[first_stop:second_start] if name == "ping"
+    ]
+    assert pings_between, names
+    assert names[-1] == "message_stop"
+
+
+def test_text_and_tool_use_coexist_stream_unary_equivalence(tmp_path):
+    # /v1/messages keeps preamble text next to tool_use (the Anthropic
+    # contract); stream and unary must reconstruct identically.
+    text = (
+        'Let me add those. <tool_call>{"name":"add","arguments":{"a":2,"b":3}}'
+        "</tool_call>"
+    )
+    request = _body(tools=[_tool()], messages=[{"role": "user", "content": "add"}])
+    client = TestClient(_app(tmp_path, _canned_backend(text)))
+    unary = client.post("/v1/messages", json=request).json()
+    assert [block["type"] for block in unary["content"]] == ["text", "tool_use"]
+    assert unary["content"][0]["text"] == "Let me add those. "
+    assert unary["content"][1]["input"] == {"a": 2, "b": 3}
+    assert unary["stop_reason"] == "tool_use"
+
+    streamed = client.post("/v1/messages", json={**request, "stream": True})
+    events = _events(streamed.text)
+    reconstructed = _blocks_from_events(events)
+    unary_no_ids = [
+        {k: v for k, v in block.items() if k != "id"} for block in unary["content"]
+    ]
+    stream_no_ids = [
+        {k: v for k, v in block.items() if k != "id"} for block in reconstructed
+    ]
+    assert stream_no_ids == unary_no_ids
+    (delta_payload,) = [p for n, p in events if n == "message_delta"]
+    assert delta_payload["delta"]["stop_reason"] == "tool_use"
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\n\t"])
+def test_empty_tool_aware_stream_emits_unary_equivalent_text_block(tmp_path, text):
+    request = _body(
+        tools=[_tool()],
+        tool_choice={"type": "auto"},
+        messages=[{"role": "user", "content": "say nothing"}],
+    )
+    client = TestClient(_app(tmp_path, _canned_backend(text)))
+    unary = client.post("/v1/messages", json=request)
+    streamed = client.post("/v1/messages", json={**request, "stream": True})
+
+    assert unary.status_code == 200
+    assert unary.json()["content"] == [{"type": "text", "text": text}]
+    events = _events(streamed.text)
+    assert _blocks_from_events(events) == unary.json()["content"]
+    names = [name for name, _payload in events]
+    assert names.count("content_block_start") == 1
+    assert names.count("content_block_stop") == 1
+    assert names.index("content_block_start") < names.index("content_block_stop")
+    assert names[-2:] == ["message_delta", "message_stop"]
+
+
+@pytest.mark.parametrize(
+    ("template", "canned"),
+    [
+        pytest.param(
+            _LLAMA_TEMPLATE,
+            '{"name":"add","parameters":{"a":1,"b":2}}',
+            id="llama",
+        ),
+        pytest.param(_QWEN_TEMPLATE, _QWEN_CALL, id="qwen"),
+        pytest.param(_DSML_TEMPLATE, _DSML_CALL, id="dsml"),
+    ],
+)
+def test_native_protocol_stream_unary_equivalence(tmp_path, template, canned):
+    # Each ToolCallProtocol family owns distinct commit rules; the shared
+    # scanner must yield the same tool block on both modes.
+    client = TestClient(
+        create_legacy_app(
+            {"m": _canned_backend(canned)},
+            chat_templates={"m": ChatTemplate(template)},
+            settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+        )
+    )
+    request = _body(tools=[_tool()], messages=[{"role": "user", "content": "add"}])
+    unary = client.post("/v1/messages", json=request).json()
+    (block,) = unary["content"]
+    assert block["type"] == "tool_use"
+    assert block["name"] == "add"
+    assert block["input"] == {"a": 1, "b": 2}
+    assert unary["stop_reason"] == "tool_use"
+
+    streamed = client.post("/v1/messages", json={**request, "stream": True})
+    reconstructed = _blocks_from_events(_events(streamed.text))
+    assert [
+        {k: v for k, v in b.items() if k != "id"} for b in reconstructed
+    ] == [{k: v for k, v in b.items() if k != "id"} for b in unary["content"]]
+
+
+def test_stream_tool_choice_violation_emits_error_event(tmp_path):
+    # required/named tool_choice unsatisfied is only knowable at end of
+    # stream: it must surface as an SSE error event with no message_stop.
+    client = TestClient(_app(tmp_path))
+    response = client.post(
+        "/v1/messages",
+        json=_body(stream=True, tools=[_tool()], tool_choice={"type": "any"}),
+    )
+    events = _events(response.text)
+    names = [name for name, _payload in events]
+    assert names[-1] == "error"
+    assert "message_stop" not in names
+    (error_payload,) = [p for n, p in events if n == "error"]
+    assert error_payload["error"]["type"] == "api_error"
+    assert "tool_choice" in error_payload["error"]["message"]
+
+
+def test_stream_parallel_violation_stops_before_second_block(tmp_path):
+    # parallel_tool_calls=false fails the moment a second call would open.
+    client = TestClient(_app(tmp_path, ParallelToolBackend()))
+    response = client.post(
+        "/v1/messages",
+        json=_body(
+            stream=True,
+            tools=[_tool()],
+            tool_choice={"type": "auto", "disable_parallel_tool_use": True},
+            messages=[{"role": "user", "content": "add"}],
+        ),
+    )
+    events = _events(response.text)
+    names = [name for name, _payload in events]
+    assert names.count("content_block_start") == 1
+    assert names[-1] == "error"
+    assert "message_stop" not in names
+
+
+def test_qwen_post_commit_invalidation_stream_errors_unary_downgrades(tmp_path):
+    # QWEN's whole-text rule voids committed calls on trailing prose: the
+    # stream (bytes already sent) emits an error event; the unary fold keeps
+    # the silent downgrade to text. The divergence is itself the contract.
+    canned = _QWEN_CALL + "\nAlso, some prose."
+    client = TestClient(
+        create_legacy_app(
+            {"m": _canned_backend(canned)},
+            chat_templates={"m": ChatTemplate(_QWEN_TEMPLATE)},
+            settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+        )
+    )
+    request = _body(tools=[_tool()], messages=[{"role": "user", "content": "add"}])
+    unary = client.post("/v1/messages", json=request).json()
+    (block,) = unary["content"]
+    assert block["type"] == "text"
+    assert _QWEN_CALL in block["text"]
+    assert unary["stop_reason"] == "end_turn"
+
+    streamed = client.post("/v1/messages", json={**request, "stream": True})
+    names = [name for name, _payload in _events(streamed.text)]
+    assert names[-1] == "error"
+    assert "message_stop" not in names
+
+
+def test_undeclared_call_flushes_as_text(tmp_path):
+    # A call to an undeclared tool never becomes a block; its envelope
+    # survives verbatim as text on both modes (mirrors the unary filter).
+    canned = '<tool_call>{"name":"other","arguments":{}}</tool_call>'
+    request = _body(tools=[_tool()], messages=[{"role": "user", "content": "add"}])
+    client = TestClient(_app(tmp_path, _canned_backend(canned)))
+    unary = client.post("/v1/messages", json=request).json()
+    assert unary["content"] == [{"type": "text", "text": canned}]
+    assert unary["stop_reason"] == "end_turn"
+    streamed = client.post("/v1/messages", json={**request, "stream": True})
+    assert _blocks_from_events(_events(streamed.text)) == unary["content"]
+
+
+def test_orchestrated_tool_stream_unary_equivalence_and_gates(tmp_path):
+    # AUTO models use the internal raw stream (#573 sentinel) for both modes;
+    # public /v1/chat behavior is covered by its own untouched tests.
+    text = (
+        'Sure. <tool_call>{"name":"add","arguments":{"a":2,"b":3}}</tool_call>'
+    )
+    backend = _canned_backend(text)
+    client = TestClient(_auto_app(tmp_path, backend))
+    request = _body(
+        model="kairyu-auto",
+        tools=[_tool()],
+        messages=[{"role": "user", "content": "add"}],
+    )
+    unary = client.post("/v1/messages", json=request).json()
+    assert [block["type"] for block in unary["content"]] == ["text", "tool_use"]
+    assert unary["content"][1]["input"] == {"a": 2, "b": 3}
+    assert unary["stop_reason"] == "tool_use"
+    assert unary["usage"]["input_tokens"] > 0
+
+    streamed = client.post("/v1/messages", json={**request, "stream": True})
+    events = _events(streamed.text)
+    assert [
+        {k: v for k, v in b.items() if k != "id"}
+        for b in _blocks_from_events(events)
+    ] == [{k: v for k, v in b.items() if k != "id"} for b in unary["content"]]
+    (delta_payload,) = [p for n, p in events if n == "message_delta"]
+    assert delta_payload["usage"]["output_tokens"] > 0
+
+    violation = client.post(
+        "/v1/messages",
+        json={**request, "tool_choice": {"type": "tool", "name": "missing"}},
+    )
+    assert violation.status_code == 400  # undeclared named tool fails validation
+    text_only = _auto_app(tmp_path)
+    stream_violation = TestClient(text_only).post(
+        "/v1/messages",
+        json=_body(
+            model="kairyu-auto",
+            stream=True,
+            tools=[_tool()],
+            tool_choice={"type": "any"},
+        ),
+    )
+    names = [name for name, _payload in _events(stream_violation.text)]
+    assert names[-1] == "error"
+    assert "message_stop" not in names
+    unary_violation = TestClient(text_only).post(
+        "/v1/messages",
+        json=_body(model="kairyu-auto", tools=[_tool()], tool_choice={"type": "any"}),
+    )
+    assert unary_violation.status_code == 502
+    assert unary_violation.json()["error"]["type"] == "api_error"
+
+
+# ---------------------------------------------------------------------------
+# count_tokens
+
+
+def test_count_tokens_matches_billed_usage_direct(tmp_path):
+    # The endpoint's one load-bearing property: the count equals the
+    # usage.input_tokens the same body would be billed (tools and system
+    # included via the tool-intent-augmented rendered prompt).
+    client = TestClient(_app(tmp_path))
+    body = _body(tools=[_tool()], system="Be terse.")
+    usage = client.post("/v1/messages", json=body).json()["usage"]
+    count_body = {k: v for k, v in body.items() if k != "max_tokens"}
+    counted = client.post("/v1/messages/count_tokens", json=count_body)
+    assert counted.status_code == 200
+    assert counted.json() == {"input_tokens": usage["input_tokens"]}
+    without_tools = {k: v for k, v in count_body.items() if k != "tools"}
+    lower = client.post("/v1/messages/count_tokens", json=without_tools).json()
+    assert counted.json()["input_tokens"] > lower["input_tokens"]
+
+
+def test_count_tokens_does_not_substitute_a_non_authoritative_estimate(tmp_path):
+    class NoAuthoritativeCountBackend(MockBackend):
+        async def count_prompt_tokens_async(self, prompt: str) -> None:
+            return None
+
+    client = TestClient(
+        _app(tmp_path, backend=NoAuthoritativeCountBackend({"hello": "hi"}))
+    )
+
+    response = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello there friend"}],
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["type"] == "not_found_error"
+    assert "authoritative token counting" in response.json()["error"]["message"]
+
+
+def test_count_tokens_orchestrated_pins_multi_stage_billing_definition(
+    tmp_path,
+):
+    # AUTO models have no single tokenizer; count_tokens implements the
+    # multi-stage billing definition — the word-split of the L2-rendered
+    # orchestration prompt (metering's usage-omitted fallback). AUTO direct
+    # routes bill the routed engine's own public accounting instead, which
+    # is unknowable before routing; that dichotomy lives in AUTO billing
+    # itself and is documented on the route.
+    from kairyu.engine.prompt import prompt_text
+    from kairyu.entrypoints.server.chat_service import (
+        validate_orchestration_chat_input,
+    )
+    from kairyu.entrypoints.server.metering import _approx_tokens
+    from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+
+    client = TestClient(_auto_app(tmp_path))
+    messages = [{"role": "user", "content": "hello there friend"}]
+    counted = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "kairyu-auto", "messages": messages},
+    )
+    assert counted.status_code == 200
+    expected_prompt = validate_orchestration_chat_input(
+        ChatCompletionRequest(model="kairyu-auto", messages=messages)
+    ).prompt
+    assert counted.json() == {
+        "input_tokens": _approx_tokens(prompt_text(expected_prompt) or "")
+    }
+
+
+def test_count_tokens_rejects_what_the_main_route_rejects(tmp_path):
+    client = TestClient(_app(tmp_path))
+    unknown = client.post(
+        "/v1/messages/count_tokens",
+        json={"model": "nope", "messages": [{"role": "user", "content": "x"}]},
+    )
+    assert unknown.status_code == 404
+    assert unknown.json()["error"]["type"] == "not_found_error"
+    image = client.post(
+        "/v1/messages/count_tokens",
+        json={
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "data": "aa"}}
+                    ],
+                }
+            ],
+        },
+    )
+    assert image.status_code == 400
+    assert image.json()["error"]["type"] == "invalid_request_error"

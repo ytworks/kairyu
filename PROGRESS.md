@@ -98,6 +98,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-08-25 — [progress] Incremental Anthropic tool streaming + count_tokens (#573)
+- What: `/v1/messages` streams tool calls incrementally — per-protocol
+  scanners (GENERIC/LLAMA/QWEN/DSML, commit-on-close, hold-back) shared by
+  stream and unary so both reconstruct one parse; text+tool_use now coexist
+  (Anthropic contract); tool gates re-homed stream-side (SSE `error`, no
+  `message_stop`); AUTO uses an in-process raw-stream sentinel (public chat
+  contract unchanged). `count_tokens` implemented: billing-consistent tiers
+  (native tokenizer exact / vLLM `/tokenize` / word-split fallback; AUTO =
+  multi-stage L2 word-split — direct-route billing dichotomy documented).
+- Refs: #573; kairyu/entrypoints/server/{tool_stream,messages_service,
+  middleware,messages_protocol}.py; kairyu/engine/*; tests/server/test_messages_api.py
+
 ### 2026-08-25 — [progress] Anthropic Messages endpoint for Claude Code (L3, #508)
 - What: `POST /v1/messages` (+`?beta=true`) as an L3 adapter over the same
   validated chat/orchestration path as `/v1/chat/completions` (AUTO via

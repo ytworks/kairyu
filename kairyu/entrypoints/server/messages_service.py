@@ -29,21 +29,30 @@ from kairyu.engine.backend import (
     GenerationResult,
     UpstreamClientError,
     backend_admission_upper_bound_async,
+    backend_count_prompt_tokens_async,
     backend_supports_slo_defer,
     prepare_backend_request,
+    render_tool_intent,
     validate_backend_request_before_prepare,
 )
+from kairyu.engine.prompt import prompt_text
+from kairyu.entrypoints.chat_template import ToolCallProtocol
 from kairyu.entrypoints.server.chat_service import (
     ChatRequestError,
     ExecutedChat,
+    NormalizedToolChoice,
     ReasoningDeltaParser,
     ValidatedChatRequest,
+    _normalize_tool_choice,
     chat_error_from_upstream_client_error,
     execute_chat,
+    validate_chat_input_async,
     validate_chat_request_async,
+    validate_orchestration_chat_input_async,
 )
 from kairyu.entrypoints.server.messages_protocol import (
     ANTHROPIC_VERSION,
+    MessagesCountTokensRequest,
     MessagesRequest,
     anthropic_error_payload,
     anthropic_error_response,
@@ -51,12 +60,14 @@ from kairyu.entrypoints.server.messages_protocol import (
     new_message_id,
 )
 from kairyu.entrypoints.server.metering import (
+    _approx_tokens,
     record_state_usage,
     resolve_cached_tokens,
     resolve_usage_counts,
     stream_usage_owner_from_state,
 )
 from kairyu.entrypoints.server.middleware import (
+    _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY,
     _SLO_ADMISSION_LEASE_STATE_KEY,
 )
 from kairyu.entrypoints.server.protocol import (
@@ -66,6 +77,17 @@ from kairyu.entrypoints.server.protocol import (
 )
 from kairyu.entrypoints.server.sse_encode import AnthropicTextDeltaSSEEncoder
 from kairyu.entrypoints.server.sse_response import sse_response
+from kairyu.entrypoints.server.tool_stream import (
+    FoldedToolStream,
+    StreamInvalid,
+    TextDelta,
+    ToolArgsDelta,
+    ToolStart,
+    ToolStop,
+    ToolStreamScanner,
+    fold_tool_stream,
+    tool_stream_scanner_for,
+)
 from kairyu.sse import escape_json_line_separators
 
 logger = logging.getLogger(__name__)
@@ -672,18 +694,92 @@ def _message_envelope(
     }
 
 
+def _tools_active(chat_request: ChatCompletionRequest) -> bool:
+    return bool(chat_request.tools) and chat_request.tool_choice != "none"
+
+
+def _strip_inline_reasoning(text: str) -> str:
+    """Mirror ``_build_choice``'s inline ``<think>`` split for raw text."""
+
+    candidate = text
+    has_opening = candidate.startswith("<think>")
+    if has_opening:
+        candidate = candidate[len("<think>") :]
+    if "</think>" in candidate:
+        _reasoning, candidate = candidate.split("</think>", 1)
+        return candidate
+    if has_opening:
+        return ""
+    return text
+
+
+def _enforce_tool_gates(
+    folded: FoldedToolStream,
+    choice_spec: NormalizedToolChoice,
+    parallel_tool_calls: bool | None,
+) -> None:
+    """Re-home the pre-SSE 502 gates onto the scanner outcome (unary side)."""
+
+    if (
+        not folded.invalidated
+        and parallel_tool_calls is False
+        and folded.committed_calls > 1
+    ):
+        raise _MessagesFailure(
+            "upstream model emitted multiple calls while parallel_tool_calls=false",
+            502,
+        )
+    if choice_spec.mode in {"required", "named"} and folded.committed_calls == 0:
+        raise _MessagesFailure("upstream model did not satisfy tool_choice", 502)
+
+
 def _outcome_from_execution(
     execution: ExecutedChat,
+    validated: ValidatedChatRequest,
 ) -> tuple[list[dict], str, dict]:
-    choice = execution.response.choices[0] if execution.response.choices else None
-    message = choice.message.model_dump(mode="json") if choice is not None else {}
-    blocks = _content_blocks_from_message(message)
-    stop_reason = _stop_reason_for(choice.finish_reason if choice is not None else None)
     usage = _usage_payload(
         execution.result.prompt,
         execution.result.completions,
         execution.result.usage,
     )
+    chat_request = validated.input.request
+    if _tools_active(chat_request):
+        # The shared scanner is the single source of truth for /v1/messages:
+        # the unary body is a one-shot fold of the same parse the stream
+        # emits, so stream/unary reconstruction is equivalent by construction
+        # (text and tool_use blocks coexist, the Anthropic contract).
+        completion = min(
+            execution.result.completions, key=lambda item: item.index, default=None
+        )
+        raw = completion.text if completion is not None else ""
+        finish_reason = (
+            completion.finish_reason if completion is not None else None
+        )
+        if (
+            chat_request.reasoning_effort is not None
+            and completion is not None
+            and completion.reasoning_content is None
+        ):
+            raw = _strip_inline_reasoning(raw)
+        choice_spec = validated.input.normalized_tool_choice
+        scanner = tool_stream_scanner_for(
+            validated.input.tool_call_protocol, chat_request.tools, choice_spec
+        )
+        events = scanner.feed(raw, final=True)
+        folded = fold_tool_stream(events, raw_text=scanner.raw_text)
+        _enforce_tool_gates(
+            folded, choice_spec, validated.input.parallel_tool_calls
+        )
+        stop_reason = (
+            "tool_use"
+            if folded.committed_calls
+            else _stop_reason_for(finish_reason)
+        )
+        return folded.blocks, stop_reason, usage
+    choice = execution.response.choices[0] if execution.response.choices else None
+    message = choice.message.model_dump(mode="json") if choice is not None else {}
+    blocks = _content_blocks_from_message(message)
+    stop_reason = _stop_reason_for(choice.finish_reason if choice is not None else None)
     return blocks, stop_reason, usage
 
 
@@ -780,100 +876,442 @@ def _error_event(message: str, error_type: str = "api_error") -> str:
     )
 
 
-def _replay_block_events(blocks: list[dict]) -> list[str]:
-    """Render final content blocks as the canonical Anthropic event sequence.
+class _AnthropicBlockEmitter:
+    """Render scanner events as Anthropic SSE with stable block indices.
 
-    Each block keeps one stable index: the text block (if any) is index 0 and
-    every tool call occupies its own subsequent index, so parallel calls stay
-    distinguishable.
+    The text block opens lazily on the first non-whitespace text so a
+    pure-call output keeps tool indices 0..n-1; whitespace between blocks is
+    held and dropped when a tool block follows (or flushed with later text).
+    New text after a tool block opens a fresh text index — Anthropic-legal
+    interleaving.
     """
 
-    events: list[str] = []
-    for index, block in enumerate(blocks):
-        if block["type"] == "text":
-            events.append(
-                _content_block_start_event(index, {"type": "text", "text": ""})
-            )
-            if block["text"]:
-                events.append(
+    def __init__(self) -> None:
+        self._encoder = AnthropicTextDeltaSSEEncoder()
+        self._next_index = 0
+        self._text_index: int | None = None
+        self._tool_index = 0
+        self._pending_ws = ""
+        self.deltas_emitted = 0
+
+    def events(self, scanned) -> list[str | bytes]:
+        out: list[str | bytes] = []
+        for event in scanned:
+            if isinstance(event, TextDelta):
+                if self._text_index is None and not event.text.strip():
+                    self._pending_ws += event.text
+                    continue
+                if self._text_index is None:
+                    self._text_index = self._next_index
+                    self._next_index += 1
+                    out.append(
+                        _content_block_start_event(
+                            self._text_index, {"type": "text", "text": ""}
+                        )
+                    )
+                text = self._pending_ws + event.text
+                self._pending_ws = ""
+                out.append(self._encoder.encode(self._text_index, text))
+                self.deltas_emitted += 1
+            elif isinstance(event, ToolStart):
+                out.extend(self._close_text())
+                self._pending_ws = ""
+                self._tool_index = self._next_index
+                self._next_index += 1
+                out.append(
+                    _content_block_start_event(
+                        self._tool_index,
+                        {
+                            "type": "tool_use",
+                            "id": event.id,
+                            "name": event.name,
+                            "input": {},
+                        },
+                    )
+                )
+            elif isinstance(event, ToolArgsDelta):
+                out.append(
                     _sse(
                         "content_block_delta",
                         {
                             "type": "content_block_delta",
-                            "index": index,
-                            "delta": {"type": "text_delta", "text": block["text"]},
+                            "index": self._tool_index,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": event.partial_json,
+                            },
                         },
                     )
                 )
-        else:
-            events.append(
-                _content_block_start_event(
-                    index,
-                    {
-                        "type": "tool_use",
-                        "id": block["id"],
-                        "name": block["name"],
-                        "input": {},
-                    },
-                )
+                self.deltas_emitted += 1
+            elif isinstance(event, ToolStop):
+                out.append(_content_block_stop_event(self._tool_index))
+        return out
+
+    def _close_text(self) -> list[str]:
+        if self._text_index is None:
+            return []
+        index, self._text_index = self._text_index, None
+        return [_content_block_stop_event(index)]
+
+    def finish(self) -> list[str | bytes]:
+        out: list[str | bytes] = self._close_text()
+        if self._next_index:
+            return out
+        index = self._next_index
+        self._next_index += 1
+        out.append(
+            _content_block_start_event(
+                index, {"type": "text", "text": ""}
             )
-            events.append(
-                _sse(
-                    "content_block_delta",
-                    {
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": {
-                            "type": "input_json_delta",
-                            "partial_json": json.dumps(
-                                block["input"], ensure_ascii=False
-                            ),
-                        },
-                    },
-                )
-            )
-        events.append(_content_block_stop_event(index))
-    return events
+        )
+        if self._pending_ws:
+            out.append(self._encoder.encode(index, self._pending_ws))
+            self._pending_ws = ""
+            self.deltas_emitted += 1
+        out.append(_content_block_stop_event(index))
+        return out
 
 
-async def _buffered_message_events(
-    request: MessagesRequest,
-    produce,
-    *,
-    message_id: str,
-) -> AsyncIterator[str]:
-    """Stream buffered generation as Anthropic SSE without going silent.
+async def _iter_with_pings(stream) -> AsyncIterator[object]:
+    """Yield stream items, interleaving ``None`` ping markers during silence.
 
-    ``produce`` runs the whole generation and returns
-    ``(blocks, stop_reason, usage)`` or raises ``_MessagesFailure``. The
-    opening event flushes immediately and ping events cover the generation
-    window. Client disconnect throws into this generator (StreamingResponse
-    contract) and cancels the underlying work — the same cancellation path the
-    existing streaming endpoints use.
+    Claude Code counts every relayed byte and aborts a stream that stays
+    silent for 300 seconds; a backend that thinks before its first partial
+    would otherwise starve the watchdog (the retired buffered path's ping
+    loop used to own this window).
     """
 
-    task = asyncio.ensure_future(produce())
+    iterator = stream.__aiter__()
+    while True:
+        task = asyncio.ensure_future(anext(iterator))
+        try:
+            while True:
+                done, _pending = await asyncio.wait(
+                    {task}, timeout=_KEEPALIVE_SECONDS
+                )
+                if done:
+                    break
+                yield None
+        except BaseException:
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            raise
+        try:
+            item = task.result()
+        except StopAsyncIteration:
+            return
+        yield item
+
+
+async def _sse_frames(upstream) -> AsyncIterator[str]:
+    """Split the in-process chat SSE byte stream into frames."""
+
+    buffer = ""
+    async for chunk in upstream:
+        buffer += chunk.decode() if isinstance(chunk, bytes) else chunk
+        while "\n\n" in buffer:
+            frame, buffer = buffer.split("\n\n", 1)
+            if frame:
+                yield frame
+    if buffer:
+        yield buffer
+
+
+async def _live_tool_events(
+    request: MessagesRequest,
+    validated: ValidatedChatRequest,
+    *,
+    message_id: str,
+    http_request: Request,
+    owner: str,
+) -> AsyncIterator[str | bytes]:
+    """Stream a direct-engine turn with executable tools incrementally (#573).
+
+    Tool calls commit as each envelope closes, so ``input_json_delta``
+    fragments reach the client while the model is still generating. The
+    pre-SSE 502 gates are re-homed here: a ``parallel_tool_calls=false``
+    violation fails the moment a second call would open, an unsatisfied
+    required/named ``tool_choice`` fails at end of stream — both as an
+    Anthropic ``error`` event with no ``message_stop``.
+    """
+
+    chat_request = validated.input.request
+    choice_spec = validated.input.normalized_tool_choice
+    parallel = validated.input.parallel_tool_calls
+    scanner = tool_stream_scanner_for(
+        validated.input.tool_call_protocol, chat_request.tools, choice_spec
+    )
+    emitter = _AnthropicBlockEmitter()
+    reasoning_parser = (
+        ReasoningDeltaParser() if chat_request.reasoning_effort is not None else None
+    )
+    sent = 0
+    started = 0
+    saw_final = False
+    last: GenerationResult | None = None
+    slo_lease = getattr(http_request.state, _SLO_ADMISSION_LEASE_STATE_KEY, None)
+    first_token_observed = False
+    usage_owner = stream_usage_owner_from_state(
+        http_request.app.state,
+        tenant=owner,
+        model=request.model,
+        prompt=validated.generation_request.prompt,
+        reservation=getattr(http_request.state, "tenant_admission", None),
+    )
+
+    def process(scanned) -> tuple[list[str | bytes], str | None]:
+        nonlocal started
+        rendered: list[str | bytes] = []
+        for event in scanned:
+            if isinstance(event, StreamInvalid):
+                return rendered, event.message
+            if isinstance(event, ToolStart):
+                if parallel is False and started >= 1:
+                    return rendered, (
+                        "upstream model emitted multiple calls while "
+                        "parallel_tool_calls=false"
+                    )
+                started += 1
+            rendered.extend(emitter.events([event]))
+        return rendered, None
+
     try:
         yield _message_start_event(request, message_id)
-        while True:
-            done, _pending = await asyncio.wait({task}, timeout=_KEEPALIVE_SECONDS)
-            if done:
-                break
-            yield _PING_EVENT
-    except BaseException:
-        task.cancel()
-        with contextlib.suppress(BaseException):
-            await task
-        raise
+        try:
+            usage_owner.mark_dispatched()
+            async for item in _iter_with_pings(
+                validated.engine.stream(validated.generation_request)
+            ):
+                if item is None:
+                    yield _PING_EVENT
+                    continue
+                partial = item
+                last = partial
+                usage_owner.observe(partial.usage, partial.completions)
+                completion = min(
+                    partial.completions, key=lambda entry: entry.index, default=None
+                )
+                if completion is None:
+                    continue
+                delta, sent = completion.delta_after(sent)
+                if reasoning_parser is not None and type(delta) is str:
+                    # <think> reasoning is stripped before the scanner.
+                    _reasoning, delta = reasoning_parser.feed(
+                        delta, final=partial.finished
+                    )
+                if partial.finished:
+                    saw_final = True
+                if type(delta) is not str:
+                    delta = ""
+                if not delta and not partial.finished:
+                    continue
+                rendered, fatal = process(
+                    scanner.feed(delta, final=partial.finished)
+                )
+                for chunk in rendered:
+                    yield chunk
+                if (
+                    slo_lease is not None
+                    and not first_token_observed
+                    and emitter.deltas_emitted
+                ):
+                    slo_lease.finished_first_token()
+                    first_token_observed = True
+                if fatal is not None:
+                    yield _error_event(fatal)
+                    return
+        except Exception as error:
+            logger.exception("Anthropic Messages upstream tool stream failed")
+            yield _error_event(f"upstream backend error ({type(error).__name__})")
+            return
+        if not saw_final:
+            rendered, fatal = process(scanner.feed("", final=True))
+            for chunk in rendered:
+                yield chunk
+            if fatal is not None:
+                yield _error_event(fatal)
+                return
+        completions = last.completions if last is not None else ()
+        usage_owner.mark_completed()
+        completion = min(completions, key=lambda entry: entry.index, default=None)
+        finish_reason = completion.finish_reason if completion is not None else None
+        if (
+            choice_spec.mode in {"required", "named"}
+            and scanner.committed_calls == 0
+        ):
+            yield _error_event("upstream model did not satisfy tool_choice")
+            return
+        for chunk in emitter.finish():
+            yield chunk
+        usage = _usage_payload(
+            validated.generation_request.prompt,
+            completions,
+            usage_owner.latest_usage,
+        )
+        stop_reason = (
+            "tool_use" if scanner.committed_calls else _stop_reason_for(finish_reason)
+        )
+        yield _message_delta_event(stop_reason, usage)
+        yield _message_stop_event()
+    finally:
+        usage_owner.finalize()
+
+
+async def _relay_auto_tool_stream(
+    request: MessagesRequest,
+    upstream,
+    *,
+    message_id: str,
+    scanner: ToolStreamScanner,
+    choice_spec: NormalizedToolChoice,
+    parallel: bool | None,
+) -> AsyncIterator[str | bytes]:
+    """Re-encode the internal raw AUTO stream with incremental tool parsing.
+
+    The upstream carries the final unit's verbatim text (tool tags included,
+    #573 sentinel); ``: status`` comments are forwarded (they feed the byte
+    watchdog) and ``delta.reasoning_content`` is dropped entirely. The chat
+    handler's pre-SSE tool gates are re-homed here as SSE ``error`` events.
+    """
+
+    emitter = _AnthropicBlockEmitter()
+    started = 0
+    finish_reason: str | None = None
+    wire_usage: dict | None = None
+    error_payload: dict | None = None
+    fatal: str | None = None
+
+    def process(scanned) -> tuple[list[str | bytes], str | None]:
+        nonlocal started
+        rendered: list[str | bytes] = []
+        for event in scanned:
+            if isinstance(event, StreamInvalid):
+                return rendered, event.message
+            if isinstance(event, ToolStart):
+                if parallel is False and started >= 1:
+                    return rendered, (
+                        "upstream model emitted multiple calls while "
+                        "parallel_tool_calls=false"
+                    )
+                started += 1
+            rendered.extend(emitter.events([event]))
+        return rendered, None
+
     try:
-        blocks, stop_reason, usage = task.result()
-    except _MessagesFailure as failure:
-        yield _error_event(failure.message, failure.error_type)
+        yield _message_start_event(request, message_id)
+        try:
+            async for frame in _sse_frames(upstream):
+                if frame.startswith(":"):
+                    yield f"{frame}\n\n"
+                    continue
+                if not frame.startswith("data:"):
+                    continue
+                payload_text = frame[len("data:") :].strip()
+                if payload_text == "[DONE]":
+                    break
+                try:
+                    chunk_payload = json.loads(payload_text)
+                except ValueError:
+                    continue
+                if "error" in chunk_payload and "choices" not in chunk_payload:
+                    error_payload = chunk_payload["error"]
+                    break
+                usage_value = chunk_payload.get("usage")
+                if isinstance(usage_value, dict):
+                    wire_usage = usage_value
+                for choice in chunk_payload.get("choices") or ():
+                    if choice.get("index", 0) != 0:
+                        continue
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    delta = choice.get("delta") or {}
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        rendered, fatal = process(scanner.feed(content))
+                        for chunk in rendered:
+                            yield chunk
+                        if fatal is not None:
+                            break
+                if fatal is not None:
+                    break
+        except Exception as error:
+            logger.exception("Anthropic Messages orchestrated tool relay failed")
+            error_payload = {
+                "message": f"upstream backend error ({type(error).__name__})"
+            }
+    finally:
+        aclose = getattr(upstream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    if fatal is not None:
+        yield _error_event(fatal)
         return
-    for event in _replay_block_events(blocks):
-        yield event
-    yield _message_delta_event(stop_reason, usage)
+    if error_payload is not None:
+        yield _error_event(error_payload.get("message") or "upstream backend error")
+        return
+    rendered, fatal = process(scanner.feed("", final=True))
+    for chunk in rendered:
+        yield chunk
+    if fatal is not None:
+        yield _error_event(fatal)
+        return
+    if choice_spec.mode in {"required", "named"} and scanner.committed_calls == 0:
+        yield _error_event("upstream model did not satisfy tool_choice")
+        return
+    for chunk in emitter.finish():
+        yield chunk
+    stop_reason = (
+        "tool_use" if scanner.committed_calls else _stop_reason_for(finish_reason)
+    )
+    yield _message_delta_event(stop_reason, _usage_from_wire(wire_usage))
     yield _message_stop_event()
+
+
+async def _consume_auto_tool_stream(
+    upstream, *, scanner: ToolStreamScanner
+) -> tuple[list, str | None, dict | None]:
+    """Drain the internal AUTO stream for the unary tool path (no bytes sent)."""
+
+    events: list = []
+    finish_reason: str | None = None
+    wire_usage: dict | None = None
+    try:
+        async for frame in _sse_frames(upstream):
+            if not frame.startswith("data:"):
+                continue
+            payload_text = frame[len("data:") :].strip()
+            if payload_text == "[DONE]":
+                break
+            try:
+                chunk_payload = json.loads(payload_text)
+            except ValueError:
+                continue
+            if "error" in chunk_payload and "choices" not in chunk_payload:
+                error = chunk_payload["error"] or {}
+                raise _MessagesFailure(
+                    error.get("message") or "upstream backend error", 502
+                )
+            usage_value = chunk_payload.get("usage")
+            if isinstance(usage_value, dict):
+                wire_usage = usage_value
+            for choice in chunk_payload.get("choices") or ():
+                if choice.get("index", 0) != 0:
+                    continue
+                if choice.get("finish_reason"):
+                    finish_reason = choice["finish_reason"]
+                delta = choice.get("delta") or {}
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    events.extend(scanner.feed(content))
+    finally:
+        aclose = getattr(upstream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+    events.extend(scanner.feed("", final=True))
+    return events, finish_reason, wire_usage
 
 
 async def _live_text_events(
@@ -987,21 +1425,10 @@ async def _relay_auto_stream(
     wire_usage: dict | None = None
     error_payload: dict | None = None
 
-    async def frames() -> AsyncIterator[str]:
-        buffer = ""
-        async for chunk in upstream:
-            buffer += chunk.decode() if isinstance(chunk, bytes) else chunk
-            while "\n\n" in buffer:
-                frame, buffer = buffer.split("\n\n", 1)
-                if frame:
-                    yield frame
-        if buffer:
-            yield buffer
-
     try:
         yield _message_start_event(request, message_id)
         yield _content_block_start_event(0, {"type": "text", "text": ""})
-        async for frame in frames():
+        async for frame in _sse_frames(upstream):
             if frame.startswith(":"):
                 yield f"{frame}\n\n"
                 continue
@@ -1094,7 +1521,75 @@ async def _orchestrated_message(
     itself.
     """
 
-    if request.stream and not request.tools:
+    if _tools_active(chat_request):
+        # #573: tool-bearing AUTO requests consume the in-process raw stream
+        # (the state sentinel is unreachable from the wire) for BOTH stream
+        # and unary modes — the delegated non-stream chat JSON nulls content
+        # when calls exist, so the raw text needed for coexisting text/tool
+        # blocks is only recoverable from the stream. AUTO is pinned GENERIC,
+        # and this adapter enforces the tool gates itself.
+        try:
+            choice_spec = _normalize_tool_choice(chat_request)
+        except ChatRequestError as error:
+            return _MessagesFailure.from_chat_error(error).json_response(
+                request_id
+            )
+        parallel = False if chat_request.parallel_tool_calls is False else None
+        scanner = tool_stream_scanner_for(
+            ToolCallProtocol.GENERIC, chat_request.tools, choice_spec
+        )
+        setattr(
+            http_request.state, _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY, True
+        )
+        live_request = chat_request.model_copy(
+            update={"stream": True, "stream_options": StreamOptions(include_usage=True)}
+        )
+        delegated = await chat_dispatch(live_request, http_request)
+        if isinstance(delegated, JSONResponse):
+            return _rerendered_chat_json_error(delegated, request_id)
+        if request.stream:
+            return sse_response(
+                _relay_auto_tool_stream(
+                    request,
+                    delegated.body_iterator,
+                    message_id=message_id,
+                    scanner=scanner,
+                    choice_spec=choice_spec,
+                    parallel=parallel,
+                )
+            )
+        try:
+            events, finish_reason, wire_usage = await _consume_auto_tool_stream(
+                delegated.body_iterator, scanner=scanner
+            )
+            folded = fold_tool_stream(events, raw_text=scanner.raw_text)
+            _enforce_tool_gates(folded, choice_spec, parallel)
+        except _MessagesFailure as failure:
+            return failure.json_response(request_id)
+        stop_reason = (
+            "tool_use"
+            if folded.committed_calls
+            else _stop_reason_for(finish_reason)
+        )
+        return JSONResponse(
+            content=_message_envelope(
+                request,
+                message_id=message_id,
+                blocks=folded.blocks,
+                stop_reason=stop_reason,
+                usage=_usage_from_wire(wire_usage),
+            )
+        )
+    if request.stream:
+        if chat_request.tools:
+            # tools declared but tool_choice=none: the calls can never run, so
+            # the plain text relay is correct — but the sentinel is still
+            # needed or the chat handler would buffer the whole generation.
+            setattr(
+                http_request.state,
+                _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY,
+                True,
+            )
         live_request = chat_request.model_copy(
             update={"stream": True, "stream_options": StreamOptions(include_usage=True)}
         )
@@ -1129,10 +1624,6 @@ async def _orchestrated_message(
             _usage_from_wire(payload.get("usage")),
         )
 
-    if request.stream:
-        return sse_response(
-            _buffered_message_events(request, produce, message_id=message_id)
-        )
     try:
         blocks, stop_reason, usage = await produce()
     except _MessagesFailure as failure:
@@ -1159,14 +1650,91 @@ def add_messages_route(
 ) -> None:
     @app.post("/v1/messages/count_tokens")
     async def messages_count_tokens(http_request: Request) -> JSONResponse:
-        # Optional in Claude Code's gateway contract: an Anthropic-shaped 404
-        # makes the client fall back to counting context usage through the
-        # inference endpoint. A truthful implementation is a follow-up.
-        return anthropic_error_response(
-            "token counting is not supported by this gateway",
-            status_code=404,
-            request_id=getattr(http_request.state, "request_id", None),
+        """Anthropic token counting, consistent with billed usage.
+
+        Tier resolution: orchestrated models count the L2-rendered prompt with
+        the same word-split billing uses for multi-stage routes; direct
+        engines count the rendered (tool-intent-augmented) prompt exactly via
+        the backend tokenizer when one is exposed, else fall back to the same
+        approximation billing uses when a backend omits usage. Served models
+        always get a number — Claude Code's graceful fallback is proven only
+        for the endpoint-absent 404, not per-request errors.
+        """
+
+        request_id = getattr(http_request.state, "request_id", None)
+
+        def request_error(
+            message: str, *, status_code: int = 400
+        ) -> JSONResponse:
+            return anthropic_error_response(
+                message, status_code=status_code, request_id=request_id
+            )
+
+        version = http_request.headers.get("anthropic-version")
+        if version is not None and version != ANTHROPIC_VERSION:
+            return request_error(
+                f"anthropic-version {version!r} is not supported; "
+                f"use {ANTHROPIC_VERSION!r}"
+            )
+        try:
+            payload = await http_request.json()
+        except ValueError:
+            return request_error("request body must be valid JSON")
+        try:
+            request = MessagesCountTokensRequest.model_validate(payload)
+        except ValidationError as error:
+            return request_error(_validation_error_message(error))
+        http_request.state.model = request.model
+        engine = engines.get(request.model)
+        orchestrated = (
+            engine is None
+            and chat_dispatch is not None
+            and request.model in (orchestrated_models or ())
         )
+        if engine is None and not orchestrated:
+            return request_error(
+                f"model {request.model!r} not found", status_code=404
+            )
+        try:
+            _validate_surface(request)
+            chat_request = _to_chat_request(request)
+            if orchestrated:
+                validated_input = await validate_orchestration_chat_input_async(
+                    chat_request
+                )
+                text = prompt_text(validated_input.prompt) or ""
+                input_tokens = _approx_tokens(text)
+            else:
+                validated_input = await validate_chat_input_async(
+                    chat_request,
+                    chat_templates,
+                    allow_multimodal=True,
+                    legacy_chat_models=legacy_chat_models,
+                )
+                effective = render_tool_intent(
+                    validated_input.prompt,
+                    tools=tuple(chat_request.tools or ()),
+                    tool_choice=chat_request.tool_choice,
+                    tools_in_prompt=validated_input.tools_in_prompt,
+                )
+                text = prompt_text(effective) or ""
+                counted = await backend_count_prompt_tokens_async(engine, text)
+                if counted is None:
+                    return request_error(
+                        f"model {request.model!r} does not support "
+                        "authoritative token counting",
+                        status_code=404,
+                    )
+                input_tokens = counted
+        except ChatRequestError as error:
+            return _MessagesFailure.from_chat_error(error).json_response(
+                request_id
+            )
+        except ValueError as error:
+            return request_error(str(error))
+        except _MessagesFailure as failure:
+            return failure.json_response(request_id)
+        return JSONResponse(content={"input_tokens": input_tokens})
 
     @app.post("/v1/messages")
     async def messages(http_request: Request):
@@ -1412,7 +1980,17 @@ def add_messages_route(
                 source="http",
             )
 
-        if request.stream and not request.tools:
+        if request.stream:
+            if _tools_active(chat_request):
+                return sse_response(
+                    _live_tool_events(
+                        request,
+                        validated,
+                        message_id=message_id,
+                        http_request=http_request,
+                        owner=owner,
+                    )
+                )
             return sse_response(
                 _live_text_events(
                     request,
@@ -1430,7 +2008,10 @@ def add_messages_route(
                 execution = await execute_chat(validated)
             except ChatRequestError as error:
                 if error.execution is not None:
+                    # The OpenAI-shaped 502 gates re-evaluate on the shared
+                    # scanner so the unary and stream verdicts cannot diverge.
                     _record_execution(http_request, request.model, error.execution)
+                    return _outcome_from_execution(error.execution, validated)
                 raise _MessagesFailure.from_chat_error(error) from error
             except Exception as error:
                 logger.exception("Anthropic Messages upstream generation failed")
@@ -1438,7 +2019,9 @@ def add_messages_route(
                     f"upstream backend error ({type(error).__name__})", 502
                 ) from error
             _record_execution(http_request, request.model, execution)
-            blocks, stop_reason, usage = _outcome_from_execution(execution)
+            blocks, stop_reason, usage = _outcome_from_execution(
+                execution, validated
+            )
             if slo_lease is not None and any(
                 block["type"] == "tool_use" or block.get("text")
                 for block in blocks
@@ -1446,10 +2029,6 @@ def add_messages_route(
                 slo_lease.finished_first_token()
             return blocks, stop_reason, usage
 
-        if request.stream:
-            return sse_response(
-                _buffered_message_events(request, produce, message_id=message_id)
-            )
         try:
             blocks, stop_reason, usage = await produce()
         except _MessagesFailure as failure:

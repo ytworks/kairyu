@@ -2045,6 +2045,13 @@ class ZmqEngineBackend:
                 self._preflight_tokenizer = tokenizer
         return tokenizer
 
+    async def count_prompt_tokens_async(self, prompt: str) -> int:
+        """Exact prompt-token count via the parent-side preflight tokenizer."""
+
+        return await self._run_tokenizer_work(
+            lambda: len(self._get_preflight_tokenizer().encode(prompt))
+        )
+
     def _get_preflight_grammar_vocab(self) -> GrammarVocabulary:
         vocabulary = self._preflight_grammar_vocab
         if vocabulary is not None:

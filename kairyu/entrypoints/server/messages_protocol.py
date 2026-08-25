@@ -119,3 +119,14 @@ class MessagesRequest(BaseModel):
     container: object | None = None
     betas: object | None = None
     service_tier: str | None = None
+
+
+class MessagesCountTokensRequest(MessagesRequest):
+    """count_tokens body: the Messages surface without generation controls.
+
+    ``max_tokens`` is not part of the Anthropic count_tokens request; the
+    harmless default keeps the shared conversion path intact, and a client
+    that replays it anyway still validates.
+    """
+
+    max_tokens: int = Field(default=1, ge=1)

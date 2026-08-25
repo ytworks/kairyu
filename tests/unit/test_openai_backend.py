@@ -2190,6 +2190,89 @@ async def test_stream_parses_sse_into_cumulative_partials(monkeypatch):
     await backend.shutdown()
 
 
+async def test_stream_reassembles_native_tool_call_deltas():
+    tools = (
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup",
+                "parameters": {"type": "object"},
+            },
+        },
+    )
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=_sse_chunks_transport(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_upstream",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "look",
+                                        "arguments": "{\"city\":",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {
+                                        "name": "up",
+                                        "arguments": "\"Tokyo\"}",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        ),
+    )
+    request = GenerationRequest(
+        request_id="tools",
+        prompt="weather",
+        sampling_params=SamplingParams().with_generation_config_omitted(
+            GENERATION_CONFIG_SAMPLING_FIELDS
+        ),
+        tools=tools,
+        tool_choice="required",
+    )
+
+    results = [result async for result in backend.stream(request)]
+
+    expected = '<tool_call>{"name":"lookup","arguments":{"city":"Tokyo"}}</tool_call>'
+    assert [result.text for result in results] == [expected, expected]
+    assert [result.text_delta for result in results] == [expected, ""]
+    assert results[-1].completions[0].finish_reason == "tool_calls"
+    await backend.shutdown()
+
+
 async def test_vllm_templated_prompt_streams_completion_text():
     backend = OpenAICompatBackend(
         base_url="http://vllm:8000/v1",
@@ -3022,3 +3105,52 @@ async def test_text_chat_forwards_allowlisted_template_kwargs():
 def test_template_kwargs_rejected_on_pre_rendered_prompt():
     with pytest.raises(ValueError, match="pre-rendered or token prompt"):
         _request(TemplatedPrompt("<bos>route me"), chat_template_kwargs={"enable_thinking": False})
+
+
+@pytest.mark.parametrize(
+    ("upstream", "status", "payload", "expected"),
+    [
+        pytest.param("vllm", 200, {"count": 42}, 42, id="vllm-count"),
+        pytest.param("vllm", 404, {"count": 42}, None, id="non-200"),
+        pytest.param("vllm", 200, {"count": "42"}, None, id="non-int"),
+        pytest.param("openai", 200, {"count": 42}, None, id="non-vllm-declines"),
+    ],
+)
+async def test_count_prompt_tokens_via_vllm_tokenize(
+    upstream, status, payload, expected
+):
+    # /v1/messages/count_tokens network boundary: exact counts come from a
+    # vLLM upstream's POST /tokenize and every failure mode fails soft to
+    # None (the route then uses the same approximation billing would).
+    captured: dict = {}
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(http_request.url)
+        captured["body"] = json.loads(http_request.content)
+        return httpx.Response(status, json=payload)
+
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream=upstream,
+    )
+    assert await backend.count_prompt_tokens_async("some prompt") == expected
+    if expected is not None:
+        assert captured["url"] == "https://api.example.com/tokenize"
+        assert captured["body"] == {"model": "m", "prompt": "some prompt"}
+
+
+async def test_count_prompt_tokens_transport_error_is_none():
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=http_request)
+
+    backend = OpenAICompatBackend(
+        base_url="https://api.example.com/v1",
+        model="m",
+        api_key_env=None,
+        transport=httpx.MockTransport(handler),
+        upstream="vllm",
+    )
+    assert await backend.count_prompt_tokens_async("x") is None

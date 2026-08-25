@@ -51,6 +51,7 @@ from kairyu.engine.backend import (
     backend_admission_upper_bound,
     backend_admission_upper_bound_async,
     backend_admission_upper_bound_key,
+    backend_count_prompt_tokens_async,
     backend_supports_chat_template_kwargs,
     backend_supports_prompt_kind,
     backend_supports_slo_defer,
@@ -947,6 +948,21 @@ class ReplicaPool:
                 seen.add(key)
             representatives.append(backend)
         return tuple(representatives)
+
+    async def count_prompt_tokens_async(self, prompt: str) -> int | None:
+        """Delegate ``/v1/messages/count_tokens`` to one capable replica.
+
+        Replicas in one pool share a model (and therefore a tokenizer), so the
+        first non-``None`` answer is authoritative.
+        """
+
+        for replica_id in self.replica_ids:
+            count = await backend_count_prompt_tokens_async(
+                self._entries[replica_id].backend, prompt
+            )
+            if count is not None:
+                return count
+        return None
 
     def _admission_members(
         self,

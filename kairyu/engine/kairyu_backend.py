@@ -1718,6 +1718,14 @@ class KairyuBackend:
             continuation,
         )
 
+    async def count_prompt_tokens_async(self, prompt: str) -> int:
+        """Exact prompt-token count for ``/v1/messages/count_tokens``."""
+
+        def count() -> int:
+            return len(self._loop.tokenize_prompt(prompt))
+
+        return await self._run_tokenizer_work(count)
+
     def _peek_prepared_request(
         self,
         request: GenerationRequest,

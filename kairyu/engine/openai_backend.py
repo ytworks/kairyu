@@ -351,6 +351,26 @@ def _message_text(message: Mapping[str, object]) -> str:
     return "".join(parts)
 
 
+def _stream_tool_calls_text(
+    calls: Mapping[int, Mapping[str, list[str]]],
+) -> str:
+    """Reassemble OpenAI chat tool-call deltas for backend-neutral consumers."""
+
+    return _message_text(
+        {
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "".join(call.get("name", ())),
+                        "arguments": "".join(call.get("arguments", ())),
+                    }
+                }
+                for _, call in sorted(calls.items())
+            ]
+        }
+    )
+
+
 class OpenAIRequestValidationError(ValueError):
     """A request cannot be represented by the configured upstream contract."""
 
@@ -923,6 +943,41 @@ class OpenAICompatBackend:
                 if isinstance(item, dict) and item.get("model") == self._model
             ]
         return payload
+
+    async def count_prompt_tokens_async(
+        self, prompt: str, *, timeout_s: float = 2.0
+    ) -> int | None:
+        """Best-effort exact count via a vLLM upstream's ``POST /tokenize``.
+
+        Mirrors ``fetch_backends``: pooled client, keyless/auth headers, and a
+        fail-soft ``None`` on any transport or shape problem. Only a vLLM
+        upstream is known to expose the endpoint.
+        """
+
+        if self._capabilities.upstream != "vllm":
+            return None
+        root = (
+            self._base_url[: -len("/v1")]
+            if self._base_url.endswith("/v1")
+            else self._base_url
+        )
+        try:
+            response = await self._get_client().post(
+                f"{root}/tokenize",
+                json={"model": self._model, "prompt": prompt},
+                headers=self._headers(),
+                timeout=timeout_s,
+            )
+        except (httpx.HTTPError, RuntimeError):  # RuntimeError: missing api key
+            return None
+        if response.status_code != 200:
+            return None
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        count = payload.get("count") if isinstance(payload, dict) else None
+        return count if type(count) is int and count >= 0 else None
 
     def _api_key(self) -> str:
         assert self._api_key_env is not None
@@ -1643,6 +1698,7 @@ class OpenAICompatBackend:
             trace_response_id: str | None = None
             done_seen = False
             completion_reasoning: dict[int, _CompletionReasoningParser] = {}
+            streamed_tool_calls: dict[int, dict[int, dict[str, list[str]]]] = {}
             async for data_str in iter_sse_data(response):
                 data_str = data_str.strip()
                 if data_str == _SSE_DONE:
@@ -1708,16 +1764,37 @@ class OpenAICompatBackend:
                     index = choice.get("index", 0)
                     text_parts.setdefault(index, [])
                     text_lengths.setdefault(index, 0)
+                    delta = choice.get("delta") or {}
                     content = (
                         choice.get("text")
                         if use_completions
-                        else (choice.get("delta") or {}).get("content")
+                        else delta.get("content")
                     )
                     reasoning = (
                         None
                         if use_completions
-                        else (choice.get("delta") or {}).get("reasoning_content")
+                        else delta.get("reasoning_content")
                     )
+                    if not use_completions and isinstance(delta, Mapping):
+                        for position, raw_call in enumerate(delta.get("tool_calls") or ()):
+                            if not isinstance(raw_call, Mapping):
+                                continue
+                            call_index = raw_call.get("index", position)
+                            if type(call_index) is not int or call_index < 0:
+                                continue
+                            function = raw_call.get("function")
+                            if not isinstance(function, Mapping):
+                                continue
+                            call = streamed_tool_calls.setdefault(index, {}).setdefault(
+                                call_index,
+                                {"name": [], "arguments": []},
+                            )
+                            name = function.get("name")
+                            if isinstance(name, str):
+                                call["name"].append(name)
+                            arguments = function.get("arguments")
+                            if isinstance(arguments, str):
+                                call["arguments"].append(arguments)
                     if use_completions and self._completion_reasoning_end_tag is not None:
                         parser = completion_reasoning.setdefault(
                             index,
@@ -1746,6 +1823,17 @@ class OpenAICompatBackend:
                         changed = True
                     if choice.get("finish_reason"):
                         finish[index] = choice["finish_reason"]
+                        calls = streamed_tool_calls.pop(index, None)
+                        if calls:
+                            tool_text = _stream_tool_calls_text(calls)
+                            if tool_text:
+                                text_parts[index].append(tool_text)
+                                text_lengths[index] += len(tool_text)
+                                text_deltas[index] = (
+                                    text_deltas.get(index, "") + tool_text
+                                )
+                                deltas_seen[index] = deltas_seen.get(index, 0) + 1
+                                changed = True
                     raw_logprobs = (choice.get("logprobs") or {}).get("content")
                     if raw_logprobs:
                         logprobs.setdefault(index, []).extend(
@@ -1765,6 +1853,31 @@ class OpenAICompatBackend:
                         reasoning_parts=reasoning_parts,
                         reasoning_lengths=reasoning_lengths,
                         reasoning_deltas=reasoning_deltas,
+                    )
+            if streamed_tool_calls:
+                text_deltas = {}
+                for index, calls in streamed_tool_calls.items():
+                    text_parts.setdefault(index, [])
+                    text_lengths.setdefault(index, 0)
+                    tool_text = _stream_tool_calls_text(calls)
+                    if not tool_text:
+                        continue
+                    text_parts[index].append(tool_text)
+                    text_lengths[index] += len(tool_text)
+                    text_deltas[index] = tool_text
+                    deltas_seen[index] = deltas_seen.get(index, 0) + 1
+                if text_deltas:
+                    yield self._partial(
+                        request,
+                        text_parts,
+                        text_lengths,
+                        text_deltas,
+                        finish,
+                        deltas_seen,
+                        logprobs,
+                        finished=False,
+                        reasoning_parts=reasoning_parts,
+                        reasoning_lengths=reasoning_lengths,
                     )
             if trace_seen and not done_seen:
                 raise RuntimeError("Kairyu upstream stage trace omitted SSE [DONE]")

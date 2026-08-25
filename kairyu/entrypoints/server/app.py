@@ -90,6 +90,7 @@ from kairyu.entrypoints.server.metering import (
 )
 from kairyu.entrypoints.server.metrics import ServerMetrics
 from kairyu.entrypoints.server.middleware import (
+    _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY,
     _SLO_ADMISSION_LEASE_STATE_KEY,
     AccessLogMiddleware,
     AuthMiddleware,
@@ -2453,7 +2454,13 @@ def create_app(
             # Tool choices must be validated across every final choice before
             # any bytes become irrevocable SSE output. Indexed alternatives
             # and logprobs otherwise stay on the low-latency pull-through path.
-            buffered_stream = bool(request.tools)
+            # The one exception is the Anthropic Messages adapter's internal
+            # dispatch (#573): the sentinel is per-request process state that
+            # no wire request can set, and the Messages relay enforces the
+            # tool gates itself on the raw stream.
+            buffered_stream = bool(request.tools) and not getattr(
+                http_request.state, _ANTHROPIC_INTERNAL_TOOL_STREAM_STATE_KEY, False
+            )
             if request.stream and not buffered_stream:
                 return sse_response(
                     _stream_orchestrator(

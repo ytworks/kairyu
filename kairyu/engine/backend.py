@@ -329,30 +329,37 @@ class AdmissionUpperBound:
     refundable_on_exact_usage: bool
 
 
-def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
+def render_tool_intent(
+    prompt: PromptInput,
+    *,
+    tools,
+    tool_choice,
+    tools_in_prompt: bool,
+) -> PromptInput:
     """Render native-engine tool intent exactly once when no HF template did.
 
     A pre-tokenized prompt is caller-owned: adding a text suffix would silently
     mix two tokenizer owners. Multimodal prompts likewise cannot be flattened
-    into text without dropping modality data.
+    into text without dropping modality data. Pure function of its arguments:
+    billing, admission, and /v1/messages/count_tokens all hash the same bytes.
     """
 
-    if not request.tools or request.tools_in_prompt or request.tool_choice == "none":
-        return request.prompt
-    if isinstance(request.prompt, TemplatedPrompt):
+    if not tools or tools_in_prompt or tool_choice == "none":
+        return prompt
+    if isinstance(prompt, TemplatedPrompt):
         raise ValueError(
             "templated prompts cannot receive an implicit tool-instruction suffix; "
             "render tools inside the chat template and set tools_in_prompt=true"
         )
-    kind = prompt_kind(request.prompt)
+    kind = prompt_kind(prompt)
     if kind != "text":
         raise ValueError(
             f"{kind} prompts cannot receive an implicit tool-instruction suffix; "
             "render tools before tokenization and set tools_in_prompt=true"
         )
-    text = prompt_text(request.prompt)
+    text = prompt_text(prompt)
     assert text is not None
-    choice = request.tool_choice
+    choice = tool_choice
     if isinstance(choice, Mapping):
         named = (choice.get("function") or {}).get("name")
         policy = f"You must call the function {named!r}."
@@ -361,7 +368,7 @@ def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
     else:
         policy = "Call a function when it is useful."
     schemas = json.dumps(
-        list(request.tools),
+        list(tools),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -371,7 +378,40 @@ def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
         f"{policy} Emit each call exactly as "
         '<tool_call>{"name":"function_name","arguments":{}}</tool_call>.'
     )
-    return TextPrompt(rendered) if isinstance(request.prompt, TextPrompt) else rendered
+    return TextPrompt(rendered) if isinstance(prompt, TextPrompt) else rendered
+
+
+def prompt_with_tool_intent(request: GenerationRequest) -> PromptInput:
+    """Render the request's tool intent (see ``render_tool_intent``)."""
+
+    return render_tool_intent(
+        request.prompt,
+        tools=request.tools,
+        tool_choice=request.tool_choice,
+        tools_in_prompt=request.tools_in_prompt,
+    )
+
+
+async def backend_count_prompt_tokens_async(
+    backend: object, prompt: str
+) -> int | None:
+    """Probe-count prompt tokens for ``/v1/messages/count_tokens``.
+
+    ``None`` is a first-class "declined" answer for backends that cannot
+    provide an authoritative count.
+    """
+
+    counter = getattr(backend, "count_prompt_tokens_async", None)
+    if not callable(counter):
+        return None
+    count = await counter(prompt)
+    if count is None:
+        return None
+    if type(count) is not int or count < 0:
+        raise TypeError(
+            "backend count_prompt_tokens_async must return a non-negative int or None"
+        )
+    return count
 
 
 def _strict_tool_response_format(
