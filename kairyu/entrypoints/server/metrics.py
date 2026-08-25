@@ -23,7 +23,7 @@ from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, Metri
 from kairyu.orchestration.replica import ReplicaPool
 
 _PREPLACEMENT_ENDPOINTS = frozenset(
-    {"chat", "completions", "responses", "route", "batch"}
+    {"chat", "completions", "responses", "messages", "route", "batch"}
 )
 _PREPLACEMENT_PHASES = frozenset(
     {

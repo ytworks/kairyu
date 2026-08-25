@@ -1609,3 +1609,42 @@ def parallel_tool_calls_is_satisfied(
     if parallel_tool_calls is not False:
         return True
     return all(len(choice.message.tool_calls or ()) <= 1 for choice in choices)
+
+
+class ReasoningDeltaParser:
+    marker = "</think>"
+
+    def __init__(self) -> None:
+        self.pending = ""
+        self.reasoning: bool | None = None
+
+    def feed(self, delta: str, *, final: bool) -> tuple[str, str]:
+        if self.reasoning is False:
+            return "", delta
+        self.pending += delta
+        if self.reasoning is None:
+            opening = "<think>"
+            if opening.startswith(self.pending) and not final:
+                return "", ""
+            if self.pending.startswith(opening):
+                self.pending = self.pending[len(opening) :]
+                self.reasoning = True
+            else:
+                content, self.pending = self.pending, ""
+                self.reasoning = False
+                return "", content
+        marker_at = self.pending.find(self.marker)
+        if marker_at >= 0:
+            reasoning = self.pending[:marker_at]
+            content = self.pending[marker_at + len(self.marker) :]
+            self.pending = ""
+            self.reasoning = False
+            return reasoning, content
+        if final:
+            reasoning, self.pending = self.pending, ""
+            return reasoning, ""
+        keep = len(self.marker) - 1
+        if len(self.pending) <= keep:
+            return "", ""
+        reasoning, self.pending = self.pending[:-keep], self.pending[-keep:]
+        return reasoning, ""
