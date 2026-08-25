@@ -397,9 +397,8 @@ async def backend_count_prompt_tokens_async(
 ) -> int | None:
     """Probe-count prompt tokens for ``/v1/messages/count_tokens``.
 
-    ``None`` is a first-class "declined" answer so remote or pooled backends
-    can fail soft at runtime; the route then falls back to the same word-split
-    approximation billing uses when a backend omits usage.
+    ``None`` is a first-class "declined" answer for backends that cannot
+    provide an authoritative count.
     """
 
     counter = getattr(backend, "count_prompt_tokens_async", None)

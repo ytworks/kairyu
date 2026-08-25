@@ -1704,9 +1704,13 @@ def add_messages_route(
                 )
                 text = prompt_text(effective) or ""
                 counted = await backend_count_prompt_tokens_async(engine, text)
-                input_tokens = (
-                    counted if counted is not None else _approx_tokens(text)
-                )
+                if counted is None:
+                    return request_error(
+                        f"model {request.model!r} does not support "
+                        "authoritative token counting",
+                        status_code=404,
+                    )
+                input_tokens = counted
         except ChatRequestError as error:
             return _MessagesFailure.from_chat_error(error).json_response(
                 request_id
