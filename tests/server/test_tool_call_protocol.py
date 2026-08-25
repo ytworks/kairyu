@@ -13,6 +13,13 @@ from kairyu.entrypoints.server.chat_service import (
     _parse_tool_calls,
 )
 from kairyu.entrypoints.server.protocol import ChatCompletionRequest
+from kairyu.entrypoints.server.tool_stream import (
+    StreamInvalid,
+    ToolArgsDelta,
+    ToolStart,
+    ToolStop,
+    ToolStreamScanner,
+)
 
 _GENERIC_TEMPLATE = "{{ messages[0].content }}"
 _LLAMA_TEMPLATE = "{{ '<|python_tag|>' }}{{ messages[0].content }}"
@@ -136,6 +143,35 @@ def test_explicit_json_tool_tag_remains_portable_across_protocols(protocol):
     calls = _parse_tool_calls(text, _tool(), protocol)
     assert len(calls) == 1
     assert json.loads(calls[0].function.arguments) == {"value": "ok"}
+
+
+def test_generic_tool_arguments_stream_across_every_character_boundary():
+    arguments = {
+        "text": 'braces stay in strings: } { and quote: "',
+        "nested": {"items": [{"value": 1}, {"value": 2}]},
+    }
+    body = json.dumps(
+        {"name": "run", "arguments": arguments},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    scanner = ToolStreamScanner(
+        _tool(),
+        NormalizedToolChoice("auto", frozenset({"run"})),
+    )
+
+    events = []
+    for character in f"<tool_call>{body}</tool_call>":
+        events.extend(scanner.feed(character))
+    events.extend(scanner.feed("", final=True))
+
+    assert sum(isinstance(event, ToolStart) for event in events) == 1
+    assert sum(isinstance(event, ToolStop) for event in events) == 1
+    assert not any(isinstance(event, StreamInvalid) for event in events)
+    partial_json = "".join(
+        event.partial_json for event in events if isinstance(event, ToolArgsDelta)
+    )
+    assert json.loads(partial_json) == arguments
 
 
 @pytest.mark.parametrize("suffix", ["", "<|eom_id|>", "<|eot_id|>"])

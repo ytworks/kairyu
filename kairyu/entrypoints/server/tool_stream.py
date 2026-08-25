@@ -2,10 +2,12 @@
 
 Turns the append-only model text stream into typed events so ``/v1/messages``
 can open ``content_block_start(tool_use)`` and emit ``input_json_delta``
-fragments while the model is still generating. A call commits only when its
-closing tag has been seen and its body validated ("commit-on-close"): once a
-tool block is on the wire it cannot be retracted, and the unary parse rules
-treat an unparsable envelope as plain text.
+fragments while the model is still generating. Canonical generic JSON
+envelopes commit once the declared name and arguments-object opener are
+complete; the object bytes then stream as generated. Other shapes retain
+commit-on-close validation. Once a tool block is on the wire it cannot be
+retracted, so a generic envelope that becomes invalid after early commit ends
+the stream with an error.
 
 The same scanners run in one-shot mode (``feed(text, final=True)`` +
 ``fold_tool_stream``) to build the unary ``/v1/messages`` response, so the
@@ -25,6 +27,7 @@ Documented divergences from the OpenAI-wire parse (``_parse_tool_calls``):
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 
@@ -46,6 +49,11 @@ _GENERIC_CLOSE = "</tool_call>"
 _DSML_BLOCK_OPEN = "<｜DSML｜tool_calls>"
 _DSML_BLOCK_CLOSE = "</｜DSML｜tool_calls>"
 _DSML_INVOKE_CLOSE = "</｜DSML｜invoke>"
+
+_GENERIC_PROGRESSIVE_PREFIX = re.compile(
+    r'^\s*\{\s*"name"\s*:\s*(?P<name>"(?:[^"\\]|\\.)*")\s*,\s*'
+    r'"(?:arguments|parameters)"\s*:\s*(?P<arguments>\{)'
+)
 
 
 @dataclass(frozen=True)
@@ -71,7 +79,7 @@ class ToolStop:
 
 @dataclass(frozen=True)
 class StreamInvalid:
-    """The protocol's whole-text rules retroactively void committed calls."""
+    """The protocol became invalid after a call was put on the wire."""
 
     message: str
 
@@ -111,6 +119,12 @@ class ToolStreamScanner:
         self._buffer = ""
         self._in_call = False
         self._raw_parts: list[str] = []
+        self._progressive_name: str | None = None
+        self._progressive_scan_at = 0
+        self._progressive_depth = 0
+        self._progressive_in_string = False
+        self._progressive_escape = False
+        self._progressive_arguments_complete = False
         self.committed_calls = 0
         self.invalidated = False
 
@@ -179,6 +193,88 @@ class ToolStreamScanner:
         self.invalidated = True
         return [StreamInvalid(message)]
 
+    def _progressive_events(self, body: str) -> list[ToolStreamEvent]:
+        """Start and advance a canonical generic call when it is safe."""
+
+        events: list[ToolStreamEvent] = []
+        if self._progressive_name is None:
+            match = _GENERIC_PROGRESSIVE_PREFIX.match(body)
+            if match is None:
+                return events
+            try:
+                name = _strict_json_loads(match.group("name"))
+            except (TypeError, ValueError, RecursionError):
+                return events
+            if not isinstance(name, str) or not name.strip() or not self._allowed(name):
+                return events
+            self._progressive_name = name
+            self._progressive_scan_at = match.start("arguments")
+            self._progressive_depth = 0
+            self._progressive_in_string = False
+            self._progressive_escape = False
+            self._progressive_arguments_complete = False
+            self.committed_calls += 1
+            events.append(
+                ToolStart(id=f"call_{uuid.uuid4().hex[:12]}", name=name)
+            )
+
+        if self._progressive_arguments_complete:
+            return events
+        start = self._progressive_scan_at
+        cursor = start
+        while cursor < len(body):
+            char = body[cursor]
+            cursor += 1
+            if self._progressive_in_string:
+                if self._progressive_escape:
+                    self._progressive_escape = False
+                elif char == "\\":
+                    self._progressive_escape = True
+                elif char == '"':
+                    self._progressive_in_string = False
+                continue
+            if char == '"':
+                self._progressive_in_string = True
+            elif char == "{":
+                self._progressive_depth += 1
+            elif char == "}":
+                self._progressive_depth -= 1
+                if self._progressive_depth == 0:
+                    self._progressive_arguments_complete = True
+                    break
+        self._progressive_scan_at = cursor
+        if cursor > start:
+            events.append(ToolArgsDelta(body[start:cursor]))
+        return events
+
+    def _finish_progressive(self, body: str) -> list[ToolStreamEvent]:
+        events = self._progressive_events(body)
+        try:
+            payload = _strict_json_loads(body)
+        except (TypeError, ValueError, RecursionError):
+            payload = None
+        call = self._validated_call(payload)
+        if (
+            not self._progressive_arguments_complete
+            or call is None
+            or call[0] != self._progressive_name
+            or not self._allowed(call[0])
+        ):
+            events.extend(
+                self._invalidate(
+                    "generic tool call became invalid after streaming arguments"
+                )
+            )
+            return events
+        events.append(ToolStop())
+        self._progressive_name = None
+        self._progressive_scan_at = 0
+        self._progressive_depth = 0
+        self._progressive_in_string = False
+        self._progressive_escape = False
+        self._progressive_arguments_complete = False
+        return events
+
     # -- feed --------------------------------------------------------------
 
     def feed(self, delta: str, *, final: bool = False) -> list[ToolStreamEvent]:
@@ -192,15 +288,28 @@ class ToolStreamScanner:
             if self._in_call:
                 close_at = self._buffer.find(_GENERIC_CLOSE)
                 if close_at < 0:
+                    if not final or self._progressive_name is not None:
+                        events.extend(self._progressive_events(self._buffer))
                     if final:
-                        events.extend(self._dangling(self._buffer))
+                        if self._progressive_name is not None:
+                            events.extend(
+                                self._invalidate(
+                                    "generic tool call ended after streaming "
+                                    "unterminated arguments"
+                                )
+                            )
+                        else:
+                            events.extend(self._dangling(self._buffer))
                         self._buffer = ""
                         self._in_call = False
                     break
                 body = self._buffer[:close_at]
                 self._buffer = self._buffer[close_at + len(_GENERIC_CLOSE) :]
                 self._in_call = False
-                events.extend(self._close_envelope(body))
+                if self._progressive_name is None:
+                    events.extend(self._close_envelope(body))
+                else:
+                    events.extend(self._finish_progressive(body))
                 continue
             open_at = self._buffer.find(_GENERIC_OPEN)
             if open_at >= 0:

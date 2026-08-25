@@ -338,17 +338,20 @@ def test_parallel_tool_calls_keep_ids_and_stream_indices(tmp_path):
     ]
     assert [index for index, _block in starts] == [0, 1]
     assert all(block["type"] == "tool_use" for _index, block in starts)
-    deltas = [
-        (payload["index"], payload["delta"]["partial_json"])
+    deltas: dict[int, str] = {}
+    for payload in [
+        payload
         for name, payload in events
         if name == "content_block_delta"
-    ]
-    assert [json.loads(partial) for _index, partial in deltas] == [
+    ]:
+        index = payload["index"]
+        deltas[index] = deltas.get(index, "") + payload["delta"]["partial_json"]
+    assert [json.loads(partial) for partial in deltas.values()] == [
         {"a": 1, "b": 2},
         {"a": 3, "b": 4},
     ]
     # streamed and unary requests reconstruct to the same tool calls
-    assert [index for index, _partial in deltas] == [0, 1]
+    assert list(deltas) == [0, 1]
     (delta_payload,) = [
         payload for name, payload in events if name == "message_delta"
     ]
@@ -767,6 +770,38 @@ def _blocks_from_events(events: list[tuple[str, dict]]) -> list[dict]:
     return out
 
 
+class StagedArgumentsBackend(MockBackend):
+    """Pauses after a declared tool's argument object has started."""
+
+    async def stream(self, request):
+        prefix = '<tool_call>{"name":"add","arguments":{"a":1'
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0, text=prefix, token_ids=(1,), finish_reason=None
+                ),
+            ),
+            finished=False,
+        )
+        await asyncio.sleep(0.2)
+        complete = prefix + ',"b":2}}</tool_call>'
+        yield GenerationResult(
+            request_id=request.request_id,
+            prompt=request.prompt,
+            completions=(
+                CompletionOutput(
+                    index=0,
+                    text=complete,
+                    token_ids=(1, 2),
+                    finish_reason="stop",
+                ),
+            ),
+            usage=GenerationUsage(prompt_tokens=5, completion_tokens=5),
+        )
+
+
 class StagedParallelBackend(MockBackend):
     """Emits one committed call, sleeps, then a second call."""
 
@@ -797,6 +832,79 @@ class StagedParallelBackend(MockBackend):
             ),
             usage=GenerationUsage(prompt_tokens=5, completion_tokens=5),
         )
+
+
+def test_tool_arguments_stream_before_generation_completes(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "kairyu.entrypoints.server.messages_service._KEEPALIVE_SECONDS", 0.02
+    )
+    client = TestClient(_app(tmp_path, StagedArgumentsBackend()))
+    response = client.post(
+        "/v1/messages",
+        json=_body(
+            stream=True, tools=[_tool()], messages=[{"role": "user", "content": "add"}]
+        ),
+    )
+
+    events = _events(response.text)
+    names = [name for name, _payload in events]
+    start = names.index("content_block_start")
+    first_delta = names.index("content_block_delta")
+    ping = names.index("ping")
+    stop = names.index("content_block_stop")
+    assert start < first_delta < ping < stop
+    argument_fragments = [
+        payload["delta"]["partial_json"]
+        for name, payload in events
+        if name == "content_block_delta"
+        and payload["delta"]["type"] == "input_json_delta"
+    ]
+    assert len(argument_fragments) >= 2
+    assert json.loads("".join(argument_fragments)) == {"a": 1, "b": 2}
+    assert names[-1] == "message_stop"
+
+
+def test_invalid_tool_arguments_after_early_commit_end_stream_with_error(tmp_path):
+    class InvalidArgumentsBackend(StagedArgumentsBackend):
+        async def stream(self, request):
+            prefix = '<tool_call>{"name":"add","arguments":{"a":1'
+            yield GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0, text=prefix, token_ids=(1,), finish_reason=None
+                    ),
+                ),
+                finished=False,
+            )
+            complete = prefix + ',"b":oops}}</tool_call>'
+            yield GenerationResult(
+                request_id=request.request_id,
+                prompt=request.prompt,
+                completions=(
+                    CompletionOutput(
+                        index=0,
+                        text=complete,
+                        token_ids=(1, 2),
+                        finish_reason="stop",
+                    ),
+                ),
+                usage=GenerationUsage(prompt_tokens=5, completion_tokens=5),
+            )
+
+    response = TestClient(_app(tmp_path, InvalidArgumentsBackend())).post(
+        "/v1/messages",
+        json=_body(
+            stream=True, tools=[_tool()], messages=[{"role": "user", "content": "add"}]
+        ),
+    )
+
+    names = [name for name, _payload in _events(response.text)]
+    assert "content_block_start" in names
+    assert "content_block_stop" not in names
+    assert names[-1] == "error"
+    assert "message_stop" not in names
 
 
 def test_tool_fragments_are_emitted_before_generation_completes(
