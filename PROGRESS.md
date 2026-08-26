@@ -91,12 +91,37 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Frontier full-checkpoint 262K/1M correctness/performance evidence, DeepSeek EP4/EP8 topology lock, CUDA Graph pointer stability, MTP/DSpark selection, 30-minute soak, and failure recovery remain open
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
+- DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-26 — [design] DTO-D15: public-output floor for chat-template final units
+- What: role-level `reasoning_continuation: chat` + `reasoning_open_tag`; the
+  empty-output re-dispatch of a final unit whose span the upstream chat
+  template opens continues the captured reasoning as a closed assistant turn
+  (`GenerationRequest.assistant_prefill` → vLLM `continue_final_message`) with
+  the reserved floor tokens. `qwen_think_answer` adopts it (floor 256 now
+  covers the `qwen_think_medium` route). Served config changed — GPU
+  re-verify and digest re-pin pending.
+- Why: 502s on `max_tokens: 8192` agent turns — medium-tier Qwen spent the
+  whole cap in `<think>` and the byte-identical retry failed the same way.
+- Refs: DTO-D15; kairyu/{dsl,engine,orchestration}; examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml
+
+### 2026-08-26 — [progress] Streamed DTO-D9 floor retry no longer 502s (delta-offset reclaim fix)
+- What: `_unit_public_output` reclaim returns cumulative-form completions
+  (`text_delta`/`text_offset` cleared); a reasoning-only delta stream left
+  `text_offset=0` behind while the reclaimed text was already published, so
+  `/v1/messages` (always streamed) failed `delta offset mismatch` → 502 after
+  the full generation. Server regression test added; floor fixture made
+  delta-native.
+- Also: the OpenAI backend now reads the upstream span under `reasoning` as
+  well as `reasoning_content` (vLLM v0.23 Qwen image); the Qwen pool's
+  reasoning had been silently dropped.
+- Refs: DTO-D9/DTO-D15; kairyu/{orchestration/conductor.py,engine/openai_backend.py}; tests/server/test_openai_api.py
 
 ### 2026-08-25 — [progress] DTO-D14 GPU-verified; three defects fixed en route
 - What: both verify.sh serving gates green on the DTO-D14 config (runs

@@ -627,13 +627,21 @@ profiles:
   # Qwen thinking at fixed medium effort (spec level `high`, medium→high
   # alias rule, DTO-D14; the example-local template renders the medium
   # reasoning preamble); T=1.0/top_p=0.95/top_k=20 (DTO-D8). One cap bounds
-  # think + answer.
+  # think + answer, so the DTO-D9 floor applies here too (DTO-D15): the
+  # vLLM chat template opens the <think> span, so a thinking span that eats
+  # the caller's whole cap is continued as an assistant prefill
+  # ("<think>\n<reasoning>\n</think>\n\n", continue_final_message) with the
+  # reserved 256 public tokens instead of a byte-identical re-dispatch that
+  # fails the same way and 502s after 2x the cost.
   - name: qwen_think_medium
     roles:
       - name: qwen_think_answer
         worker: tier1
         role_type: publisher
         reasoning_effort: high
+        reasoning_close_tag: "</think>"
+        reasoning_continuation: chat
+        reasoning_open_tag: "<think>"
         sampling: {temperature: 1.0, top_p: 0.95, top_k: 20, max_tokens: 131072}
         prompt: |
           --- REQUEST ---
