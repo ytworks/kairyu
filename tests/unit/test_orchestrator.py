@@ -772,17 +772,21 @@ async def test_async_prepare_keeps_chat_retry_intent_validation_only() -> None:
     )
 
     prepared = await orchestrator.prepare_request(call)
-    await orchestrator.run(call, prepared=prepared)
 
-    assert [request.assistant_prefill for request in backend.prepared] == [
+    assert [request.assistant_prefill for request in backend.validated] == [
         None,
         "<THINK>\n\n</THINK>\n\n",
         None,
     ]
+    assert [request.assistant_prefill for request in backend.prepared] == [
+        None,
+        None,
+    ]
     assert backend.prepared[0].request_id.startswith("preflight-tier2-")
-    assert backend.prepared[1].request_id.startswith("preflight-retry-tier2-")
-    assert backend.prepared[2].request_id.startswith("preflight-role-final-")
-    assert backend.generated == [backend.prepared[2]]
+    assert backend.prepared[1].request_id.startswith("preflight-role-final-")
+
+    await orchestrator.run(call, prepared=prepared)
+    assert backend.generated == [backend.prepared[1]]
 
 
 async def test_async_prepare_rejects_exact_initial_role_prompt_before_dispatch() -> None:

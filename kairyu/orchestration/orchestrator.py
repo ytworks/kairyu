@@ -297,6 +297,7 @@ class _IntentRequest:
     engine_key: str
     request: GenerationRequest
     role_name: str | None = None
+    validation_only: bool = False
 
 
 @dataclass
@@ -1164,6 +1165,7 @@ class Orchestrator:
                             request_id=f"preflight-retry-{key}",
                             assistant_prefill=retry_assistant_prefill,
                         ),
+                        validation_only=True,
                     )
                 )
         return tuple(requests)
@@ -1380,9 +1382,9 @@ class Orchestrator:
         final_requests = self._final_intent_requests(call, decision)
         if decision.target != "multi_agent":
             final_requests = tuple(
-                _IntentRequest(
-                    intent.engine_key,
-                    replace(
+                replace(
+                    intent,
+                    request=replace(
                         intent.request,
                         request_id=f"direct-{suffix}-{intent.engine_key}",
                     ),
@@ -1391,9 +1393,9 @@ class Orchestrator:
             )
         else:
             final_requests = tuple(
-                _IntentRequest(
-                    intent.engine_key,
-                    replace(
+                replace(
+                    intent,
+                    request=replace(
                         intent.request,
                         request_id=f"{intent.request.request_id}-{suffix}",
                     ),
@@ -1475,9 +1477,12 @@ class Orchestrator:
             before_prepare=True,
         )
 
+        preparable_final_requests = tuple(
+            intent for intent in plan.final_requests if not intent.validation_only
+        )
         failure_groups: list[str] = []
         for kind, intents in (
-            ("final", plan.final_requests),
+            ("final", preparable_final_requests),
             ("internal", plan.internal_requests),
             ("initial", plan.initial_requests),
         ):
@@ -1500,7 +1505,7 @@ class Orchestrator:
             call=plan.call,
             decision=plan.decision,
             dispatch=_PreparedDispatchState(
-                final_requests=plan.final_requests,
+                final_requests=preparable_final_requests,
                 initial_requests=plan.initial_requests,
                 conductor_session=plan.conductor_session,
                 moa_setup=plan.moa_setup,
