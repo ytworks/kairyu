@@ -704,6 +704,91 @@ async def test_async_prepare_rejects_noninitial_final_sampling_policy() -> None:
     assert tier2.generated == []
 
 
+def test_validate_request_rejects_unsupported_chat_continuation_retry() -> None:
+    class RejectAssistantPrefillBackend(_PreparingBackend):
+        def validate_request(self, request: GenerationRequest) -> None:
+            super().validate_request(request)
+            if request.assistant_prefill is not None:
+                raise ValueError("assistant prefill unsupported")
+
+    backend = RejectAssistantPrefillBackend("tier2", [])
+    orchestrator = _orchestrator(
+        engines={"tier2": backend},
+        roles=(
+            RoleSpec(
+                name="final",
+                worker="tier2",
+                role_type="publisher",
+                prompt="[final] {query}",
+                reasoning_close_tag="</THINK>",
+                reasoning_continuation="chat",
+                reasoning_open_tag="<THINK>",
+            ),
+        ),
+        public_output_floor=64,
+    )
+    call = OrchestrationRequest(
+        prompt=COMPLEX,
+        sampling_params=SamplingParams(max_tokens=512),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^final orchestration intent is unsupported: "
+            r"tier2: assistant prefill unsupported$"
+        ),
+    ):
+        orchestrator.validate_request(call)
+
+    assert [request.assistant_prefill for request in backend.validated] == [
+        None,
+        "<THINK>\n\n</THINK>\n\n",
+    ]
+    assert backend.generated == []
+
+
+async def test_async_prepare_keeps_chat_retry_intent_validation_only() -> None:
+    events: list[tuple[str, str]] = []
+    backend = _PreparingBackend("tier2", events)
+    orchestrator = _orchestrator(
+        engines={"tier2": backend},
+        roles=(
+            RoleSpec(
+                name="final",
+                worker="tier2",
+                role_type="publisher",
+                prompt="[final] {query}",
+                reasoning_close_tag="</THINK>",
+                reasoning_continuation="chat",
+                reasoning_open_tag="<THINK>",
+            ),
+        ),
+        public_output_floor=64,
+    )
+    call = OrchestrationRequest(
+        prompt=COMPLEX,
+        sampling_params=SamplingParams(max_tokens=512),
+    )
+
+    prepared = await orchestrator.prepare_request(call)
+
+    assert [request.assistant_prefill for request in backend.validated] == [
+        None,
+        "<THINK>\n\n</THINK>\n\n",
+        None,
+    ]
+    assert [request.assistant_prefill for request in backend.prepared] == [
+        None,
+        None,
+    ]
+    assert backend.prepared[0].request_id.startswith("preflight-tier2-")
+    assert backend.prepared[1].request_id.startswith("preflight-role-final-")
+
+    await orchestrator.run(call, prepared=prepared)
+    assert backend.generated == [backend.prepared[1]]
+
+
 async def test_async_prepare_rejects_exact_initial_role_prompt_before_dispatch() -> None:
     events: list[tuple[str, str]] = []
 
