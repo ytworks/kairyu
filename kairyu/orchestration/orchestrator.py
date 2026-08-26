@@ -1110,6 +1110,7 @@ class Orchestrator:
         sampling_params = call.sampling_params
         reasoning_effort = self._effective_reasoning_effort(call)
         conductor = None
+        retry_assistant_prefill = None
         if (
             decision is not None
             and decision.target == "multi_agent"
@@ -1118,6 +1119,9 @@ class Orchestrator:
             conductor = self._new_conductor(call, [])
             sampling_params = conductor.final_intent_sampling_params()
             reasoning_effort = conductor.final_intent_reasoning_effort()
+            retry_assistant_prefill = (
+                conductor.final_retry_intent_assistant_prefill()
+            )
         requests: list[_IntentRequest] = []
         for key in self._final_engine_keys(call, decision):
             prompt = self._engine_prompt(
@@ -1151,6 +1155,17 @@ class Orchestrator:
                     ),
                 )
             )
+            if retry_assistant_prefill is not None:
+                requests.append(
+                    _IntentRequest(
+                        key,
+                        replace(
+                            requests[-1].request,
+                            request_id=f"preflight-retry-{key}",
+                            assistant_prefill=retry_assistant_prefill,
+                        ),
+                    )
+                )
         return tuple(requests)
 
     def _direct_generation_request(

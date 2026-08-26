@@ -794,6 +794,23 @@ class Conductor:
             return None
         return self._role_reasoning_effort(self._selected_final_unit())
 
+    def final_retry_intent_assistant_prefill(self) -> str | None:
+        """A representative chat-continuation prefill for preflight.
+
+        The real text is only known after attempt 0, but backend capability is
+        determined by the presence of the final assistant turn.  An empty
+        reasoning span is also a valid retry payload and lets orchestration
+        reject unsupported workers before spending the reserved budget.
+        """
+
+        if self._think_close_floor() is None:
+            return None
+        final = self._selected_final_unit()
+        if final.reasoning_continuation != "chat":
+            return None
+        _prompt, assistant_prefill = self._think_close_continuation(final, "", "")
+        return assistant_prefill
+
     def final_intent_sampling_params(self) -> SamplingParams:
         """Effective final-unit params before run-local budget deductions.
 
