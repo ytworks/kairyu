@@ -10,9 +10,6 @@ primary samples with the full internal DAG and the audit verdict. Manual
 Chat UI and Terminal-Bench passes remain on the next-window list. The
 previous green run (2026-08-18, `20260818T025710Z`) measured the pre-DTO-D8
 nine-role DAG.
-DTO-D13 (2026-08-22: a Qwen non-thinking route judge selecting among four
-single-call direct routes and the ensemble) is accepted and implemented,
-changes the served-config digest again, and is **not yet GPU-verified**.
 Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes.
 Supersedes the ECO-D2/D3/D5/D6 role graphs, profiles, and profile judge in
@@ -508,9 +505,11 @@ are judged too; judge failure falls back to the ensemble.
   render the role-tagged conversation inside one user turn like every other
   role; from the Chat UI the 65536 caller cap binds before the official
   route caps; vLLM's behavior for `max_tokens` exceeding the remaining
-  context with the 131072/393216 caps must be confirmed (clamp follow-up if
-  it 400s). Both `verify.sh` gates, a manual per-route Chat UI pass, and the
-  judge-latency measurement are due in the next GPU window.
+  context with the 131072/393216 caps must be confirmed (add a clamp if vLLM
+  returns HTTP 400). Both `verify.sh` gates are green on the current digest,
+  and their `routes.json` artifacts record judge latency. A manual image chat,
+  a manual per-route Chat UI pass, and a Terminal-Bench-style agent run remain
+  outstanding.
 
 ### DTO-D14 — Qwen medium tier and audit on Qwen (owner amendment, 2026-08-25; amends the Qwen side of DTO-D6/D8 and the audit worker of DTO-D10)
 
@@ -543,8 +542,9 @@ Status: accepted; implemented; serving gates GPU-verified (2026-08-25, runs 2026
   chain; `synthesis` stays on tier2 and the caller's effort still grades
   `policies`/`critique`/`synthesis`.
 - Risk accepted by the owner: a 27B Qwen now audits a frontier DeepSeek
-  synthesis (previously peer-strength). GPU re-verification (both verify.sh
-  gates and a served-config digest re-pin) is due in the next window.
+  synthesis (previously peer-strength). Both serving gates and the
+  served-config digest re-pin are complete (2026-08-25, runs
+  `20260825T161729Z`/`20260825T173343Z`).
 
 
 ## Acceptance
@@ -574,12 +574,13 @@ Status: accepted; implemented; serving gates GPU-verified (2026-08-25, runs 2026
   contains a TTFT-gated profile (c32 is the watch row); thinking-direct-only
   rows report `not_applicable`. Results are recorded in the example's
   MEASUREMENTS.md.
-- GPU re-verification list for DTO-D10..D13 (next window): both `verify.sh`
-  gates; a manual image chat (the `image_description` stage appears in the
-  internal-work item; `skipped:condition` on a text chat); a manual Chat UI
-  pass for every route; judge-latency measurement; and a Terminal-Bench-style
-  Codex run over `/v1/responses` checking per-turn time against 900 s and that
-  tool-call turns PASS the audit.
+- GPU verification status for DTO-D10..D14: both `verify.sh` gates are green
+  on digest `69702ab5af0ab3c0…`, and the per-row `routes.json` artifacts record
+  judge latency. Outstanding manual checks are an image chat (the
+  `image_description` stage appears in the internal-work item;
+  `skipped:condition` on a text chat), a Chat UI pass for every route, and a
+  Terminal-Bench-style Codex run over `/v1/responses` checking per-turn time
+  against 900 s and that tool-call turns PASS the audit.
 - Test-policy accounting: the executor-status gate tests and retired general
   profile assertions were deleted with the features they protected; DTO-D13
   reintroduced profile/judge assertions and route-aware gate tests;
