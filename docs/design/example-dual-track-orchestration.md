@@ -547,6 +547,66 @@ Status: accepted; implemented; serving gates GPU-verified (2026-08-25, runs 2026
   `20260825T161729Z`/`20260825T173343Z`).
 
 
+### DTO-D15 — Public-output floor for chat-template final units (owner amendment, 2026-08-26; extends DTO-D9 to the DTO-D13 `qwen_think_medium` route)
+
+Status: accepted; implemented; serving gates GPU re-verify and digest re-pin pending.
+
+- Trigger (2026-08-26): a SWE-bench Pro run sending `max_tokens: 8192`
+  received 502s from `qwen_think_medium` after ~2 × 8192 tokens: the Qwen
+  medium tier (DTO-D14) routinely deliberates ~7k tokens, the whole caller
+  cap went inside `<think>`, and — because the route's final unit declared
+  no `reasoning_close_tag` — `_profile_output_floor` passed no floor, so the
+  issue-#496 re-dispatch was byte-identical (prefix-cache hit, same outcome)
+  and the run ended `EmptyFinalOutput`. The caller cap is legitimate; the
+  server must answer within it.
+- Same window, second defect fixed en route: the DTO-D9 forced-close retry on
+  a *streamed* call (`/v1/messages`, which always streams internally)
+  produced `completion text delta offset mismatch … got 0` → 502. The
+  reasoning-only OpenAI stream leaves `text_delta=""`/`text_offset=0` on the
+  completion that `_unit_public_output` reclaims as public text, while the
+  reclaimed text is already published as a tail delta. The reclaim now
+  returns the cumulative form (`text_delta`/`text_offset` cleared) so the
+  server slices by its own offset; the unit fixture `ThinkExhaustedBackend`
+  is delta-native so the floor tests exercise the real backend shape.
+- Third defect found by the live re-check on the deployed Qwen worker: vLLM
+  v0.23 returns the private span under the OpenAI-compatible key
+  `reasoning`, not `reasoning_content`; the OpenAI backend read only the
+  latter, so every Qwen-pool call silently lost its reasoning (the chat
+  continuation carried an empty think and the `reasoning_closed` reclaim
+  had nothing to publish). The backend now accepts either key on messages
+  and stream deltas.
+- **Config**: role-level `reasoning_continuation: prefix | chat` (default
+  `prefix`, today's behavior) and `reasoning_open_tag`. `chat` declares
+  that the worker's upstream chat template opens the reasoning span
+  (Qwen-family `<think>`), so the empty-output re-dispatch cannot extend a
+  text scaffold; it requires both tags. DSL/Conductor validation rejects
+  `chat` without them and an open tag outside `chat`.
+- **Phase A** is unchanged: attempt 0 dispatches with `max_tokens = B −
+  floor`.
+- **Phase B (`chat`)**: the same single bounded re-dispatch sends the
+  rendered role prompt unchanged plus a final assistant message
+  `"<open>\n<attempt-0 reasoning>\n<close>\n\n"` with vLLM
+  `continue_final_message: true` / `add_generation_prompt: false`
+  (`GenerationRequest.assistant_prefill`; OpenAI backend, vLLM upstream and
+  template-owned chat prompts only). The Qwen template re-renders that
+  message as a closed thinking turn (`<|im_start|>assistant\n<think>\n…\n</think>\n\n`)
+  and the model continues with the reserved `min(floor, B)` public tokens;
+  vLLM requires the prefill to appear verbatim in the rendered chat, hence
+  the exact shape (probed on the deployed vLLM v0.23 Qwen worker). The
+  dispatch is `reasoning_closed` so parser-classified output is reclaimed
+  (issue #496); the trace keeps `retry:empty_output` with
+  `continuation: think_close` and adds `mode: chat`.
+- **Example**: `qwen_think_answer` declares `reasoning_close_tag: "</think>"`,
+  `reasoning_continuation: chat`, `reasoning_open_tag: "<think>"`; floor 256
+  now applies to the `qwen_think_medium` profile (0.4% of the Chat-UI cap;
+  0.2% of 131072). The other profiles are unchanged.
+- **Trade-off**: as DTO-D9 — an answer that finishes thinking inside phase A
+  may truncate up to `floor` tokens earlier; accepted. The continuation
+  prompt shape is model-family knowledge declared as config, like
+  `prompt_suffix`.
+- GPU consequences: served config changed → both serving gates and the
+  digest re-pin must be re-run before the next status claim.
+
 ## Acceptance
 
 - CPU suite green with the rewritten example pinning test

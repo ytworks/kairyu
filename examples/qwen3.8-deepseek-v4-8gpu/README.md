@@ -136,6 +136,14 @@ measured and the criteria adjusted from evidence.
   and audit loop are exactly DTO-D1..D12. The spec-level `budget {19, 2}`
   applies to every profile; a direct route spends one step plus the bounded
   empty-output re-dispatch.
+- **The Qwen thinking route keeps the floor too (DTO-D15)**: the vLLM chat
+  template opens Qwen's `<think>` span, so `qwen_think_answer` declares
+  `reasoning_close_tag`/`reasoning_open_tag` with
+  `reasoning_continuation: chat`. When a small caller cap (an agent harness
+  sending `max_tokens: 8192`) is eaten by medium-tier deliberation, the one
+  bounded re-dispatch continues the captured reasoning as a closed assistant
+  turn (vLLM `continue_final_message`) with the reserved 256 public tokens
+  instead of re-running the same request and 502-ing after 2x the cost.
 - **Cost**: the judge is one serial small Qwen call on every turn (~0.2 s
   measured on this deployment for a short turn); the next GPU window
   measures its TTFT contribution on the ensemble route and the route

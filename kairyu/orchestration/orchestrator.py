@@ -297,6 +297,7 @@ class _IntentRequest:
     engine_key: str
     request: GenerationRequest
     role_name: str | None = None
+    validation_only: bool = False
 
 
 @dataclass
@@ -1110,6 +1111,7 @@ class Orchestrator:
         sampling_params = call.sampling_params
         reasoning_effort = self._effective_reasoning_effort(call)
         conductor = None
+        retry_assistant_prefill = None
         if (
             decision is not None
             and decision.target == "multi_agent"
@@ -1118,6 +1120,9 @@ class Orchestrator:
             conductor = self._new_conductor(call, [])
             sampling_params = conductor.final_intent_sampling_params()
             reasoning_effort = conductor.final_intent_reasoning_effort()
+            retry_assistant_prefill = (
+                conductor.final_retry_intent_assistant_prefill()
+            )
         requests: list[_IntentRequest] = []
         for key in self._final_engine_keys(call, decision):
             prompt = self._engine_prompt(
@@ -1151,6 +1156,18 @@ class Orchestrator:
                     ),
                 )
             )
+            if retry_assistant_prefill is not None:
+                requests.append(
+                    _IntentRequest(
+                        key,
+                        replace(
+                            requests[-1].request,
+                            request_id=f"preflight-retry-{key}",
+                            assistant_prefill=retry_assistant_prefill,
+                        ),
+                        validation_only=True,
+                    )
+                )
         return tuple(requests)
 
     def _direct_generation_request(
@@ -1365,9 +1382,9 @@ class Orchestrator:
         final_requests = self._final_intent_requests(call, decision)
         if decision.target != "multi_agent":
             final_requests = tuple(
-                _IntentRequest(
-                    intent.engine_key,
-                    replace(
+                replace(
+                    intent,
+                    request=replace(
                         intent.request,
                         request_id=f"direct-{suffix}-{intent.engine_key}",
                     ),
@@ -1376,9 +1393,9 @@ class Orchestrator:
             )
         else:
             final_requests = tuple(
-                _IntentRequest(
-                    intent.engine_key,
-                    replace(
+                replace(
+                    intent,
+                    request=replace(
                         intent.request,
                         request_id=f"{intent.request.request_id}-{suffix}",
                     ),
@@ -1460,9 +1477,12 @@ class Orchestrator:
             before_prepare=True,
         )
 
+        preparable_final_requests = tuple(
+            intent for intent in plan.final_requests if not intent.validation_only
+        )
         failure_groups: list[str] = []
         for kind, intents in (
-            ("final", plan.final_requests),
+            ("final", preparable_final_requests),
             ("internal", plan.internal_requests),
             ("initial", plan.initial_requests),
         ):
@@ -1485,7 +1505,7 @@ class Orchestrator:
             call=plan.call,
             decision=plan.decision,
             dispatch=_PreparedDispatchState(
-                final_requests=plan.final_requests,
+                final_requests=preparable_final_requests,
                 initial_requests=plan.initial_requests,
                 conductor_session=plan.conductor_session,
                 moa_setup=plan.moa_setup,
