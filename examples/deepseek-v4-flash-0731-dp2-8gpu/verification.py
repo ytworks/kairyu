@@ -199,8 +199,9 @@ def _placement_report(
     """Per-replica placement counts for one row, from the pool's JSONL log.
 
     The log is written asynchronously, so poll until the row's placements
-    have landed (or the settle window expires). The gate requires every
-    replica to receive traffic and no replica to exceed ``max_share_of_mean``
+    have landed (or the settle window expires). The gate requires exactly
+    ``expected_requests`` placements, every replica to receive traffic, and
+    no replica to exceed ``max_share_of_mean``
     times the ideal even share; a serial row (c1) is reported only, because
     least-outstanding ties resolve to the lowest replica id by design.
     """
@@ -211,10 +212,10 @@ def _placement_report(
         time.sleep(0.5)
         counts = _placement_counts(path, offset)
     total = sum(counts.values())
-    mean = total / replicas if replicas else 0.0
+    mean = expected_requests / replicas if replicas else 0.0
     largest = max(counts.values(), default=0)
     even = (
-        total >= expected_requests
+        total == expected_requests
         and len(counts) == replicas
         and largest <= max_share_of_mean * mean
     )

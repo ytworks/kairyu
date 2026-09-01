@@ -227,3 +227,50 @@ def test_qwen_eight_replica_gate_rejects_material_skew(tmp_path: Path) -> None:
     assert report["per_replica"] == {str(replica): 8 for replica in range(8)}
     assert report["largest_share_of_mean"] == 1.0
     assert report["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("environment", "replicas", "benchmark_counts", "unrelated_counts"),
+    [
+        (
+            "qwen3.8-27b-dp8-8gpu",
+            8,
+            (16, 16, 16, 8, 2, 2, 2, 2),
+            (0, 0, 0, 8, 14, 14, 14, 14),
+        ),
+        ("deepseek-v4-flash-0731-dp2-8gpu", 2, (63, 1), (1, 63)),
+    ],
+)
+def test_placement_gate_rejects_extra_requests_that_mask_skew(
+    tmp_path: Path,
+    environment: str,
+    replicas: int,
+    benchmark_counts: tuple[int, ...],
+    unrelated_counts: tuple[int, ...],
+) -> None:
+    module = _load(
+        ROOT / "examples" / environment / "verification.py",
+        f"{environment}_extra_placements_verification",
+    )
+    log = tmp_path / "placement.jsonl"
+    rows = [
+        {"kind": "replica", "replica_id": str(replica)}
+        for counts in (benchmark_counts, unrelated_counts)
+        for replica, count in enumerate(counts)
+        for _ in range(count)
+    ]
+    _write_log(log, rows)
+    gate = module.SPEC["verification"]["serving"]["placement_gate"]
+    report = module._placement_report(
+        log,
+        0,
+        expected_requests=sum(benchmark_counts),
+        replicas=replicas,
+        gated=True,
+        max_share_of_mean=float(gate["max_share_of_mean"]),
+        settle_s=0,
+    )
+
+    assert report["placements"] == sum(benchmark_counts) + sum(unrelated_counts)
+    assert report["largest_share_of_mean"] == 2.0
+    assert report["passed"] is False
