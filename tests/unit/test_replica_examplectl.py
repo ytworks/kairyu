@@ -85,11 +85,9 @@ def test_allocation_compose_and_pool_agree(environment: str) -> None:
     assert hosts == l1
     assert deployment.server.max_concurrency == replicas * spec["vllm"]["max_num_seqs"]
     if prefix == "qwen":
-        assert spec["verification"]["serving"]["placement_gate"]["max_share_of_mean"] == 2.0
         assert deployment.legacy_chat_models == frozenset({model})
         assert deployment.chat_templates == {}
     else:
-        assert spec["verification"]["serving"]["placement_gate"]["max_share_of_mean"] == 1.25
         assert deployment.legacy_chat_models == frozenset()
         assert set(deployment.chat_templates) == {model}
         assert pool.replicas[0].options["allow_templated_chat_passthrough"] is True
@@ -153,7 +151,6 @@ def test_deepseek_two_replica_gate_rejects_material_skew(tmp_path: Path) -> None
     )
     assert report["per_replica"] == {"0": 63, "1": 1}
     assert report["largest_share_of_mean"] == pytest.approx(1.969)
-    assert report["max_share_of_mean"] == 1.25
     assert report["passed"] is False
 
     offset = module._placement_offset(log)
@@ -172,4 +169,61 @@ def test_deepseek_two_replica_gate_rejects_material_skew(tmp_path: Path) -> None
     )
     assert report["per_replica"] == {"0": 33, "1": 31}
     assert report["largest_share_of_mean"] == pytest.approx(1.031)
+    assert report["passed"] is True
+
+
+def test_qwen_eight_replica_gate_rejects_material_skew(tmp_path: Path) -> None:
+    module = _load(
+        ROOT / "examples/qwen3.8-27b-dp8-8gpu/verification.py",
+        "qwen_dp8_gate_verification",
+    )
+    log = tmp_path / "placement.jsonl"
+    skewed_counts = (16, 16, 16, 8, 2, 2, 2, 2)
+    skewed = [
+        {"kind": "replica", "replica_id": str(replica)}
+        for replica, count in enumerate(skewed_counts)
+        for _ in range(count)
+    ]
+    _write_log(log, skewed)
+    gate = module.SPEC["verification"]["serving"]["placement_gate"]
+    report = module._placement_report(
+        log,
+        0,
+        expected_requests=64,
+        replicas=8,
+        gated=True,
+        max_share_of_mean=float(gate["max_share_of_mean"]),
+        settle_s=0,
+    )
+    assert report["per_replica"] == {
+        "0": 16,
+        "1": 16,
+        "2": 16,
+        "3": 8,
+        "4": 2,
+        "5": 2,
+        "6": 2,
+        "7": 2,
+    }
+    assert report["largest_share_of_mean"] == 2.0
+    assert report["passed"] is False
+
+    offset = module._placement_offset(log)
+    balanced = [
+        {"kind": "replica", "replica_id": str(replica)}
+        for replica in range(8)
+        for _ in range(8)
+    ]
+    _write_log(log, balanced)
+    report = module._placement_report(
+        log,
+        offset,
+        expected_requests=64,
+        replicas=8,
+        gated=True,
+        max_share_of_mean=float(gate["max_share_of_mean"]),
+        settle_s=0,
+    )
+    assert report["per_replica"] == {str(replica): 8 for replica in range(8)}
+    assert report["largest_share_of_mean"] == 1.0
     assert report["passed"] is True

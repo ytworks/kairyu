@@ -17,8 +17,14 @@ matrix.
 - vLLM: `v0.23.0`, image ID
   `sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`
 - Kairyu verification commit: `1d80d0d1d8d11ea8d5d2fa3a160f400350057528`
-  (PR #584 branch; the served config is byte-identical to the committed files)
-- Served-config SHA-256: `3b2fd507c45c2de8bf9fe596024bfe5faa9629316686030ccda09b0014217f0b`
+  (PR #584 branch)
+- Served-config SHA-256 at measurement time:
+  `3b2fd507c45c2de8bf9fe596024bfe5faa9629316686030ccda09b0014217f0b`
+- Current served-config SHA-256: `73fbc359ae1c16cf07d41efd3ebe0a6bffef0022f5a597e660324e7a9b209ae2`. The
+  only difference is the verification-only placement bound changing from
+  2x to 1.25x; no runtime-bearing setting changed, so the GPU matrix was not
+  rerun. Its retained 8, 8, 8, 8, 8, 8, 8, 8 placements remain within the
+  tightened bound.
 - L1: 8 x TP1 replicas, each with `max_num_batched_tokens=32768`,
   `max_num_seqs=32`, FP8 KV, FP16 Gated-DeltaNet state, piecewise CUDA Graphs,
   MTP off — the single-GPU example's measured envelope.
@@ -31,8 +37,8 @@ Each operating point completed 64/64 requests with approximately 8K input
 tokens and exactly 256 output tokens per request (success rate 1.0 in every
 row). Percentiles use the harness's nearest-rank method. "Placements" is the
 per-replica request count from the pool's placement log for that row; the
-gate requires every replica to receive traffic and no replica to exceed 2x
-the even share (8 of 64) at concurrency >= 8.
+gate requires every replica to receive traffic and no replica to exceed 1.25x
+the even share (10 of 64) at concurrency >= 8.
 
 | Concurrency | TTFT p50 (ms) | TTFT p99 (ms) | E2E p50 (ms) | Mean TPOT (ms) | Requests/s | Output tok/s | Placements (replica 0..7) | Placement gate |
 |---:|---:|---:|---:|---:|---:|---:|---|---|

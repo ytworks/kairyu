@@ -152,7 +152,7 @@ otherwise strict least-outstanding (m5 D4 / m10 D6 semantics), so concurrent
 traffic spreads one-per-replica before any replica takes a second request.
 The pool's `placement_log_path` is the evidence surface: `verify.sh serving`
 reads the per-row JSONL delta and fails a row at concurrency ≥ 8 unless every
-replica received traffic and none took more than 2× the even share; c1 is
+replica received traffic and none took more than 1.25× the even share; c1 is
 reported only (least-outstanding ties resolve to the lowest replica id).
 Checkpoints, templates, images, and L1 flags are shared by reference with
 the sibling examples; no product code changed. Existing FN-D7 gates are not

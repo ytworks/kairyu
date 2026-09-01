@@ -100,6 +100,14 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-02 — [amendment] FN-D9: replica placement gates reject material skew
+- What: both replica-pool examples now limit a replica to 1.25× the even share.
+  Behavior tests reject the 8-way `16,16,16,8,2,2,2,2` and 2-way `63,1`
+  skews while the retained exact-even distributions pass. The verification-only
+  config change does not require a GPU rerun.
+- Why: the former 2× bound admitted materially skewed distributions as passing.
+- Refs: PR #585; FN-D9; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
+
 ### 2026-09-01 — [amendment] FN-D9: two replica-pool 8-GPU examples (no orchestration)
 - What: `examples/qwen3.8-27b-dp8-8gpu` (Qwen3.8 TP1 × 8) and
   `examples/deepseek-v4-flash-0731-dp2-8gpu` (DeepSeek TP4+EP4 × 2) expose one
