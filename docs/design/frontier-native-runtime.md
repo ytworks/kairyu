@@ -131,7 +131,9 @@ The binding example contract is `example-layered-orchestration.md`.
 
 ## FN-D9 — Replica-pool scale-out examples (amendment, 2026-09-01)
 
-Status: accepted; implemented; GPU serving evidence pending.
+Status: accepted; implemented; GPU-verified 2026-09-01 (placement gates green at
+c8–c64; runs `20260901T133331Z` Qwen, `20260901T140112Z` DeepSeek — see the
+examples' `MEASUREMENTS.md`).
 
 This amends the FN-D6/FN-D8 example surface: `examples/` gains two
 environments in which Kairyu L2 does **no orchestration** — it is only the
