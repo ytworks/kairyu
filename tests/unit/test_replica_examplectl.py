@@ -85,9 +85,11 @@ def test_allocation_compose_and_pool_agree(environment: str) -> None:
     assert hosts == l1
     assert deployment.server.max_concurrency == replicas * spec["vllm"]["max_num_seqs"]
     if prefix == "qwen":
+        assert spec["verification"]["serving"]["placement_gate"]["max_share_of_mean"] == 2.0
         assert deployment.legacy_chat_models == frozenset({model})
         assert deployment.chat_templates == {}
     else:
+        assert spec["verification"]["serving"]["placement_gate"]["max_share_of_mean"] == 1.25
         assert deployment.legacy_chat_models == frozenset()
         assert set(deployment.chat_templates) == {model}
         assert pool.replicas[0].options["allow_templated_chat_passthrough"] is True
@@ -102,9 +104,7 @@ def _write_log(path: Path, rows: list[dict]) -> None:
 
 
 def test_placement_gate_reads_only_the_row_delta_and_rejects_skew(tmp_path: Path) -> None:
-    module = _load(
-        ROOT / "examples/qwen3.8-27b-dp8-8gpu/verification.py", "qwen_dp8_verification"
-    )
+    module = _load(ROOT / "examples/qwen3.8-27b-dp8-8gpu/verification.py", "qwen_dp8_verification")
     log = tmp_path / "placement.jsonl"
     # Earlier traffic (warm-up) must not count toward the row.
     _write_log(log, [{"kind": "replica", "replica_id": "0", "reason": "least_outstanding"}] * 5)
@@ -129,3 +129,47 @@ def test_placement_gate_reads_only_the_row_delta_and_rejects_skew(tmp_path: Path
     assert report["passed"] is False  # two replicas idle, one above 2x the mean
     ungated = module._placement_report(log, offset, gated=False, **gate)
     assert ungated["passed"] is None and ungated["per_replica"] == {"0": 15, "1": 1}
+
+
+def test_deepseek_two_replica_gate_rejects_material_skew(tmp_path: Path) -> None:
+    module = _load(
+        ROOT / "examples/deepseek-v4-flash-0731-dp2-8gpu/verification.py",
+        "deepseek_dp2_verification",
+    )
+    log = tmp_path / "placement.jsonl"
+    skewed = [{"kind": "replica", "replica_id": "0"}] * 63 + [
+        {"kind": "replica", "replica_id": "1"}
+    ]
+    _write_log(log, skewed)
+    gate = module.SPEC["verification"]["serving"]["placement_gate"]
+    report = module._placement_report(
+        log,
+        0,
+        expected_requests=64,
+        replicas=2,
+        gated=True,
+        max_share_of_mean=float(gate["max_share_of_mean"]),
+        settle_s=0,
+    )
+    assert report["per_replica"] == {"0": 63, "1": 1}
+    assert report["largest_share_of_mean"] == pytest.approx(1.969)
+    assert report["max_share_of_mean"] == 1.25
+    assert report["passed"] is False
+
+    offset = module._placement_offset(log)
+    balanced = [{"kind": "replica", "replica_id": "0"}] * 33 + [
+        {"kind": "replica", "replica_id": "1"}
+    ] * 31
+    _write_log(log, balanced)
+    report = module._placement_report(
+        log,
+        offset,
+        expected_requests=64,
+        replicas=2,
+        gated=True,
+        max_share_of_mean=float(gate["max_share_of_mean"]),
+        settle_s=0,
+    )
+    assert report["per_replica"] == {"0": 33, "1": 31}
+    assert report["largest_share_of_mean"] == pytest.approx(1.031)
+    assert report["passed"] is True

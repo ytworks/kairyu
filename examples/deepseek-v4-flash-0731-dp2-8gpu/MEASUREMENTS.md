@@ -16,8 +16,13 @@ vLLM prefix caching nor Kairyu's prefix-aware placement can inflate the matrix.
 - vLLM revision: `aa0d51302747ea80f282e26949708b3253409fe2`, image ID
   `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`
 - Kairyu verification commit: `1d80d0d1d8d11ea8d5d2fa3a160f400350057528`
-  (PR #584 branch; the served config is byte-identical to the committed files)
-- Served-config SHA-256: `b6ccf1d629b42383f329011398bccc89949d89029e9a42c320182a4aa84564c0`
+  (PR #584 branch). The retained run's served-config SHA-256 is
+  `b6ccf1d629b42383f329011398bccc89949d89029e9a42c320182a4aa84564c0`.
+  The current digest differs only because the post-run placement-gate limit in
+  `example.json` was tightened from 2x to 1.25x; no runtime-bearing setting
+  changed. Its SHA-256 is
+  `c7ff1034d5871c5dda20b4bacc6418253db9cfcad34b2b8cee895b5e59343733`,
+  and the retained 32/32 rows satisfy the tighter gate.
 - L1: 2 x TP4+EP4 replicas (GPU 0-3, GPU 4-7), each with DSpark-5,
   `max_num_batched_tokens=16384`, `max_num_seqs=32`, FP8 KV, 256-token blocks,
   prefix caching, full/piecewise CUDA Graphs; SM100-only MegaMoE and FP4
@@ -35,8 +40,8 @@ Each operating point completed 64/64 requests with approximately 8K input
 tokens and exactly 256 output tokens per request (success rate 1.0 in every
 row). Percentiles use the harness's nearest-rank method. "Placements" is the
 per-replica request count from the pool's placement log for that row; the
-gate requires both replicas to receive traffic and neither to exceed 2x the
-even share (32 of 64) at concurrency >= 8.
+gate requires both replicas to receive traffic and neither to exceed 1.25x the
+even share (40 of 64) at concurrency >= 8.
 
 | Concurrency | TTFT p50 (ms) | TTFT p99 (ms) | E2E p50 (ms) | Mean TPOT (ms) | Requests/s | Output tok/s | Placements (replica 0, 1) | Placement gate |
 |---:|---:|---:|---:|---:|---:|---:|---|---|

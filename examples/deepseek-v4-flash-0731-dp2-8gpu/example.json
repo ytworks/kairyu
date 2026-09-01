@@ -63,7 +63,7 @@
       "requests_per_concurrency": 64,
       "placement_gate": {
         "min_concurrency": 8,
-        "max_share_of_mean": 2.0
+        "max_share_of_mean": 1.25
       }
     }
   }

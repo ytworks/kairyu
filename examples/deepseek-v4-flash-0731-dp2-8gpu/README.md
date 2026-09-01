@@ -92,7 +92,7 @@ neither vLLM prefix caching nor Kairyu's prefix-aware placement can inflate the
 matrix. For every row it also reads the placement log delta and writes
 `placement.json` with the per-replica request counts; at concurrency >= 8 the
 row **fails** unless both replicas received traffic and neither took more than
-2x the even share. Artifacts go to
+1.25x the even share (40 of 64 requests). Artifacts go to
 `/mnt/nvme/kairyu/model-volumes/deepseek-v4-flash-0731-dp2-8gpu/verification-results/<UTC-run-id>/`
 (override with `VERIFICATION_RESULTS_ROOT`). The locked results are in
 [MEASUREMENTS.md](MEASUREMENTS.md). Model and product evaluations are invoked
