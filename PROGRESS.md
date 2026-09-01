@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end, including AUTO models over /v1/responses (#530)
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- The tiered RTX PRO example (DTO-D13, 2026-08-22) puts a bounded Qwen non-thinking route judge in front of five profiles — four single-call direct routes (Qwen non-thinking, Qwen thinking-low, DeepSeek non-thinking on the re-added `tier2-direct` pool, DeepSeek thinking at the L3 effort; official per-mode sampling fixed on the final unit, vendor-official caps 131072/393216) and the ensemble — selecting per request with fallback to the ensemble; the L2 DSL now has N named `profiles` + a judge with spec-defined `choices`, final-unit sampling overrides (caps min()'d with the caller), and route-aware serving gates. Not GPU-measured. The ensemble (`primary`) profile is the unchanged dual-track policy-ensemble L2 DAG (DTO-D1..D12) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one thinking DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; thinking DeepSeek `synthesis` weighs the 5 candidates as peers and writes one better answer, and an inline thinking-DeepSeek `audit` (PASS/FAIL, ≤2 refinements, last attempt published on exhaustion) gates the streamed remainder (DTO-D10); a Qwen `image_description` stage runs on image requests only and feeds the text-only DeepSeek roles (DTO-D11); DeepSeek budgets halved to 8192/32768/65536 with a 65536 ceiling and Chat UI default for the Terminal-Bench 900 s turn envelope (DTO-D12). The sandbox executor stays deployed but unreferenced. Last green verify.sh run 20260818T025710Z (TTFT PASS c1/8/16/32, c32 1.87×→0.67×) predates DTO-D8..D13 — GPU re-verification pending. Composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- The tiered RTX PRO example (DTO-D13, 2026-08-22) puts a bounded Qwen non-thinking route judge in front of five profiles — four single-call direct routes (Qwen non-thinking, Qwen thinking-medium, DeepSeek non-thinking on the re-added `tier2-direct` pool, DeepSeek thinking at the L3 effort; official per-mode sampling fixed on the final unit, vendor-official caps 131072/393216) and the ensemble — selecting per request with fallback to the ensemble; the L2 DSL now has N named `profiles` + a judge with spec-defined `choices`, final-unit sampling overrides (caps min()'d with the caller), and route-aware serving gates. The ensemble (`primary`) profile is the dual-track policy-ensemble L2 DAG (DTO-D1..D12, amended by DTO-D14) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one thinking DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; thinking DeepSeek `synthesis` weighs the 5 candidates as peers and writes one better answer, and an inline Qwen thinking-medium (DTO-D14) `audit` (PASS/FAIL, ≤2 refinements, last attempt published on exhaustion) gates the streamed remainder (DTO-D10); a Qwen `image_description` stage runs on image requests only and feeds the text-only DeepSeek roles (DTO-D11); DeepSeek budgets halved to 8192/32768/65536 with a 65536 ceiling and Chat UI default for the Terminal-Bench 900 s turn envelope (DTO-D12). The sandbox executor stays deployed but unreferenced. Last green verify.sh runs 20260825T161729Z (coding) and 20260825T173343Z (generic) on the DTO-D8..D14 served config: coding TTFT rows all not_applicable (the judge routes every coding request to the ungated qwen_think_medium route), generic route-aware stage validation green. Composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -91,12 +91,59 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Frontier full-checkpoint 262K/1M correctness/performance evidence, DeepSeek EP4/EP8 topology lock, CUDA Graph pointer stability, MTP/DSpark selection, 30-minute soak, and failure recovery remain open
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
+- DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-08-26 — [design] DTO-D15: public-output floor for chat-template final units
+- What: role-level `reasoning_continuation: chat` + `reasoning_open_tag`; the
+  empty-output re-dispatch of a final unit whose span the upstream chat
+  template opens continues the captured reasoning as a closed assistant turn
+  (`GenerationRequest.assistant_prefill` → vLLM `continue_final_message`) with
+  the reserved floor tokens. `qwen_think_answer` adopts it (floor 256 now
+  covers the `qwen_think_medium` route). Served config changed — GPU
+  re-verify and digest re-pin pending.
+- Why: 502s on `max_tokens: 8192` agent turns — medium-tier Qwen spent the
+  whole cap in `<think>` and the byte-identical retry failed the same way.
+- Refs: DTO-D15; kairyu/{dsl,engine,orchestration}; examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml
+
+### 2026-08-26 — [progress] Streamed DTO-D9 floor retry no longer 502s (delta-offset reclaim fix)
+- What: `_unit_public_output` reclaim returns cumulative-form completions
+  (`text_delta`/`text_offset` cleared); a reasoning-only delta stream left
+  `text_offset=0` behind while the reclaimed text was already published, so
+  `/v1/messages` (always streamed) failed `delta offset mismatch` → 502 after
+  the full generation. Server regression test added; floor fixture made
+  delta-native.
+- Also: the OpenAI backend now reads the upstream span under `reasoning` as
+  well as `reasoning_content` (vLLM v0.23 Qwen image); the Qwen pool's
+  reasoning had been silently dropped.
+- Refs: DTO-D9/DTO-D15; kairyu/{orchestration/conductor.py,engine/openai_backend.py}; tests/server/test_openai_api.py
+
+### 2026-08-25 — [progress] DTO-D14 GPU-verified; three defects fixed en route
+- What: both verify.sh serving gates green on the DTO-D14 config (runs
+  20260825T161729Z coding / 20260825T173343Z generic, digest 69702ab5…).
+  The runs surfaced and fixed: trace v2 rejecting list detail values (judge
+  offered labels) crashing streamed SSE; trace envelope anchored at judge
+  started_at instead of queued_at (1 ms outside-envelope races); the Qwen
+  medium preamble missing the think-close guard sentence, letting long
+  L2-wrapped contexts end inside the think span (EmptyFinalOutput).
+- Refs: PR #579; DTO-D14 (amends the 2026-08-25 [design] entry below);
+  kairyu/{entrypoints/server/protocol.py,orchestration/{trace,orchestrator}.py}
+
+### 2026-08-25 — [design] DTO-D14: Qwen medium tier; audit moves to Qwen (tiered example)
+- What: Qwen thinking roles (draft, image_description, answer_1..4, renamed
+  qwen_think_medium route) fixed at spec `high` = medium tier (L3
+  medium→high alias); example-local graded Qwen template replaces the shared
+  clamped one; Qwen budgets doubled (2048/4096); audit moved to tier1 fixed
+  medium, one 16384 cap, REQUEST-first Qwen prompt without scaffold.
+- Why: owner request to raise Qwen deliberation to medium and audit on Qwen;
+  sampling stays DTO-D8; core effort ladder untouched. Served config changed
+  — GPU re-verify and digest re-pin pending.
+- Refs: DTO-D14; examples/qwen3.8-deepseek-v4-8gpu/*; tests/unit/test_tiered_frontier_examplectl.py
 
 ### 2026-08-25 — [progress] Incremental Anthropic tool streaming + count_tokens (#573)
 - What: `/v1/messages` streams tool calls incrementally — per-protocol
