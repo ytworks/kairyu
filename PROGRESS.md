@@ -92,12 +92,23 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
+- FN-D9 replica-pool examples (`*-dp8-8gpu`, `*-dp2-8gpu`): `verify.sh serving` GPU runs and MEASUREMENTS pending
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-01 — [amendment] FN-D9: two replica-pool 8-GPU examples (no orchestration)
+- What: `examples/qwen3.8-27b-dp8-8gpu` (Qwen3.8 TP1 × 8) and
+  `examples/deepseek-v4-flash-0731-dp2-8gpu` (DeepSeek TP4+EP4 × 2) expose one
+  public model each; L2 is only the `ReplicaPool` (`prefix_index: true`,
+  `queue_depth_threshold: 0`) and `verify.sh serving` gates the per-replica
+  split from `placement_log_path`. Same run/verify UX; no product code changed.
+- Why: a plain scale-out serving path (one API over N identical L1 replicas)
+  next to the orchestrated tiered example. GPU serving evidence pending.
+- Refs: FN-D9 (docs/design/frontier-native-runtime.md); tests/unit/test_replica_examplectl.py
 
 ### 2026-08-26 — [design] DTO-D15: public-output floor for chat-template final units
 - What: role-level `reasoning_continuation: chat` + `reasoning_open_tag`; the
