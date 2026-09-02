@@ -163,7 +163,12 @@ def _placement_offset(path: Path) -> int:
     return path.stat().st_size if path.exists() else 0
 
 
-def _placement_counts(path: Path, offset: int) -> Counter[str]:
+def _placement_counts(
+    path: Path,
+    offset: int,
+    *,
+    request_ids: set[str] | None = None,
+) -> Counter[str]:
     counts: Counter[str] = Counter()
     if not path.exists():
         return counts
@@ -179,8 +184,26 @@ def _placement_counts(path: Path, offset: int) -> Counter[str]:
                 continue
             if row.get("kind") != "replica":
                 continue
+            if request_ids is not None and row.get("request_id") not in request_ids:
+                continue
             replica = row.get("replica_id", row.get("replica"))
             counts[str(replica)] += 1
+    return counts
+
+
+def _wait_for_placement_counts(
+    path: Path,
+    offset: int,
+    *,
+    expected_requests: int,
+    request_ids: set[str] | None = None,
+    settle_s: float = 10.0,
+) -> Counter[str]:
+    deadline = time.monotonic() + settle_s
+    counts = _placement_counts(path, offset, request_ids=request_ids)
+    while sum(counts.values()) < expected_requests and time.monotonic() < deadline:
+        time.sleep(0.5)
+        counts = _placement_counts(path, offset, request_ids=request_ids)
     return counts
 
 
@@ -204,11 +227,12 @@ def _placement_report(
     least-outstanding ties resolve to the lowest replica id by design.
     """
 
-    deadline = time.monotonic() + settle_s
-    counts = _placement_counts(path, offset)
-    while sum(counts.values()) < expected_requests and time.monotonic() < deadline:
-        time.sleep(0.5)
-        counts = _placement_counts(path, offset)
+    counts = _wait_for_placement_counts(
+        path,
+        offset,
+        expected_requests=expected_requests,
+        settle_s=settle_s,
+    )
     total = sum(counts.values())
     mean = expected_requests / replicas if replicas else 0.0
     largest = max(counts.values(), default=0)
@@ -382,6 +406,23 @@ def _validate_tool_call_message(message: dict, finish_reason: object) -> str | N
     return None
 
 
+def _tool_placement_error(
+    counts: Counter[str],
+    *,
+    expected_requests: int,
+    replicas: int,
+) -> str | None:
+    total = sum(counts.values())
+    if total != expected_requests:
+        return (
+            f"recorded {total} correlated placements, expected {expected_requests}: "
+            f"{dict(counts)}"
+        )
+    if len(counts) != replicas:
+        return f"only {len(counts)} of {replicas} replicas served tool calls: {dict(counts)}"
+    return None
+
+
 def _reassemble_stream_tool_calls(sse_body: str) -> tuple[dict, object]:
     """Fold SSE chat chunks into (message-like dict, final finish_reason)."""
 
@@ -419,7 +460,12 @@ def _reassemble_stream_tool_calls(sse_body: str) -> tuple[dict, object]:
     return message, finish_reason
 
 
-def _post_chat(payload: dict, *, timeout_s: float = 600.0) -> tuple[int, object]:
+def _post_chat(
+    payload: dict,
+    *,
+    timeout_s: float = 600.0,
+    include_request_id: bool = False,
+) -> tuple[int, object] | tuple[int, object, str | None]:
     import urllib.error
     import urllib.request
 
@@ -436,11 +482,13 @@ def _post_chat(payload: dict, *, timeout_s: float = 600.0) -> tuple[int, object]
         with urllib.request.urlopen(request, timeout=timeout_s) as response:
             body = response.read().decode("utf-8")
             status = response.status
+            request_id = response.headers.get("x-request-id")
     except urllib.error.HTTPError as error:
-        return error.code, error.read().decode("utf-8", "replace")
-    if payload.get("stream"):
-        return status, body
-    return status, json.loads(body)
+        result: tuple[int, object] = (error.code, error.read().decode("utf-8", "replace"))
+        request_id = error.headers.get("x-request-id") if error.headers else None
+    else:
+        result = (status, body if payload.get("stream") else json.loads(body))
+    return (*result, request_id) if include_request_id else result
 
 
 def _tool_call_request(**overrides) -> dict:
@@ -475,10 +523,18 @@ def tool_calling(run_dir: Path) -> int:
     offset = _placement_offset(PLACEMENT_LOG)
     fan = 2 * REPLICAS
     with concurrent.futures.ThreadPoolExecutor(max_workers=fan) as pool:
-        results = list(pool.map(lambda _: _post_chat(_tool_call_request()), range(fan)))
+        results = list(
+            pool.map(
+                lambda _: _post_chat(_tool_call_request(), include_request_id=True),
+                range(fan),
+            )
+        )
     first_message: dict | None = None
+    request_ids: set[str] = set()
     error = None
-    for status, body in results:
+    for status, body, request_id in results:
+        if isinstance(request_id, str) and request_id:
+            request_ids.add(request_id)
         if status != 200 or not isinstance(body, dict):
             error = f"HTTP {status}: {str(body)[:300]}"
             break
@@ -488,11 +544,30 @@ def tool_calling(run_dir: Path) -> int:
             error = case_error
             break
         first_message = choice["message"]
+    if error is None and len(request_ids) != fan:
+        error = f"received {len(request_ids)} unique x-request-id headers, expected {fan}"
     record(f"auto_tool_call_x{fan}", error)
-    counts = _placement_counts(PLACEMENT_LOG, offset)
+    if len(request_ids) == fan:
+        counts = _wait_for_placement_counts(
+            PLACEMENT_LOG,
+            offset,
+            expected_requests=fan,
+            request_ids=request_ids,
+        )
+        placement_error = _tool_placement_error(
+            counts,
+            expected_requests=fan,
+            replicas=REPLICAS,
+        )
+    else:
+        counts = Counter()
+        placement_error = (
+            f"cannot correlate placements: received {len(request_ids)} unique "
+            f"x-request-id headers, expected {fan}"
+        )
     record(
         "all_replicas_served_tool_calls",
-        None if len(counts) == REPLICAS else f"placements {dict(counts)}",
+        placement_error,
         dict(sorted(counts.items())),
     )
 

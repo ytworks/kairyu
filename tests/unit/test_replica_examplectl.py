@@ -334,3 +334,74 @@ def test_tool_call_message_validator_rejects_unusable_responses(tmp_path: Path) 
     )
     message, finish_reason = module._reassemble_stream_tool_calls(sse)
     assert module._validate_tool_call_message(message, finish_reason) is None
+
+
+@pytest.mark.parametrize("environment", sorted(EXAMPLES))
+def test_tool_placement_gate_ignores_unrelated_requests(
+    tmp_path: Path,
+    environment: str,
+) -> None:
+    module = _load(
+        ROOT / "examples" / environment / "verification.py",
+        f"{environment}_tool_placement_gate",
+    )
+    fan = 2 * module.REPLICAS
+    tool_request_ids = {f"tool-{index}" for index in range(fan)}
+    rows = [
+        {
+            "kind": "replica",
+            "request_id": request_id,
+            "replica_id": "0",
+        }
+        for request_id in tool_request_ids
+    ] + [
+        {
+            "kind": "replica",
+            "request_id": f"unrelated-{replica}",
+            "replica_id": str(replica),
+        }
+        for replica in range(1, module.REPLICAS)
+    ]
+    log = tmp_path / "placement.jsonl"
+    _write_log(log, rows)
+
+    counts = module._placement_counts(log, 0, request_ids=tool_request_ids)
+
+    assert counts == {"0": fan}
+    assert module._tool_placement_error(
+        counts,
+        expected_requests=fan,
+        replicas=module.REPLICAS,
+    ) == f"only 1 of {module.REPLICAS} replicas served tool calls: {{'0': {fan}}}"
+
+
+@pytest.mark.parametrize("environment", sorted(EXAMPLES))
+def test_tool_placement_gate_waits_for_async_log_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    environment: str,
+) -> None:
+    module = _load(
+        ROOT / "examples" / environment / "verification.py",
+        f"{environment}_tool_placement_settle",
+    )
+    fan = 2 * module.REPLICAS
+    final_counts = {str(replica): 2 for replica in range(module.REPLICAS)}
+    snapshots = iter([{}, final_counts])
+    monkeypatch.setattr(module, "_placement_counts", lambda *args, **kwargs: next(snapshots))
+    monkeypatch.setattr(module.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+
+    counts = module._wait_for_placement_counts(
+        Path("unused.jsonl"),
+        0,
+        expected_requests=fan,
+        request_ids={f"tool-{index}" for index in range(fan)},
+        settle_s=1.0,
+    )
+
+    assert counts == final_counts
+    assert module._tool_placement_error(
+        counts,
+        expected_requests=fan,
+        replicas=module.REPLICAS,
+    ) is None
