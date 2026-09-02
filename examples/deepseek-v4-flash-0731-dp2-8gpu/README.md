@@ -22,14 +22,17 @@ five-token DSpark speculation, a 16K batch-token budget, and 32 sequences per
 replica. The SM100-only MegaMoE and FP4 indexer-cache paths stay disabled on
 SM120, as in the [TP8 example](../deepseek-v4-flash-0731-8gpu/README.md).
 
-Kairyu owns the official DeepSeek-V4 text prompt encoding (the TP8 example's
-`deepseek-v4-0731.jinja`, mounted from that directory) and sends the
-pre-rendered prompt to vLLM's `/completions` endpoint through an identity
-template, avoiding a second chat-template pass. `tools` metadata from chat
-clients is ignored by the text-only template; model-side function-tool
-execution is not provided. Ordinary requests default to direct chat mode; an
-explicit `reasoning_effort` selects thinking mode. Open WebUI defaults output
-to 32,768 tokens.
+vLLM renders every chat request with the checkpoint's own prompt encoder
+(`--tokenizer-mode deepseek_v4`, the same `encoding_dsv4.py` that ships inside
+the checkpoint), so **OpenAI function-tool calling works end to end**: declared
+`tools` are rendered into the official DSML prompt form, the model's tool calls
+are parsed by vLLM's `deepseek_v4` tool parser, Kairyu normalizes them into
+`choices[0].message.tool_calls`, and `role: "tool"` results round-trip on the
+next turn. This is the same layering as the Qwen examples and is what
+tool-driven agents (Codex CLI, SWE-bench Pro's mini-swe-agent) require.
+Ordinary requests default to direct chat mode; an explicit `reasoning_effort`
+selects thinking mode (vLLM maps it onto the encoder's thinking switch). Open
+WebUI defaults output to 32,768 tokens.
 
 ## How requests are spread over the replicas
 
@@ -63,7 +66,8 @@ pinned SM120 vLLM source revision if its image is absent, reuses the
 NVMe-backed checkpoint volume shared with the TP8 and tiered examples (or
 downloads and hashes the exact model revision), builds Kairyu, waits for
 readiness, checks that Kairyu reports exactly one public model with two
-healthy replicas, and prints:
+healthy replicas, proves one live bash tool call round-trip (the environment
+is not "ready" if `tool_calls` comes back null), and prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8006/v1
@@ -82,7 +86,15 @@ and `./run.sh down`.
 ```sh
 ./verify.sh list
 ./verify.sh serving
+./verify.sh tool-calling
 ```
+
+`tool-calling` gates the OpenAI agent contract the serving claim depends on:
+an auto-choice `bash` tool call (the SWE-bench Pro mini-swe-agent request
+shape) fanned across both replicas, the follow-up turn with the `role: "tool"`
+result, the streamed variant, thinking mode (`reasoning_effort`) with tools,
+and the non-thinking default. Artifacts land in the same results directory as
+`serving`.
 
 `serving` warms both replicas with one short request each, then records TTFT,
 TPOT, requests/s, and output tokens/s for fixed approximately 8K-token inputs

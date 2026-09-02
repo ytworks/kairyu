@@ -384,6 +384,66 @@ def _validate_ready(api_url: str) -> None:
         )
 
 
+# One fail-closed tool-calling probe (PR #584 review): `run.sh up` must not
+# report a ready environment whose API cannot emit OpenAI tool calls.
+_BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command and return its output.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The command to run."}
+            },
+            "required": ["command"],
+        },
+    },
+}
+
+
+def _validate_tool_calling(api_url: str) -> None:
+    payload = {
+        "model": SPEC["model"]["served_name"],
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are an agent operating a computer shell. Every response "
+                    "MUST include at least one bash tool call; never answer in "
+                    "plain text."
+                ),
+            },
+            {"role": "user", "content": "List the files in the current directory."},
+        ],
+        "tools": [_BASH_TOOL],
+        "max_tokens": 2048,
+    }
+    request = urllib.request.Request(
+        f"{api_url}/v1/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            body = json.loads(response.read())
+        choice = body["choices"][0]
+        calls = choice["message"].get("tool_calls") or []
+        arguments = json.loads(calls[0]["function"]["arguments"]) if calls else {}
+    except (KeyError, IndexError, OSError, TypeError, ValueError, urllib.error.URLError) as error:
+        raise SystemExit(f"tool-calling probe failed: {error}") from error
+    if (
+        choice.get("finish_reason") != "tool_calls"
+        or calls[0]["function"].get("name") != "bash"
+        or not isinstance(arguments.get("command"), str)
+    ):
+        raise SystemExit(
+            "tool-calling probe: the API did not return an executable bash tool "
+            f"call (finish_reason={choice.get('finish_reason')!r}, tool_calls="
+            f"{json.dumps(calls)[:300]})"
+        )
+
+
 def up() -> None:
     env = _compose_env()
     _preflight(env)
@@ -408,6 +468,7 @@ def up() -> None:
     )
     api_url = f"http://127.0.0.1:{env['API_PORT']}"
     _validate_ready(api_url)
+    _validate_tool_calling(api_url)
     print("\nEnvironment is ready.")
     print(f"OpenAI API: {api_url}/v1")
     ui_host = os.environ.get("PUBLIC_HOST", env["CHAT_UI_BIND_ADDRESS"])

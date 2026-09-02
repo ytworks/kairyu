@@ -18,7 +18,11 @@ context, FP8 KV cache, FP16 Gated-DeltaNet state, prefix caching, chunked
 prefill, FlashInfer autotuning, piecewise CUDA Graphs, MTP off, and the same
 adapted chat template mounted from that example). Ordinary requests default to
 direct answers; an explicit `reasoning_effort` enables Qwen's thinking mode at
-the fixed low effort level, as in the single-GPU example.
+the fixed low effort level, as in the single-GPU example. The replicas also
+pass `--default-chat-template-kwargs '{"enable_thinking": false}'` so vLLM's
+`qwen3` reasoning parser shares the template's default: without it a direct
+answer (which contains no `</think>`) is filed as `reasoning_content` and
+`content` comes back empty. `reasoning_effort` still switches thinking on.
 
 ## How requests are spread over the replicas
 
@@ -51,7 +55,9 @@ its GPU's NUMA-local CPUs, prepares bind-backed storage below
 `/mnt/nvme/kairyu`, pulls the digest-pinned official vLLM release if needed,
 reuses the single-GPU example's attested checkpoint download (or downloads and
 hashes it), builds Kairyu, waits for all ten services, checks that Kairyu
-reports exactly one public model with eight healthy replicas, and prints:
+reports exactly one public model with eight healthy replicas, proves one live
+bash tool call round-trip (the environment is not "ready" if `tool_calls`
+comes back null), and prints:
 
 ```text
 OpenAI API: http://127.0.0.1:8004/v1
@@ -71,9 +77,14 @@ cache per replica, and the placement log live below
 ```sh
 ./verify.sh list
 ./verify.sh serving
+./verify.sh tool-calling
 ```
 
-`serving` warms every replica with one short request, then records TTFT,
+`tool-calling` gates the OpenAI agent contract (auto-choice `bash` tool call
+fanned across all eight replicas, the `role: "tool"` follow-up turn, the
+streamed variant, thinking mode with tools, and the non-thinking default);
+vLLM's `qwen3_coder` tool parser produces the calls and Kairyu normalizes
+them. `serving` warms every replica with one short request, then records TTFT,
 TPOT, requests/s, and output tokens/s for fixed approximately 8K-token inputs
 and exactly 256 generated tokens at concurrency 1, 8, 16, 32, and 64 (64
 requests per row). Each row's prompts carry a row-unique prefix first, so

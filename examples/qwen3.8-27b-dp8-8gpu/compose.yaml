@@ -63,6 +63,12 @@ x-qwen: &qwen
     - /etc/kairyu/qwen3.8-chat.jinja
     - --reasoning-parser
     - qwen3
+    # The Kairyu-owned template already renders non-thinking prompts unless
+    # reasoning_effort is set; this tells vLLM's qwen3 reasoning parser the
+    # same default, otherwise a direct answer (no </think>) is misfiled as
+    # reasoning_content and content comes back empty.
+    - --default-chat-template-kwargs
+    - '{"enable_thinking": false}'
     - --enable-auto-tool-choice
     - --tool-call-parser
     - qwen3_coder

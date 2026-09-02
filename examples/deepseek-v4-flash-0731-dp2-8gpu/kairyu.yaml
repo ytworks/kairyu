@@ -24,10 +24,13 @@ pools:
           # replica slot for a day (issue #495).
           timeout_s: 1800
           upstream: vllm
-          # Kairyu renders the official DeepSeek-V4 prompt and sends it
-          # pre-rendered to vLLM /completions (identity template at vLLM).
-          allow_templated_chat_passthrough: true
-          chat_tokenizer: /models/deepseek-v4-flash-0731
+          # vLLM owns the prompt: it renders chat with the checkpoint's own
+          # encoder (tokenizer-mode deepseek_v4), so Kairyu forwards messages,
+          # tools, tool_choice, parallel_tool_calls, and reasoning_effort to
+          # /chat/completions and normalizes the parsed tool calls (the same
+          # path the Qwen examples use).
+          capabilities:
+            allow_chat_template_kwargs: [thinking, enable_thinking]
           model_revision: 9e165c30e2704aec5d9d593cce3eebd58bbef1cb
           max_model_len: 1048576
           quantization_format: mixed-fp4-fp8
@@ -56,8 +59,8 @@ pools:
     # verify.sh reads it to prove the per-row distribution.
     placement_log_path: /var/lib/kairyu/placement/deepseek-v4-flash-0731.jsonl
 
-# The official DeepSeek-V4 text-chat encoding, owned by Kairyu (shared with
-# the single-model eight-GPU example). Ordinary requests default to direct
-# chat; an explicit reasoning_effort selects thinking mode.
-chat_templates:
-  deepseek-v4-flash-0731: /etc/kairyu/deepseek-v4-0731.jinja
+# vLLM renders the checkpoint's own chat encoding (including DSML tools) and
+# parses tool calls, so Kairyu uses its legacy chat path here, exactly as in
+# the Qwen examples. Ordinary requests default to direct chat; an explicit
+# reasoning_effort selects thinking mode (vLLM maps it to enable_thinking).
+legacy_chat_models: [deepseek-v4-flash-0731]

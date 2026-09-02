@@ -49,10 +49,16 @@ x-deepseek: &deepseek
     - deepseek_v4
     - --reasoning-parser
     - deepseek_v4
-    # Kairyu owns the official DeepSeek-V4 prompt encoding and sends the
-    # pre-rendered prompt to /completions; vLLM only sees the identity template.
-    - --chat-template
-    - /etc/kairyu/identity-chat.jinja
+    # vLLM renders chat with the checkpoint's own encoder (tokenizer-mode
+    # deepseek_v4) and parses DSML tool calls into OpenAI tool_calls; without
+    # --tool-call-parser the markup leaks into message.content and tool-driven
+    # agents fail (PR #584 review). Thinking defaults off to keep the
+    # direct-chat contract; an explicit reasoning_effort re-enables it.
+    - --enable-auto-tool-choice
+    - --tool-call-parser
+    - deepseek_v4
+    - --default-chat-template-kwargs
+    - '{"thinking": false, "enable_thinking": false}'
     - --enable-prefix-caching
     - --gpu-memory-utilization
     - "0.95"
@@ -78,7 +84,6 @@ services:
       - type: bind
         source: ${DEEPSEEK_CACHE_0_PATH}
         target: /root/.cache
-      - ../deepseek-v4-flash-0731-8gpu/identity-chat.jinja:/etc/kairyu/identity-chat.jinja:ro
     deploy:
       resources:
         reservations:
@@ -95,7 +100,6 @@ services:
       - type: bind
         source: ${DEEPSEEK_CACHE_1_PATH}
         target: /root/.cache
-      - ../deepseek-v4-flash-0731-8gpu/identity-chat.jinja:/etc/kairyu/identity-chat.jinja:ro
     deploy:
       resources:
         reservations:
@@ -113,16 +117,12 @@ services:
     environment:
       KAIRYU_CONTAINER_IMAGE_DIGEST: ${KAIRYU_IMAGE_ID:-local-build}
     volumes:
-      # Read-only checkpoint for the chat_tokenizer that renders the official
-      # DeepSeek-V4 prompt encoding in Kairyu.
-      - deepseek-models:/models:ro
       # Per-placement JSONL evidence (replica id + reason per request) that
       # verify.sh reads to prove the even spread; session ids are hashed.
       - type: bind
         source: ${PLACEMENT_LOG_PATH}
         target: /var/lib/kairyu/placement
       - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
-      - ../deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
     depends_on:
       deepseek-0: {condition: service_healthy}
       deepseek-1: {condition: service_healthy}

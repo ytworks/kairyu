@@ -131,9 +131,10 @@ The binding example contract is `example-layered-orchestration.md`.
 
 ## FN-D9 — Replica-pool scale-out examples (amendment, 2026-09-01)
 
-Status: accepted; implemented; GPU-verified 2026-09-01 (placement gates green at
-c8–c64; runs `20260901T133331Z` Qwen, `20260901T140112Z` DeepSeek — see the
-examples' `MEASUREMENTS.md`).
+Status: accepted; implemented; GPU-verified 2026-09-01/02 (placement gates
+green at c8–c64; runs `20260901T133331Z` Qwen, `20260902T005136Z` DeepSeek
+after the tool-calling amendment below; `verify.sh tool-calling` green on both
+— see the examples' `MEASUREMENTS.md`).
 
 This amends the FN-D6/FN-D8 example surface: `examples/` gains two
 environments in which Kairyu L2 does **no orchestration** — it is only the
@@ -157,3 +158,26 @@ reported only (least-outstanding ties resolve to the lowest replica id).
 Checkpoints, templates, images, and L1 flags are shared by reference with
 the sibling examples; no product code changed. Existing FN-D7 gates are not
 weakened: these are vLLM-backed L1 deployments, not native-engine claims.
+
+**Tool-calling amendment (2026-09-02, PR #584 review).** The served DP2
+example returned `tool_calls: null` (DSML markup leaked into `content`), so
+the official SWE-bench Pro mini-swe-agent failed every turn — a served example
+that cannot drive tool agents does not satisfy this decision. The
+Kairyu-rendered `/completions` passthrough shape is abandoned for these
+examples: Kairyu never forwards `tools` on that path, and Kairyu's DSML parser
+accepts only a whole-completion DSML block, which the prose-plus-call agent
+format never satisfies. Both replica examples now use the Qwen examples'
+layering — vLLM owns the chat rendering (for DeepSeek via the checkpoint's own
+`deepseek_v4` encoder, which also renders DSML tools and merges `tool` turns)
+plus `--enable-auto-tool-choice --tool-call-parser {qwen3_coder|deepseek_v4}`,
+and Kairyu (`legacy_chat_models`) forwards tools to `/chat/completions` and
+normalizes the parsed calls. Thinking defaults off in both via
+`--default-chat-template-kwargs` (`thinking`/`enable_thinking: false`);
+`reasoning_effort` re-enables it. For Qwen the flag is required even though
+the Kairyu-owned template already renders non-thinking prompts: vLLM's `qwen3`
+reasoning parser otherwise assumes thinking and files a plain answer (no
+`</think>`) as `reasoning_content`, leaving `content` empty — caught by the
+gate's non-thinking case on the first GPU run. The
+example contract now includes fail-closed tool-calling evidence: a readiness
+probe in `run.sh up` and the `verify.sh tool-calling` gate (auto call on every
+replica, tool-result turn, streaming, thinking, non-thinking default).

@@ -20,14 +20,12 @@ SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
 REPLICAS = int(SPEC["allocation"]["replicas"])
 TENSOR_PARALLEL = int(SPEC["allocation"]["tensor_parallel_size"])
 SERVED_MODEL = SPEC["model"]["served_name"]
-# Files whose bytes define the served configuration (both DeepSeek templates
-# are shared with the single-model eight-GPU example and mounted from there).
+# Files whose bytes define the served configuration (vLLM renders chat with
+# the checkpoint's own encoder, so no example-owned template is involved).
 SERVED_CONFIG_FILES = (
     HERE / "example.json",
     HERE / "compose.yaml",
     HERE / "kairyu.yaml",
-    HERE / "../deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja",
-    HERE / "../deepseek-v4-flash-0731-8gpu/identity-chat.jinja",
 )
 
 
@@ -338,6 +336,255 @@ def serving(run_dir: Path) -> int:
     return 1 if failures else 0
 
 
+# --- Tool-calling gate (PR #584 review: a served example must emit OpenAI
+# tool calls, or tool-driven agents such as SWE-bench Pro's mini-swe-agent
+# fail every turn). The request shape mirrors that agent: an auto-choice
+# `bash` function tool on unary /chat/completions.
+_BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command and return its output.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The command to run."}
+            },
+            "required": ["command"],
+        },
+    },
+}
+_TOOL_SYSTEM = (
+    "You are an agent operating a computer shell. Every response MUST include "
+    "at least one bash tool call; never answer in plain text."
+)
+_TOOL_USER = "List the files in the current directory."
+
+
+def _validate_tool_call_message(message: dict, finish_reason: object) -> str | None:
+    """Reject responses a bash-tool agent loop cannot execute (None = valid)."""
+
+    if finish_reason != "tool_calls":
+        return f"finish_reason is {finish_reason!r}, expected 'tool_calls'"
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list) or not calls:
+        return f"message.tool_calls is {calls!r}"
+    for call in calls:
+        function = call.get("function") if isinstance(call, dict) else None
+        if not isinstance(function, dict) or function.get("name") != "bash":
+            return f"unexpected tool call {call!r}"
+        try:
+            arguments = json.loads(function.get("arguments") or "")
+        except ValueError:
+            return f"tool call arguments are not JSON: {function.get('arguments')!r}"
+        if not isinstance(arguments.get("command"), str) or not arguments["command"]:
+            return f"tool call arguments lack a command string: {arguments!r}"
+    return None
+
+
+def _reassemble_stream_tool_calls(sse_body: str) -> tuple[dict, object]:
+    """Fold SSE chat chunks into (message-like dict, final finish_reason)."""
+
+    calls: dict[int, dict[str, list[str]]] = {}
+    finish_reason: object = None
+    for line in sse_body.splitlines():
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        chunk = json.loads(line[len("data: "):])
+        for choice in chunk.get("choices", ()):
+            if choice.get("finish_reason") is not None:
+                finish_reason = choice["finish_reason"]
+            for delta_call in (choice.get("delta") or {}).get("tool_calls") or ():
+                index = delta_call.get("index")
+                if not isinstance(index, int):
+                    return {"tool_calls": None}, "missing tool_call delta index"
+                slot = calls.setdefault(index, {"name": [], "arguments": []})
+                function = delta_call.get("function") or {}
+                if function.get("name"):
+                    slot["name"].append(function["name"])
+                if function.get("arguments"):
+                    slot["arguments"].append(function["arguments"])
+    message = {
+        "tool_calls": [
+            {
+                "function": {
+                    "name": "".join(slot["name"]),
+                    "arguments": "".join(slot["arguments"]),
+                }
+            }
+            for _, slot in sorted(calls.items())
+        ]
+        or None
+    }
+    return message, finish_reason
+
+
+def _post_chat(payload: dict, *, timeout_s: float = 600.0) -> tuple[int, object]:
+    import urllib.error
+    import urllib.request
+
+    url = (
+        f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}"
+        "/v1/chat/completions"
+    )
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            body = response.read().decode("utf-8")
+            status = response.status
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode("utf-8", "replace")
+    if payload.get("stream"):
+        return status, body
+    return status, json.loads(body)
+
+
+def _tool_call_request(**overrides) -> dict:
+    payload = {
+        "model": SERVED_MODEL,
+        "messages": [
+            {"role": "system", "content": _TOOL_SYSTEM},
+            {"role": "user", "content": _TOOL_USER},
+        ],
+        "tools": [_BASH_TOOL],
+        "parallel_tool_calls": True,
+        "max_tokens": 8192,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def tool_calling(run_dir: Path) -> int:
+    import concurrent.futures
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    report: dict = {"schema_version": 1, "cases": {}}
+    failures: list[str] = []
+
+    def record(name: str, error: str | None, detail: object = None) -> None:
+        report["cases"][name] = {"passed": error is None, "error": error, "detail": detail}
+        if error is not None:
+            failures.append(f"{name}: {error}")
+
+    # Case 1 (mini-swe-agent shape) fanned to 2x replicas concurrently, so the
+    # placement log proves every replica serves tool calls, not just one.
+    offset = _placement_offset(PLACEMENT_LOG)
+    fan = 2 * REPLICAS
+    with concurrent.futures.ThreadPoolExecutor(max_workers=fan) as pool:
+        results = list(pool.map(lambda _: _post_chat(_tool_call_request()), range(fan)))
+    first_message: dict | None = None
+    error = None
+    for status, body in results:
+        if status != 200 or not isinstance(body, dict):
+            error = f"HTTP {status}: {str(body)[:300]}"
+            break
+        choice = body["choices"][0]
+        case_error = _validate_tool_call_message(choice["message"], choice["finish_reason"])
+        if case_error is not None:
+            error = case_error
+            break
+        first_message = choice["message"]
+    record(f"auto_tool_call_x{fan}", error)
+    counts = _placement_counts(PLACEMENT_LOG, offset)
+    record(
+        "all_replicas_served_tool_calls",
+        None if len(counts) == REPLICAS else f"placements {dict(counts)}",
+        dict(sorted(counts.items())),
+    )
+
+    # Case 2: the agent loop's second turn (assistant tool_calls + tool result).
+    if first_message is not None:
+        call = first_message["tool_calls"][0]
+        call_id = call.get("id") or "call_0"
+        status, body = _post_chat(
+            _tool_call_request(
+                messages=[
+                    {"role": "system", "content": _TOOL_SYSTEM},
+                    {"role": "user", "content": _TOOL_USER},
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "type": "function",
+                                "function": dict(call["function"]),
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": "README.md\nsrc\ntests\n",
+                    },
+                ]
+            )
+        )
+        if status != 200 or not isinstance(body, dict):
+            record("tool_result_turn", f"HTTP {status}: {str(body)[:300]}")
+        else:
+            choice = body["choices"][0]
+            message = choice["message"]
+            ok = bool(message.get("content")) or bool(message.get("tool_calls"))
+            record(
+                "tool_result_turn",
+                None if ok else f"empty follow-up: {json.dumps(choice)[:300]}",
+            )
+    else:
+        record("tool_result_turn", "skipped: no tool call from case 1")
+
+    # Case 3: streaming deltas carry the same call.
+    status, body = _post_chat(_tool_call_request(stream=True))
+    if status != 200 or not isinstance(body, str):
+        record("streamed_tool_call", f"HTTP {status}: {str(body)[:300]}")
+    else:
+        message, finish_reason = _reassemble_stream_tool_calls(body)
+        record("streamed_tool_call", _validate_tool_call_message(message, finish_reason))
+
+    # Case 4: explicit reasoning_effort must think AND still emit the call.
+    status, body = _post_chat(_tool_call_request(reasoning_effort="high"), timeout_s=1200.0)
+    if status != 200 or not isinstance(body, dict):
+        record("thinking_tool_call", f"HTTP {status}: {str(body)[:300]}")
+    else:
+        choice = body["choices"][0]
+        error = _validate_tool_call_message(choice["message"], choice["finish_reason"])
+        if error is None and not choice["message"].get("reasoning_content"):
+            error = "reasoning_content is empty under reasoning_effort=high"
+        record("thinking_tool_call", error)
+
+    # Case 5: ordinary chat stays non-thinking by default.
+    status, body = _post_chat(
+        {
+            "model": SERVED_MODEL,
+            "messages": [{"role": "user", "content": "Reply with the single word OK."}],
+            "max_tokens": 512,
+        }
+    )
+    if status != 200 or not isinstance(body, dict):
+        record("default_direct_chat", f"HTTP {status}: {str(body)[:300]}")
+    else:
+        message = body["choices"][0]["message"]
+        error = None
+        if not message.get("content"):
+            error = "empty content"
+        elif message.get("reasoning_content"):
+            error = "reasoning_content present without reasoning_effort"
+        record("default_direct_chat", error)
+
+    report["passed"] = not failures
+    (run_dir / "tool-calling.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    for line in failures:
+        print(f"tool-calling: {line}", file=sys.stderr)
+    print(f"tool-calling: {'PASS' if not failures else 'FAIL'} ({len(report['cases'])} cases)")
+    return 1 if failures else 0
+
+
 def _served_config_sha256() -> str:
     digest = hashlib.sha256()
     for path in SERVED_CONFIG_FILES:
@@ -350,14 +597,18 @@ def _served_config_sha256() -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("verification", choices=("serving", "list"))
+    parser.add_argument("verification", choices=("serving", "tool-calling", "list"))
     parser.add_argument("--run-id")
     parser.add_argument("--no-start", action="store_true")
     args = parser.parse_args()
     if args.verification == "list":
         print(
-            "serving  fixed 8K-input/256-output TTFT and throughput at c=1,8,16,32,64 "
+            "serving       fixed 8K-input/256-output TTFT and throughput at c=1,8,16,32,64 "
             "plus the per-row replica placement gate"
+        )
+        print(
+            "tool-calling  OpenAI bash-tool agent contract (auto call, tool-result turn, "
+            "streaming, thinking, non-thinking default) on every replica"
         )
         return
 
@@ -375,13 +626,14 @@ def main() -> None:
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    target = serving if args.verification == "serving" else tool_calling
     try:
-        code = serving(run_dir)
+        code = target(run_dir)
     except Exception as error:
-        print(f"serving failed: {error}", file=sys.stderr)
+        print(f"{args.verification} failed: {error}", file=sys.stderr)
         code = 1
     manifest["completed_at"] = datetime.now(UTC).isoformat()
-    manifest["exit_codes"] = {"serving": code}
+    manifest["exit_codes"] = {args.verification: code}
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

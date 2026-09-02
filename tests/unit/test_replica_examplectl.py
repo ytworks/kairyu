@@ -84,15 +84,28 @@ def test_allocation_compose_and_pool_agree(environment: str) -> None:
         hosts.append(replica.options["base_url"].removeprefix("http://").split(":")[0])
     assert hosts == l1
     assert deployment.server.max_concurrency == replicas * spec["vllm"]["max_num_seqs"]
-    if prefix == "qwen":
-        assert deployment.legacy_chat_models == frozenset({model})
-        assert deployment.chat_templates == {}
-    else:
-        assert deployment.legacy_chat_models == frozenset()
-        assert set(deployment.chat_templates) == {model}
-        assert pool.replicas[0].options["allow_templated_chat_passthrough"] is True
+    # Both examples use the legacy chat path: vLLM owns the chat template and
+    # the tool-call parser, so Kairyu forwards tools to /chat/completions.
+    # The passthrough-to-/completions shape drops tools entirely (PR #584).
+    assert deployment.legacy_chat_models == frozenset({model})
+    assert deployment.chat_templates == {}
+    assert "allow_templated_chat_passthrough" not in pool.replicas[0].options
+    if prefix == "deepseek":
         expert_parallel = pool.replicas[0].options["expert_parallel_size"]
         assert expert_parallel == allocation["expert_parallel_size"]
+
+    # Without vLLM's tool parser the DSML/tool markup leaks into
+    # message.content and tool_calls stays null — the reviewed live failure.
+    # Without the non-thinking default kwargs the reasoning parser files a
+    # plain answer (no </think>) as reasoning_content and content is empty.
+    parser = {"qwen": "qwen3_coder", "deepseek": "deepseek_v4"}[prefix]
+    thinking_key = {"qwen": "enable_thinking", "deepseek": "thinking"}[prefix]
+    for name in l1:
+        command = services[name]["command"]
+        assert "--enable-auto-tool-choice" in command
+        assert command[command.index("--tool-call-parser") + 1] == parser
+        default_kwargs = command[command.index("--default-chat-template-kwargs") + 1]
+        assert json.loads(default_kwargs)[thinking_key] is False
 
 
 def _write_log(path: Path, rows: list[dict]) -> None:
@@ -274,3 +287,50 @@ def test_placement_gate_rejects_extra_requests_that_mask_skew(
     assert report["placements"] == sum(benchmark_counts) + sum(unrelated_counts)
     assert report["largest_share_of_mean"] == 2.0
     assert report["passed"] is False
+
+
+def test_tool_call_message_validator_rejects_unusable_responses(tmp_path: Path) -> None:
+    module = _load(
+        ROOT / "examples/deepseek-v4-flash-0731-dp2-8gpu/verification.py",
+        "deepseek_dp2_tool_gate",
+    )
+    good_call = {"function": {"name": "bash", "arguments": json.dumps({"command": "ls"})}}
+    assert module._validate_tool_call_message({"tool_calls": [good_call]}, "tool_calls") is None
+    # The reviewed live failure: markup in content, tool_calls null, stop.
+    assert module._validate_tool_call_message({"tool_calls": None}, "stop") is not None
+    assert module._validate_tool_call_message({"tool_calls": []}, "tool_calls") is not None
+    assert (
+        module._validate_tool_call_message(
+            {"tool_calls": [{"function": {"name": "python", "arguments": "{}"}}]},
+            "tool_calls",
+        )
+        is not None
+    )
+    assert (
+        module._validate_tool_call_message(
+            {"tool_calls": [{"function": {"name": "bash", "arguments": "{not json"}}]},
+            "tool_calls",
+        )
+        is not None
+    )
+    assert (
+        module._validate_tool_call_message(
+            {"tool_calls": [{"function": {"name": "bash", "arguments": "{}"}}]},
+            "tool_calls",
+        )
+        is not None
+    )
+
+    sse = "\n".join(
+        [
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"bash"}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            '"function":{"arguments":"{\\"command\\""}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            '"function":{"arguments":": \\"ls\\"}"}}]}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+            "data: [DONE]",
+        ]
+    )
+    message, finish_reason = module._reassemble_stream_tool_calls(sse)
+    assert module._validate_tool_call_message(message, finish_reason) is None
