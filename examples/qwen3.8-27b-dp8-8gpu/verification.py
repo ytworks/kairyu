@@ -529,11 +529,9 @@ def tool_calling(run_dir: Path) -> int:
             record("tool_result_turn", f"HTTP {status}: {str(body)[:300]}")
         else:
             choice = body["choices"][0]
-            message = choice["message"]
-            ok = bool(message.get("content")) or bool(message.get("tool_calls"))
             record(
                 "tool_result_turn",
-                None if ok else f"empty follow-up: {json.dumps(choice)[:300]}",
+                _validate_tool_call_message(choice["message"], choice["finish_reason"]),
             )
     else:
         record("tool_result_turn", "skipped: no tool call from case 1")

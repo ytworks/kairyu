@@ -334,3 +334,68 @@ def test_tool_call_message_validator_rejects_unusable_responses(tmp_path: Path) 
     )
     message, finish_reason = module._reassemble_stream_tool_calls(sse)
     assert module._validate_tool_call_message(message, finish_reason) is None
+
+
+@pytest.mark.parametrize("environment", sorted(EXAMPLES))
+def test_tool_result_turn_requires_a_parsed_tool_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment: str,
+) -> None:
+    module = _load(
+        ROOT / "examples" / environment / "verification.py",
+        f"{environment}_tool_result_gate",
+    )
+    good_call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "bash", "arguments": json.dumps({"command": "ls"})},
+    }
+    good_choice = {
+        "message": {"tool_calls": [good_call]},
+        "finish_reason": "tool_calls",
+    }
+    leaked_markup_choice = {
+        "message": {
+            "content": "<tool_calls><invoke name='bash'>ls</invoke></tool_calls>",
+            "tool_calls": None,
+        },
+        "finish_reason": "stop",
+    }
+    streamed_call = "\n".join(
+        [
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+            '"function":{"name":"bash","arguments":"{\\\"command\\\":\\\"ls\\\"}"}}]}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+            "data: [DONE]",
+        ]
+    )
+    thinking_choice = {
+        "message": {"tool_calls": [good_call], "reasoning_content": "I should list files."},
+        "finish_reason": "tool_calls",
+    }
+    responses = iter(
+        [(200, {"choices": [good_choice]})] * (2 * module.REPLICAS)
+        + [
+            (200, {"choices": [leaked_markup_choice]}),
+            (200, streamed_call),
+            (200, {"choices": [thinking_choice]}),
+            (200, {"choices": [{"message": {"content": "OK"}}]}),
+        ]
+    )
+    monkeypatch.setattr(module, "_post_chat", lambda *args, **kwargs: next(responses))
+    monkeypatch.setattr(module, "_placement_offset", lambda path: 0)
+    monkeypatch.setattr(
+        module,
+        "_placement_counts",
+        lambda path, offset: {str(replica): 2 for replica in range(module.REPLICAS)},
+    )
+
+    assert module.tool_calling(tmp_path) == 1
+    report = json.loads((tmp_path / "tool-calling.json").read_text())
+    assert report["passed"] is False
+    assert report["cases"]["tool_result_turn"] == {
+        "detail": None,
+        "error": "finish_reason is 'stop', expected 'tool_calls'",
+        "passed": False,
+    }
