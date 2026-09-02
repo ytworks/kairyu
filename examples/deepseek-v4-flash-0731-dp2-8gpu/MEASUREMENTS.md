@@ -89,9 +89,10 @@ resolve rate.
 ## Raw evidence identity
 
 Artifacts are below
-`/mnt/nvme/kairyu/model-volumes/deepseek-v4-flash-0731-dp2-8gpu/verification-results/20260901T140112Z/`
+`/mnt/nvme/kairyu/model-volumes/deepseek-v4-flash-0731-dp2-8gpu/verification-results/20260902T005136Z/`
 on the measurement host (`run.json`, per-row `*-serving.json`,
-`placement.json`, and logs).
+`placement.json`, and logs); the tool-calling gate is under
+`…/20260902T005122Z/tool-calling.json`.
 
 | Artifact | SHA-256 |
 |---|---|
