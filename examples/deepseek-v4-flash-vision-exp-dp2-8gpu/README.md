@@ -168,8 +168,11 @@ explicitly through `python -m evals`.
 
 Override ports with `API_PORT` and `CHAT_UI_PORT`. Override images with
 `DEEPSEEK_VLLM_IMAGE` or `OPEN_WEBUI_IMAGE`; a non-default vLLM override must
-already exist locally. Dotenv files are intentionally ignored and credentials
-are not written into evidence.
+already exist locally and carry the image ID pinned in `example.json` /
+`kairyu.yaml` (an alias tag of the same build), because the pool reports that
+ID as `container_image_digest` evidence — `run.sh up` refuses any other
+image. Dotenv files are intentionally ignored and credentials are not
+written into evidence.
 
 The Chat UI has no login, so bind it to loopback (the default) or to a
 network you trust; a deliberately public UI needs TLS and a firewall/reverse
