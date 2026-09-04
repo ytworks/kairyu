@@ -696,13 +696,20 @@ def _image_request(case: int, *, max_tokens: int) -> dict:
 
 
 def _validate_image_message(message: object) -> str | None:
-    """Reject image responses with no visible answer (None = valid)."""
+    """Reject image responses that do not name the probe colour (None = valid).
+
+    The probe image is solid red, so a correct answer contains "red". Checking
+    for non-empty content alone let batched MTP + prefix-caching corruption
+    ("ductduct...", vllm-project/vllm#53912) pass this gate once.
+    """
 
     if not isinstance(message, dict):
         return f"message is {message!r}"
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
         return f"empty content for an image request ({message!r})"
+    if "red" not in content.lower():
+        return f"image answer does not name the probe colour: {content.strip()[:80]!r}"
     return None
 
 

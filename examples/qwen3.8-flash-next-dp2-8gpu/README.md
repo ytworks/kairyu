@@ -6,7 +6,7 @@ identical four-GPU vLLM replicas with one command:
 ```text
 Open WebUI -> Kairyu L3 (:8007; model qwen3.8-flash-next)
                 -> Kairyu L2 replica pool (placement only, no orchestration)
-                    -> 2 x vLLM L1, Qwen3.8-Flash-Next-FP8 TP4 + MTP
+                    -> 2 x vLLM L1, Qwen3.8-Flash-Next-FP8 TP4
                        (replica 0 on GPU 0-3, replica 1 on GPU 4-7)
 ```
 
@@ -20,9 +20,25 @@ sequence capacity of one TP4 replica — the same layout as the
 The L1 command is the
 [official vLLM recipe](https://docs.vllm.ai/projects/recipes/en/latest/Qwen/Qwen3.8-Flash-Next.html)'s
 verified `rtx_pro_6000_4x` layout for the FP8 checkpoint (TP4, 16
-sequences, 8K batch tokens, 0.95 memory utilization, prefix caching,
-FlashInfer autotune off, MTP k=3, `qwen3_xml` tool parser and `qwen3`
-reasoning parser) at the checkpoint's native 262,144-token context. TP8 is
+sequences, 8K batch tokens, prefix caching,
+FlashInfer autotune off, `qwen3_xml` tool parser and `qwen3` reasoning
+parser) at the checkpoint's native 262,144-token context, **without the
+recipe's MTP k=3 speculative decoding**: on the pinned vLLM revision, prefix
+caching and MTP together silently corrupt about 5% of answers whenever
+requests are batched (upstream
+[vllm-project/vllm#53912](https://github.com/vllm-project/vllm/issues/53912);
+reproduced here as `ductduct…`/`Register Register…` output in 13 of 274
+greedy requests at 2-12 concurrent, 0 of 1,508 with either feature off).
+Prefix caching is the one kept because Kairyu's prefix-aware placement and
+multi-turn/agent traffic depend on it (8K-context follow-up TTFT 194 ms vs
+1,340 ms with caching off); the cost is single-stream decode at 104 instead
+of 175 tokens/s. Re-enable MTP only after upstream fixes the interaction and
+the `verify.sh vision` batch check stays clean. `--kv-cache-memory`
+(43.16 GiB, the value vLLM derives for the recipe's 0.95 utilization on a
+warm start) replaces the utilization-based sizing: vLLM sizes the cache from
+a start-up memory profile, and on a cold torch.compile cache that profile
+includes about 35 GiB of compile scratch, so a first boot otherwise gets
+741K KV tokens per replica instead of 3.45M. TP8 is
 incompatible with the 128-wide FP8 weight blocks and pipeline parallel is
 unsupported, so two TP4 replicas are the only eight-GPU split. The
 checkpoint's preprocessor accepts 65,536 - 16,777,216 px per image with no

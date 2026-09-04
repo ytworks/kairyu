@@ -21,11 +21,20 @@ x-qwen: &qwen
     TILELANG_CACHE_DIR: /root/.cache/tilelang
     TILELANG_TMP_DIR: /root/.cache/tilelang/tmp
   # The official vLLM recipe's verified rtx_pro_6000_4x layout for the FP8
-  # checkpoint (TP4, 16 sequences, 8K batch tokens, 0.95 memory utilization,
-  # prefix caching, FlashInfer autotune off, MTP k=3, qwen3_xml/qwen3 parsers)
-  # at the checkpoint's native 256K context. TP8 is incompatible with the
-  # 128-wide FP8 blocks and pipeline parallel is unsupported, so 2 x TP4 is
-  # the only eight-GPU split.
+  # checkpoint (TP4, 16 sequences, 8K batch tokens, prefix caching,
+  # FlashInfer autotune off, qwen3_xml/qwen3 parsers) at the
+  # checkpoint's native 256K context, minus the recipe's MTP k=3: on this
+  # vLLM revision prefix caching + MTP silently corrupts ~5% of batched
+  # answers on hybrid GDN models (upstream vllm-project/vllm#53912, reproduced
+  # here 13/274 at 2-12 concurrent; 0/1508 with either one off). Prefix reuse
+  # is kept because Kairyu's prefix-aware placement and multi-turn/agent
+  # traffic depend on it. --kv-cache-memory pins the KV budget to the value
+  # vLLM derives for the recipe's 0.95 utilization on a warm start (43.16
+  # GiB, 3.45M tokens per replica) and supersedes the utilization-based
+  # sizing: without it a cold torch.compile cache inflates the start-up
+  # memory profile by ~35 GiB and the replica boots with 741K tokens. TP8 is
+  # incompatible with the 128-wide FP8 blocks and pipeline parallel is
+  # unsupported, so 2 x TP4 is the only eight-GPU split.
   command:
     - /models/qwen3.8-flash-next
     - --served-model-name
@@ -34,8 +43,6 @@ x-qwen: &qwen
     - "262144"
     - --tensor-parallel-size
     - "4"
-    - --speculative-config
-    - '{"method":"mtp","num_speculative_tokens":3}'
     - --reasoning-parser
     - qwen3
     # vLLM renders chat with the example-local template (the official one
@@ -57,6 +64,8 @@ x-qwen: &qwen
     - --no-enable-flashinfer-autotune
     - --gpu-memory-utilization
     - "0.95"
+    - --kv-cache-memory
+    - "46346979738"
     - --max-num-seqs
     - "16"
     - --max-num-batched-tokens

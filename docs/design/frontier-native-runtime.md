@@ -195,8 +195,17 @@ reject TP8 and pipeline parallel is unsupported):
   verification. Effort levels `low/high/max` are the encoder's own vocabulary.
 - `qwen3.8-flash-next-dp2-8gpu`: Qwen3.8-Flash-Next-FP8 (revision `236dfdf2`)
   with the official recipe's verified `rtx_pro_6000_4x` layout (16 sequences,
-  8K batch tokens, 0.95 memory, MTP k=3, `qwen3_xml`/`qwen3` parsers), 256K
-  context. Kairyu L3 normalizes the wire vocabulary `medium→high`,
+  8K batch tokens, 0.95 memory, prefix caching, `qwen3_xml`/`qwen3` parsers),
+  256K context, **without the recipe's MTP k=3**: on `vllm@27a94d1c` prefix
+  caching + MTP corrupts batched answers on hybrid GDN models
+  (vllm-project/vllm#53912; reproduced 13/274 at 2-12 concurrent, 0/1,508
+  with either feature off, 63.8% with `--no-async-scheduling`). Prefix
+  caching stays because Kairyu's prefix-aware placement and multi-turn
+  traffic depend on it; the price is single-stream decode 104 vs 175 tok/s.
+  The KV budget is pinned (`--kv-cache-memory` 43.16 GiB, the warm-start
+  value for 0.95 utilization) because a cold torch.compile cache inflates
+  vLLM's start-up memory profile and a first boot otherwise serves 741K KV
+  tokens instead of 3.45M. Kairyu L3 normalizes the wire vocabulary `medium→high`,
   `xhigh→max`, and the official template rejects anything outside
   `low/medium/xhigh` (HTTP 400), so the example-local template aliases
   `high→medium`, `max→xhigh` at the top and is otherwise byte-identical.
@@ -215,5 +224,8 @@ official tag carries the merged support, so both share one overlay image —
 upstream's digest-pinned nightly of `vllm@27a94d1c` plus FlashInfer
 `60b49158` (#4802) with the stale AOT module cache removed — and `run.sh up`
 refuses to serve if the built image ID differs from the pinned
-`container_image_digest`. Status: implemented, unit-verified; GPU verification
-(tree hash / image ID pins, `MEASUREMENTS.md`) pending on the host.
+`container_image_digest`. The vision gate requires the answer to name the
+probe colour (a non-empty check let the corrupted `ductduct…` output pass
+once). Status: GPU-verified 2026-09-04 on 8 × RTX PRO 6000 (tree hash /
+image ID pinned; all three gates PASS for both examples; results in each
+example's `MEASUREMENTS.md`).

@@ -57,7 +57,7 @@ pools:
           expert_parallel_size: 4
           attention_data_parallel_size: 1
           dspark_enabled: true
-          container_image_digest: sha256:PENDING-FIRST-BUILD
+          container_image_digest: sha256:b47e22101829b471e8d3b0702a50ab884f58390cc2dfd50cb83aaf43ae30e9d4
       - backend: openai
         health_url: http://deepseek-1:8000/health
         options: {<<: *deepseek, base_url: http://deepseek-1:8000/v1}

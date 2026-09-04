@@ -28,7 +28,7 @@
   "model": {
     "repo": "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
     "revision": "6821d6ad3681a4b137b066b76094fa82ebd0a380",
-    "tree_sha256": "PENDING-FIRST-DOWNLOAD",
+    "tree_sha256": "7bd9e830b8400fdc3a4ac407910f82121d2e975a583c830015d84219e671f0a6",
     "slug": "deepseek-v4-flash-vision-exp",
     "served_name": "deepseek-v4-flash-vision-exp",
     "max_context_tokens": 1048576,
@@ -37,7 +37,7 @@
   },
   "vllm": {
     "image": "local/vllm-openai:sm120-27a94d1-flashinfer-60b4915",
-    "image_id": "sha256:PENDING-FIRST-BUILD",
+    "image_id": "sha256:b47e22101829b471e8d3b0702a50ab884f58390cc2dfd50cb83aaf43ae30e9d4",
     "distribution": "overlay",
     "dockerfile": "vllm-sm120.Dockerfile",
     "base_image": "vllm/vllm-openai:nightly-27a94d1ce4e3fc100c4732439ccec10f8246a804@sha256:7d5128a92db05e6d70661a18f10e40c17cd2d8fcaad9226e170a0d69f822b795",

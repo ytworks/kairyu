@@ -83,6 +83,14 @@ def test_allocation_compose_and_pool_agree(environment: str) -> None:
             for name in l1
         ]
         assert [[int(v) for v in group] for group in groups] == allocation["replica_gpu_ids"]
+    if "kv_cache_memory_bytes" in spec["vllm"]:
+        # A cold torch.compile cache inflates vLLM's start-up memory profile,
+        # so without the pinned budget a first boot serves a ~5x smaller KV
+        # cache than the sibling replica (Qwen3.8-Flash-Next: 741K vs 3.47M).
+        for name in l1:
+            command = services[name]["command"]
+            budget = command[command.index("--kv-cache-memory") + 1]
+            assert int(budget) == spec["vllm"]["kv_cache_memory_bytes"]
 
     # kairyu.yaml: one pool, one replica per compose service, even-spread knobs.
     model = allocation["model"]
