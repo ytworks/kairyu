@@ -10,6 +10,52 @@ When trimming `PROGRESS.md`, insert the trimmed entries directly below this
 header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
+
+### 2026-08-26 — [design] DTO-D15: public-output floor for chat-template final units
+- What: role-level `reasoning_continuation: chat` + `reasoning_open_tag`; the
+  empty-output re-dispatch of a final unit whose span the upstream chat
+  template opens continues the captured reasoning as a closed assistant turn
+  (`GenerationRequest.assistant_prefill` → vLLM `continue_final_message`) with
+  the reserved floor tokens. `qwen_think_answer` adopts it (floor 256 now
+  covers the `qwen_think_medium` route). Served config changed — GPU
+  re-verify and digest re-pin pending.
+- Why: 502s on `max_tokens: 8192` agent turns — medium-tier Qwen spent the
+  whole cap in `<think>` and the byte-identical retry failed the same way.
+- Refs: DTO-D15; kairyu/{dsl,engine,orchestration}; examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml
+
+### 2026-08-26 — [progress] Streamed DTO-D9 floor retry no longer 502s (delta-offset reclaim fix)
+- What: `_unit_public_output` reclaim returns cumulative-form completions
+  (`text_delta`/`text_offset` cleared); a reasoning-only delta stream left
+  `text_offset=0` behind while the reclaimed text was already published, so
+  `/v1/messages` (always streamed) failed `delta offset mismatch` → 502 after
+  the full generation. Server regression test added; floor fixture made
+  delta-native.
+- Also: the OpenAI backend now reads the upstream span under `reasoning` as
+  well as `reasoning_content` (vLLM v0.23 Qwen image); the Qwen pool's
+  reasoning had been silently dropped.
+- Refs: DTO-D9/DTO-D15; kairyu/{orchestration/conductor.py,engine/openai_backend.py}; tests/server/test_openai_api.py
+
+### 2026-08-25 — [progress] DTO-D14 GPU-verified; three defects fixed en route
+- What: both verify.sh serving gates green on the DTO-D14 config (runs
+  20260825T161729Z coding / 20260825T173343Z generic, digest 69702ab5…).
+  The runs surfaced and fixed: trace v2 rejecting list detail values (judge
+  offered labels) crashing streamed SSE; trace envelope anchored at judge
+  started_at instead of queued_at (1 ms outside-envelope races); the Qwen
+  medium preamble missing the think-close guard sentence, letting long
+  L2-wrapped contexts end inside the think span (EmptyFinalOutput).
+- Refs: PR #579; DTO-D14 (amends the 2026-08-25 [design] entry below);
+  kairyu/{entrypoints/server/protocol.py,orchestration/{trace,orchestrator}.py}
+
+### 2026-08-25 — [design] DTO-D14: Qwen medium tier; audit moves to Qwen (tiered example)
+- What: Qwen thinking roles (draft, image_description, answer_1..4, renamed
+  qwen_think_medium route) fixed at spec `high` = medium tier (L3
+  medium→high alias); example-local graded Qwen template replaces the shared
+  clamped one; Qwen budgets doubled (2048/4096); audit moved to tier1 fixed
+  medium, one 16384 cap, REQUEST-first Qwen prompt without scaffold.
+- Why: owner request to raise Qwen deliberation to medium and audit on Qwen;
+  sampling stays DTO-D8; core effort ladder untouched. Served config changed
+  — GPU re-verify and digest re-pin pending.
+- Refs: DTO-D14; examples/qwen3.8-deepseek-v4-8gpu/*; tests/unit/test_tiered_frontier_examplectl.py
 ### 2026-08-25 — [progress] Incremental Anthropic tool streaming + count_tokens (#573)
 - What: `/v1/messages` streams tool calls incrementally — per-protocol
   scanners (GENERIC/LLAMA/QWEN/DSML, commit-on-close, hold-back) shared by
