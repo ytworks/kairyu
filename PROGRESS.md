@@ -103,7 +103,7 @@ in `.claude/rules/progress-log.md`).
 
 ### 2026-09-04 — [amendment] FN-D9: vision examples GPU-verified; Qwen drops MTP k=3
 - What: both vision replica examples pinned (tree SHA, image ID `b47e2210`) and all gates
-  PASS — DeepSeek c64 689 tok/s, Qwen c32 582 tok/s, placement 32/32 at every row ≥c8,
+  PASS — DeepSeek c64 689 tok/s, Qwen c32 548 tok/s, placement 32/32 at every row ≥c8,
   tool-calling 6/6, vision 2/2. `qwen3.8-flash-next-dp2-8gpu` now serves without the
   recipe's `--speculative-config mtp k=3` and with `--kv-cache-memory` pinned (a cold
   torch.compile cache made vLLM's start-up profile shrink replica 0's KV cache to 741K
