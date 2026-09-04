@@ -29,7 +29,11 @@ prefix-aware placement can inflate the matrix.
   chat with the checkpoint's own `deepseek_v4` encoder (image parts become
   `<｜deepseek_image｜>` placeholders) and parses DSML tool calls
   (`--enable-auto-tool-choice --tool-call-parser deepseek_v4`, thinking off
-  by default). KV cache per replica: 2,327,629 tokens (2.22x the 1M context).
+  by default). KV cache per replica: 2,327,629 tokens (36.12 GiB, 2.22x the
+  1M context) — identical on both replicas on the measured first boot and on
+  a second boot (2026-09-04); this checkpoint runs with vLLM
+  `CompilationMode.NONE`, so the cold-compile-cache profile inflation that
+  shrinks the Qwen example's KV cache does not apply here.
 - L2: one pool, `prefix_index: true`, `queue_depth_threshold: 0`,
   `unhealthy_after: 1`; Kairyu forwards tools to /chat/completions
   (`legacy_chat_models`) and admits images under `image_input_policy`.
