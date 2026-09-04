@@ -20,7 +20,7 @@ can inflate the matrix.
   overlaid from source (`vllm-sm120.Dockerfile`), image ID
   `sha256:b47e22101829b471e8d3b0702a50ab884f58390cc2dfd50cb83aaf43ae30e9d4`
 - Served-config SHA-256:
-  `d022399c43692ac760fba80d9b11df99cf644eeb17ece8faf000649e40a9a442`
+  `ac3c8f9ff8a7fb1178bfdd797a8410b8ce6052e57f7bac86a9ffe27416d9af8f`
   (identical across the three gate runs below). Two earlier passes are
   superseded: the runs with the recipe's MTP k=3 enabled
   (`20260904T121052Z`/`121116Z`/`121132Z`, served-config `c8acee3c…`), whose
