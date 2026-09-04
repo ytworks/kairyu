@@ -222,7 +222,8 @@ def _ensure_vllm_image(env: dict[str, str]) -> None:
 
     image = env["DEEPSEEK_VLLM_IMAGE"]
     source = SPEC["vllm"]
-    if _image_id(image) is None:
+    actual = _image_id(image)
+    if actual is None:
         if image != source["image"]:
             raise SystemExit(f"DEEPSEEK_VLLM_IMAGE does not exist locally: {image}")
         print("vLLM image is absent; building the pinned SM120 overlay", flush=True)
@@ -248,7 +249,8 @@ def _ensure_vllm_image(env: dict[str, str]) -> None:
                 str(HERE),
             ]
         )
-    if image == source["image"] and (actual := _image_id(image)) != source["image_id"]:
+        actual = _image_id(image)
+    if actual != source["image_id"]:
         raise SystemExit(
             f"vLLM image {image} has ID {actual}; example.json and kairyu.yaml pin "
             f"{source['image_id']} (update both to this build before serving)"
