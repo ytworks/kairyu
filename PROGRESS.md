@@ -78,6 +78,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
 - The tiered RTX PRO example (DTO-D13, 2026-08-22) puts a bounded Qwen non-thinking route judge in front of five profiles — four single-call direct routes (Qwen non-thinking, Qwen thinking-medium, DeepSeek non-thinking on the re-added `tier2-direct` pool, DeepSeek thinking at the L3 effort; official per-mode sampling fixed on the final unit, vendor-official caps 131072/393216) and the ensemble — selecting per request with fallback to the ensemble; the L2 DSL now has N named `profiles` + a judge with spec-defined `choices`, final-unit sampling overrides (caps min()'d with the caller), and route-aware serving gates. The ensemble (`primary`) profile is the dual-track policy-ensemble L2 DAG (DTO-D1..D12, amended by DTO-D14) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one thinking DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; thinking DeepSeek `synthesis` weighs the 5 candidates as peers and writes one better answer, and an inline Qwen thinking-medium (DTO-D14) `audit` (PASS/FAIL, ≤2 refinements, last attempt published on exhaustion) gates the streamed remainder (DTO-D10); a Qwen `image_description` stage runs on image requests only and feeds the text-only DeepSeek roles (DTO-D11); DeepSeek budgets halved to 8192/32768/65536 with a 65536 ceiling and Chat UI default for the Terminal-Bench 900 s turn envelope (DTO-D12). The sandbox executor stays deployed but unreferenced. Last green verify.sh runs 20260825T161729Z (coding) and 20260825T173343Z (generic) on the DTO-D8..D14 served config: coding TTFT rows all not_applicable (the judge routes every coding request to the ungated qwen_think_medium route), generic route-aware stage validation green. Composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
+- Replica-pool scale-out examples (FN-D9, 2026-09-01): Qwen3.8 TP1 x 8 and DeepSeek TP4+EP4 x 2 behind one public model each; `verify.sh serving` proves the even per-replica split from the pool placement log and `verify.sh tool-calling` proves OpenAI tool calls on every replica (see their MEASUREMENTS.md)
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
 - CPU suite green (thousands of tests, no selected skips); CPU microbenchmark smoke + nightly regression series in CI
 
@@ -98,6 +99,38 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-02 — [amendment] FN-D9: replica examples must serve OpenAI tool calls
+- What: DP2 DeepSeek drops the Kairyu-rendered /completions passthrough (forwards
+  no tools; DSML parse is whole-block only) for the Qwen-style legacy path: vLLM
+  renders with the checkpoint's deepseek_v4 encoder + `--tool-call-parser
+  deepseek_v4`, Kairyu forwards tools to /chat/completions and normalizes. Both
+  examples gain a fail-closed readiness tool probe + `verify.sh tool-calling`
+  and non-thinking default kwargs (Qwen gate caught empty `content` on plain chat).
+- Why: PR #584 review — SWE-bench Pro got `tool_calls: null` every turn (22/22
+  RepeatedFormatError). GPU-verified: both tool gates 6/6, both matrices
+  re-pinned, SWE-bench Pro smoke 3/3 (kairyu-bench `20260902T010540Z-3bf671e8`).
+- Refs: PR #584; FN-D9 amendment; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
+
+### 2026-09-02 — [amendment] FN-D9: replica placement gates reject material skew
+- What: both replica-pool examples now limit a replica to 1.25× the even share.
+  Behavior tests reject the 8-way `16,16,16,8,2,2,2,2` and 2-way `63,1`
+  skews while the retained exact-even distributions pass. The verification-only
+  config change does not require a GPU rerun.
+- Why: the former 2× bound admitted materially skewed distributions as passing.
+- Refs: PR #585; FN-D9; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
+
+### 2026-09-01 — [amendment] FN-D9: two replica-pool 8-GPU examples (no orchestration)
+- What: `examples/qwen3.8-27b-dp8-8gpu` (Qwen3.8 TP1 × 8) and
+  `examples/deepseek-v4-flash-0731-dp2-8gpu` (DeepSeek TP4+EP4 × 2) expose one
+  public model each; L2 is only the `ReplicaPool` (`prefix_index: true`,
+  `queue_depth_threshold: 0`) and `verify.sh serving` gates the per-replica
+  split from `placement_log_path`. Same run/verify UX; no product code changed.
+- Why: a plain scale-out serving path (one API over N identical L1 replicas)
+  next to the orchestrated tiered example. GPU-verified 2026-09-01: gates green,
+  exact 8x8 / 32x2 splits; Qwen 313.7 tok/s at c8 (8.0x c1), DeepSeek 471 tok/s
+  at c32 (1.95x one replica) — MEASUREMENTS.md runs 20260901T133331Z / 20260901T140112Z.
+- Refs: FN-D9 (docs/design/frontier-native-runtime.md); tests/unit/test_replica_examplectl.py
 
 ### 2026-08-26 — [design] DTO-D15: public-output floor for chat-template final units
 - What: role-level `reasoning_continuation: chat` + `reasoning_open_tag`; the
@@ -144,40 +177,3 @@ in `.claude/rules/progress-log.md`).
   sampling stays DTO-D8; core effort ladder untouched. Served config changed
   — GPU re-verify and digest re-pin pending.
 - Refs: DTO-D14; examples/qwen3.8-deepseek-v4-8gpu/*; tests/unit/test_tiered_frontier_examplectl.py
-
-### 2026-08-25 — [progress] Incremental Anthropic tool streaming + count_tokens (#573)
-- What: `/v1/messages` streams tool calls incrementally — per-protocol
-  scanners (GENERIC/LLAMA/QWEN/DSML, commit-on-close, hold-back) shared by
-  stream and unary so both reconstruct one parse; text+tool_use now coexist
-  (Anthropic contract); tool gates re-homed stream-side (SSE `error`, no
-  `message_stop`); AUTO uses an in-process raw-stream sentinel (public chat
-  contract unchanged). `count_tokens` implemented: billing-consistent tiers
-  (native tokenizer exact / vLLM `/tokenize` / word-split fallback; AUTO =
-  multi-stage L2 word-split — direct-route billing dichotomy documented).
-- Refs: #573; kairyu/entrypoints/server/{tool_stream,messages_service,
-  middleware,messages_protocol}.py; kairyu/engine/*; tests/server/test_messages_api.py
-
-### 2026-08-25 — [progress] Anthropic Messages endpoint for Claude Code (L3, #508)
-- What: `POST /v1/messages` (+`?beta=true`) as an L3 adapter over the same
-  validated chat/orchestration path as `/v1/chat/completions` (AUTO via
-  `chat_dispatch`): text/tool_use/tool_result subset, live text SSE, Anthropic
-  error envelope on the route (incl. middleware 401/413/429), `x-api-key` auth
-  fallback, `HEAD /api/hello`; `reasoning_content` never leaks into text blocks.
-  Executable-tool streams temporarily buffer inference and emit ping keep-alives
-  before replaying canonical blocks; this preserves Claude Code compatibility but
-  is a known exception to the gateway's incremental-streaming requirement (#573).
-  count_tokens is an Anthropic-shaped 404 (client falls back); stop_sequence
-  attribution is unavailable (`end_turn`).
-- Refs: #508; kairyu/entrypoints/server/{messages_protocol,messages_service,
-  middleware,tenancy,metrics,sse_encode,extra_routes}.py; tests/server/test_messages_api.py
-
-### 2026-08-22 — [amendment] Non-thinking L2 calls declare enable_thinking=false (DTO-D13 live fix)
-- What: live check showed the route judge's verdict arriving empty on the
-  deployed vLLM v0.23 Qwen service (Qwen3 parser drops non-streamed output
-  without an explicit `enable_thinking=false`), so every request fell back
-  to the ensemble. Judge requests and effort-less roles on workers that
-  accept `enable_thinking` now send it; `GenerationRequest` allows template
-  kwargs on text chat prompts (still not on pre-rendered/token prompts).
-- Why: vendor/vLLM contract for Qwen3 non-thinking calls; amends the entry below.
-- Refs: DTO-D13 amendment; kairyu/{engine/backend.py,orchestration/conductor.py,orchestration/orchestrator.py}
-
