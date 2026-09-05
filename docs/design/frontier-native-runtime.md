@@ -181,3 +181,51 @@ gate's non-thinking case on the first GPU run. The
 example contract now includes fail-closed tool-calling evidence: a readiness
 probe in `run.sh up` and the `verify.sh tool-calling` gate (auto call on every
 replica, tool-result turn, streaming, thinking, non-thinking default).
+
+**Vision replica amendment (2026-09-04).** Two more replica-pool examples
+apply the same layering to the newly released vision-language checkpoints,
+each as 2 × TP4 replicas (GPU 0-3, 4-7) — the only eight-card split that fits
+either checkpoint (neither fits one 96 GB card; Qwen's 128-wide FP8 blocks
+reject TP8 and pipeline parallel is unsupported):
+
+- `deepseek-v4-flash-vision-exp-dp2-8gpu`: DeepSeek-V4-Flash-Vision-Exp
+  (revision `6821d6ad`) with the official recipe's TP4+EP, FP8 KV, 256-token
+  blocks, DSpark k=3 probabilistic drafting, `deepseek_v4` parsers, 1M
+  context; SM120 pins `--moe-backend marlin` and disables DSpark adaptive
+  verification. Effort levels `low/high/max` are the encoder's own vocabulary.
+- `qwen3.8-flash-next-dp2-8gpu`: Qwen3.8-Flash-Next-FP8 (revision `236dfdf2`)
+  with the official recipe's verified `rtx_pro_6000_4x` layout (16 sequences,
+  8K batch tokens, 0.95 memory, prefix caching, `qwen3_xml`/`qwen3` parsers),
+  256K context, **without the recipe's MTP k=3**: on `vllm@27a94d1c` prefix
+  caching + MTP corrupts batched answers on hybrid GDN models
+  (vllm-project/vllm#53912; reproduced 13/274 at 2-12 concurrent, 0/1,508
+  with either feature off, 63.8% with `--no-async-scheduling`). Prefix
+  caching stays because Kairyu's prefix-aware placement and multi-turn
+  traffic depend on it; the price is single-stream decode 104 vs 175 tok/s.
+  The KV budget is pinned (`--kv-cache-memory` 43.16 GiB, the warm-start
+  value for 0.95 utilization) because a cold torch.compile cache inflates
+  vLLM's start-up memory profile and a first boot otherwise serves 741K KV
+  tokens instead of 3.45M. Kairyu L3 normalizes the wire vocabulary `medium→high`,
+  `xhigh→max`, and the official template rejects anything outside
+  `low/medium/xhigh` (HTTP 400), so the example-local template aliases
+  `high→medium`, `max→xhigh` at the top and is otherwise byte-identical.
+  Selecting an effort in the Chat UI also drops the pinned instruct sampling
+  (T 0.7 / top_p 0.8 / presence 1.5) so vLLM applies the checkpoint's
+  thinking `generation_config` — the two official sampling modes, not a
+  blend.
+
+Both are vision-capable (`allow_prompt_kinds: [multimodal]` paired with an
+`image_input_policy`, Kairyu built with the `vision` extra), run the Chat UI
+without login and provision the tiered example's Reasoning Effort dropdown
+(fail-closed enum check) from `run.sh up`, and add a `verify.sh vision` gate
+plus an image readiness probe (the first image request is where the SM120
+sparse-MLA path failed on FlashInfer 0.6.18). vLLM image: no release or
+official tag carries the merged support, so both share one overlay image —
+upstream's digest-pinned nightly of `vllm@27a94d1c` plus FlashInfer
+`60b49158` (#4802) with the stale AOT module cache removed — and `run.sh up`
+refuses to serve if the built image ID differs from the pinned
+`container_image_digest`. The vision gate requires the answer to name the
+probe colour (a non-empty check let the corrupted `ductduct…` output pass
+once). Status: GPU-verified 2026-09-04 on 8 × RTX PRO 6000 (tree hash /
+image ID pinned; all three gates PASS for both examples; results in each
+example's `MEASUREMENTS.md`).
