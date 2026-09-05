@@ -93,7 +93,7 @@
   "orchestration": {
     "auto_max_model": "kairyu-auto-max",
     "internal_max_output_tokens": 65536,
-    "product_policy": "judged-five-route-dual-track",
+    "product_policy": "judged-six-route-dual-track-and-repair",
     "roles": [
       "head",
       "draft",
@@ -117,7 +117,8 @@
       "qwen_direct": ["qwen_answer"],
       "qwen_think_medium": ["qwen_think_answer"],
       "deepseek_direct": ["deepseek_answer"],
-      "deepseek_think": ["deepseek_think_answer"]
+      "deepseek_think": ["deepseek_think_answer"],
+      "swe_evidence": ["image_description", "swe_hypothesis", "swe_alternative", "swe_plan", "swe_critic", "swe_decision", "swe_final"]
     },
     "profile_judge": {
       "worker": "tier1",
@@ -127,7 +128,8 @@
         {"label": "QWEN_THINK", "profile": "qwen_think_medium"},
         {"label": "DEEPSEEK", "profile": "deepseek_direct"},
         {"label": "DEEPSEEK_THINK", "profile": "deepseek_think"},
-        {"label": "ENSEMBLE", "profile": "primary"}
+        {"label": "ENSEMBLE", "profile": "primary"},
+        {"label": "SWE", "profile": "swe_evidence"}
       ]
     },
     "profile_final_roles": {
@@ -135,7 +137,22 @@
       "qwen_direct": "qwen_answer",
       "qwen_think_medium": "qwen_think_answer",
       "deepseek_direct": "deepseek_answer",
-      "deepseek_think": "deepseek_think_answer"
+      "deepseek_think": "deepseek_think_answer",
+      "swe_evidence": "swe_final"
+    },
+    "profile_required_generation_nodes": {
+      "swe_evidence": ["swe_hypothesis", "swe_alternative", "swe_plan", "swe_critic", "swe_decision", "swe_final"]
+    },
+    "profile_role_sampling": {
+      "swe_evidence": {
+        "image_description": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "max_tokens": 4096, "seed_offset": 8},
+        "swe_hypothesis": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "max_tokens": 2048, "seed_offset": 21},
+        "swe_alternative": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "max_tokens": 2048, "seed_offset": 22},
+        "swe_plan": {"temperature": 1.0, "top_p": 0.95, "max_tokens": 8192},
+        "swe_critic": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "max_tokens": 2048},
+        "swe_decision": {"temperature": 1.0, "top_p": 0.95, "max_tokens": 8192},
+        "swe_final": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "max_tokens": 8192, "presence_penalty": 1.5}
+      }
     },
     "ttft_gated_profiles": ["primary", "qwen_direct", "deepseek_direct"],
     "direct_route_max_tokens": {

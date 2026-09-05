@@ -275,7 +275,18 @@ def _validate_serving_row(
                 if route is None:
                     return False
                 if route != "primary":
-                    return True
+                    required = SPEC["orchestration"].get(
+                        "profile_required_generation_nodes", {}
+                    ).get(route, ())
+                    return all(
+                        any(
+                            stage.get("node") == node
+                            and stage.get("kind") == "generation"
+                            and stage.get("status") == "success"
+                            for stage in stages
+                        )
+                        for node in required
+                    )
             if not any(
                 stage.get("node") == expected_route
                 and stage.get("role") == expected_role

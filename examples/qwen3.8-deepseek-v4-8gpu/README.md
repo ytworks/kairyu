@@ -1,4 +1,4 @@
-# Qwen3.8 + DeepSeek V4 judged five-route orchestration on 8 x RTX PRO 6000
+# Qwen3.8 + DeepSeek V4 judged six-route orchestration on 8 x RTX PRO 6000
 
 This example starts one layered quality-first product path with one command:
 
@@ -13,6 +13,7 @@ Open WebUI
              DEEPSEEK       -> deepseek_direct DeepSeek non-thinking, one call
              DEEPSEEK_THINK -> deepseek_think  DeepSeek thinking at the L3 effort
              ENSEMBLE       -> primary         the dual-track ensemble DAG below
+             SWE            -> swe_evidence    the evidence-based repair DAG
         -> Kairyu L2 primary profile: the dual-track ensemble DAG
            (11 roles: 10 generation + 1 audit verifier)
             Track A: DeepSeek writes 4 maximally different answer policies;
@@ -43,12 +44,17 @@ routes answer from t=0 and share the gate; the thinking direct routes pay a
 deliberate think tax before their first public byte and are reported, not
 gated.
 
-## Routing: one Qwen judge picks exactly one of five routes (DTO-D13)
+The new `SWE` route is selected automatically by the same judge during normal
+`./run.sh` operation. The original ensemble and four direct routes retain their
+configuration and criteria. Its accuracy and cost are **not GPU-validated yet**;
+see [repair composition and remaining evaluation](SWE-EVIDENCE.md).
+
+## Routing: one Qwen judge picks exactly one of six routes (DTO-D13 / DTO-D16)
 
 **In one sentence:** every request is first shown to a small, fast Qwen call
-(the *route judge*), which answers with one of five labels; the profile named
+(the *route judge*), which answers with one of six labels; the profile named
 by that label is the **only** thing that runs for the request — the other
-four routes do not execute at all.
+five routes do not execute at all.
 
 How a request flows:
 
@@ -56,22 +62,23 @@ How a request flows:
    5 s timeout) reads the latest user turn (a 4,000-character head+tail
    view) plus a one-line context flag (`tool calling yes/no; image attached
    yes/no`) and answers exactly one label: `QWEN`, `QWEN_THINK`, `DEEPSEEK`,
-   `DEEPSEEK_THINK`, or `ENSEMBLE`.
+   `DEEPSEEK_THINK`, `ENSEMBLE`, or `SWE`.
 2. **Dispatch** — Kairyu attaches the verdict to the request once (before
    preflight and admission, so all three agree) and builds the Conductor DAG
-   of that profile only. Four of the profiles are a single model call; the
-   fifth is the eleven-role ensemble below.
+   of that profile only. Four profiles are a single model call; the original
+   fifth is the eleven-role ensemble below, and the sixth is the focused repair DAG.
 3. **Fallback** — if the judge times out, errors, or answers anything that is
    not exactly one offered label, the request runs the ensemble (`primary`),
    i.e. the quality-safe route.
 
-| label | profile | what runs | thinking | sampling (fixed, DTO-D8) | max_tokens cap (vendor-official) |
+| label | profile | what runs | thinking | sampling (fixed, DTO-D8) | max_tokens cap (direct routes vendor-official) |
 |---|---|---|---|---|---|
 | `QWEN` | `qwen_direct` | one Qwen3.8 call (`qwen_answer`) | no | T=0.7, top_p=0.8, top_k=20, presence_penalty=1.5 | 131,072 |
 | `QWEN_THINK` | `qwen_think_medium` | one Qwen3.8 call (`qwen_think_answer`) | fixed `medium` (spec `high`) | T=1.0, top_p=0.95, top_k=20 | 131,072 |
 | `DEEPSEEK` | `deepseek_direct` | one DeepSeek call on the non-thinking pool (`deepseek_answer`) | no | T=1.0, top_p=0.95 | 393,216 (384K) |
 | `DEEPSEEK_THINK` | `deepseek_think` | one DeepSeek call on the thinking pool (`deepseek_think_answer`) | caller's L3 effort (default `high`) | T=1.0, top_p=0.95 | 393,216 (384K) |
 | `ENSEMBLE` | `primary` | the eleven-role dual-track DAG below | as before | as before | as before |
+| `SWE` | `swe_evidence` | six text calls; conditional image description | Qwen medium + DeepSeek caller effort | per-role limits | 8,192 final |
 
 ### What the judge optimizes — and what it is not
 
@@ -346,7 +353,7 @@ Kairyu L3, and is explicitly limited to `kairyu-auto-max`. The public
 public IDs or Chat UI choices. The launcher validates that exact public
 inventory, the explicit eleven-role dual-track primary DAG (including the
 streamed head and the `{max_steps: 19, max_refine_depth: 2}` budget), the
-four direct-route profiles and the Qwen route judge with its five choices
+four direct-route profiles, the repair profile, and the Qwen route judge with its six choices
 (DTO-D13), the `tier1`/`tier2`/`tier2-direct` engine bindings, and two
 ordered finite 384-dimensional embedding vectors with positive usage before
 printing the URL.

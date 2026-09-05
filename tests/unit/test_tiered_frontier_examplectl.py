@@ -358,7 +358,7 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert maximum.public_output_floor == 256
     assert maximum.expose_intermediate_outputs is True
     assert config["orchestration"]["internal_max_output_tokens"] == 65536
-    assert config["orchestration"]["product_policy"] == "judged-five-route-dual-track"
+    assert config["orchestration"]["product_policy"] == "judged-six-route-dual-track-and-repair"
     # DTO-D10 budget: 10 generation units + 1 empty-output re-dispatch
     # + 3 audit verdicts + 3 inconclusive re-verifies + 2 refinements.
     assert config["orchestration"]["product_normal_calls"] == 10
@@ -494,16 +494,22 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
         {"label": "DEEPSEEK", "profile": "deepseek_direct"},
         {"label": "DEEPSEEK_THINK", "profile": "deepseek_think"},
         {"label": "ENSEMBLE", "profile": "primary"},
+        {"label": "SWE", "profile": "swe_evidence"},
     ]
     assert all(choice.criteria.strip() for choice in judge.choices)
     profiles = {profile.name: profile.roles for profile in maximum.profiles}
     assert {name: [role.name for role in roles] for name, roles in profiles.items()} == {
         name: list(roles) for name, roles in config["orchestration"]["profiles"].items()
     }
-    assert all(len(roles) == 1 and roles[0].role_type == "publisher" for roles in profiles.values())
-    finals = {name: roles[0] for name, roles in profiles.items()}
+    direct_profiles = {name: roles for name, roles in profiles.items() if name != "swe_evidence"}
+    assert all(
+        len(roles) == 1 and roles[0].role_type == "publisher"
+        for roles in direct_profiles.values()
+    )
+    finals = {name: roles[0] for name, roles in direct_profiles.items()}
     assert config["orchestration"]["profile_final_roles"] == {
         "primary": "synthesis",
+        "swe_evidence": "swe_final",
         **{name: role.name for name, role in finals.items()},
     }
     caps = config["orchestration"]["direct_route_max_tokens"]
@@ -637,11 +643,14 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                     "profiles": {
                         profile: [
                             {
-                                "name": roles[0],
-                                "sampling": control.SPEC["orchestration"][
-                                    "direct_route_sampling"
-                                ][profile],
+                                "name": name,
+                                "sampling": (
+                                    control.SPEC["orchestration"]["profile_role_sampling"][profile][name]
+                                    if profile == "swe_evidence" else
+                                    control.SPEC["orchestration"]["direct_route_sampling"][profile]
+                                ),
                             }
+                            for name in roles
                         ]
                         for profile, roles in control.SPEC["orchestration"][
                             "profiles"
@@ -658,6 +667,7 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                                 ("DEEPSEEK", "deepseek_direct"),
                                 ("DEEPSEEK_THINK", "deepseek_think"),
                                 ("ENSEMBLE", "primary"),
+                                ("SWE", "swe_evidence"),
                             )
                         ],
                     },

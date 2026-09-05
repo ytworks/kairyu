@@ -228,6 +228,8 @@ def _ensure_vllm_image(env: dict[str, str], env_key: str, source: dict) -> None:
             "docker",
             "build",
             "--pull",
+            "--build-arg",
+            "BUILDKIT_CONTEXT_KEEP_GIT_DIR=1",
             "--file",
             "docker/Dockerfile",
             "--tag",
@@ -551,7 +553,8 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         )
     # DTO-D13: the dual-track DAG is the primary profile behind a Qwen route
     # judge that selects among four single-role direct routes and the
-    # ensemble; a missing profile or judge means the wrong policy is live.
+    # ensemble, plus the repair ensemble; a missing profile or judge means
+    # the wrong policy is live.
     expected_profiles = {
         name: list(roles) for name, roles in orchestration["profiles"].items()
     }
@@ -572,11 +575,22 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
             if value not in (None, [], {})
         }
         for name, roles in (policy.get("profiles") or {}).items()
+        if name in expected_sampling
     }
     if served_sampling != expected_sampling:
         raise SystemExit(
             "Kairyu L2 does not report the required direct-route sampling policy"
         )
+    for profile, expected in orchestration.get("profile_role_sampling", {}).items():
+        actual = {
+            role["name"]: {
+                key: value for key, value in (role.get("sampling") or {}).items()
+                if value not in (None, [], {})
+            }
+            for role in (policy.get("profiles") or {}).get(profile, ())
+        }
+        if actual != expected:
+            raise SystemExit(f"Kairyu L2 does not report the required {profile} sampling policy")
     expected_judge = orchestration["profile_judge"]
     judge = policy.get("profile_judge") or {}
     served_choices = [
