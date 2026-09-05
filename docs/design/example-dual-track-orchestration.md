@@ -1,6 +1,8 @@
 # Tiered Example Dual-Track Policy-Ensemble Orchestration
 
-Status: **Accepted; implemented and GPU-verified** (2026-08-25; runs
+Status: **Accepted; DTO-D16 CPU-verified; GPU validation pending.**
+
+Historical DTO-D8..D14 GPU verification (2026-08-25; runs
 `20260825T161729Z` coding + `20260825T173343Z` generic — both `verify.sh`
 serving gates green on the DTO-D8..D14 served config, digest
 `69702ab5af0ab3c0…`). The judge routes every coding-gate request to the
@@ -645,3 +647,25 @@ Status: accepted; implemented; serving gates GPU re-verify and digest re-pin pen
   profile assertions were deleted with the features they protected; DTO-D13
   reintroduced profile/judge assertions and route-aware gate tests;
   base→head collection counts are reported in the change.
+
+## DTO-D16 — Add automatic evidence-based repair profile (2026-09-05)
+
+Status: implemented using Example configuration only; CPU verification; GPU
+route/tool correctness, measured cost and SWE-bench Pro 80% remain pending.
+
+Preserve DTO-D1..D15 primary and all four direct routes. Add `SWE` to the same
+judge and `swe_evidence` to its profiles: two parallel Qwen medium hypotheses,
+DeepSeek plan, Qwen medium critic, DeepSeek decision, Qwen non-thinking publisher.
+The caller still sends one ordinary request to the existing model; no opt-in
+configuration, extra judge, framework type or external agent change is added.
+
+This allocates bounded inference to competing causes and observed tests instead
+of producing several complete answers. Only the final Qwen role renders tool
+intent through its existing template. Qwen medium uses DTO-D14's `high` alias.
+The profile reuses conditional image description and has no semantic verifier
+loop. Its nominal text output caps total 30,720 tokens; they do not enforce a
+cross-turn cost limit. The existing judge sees only its latest-user view.
+
+See the Example's `SWE-EVIDENCE.md` for role limits, compatibility checks and
+required eight-GPU evaluation. Historical GPU evidence above does not validate
+DTO-D16. No accuracy or cost improvement is claimed before that evaluation.
