@@ -159,6 +159,8 @@ def _ensure_vllm_image() -> None:
             "docker",
             "build",
             "--pull",
+            "--build-arg",
+            "BUILDKIT_CONTEXT_KEEP_GIT_DIR=1",
             "--file",
             "docker/Dockerfile",
             "--tag",
