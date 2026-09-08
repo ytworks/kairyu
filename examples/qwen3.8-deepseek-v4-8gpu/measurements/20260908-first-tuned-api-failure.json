@@ -1,0 +1,1266 @@
+{
+  "scope": "Failed first public-API tuning trial; remaining cases interrupted after review findings. Source-only literal match was a known false positive in this gate version.",
+  "run": {
+    "schema_version": 1,
+    "run_id": "20260908T070951Z",
+    "started_at": "2026-09-08T07:09:52.060595+00:00",
+    "requested": "requirements-quality",
+    "served_config_sha256": "31e2ebb0b9053e6d6c9ad9c4c5a423a13fad4a4407d4c0f30406833b71452bc1",
+    "verification_files_sha256": {
+      "verification.py": "0d818f9b92640d8eca4efa50782ed70e01470e89b2f8f97a8997fb70b7bca7f5",
+      "requirements_quality.py": "96c6428c21a52b09265c3e8e557da3d0a16d77c73840dc2d28edcae4d062dd5a",
+      "requirements-quality-cases.json": "75fdafea0d03c1ca12f1e7065f3e05d2e7d7daeca764bf6bafe4e6eb9e1fecbe"
+    },
+    "spec": {
+      "schema_version": 1,
+      "environment": "qwen3.8-deepseek-v4-8gpu",
+      "hardware": {
+        "gpu_count": 8,
+        "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "minimum_compute_capability": 12.0,
+        "minimum_vram_mib": 90000
+      },
+      "storage": {
+        "root": "/mnt/nvme/kairyu",
+        "minimum_free_gib": 220,
+        "deepseek_model_volume": "kairyu-models-deepseek-v4-flash-0731-8gpu"
+      },
+      "allocation": {
+        "tier1": {
+          "model": "qwen3.8-27b",
+          "gpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "replicas": 4,
+          "tensor_parallel_size": 1
+        },
+        "tier2": {
+          "model": "deepseek-v4-flash-0731",
+          "gpu_ids": [
+            4,
+            5,
+            6,
+            7
+          ],
+          "replicas": 1,
+          "tensor_parallel_size": 4,
+          "expert_parallel_size": 4
+        }
+      },
+      "models": {
+        "tier1": {
+          "repo": "Qwen/Qwen3.8-27B-FP8",
+          "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+          "tree_sha256": "9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e",
+          "slug": "qwen3.8-27b-fp8",
+          "served_name": "qwen3.8-27b",
+          "max_context_tokens": 262144,
+          "quantization": "fp8"
+        },
+        "tier2": {
+          "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+          "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+          "tree_sha256": "90bd164d6f778d798eeaecd3517d83b87d49d300756a9217ada14a2b15203754",
+          "slug": "deepseek-v4-flash-0731",
+          "served_name": "deepseek-v4-flash-0731",
+          "max_context_tokens": 1048576,
+          "quantization": "mixed-fp4-fp8"
+        }
+      },
+      "embedding": {
+        "served_name": "embed-small",
+        "backend": "fastembed",
+        "model": "sentence-transformers/all-MiniLM-L6-v2",
+        "model_path": "/opt/kairyu/models/all-MiniLM-L6-v2",
+        "repository": "Qdrant/all-MiniLM-L6-v2-onnx",
+        "revision": "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079",
+        "model_sha256": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+        "provenance_sha256": "57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c",
+        "dimensions": 384,
+        "batch_size": 64,
+        "threads": 2,
+        "max_concurrency": 2
+      },
+      "vllm": {
+        "qwen": {
+          "image": "vllm/vllm-openai:v0.23.0@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+          "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+          "image_revision": "91df0fad4dc98a67c7659d9dbd915245d5c43d96",
+          "distribution": "upstream",
+          "source_repository": "https://github.com/vllm-project/vllm.git",
+          "source_revision": "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
+          "source_ref": "v0.23.0",
+          "release": "v0.23.0"
+        },
+        "deepseek": {
+          "image": "local/vllm-openai:sm120-aa0d513027",
+          "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
+          "source_repository": "https://github.com/jasl/vllm.git",
+          "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
+          "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834"
+        },
+        "qwen_mtp_speculative_tokens": 0,
+        "qwen_max_num_batched_tokens": 32768,
+        "qwen_max_num_seqs": 32,
+        "qwen_kv_cache_dtype": "fp8",
+        "qwen_cudagraph_mode": "PIECEWISE",
+        "deepseek_dspark_speculative_tokens": 5,
+        "deepseek_max_num_batched_tokens": 16384,
+        "deepseek_max_num_seqs": 32,
+        "deepseek_kv_cache_dtype": "fp8",
+        "deepseek_cudagraph_mode": "FULL_AND_PIECEWISE"
+      },
+      "orchestration": {
+        "auto_max_model": "kairyu-auto-max",
+        "internal_max_output_tokens": 65536,
+        "requirements_thinking_token_budget": 2048,
+        "product_policy": "judged-five-route-dual-track",
+        "roles": [
+          "head",
+          "draft",
+          "image_description",
+          "requirements",
+          "policies",
+          "answer_1",
+          "answer_2",
+          "answer_3",
+          "answer_4",
+          "critique",
+          "synthesis",
+          "audit"
+        ],
+        "stream_head": "head",
+        "max_steps": 20,
+        "product_normal_calls": 11,
+        "product_max_calls": 20,
+        "product_max_refinements": 2,
+        "product_exposes_intermediate_outputs": true,
+        "profiles": {
+          "qwen_direct": [
+            "qwen_answer"
+          ],
+          "qwen_think_medium": [
+            "qwen_think_answer"
+          ],
+          "deepseek_direct": [
+            "deepseek_answer"
+          ],
+          "deepseek_think": [
+            "deepseek_think_answer"
+          ]
+        },
+        "profile_judge": {
+          "worker": "tier1",
+          "fallback": "primary",
+          "choices": [
+            {
+              "label": "QWEN",
+              "profile": "qwen_direct"
+            },
+            {
+              "label": "QWEN_THINK",
+              "profile": "qwen_think_medium"
+            },
+            {
+              "label": "DEEPSEEK",
+              "profile": "deepseek_direct"
+            },
+            {
+              "label": "DEEPSEEK_THINK",
+              "profile": "deepseek_think"
+            },
+            {
+              "label": "ENSEMBLE",
+              "profile": "primary"
+            }
+          ]
+        },
+        "profile_final_roles": {
+          "primary": "synthesis",
+          "qwen_direct": "qwen_answer",
+          "qwen_think_medium": "qwen_think_answer",
+          "deepseek_direct": "deepseek_answer",
+          "deepseek_think": "deepseek_think_answer"
+        },
+        "ttft_gated_profiles": [
+          "primary",
+          "qwen_direct",
+          "deepseek_direct"
+        ],
+        "direct_route_max_tokens": {
+          "qwen_direct": 131072,
+          "qwen_think_medium": 131072,
+          "deepseek_direct": 393216,
+          "deepseek_think": 393216
+        },
+        "direct_route_sampling": {
+          "qwen_direct": {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "presence_penalty": 1.5,
+            "max_tokens": 131072
+          },
+          "qwen_think_medium": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 20,
+            "max_tokens": 131072
+          },
+          "deepseek_direct": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 393216
+          },
+          "deepseek_think": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 393216
+          }
+        }
+      },
+      "executor": {
+        "image": "local/kairyu-executor:coding-v1",
+        "base_image": "python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65",
+        "pytest_version": "9.1.1",
+        "languages": [
+          "python"
+        ],
+        "transport": "unix",
+        "socket_path": "/run/kairyu-executor/executor.sock",
+        "max_concurrency": 8,
+        "queue_wait_s": 8
+      },
+      "webui": {
+        "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+        "port": 3000
+      },
+      "api_port": 8003,
+      "deepseek_l1_loopback_port": 8005,
+      "verification": {
+        "serving": {
+          "prompt_tokens_approx": 8192,
+          "output_tokens": 256,
+          "auto_max_combined_max_tokens": 65536,
+          "concurrency": [
+            1,
+            8,
+            16,
+            32
+          ],
+          "requests_per_concurrency": 32
+        },
+        "coding": {
+          "prompt_tokens_approx": 1536,
+          "auto_max_combined_max_tokens": 65536,
+          "concurrency": [
+            1,
+            8,
+            16,
+            32
+          ],
+          "requests_per_concurrency": 32,
+          "ttft_multiplier_vs_deepseek_direct": 2.0,
+          "deepseek_direct_ttft_p50_ms_fallback": {
+            "1": 779.22,
+            "8": 833.16,
+            "16": 2710.53,
+            "32": 12399.45
+          }
+        }
+      }
+    },
+    "completed_at": "2026-09-08T07:20:16.680912+00:00",
+    "exit_codes": {
+      "requirements-quality": 1
+    }
+  },
+  "runtime": {
+    "collected_at": "2026-09-08T07:09:51.625979+00:00",
+    "git_head": "c86cb4b6a7a382017ae7025d44066f82e20e8531",
+    "git_status": "",
+    "containers": [
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-kairyu-1",
+        "image_id": "sha256:97cec2f9ad9c7a76469584eee91674fb35c6ce9915534c9c4f220e4809180dd2",
+        "started_at": "2026-09-08T07:09:10.974371282Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/kairyu.yaml",
+            "target": "/etc/kairyu/kairyu.yaml",
+            "sha256": "33f189f2ecfdb6591590d741b29393dcb4dee76c131bba1919501a87ca12cb57"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "bad5e93ba9cd64be122607e6734d9e78e2c7596b0ca250bfa1cba5b06a5882af"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/router.json",
+            "target": "/etc/kairyu/router.json",
+            "sha256": "9b3cc02780fd5a1cdf1073557b66900e14dd59b6dd655b961f6f85bc3cb51ca5"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/deepseek-thinking.jinja",
+            "target": "/etc/kairyu/deepseek-thinking.jinja",
+            "sha256": "5b3c37f08ae895028e6febdcc1642e8034e0871e23b2bc1b59c3b05a4eb942ee"
+          }
+        ]
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-deepseek-1",
+        "image_id": "sha256:b77f630cecd3945a046f0a89f642ee604639d29652cabfd79ccd4a1f4b81d78f",
+        "started_at": "2026-09-08T07:06:50.669471176Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/deepseek-role-effort.jinja",
+            "target": "/etc/kairyu/deepseek-role-effort.jinja",
+            "sha256": "1512e12bea2dcd54f128e83ac7b4415cc318140bf680733b22afe2effdf51f0f"
+          }
+        ]
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-executor-1",
+        "image_id": "sha256:5b8e30fc83b360e434d1ac003916dfe16a89bba37ed4ac02fd078204b1863db8",
+        "started_at": "2026-09-08T07:06:50.665765886Z",
+        "health": "healthy",
+        "mounted_files": []
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-qwen-0-1",
+        "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+        "started_at": "2026-09-08T07:04:50.250568235Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+            "target": "/etc/kairyu/qwen3.8-chat.jinja",
+            "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+            "target": "/etc/kairyu/requirements_budget.py",
+            "sha256": "7faa7155bcc094a48d2b2f962fa15b860cdbf501ec3b791441d5c2886d711a83"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "bad5e93ba9cd64be122607e6734d9e78e2c7596b0ca250bfa1cba5b06a5882af"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+            "target": "/etc/kairyu/example.json",
+            "sha256": "32b0f02891a165862496a9f1dcffec580fcb75050a0680eb29d40e03b362e3c4"
+          }
+        ]
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-qwen-1-1",
+        "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+        "started_at": "2026-09-08T07:04:50.254514389Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+            "target": "/etc/kairyu/requirements_budget.py",
+            "sha256": "7faa7155bcc094a48d2b2f962fa15b860cdbf501ec3b791441d5c2886d711a83"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "bad5e93ba9cd64be122607e6734d9e78e2c7596b0ca250bfa1cba5b06a5882af"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+            "target": "/etc/kairyu/example.json",
+            "sha256": "32b0f02891a165862496a9f1dcffec580fcb75050a0680eb29d40e03b362e3c4"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+            "target": "/etc/kairyu/qwen3.8-chat.jinja",
+            "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+          }
+        ]
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-qwen-2-1",
+        "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+        "started_at": "2026-09-08T07:04:50.253703647Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+            "target": "/etc/kairyu/example.json",
+            "sha256": "32b0f02891a165862496a9f1dcffec580fcb75050a0680eb29d40e03b362e3c4"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+            "target": "/etc/kairyu/qwen3.8-chat.jinja",
+            "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+            "target": "/etc/kairyu/requirements_budget.py",
+            "sha256": "7faa7155bcc094a48d2b2f962fa15b860cdbf501ec3b791441d5c2886d711a83"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "bad5e93ba9cd64be122607e6734d9e78e2c7596b0ca250bfa1cba5b06a5882af"
+          }
+        ]
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-qwen-3-1",
+        "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+        "started_at": "2026-09-08T07:04:50.254969307Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+            "target": "/etc/kairyu/requirements_budget.py",
+            "sha256": "7faa7155bcc094a48d2b2f962fa15b860cdbf501ec3b791441d5c2886d711a83"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "bad5e93ba9cd64be122607e6734d9e78e2c7596b0ca250bfa1cba5b06a5882af"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+            "target": "/etc/kairyu/example.json",
+            "sha256": "32b0f02891a165862496a9f1dcffec580fcb75050a0680eb29d40e03b362e3c4"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+            "target": "/etc/kairyu/qwen3.8-chat.jinja",
+            "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+          }
+        ]
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-chat-ui-1",
+        "image_id": "sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+        "started_at": "2026-09-06T03:10:01.300013073Z",
+        "health": "healthy",
+        "mounted_files": []
+      }
+    ],
+    "gpus": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-c2dec644-056f-5a18-64af-0dcb2d4b5aa1, 595.84\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-7ca344d0-c282-61d7-446b-dcdf5c2dee16, 595.84\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-8accd8d3-6791-1e54-af77-b229a199b1f1, 595.84\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-7a56fbb4-fd9d-1f93-7bd6-f7e55579a964, 595.84\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-d8ef7924-e297-e1ef-e51e-82c77b41715a, 595.84\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-4884d626-ecaa-7fc1-49d2-158f6d118801, 595.84\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-f212d821-c550-947e-904c-1ee6be110c96, 595.84\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-9813a152-84b7-57ef-3109-76b4a1d47673, 595.84\n"
+  },
+  "budget_application": {
+    "count": 2,
+    "records": [
+      {
+        "worker": 0,
+        "line": "2026-09-08T07:18:54.293908833Z (APIServer pid=1) INFO 09-08 07:18:54 [requirements_budget.py:120] Kairyu requirements budget: thinking=2048 max_tokens=8192 seed=605 messages_sha256=e8256c0f58a2b6ad6d5c45662881209163d453d0692a40e36d64d7f47a0ced73"
+      },
+      {
+        "worker": 2,
+        "line": "2026-09-08T07:09:53.052151495Z (APIServer pid=1) INFO 09-08 07:09:53 [requirements_budget.py:120] Kairyu requirements budget: thinking=2048 max_tokens=8192 seed=605 messages_sha256=4a297366e9fadb0771b2987f483fff60650fcd947b5fe725de77770a80761448"
+      }
+    ]
+  },
+  "validation": {
+    "case": "headed-comparison",
+    "checks": {
+      "ensemble_executed": true,
+      "one_successful_requirements_stage": true,
+      "complete_checklist": true,
+      "covers:English memo": true,
+      "covers:supplied facts": true,
+      "covers:both options": true,
+      "covers:hard limits": true,
+      "covers:infeasible": true,
+      "covers:assumptions": true,
+      "covers:two conditional next steps": true,
+      "covers:no invented evidence": true,
+      "covers:word limit": true,
+      "covers:independent approaches": true,
+      "covers:audit": true,
+      "preserves_required_literals": true,
+      "excludes_rendering_boilerplate": true,
+      "requirements_finish_within_cap": true,
+      "audit_covers_checklist_ids": false,
+      "audit_evidence_present": false,
+      "final_minimum_items_satisfied": false,
+      "final_audit_passes": true,
+      "nonempty_final_answer": true,
+      "checklist_not_published": true,
+      "final_word_limit": false,
+      "final_ending": true,
+      "final_compares_infeasible_options": true,
+      "complete_sse": true
+    },
+    "failures": [
+      "audit has no explicit verdict",
+      "audit_covers_checklist_ids",
+      "audit_evidence_present",
+      "final_minimum_items_satisfied",
+      "final_word_limit"
+    ],
+    "passed": false,
+    "word_count": 405,
+    "requirements_tokens": 2747,
+    "checklist": [
+      {
+        "id": "1",
+        "priority": "minimum",
+        "requirement": "answer is an English deployment decision memo",
+        "acceptance": "final answer is written in English and framed as a deployment decision memo",
+        "source": "Write an English deployment decision memo"
+      },
+      {
+        "id": "2",
+        "priority": "minimum",
+        "requirement": "use only supplied facts",
+        "acceptance": "final relies only on supplied A/B costs/latency and supplied budget/latency constraints for substantive claims",
+        "source": "using only these supplied facts"
+      },
+      {
+        "id": "3",
+        "priority": "minimum",
+        "requirement": "compare options A and B",
+        "acceptance": "final explicitly compares A and B against the relevant cost and latency constraints",
+        "source": "Compare A and B"
+      },
+      {
+        "id": "4",
+        "priority": "minimum",
+        "requirement": "use a multi-approach, not single-perspective, analysis",
+        "acceptance": "final includes more than one independent analytical perspective or independent option comparison before the merged recommendation",
+        "source": "compare several independent approaches"
+      },
+      {
+        "id": "5",
+        "priority": "minimum",
+        "requirement": "audit merged recommendation against every requirement",
+        "acceptance": "final explicitly checks the merged recommendation against budget, latency, feasibility, no-relaxation, facts/assumptions, and next-step requirements",
+        "source": "critically audit the merged recommendation"
+      },
+      {
+        "id": "6",
+        "priority": "minimum",
+        "requirement": "state both options are infeasible",
+        "acceptance": "final explicitly states that neither A nor B is feasible",
+        "source": "explicitly state neither is feasible"
+      },
+      {
+        "id": "7",
+        "priority": "minimum",
+        "requirement": "budget constraint is at most 60 units/month",
+        "acceptance": "final treats 60 units/month as the maximum allowable cost and does not exceed it in the recommendation",
+        "source": "Budget is at most 60 units/month"
+      },
+      {
+        "id": "8",
+        "priority": "minimum",
+        "requirement": "latency target is at most 50 ms",
+        "acceptance": "final treats 50 ms as the maximum allowable latency and does not exceed it in the recommendation",
+        "source": "latency target is at most 50 ms"
+      },
+      {
+        "id": "9",
+        "priority": "minimum",
+        "requirement": "neither constraint may be silently relaxed",
+        "acceptance": "final does not present relaxed budget or latency values as acceptable without explicit identification and deferral",
+        "source": "Neither constraint may silently be relaxed"
+      },
+      {
+        "id": "10",
+        "priority": "minimum",
+        "requirement": "distinguish facts from assumptions",
+        "acceptance": "final separates supplied facts from any assumptions, conditionals, or interpretations",
+        "source": "distinguish facts from assumptions"
+      },
+      {
+        "id": "11",
+        "priority": "minimum",
+        "requirement": "propose two different conditional next steps",
+        "acceptance": "final contains two distinct conditional next steps, each with a clear condition",
+        "source": "propose two different conditional next steps"
+      },
+      {
+        "id": "12",
+        "priority": "minimum",
+        "requirement": "no invented benchmark results",
+        "acceptance": "final contains no benchmark results, measurements, or performance data beyond supplied values",
+        "source": "Do not invent benchmark results"
+      },
+      {
+        "id": "13",
+        "priority": "minimum",
+        "requirement": "no invented citations",
+        "acceptance": "final contains no citations, references, or external sources",
+        "source": "or citations"
+      },
+      {
+        "id": "14",
+        "priority": "minimum",
+        "requirement": "memo ends with exact final sentence",
+        "acceptance": "final answer\u2019s last sentence is exactly Decision: defer",
+        "source": "end with exactly the sentence: Decision: defer."
+      },
+      {
+        "id": "15",
+        "priority": "minimum",
+        "requirement": "complete memo under 350 words",
+        "acceptance": "final answer total word count is fewer than 350 words",
+        "source": "Keep the complete memo under 350 words"
+      }
+    ],
+    "stage_outputs": [
+      {
+        "node": "draft",
+        "attempt": 0,
+        "output": ""
+      },
+      {
+        "node": "requirements",
+        "attempt": 0,
+        "output": "R1 | priority: minimum | requirement: answer is an English deployment decision memo | acceptance_criterion: final answer is written in English and framed as a deployment decision memo | source: Write an English deployment decision memo\nR2 | priority: minimum | requirement: use only supplied facts | acceptance_criterion: final relies only on supplied A/B costs/latency and supplied budget/latency constraints for substantive claims | source: using only these supplied facts\nR3 | priority: minimum | requirement: compare options A and B | acceptance_criterion: final explicitly compares A and B against the relevant cost and latency constraints | source: Compare A and B\nR4 | priority: minimum | requirement: use a multi-approach, not single-perspective, analysis | acceptance_criterion: final includes more than one independent analytical perspective or independent option comparison before the merged recommendation | source: compare several independent approaches\nR5 | priority: minimum | requirement: audit merged recommendation against every requirement | acceptance_criterion: final explicitly checks the merged recommendation against budget, latency, feasibility, no-relaxation, facts/assumptions, and next-step requirements | source: critically audit the merged recommendation\nR6 | priority: minimum | requirement: state both options are infeasible | acceptance_criterion: final explicitly states that neither A nor B is feasible | source: explicitly state neither is feasible\nR7 | priority: minimum | requirement: budget constraint is at most 60 units/month | acceptance_criterion: final treats 60 units/month as the maximum allowable cost and does not exceed it in the recommendation | source: Budget is at most 60 units/month\nR8 | priority: minimum | requirement: latency target is at most 50 ms | acceptance_criterion: final treats 50 ms as the maximum allowable latency and does not exceed it in the recommendation | source: latency target is at most 50 ms\nR9 | priority: minimum | requirement: neither constraint may be silently relaxed | acceptance_criterion: final does not present relaxed budget or latency values as acceptable without explicit identification and deferral | source: Neither constraint may silently be relaxed\nR10 | priority: minimum | requirement: distinguish facts from assumptions | acceptance_criterion: final separates supplied facts from any assumptions, conditionals, or interpretations | source: distinguish facts from assumptions\nR11 | priority: minimum | requirement: propose two different conditional next steps | acceptance_criterion: final contains two distinct conditional next steps, each with a clear condition | source: propose two different conditional next steps\nR12 | priority: minimum | requirement: no invented benchmark results | acceptance_criterion: final contains no benchmark results, measurements, or performance data beyond supplied values | source: Do not invent benchmark results\nR13 | priority: minimum | requirement: no invented citations | acceptance_criterion: final contains no citations, references, or external sources | source: or citations\nR14 | priority: minimum | requirement: memo ends with exact final sentence | acceptance_criterion: final answer\u2019s last sentence is exactly Decision: defer | source: end with exactly the sentence: Decision: defer.\nR15 | priority: minimum | requirement: complete memo under 350 words | acceptance_criterion: final answer total word count is fewer than 350 words | source: Keep the complete memo under 350 words\nEND_REQUIREMENTS"
+      },
+      {
+        "node": "critique",
+        "attempt": 0,
+        "output": "Subject: Deployment Decision \u2014 Options A and B\n\nFacts (supplied):\n- A: 40 units/month cost, 80 ms latency.\n- B: 70 units/month cost, 30 ms latency.\n- Budget maximum: 60 units/month.\n- Latency maximum: 50 ms.\n\nAssumptions (not supplied):\n- Costs and latencies are fixed, representative, all-inclusive values.\n- A and B are the currently named deployment candidates.\n- No additional setup, migration, or operational costs/latency are included.\n\nIndependent analytical approaches:\n\n1. Budget-first feasibility: A meets the 60-unit budget; B does not.\n2. Latency-first feasibility: B meets the 50 ms target; A does not.\n3. Joint-constraint feasibility: neither option satisfies both constraints simultaneously.\n\nComparison:\n\n- A: meets budget (40 \u2264 60), fails latency (80 > 50).\n- B: meets latency (30 \u2264 50), fails budget (70 > 60).\n\nMerged recommendation: defer selection, because the supplied facts contain no feasible option.\n\nCritical audit against every requirement:\n\n- Budget: the recommendation does not exceed 60 units/month; B is rejected.\n- Latency: the recommendation does not exceed 50 ms; A is rejected.\n- Feasibility: neither A nor B passes both hard constraints.\n- No silent relaxation: neither constraint is relaxed; deferral preserves both limits.\n- Facts vs. assumptions: facts are listed above; assumptions are explicitly labeled.\n- Next steps: two conditional actions follow.\n\nConditional next steps:\n\n1. If either vendor can quote a revised configuration that meets both constraints \u2014 A with latency at most 50 ms, or B with cost at most 60 units/month \u2014 request that formal quote and re-run this comparison with the new figures.\n2. If a decision-maker explicitly changes a constraint in writing, such as raising the budget above 60 units/month or the latency limit above 50 ms, then re-evaluate the relevant option under the newly approved requirement; this would be a conscious requirement change, not a silent relaxation.\n\nDecision: defer."
+      },
+      {
+        "node": "policies",
+        "attempt": 0,
+        "output": "POLICY 1: Formal feasibility-check policy. Angle: treat the decision as a constraint satisfaction problem with no objective function and no allowed trade-offs. Method: enumerate each candidate against the hard budget threshold (\u226460 units/month) and hard latency threshold (\u226450 ms), producing a truth table: A passes budget but fails latency; B passes latency but fails budget; the feasible set is therefore empty. Structure: facts table, constraint audit, explicit infeasibility conclusion, facts-versus-assumptions note, two conditionals, and the required closing sentence. Prioritizes logical reproducibility and hard-requirement enforcement over stakeholder preference.\n\nPOLICY 2: Multi-criteria trade-off and sensitivity policy. Angle: although feasibility is binary, the memo explores how close each option is and what would have to change. Method: use a decision matrix with cost and latency desirability scores, set any constraint violation to effectively unacceptable, then run sensitivity thresholds such as \u201cA would need latency \u226450 ms\u201d and \u201cB would need cost \u226460 units/month,\u201d without treating these as actual relaxations. Structure: matrix comparison, Pareto-style prose comparison, sensitivity bullets, distinct conditional next steps, closing sentence. Prioritizes exposing trade-off distances and possible future remedies while still refusing to relax current constraints.\n\nPOLICY 3: Decision-tree uncertainty policy. Angle: since neither option is feasible, treat the memo as a decision analysis under unresolved facts and future unknowns. Method: build a decision tree rooted at \u201cdefer,\u201d with branches for possible legitimate constraint changes: if the latency target were later changed upward, A might be viable; if the budget cap were later increased, B might be viable; each branch includes the explicit condition, the remaining constraint check, and no invented evidence. Structure: node-by-node walkthrough, facts/assumptions split, two conditional next steps, closing sentence. Prioritizes actionability under uncertainty and avoiding premature commitment.\n\nPOLICY 4: Red-team/anti-recommendation policy. Angle: adopt an adversarial \u201cpremortem\u201d perspective by deliberately trying to recommend each option and then attacking that recommendation. Method: run independent lenses\u2014engineering, finance, and operations\u2014against both candidates, cross-examine the merged recommendation against every constraint, and state the strongest objection to any compromise such as half-relaxing budget or latency. Structure: lens-by-lens comparison, pooled critique, explicit \u201cneither is feasible\u201d judgment, two conditionals tied to real-world remediation, closing sentence. Prioritizes surfacing hidden relaxations and avoiding groupthink."
+      },
+      {
+        "node": "answer_1",
+        "attempt": 0,
+        "output": "Deployment Decision Memo\n\nFacts: A costs 40 units/month and has 80 ms latency. B costs 70 units/month and has 30 ms latency. Budget limit is 60 units/month. Latency target is 50 ms.\n\nApproach 1: cost-only lens. A is under budget; B is over budget.\nApproach 2: latency-only lens. A is over latency; B is under latency.\nApproach 3: joint feasibility lens. A fails latency; B fails budget.\n\nMerged recommendation: defer deployment. Neither A nor B is feasible: A violates the 50 ms latency target; B violates the 60 units/month budget limit.\n\nFacts vs assumptions: The facts are the supplied costs, latencies, budget limit, and latency target. Assumption: the supplied values are the only decision-relevant performance and cost values; no external benchmarks, estimates, or citations are introduced.\n\nAudit of recommendation: Budget: deferring does not commit to a 60-unit-max option and avoids B\u2019s 70-unit cost. Latency: deferring avoids A\u2019s 80-ms latency and does not commit to an option above 50 ms. Feasibility: the feasible set is empty. No-relaxation: the memo does not treat 80 ms as within 50 ms or 70 units as within 60 units. Facts/assumptions: only supplied facts are used. Next steps: two conditionals are included.\n\nConditional next step 1: If an approved, explicit latency change raises the target to at least 80 ms while the budget remains at most 60 units/month, then re-evaluate A.\nConditional next step 2: If an approved, explicit budget change raises the limit to at least 70 units/month while the latency target remains at most 50 ms, then re-evaluate B.\n\nDecision: defer."
+      },
+      {
+        "node": "answer_4",
+        "attempt": 0,
+        "output": "Deployment Decision Memo\n\nFacts: A costs 40 units/month and has 80 ms latency; B costs 70 units/month and has 30 ms latency. Budget is at most 60 units/month; latency is at most 50 ms; neither constraint may be silently relaxed.\n\nAssumptions: The supplied numbers are the only deployment facts; no external measurements or sources are used. Any future change must be explicitly granted.\n\nIndependent analytical approaches:\nEngineering: A misses latency by 30 ms; B meets latency with 20 ms headroom.\nFinance: A is 20 units under budget; B exceeds budget by 10 units.\nOperations: A could be deployed within cost but would miss the performance target; B could meet performance but would breach the funding cap.\n\nPooled critique: A fails latency; B fails budget. No option satisfies both hard constraints. A compromise such as accepting 80 ms or 70 units would silently relax a constraint and is rejected.\n\nMerged recommendation audit: Budget: A pass, B fail. Latency: A fail, B pass. Feasibility: neither A nor B is feasible. No relaxation: constraints remain unaltered. Facts/assumptions: comparison uses only supplied numbers; assumptions are identified separately. Next steps: included below.\n\nConditional next steps:\n1. If an explicit latency waiver is granted, re-evaluate A only if its 80 ms remains the only change and cost stays 40 units/month.\n2. If an explicit budget increase to at least 70 units/month is granted, re-evaluate B only if its 30 ms remains the only change.\n\nDecision: defer"
+      },
+      {
+        "node": "answer_2",
+        "attempt": 0,
+        "output": "Deployment Decision Memo\n\nFacts (supplied only):\n- A: 40 units/month; 80 ms latency.\n- B: 70 units/month; 30 ms latency.\n- Budget: at most 60 units/month.\n- Latency target: at most 50 ms.\n\nAssumptions"
+      },
+      {
+        "node": "answer_3",
+        "attempt": 0,
+        "output": ""
+      },
+      {
+        "node": "audit",
+        "attempt": 0,
+        "output": "FAIL\nR1 | satisfied | evidence: \u201cDeployment Decision Memo\u201d and memo-style prose frame the answer as a deployment decision memo | correction: none\nR2 | satisfied | evidence: substantive comparison relies on the supplied A/B costs, latencies, budget, and latency limits | correction: none\nR3 | satisfied | evidence: the memo compares A and B against both cost and latency constraints | correction: none\nR4 | satisfied | evidence: includes cost-first, latency-first, and joint-feasibility perspectives | correction: none\nR5 | unsatisfied | evidence: the \u201cCritical audit\u201d checks budget, latency, no silent relaxation, facts/assumptions, and no invented benchmarks/citations, but does not explicitly audit the next-step requirements or the explicit neither-feasible conclusion | correction: add a concise audit sentence confirming that the deferral, feasibility conclusion, and two conditional next steps satisfy the memo requirements, while staying under the word limit\nR6 | satisfied | evidence: \u201cneither option holds both constraints simultaneously; the feasible set is empty\u201d | correction: none\nR7 | satisfied | evidence: treats 60 units/month as the maximum and notes B exceeds it | correction: none\nR8 | satisfied | evidence: treats 50 ms as the maximum and notes A exceeds it | correction: none\nR9 | satisfied | evidence: \u201cno constraint has been silently relaxed\u201d | correction: none\nR10 | satisfied | evidence: explicitly distinguishes stated facts from assumptions and later restates \u201cFacts are the supplied costs, latencies, and limits\u201d | correction: none\nR11 | satisfied | evidence: two distinct numbered conditional next steps are provided | correction: none\nR12 | satisfied | evidence: no benchmark results or performance data beyond the supplied values are invented | correction: none\nR13 | satisfied | evidence: no citations or external references are included | correction: none\nR14 | satisfied | evidence: final line is exactly \u201cDecision: defer.\u201d | correction: none\nR15 | unsatisfied | evidence: the combined memo is well over 350 words, approximately 415 by whitespace token count | correction: reduce the complete memo to fewer than 350 words while preserving the comparison, explicit infeasibility statement, facts/assumptions distinction, two conditional next steps, audit, and exact final sentence\nR16 | unsatisfied | evidence: the committed opening ends \u201cwithout inflation\u201d and the remainder begins \u201cindependent analytical perspectives\u2026\u201d, producing an ungrammatical transition | correction: the remainder must bridge the committed sentence without changing the opening, for example by beginning with \u201cand that independent analytical perspectives\u2026\u201d, while preserving the exact final sentence and word limit"
+      },
+      {
+        "node": "audit",
+        "attempt": 1,
+        "output": "PASS/FAIL assessment:\n\nFAIL\n\nR1 | satisfied | evidence: \"Deployment Decision Memo\" heading; entire text in English, framed as a memo | correction: none\nR2 | satisfied | evidence: Only supplied values (40/80, 70/30, 60, 50) used for substantive claims; assumptions explicitly labeled as such | correction: none\nR3 | satisfied | evidence: \"Option A satisfies the budget constraint at 40 units but fails the latency target at 80 ms\u2026 Option B satisfies the latency target at 30 ms but fails the budget constraint at 70 units\" plus Budget-first/Latency-first comparisons | correction: none\nR4 | satisfied | evidence: Three independent lenses: \"Budget-first\u2026 Latency-first\u2026 Joint feasibility\u2026\" before merged recommendation | correction: none\nR5 | satisfied | evidence: \"Audit of the merged recommendation to defer: it commits to no option exceeding the 60-unit budget, no option exceeding the 50 ms latency target, and no relaxed constraint. It explicitly concludes neither option is feasible, distinguishes supplied facts from assumptions, provides two conditional next steps, and introduces no benchmark results or citations.\" | correction: none\nR6 | satisfied | evidence: \"no option satisfies both constraints, so the feasible set is empty\" and \"It explicitly concludes neither option is feasible\" | correction: none\nR7 | satisfied | evidence: \"maximum budget of 60 units/month\"; B fails at 70 > 60 | correction: none\nR8 | satisfied | evidence: \"maximum latency target of 50 ms\"; A fails at 80 > 50 | correction: none\nR9 | satisfied | evidence: \"neither constraint may be silently relaxed\"; \"A trade-off such as accepting 80 ms\u2026 or accepting 70 units\u2026 would silently relax a hard limit and is therefore rejected\" | correction: none\nR10 | satisfied | evidence: \"Next, we distinguish between facts and assumptions. The costs and latencies are stated facts. However, it is an assumption that\u2026\" | correction: none\nR11 | satisfied | evidence: Two numbered conditional steps, each beginning with \"If\u2026\" and specifying a distinct condition (vendor revised quote vs. decision-maker amendment) | correction: none\nR12 | satisfied | evidence: No benchmark results or performance data beyond the four supplied values | correction: none\nR13 | satisfied | evidence: No citations, references, or external sources | correction: none\nR14 | satisfied | evidence: Final sentence is exactly \"Decision: defer.\" | correction: none\nR15 | unsatisfied | evidence: Combined word count is approximately 400+ words, exceeding the 350-word limit. The opening alone is ~208 words and the remainder ~200 words. | correction: Trim the memo by at least 50\u201360 words. The audit paragraph, the trade-off rejection sentence, and some of the assumption elaboration are the most compressible sections without losing required content. For example, the audit paragraph can be reduced to a single clause, and the \"A trade-off such as\u2026\" sentence can be shortened or merged into the joint-feasibility statement.\n\nThe sole defect is the word-count violation. The memo must be cut to under 350 words while preserving all required elements (comparison, infeasibility statement, facts/assumptions distinction, two conditional next steps, audit, and exact closing sentence)."
+      }
+    ],
+    "ttft_s": 0.8023029470059555,
+    "e2e_s": 541.6010770720022,
+    "seed": 595,
+    "directory": "r0-headed-comparison"
+  },
+  "answer": "Deployment Decision Memo\n\nThe objective is to evaluate two deployment options against strict cost and latency constraints to determine a viable path forward. We are tasked with comparing Option A (40 units/month, 80 ms latency) and Option B (70 units/month, 30 ms latency) against a maximum budget of 60 units/month and a maximum latency target of 50 ms. The core requirement is that neither constraint may be silently relaxed, meaning any solution must satisfy both limits simultaneously.\n\nFirst, we examine the facts provided. Option A satisfies the budget constraint at 40 units but fails the latency target at 80 ms, exceeding the 50 ms limit by 30 ms. Option B satisfies the latency target at 30 ms but fails the budget constraint at 70 units, exceeding the 60 unit limit by 10 units. There are no hidden variables or alternative configurations mentioned in the supplied data.\n\nNext, we distinguish between facts and assumptions. The costs and latencies are stated facts. However, it is an assumption that these metrics are static and cannot be optimized through configuration changes, as no such capabilities were described. It is also assumed that \"units\" represent a fixed currency or resource metric without inflationand that these values are all-inclusive for the decision horizon.\n\nViewing the same facts through independent analytical lenses yields convergent results. Budget-first: A passes (40 \u2264 60); B fails (70 > 60). Latency-first: B passes (30 \u2264 50); A fails (80 > 50). Joint feasibility: no option satisfies both constraints, so the feasible set is empty. A trade-off such as accepting 80 ms to keep cost low, or accepting 70 units to gain low latency, would silently relax a hard limit and is therefore rejected.\n\nAudit of the merged recommendation to defer: it commits to no option exceeding the 60-unit budget, no option exceeding the 50 ms latency target, and no relaxed constraint. It explicitly concludes neither option is feasible, distinguishes supplied facts from assumptions, provides two conditional next steps, and introduces no benchmark results or citations.\n\nConditional next steps:\n\n1. If either vendor provides a formal revised quote meeting both constraints \u2014 for example, A at latency \u2264 50 ms, or B at cost \u2264 60 units/month \u2014 re-run this comparison using only those newly supplied figures.\n\n2. If a decision-maker approves a written amendment to one constraint, re-evaluate only the option that the amended limit makes eligible, treating that change as an explicit requirement change rather than precedent for the other constraint.\n\nDecision: defer.",
+  "trace": {
+    "trace_version": "2.0",
+    "request_id": "chatcmpl-4ba74c5cb4a94287",
+    "started_at": "2026-09-08T07:09:52.527Z",
+    "completed_at": "2026-09-08T07:18:54.087Z",
+    "events": [
+      {
+        "seq": 1,
+        "node": "profile_judge",
+        "role": "profile_judge",
+        "kind": "classification",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:09:52.527Z",
+          "started_at": "2026-09-08T07:09:52.527Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:09:52.978Z"
+        },
+        "usage": {
+          "prompt_tokens": 577,
+          "completion_tokens": 4,
+          "cached_tokens": 0
+        },
+        "budget": null,
+        "detail": {
+          "verdict": "primary",
+          "offered": [
+            "QWEN",
+            "QWEN_THINK",
+            "DEEPSEEK",
+            "DEEPSEEK_THINK",
+            "ENSEMBLE"
+          ],
+          "fallback": null,
+          "message": "profile: primary"
+        },
+        "error": null
+      },
+      {
+        "seq": 2,
+        "node": "router",
+        "role": "router",
+        "kind": "routing",
+        "status": "success",
+        "attempt": 0,
+        "worker": null,
+        "engine": null,
+        "model": null,
+        "timing": {
+          "queued_at": null,
+          "started_at": "2026-09-08T07:09:52.986Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:09:52.986Z"
+        },
+        "usage": null,
+        "budget": null,
+        "detail": {
+          "target": "multi_agent",
+          "confidence": 1.0,
+          "reason": "auto-max: three tier1 proposals and tier2 synthesis",
+          "message": "multi_agent (auto-max: three tier1 proposals and tier2 synthesis)"
+        },
+        "error": null
+      },
+      {
+        "seq": 3,
+        "node": "image_description",
+        "role": "proposal",
+        "kind": "generation",
+        "status": "skipped",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": null,
+        "usage": null,
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 0,
+          "steps_consumed": 0,
+          "steps_remaining": 20,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "reason": "no_image",
+          "requires": "image"
+        },
+        "error": null
+      },
+      {
+        "seq": 4,
+        "node": "head",
+        "role": "head",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:09:52.987Z",
+          "started_at": "2026-09-08T07:09:52.987Z",
+          "first_token_at": "2026-09-08T07:09:53.289Z",
+          "completed_at": "2026-09-08T07:09:58.838Z"
+        },
+        "usage": {
+          "prompt_tokens": 605,
+          "completion_tokens": 256,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 0,
+          "steps_consumed": 1,
+          "steps_remaining": 17,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "streamed": true,
+          "head": true,
+          "message": "attempt=0 streamed=true head=true"
+        },
+        "error": null
+      },
+      {
+        "seq": 5,
+        "node": "draft",
+        "role": "proposal",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:09:52.988Z",
+          "started_at": "2026-09-08T07:09:52.988Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:10:38.161Z"
+        },
+        "usage": {
+          "prompt_tokens": 697,
+          "completion_tokens": 2048,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 1,
+          "steps_consumed": 1,
+          "steps_remaining": 17,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=0"
+        },
+        "error": null
+      },
+      {
+        "seq": 6,
+        "node": "requirements",
+        "role": "planner",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:09:53.018Z",
+          "started_at": "2026-09-08T07:09:53.018Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:10:53.678Z"
+        },
+        "usage": {
+          "prompt_tokens": 982,
+          "completion_tokens": 2747,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 2,
+          "steps_consumed": 1,
+          "steps_remaining": 17,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=0"
+        },
+        "error": null
+      },
+      {
+        "seq": 7,
+        "node": "critique",
+        "role": "synthesizer",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier2",
+        "engine": "tier2",
+        "model": "deepseek-v4-flash-0731-thinking",
+        "timing": {
+          "queued_at": "2026-09-08T07:10:53.683Z",
+          "started_at": "2026-09-08T07:10:53.683Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:11:02.076Z"
+        },
+        "usage": {
+          "prompt_tokens": 1459,
+          "completion_tokens": 1476,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 4,
+          "steps_consumed": 1,
+          "steps_remaining": 15,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=0"
+        },
+        "error": null
+      },
+      {
+        "seq": 8,
+        "node": "policies",
+        "role": "planner",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier2",
+        "engine": "tier2",
+        "model": "deepseek-v4-flash-0731-thinking",
+        "timing": {
+          "queued_at": "2026-09-08T07:10:53.682Z",
+          "started_at": "2026-09-08T07:10:53.682Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:11:08.115Z"
+        },
+        "usage": {
+          "prompt_tokens": 1399,
+          "completion_tokens": 2535,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 3,
+          "steps_consumed": 1,
+          "steps_remaining": 15,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=0"
+        },
+        "error": null
+      },
+      {
+        "seq": 9,
+        "node": "answer_1",
+        "role": "proposal",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:11:08.119Z",
+          "started_at": "2026-09-08T07:11:08.119Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:12:17.216Z"
+        },
+        "usage": {
+          "prompt_tokens": 2036,
+          "completion_tokens": 3148,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 5,
+          "steps_consumed": 1,
+          "steps_remaining": 11,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=0"
+        },
+        "error": null
+      },
+      {
+        "seq": 10,
+        "node": "answer_4",
+        "role": "proposal",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:11:08.121Z",
+          "started_at": "2026-09-08T07:11:08.121Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:12:24.282Z"
+        },
+        "usage": {
+          "prompt_tokens": 2036,
+          "completion_tokens": 3457,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 8,
+          "steps_consumed": 1,
+          "steps_remaining": 11,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=0"
+        },
+        "error": null
+      },
+      {
+        "seq": 11,
+        "node": "answer_2",
+        "role": "proposal",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:11:08.119Z",
+          "started_at": "2026-09-08T07:11:08.119Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:12:38.052Z"
+        },
+        "usage": {
+          "prompt_tokens": 2036,
+          "completion_tokens": 4096,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 6,
+          "steps_consumed": 1,
+          "steps_remaining": 11,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=0"
+        },
+        "error": null
+      },
+      {
+        "seq": 12,
+        "node": "answer_3",
+        "role": "proposal",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:11:08.119Z",
+          "started_at": "2026-09-08T07:11:08.119Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:12:38.182Z"
+        },
+        "usage": {
+          "prompt_tokens": 2036,
+          "completion_tokens": 4096,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 7,
+          "steps_consumed": 1,
+          "steps_remaining": 11,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=0"
+        },
+        "error": null
+      },
+      {
+        "seq": 13,
+        "node": "synthesis",
+        "role": "publisher",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier2",
+        "engine": "tier2",
+        "model": "deepseek-v4-flash-0731-thinking",
+        "timing": {
+          "queued_at": "2026-09-08T07:12:38.186Z",
+          "started_at": "2026-09-08T07:12:38.186Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:12:46.902Z"
+        },
+        "usage": {
+          "prompt_tokens": 3106,
+          "completion_tokens": 2020,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 9,
+          "steps_consumed": 1,
+          "steps_remaining": 10,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=0"
+        },
+        "error": null
+      },
+      {
+        "seq": 14,
+        "node": "audit",
+        "role": "verifier",
+        "kind": "verification",
+        "status": "success",
+        "attempt": 0,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:12:46.903Z",
+          "started_at": "2026-09-08T07:12:46.903Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:15:27.693Z"
+        },
+        "usage": {
+          "prompt_tokens": 2525,
+          "completion_tokens": 7309,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 10,
+          "steps_consumed": 1,
+          "steps_remaining": 9,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "pass": false,
+          "inconclusive": false,
+          "refinement_exhausted": false,
+          "message": "attempt=0 pass=False"
+        },
+        "error": null
+      },
+      {
+        "seq": 15,
+        "node": "synthesis",
+        "role": "publisher",
+        "kind": "generation",
+        "status": "success",
+        "attempt": 1,
+        "worker": "tier2",
+        "engine": "tier2",
+        "model": "deepseek-v4-flash-0731-thinking",
+        "timing": {
+          "queued_at": "2026-09-08T07:15:27.694Z",
+          "started_at": "2026-09-08T07:15:27.694Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:15:31.708Z"
+        },
+        "usage": {
+          "prompt_tokens": 3957,
+          "completion_tokens": 779,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 11,
+          "steps_consumed": 1,
+          "steps_remaining": 8,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "message": "attempt=1"
+        },
+        "error": null
+      },
+      {
+        "seq": 16,
+        "node": "audit",
+        "role": "verifier",
+        "kind": "verification",
+        "status": "success",
+        "attempt": 1,
+        "worker": "tier1",
+        "engine": "tier1",
+        "model": "qwen3.8-27b",
+        "timing": {
+          "queued_at": "2026-09-08T07:15:31.709Z",
+          "started_at": "2026-09-08T07:15:31.709Z",
+          "first_token_at": null,
+          "completed_at": "2026-09-08T07:18:54.074Z"
+        },
+        "usage": {
+          "prompt_tokens": 2523,
+          "completion_tokens": 9190,
+          "cached_tokens": 0
+        },
+        "budget": {
+          "max_steps": 20,
+          "steps_before": 12,
+          "steps_consumed": 1,
+          "steps_remaining": 7,
+          "max_cost_usd": null,
+          "cost_before_usd": 0.0,
+          "cost_consumed_usd": 0.0,
+          "cost_remaining_usd": null
+        },
+        "detail": {
+          "pass": true,
+          "inconclusive": false,
+          "refinement_exhausted": false,
+          "message": "attempt=1 pass=True"
+        },
+        "error": null
+      }
+    ]
+  },
+  "artifact_sha256": {
+    "qwen-1-requirements-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "qwen-0-requirements-budget.log": "b959100aebdb75749ed9ecdec8545e6bbebed466004fbc1476de60e1c86154f8",
+    "launcher.log": "109d2398618b9f2d79dc74cf4cf57fcf53a9bfd8384cc3a3652b4a97816b3f82",
+    "run.json": "8217a1843ba4f91e436975dc1641b3ec3c50af75251143815f89902720e51a87",
+    "budget-application.json": "55cb5adbb451d2e0aaafe1416dbfc9843274f860bc86e0a7814911ae64bdd50d",
+    "qwen-2-requirements-budget.log": "55842bdf2b75415171bf9629426b951a2619b82648608f2b9f97bb4b45d41359",
+    "qwen-3-requirements-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "runtime.json": "1ff1813d8352d714e57d687dfa557145eb3643eabcecf2fd4bcfd651ffad220a",
+    "requirements-quality/summary.json": "7907cd67ceb6f33c1745e7c1d9bac1da35bea8d971ad8c5bb44d048de46f6935",
+    "requirements-quality/r0-headless-json/response.sse": "ad8d90053ad15f84f2a00df22a98e8d90eae3b4dfc8642aa5b4747ac64d54df5",
+    "requirements-quality/r0-headless-json/request.json": "d1f3b80358b9667d14a0e1a790135bb191e238f4bef8f3b4f3cd53e31f7c8d18",
+    "requirements-quality/r0-headed-comparison/validation.json": "6c86ca2e81e7366cf00f0b11c3666fac458aa0d12b4c91a22ba04c631a3aa82f",
+    "requirements-quality/r0-headed-comparison/response.sse": "480e5f3093e67e15bc937dfabac5b439ee85852c0f9d126f63319e20b6e07c58",
+    "requirements-quality/r0-headed-comparison/request.json": "bced7e945cbbb0c9f52f98c0442baff4c43dc02d3d21fee0bd497ef2d80170ae",
+    "requirements-quality/r0-headed-comparison/result.json": "f73c7b94cc258180f50c8a570d59207616de60efa0b9ef95e1762177a0b09ff5"
+  }
+}

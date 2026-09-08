@@ -13,6 +13,25 @@ _LOGGER = logging.getLogger("vllm.entrypoints.openai.api_server")
 _MAX_BUFFER_BYTES = 32 * 1024 * 1024
 
 
+CHECKLIST_SCHEMA = {
+    "type": "array",
+    "minItems": 1,
+    "items": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "pattern": "^R[1-9][0-9]*$"},
+            "priority": {"type": "string", "enum": ["minimum", "optional"]},
+            **{
+                name: {"type": "string", "minLength": 1}
+                for name in ("requirement", "acceptance_criterion", "source")
+            },
+        },
+        "required": ["id", "priority", "requirement", "acceptance_criterion", "source"],
+        "additionalProperties": False,
+    },
+}
+
+
 def budget_payload(payload: object, *, prefix: str, suffix: str, thinking_budget: int):
     """Recognize the entire shipped role template, never a marker in user data."""
     if not isinstance(payload, dict) or payload.get("model") != "qwen3.8-27b":
@@ -45,7 +64,11 @@ def budget_payload(payload: object, *, prefix: str, suffix: str, thinking_budget
     # Short caller allowances still retain at least half for the body. This
     # does not enlarge the caller's or the role's total token allowance.
     limit = min(thinking_budget, maximum // 2)
-    return {**payload, "thinking_token_budget": limit}
+    return {
+        **payload,
+        "thinking_token_budget": limit,
+        "structured_outputs": {"json": CHECKLIST_SCHEMA},
+    }
 
 
 class RequirementsBudgetMiddleware:

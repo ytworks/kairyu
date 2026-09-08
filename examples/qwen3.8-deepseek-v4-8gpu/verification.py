@@ -868,6 +868,7 @@ def _served_config_sha256() -> str:
         "deepseek-role-effort.jinja",
         "qwen3.8-chat.jinja",
         "requirements_budget.py",
+        "control.py",
         "sandbox/Dockerfile",
         "sandbox/runner.py",
     ):

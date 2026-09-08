@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -78,6 +79,14 @@ def _storage_paths() -> dict[str, Path]:
     return paths
 
 
+def _requirements_config_sha256() -> str:
+    """Make mounted extractor changes visible to Compose's recreate decision."""
+    digest = hashlib.sha256()
+    for name in ("auto-max.yaml", "example.json", "requirements_budget.py"):
+        digest.update(name.encode() + b"\0" + (HERE / name).read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
 def _compose_env() -> dict[str, str]:
     env = {
         key: value
@@ -90,6 +99,7 @@ def _compose_env() -> dict[str, str]:
             "COMPOSE_DISABLE_ENV_FILE": "1",
             "COMPOSE_PROJECT_NAME": SPEC["environment"].replace(".", "-"),
             "QWEN_MODEL_STORAGE_PATH": str(paths["qwen_models"]),
+            "KAIRYU_REQUIREMENTS_CONFIG_SHA256": _requirements_config_sha256(),
             "DEEPSEEK_MODEL_VOLUME": os.environ.get(
                 "DEEPSEEK_MODEL_VOLUME", SPEC["storage"]["deepseek_model_volume"]
             ),

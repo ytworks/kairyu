@@ -222,11 +222,15 @@ Role contracts:
 Requirement verification (DTO-D16) is a lightweight model-based quality check
 for any task: writing, research, comparisons, image questions, or programming.
 The `requirements` role reads the original conversation independently of the
-candidate drafts and emits one line per item, for example:
+candidate drafts and emits a nonempty JSON array, for example:
 
-```text
-R1 | priority: minimum | requirement: Compare both options | acceptance_criterion: Discuss A and B and their differences | source: "Compare A and B"
+```json
+[{"id":"R1","priority":"minimum","requirement":"Compare both options","acceptance_criterion":"Discuss A and B and their differences","source":"Compare A and B"}]
 ```
+
+A vLLM JSON schema constrains the output fields while preserving literal
+vertical bars, quotes, and newlines inside criteria. The quality gate still
+checks semantic coverage, exact literals in acceptance criteria, and stable IDs.
 
 The checklist travels to policies, all four answers, critique, both synthesis
 prompt variants, and every audit attempt. It is untrusted derived data: the
@@ -243,7 +247,7 @@ excluding the separately bounded route judge and refinement/retry calls.
 It uses the existing example's medium-thinking mapping (`reasoning_effort:
 high`, DTO-D14) and an 8192-token combined thinking/checklist cap. The example-local vLLM
 `requirements_budget.py` middleware applies the standard per-request
-`thinking_token_budget: 2048` only to the complete requirements role template,
+`thinking_token_budget: 4096` only to the complete requirements role template,
 reserving room for its checklist while retaining fixed medium thinking.
 The other roles and direct profiles keep their sampling settings. This is an
 agent judgment, not a mechanically enforced proof of requirement satisfaction:
@@ -547,3 +551,9 @@ cases three times (serial, then concurrent). It rejects empty or truncated
 checklists, missing minimum constraints, missing audit IDs/evidence, and a
 PASS that leaves minimum requirements unsatisfied. Full tuned API evidence
 is pending; direct worker probes alone do not close this gate.
+
+When extractor settings change, `control.py` passes their content hash into
+the Qwen Compose environment. Normal `./run.sh up` therefore recreates the
+affected workers and reloads the complete prompt matcher. The committed
+opening is limited to one sentence of at most 30 words; synthesis applies
+user length limits to that opening plus its remainder.

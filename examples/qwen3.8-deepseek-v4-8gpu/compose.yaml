@@ -5,6 +5,7 @@ x-qwen: &qwen
   ipc: host
   environment:
     PYTHONPATH: /etc/kairyu
+    KAIRYU_REQUIREMENTS_CONFIG_SHA256: ${KAIRYU_REQUIREMENTS_CONFIG_SHA256:?run control.py to hash the extractor config}
     HF_HOME: /models/.cache
     HF_HUB_OFFLINE: "1"
     HF_HUB_DISABLE_TELEMETRY: "1"

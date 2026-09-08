@@ -706,3 +706,30 @@ A new `requirements-quality` gate repeats the original three cases serially
 and concurrently, rejecting empty/truncated outputs, missing minimum coverage,
 audit IDs or evidence, and PASS with unresolved minimum requirements. Full
 public-API and serving re-verification on this tuned config remains pending.
+
+The first tuned API trial exposed two further failures: a source quotation
+preserved the required period while its acceptance criterion omitted it, and
+a 405-word answer exceeded 350 words. Its second audit emitted a
+`PASS/FAIL assessment:` heading before FAIL, which the existing prefix-based
+framework parser recorded as PASS. The example quality gate rejected the
+answer. Audit outputs were nonempty and below their cap (7309/9190 tokens).
+The follow-up keeps framework behavior unchanged: literals must be quoted
+exactly in acceptance criteria, the head emits one sentence of at most 30
+words, synthesis budgets the combined answer length, and audit emits a bare
+verdict followed by one complete evidence row per ID without headings.
+
+Further extraction probes found that a forced thinking cutoff can continue
+from the middle of a checklist line. The accepted follow-up representation
+is a nonempty JSON array constrained by vLLM `structured_outputs.json`, with
+required id/priority/requirement/acceptance_criterion/source fields and no
+additional properties. It retains arbitrary literal characters, unlike a
+pipe-delimited generation regex. The role preserves concrete bounds and
+quotes exact strings in acceptance criteria. Thinking has a 4096-token
+allowance within the unchanged 8192 total, still fixed medium: all four
+adopted direct probes pass complete coverage and literal checks. Earlier
+2048-token JSON probes were syntactically valid but omitted requirements;
+they remain failed evidence. Full API re-verification is still pending.
+
+The launcher hashes auto-max.yaml, example.json, and requirements_budget.py
+into the Qwen environment so Compose recreates workers after these mounted
+files change. The verification config digest also includes control.py.

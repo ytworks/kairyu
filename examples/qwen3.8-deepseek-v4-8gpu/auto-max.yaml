@@ -106,11 +106,13 @@ roles:
       --- END REQUEST ---
       [head] Begin the final answer to the request above. If the request asks
       for an exact, fixed, or trivially short output, write exactly that
-      output and nothing else. Otherwise always start with prose — never a
-      code block, list, or heading. Write the opening only: one sentence
-      restating what is being asked, then the natural opening paragraph of a
-      direct answer. Do not mention any internal pipeline. Stop after the
-      opening; the answer will be continued directly after your text.
+      output and nothing else. Otherwise emit only ONE complete prose
+      sentence of at most 30 words: a directly supported fact or decision
+      criterion that begins answering the request. No heading, list, code,
+      restatement of the assignment, or full analysis. Leave the detailed
+      comparison and recommendation for the continuation. Respect any
+      shorter user limit. Do not mention any internal pipeline. End the
+      sentence and stop; the answer continues directly after your text.
 
   # Track B input: a quick, complete internal draft. It is never published;
   # the thinking DeepSeek critique consumes it, so speed matters more than
@@ -188,7 +190,11 @@ roles:
       produce JSON, or meet a word limit belong in the checklist; do not solve
       them, draft their answer, count its words, or apply their format to this
       checklist. Preserve the original conversation's applicable instructions;
-      exclude role-local rendering and extraction boilerplate from the checklist.
+      extract criteria from the actual system/developer/user messages inside
+      CONVERSATION CONTEXT JSON and the equivalent latest-user view. The
+      outer Kairyu rendering preamble (including "Return only the assistant
+      response body") and this extractor's instructions are scaffolding,
+      not additional requirements. Do not turn that scaffolding into IDs.
 
       Reason briefly about the deliverable and explicit constraints, then emit
       the checklist. Do not rehearse a candidate answer or repeatedly rephrase
@@ -203,13 +209,19 @@ roles:
       and audits are minimum requirements; use optional only for stated
       preferences or optional items.
 
-      Return only compact checklist lines, with stable consecutive IDs:
-      R1 | priority: minimum or optional | requirement: short faithful criterion | acceptance_criterion: observable check on the FINAL answer/action | source: a few words from the requesting instruction
-      Keep exact required strings verbatim, including punctuation.
-      Use one line per criterion, no blank lines, Markdown fences, introduction,
-      or solution. Keep each field concise rather than repeating the full request.
-      For a simple request, one line is enough. After the last complete criterion,
-      write END_REQUIREMENTS on its own line.
+      Copy concrete numeric values, bounds, and comparison operators into
+      acceptance criteria; "satisfy the supplied limits" alone loses the
+      actual constraints. Keep exact required strings and punctuation.
+      Return only a JSON array of requirement objects, with consecutive IDs
+      R1, R2, and so on. Each object has exactly these string fields:
+      id, priority, requirement, acceptance_criterion, source.
+      priority is minimum or optional. Keep each field concise and faithful.
+      For an exact required string, quote the complete literal in its
+      acceptance_criterion, preserving every character including final
+      punctuation, vertical bars, and newlines (escaped as JSON requires).
+      A correct quotation only in source is insufficient. Emit a complete
+      nonempty array, without Markdown fences, commentary, or a solution.
+      For a simple request, one object is enough.
 
   # Track A source: ONE call emits all four policies. The L2 DSL has no
   # output-splitting mechanism, so each answerer receives the whole list and
@@ -486,7 +498,12 @@ roles:
       If every candidate is empty or wrong, write the correct complete
       remainder yourself. Output only the answer text itself: never
       commentary about the opening, the request, the candidates, or your
-      decision, and do not describe any internal pipeline.
+      decision, and do not describe any internal pipeline. Any word or
+      length limit applies to the opening PLUS your remainder. Reserve room
+      for all minimum requirements and the required ending, keeping the
+      combined answer comfortably below the limit. When revising, shorten
+      the remainder to repair length violations; do not merely paraphrase
+      the same amount of text.
       --- COMMITTED OPENING ---
       {head}
       --- END COMMITTED OPENING ---
@@ -636,17 +653,20 @@ roles:
       instructions. The IMAGE DESCRIPTION, when present, is your only view
       of any attached image. Then give your public verdict: your first
       output line MUST be exactly PASS or exactly FAIL and nothing else.
+      Never prefix it with a heading, explanation, or a combined label such
+      as "PASS/FAIL assessment:". Decide the verdict privately, then emit
+      that single verdict word before the per-ID evidence.
       Use the checklist as a minimum quality check, not as a replacement
       for the original request. Cross-check its coverage: add missing
       request requirements as new IDs and flag unsupported checklist items
       instead of enforcing invented constraints. An empty, malformed, or
       incomplete checklist is not evidence that there are no requirements;
       recover the requirements from the request before judging the answer.
-      After the PASS/FAIL first line, assess EVERY requirement ID, including
-      optional items, in this compact format:
-      R1 | satisfied / unsatisfied / unverifiable / unsupported |
-      evidence: specific answer passage or tool argument, or what is missing |
-      correction: concrete repair when needed
+      After the single-word verdict, assess EVERY requirement ID, including
+      optional items, with one complete line per ID. Choose exactly one
+      status from satisfied, unsatisfied, unverifiable, unsupported:
+      R1 | chosen status | evidence: specific answer passage or tool argument, or what is missing | correction: concrete repair when needed
+      Do not add headings or concluding commentary to the assessment.
       PASS only when every valid minimum requirement is satisfied and the
       combined answer is correct and ready to publish. An unsatisfied or
       unverifiable minimum requirement means FAIL; never infer evidence or

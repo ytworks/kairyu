@@ -13,35 +13,40 @@ from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-END_MARKER = "END_REQUIREMENTS"
-_LINE = re.compile(
-    r"^R(?P<id>[1-9]\d*)\s*\|\s*priority:\s*(?P<priority>minimum|optional)"
-    r"\s*\|\s*requirement:\s*(?P<requirement>[^|]+?)"
-    r"\s*\|\s*acceptance_criterion:\s*(?P<acceptance>[^|]+?)"
-    r"\s*\|\s*source:\s*(?P<source>[^|]+?)$"
-)
 _STAGE = re.compile(r"(?m)^### (?P<node>[\w:-]+) — attempt (?P<attempt>\d+)\n")
 
 
 def parse_checklist(text: str) -> list[dict[str, str]]:
-    """Reject empty, truncated, malformed, or ambiguously numbered checklists."""
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-    if not lines or lines[-1] != END_MARKER or lines.count(END_MARKER) != 1:
-        raise ValueError("missing or repeated checklist end marker")
-    if len(lines) == 1:
-        raise ValueError("end marker without requirements")
+    """Require a complete nonempty JSON checklist and stable, usable criteria."""
+    values = json.loads(text)
+    if not isinstance(values, list) or not values:
+        raise ValueError("expected a nonempty JSON checklist array")
     entries = []
-    for index, line in enumerate(lines[:-1], 1):
-        match = _LINE.fullmatch(line)
-        if match is None:
-            raise ValueError(f"incomplete requirement fields on line {index}")
-        entry = {key: value.strip() for key, value in match.groupdict().items()}
-        if entry["id"] != str(index):
+    for index, value in enumerate(values, 1):
+        if not isinstance(value, dict) or set(value) != {
+            "id",
+            "priority",
+            "requirement",
+            "acceptance_criterion",
+            "source",
+        }:
+            raise ValueError(f"incomplete requirement fields on item {index}")
+        if value["id"] != f"R{index}":
             raise ValueError("requirement IDs must be consecutive and unique")
-        for key in ("requirement", "acceptance", "source"):
-            if not re.search(r"\w", entry[key]) or entry[key] == "...":
+        if value["priority"] not in ("minimum", "optional"):
+            raise ValueError("invalid requirement priority")
+        for key in ("requirement", "acceptance_criterion", "source"):
+            if not isinstance(value[key], str) or not re.search(r"\w", value[key]):
                 raise ValueError(f"empty {key} on R{index}")
-        entries.append(entry)
+        entries.append(
+            {
+                "id": str(index),
+                "priority": value["priority"],
+                "requirement": value["requirement"],
+                "acceptance": value["acceptance_criterion"],
+                "source": value["source"],
+            }
+        )
     return entries
 
 
@@ -140,8 +145,11 @@ def validate_result(case: dict, result: dict, *, requirement_cap: int) -> dict:
             re.search(pattern, minimum_text, re.IGNORECASE) is not None
             for pattern in group["patterns"]
         )
+    minimum_acceptance = "\n".join(
+        entry["acceptance"] for entry in entries if entry["priority"] == "minimum"
+    )
     checks["preserves_required_literals"] = bool(entries) and all(
-        literal in minimum_text for literal in case["checklist_literals"]
+        literal in minimum_acceptance for literal in case["checklist_literals"]
     )
     checks["excludes_rendering_boilerplate"] = bool(entries) and all(
         "return only the assistant response body" not in entry["source"].lower()
@@ -181,9 +189,7 @@ def validate_result(case: dict, result: dict, *, requirement_cap: int) -> dict:
     )
     answer = result.get("answer", "").strip()
     checks["nonempty_final_answer"] = bool(answer)
-    checks["checklist_not_published"] = (
-        END_MARKER not in answer and "acceptance_criterion:" not in answer
-    )
+    checks["checklist_not_published"] = "acceptance_criterion" not in answer
     word_count = sum(bool(re.search(r"\w", word)) for word in answer.split())
     if case["id"] == "headed-comparison":
         checks["final_word_limit"] = word_count < 350

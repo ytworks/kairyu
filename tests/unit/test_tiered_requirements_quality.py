@@ -24,30 +24,43 @@ def _load(name):
 
 quality = _load("requirements_quality")
 budget = _load("requirements_budget")
-LINE = (
-    "R1 | priority: minimum | requirement: Use English | "
-    "acceptance_criterion: Answer is English | source: Use English"
-)
-CHECKLIST = LINE + "\nEND_REQUIREMENTS"
+ENTRY = {
+    "id": "R1",
+    "priority": "minimum",
+    "requirement": "Use English",
+    "acceptance_criterion": "Answer is English",
+    "source": "Use English",
+}
+LINE = json.dumps(ENTRY)
+CHECKLIST = "[" + LINE + "]"
 
 
 @pytest.mark.parametrize(
     "text",
     [
         "",
-        "END_REQUIREMENTS",
-        LINE,
-        LINE + "\nEND_REQUIREMENTS\ntruncated",
-        LINE + "\n" + LINE + "\nEND_REQUIREMENTS",
-        CHECKLIST.replace("R1 |", "R2 |"),
-        CHECKLIST.replace("source: Use English", "source: "),
-        CHECKLIST.replace("acceptance_criterion: Answer is English", "acceptance_criterion: ..."),
-        CHECKLIST.replace(" | source: Use English", ""),
+        "[]",
+        "[",
+        CHECKLIST[:-1],
+        CHECKLIST + "truncated",
+        json.dumps([ENTRY, ENTRY]),
+        json.dumps([{**ENTRY, "id": "R2"}]),
+        json.dumps([{**ENTRY, "source": ""}]),
+        json.dumps([{**ENTRY, "acceptance_criterion": "..."}]),
+        json.dumps([{key: value for key, value in ENTRY.items() if key != "source"}]),
+        json.dumps([{**ENTRY, "priority": "recommended"}]),
     ],
 )
 def test_checklist_rejects_empty_truncated_or_ambiguous_outputs(text):
     with pytest.raises(ValueError):
         quality.parse_checklist(text)
+
+
+def test_checklist_preserves_vertical_bars_and_newlines():
+    literal = "first | second\nthird."
+    entry = {**ENTRY, "acceptance_criterion": f"Ends with exactly {literal}"}
+    parsed = quality.parse_checklist(json.dumps([entry]))
+    assert literal in parsed[0]["acceptance"]
 
 
 def _fixture():
@@ -153,11 +166,15 @@ def test_budget_changes_only_sampling_budget_and_preserves_medium(image):
         "chat_template_kwargs": {"enable_thinking": True},
     }
     original = copy.deepcopy(payload)
-    changed = budget.budget_payload(payload, prefix=prefix, suffix=suffix, thinking_budget=2048)
-    assert changed == {**original, "thinking_token_budget": 2048}
+    changed = budget.budget_payload(payload, prefix=prefix, suffix=suffix, thinking_budget=4096)
+    assert changed == {
+        **original,
+        "thinking_token_budget": 4096,
+        "structured_outputs": {"json": budget.CHECKLIST_SCHEMA},
+    }
     assert payload == original
     payload["max_tokens"] = 1000
-    changed = budget.budget_payload(payload, prefix=prefix, suffix=suffix, thinking_budget=2048)
+    changed = budget.budget_payload(payload, prefix=prefix, suffix=suffix, thinking_budget=4096)
     assert changed["thinking_token_budget"] == 500
     assert changed["max_tokens"] == 1000
 
@@ -191,7 +208,7 @@ def test_marker_in_user_data_cannot_change_any_other_role():
                 payload,
                 prefix=prefix,
                 suffix=suffix,
-                thinking_budget=2048,
+                thinking_budget=4096,
             )
             is None
         ), role["name"]
@@ -240,7 +257,11 @@ async def test_asgi_hook_replays_chunked_body_and_updates_length_only_for_extrac
         None,
     )
     if matching:
-        assert json.loads(observed["body"]) == {**payload, "thinking_token_budget": 2048}
+        assert json.loads(observed["body"]) == {
+            **payload,
+            "thinking_token_budget": 4096,
+            "structured_outputs": {"json": budget.CHECKLIST_SCHEMA},
+        }
         assert dict(observed["headers"])[b"content-length"] == str(len(observed["body"])).encode()
     else:
         assert observed == {"body": body, "headers": headers}
@@ -258,3 +279,46 @@ def test_compose_enables_hook_on_each_qwen_worker_and_preserves_template():
         assert "./requirements_budget.py:/etc/kairyu/requirements_budget.py:ro" in worker["volumes"]
         assert "./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro" in worker["volumes"]
         assert "--default-chat-template-kwargs" not in command
+
+
+@pytest.mark.parametrize(
+    "acceptance", ["last sentence is exactly Decision: defer", "ends as requested"]
+)
+def test_exact_literal_in_source_cannot_hide_incorrect_acceptance(acceptance):
+    case, result = _fixture()
+    case["checklist_literals"] = ["Decision: defer."]
+    line = json.dumps(
+        {**ENTRY, "acceptance_criterion": acceptance, "source": "End with Decision: defer."}
+    )
+    result["reasoning"] = result["reasoning"].replace(LINE, line)
+    report = quality.validate_result(case, result, requirement_cap=8192)
+    assert report["checks"]["complete_checklist"]
+    assert not report["checks"]["preserves_required_literals"]
+    assert not report["passed"]
+
+
+def test_verdict_heading_cannot_hide_fail_under_trace_pass():
+    case, result = _fixture()
+    result["reasoning"] = result["reasoning"].replace("PASS\nR1", "PASS/FAIL assessment:\nFAIL\nR1")
+    report = quality.validate_result(case, result, requirement_cap=8192)
+    assert report["checks"]["final_audit_passes"]
+    assert not report["checks"]["audit_evidence_present"]
+    assert not report["passed"]
+
+
+@pytest.mark.parametrize("changed", ["auto-max.yaml", "example.json", "requirements_budget.py"])
+def test_extractor_config_change_triggers_compose_recreation(tmp_path, monkeypatch, changed):
+    control = _load("control")
+    for name in ("auto-max.yaml", "example.json", "requirements_budget.py"):
+        (tmp_path / name).write_bytes((EXAMPLE / name).read_bytes())
+    monkeypatch.setattr(control, "HERE", tmp_path)
+    before = control._requirements_config_sha256()
+    assert before == control._requirements_config_sha256()
+    with (tmp_path / changed).open("a") as stream:
+        stream.write("\n")
+    assert before != control._requirements_config_sha256()
+    spec = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
+    for index in range(4):
+        assert (
+            "KAIRYU_REQUIREMENTS_CONFIG_SHA256" in spec["services"][f"qwen-{index}"]["environment"]
+        )

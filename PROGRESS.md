@@ -93,13 +93,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
-- DTO-D16 GPU quality fails: two of three diagnostic requests exhaust the 4096-token requirements cap in reasoning and pass an empty checklist downstream despite successful stage traces and final audit PASS. Baseline generic and coding serving pass. Example-only extraction tuning (8192 total / 2048 thinking, fixed medium) and a strict repeated quality gate are implemented; tuned API re-verification remains pending. Evidence: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality.json`.
+- DTO-D16 GPU quality fails: two of three diagnostic requests exhaust the 4096-token requirements cap in reasoning and pass an empty checklist downstream despite successful stage traces and final audit PASS. Baseline generic and coding serving pass. Example-only tuning uses a JSON-schema checklist, 8192 total / 4096 thinking at fixed medium, a short committed opening, and strict per-ID/literal checks. The first tuned API trial still fails word-limit/audit-format checks; follow-up direct probes pass and full API re-verification remains pending. Evidence: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality.json`.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-08 — [amendment] DTO-D16: preserve literal criteria and bounded openings
+- What: the first tuned API trial emits a complete checklist but exceeds the answer word limit and emits a misleading audit heading. Require exact literals in acceptance criteria (source-only matches fail), keep the committed opening within one short sentence, and reinforce single-word audit verdicts and combined-answer length limits.
+- Why: the first trial's correct source quotation hid a missing punctuation mark in its criterion; a 405-word answer and `PASS/FAIL assessment:` preceding FAIL were not caught by the framework's prefix verdict parsing. Example quality checks reject them; audit budgets were not exhausted (7309/9190 tokens).
+- Refs: DTO-D16; tiered example `measurements/20260908-first-tuned-api-failure.json`; repeated GPU re-verification pending.
 
 ### 2026-09-08 — [amendment] DTO-D16: reserve checklist output tokens
 - What: example-local vLLM middleware caps requirements thinking at 2048 within an 8192-token total; fixed medium thinking and framework code stay unchanged. A repeated real-API gate checks complete checklist coverage, audit IDs/evidence, final minimum satisfaction, and image-root overlap.

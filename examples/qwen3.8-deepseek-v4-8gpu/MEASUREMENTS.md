@@ -572,3 +572,45 @@ The baseline coding run `20260908T052334Z` also exits zero: 128 product and
 all TTFT gates are `not_applicable`, not speed passes. Complete baseline
 route, latency, manifest and artifact hashes are retained in
 [20260908-serving-baseline.json](measurements/20260908-serving-baseline.json).
+
+### Tuned runtime setup
+
+The tuned rollout preserves the baseline DeepSeek worker image by passing
+`DEEPSEEK_VLLM_IMAGE=sha256:b77f630cecd3945a046f0a89f642ee604639d29652cabfd79ccd4a1f4b81d78f`
+to the launcher. This is the existing local
+`local/vllm-openai:sm120-aa0d513027-cachefix` image, also recorded in the
+baseline runtime manifest. The default local tag currently resolves to
+`sha256:f16eaab2f2964d6917c7679157b53e0019581da8047cb9c4a0464d6f27561f9f`,
+which fails to access `/root/.cache` as its non-root user. The first rollout
+exposed this mismatch; restoring the baseline image completed readiness.
+Runtime manifests record actual image IDs and mounted config hashes.
+
+The adopted and rejected direct-worker extraction probes are summarized in
+[20260908-requirements-tuning.json](measurements/20260908-requirements-tuning.json),
+including checklist bodies, token counts, stop reasons, and raw-artifact hashes.
+
+### First tuned public-API trial: failed, retained
+
+Run `20260908T070951Z` completed its first memo case in 541.60 s. Requirements
+completed with 15 IDs and 2747 tokens, and the role budget application was
+confirmed by the exact request-message hash and seed. The final answer has
+405 words (limit <350). Audits used 7309/9190 tokens, both below 16384 and
+nonempty. The second audit begins `PASS/FAIL assessment:` then FAIL; the
+framework prefix parser records PASS, while the strict example gate fails.
+The source-only literal test also missed a period omitted from the acceptance
+criterion. Subsequent cases were interrupted after these review findings.
+
+[Preserved failed trial](measurements/20260908-first-tuned-api-failure.json)
+contains the final answer, checklist/audits, trace, runtime, budget logs, and
+raw-artifact hashes. Follow-up checks require literals in acceptance criteria;
+the example prompts enforce a short opening and a bare audit verdict.
+
+### Follow-up extraction: JSON schema and explicit output allowance
+
+Run `20260908T073325Z-requirements-tuning` passes all four direct probes
+with complete coverage and exact acceptance-criterion literals. Total tokens
+are 4928/3564/3281/5042, below 8192. The adopted per-request reasoning cap is
+4096 and the medium thinking template remains unchanged. A JSON schema
+constrains the nonempty checklist array. Preceding pipe-regex and 2048-token
+JSON trials failed either numeric coverage or complete semantic extraction,
+even when syntax was valid. Their outputs and hashes remain retained.
