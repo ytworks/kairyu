@@ -1,0 +1,2763 @@
+{
+  "scope": "Incomplete tuned API run: memo and JSON pass; image fails because acceptance criterion references rather than copies the required ending. Parallel round interrupted; not a passing nine-case run.",
+  "manifest": {
+    "schema_version": 1,
+    "run_id": "20260908T074112Z",
+    "started_at": "2026-09-08T07:41:12.866154+00:00",
+    "requested": "requirements-quality",
+    "served_config_sha256": "4bb1a61171681fca6d59bbafcab4b20076820ab6c43c5bf732839ccd5f5b1b80",
+    "verification_files_sha256": {
+      "verification.py": "69d5b85b4b166cdfbbafb405f9f13d9d55dcefb3ebe8008907bc305f51db9139",
+      "requirements_quality.py": "d831e88d2eaba81461f835d32c30fa441f8fde8925c39491181a1f17114ae269",
+      "requirements-quality-cases.json": "75fdafea0d03c1ca12f1e7065f3e05d2e7d7daeca764bf6bafe4e6eb9e1fecbe"
+    },
+    "spec": {
+      "schema_version": 1,
+      "environment": "qwen3.8-deepseek-v4-8gpu",
+      "hardware": {
+        "gpu_count": 8,
+        "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "minimum_compute_capability": 12.0,
+        "minimum_vram_mib": 90000
+      },
+      "storage": {
+        "root": "/mnt/nvme/kairyu",
+        "minimum_free_gib": 220,
+        "deepseek_model_volume": "kairyu-models-deepseek-v4-flash-0731-8gpu"
+      },
+      "allocation": {
+        "tier1": {
+          "model": "qwen3.8-27b",
+          "gpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "replicas": 4,
+          "tensor_parallel_size": 1
+        },
+        "tier2": {
+          "model": "deepseek-v4-flash-0731",
+          "gpu_ids": [
+            4,
+            5,
+            6,
+            7
+          ],
+          "replicas": 1,
+          "tensor_parallel_size": 4,
+          "expert_parallel_size": 4
+        }
+      },
+      "models": {
+        "tier1": {
+          "repo": "Qwen/Qwen3.8-27B-FP8",
+          "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+          "tree_sha256": "9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e",
+          "slug": "qwen3.8-27b-fp8",
+          "served_name": "qwen3.8-27b",
+          "max_context_tokens": 262144,
+          "quantization": "fp8"
+        },
+        "tier2": {
+          "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+          "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+          "tree_sha256": "90bd164d6f778d798eeaecd3517d83b87d49d300756a9217ada14a2b15203754",
+          "slug": "deepseek-v4-flash-0731",
+          "served_name": "deepseek-v4-flash-0731",
+          "max_context_tokens": 1048576,
+          "quantization": "mixed-fp4-fp8"
+        }
+      },
+      "embedding": {
+        "served_name": "embed-small",
+        "backend": "fastembed",
+        "model": "sentence-transformers/all-MiniLM-L6-v2",
+        "model_path": "/opt/kairyu/models/all-MiniLM-L6-v2",
+        "repository": "Qdrant/all-MiniLM-L6-v2-onnx",
+        "revision": "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079",
+        "model_sha256": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+        "provenance_sha256": "57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c",
+        "dimensions": 384,
+        "batch_size": 64,
+        "threads": 2,
+        "max_concurrency": 2
+      },
+      "vllm": {
+        "qwen": {
+          "image": "vllm/vllm-openai:v0.23.0@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+          "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+          "image_revision": "91df0fad4dc98a67c7659d9dbd915245d5c43d96",
+          "distribution": "upstream",
+          "source_repository": "https://github.com/vllm-project/vllm.git",
+          "source_revision": "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
+          "source_ref": "v0.23.0",
+          "release": "v0.23.0"
+        },
+        "deepseek": {
+          "image": "local/vllm-openai:sm120-aa0d513027",
+          "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
+          "source_repository": "https://github.com/jasl/vllm.git",
+          "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
+          "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834"
+        },
+        "qwen_mtp_speculative_tokens": 0,
+        "qwen_max_num_batched_tokens": 32768,
+        "qwen_max_num_seqs": 32,
+        "qwen_kv_cache_dtype": "fp8",
+        "qwen_cudagraph_mode": "PIECEWISE",
+        "deepseek_dspark_speculative_tokens": 5,
+        "deepseek_max_num_batched_tokens": 16384,
+        "deepseek_max_num_seqs": 32,
+        "deepseek_kv_cache_dtype": "fp8",
+        "deepseek_cudagraph_mode": "FULL_AND_PIECEWISE"
+      },
+      "orchestration": {
+        "auto_max_model": "kairyu-auto-max",
+        "internal_max_output_tokens": 65536,
+        "requirements_thinking_token_budget": 4096,
+        "product_policy": "judged-five-route-dual-track",
+        "roles": [
+          "head",
+          "draft",
+          "image_description",
+          "requirements",
+          "policies",
+          "answer_1",
+          "answer_2",
+          "answer_3",
+          "answer_4",
+          "critique",
+          "synthesis",
+          "audit"
+        ],
+        "stream_head": "head",
+        "max_steps": 20,
+        "product_normal_calls": 11,
+        "product_max_calls": 20,
+        "product_max_refinements": 2,
+        "product_exposes_intermediate_outputs": true,
+        "profiles": {
+          "qwen_direct": [
+            "qwen_answer"
+          ],
+          "qwen_think_medium": [
+            "qwen_think_answer"
+          ],
+          "deepseek_direct": [
+            "deepseek_answer"
+          ],
+          "deepseek_think": [
+            "deepseek_think_answer"
+          ]
+        },
+        "profile_judge": {
+          "worker": "tier1",
+          "fallback": "primary",
+          "choices": [
+            {
+              "label": "QWEN",
+              "profile": "qwen_direct"
+            },
+            {
+              "label": "QWEN_THINK",
+              "profile": "qwen_think_medium"
+            },
+            {
+              "label": "DEEPSEEK",
+              "profile": "deepseek_direct"
+            },
+            {
+              "label": "DEEPSEEK_THINK",
+              "profile": "deepseek_think"
+            },
+            {
+              "label": "ENSEMBLE",
+              "profile": "primary"
+            }
+          ]
+        },
+        "profile_final_roles": {
+          "primary": "synthesis",
+          "qwen_direct": "qwen_answer",
+          "qwen_think_medium": "qwen_think_answer",
+          "deepseek_direct": "deepseek_answer",
+          "deepseek_think": "deepseek_think_answer"
+        },
+        "ttft_gated_profiles": [
+          "primary",
+          "qwen_direct",
+          "deepseek_direct"
+        ],
+        "direct_route_max_tokens": {
+          "qwen_direct": 131072,
+          "qwen_think_medium": 131072,
+          "deepseek_direct": 393216,
+          "deepseek_think": 393216
+        },
+        "direct_route_sampling": {
+          "qwen_direct": {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "presence_penalty": 1.5,
+            "max_tokens": 131072
+          },
+          "qwen_think_medium": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 20,
+            "max_tokens": 131072
+          },
+          "deepseek_direct": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 393216
+          },
+          "deepseek_think": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 393216
+          }
+        }
+      },
+      "executor": {
+        "image": "local/kairyu-executor:coding-v1",
+        "base_image": "python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65",
+        "pytest_version": "9.1.1",
+        "languages": [
+          "python"
+        ],
+        "transport": "unix",
+        "socket_path": "/run/kairyu-executor/executor.sock",
+        "max_concurrency": 8,
+        "queue_wait_s": 8
+      },
+      "webui": {
+        "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+        "port": 3000
+      },
+      "api_port": 8003,
+      "deepseek_l1_loopback_port": 8005,
+      "verification": {
+        "serving": {
+          "prompt_tokens_approx": 8192,
+          "output_tokens": 256,
+          "auto_max_combined_max_tokens": 65536,
+          "concurrency": [
+            1,
+            8,
+            16,
+            32
+          ],
+          "requests_per_concurrency": 32
+        },
+        "coding": {
+          "prompt_tokens_approx": 1536,
+          "auto_max_combined_max_tokens": 65536,
+          "concurrency": [
+            1,
+            8,
+            16,
+            32
+          ],
+          "requests_per_concurrency": 32,
+          "ttft_multiplier_vs_deepseek_direct": 2.0,
+          "deepseek_direct_ttft_p50_ms_fallback": {
+            "1": 779.22,
+            "8": 833.16,
+            "16": 2710.53,
+            "32": 12399.45
+          }
+        }
+      }
+    },
+    "completed_at": "2026-09-08T08:01:28.206388+00:00",
+    "exit_codes": {
+      "requirements-quality": 1
+    }
+  },
+  "runtime": {
+    "collected_at": "2026-09-08T07:41:12.332313+00:00",
+    "git_head": "b09616b378936b780b894cb147e8864bc4391f2f",
+    "git_status": "",
+    "containers": [
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-kairyu-1",
+        "image_id": "sha256:2650198d64c3c97213b2ef89779991a5f336fca4264aaa3244e1ddaf91737b03",
+        "started_at": "2026-09-08T07:39:57.963770929Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "41179ca27945ba3f477b588795265f837df65653bcef61b46fe3451e96b9b014"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/router.json",
+            "target": "/etc/kairyu/router.json",
+            "sha256": "9b3cc02780fd5a1cdf1073557b66900e14dd59b6dd655b961f6f85bc3cb51ca5"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/deepseek-thinking.jinja",
+            "target": "/etc/kairyu/deepseek-thinking.jinja",
+            "sha256": "5b3c37f08ae895028e6febdcc1642e8034e0871e23b2bc1b59c3b05a4eb942ee"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/kairyu.yaml",
+            "target": "/etc/kairyu/kairyu.yaml",
+            "sha256": "33f189f2ecfdb6591590d741b29393dcb4dee76c131bba1919501a87ca12cb57"
+          }
+        ],
+        "requirements_config_sha256": null
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-qwen-1-1",
+        "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+        "started_at": "2026-09-08T07:38:04.493547348Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+            "target": "/etc/kairyu/example.json",
+            "sha256": "1bb3d8532fed9e2cda99ba663a9fbb625ef13190f2546e7ef0b59b1df73a6293"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+            "target": "/etc/kairyu/qwen3.8-chat.jinja",
+            "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+            "target": "/etc/kairyu/requirements_budget.py",
+            "sha256": "bd02edc1732475a4405dae40922c9e7d510e8a842e114c3863e00ba41760413f"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "41179ca27945ba3f477b588795265f837df65653bcef61b46fe3451e96b9b014"
+          }
+        ],
+        "requirements_config_sha256": "f84866841469c0080da42eefaad5b43639af7f273c0683604a8475d8beff2267"
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-qwen-0-1",
+        "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+        "started_at": "2026-09-08T07:38:04.499822664Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+            "target": "/etc/kairyu/qwen3.8-chat.jinja",
+            "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+            "target": "/etc/kairyu/requirements_budget.py",
+            "sha256": "bd02edc1732475a4405dae40922c9e7d510e8a842e114c3863e00ba41760413f"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "41179ca27945ba3f477b588795265f837df65653bcef61b46fe3451e96b9b014"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+            "target": "/etc/kairyu/example.json",
+            "sha256": "1bb3d8532fed9e2cda99ba663a9fbb625ef13190f2546e7ef0b59b1df73a6293"
+          }
+        ],
+        "requirements_config_sha256": "f84866841469c0080da42eefaad5b43639af7f273c0683604a8475d8beff2267"
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-qwen-2-1",
+        "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+        "started_at": "2026-09-08T07:38:04.499242018Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "41179ca27945ba3f477b588795265f837df65653bcef61b46fe3451e96b9b014"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+            "target": "/etc/kairyu/example.json",
+            "sha256": "1bb3d8532fed9e2cda99ba663a9fbb625ef13190f2546e7ef0b59b1df73a6293"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+            "target": "/etc/kairyu/qwen3.8-chat.jinja",
+            "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+            "target": "/etc/kairyu/requirements_budget.py",
+            "sha256": "bd02edc1732475a4405dae40922c9e7d510e8a842e114c3863e00ba41760413f"
+          }
+        ],
+        "requirements_config_sha256": "f84866841469c0080da42eefaad5b43639af7f273c0683604a8475d8beff2267"
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-qwen-3-1",
+        "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+        "started_at": "2026-09-08T07:38:04.500347746Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+            "target": "/etc/kairyu/qwen3.8-chat.jinja",
+            "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+            "target": "/etc/kairyu/requirements_budget.py",
+            "sha256": "bd02edc1732475a4405dae40922c9e7d510e8a842e114c3863e00ba41760413f"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+            "target": "/etc/kairyu/auto-max.yaml",
+            "sha256": "41179ca27945ba3f477b588795265f837df65653bcef61b46fe3451e96b9b014"
+          },
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+            "target": "/etc/kairyu/example.json",
+            "sha256": "1bb3d8532fed9e2cda99ba663a9fbb625ef13190f2546e7ef0b59b1df73a6293"
+          }
+        ],
+        "requirements_config_sha256": "f84866841469c0080da42eefaad5b43639af7f273c0683604a8475d8beff2267"
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-executor-1",
+        "image_id": "sha256:f42317471520beec567acb0ae4b99f6146fa2257b9eb87e02d2b69dae38efc77",
+        "started_at": "2026-09-08T07:38:04.48626525Z",
+        "health": "healthy",
+        "mounted_files": [],
+        "requirements_config_sha256": null
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-deepseek-1",
+        "image_id": "sha256:b77f630cecd3945a046f0a89f642ee604639d29652cabfd79ccd4a1f4b81d78f",
+        "started_at": "2026-09-08T07:06:50.669471176Z",
+        "health": "healthy",
+        "mounted_files": [
+          {
+            "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/deepseek-role-effort.jinja",
+            "target": "/etc/kairyu/deepseek-role-effort.jinja",
+            "sha256": "1512e12bea2dcd54f128e83ac7b4415cc318140bf680733b22afe2effdf51f0f"
+          }
+        ],
+        "requirements_config_sha256": null
+      },
+      {
+        "name": "qwen3-8-deepseek-v4-8gpu-chat-ui-1",
+        "image_id": "sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+        "started_at": "2026-09-06T03:10:01.300013073Z",
+        "health": "healthy",
+        "mounted_files": [],
+        "requirements_config_sha256": null
+      }
+    ],
+    "gpus": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-c2dec644-056f-5a18-64af-0dcb2d4b5aa1, 595.84\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-7ca344d0-c282-61d7-446b-dcdf5c2dee16, 595.84\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-8accd8d3-6791-1e54-af77-b229a199b1f1, 595.84\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-7a56fbb4-fd9d-1f93-7bd6-f7e55579a964, 595.84\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-d8ef7924-e297-e1ef-e51e-82c77b41715a, 595.84\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-4884d626-ecaa-7fc1-49d2-158f6d118801, 595.84\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-f212d821-c550-947e-904c-1ee6be110c96, 595.84\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-9813a152-84b7-57ef-3109-76b4a1d47673, 595.84\n",
+    "runtime_python_files": 183,
+    "runtime_matches_checkout": true,
+    "mismatched_files": []
+  },
+  "budget_application": {
+    "count": 6,
+    "records": [
+      {
+        "worker": 0,
+        "line": "2026-09-08T07:49:44.361484523Z (APIServer pid=1) INFO 09-08 07:49:44 [requirements_budget.py:143] Kairyu requirements budget: thinking=4096 max_tokens=8192 seed=605 messages_sha256=434f96c1428bc4d0bba69f4d04c4e46896f613268cf12fedffa030b9ac7974c4"
+      },
+      {
+        "worker": 0,
+        "line": "2026-09-08T07:58:52.761286802Z (APIServer pid=1) INFO 09-08 07:58:52 [requirements_budget.py:143] Kairyu requirements budget: thinking=4096 max_tokens=8192 seed=606 messages_sha256=434f96c1428bc4d0bba69f4d04c4e46896f613268cf12fedffa030b9ac7974c4"
+      },
+      {
+        "worker": 0,
+        "line": "2026-09-08T07:58:52.766509262Z (APIServer pid=1) INFO 09-08 07:58:52 [requirements_budget.py:143] Kairyu requirements budget: thinking=4096 max_tokens=8192 seed=606 messages_sha256=c5ddc2a367d6f8f4feae871f3972e3d9fc54aa62c4a2b99cdea04364cc9b728e"
+      },
+      {
+        "worker": 0,
+        "line": "2026-09-08T07:58:52.775933831Z (APIServer pid=1) INFO 09-08 07:58:52 [requirements_budget.py:143] Kairyu requirements budget: thinking=4096 max_tokens=8192 seed=606 messages_sha256=d18078d0c34f93cdce9a70c3f5576222f6efe73c0a089a03d72470878e7e03cd"
+      },
+      {
+        "worker": 2,
+        "line": "2026-09-08T07:41:13.599498104Z (APIServer pid=1) INFO 09-08 07:41:13 [requirements_budget.py:143] Kairyu requirements budget: thinking=4096 max_tokens=8192 seed=605 messages_sha256=c5ddc2a367d6f8f4feae871f3972e3d9fc54aa62c4a2b99cdea04364cc9b728e"
+      },
+      {
+        "worker": 2,
+        "line": "2026-09-08T07:53:09.255701546Z (APIServer pid=1) INFO 09-08 07:53:09 [requirements_budget.py:143] Kairyu requirements budget: thinking=4096 max_tokens=8192 seed=605 messages_sha256=d18078d0c34f93cdce9a70c3f5576222f6efe73c0a089a03d72470878e7e03cd"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "case": "r0-headed-comparison",
+      "request": {
+        "model": "kairyu-auto-max",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Use the most thorough possible answer: compare several independent approaches and critically audit the merged recommendation against every requirement. This is an ambiguous multi-constraint design decision; do not substitute a quick single-perspective answer. Write an English deployment decision memo using only these supplied facts: A costs 40 units/month and has 80 ms latency; B costs 70 units/month and has 30 ms latency. Budget is at most 60 units/month; latency target is at most 50 ms. Neither constraint may silently be relaxed. Compare A and B, explicitly state neither is feasible, distinguish facts from assumptions, propose two different conditional next steps, and end with exactly the sentence: Decision: defer. Do not invent benchmark results or citations. Keep the complete memo under 350 words."
+          }
+        ],
+        "max_tokens": 65536,
+        "reasoning_effort": "low",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "seed": 595
+      },
+      "validation": {
+        "case": "headed-comparison",
+        "checks": {
+          "ensemble_executed": true,
+          "one_successful_requirements_stage": true,
+          "complete_checklist": true,
+          "covers:English memo": true,
+          "covers:supplied facts": true,
+          "covers:both options": true,
+          "covers:hard limits": true,
+          "covers:infeasible": true,
+          "covers:assumptions": true,
+          "covers:two conditional next steps": true,
+          "covers:no invented evidence": true,
+          "covers:word limit": true,
+          "covers:independent approaches": true,
+          "covers:audit": true,
+          "preserves_required_literals": true,
+          "excludes_rendering_boilerplate": true,
+          "requirements_finish_within_cap": true,
+          "audit_covers_checklist_ids": true,
+          "audit_evidence_present": true,
+          "final_minimum_items_satisfied": true,
+          "final_audit_passes": true,
+          "nonempty_final_answer": true,
+          "checklist_not_published": true,
+          "final_word_limit": true,
+          "final_ending": true,
+          "final_compares_infeasible_options": true,
+          "complete_sse": true
+        },
+        "failures": [],
+        "passed": true,
+        "word_count": 231,
+        "requirements_tokens": 4296,
+        "checklist": [
+          {
+            "id": "1",
+            "priority": "minimum",
+            "requirement": "Use a thorough, multi-approach analysis instead of a quick single-perspective answer",
+            "acceptance": "The memo compares at least two independent approaches and includes a critical audit of the merged recommendation against every stated requirement.",
+            "source": "user message"
+          },
+          {
+            "id": "2",
+            "priority": "minimum",
+            "requirement": "Write an English deployment decision memo",
+            "acceptance": "The deliverable is a deployment decision memo written in English.",
+            "source": "user message"
+          },
+          {
+            "id": "3",
+            "priority": "minimum",
+            "requirement": "Use only the supplied facts",
+            "acceptance": "The memo relies only on these supplied facts: A costs 40 units/month and has 80 ms latency; B costs 70 units/month and has 30 ms latency; budget is at most 60 units/month; latency target is at most 50 ms.",
+            "source": "user message"
+          },
+          {
+            "id": "4",
+            "priority": "minimum",
+            "requirement": "Compare A and B",
+            "acceptance": "The memo explicitly compares options A and B on their supplied cost and latency values.",
+            "source": "user message"
+          },
+          {
+            "id": "5",
+            "priority": "minimum",
+            "requirement": "State that neither option is feasible",
+            "acceptance": "The memo explicitly states that neither A nor B is feasible under the stated constraints.",
+            "source": "user message"
+          },
+          {
+            "id": "6",
+            "priority": "minimum",
+            "requirement": "Distinguish facts from assumptions",
+            "acceptance": "The memo clearly distinguishes supplied facts from assumptions, and any non-supplied premise is explicitly labeled as an assumption.",
+            "source": "user message"
+          },
+          {
+            "id": "7",
+            "priority": "minimum",
+            "requirement": "Propose two different conditional next steps",
+            "acceptance": "The memo proposes exactly two different next steps, each stated as conditional.",
+            "source": "user message"
+          },
+          {
+            "id": "8",
+            "priority": "minimum",
+            "requirement": "End with the exact required sentence",
+            "acceptance": "The memo's final sentence is exactly the literal string: Decision: defer.",
+            "source": "user message"
+          },
+          {
+            "id": "9",
+            "priority": "minimum",
+            "requirement": "Do not invent benchmark results or citations",
+            "acceptance": "The memo contains no invented benchmark results, benchmark-derived claims, or citations.",
+            "source": "user message"
+          },
+          {
+            "id": "10",
+            "priority": "minimum",
+            "requirement": "Keep the complete memo under 350 words",
+            "acceptance": "The complete memo has fewer than 350 words.",
+            "source": "user message"
+          },
+          {
+            "id": "11",
+            "priority": "minimum",
+            "requirement": "Do not silently relax either constraint",
+            "acceptance": "The memo does not implicitly accept a cost above 60 units/month or latency above 50 ms; any considered relaxation is explicitly flagged.",
+            "source": "user message"
+          },
+          {
+            "id": "12",
+            "priority": "minimum",
+            "requirement": "Apply both numeric constraints jointly",
+            "acceptance": "The memo evaluates A and B against both mandatory constraints: cost at most 60 units/month and latency at most 50 ms.",
+            "source": "user message"
+          }
+        ],
+        "stage_outputs": [
+          {
+            "node": "draft",
+            "attempt": 0,
+            "output": ""
+          },
+          {
+            "node": "requirements",
+            "attempt": 0,
+            "output": "[\n  {\n    \"id\": \"R1\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Use a thorough, multi-approach analysis instead of a quick single-perspective answer\",\n    \"acceptance_criterion\": \"The memo compares at least two independent approaches and includes a critical audit of the merged recommendation against every stated requirement.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R2\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Write an English deployment decision memo\",\n    \"acceptance_criterion\": \"The deliverable is a deployment decision memo written in English.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R3\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Use only the supplied facts\",\n    \"acceptance_criterion\": \"The memo relies only on these supplied facts: A costs 40 units/month and has 80 ms latency; B costs 70 units/month and has 30 ms latency; budget is at most 60 units/month; latency target is at most 50 ms.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R4\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Compare A and B\",\n    \"acceptance_criterion\": \"The memo explicitly compares options A and B on their supplied cost and latency values.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R5\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"State that neither option is feasible\",\n    \"acceptance_criterion\": \"The memo explicitly states that neither A nor B is feasible under the stated constraints.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R6\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Distinguish facts from assumptions\",\n    \"acceptance_criterion\": \"The memo clearly distinguishes supplied facts from assumptions, and any non-supplied premise is explicitly labeled as an assumption.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R7\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Propose two different conditional next steps\",\n    \"acceptance_criterion\": \"The memo proposes exactly two different next steps, each stated as conditional.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R8\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"End with the exact required sentence\",\n    \"acceptance_criterion\": \"The memo's final sentence is exactly the literal string: Decision: defer.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R9\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Do not invent benchmark results or citations\",\n    \"acceptance_criterion\": \"The memo contains no invented benchmark results, benchmark-derived claims, or citations.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R10\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Keep the complete memo under 350 words\",\n    \"acceptance_criterion\": \"The complete memo has fewer than 350 words.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R11\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Do not silently relax either constraint\",\n    \"acceptance_criterion\": \"The memo does not implicitly accept a cost above 60 units/month or latency above 50 ms; any considered relaxation is explicitly flagged.\",\n    \"source\": \"user message\"\n  },\n  {\n    \"id\": \"R12\",\n    \"priority\": \"minimum\",\n    \"requirement\": \"Apply both numeric constraints jointly\",\n    \"acceptance_criterion\": \"The memo evaluates A and B against both mandatory constraints: cost at most 60 units/month and latency at most 50 ms.\",\n    \"source\": \"user message\"\n  }\n]"
+          },
+          {
+            "node": "policies",
+            "attempt": 0,
+            "output": "POLICY 1: Constraint-Gate Feasibility Audit. Adopt a hard-constraint screening method: first evaluate each option independently against the two mandatory thresholds (cost \u2264 60, latency \u2264 50) as pass/fail gates. Use a table or flowchart to show A passes cost but fails latency, B passes latency but fails cost, so both fail at least one gate. Then a critical audit merges the two gates to confirm no feasible option. Structure the memo in four sections: constraints, individual evaluation, joint audit, decisive conclusion. Prioritize strict non-relaxation and the binary feasibility verdict above all else. Next steps are conditional on relaxing one specific constraint, each explicitly labeled as an assumption not a fact.\n\nPOLICY 2: Weighted Multi-Criteria Trade-Off Scoring. Use a decision-analysis framing where cost and latency are normalized to a 0\u20131 scale (cost lower is better, latency lower is better) and combined with a weight reflecting business priority\u2014but do not allow weights to justify violating either hard limit. Structure the memo as: criteria definition, normalized scores, weighted totals for A and B, then a \u201creality check\u201d that the top-weighted option still lies outside the feasible region. Prioritize transparency of trade-off mechanics and the explicit disconnect between scoring and hard constraints. Conditional next steps are two possible weight assumptions (e.g., if cost weight is 0.8 vs 0.2) leading to different preferred options, but both conditional on a relaxation that must be flagged.\n\nPOLICY 3: Feasibility-Region Mapping and Dominance Analysis. Treat the two constraints as axes on a 2D cost\u2013latency plane; plot A (40,80), B (70,30), and shade the feasible rectangle where cost \u226460 and latency \u226450. Show that neither point lies in the rectangle, and also check Pareto dominance (A is cheaper, B is faster; no dominance). Structure the memo as a visual/verbal walkthrough of the plane, followed by a joint audit: no point satisfies both constraints simultaneously. Prioritize spatial/cluster intuition and the impossibility of trade-off without leaving the feasible region. Conditional next steps are \u201cif you can move vertically\u201d (relax latency) or \u201cif you can move horizontally\u201d (relax budget), each explicitly not part of the original requirements.\n\nPOLICY 4: Fact-Assumption Separation and Scenario Contingencies. Begin by inventorying the four supplied facts (costs, latencies, budget cap, latency cap) and then list every implicit assumption needed for a decision (e.g., linear utility, no hidden costs, equal other performance). Create a scenario matrix where the assumption changes the \u201ceffective\u201d constraint threshold, but mark all such changes as assumptions. Structure the memo as: facts table, assumptions table, scenario analysis showing that under assumption X option A might become feasible if latency were 50+, and under assumption Y option B might become feasible if cost were 60+, but per supplied facts neither is feasible. Prioritize epistemic rigor\u2014distinguishing what is known from what is supposed\u2014and the conditional nature of any path forward. The two next steps are each tied to a specific assumption that, if validated by future data, would change the constraint set."
+          },
+          {
+            "node": "critique",
+            "attempt": 0,
+            "output": "MEMO\n\nSubject: Deployment Decision for A vs. B\n\nFacts (supplied): A costs 40 units/month and has 80 ms latency; B costs 70 units/month and has 30 ms latency. Budget is at most 60 units/month. Latency target is at most 50 ms.\n\nIndependent approach 1 \u2014 Feasibility-gate check: A passes the cost gate (40 \u2264 60) but fails the latency gate (80 > 50). B passes the latency gate (30 \u2264 50) but fails the cost gate (70 > 60). Neither passes both mandatory gates.\n\nIndependent approach 2 \u2014 Constraint-priority ordering: If cost is treated as the first gate, A is the only candidate surviving on cost, yet A\u2019s latency misses the target by 30 ms. If latency is treated as the first gate, B is the only candidate surviving on latency, yet B\u2019s cost exceeds the budget by 10 units/month. No ordering of the two priorities produces an option that satisfies both constraints jointly.\n\nIndependent approach 3 \u2014 Requirement audit of the merged recommendation: The merged recommendation is \u201cneither A nor B.\u201d Auditing against every stated requirement: A meets the budget requirement, but not the latency requirement; B meets the latency requirement, but not the budget requirement. A deployment decision accepting either option would necessarily relax one mandatory constraint, and neither constraint may be silently relaxed. Therefore, no supported deployment recommendation can be made from the supplied data.\n\nAssumptions: I assume there is no third candidate with supplied data; that the two latency figures are directly comparable; that the costs are comparable monthly expenditures; and that both constraints are equally enforceable. These are assumptions, not supplied facts, and they do not change the infeasibility result.\n\nConditional next steps:\n1. If a new option C is identified, require evidence that C\u2019s total cost is \u2264 60 units/month and latency is \u2264 50 ms, then evaluate C against both constraints before deployment.\n2. If the requirement owner explicitly revises either constraint cap as a deliberate trade-off, document that revised requirement in writing and re-run this comparison under the new caps; otherwise retain the infeasibility conclusion.\n\nDecision: defer."
+          },
+          {
+            "node": "answer_2",
+            "attempt": 0,
+            "output": "**Deployment Decision Memo**\n\n**1. Criteria and Constraints (Facts)**\n- Fact: Option A costs 40 units/month; latency 80 ms.\n- Fact: Option B costs 70 units/month; latency 30 ms.\n- Fact: Budget cap \u2264 60 units/month; latency target \u2264 50 ms.\n- Assumption (labeled): No hidden costs or configuration-dependent latency beyond the supplied figures.\n\n**2. Approach 1 \u2013 Hard-Constraint Gates**\n- A: cost 40 \u2264 60 (pass); latency 80 > 50 (fail).\n- B: cost 70 > 60 (fail); latency 30 \u2264 50 (pass).\n- Neither option satisfies both gates. Neither is feasible.\n\n**3. Approach 2 \u2013 Weighted Trade-Off Scoring**\nNormalize cost (lower = better) and latency (lower = better) to a 0\u20131 scale:\n- Cost scores: A = 1.0, B = 0.0.\n- Latency scores: A = 0.0, B = 1.0.\n\nWeight assumption (labeled): If cost weight = 0.8, weighted totals are A = 0.8, B = 0.2 \u2192 A preferred. If cost weight = 0.2, totals are B = 0.8, A = 0.2 \u2192 B preferred.\n\n**Reality Check:** Regardless of weight assignment, the top-scoring option still violates at least one hard constraint. Scoring does not confer feasibility.\n\n**4. Joint Audit \u2013 Merged Verdict**\nBoth approaches converge: no option simultaneously meets cost \u2264 60 and latency \u2264 50. No constraint is silently relaxed in this memo.\n\n**5. Conditional Next Steps**\n- If the business assigns cost a weight of 0.8 (assumption), A is preferred; deployment remains blocked unless the latency target is explicitly relaxed to \u2265 80 ms (flagged relaxation, not a fact).\n- If the business assigns cost a weight of 0.2 (assumption), B is preferred; deployment remains blocked unless the budget cap is explicitly relaxed to \u2265 70 units/month (flagged relaxation, not a fact).\n\nDecision: defer."
+          },
+          {
+            "node": "answer_3",
+            "attempt": 0,
+            "output": "Deployment Decision Memo\n\n**Supplied Facts**\n- A: cost = 40 units/month, latency = 80 ms\n- B: cost = 70 units/month, latency = 30 ms\n- Budget cap: 60 units/month\n- Latency cap: 50 ms\n\n**Feasibility-Region Mapping**\nOn a cost\u2013latency plane, the feasible region is the rectangle bounded by cost \u2264 60 and latency \u2264 50. Plotting both options:\n\n- A (40, 80): inside the budget boundary but 30 ms beyond the latency cap.\n- B (70, 30): inside the latency boundary but 10 units beyond the budget cap.\n\nNeither point falls within the feasible rectangle. No option satisfies both constraints simultaneously.\n\n**Pareto-Dominance Check**\nA is cheaper than B (40 < 70); B is faster than A (30 < 80). Neither option Pareto-dominates the other, so no trade-off preference can rescue feasibility without leaving the rectangle.\n\n**Joint Audit Against Every Requirement**\n- Cost \u2264 60: A passes, B fails.\n- Latency \u2264 50: A fails, B passes.\n- Both constraints jointly: A fails on latency, B fails on cost.\n\nVerdict: neither A nor B is feasible. No constraint has been relaxed.\n\n**Facts vs. Assumptions**\nFacts are the four numeric values listed above. Assumptions made for this memo: (1) cost and latency are the only decision criteria; (2) values are fixed and not subject to negotiation within this cycle. Both are assumptions, not supplied facts.\n\n**Conditional Next Steps**\n1. If the latency cap could be raised to at least 80 ms (an explicit relaxation, flagged as an assumption, not a fact), option A would enter the feasible region at 40 units/month.\n2. If the budget cap could be raised to at least 70 units/month (an explicit relaxation, flagged as an assumption, not a fact), option B would enter the feasible region at 30 ms latency.\n\nEach step is conditional on a stakeholder explicitly accepting a constraint change; neither step is taken under the current constraints.\n\nDecision: defer."
+          },
+          {
+            "node": "answer_1",
+            "attempt": 0,
+            "output": ""
+          },
+          {
+            "node": "answer_4",
+            "attempt": 0,
+            "output": ""
+          },
+          {
+            "node": "audit",
+            "attempt": 0,
+            "output": "FAIL\nR1 | satisfied | evidence: Three independent approaches are presented (Hard-constraint gate, Priority ordering, Pareto dominance check) plus a dedicated \"Audit of the merged recommendation\" section that checks the recommendation against every constraint. | correction: none\nR2 | satisfied | evidence: The output is a structured English deployment decision memo with sections for feasibility, approaches, facts/assumptions, audit, next steps, and a decision line. | correction: none\nR3 | satisfied | evidence: Only the supplied values (40, 80, 70, 30, 60, 50) appear as numeric data; no external data sources are introduced. | correction: none\nR4 | satisfied | evidence: \"A passes the cost gate (40 \u2264 60) but fails the latency gate (80 > 50); B passes the latency gate (30 \u2264 50) but fails the cost gate (70 > 60).\" | correction: none\nR5 | satisfied | evidence: \"Neither point falls inside the feasible rectangle, so neither option is feasible under the current constraints.\" | correction: none\nR6 | satisfied | evidence: Dedicated \"Facts vs. assumptions\" paragraph explicitly lists supplied facts and labels assumptions (no hidden costs, comparability, equal enforceability, no third candidate). | correction: none\nR7 | satisfied | evidence: Two bullet points, each introduced by \"If\u2026\", presenting distinct conditional actions (evaluate a new Option C; re-run under a stakeholder-revised cap). | correction: none\nR8 | satisfied | evidence: The final sentence of the combined output is exactly \"Decision: defer.\" | correction: none\nR9 | satisfied | evidence: No benchmark results, performance test data, or citations appear anywhere in the memo. | correction: none\nR10 | unsatisfied | evidence: Word-by-word count of the combined opening + remainder yields approximately 377 words, exceeding the 350-word cap by roughly 27 words. | correction: Trim at least 27 words; candidates include condensing the Pareto paragraph, shortening the \"Audit\" section, or tightening the conditional next-step bullets while preserving all required content.\nR11 | satisfied | evidence: \"Neither constraint has been silently relaxed here; any future relaxation must be explicitly documented.\" Both conditional steps explicitly flag a relaxation rather than silently accepting one. | correction: none\nR12 | satisfied | evidence: Both options are evaluated against both constraints jointly (A: cost pass, latency fail; B: cost fail, latency pass), and the audit states \"Applying both constraints jointly yields no feasible option.\" | correction: none"
+          },
+          {
+            "node": "audit",
+            "attempt": 1,
+            "output": "PASS\n\nR1 | satisfied | evidence: Three independent approaches are described (hard-constraint gate, priority ordering, Pareto-dominance check), and the merged recommendation is audited: \"The merged recommendation from all approaches is identical: no feasible deployment exists under the stated caps. No constraint has been silently relaxed.\" | correction: none\nR2 | satisfied | evidence: The deliverable is an English deployment decision memo with a clear structure (comparison, infeasibility statement, assumptions, next steps, decision). | correction: none\nR3 | satisfied | evidence: Only the supplied facts (A: 40 units/month, 80 ms; B: 70 units/month, 30 ms; budget \u2264 60; latency \u2264 50) are used. Assumptions are explicitly labeled as such. No external data introduced. | correction: none\nR4 | satisfied | evidence: \"Option A fails the latency target, while Option B exceeds the budget constraint. Specifically, A meets the cost cap (40 \u2264 60) but misses latency (80 > 50); B meets latency (30 \u2264 50) but violates cost (70 > 60).\" | correction: none\nR5 | satisfied | evidence: \"Applying both constraints jointly, neither option lies within the feasible region.\" and \"no feasible deployment exists under the stated caps.\" | correction: none\nR6 | satisfied | evidence: \"Supplied facts are the cost/latency values and the two caps. Assumptions\u2014explicitly labeled\u2014are that the figures are directly comparable, no hidden costs exist, and no third candidate is under consideration.\" | correction: none\nR7 | satisfied | evidence: Two distinct conditional next steps: \"(1) If a new Option C is supplied, require verified evidence\u2026\" and \"(2) If a stakeholder explicitly revises either cap as a deliberate trade-off, document that revision in writing\u2026\" Both are conditional and different. | correction: none\nR8 | satisfied | evidence: The final sentence is exactly \"Decision: defer.\" | correction: none\nR9 | satisfied | evidence: No benchmark results, benchmark-derived claims, or citations appear anywhere in the memo. | correction: none\nR10 | satisfied | evidence: The combined memo (opening + remainder) is approximately 238 space-separated tokens, well under the 350-word limit. | correction: none\nR11 | satisfied | evidence: The memo never treats cost > 60 or latency > 50 as acceptable. It explicitly states \"No constraint has been silently relaxed\" and the conditional next step (2) requires any cap revision to be explicitly documented. | correction: none\nR12 | satisfied | evidence: Each option is evaluated against both constraints jointly: A is checked on cost (40 \u2264 60, pass) and latency (80 > 50, fail); B is checked on latency (30 \u2264 50, pass) and cost (70 > 60, fail). \"Applying both constraints jointly\" is stated explicitly. | correction: none"
+          }
+        ],
+        "ttft_s": 0.5189575609983876,
+        "e2e_s": 510.8551338069956,
+        "seed": 595,
+        "directory": "r0-headed-comparison"
+      },
+      "answer": "Option A fails the latency target, while Option B exceeds the budget constraint.Specifically, A meets the cost cap (40 \u2264 60) but misses latency (80 > 50); B meets latency (30 \u2264 50) but violates cost (70 > 60). Applying both constraints jointly, neither option lies within the feasible region.\n\nTo verify this thoroughly, I applied three independent approaches. First, a hard-constraint gate: both options fail at least one gate. Second, priority ordering: if cost is gated first, A survives but still fails latency; if latency is gated first, B survives but still fails cost\u2014ordering cannot create feasibility. Third, a Pareto-dominance check: A is cheaper, B is faster, so neither dominates; any weighted trade-off would still select an option that violates a hard cap. The merged recommendation from all approaches is identical: no feasible deployment exists under the stated caps. No constraint has been silently relaxed.\n\nSupplied facts are the cost/latency values and the two caps. Assumptions\u2014explicitly labeled\u2014are that the figures are directly comparable, no hidden costs exist, and no third candidate is under consideration.\n\nConditional next steps: (1) If a new Option C is supplied, require verified evidence that its cost is \u2264 60 units/month and latency is \u2264 50 ms before evaluation. (2) If a stakeholder explicitly revises either cap as a deliberate trade-off, document that revision in writing and re-run this exact comparison under the revised cap; otherwise, retain the infeasibility conclusion.\n\nDecision: defer.",
+      "trace": {
+        "trace_version": "2.0",
+        "request_id": "chatcmpl-7475f6b4f7504bd1",
+        "started_at": "2026-09-08T07:41:13.339Z",
+        "completed_at": "2026-09-08T07:49:44.158Z",
+        "events": [
+          {
+            "seq": 1,
+            "node": "profile_judge",
+            "role": "profile_judge",
+            "kind": "classification",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:41:13.339Z",
+              "started_at": "2026-09-08T07:41:13.339Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:41:13.555Z"
+            },
+            "usage": {
+              "prompt_tokens": 577,
+              "completion_tokens": 4,
+              "cached_tokens": 0
+            },
+            "budget": null,
+            "detail": {
+              "verdict": "primary",
+              "offered": [
+                "QWEN",
+                "QWEN_THINK",
+                "DEEPSEEK",
+                "DEEPSEEK_THINK",
+                "ENSEMBLE"
+              ],
+              "fallback": null,
+              "message": "profile: primary"
+            },
+            "error": null
+          },
+          {
+            "seq": 2,
+            "node": "router",
+            "role": "router",
+            "kind": "routing",
+            "status": "success",
+            "attempt": 0,
+            "worker": null,
+            "engine": null,
+            "model": null,
+            "timing": {
+              "queued_at": null,
+              "started_at": "2026-09-08T07:41:13.562Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:41:13.562Z"
+            },
+            "usage": null,
+            "budget": null,
+            "detail": {
+              "target": "multi_agent",
+              "confidence": 1.0,
+              "reason": "auto-max: three tier1 proposals and tier2 synthesis",
+              "message": "multi_agent (auto-max: three tier1 proposals and tier2 synthesis)"
+            },
+            "error": null
+          },
+          {
+            "seq": 3,
+            "node": "image_description",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "skipped",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": null,
+            "usage": null,
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 0,
+              "steps_consumed": 0,
+              "steps_remaining": 20,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "reason": "no_image",
+              "requires": "image"
+            },
+            "error": null
+          },
+          {
+            "seq": 4,
+            "node": "head",
+            "role": "head",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:41:13.563Z",
+              "started_at": "2026-09-08T07:41:13.563Z",
+              "first_token_at": "2026-09-08T07:41:13.822Z",
+              "completed_at": "2026-09-08T07:41:14.132Z"
+            },
+            "usage": {
+              "prompt_tokens": 629,
+              "completion_tokens": 16,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 0,
+              "steps_consumed": 1,
+              "steps_remaining": 17,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "streamed": true,
+              "head": true,
+              "message": "attempt=0 streamed=true head=true"
+            },
+            "error": null
+          },
+          {
+            "seq": 5,
+            "node": "draft",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:41:13.563Z",
+              "started_at": "2026-09-08T07:41:13.563Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:41:58.428Z"
+            },
+            "usage": {
+              "prompt_tokens": 697,
+              "completion_tokens": 2048,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 1,
+              "steps_consumed": 1,
+              "steps_remaining": 17,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 6,
+            "node": "requirements",
+            "role": "planner",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:41:13.564Z",
+              "started_at": "2026-09-08T07:41:13.564Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:42:49.289Z"
+            },
+            "usage": {
+              "prompt_tokens": 1095,
+              "completion_tokens": 4296,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 2,
+              "steps_consumed": 1,
+              "steps_remaining": 17,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 7,
+            "node": "policies",
+            "role": "planner",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:42:49.295Z",
+              "started_at": "2026-09-08T07:42:49.295Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:42:56.790Z"
+            },
+            "usage": {
+              "prompt_tokens": 1554,
+              "completion_tokens": 1183,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 3,
+              "steps_consumed": 1,
+              "steps_remaining": 15,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 8,
+            "node": "critique",
+            "role": "synthesizer",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:42:49.295Z",
+              "started_at": "2026-09-08T07:42:49.295Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:42:59.296Z"
+            },
+            "usage": {
+              "prompt_tokens": 1614,
+              "completion_tokens": 1724,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 4,
+              "steps_consumed": 1,
+              "steps_remaining": 15,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 9,
+            "node": "answer_2",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:42:59.300Z",
+              "started_at": "2026-09-08T07:42:59.300Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:44:04.395Z"
+            },
+            "usage": {
+              "prompt_tokens": 2428,
+              "completion_tokens": 2961,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 6,
+              "steps_consumed": 1,
+              "steps_remaining": 11,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 10,
+            "node": "answer_3",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:42:59.300Z",
+              "started_at": "2026-09-08T07:42:59.300Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:44:14.563Z"
+            },
+            "usage": {
+              "prompt_tokens": 2428,
+              "completion_tokens": 3419,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 7,
+              "steps_consumed": 1,
+              "steps_remaining": 11,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 11,
+            "node": "answer_1",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:42:59.300Z",
+              "started_at": "2026-09-08T07:42:59.300Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:44:29.354Z"
+            },
+            "usage": {
+              "prompt_tokens": 2428,
+              "completion_tokens": 4096,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 5,
+              "steps_consumed": 1,
+              "steps_remaining": 11,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 12,
+            "node": "answer_4",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:42:59.300Z",
+              "started_at": "2026-09-08T07:42:59.300Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:44:29.594Z"
+            },
+            "usage": {
+              "prompt_tokens": 2428,
+              "completion_tokens": 4096,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 8,
+              "steps_consumed": 1,
+              "steps_remaining": 11,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 13,
+            "node": "synthesis",
+            "role": "publisher",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:44:29.599Z",
+              "started_at": "2026-09-08T07:44:29.599Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:44:37.477Z"
+            },
+            "usage": {
+              "prompt_tokens": 3233,
+              "completion_tokens": 1699,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 9,
+              "steps_consumed": 1,
+              "steps_remaining": 10,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 14,
+            "node": "audit",
+            "role": "verifier",
+            "kind": "verification",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:44:37.478Z",
+              "started_at": "2026-09-08T07:44:37.478Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:47:57.291Z"
+            },
+            "usage": {
+              "prompt_tokens": 2793,
+              "completion_tokens": 9069,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 10,
+              "steps_consumed": 1,
+              "steps_remaining": 9,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "pass": false,
+              "inconclusive": false,
+              "refinement_exhausted": false,
+              "message": "attempt=0 pass=False"
+            },
+            "error": null
+          },
+          {
+            "seq": 15,
+            "node": "synthesis",
+            "role": "publisher",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 1,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:47:57.292Z",
+              "started_at": "2026-09-08T07:47:57.292Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:48:10.884Z"
+            },
+            "usage": {
+              "prompt_tokens": 4276,
+              "completion_tokens": 3784,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 11,
+              "steps_consumed": 1,
+              "steps_remaining": 8,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=1"
+            },
+            "error": null
+          },
+          {
+            "seq": 16,
+            "node": "audit",
+            "role": "verifier",
+            "kind": "verification",
+            "status": "success",
+            "attempt": 1,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:48:10.885Z",
+              "started_at": "2026-09-08T07:48:10.885Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:49:44.148Z"
+            },
+            "usage": {
+              "prompt_tokens": 2604,
+              "completion_tokens": 4243,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 12,
+              "steps_consumed": 1,
+              "steps_remaining": 7,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "pass": true,
+              "inconclusive": false,
+              "refinement_exhausted": false,
+              "message": "attempt=1 pass=True"
+            },
+            "error": null
+          }
+        ]
+      },
+      "manual_review": {
+        "passed": true,
+        "reviewed": "final answer and both audit outputs",
+        "findings": [
+          "A and B are compared against both supplied hard limits and correctly rejected.",
+          "Three analytical approaches support the same defer decision.",
+          "Assumptions are explicitly labeled; no measured results or citations are invented.",
+          "Both next steps are conditional; new evidence and an explicit requirement change are not presented as already feasible.",
+          "Final ending is exact and final length is below 350 words.",
+          "First audit identifies the original length violation; the final audit cites the revised answer and marks every minimum item satisfied."
+        ],
+        "scope": "Manual review of this diagnostic case, not a general proof of answer quality."
+      }
+    },
+    {
+      "case": "r0-headless-json",
+      "request": {
+        "model": "kairyu-auto-max",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Use the most thorough possible answer: compare several independent approaches and critically audit the merged recommendation against every requirement. This is an ambiguous multi-constraint design decision; do not substitute a quick single-perspective answer. Choose a storage design under conflicting mandatory constraints. Given only: A costs 40 and latency is 80; B costs 70 and latency is 30; budget <=60 and latency <=50. Return one JSON object with exactly the keys feasible, choice, violations, next_steps. feasible must be false, choice must be null, violations must be {\"A\":\"latency\",\"B\":\"budget\"}, and next_steps must contain exactly two distinct conditional actions that obtain evidence without asserting an unmeasured design meets the constraints. No Markdown or surrounding prose."
+          }
+        ],
+        "max_tokens": 65536,
+        "reasoning_effort": "low",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "response_format": {
+          "type": "json_object"
+        },
+        "seed": 595
+      },
+      "validation": {
+        "case": "headless-json",
+        "checks": {
+          "ensemble_executed": true,
+          "one_successful_requirements_stage": true,
+          "complete_checklist": true,
+          "covers:JSON only": true,
+          "covers:exact keys": true,
+          "covers:fixed values": true,
+          "covers:two conditional evidence steps": true,
+          "covers:numeric limits": true,
+          "covers:no unmeasured feasibility claim": true,
+          "covers:thorough comparison and audit": true,
+          "preserves_required_literals": true,
+          "excludes_rendering_boilerplate": true,
+          "requirements_finish_within_cap": true,
+          "audit_covers_checklist_ids": true,
+          "audit_evidence_present": true,
+          "final_minimum_items_satisfied": true,
+          "final_audit_passes": true,
+          "nonempty_final_answer": true,
+          "checklist_not_published": true,
+          "final_json_contract": true,
+          "complete_sse": true
+        },
+        "failures": [],
+        "passed": true,
+        "word_count": 79,
+        "requirements_tokens": 1983,
+        "checklist": [
+          {
+            "id": "1",
+            "priority": "minimum",
+            "requirement": "Output must be a single JSON object with no Markdown formatting or surrounding prose",
+            "acceptance": "The entire response is valid JSON consisting of one object; no Markdown fences, headers, bullet points, or prose text appear outside the JSON structure.",
+            "source": "user: 'Return one JSON object with exactly the keys feasible, choice, violations, next_steps.' and 'No Markdown or surrounding prose.'"
+          },
+          {
+            "id": "2",
+            "priority": "minimum",
+            "requirement": "The JSON object must contain exactly four keys: feasible, choice, violations, next_steps",
+            "acceptance": "The top-level object has exactly the keys [feasible, choice, violations, next_steps] and no additional or missing keys.",
+            "source": "user: 'Return one JSON object with exactly the keys feasible, choice, violations, next_steps.'"
+          },
+          {
+            "id": "3",
+            "priority": "minimum",
+            "requirement": "feasible must be the boolean false",
+            "acceptance": "The value of the 'feasible' key is exactly the JSON literal false.",
+            "source": "user: 'feasible must be false'"
+          },
+          {
+            "id": "4",
+            "priority": "minimum",
+            "requirement": "choice must be null",
+            "acceptance": "The value of the 'choice' key is exactly the JSON literal null.",
+            "source": "user: 'choice must be null'"
+          },
+          {
+            "id": "5",
+            "priority": "minimum",
+            "requirement": "violations must be the exact object mapping A to latency and B to budget",
+            "acceptance": "The value of the 'violations' key is exactly {A:latency, B:budget} (JSON: {A:latency, B:budget} i.e. the object with key A value latency and key B value budget).",
+            "source": "user: 'violations must be {A:latency,B:budget}'"
+          },
+          {
+            "id": "6",
+            "priority": "minimum",
+            "requirement": "next_steps must contain exactly two distinct conditional actions",
+            "acceptance": "The 'next_steps' value is an array of length 2; the two entries are distinct (not duplicates) and each is phrased as a conditional action (e.g., 'If X, then do Y').",
+            "source": "user: 'next_steps must contain exactly two distinct conditional actions'"
+          },
+          {
+            "id": "7",
+            "priority": "minimum",
+            "requirement": "Each next_step action must obtain evidence without asserting that an unmeasured design meets the constraints",
+            "acceptance": "Neither action in next_steps claims or implies that a specific candidate already satisfies budget<=60 or latency<=50; both actions are framed as gathering or verifying evidence (e.g., measure, benchmark, obtain updated pricing).",
+            "source": "user: 'that obtain evidence without asserting an unmeasured design meets the constraints'"
+          },
+          {
+            "id": "8",
+            "priority": "minimum",
+            "requirement": "The answer must reflect a thorough multi-approach comparison and critical audit, not a quick single-perspective conclusion",
+            "acceptance": "The content of the JSON (particularly next_steps) demonstrates awareness of multiple candidate strategies and their respective violations, rather than a one-liner that picks or dismisses without comparing A and B independently against both constraints.",
+            "source": "user: 'Use the most thorough possible answer: compare several independent approaches and critically audit the merged recommendation against every requirement.' and 'do not substitute a quick single-perspective answer.'"
+          },
+          {
+            "id": "9",
+            "priority": "minimum",
+            "requirement": "The feasibility determination must be based on the stated parameters: A (cost 40, latency 80), B (cost 70, latency 30), budget <= 60, latency <= 50",
+            "acceptance": "The conclusion feasible=false is derivable from the given numbers: A violates latency (80>50) and B violates budget (70>60), so no single option satisfies both constraints simultaneously.",
+            "source": "user: 'Given only: A costs 40 and latency is 80; B costs 70 and latency is 30; budget <=60 and latency <=50.'"
+          }
+        ],
+        "stage_outputs": [
+          {
+            "node": "draft",
+            "attempt": 0,
+            "output": "{\"feasible\":false,\"choice\":null,\"violations\":{\"A\":\"latency\",\"B\":\"budget\"},\"next_steps\":[\"If a revised latency measurement for design A yields a value <= 50, re-evaluate A as a feasible candidate; otherwise record A as infeasible on latency.\",\"If a revised cost measurement for design B yields a value <= 60, re-evaluate B as a feasible candidate; otherwise record B as infeasible on budget.\"]}"
+          },
+          {
+            "node": "requirements",
+            "attempt": 0,
+            "output": "[{\"id\":\"R1\",\"priority\":\"minimum\",\"requirement\":\"Output must be a single JSON object with no Markdown formatting or surrounding prose\",\"acceptance_criterion\":\"The entire response is valid JSON consisting of one object; no Markdown fences, headers, bullet points, or prose text appear outside the JSON structure.\",\"source\":\"user: 'Return one JSON object with exactly the keys feasible, choice, violations, next_steps.' and 'No Markdown or surrounding prose.'\"},{\"id\":\"R2\",\"priority\":\"minimum\",\"requirement\":\"The JSON object must contain exactly four keys: feasible, choice, violations, next_steps\",\"acceptance_criterion\":\"The top-level object has exactly the keys [feasible, choice, violations, next_steps] and no additional or missing keys.\",\"source\":\"user: 'Return one JSON object with exactly the keys feasible, choice, violations, next_steps.'\"},{\"id\":\"R3\",\"priority\":\"minimum\",\"requirement\":\"feasible must be the boolean false\",\"acceptance_criterion\":\"The value of the 'feasible' key is exactly the JSON literal false.\",\"source\":\"user: 'feasible must be false'\"},{\"id\":\"R4\",\"priority\":\"minimum\",\"requirement\":\"choice must be null\",\"acceptance_criterion\":\"The value of the 'choice' key is exactly the JSON literal null.\",\"source\":\"user: 'choice must be null'\"},{\"id\":\"R5\",\"priority\":\"minimum\",\"requirement\":\"violations must be the exact object mapping A to latency and B to budget\",\"acceptance_criterion\":\"The value of the 'violations' key is exactly {A:latency, B:budget} (JSON: {A:latency, B:budget} i.e. the object with key A value latency and key B value budget).\",\"source\":\"user: 'violations must be {A:latency,B:budget}'\"},{\"id\":\"R6\",\"priority\":\"minimum\",\"requirement\":\"next_steps must contain exactly two distinct conditional actions\",\"acceptance_criterion\":\"The 'next_steps' value is an array of length 2; the two entries are distinct (not duplicates) and each is phrased as a conditional action (e.g., 'If X, then do Y').\",\"source\":\"user: 'next_steps must contain exactly two distinct conditional actions'\"},{\"id\":\"R7\",\"priority\":\"minimum\",\"requirement\":\"Each next_step action must obtain evidence without asserting that an unmeasured design meets the constraints\",\"acceptance_criterion\":\"Neither action in next_steps claims or implies that a specific candidate already satisfies budget<=60 or latency<=50; both actions are framed as gathering or verifying evidence (e.g., measure, benchmark, obtain updated pricing).\",\"source\":\"user: 'that obtain evidence without asserting an unmeasured design meets the constraints'\"},{\"id\":\"R8\",\"priority\":\"minimum\",\"requirement\":\"The answer must reflect a thorough multi-approach comparison and critical audit, not a quick single-perspective conclusion\",\"acceptance_criterion\":\"The content of the JSON (particularly next_steps) demonstrates awareness of multiple candidate strategies and their respective violations, rather than a one-liner that picks or dismisses without comparing A and B independently against both constraints.\",\"source\":\"user: 'Use the most thorough possible answer: compare several independent approaches and critically audit the merged recommendation against every requirement.' and 'do not substitute a quick single-perspective answer.'\"},{\"id\":\"R9\",\"priority\":\"minimum\",\"requirement\":\"The feasibility determination must be based on the stated parameters: A (cost 40, latency 80), B (cost 70, latency 30), budget <= 60, latency <= 50\",\"acceptance_criterion\":\"The conclusion feasible=false is derivable from the given numbers: A violates latency (80>50) and B violates budget (70>60), so no single option satisfies both constraints simultaneously.\",\"source\":\"user: 'Given only: A costs 40 and latency is 80; B costs 70 and latency is 30; budget <=60 and latency <=50.'\"}]"
+          },
+          {
+            "node": "critique",
+            "attempt": 0,
+            "output": "{\"feasible\":false,\"choice\":null,\"violations\":{\"A\":\"latency\",\"B\":\"budget\"},\"next_steps\":[\"If a third-party benchmark measures option A's latency under production load and that observed latency is <= 50, then re-audit A against both constraints using the measured value; otherwise retain A's latency violation and do not claim feasibility before measurement.\",\"If a vendor quote or alternative procurement model prices option B at a total cost <= 60, then re-audit B against both constraints using that quoted cost; otherwise retain B's budget violation and do not claim feasibility before measurement.\"]}"
+          },
+          {
+            "node": "policies",
+            "attempt": 0,
+            "output": "POLICY 1: Formal exhaustive-enumeration approach. Method: construct a Cartesian product of all available candidates (A and B) against the two mandatory constraints (budget \u2264 60, latency \u2264 50), applying each constraint independently to each candidate to derive the exact violation set. Structure the response purely as a spec-compliant JSON literal with the mandated keys and fixed primitive values (feasible:false, choice:null, violations:{\"A\":\"latency\",\"B\":\"budget\"}). For next_steps, generate conditional actions that solicit unmeasured data points strictly as evidence, e.g., \"If vendor A provides production-load latency measurements, record the observed value\" and \"If vendor B issues updated pricing beyond the current quote, log the new cost figure.\" Prioritizes absolute adherence to the required schema and avoids any interpretation beyond the literal numbers.\n\nPOLICY 2: Pareto-trade-off and hybrid-exploration approach. Method: treat A and B as Pareto frontier points (A sacrifices latency for cost, B sacrifices cost for latency), recognize that neither dominates the other, and conclude infeasibility because no singleton satisfies both thresholds. Structure the output as the required JSON envelope, but craft next_steps to probe composite or alternative configurations without asserting feasibility: \"If a blended A/B configuration is proposed, benchmark its actual combined latency and cost empirically\" and \"If a third candidate C is introduced, request its measured spec sheet.\" Prioritizes the engineering reality of multi-constraint design, framing the answer around trade-off discovery and conditional evidence acquisition.\n\nPOLICY 3: Adversarial audit and measurement verification approach. Method: critically audit the given data by cross-referencing each claim (A cost=40/latency=80, B cost=70/latency=30) against the thresholds, explicitly validating that A fails latency (80>50) and B fails budget (70>60). Structure the answer as a strict JSON object, but use next_steps to demand re-measurement or re-quotation of the underlying numbers, e.g., \"If A's latency is re-tested under a different workload, record the empirically observed latency\" and \"If B's cost is re-quoted as a volume discount, capture the exact revised figure.\" Prioritizes epistemic rigor\u2014never treating the given parameters as immutable\u2014while ensuring the mandatory output literals remain untouched.\n\nPOLICY 4: Constraint-relaxation and sensitivity-analysis approach. Method: analyze what parametric shifts would be necessary for feasibility (e.g., B's cost must drop \u226410, A's latency must drop \u226430), but explicitly refrain from asserting any such shift exists. Structure the response as the required JSON schema, and in next_steps include conditional actions that gather evidence for those hypothetical shifts without validating them, such as \"If a revised quotation for B is obtained showing cost below 60, store that quotation\" and \"If a re-benchmark of A reports latency below 50, archive that measurement.\" Prioritizes forward-looking decision support, focusing on which unknown variables need empirical resolution to potentially unlock feasibility, while strictly preserving the false/null/violations contract."
+          },
+          {
+            "node": "answer_1",
+            "attempt": 0,
+            "output": "{\"feasible\":false,\"choice\":null,\"violations\":{\"A\":\"latency\",\"B\":\"budget\"},\"next_steps\":[\"If independent verification of A's production latency under the target workload is obtained, record the measured latency and audit A against both cost <= 60 and latency <= 50 before treating A as a candidate.\",\"If independent verification of B's production cost under the target volume terms is obtained, record the measured cost and audit B against both cost <= 60 and latency <= 50 before treating B as a candidate.\"]}"
+          },
+          {
+            "node": "answer_4",
+            "attempt": 0,
+            "output": "{\"feasible\":false,\"choice\":null,\"violations\":{\"A\":\"latency\",\"B\":\"budget\"},\"next_steps\":[\"If a revised quotation for B is obtained showing cost at or below 60, archive that quotation for constraint verification\",\"If a re-benchmark of A under target workload reports latency at or below 50, record the measurement for constraint verification\"]}"
+          },
+          {
+            "node": "answer_3",
+            "attempt": 0,
+            "output": "{\"feasible\":false,\"choice\":null,\"violations\":{\"A\":\"latency\",\"B\":\"budget\"},\"next_steps\":[\"If A's stated latency of 80 is re-benchmarked under a specified production workload, record the measured value as evidence without concluding it satisfies the 50-unit threshold\",\"If B's stated cost of 70 is re-quoted by the vendor under current or revised pricing terms, record the quoted figure as evidence without concluding it satisfies the 60-unit budget\"]}"
+          },
+          {
+            "node": "answer_2",
+            "attempt": 0,
+            "output": "{\"feasible\":false,\"choice\":null,\"violations\":{\"A\":\"latency\",\"B\":\"budget\"},\"next_steps\":[\"If a hybrid or load-balanced configuration combining A and B is proposed, benchmark its end-to-end cost and latency under production-equivalent load to obtain empirical values without presuming the composite satisfies both thresholds.\",\"If an alternative candidate C or a revised specification for A or B is identified, request its independently measured cost and latency figures so the new data point can be evaluated against budget <= 60 and latency <= 50 before any feasibility claim is made.\"]}"
+          },
+          {
+            "node": "audit",
+            "attempt": 0,
+            "output": "PASS\nR1 | satisfied | evidence: the candidate is a single raw JSON object with no Markdown fences, headers, bullets, or surrounding prose | correction: none\nR2 | satisfied | evidence: the top-level object contains exactly feasible, choice, violations, next_steps | correction: none\nR3 | satisfied | evidence: \"feasible\":false | correction: none\nR4 | satisfied | evidence: \"choice\":null | correction: none\nR5 | satisfied | evidence: \"violations\":{\"A\":\"latency\",\"B\":\"budget\"} | correction: none\nR6 | satisfied | evidence: next_steps is an array of two distinct entries, each beginning with \u201cIf ...\u201d and directing a record/re-audit action | correction: none\nR7 | satisfied | evidence: both actions require recording independent measurements or quotes and re-auditing against budget and latency before claiming feasibility, and they only state existing violations rather than asserting feasibility | correction: none\nR8 | satisfied | evidence: the violations object identifies separate A and B violations, and the two next_steps independently require re-auditing A and B against both constraints, showing multi-candidate awareness rather than a single unperspectived dismissal | correction: none\nR9 | satisfied | evidence: feasible=false follows from A\u2019s stated latency 80 exceeding 50 and B\u2019s stated cost 70 exceeding 60, so no given option satisfies both mandatory constraints | correction: none"
+          }
+        ],
+        "ttft_s": 204.85426409900538,
+        "e2e_s": 204.8554376109969,
+        "seed": 595,
+        "directory": "r0-headless-json"
+      },
+      "answer": "{\"feasible\":false,\"choice\":null,\"violations\":{\"A\":\"latency\",\"B\":\"budget\"},\"next_steps\":[\"If A's actual latency and total cost are independently benchmarked under a production-equivalent workload, record those measurements and re-audit A against both budget <=60 and latency <=50 before claiming feasibility; the stated 80 latency currently violates the 50 threshold.\",\"If B's actual total cost and latency are independently quoted or measured under current procurement terms, record those measurements and re-audit B against both budget <=60 and latency <=50 before claiming feasibility; the stated 70 cost currently violates the 60 budget.\"]}",
+      "trace": {
+        "trace_version": "2.0",
+        "request_id": "chatcmpl-c2cea3b540254eb4",
+        "started_at": "2026-09-08T07:49:44.172Z",
+        "completed_at": "2026-09-08T07:53:09.020Z",
+        "events": [
+          {
+            "seq": 1,
+            "node": "profile_judge",
+            "role": "profile_judge",
+            "kind": "classification",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:49:44.172Z",
+              "started_at": "2026-09-08T07:49:44.172Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:49:44.351Z"
+            },
+            "usage": {
+              "prompt_tokens": 571,
+              "completion_tokens": 4,
+              "cached_tokens": 0
+            },
+            "budget": null,
+            "detail": {
+              "verdict": "primary",
+              "offered": [
+                "QWEN",
+                "QWEN_THINK",
+                "DEEPSEEK",
+                "DEEPSEEK_THINK",
+                "ENSEMBLE"
+              ],
+              "fallback": null,
+              "message": "profile: primary"
+            },
+            "error": null
+          },
+          {
+            "seq": 2,
+            "node": "router",
+            "role": "router",
+            "kind": "routing",
+            "status": "success",
+            "attempt": 0,
+            "worker": null,
+            "engine": null,
+            "model": null,
+            "timing": {
+              "queued_at": null,
+              "started_at": "2026-09-08T07:49:44.357Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:49:44.357Z"
+            },
+            "usage": null,
+            "budget": null,
+            "detail": {
+              "target": "multi_agent",
+              "confidence": 1.0,
+              "reason": "auto-max: three tier1 proposals and tier2 synthesis",
+              "message": "multi_agent (auto-max: three tier1 proposals and tier2 synthesis)"
+            },
+            "error": null
+          },
+          {
+            "seq": 3,
+            "node": "head",
+            "role": "head",
+            "kind": "generation",
+            "status": "skipped",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": null,
+            "usage": null,
+            "budget": null,
+            "detail": {
+              "reason": "intent",
+              "head": true
+            },
+            "error": null
+          },
+          {
+            "seq": 4,
+            "node": "image_description",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "skipped",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": null,
+            "usage": null,
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 0,
+              "steps_consumed": 0,
+              "steps_remaining": 20,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "reason": "no_image",
+              "requires": "image"
+            },
+            "error": null
+          },
+          {
+            "seq": 5,
+            "node": "draft",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:49:44.358Z",
+              "started_at": "2026-09-08T07:49:44.358Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:50:01.917Z"
+            },
+            "usage": {
+              "prompt_tokens": 687,
+              "completion_tokens": 794,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 0,
+              "steps_consumed": 1,
+              "steps_remaining": 18,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 6,
+            "node": "requirements",
+            "role": "planner",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:49:44.359Z",
+              "started_at": "2026-09-08T07:49:44.359Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:50:28.598Z"
+            },
+            "usage": {
+              "prompt_tokens": 1085,
+              "completion_tokens": 1983,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 1,
+              "steps_consumed": 1,
+              "steps_remaining": 18,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 7,
+            "node": "critique",
+            "role": "synthesizer",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:50:28.602Z",
+              "started_at": "2026-09-08T07:50:28.602Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:50:41.678Z"
+            },
+            "usage": {
+              "prompt_tokens": 1734,
+              "completion_tokens": 2288,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 3,
+              "steps_consumed": 1,
+              "steps_remaining": 16,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 8,
+            "node": "policies",
+            "role": "planner",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:50:28.602Z",
+              "started_at": "2026-09-08T07:50:28.602Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:50:43.801Z"
+            },
+            "usage": {
+              "prompt_tokens": 1574,
+              "completion_tokens": 2522,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 2,
+              "steps_consumed": 1,
+              "steps_remaining": 16,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 9,
+            "node": "answer_1",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:50:43.804Z",
+              "started_at": "2026-09-08T07:50:43.804Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:51:02.229Z"
+            },
+            "usage": {
+              "prompt_tokens": 2295,
+              "completion_tokens": 830,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 4,
+              "steps_consumed": 1,
+              "steps_remaining": 12,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 10,
+            "node": "answer_4",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:50:43.805Z",
+              "started_at": "2026-09-08T07:50:43.805Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:51:07.364Z"
+            },
+            "usage": {
+              "prompt_tokens": 2295,
+              "completion_tokens": 1059,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 7,
+              "steps_consumed": 1,
+              "steps_remaining": 12,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 11,
+            "node": "answer_3",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:50:43.805Z",
+              "started_at": "2026-09-08T07:50:43.805Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:51:07.916Z"
+            },
+            "usage": {
+              "prompt_tokens": 2295,
+              "completion_tokens": 1086,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 6,
+              "steps_consumed": 1,
+              "steps_remaining": 12,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 12,
+            "node": "answer_2",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:50:43.805Z",
+              "started_at": "2026-09-08T07:50:43.805Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:51:08.182Z"
+            },
+            "usage": {
+              "prompt_tokens": 2295,
+              "completion_tokens": 1103,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 5,
+              "steps_consumed": 1,
+              "steps_remaining": 12,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 13,
+            "node": "synthesis",
+            "role": "publisher",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:51:08.185Z",
+              "started_at": "2026-09-08T07:51:08.185Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:51:28.828Z"
+            },
+            "usage": {
+              "prompt_tokens": 2307,
+              "completion_tokens": 4400,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 8,
+              "steps_consumed": 1,
+              "steps_remaining": 11,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 14,
+            "node": "audit",
+            "role": "verifier",
+            "kind": "verification",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:51:28.828Z",
+              "started_at": "2026-09-08T07:51:28.828Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:53:09.016Z"
+            },
+            "usage": {
+              "prompt_tokens": 2300,
+              "completion_tokens": 4562,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 9,
+              "steps_consumed": 1,
+              "steps_remaining": 10,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "pass": true,
+              "inconclusive": false,
+              "refinement_exhausted": false,
+              "message": "attempt=0 pass=True"
+            },
+            "error": null
+          }
+        ]
+      },
+      "manual_review": {
+        "passed": true,
+        "reviewed": "final JSON and per-ID audit evidence",
+        "findings": [
+          "The object has exactly the four requested keys and prescribed values.",
+          "Both distinct next steps are conditional and require recording independent measurements or quotes before re-auditing both hard limits.",
+          "The response does not claim that either unmeasured design has become feasible; it explicitly retains the stated 80-latency and 70-cost violations.",
+          "Audit evidence refers to the actual JSON fields and conditional wording."
+        ],
+        "scope": "Manual review of this diagnostic case."
+      }
+    },
+    {
+      "case": "r0-image-requirements",
+      "request": {
+        "model": "kairyu-auto-max",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the most thorough possible answer: compare several independent approaches and critically audit the merged recommendation against every requirement. This is an ambiguous multi-constraint design decision; do not substitute a quick single-perspective answer. Audit a proposed status indicator for a product using the attached image as the only visual evidence. In under 250 English words, identify its visible color as red; explain why color alone cannot establish the underlying service health; compare a text label versus a shape as redundant signals; recommend one approach conditionally; and do not claim measured accessibility compliance. End with exactly: Health status: unknown."
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKElEQVR4nO3NsQ0AAAzCMP5/un0CNkuZ41wybXsHAAAAAAAAAAAAxR4yw/wuPL6QkAAAAABJRU5ErkJggg=="
+                }
+              }
+            ]
+          }
+        ],
+        "max_tokens": 65536,
+        "reasoning_effort": "low",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "seed": 595
+      },
+      "validation": {
+        "case": "image-requirements",
+        "checks": {
+          "ensemble_executed": true,
+          "one_successful_requirements_stage": true,
+          "complete_checklist": true,
+          "covers:language and length": true,
+          "covers:red": true,
+          "covers:image evidence only": true,
+          "covers:unknown health": true,
+          "covers:text and shape": true,
+          "covers:conditional recommendation": true,
+          "covers:no measured compliance claim": true,
+          "covers:independent comparison and audit": true,
+          "preserves_required_literals": false,
+          "excludes_rendering_boilerplate": true,
+          "requirements_finish_within_cap": true,
+          "audit_covers_checklist_ids": true,
+          "audit_evidence_present": true,
+          "final_minimum_items_satisfied": true,
+          "final_audit_passes": true,
+          "nonempty_final_answer": true,
+          "checklist_not_published": true,
+          "image_root_and_checklist_overlap": true,
+          "image_description_nonempty": true,
+          "final_word_limit": true,
+          "final_ending": true,
+          "final_image_constraints": true,
+          "complete_sse": true
+        },
+        "failures": [
+          "preserves_required_literals"
+        ],
+        "passed": false,
+        "word_count": 187,
+        "requirements_tokens": 4768,
+        "checklist": [
+          {
+            "id": "1",
+            "priority": "minimum",
+            "requirement": "Answer in English under 250 words.",
+            "acceptance": "The final response is written in English and contains fewer than 250 English words.",
+            "source": "In under 250 English words"
+          },
+          {
+            "id": "2",
+            "priority": "minimum",
+            "requirement": "Use only the attached image as visual evidence.",
+            "acceptance": "All visual observations are grounded solely in the supplied image, with no reliance on external or unprovided visual evidence.",
+            "source": "using the attached image as the only visual evidence"
+          },
+          {
+            "id": "3",
+            "priority": "minimum",
+            "requirement": "Identify the visible color as red.",
+            "acceptance": "The response explicitly identifies the indicator's visible color as red.",
+            "source": "identify its visible color as red"
+          },
+          {
+            "id": "4",
+            "priority": "minimum",
+            "requirement": "Explain why color alone cannot establish service health.",
+            "acceptance": "The response explains that color alone is insufficient to establish underlying service health because it only indicates a displayed state, not verified service condition.",
+            "source": "explain why color alone cannot establish the underlying service health"
+          },
+          {
+            "id": "5",
+            "priority": "minimum",
+            "requirement": "Compare text label versus shape as redundant signals.",
+            "acceptance": "The response directly compares a text label and a shape as redundant or alternative status signals.",
+            "source": "compare a text label versus a shape as redundant signals"
+          },
+          {
+            "id": "6",
+            "priority": "minimum",
+            "requirement": "Recommend one approach conditionally.",
+            "acceptance": "The response recommends one approach and ties the recommendation to explicit conditions or context.",
+            "source": "recommend one approach conditionally"
+          },
+          {
+            "id": "7",
+            "priority": "minimum",
+            "requirement": "Do not claim measured accessibility compliance.",
+            "acceptance": "The response makes no claim that the indicator or recommendation has been measured as accessible or compliant with accessibility standards.",
+            "source": "do not claim measured accessibility compliance"
+          },
+          {
+            "id": "8",
+            "priority": "minimum",
+            "requirement": "End with the exact required status string.",
+            "acceptance": "The response ends with exactly the specified literal shown after the instruction's colon, with no additional text after it.",
+            "source": "End with exactly: Health status: unknown."
+          },
+          {
+            "id": "9",
+            "priority": "minimum",
+            "requirement": "Compare several independent approaches rather than giving a single-perspective answer.",
+            "acceptance": "The response presents and compares several independent approaches or design perspectives, not merely one quick single-perspective answer.",
+            "source": "compare several independent approaches and critically audit the merged recommendation against every requirement; do not substitute a quick single-perspective answer"
+          },
+          {
+            "id": "10",
+            "priority": "minimum",
+            "requirement": "Critically audit the merged recommendation against every requirement.",
+            "acceptance": "The response includes a critical audit of the final/merged recommendation against the stated constraints, including word limit, image-only evidence, red-color identification, color insufficiency, text/shape comparison, conditional recommendation, accessibility-claim exclusion, and required ending.",
+            "source": "critically audit the merged recommendation against every requirement"
+          },
+          {
+            "id": "11",
+            "priority": "minimum",
+            "requirement": "Audit the proposed product status indicator.",
+            "acceptance": "The response treats the image as a proposed status indicator for a product and evaluates/audits that indicator design.",
+            "source": "Audit a proposed status indicator for a product"
+          }
+        ],
+        "stage_outputs": [
+          {
+            "node": "image_description",
+            "attempt": 0,
+            "output": "The image is a uniform red field; its visible color is red. No text, glyph, or boundary is present.\n\nColor alone cannot establish service health. Red encodes only a perceptual cue, not a semantic state: it may denote error, warning, brand, or nothing, and rendering, screen calibration, and color-vision variation all alter perception. A solid fill proves no uptime, latency, or failure exists behind it.\n\nRedundant-signal comparison. A text label (e.g., \u201cOutage\u201d) conveys explicit meaning and survives low vision better than hue, but adds length, localization burden, and layout complexity. A shape (e.g., an X or triangle) is scannable and locale-independent, yet ambiguous without prior learning and can read as decoration. Each alone is weaker than color plus one non-color channel.\n\nIndependent approaches: (1) color only; (2) color plus text; (3) color plus shape; (4) color plus text plus shape. Approaches 2 and 3 add robustness; approach 4 risks clutter.\n\nConditional recommendation: if the indicator sits in a dense dashboard and space is constrained, choose color plus a distinct shape, reserving text for hover/tooltip; if it is a primary banner, choose color plus text for maximum clarity. Either way, pair the visual with a programmatic live region and documented state mapping.\n\nAudit against requirements: red identified; color limitation explained; text vs shape compared; conditional recommendation given; no measured accessibility compliance claimed.\n\nHealth status: unknown."
+          },
+          {
+            "node": "draft",
+            "attempt": 0,
+            "output": ""
+          },
+          {
+            "node": "requirements",
+            "attempt": 0,
+            "output": "[{\"id\":\"R1\",\"priority\":\"minimum\",\"requirement\":\"Answer in English under 250 words.\",\"acceptance_criterion\":\"The final response is written in English and contains fewer than 250 English words.\",\"source\":\"In under 250 English words\"},{\"id\":\"R2\",\"priority\":\"minimum\",\"requirement\":\"Use only the attached image as visual evidence.\",\"acceptance_criterion\":\"All visual observations are grounded solely in the supplied image, with no reliance on external or unprovided visual evidence.\",\"source\":\"using the attached image as the only visual evidence\"},{\"id\":\"R3\",\"priority\":\"minimum\",\"requirement\":\"Identify the visible color as red.\",\"acceptance_criterion\":\"The response explicitly identifies the indicator's visible color as red.\",\"source\":\"identify its visible color as red\"},{\"id\":\"R4\",\"priority\":\"minimum\",\"requirement\":\"Explain why color alone cannot establish service health.\",\"acceptance_criterion\":\"The response explains that color alone is insufficient to establish underlying service health because it only indicates a displayed state, not verified service condition.\",\"source\":\"explain why color alone cannot establish the underlying service health\"},{\"id\":\"R5\",\"priority\":\"minimum\",\"requirement\":\"Compare text label versus shape as redundant signals.\",\"acceptance_criterion\":\"The response directly compares a text label and a shape as redundant or alternative status signals.\",\"source\":\"compare a text label versus a shape as redundant signals\"},{\"id\":\"R6\",\"priority\":\"minimum\",\"requirement\":\"Recommend one approach conditionally.\",\"acceptance_criterion\":\"The response recommends one approach and ties the recommendation to explicit conditions or context.\",\"source\":\"recommend one approach conditionally\"},{\"id\":\"R7\",\"priority\":\"minimum\",\"requirement\":\"Do not claim measured accessibility compliance.\",\"acceptance_criterion\":\"The response makes no claim that the indicator or recommendation has been measured as accessible or compliant with accessibility standards.\",\"source\":\"do not claim measured accessibility compliance\"},{\"id\":\"R8\",\"priority\":\"minimum\",\"requirement\":\"End with the exact required status string.\",\"acceptance_criterion\":\"The response ends with exactly the specified literal shown after the instruction's colon, with no additional text after it.\",\"source\":\"End with exactly: Health status: unknown.\"},{\"id\":\"R9\",\"priority\":\"minimum\",\"requirement\":\"Compare several independent approaches rather than giving a single-perspective answer.\",\"acceptance_criterion\":\"The response presents and compares several independent approaches or design perspectives, not merely one quick single-perspective answer.\",\"source\":\"compare several independent approaches and critically audit the merged recommendation against every requirement; do not substitute a quick single-perspective answer\"},{\"id\":\"R10\",\"priority\":\"minimum\",\"requirement\":\"Critically audit the merged recommendation against every requirement.\",\"acceptance_criterion\":\"The response includes a critical audit of the final/merged recommendation against the stated constraints, including word limit, image-only evidence, red-color identification, color insufficiency, text/shape comparison, conditional recommendation, accessibility-claim exclusion, and required ending.\",\"source\":\"critically audit the merged recommendation against every requirement\"},{\"id\":\"R11\",\"priority\":\"minimum\",\"requirement\":\"Audit the proposed product status indicator.\",\"acceptance_criterion\":\"The response treats the image as a proposed status indicator for a product and evaluates/audits that indicator design.\",\"source\":\"Audit a proposed status indicator for a product\"}]"
+          },
+          {
+            "node": "critique",
+            "attempt": 0,
+            "output": "The indicator\u2019s visible color is red, with no other visual detail in the image. Color alone cannot establish service health: it encodes a perceptual cue, not verified uptime, latency, or failure state. Red could mean error, warning, or branding, and perception shifts with calibration and color-vision variation.\n\nComparing redundant signals: a text label (e.g., \u201cOutage\u201d) gives explicit, low-vision-friendly meaning but adds localization and layout cost. A shape (e.g., an X or triangle) is scannable and locale-independent but ambiguous without prior learning. Independent approaches include color-only, color+text, color+shape, and color+text+shape. Color+text maximizes clarity; color+shape maximizes compactness; all three risk clutter.\n\nConditional recommendation: choose color+shape for dense dashboards where space is tight, with text in hover or tooltip; choose color+text for primary, attention-critical alerts. I do not claim measured accessibility compliance for either.\n\nAudit: red identified; color insufficiency explained; text vs shape compared; conditional recommendation given; no compliance claim; image-only evidence used; multiple approaches compared.\n\nHealth status: unknown."
+          },
+          {
+            "node": "policies",
+            "attempt": 0,
+            "output": "POLICY 1: Signal-theoretic decomposition. Treat the indicator as a multi-channel communication system. The answer will isolate color, text, and shape as redundant channels, then build a decision matrix scoring each candidate design (color-only, color+text, color+shape, color+text+shape) against constraints such as density, localization, and scan time. It prioritizes rigorous trade-off analysis and explicitly maps every requirement to a scored criterion, ending with a conditional recommendation based on the dominant usage context.\n\nPOLICY 2: Accessibility-first persona heuristic. Start from inclusive design, assuming users with color blindness, low vision, and cognitive disabilities. The answer will evaluate text label versus shape through brief persona vignettes (e.g., a driver, a screen-reader user, a non-native speaker), then recommend conditionally based on which persona is most critical in the deployment environment. It prioritizes human variability and explicitly avoids claiming compliance, instead framing choices as better or worse for specific user groups.\n\nPOLICY 3: Forensic pixel-level audit. Anchor the answer in observable image properties: a uniform red fill with no boundary, glyph, or texture. The answer will argue from this evidence that color alone carries no state semantics, then compare text and shape as additions that create a second channel. Structure follows a forensic narrative\u2014observation, inference, redundancy comparison\u2014and yields a conditional recommendation tied to whether the surrounding UI already supplies contextual labels. Empirically grounded in the image alone.\n\nPOLICY 4: Constraint-satisfaction checklist. Treat the request as a set of hard requirements to be satisfied in sequence. The answer will enumerate each imposed constraint (word limit, red identification, insufficiency explanation, text/shape comparison, conditional recommendation, no compliance claim, exact ending) and compose a response that mechanically fulfills each sentence-by-sentence. It prioritizes total compliance over elegance, using a direct, almost boilerplate structure, with the conditional recommendation phrased as a simple if-then rule."
+          },
+          {
+            "node": "answer_1",
+            "attempt": 0,
+            "output": "The attached indicator shows a solid red field. In signal terms, color is one channel: it encodes a displayed state, not verified service health; red may mean error, idle, uninstrumented, or merely brand styling. Thus color alone cannot establish health.\n\nApproaches: (1) color-only: dense but semantically weak. (2) color + text: explicit, localizable, good for diagnostics, costs space. (3) color + shape: low-text, supports quick scanning, can be ambiguous. (4) color + text + shape: most redundant, best for critical states, heaviest. Text labels versus shapes: text states the state unambiguously but is language-bound; shapes are language-neutral and faster at a glance but less precise. If the deployment context is a low-density console with critical operational states, recommend color + shape + short text; if the UI is high-density or already context-labeled, recommend color + shape only. This recommendation is conditional on surrounding context and user need.\n\nAudit: stays under 250 English words; uses only the image; identifies red; explains color insufficiency; compares text and shape; gives conditional recommendation; avoids measured accessibility compliance claims; compares multiple approaches. The merged recommendation satisfies the constraints: it treats red as a visual observation, not health evidence, and adds redundant channels only when context warrants.\n\nHealth status: unknown."
+          },
+          {
+            "node": "answer_4",
+            "attempt": 0,
+            "output": "Constraint checklist, fulfilled in order:\n\nR1\u2013R2, R11: The image is a flat, uniform red square\u2014no glyph, border, or texture\u2014treated as the proposed product status indicator, the sole visual evidence.\n\nR3: Its visible color is red.\n\nR4: Color alone cannot establish service health; a red fill signals a displayed state, not verified backend condition.\n\nR9, R5 (several independent approaches): Approach A (color-only) fails R4. Approach B (color + text label) encodes state in language, aiding non-native and low-vision users but increasing width and localization cost. Approach C (color + shape, e.g., triangle vs circle) is language-neutral, scannable at a glance, but shape semantics need prior learning. B and C are redundant second channels; text wins on explicitness, shape wins on density and localization.\n\nR6 (conditional): If surrounding UI already provides contextual labels, use color+shape; otherwise use color+text.\n\nR7: No measured accessibility compliance is claimed.\n\nR10 audit: Merged pick satisfies R1 (English, under 250), R2 (image-only), R3 (red named), R4 (insufficiency stated), R5 (text/shape compared), R6 (if-then), R7 (no compliance claim), R8 (exact ending follows), R9 (three approaches), R11 (indicator audited).\n\nHealth status: unknown."
+          },
+          {
+            "node": "answer_3",
+            "attempt": 0,
+            "output": "Forensic observation: the supplied image is a uniform red square\u2014no border, no glyph, no texture, no text. The sole visible property is a solid red fill.\n\nInference: the indicator's visible color is red. Yet color alone is a displayed state, not a verified service condition. A red fill could denote error, warning, offline status, or a brand accent; without external telemetry the image supplies no evidence of underlying service health.\n\nRedundancy comparison: adding a text label (e.g., \"DOWN\") or a shape (e.g., a cross) each introduces a second channel independent of hue. A text label is explicit and localizable but consumes horizontal space and demands reading. A shape is compact and iconographic but depends on learned convention. The two are not redundant with each other; they encode the same state through different perceptual routes, and each is redundant only with color when the intended state is already unambiguous from context.\n\nConditional recommendation: if the surrounding UI already provides a contextual text label (for instance a status bar reading \"Service: Down\"), prefer a shape to preserve layout density. If no surrounding label exists, prefer a text label, because a shape alone leaves ambiguity that color cannot resolve.\n\nAudit against constraints: the answer identifies red, relies solely on the image, explains color insufficiency, compares text versus shape, issues a conditional recommendation, makes no measured accessibility-compliance claim, treats the square as a proposed product indicator, and compares multiple approaches.\n\nHealth status: unknown."
+          },
+          {
+            "node": "answer_2",
+            "attempt": 0,
+            "output": ""
+          },
+          {
+            "node": "audit",
+            "attempt": 0,
+            "output": "FAIL\nR1 | satisfied | evidence: the combined answer is well under 250 English words | correction: none\nR2 | satisfied | evidence: the only visual observation is \u201csolid red field,\u201d grounded in the provided image description | correction: none\nR3 | satisfied | evidence: \u201cThe indicator displays a solid red field\u201d explicitly identifies the visible color as red | correction: none\nR4 | satisfied | evidence: \u201cthat hue alone cannot verify actual service health because color conveys no operational state without context or measurement\u201d explains color insufficiency | correction: none\nR5 | satisfied | evidence: \u201ccolor-plus-text is explicit and language-dependent; color-plus-shape is compact and locale-neutral but relies on learned conventions\u201d compares text and shape as redundant signals | correction: none\nR6 | unsatisfied | evidence: \u201cchoose color-plus-shape for dense dashboards \u2026 and color-plus-text for primary alerts\u201d gives two conditional alternatives rather than one recommended approach | correction: collapse the recommendation into a single preferred approach with an explicit condition\nR7 | satisfied | evidence: \u201cno measured accessibility compliance is claimed\u201d avoids claiming measured accessibility compliance | correction: none\nR8 | satisfied | evidence: the response ends with exactly \u201cHealth status: unknown.\u201d | correction: none\nR9 | satisfied | evidence: the answer compares color-plus-text, color-plus-shape, and layering all three | correction: none\nR10 | unsatisfied | evidence: the self-audit omits the word-limit and exact-ending requirements and merely asserts \u201cAll constraints are met\u201d without a full critical audit | correction: explicitly audit every requirement, including word count and required ending, and assess the recommendation against each constraint\nR11 | satisfied | evidence: the answer treats the image as a proposed product status indicator and evaluates its signal design | correction: none"
+          },
+          {
+            "node": "audit",
+            "attempt": 1,
+            "output": "PASS\nR1 | satisfied | evidence: combined answer is approximately 187 words and is in English | correction: none\nR2 | satisfied | evidence: only visual observation made is \u201csolid red field\u201d / \u201csolid red fill,\u201d grounded in the supplied image | correction: none\nR3 | satisfied | evidence: \u201cThe indicator displays a solid red field\u201d and \u201cA solid red fill\u201d | correction: none\nR4 | satisfied | evidence: \u201cthat hue alone cannot verify actual service health\u201d and \u201ccolor conveys no operational state without context or measurement\u201d | correction: none\nR5 | satisfied | evidence: \u201cComparing redundant signals, a text label is unambiguous but slower to scan, while a shape is faster and language-neutral but less precise.\u201d | correction: none\nR6 | satisfied | evidence: \u201cI recommend color+shape, conditionally: use it only when the surrounding UI already provides a contextual text label\u201d | correction: none\nR7 | satisfied | evidence: \u201cI make no measured accessibility compliance claim.\u201d | correction: none\nR8 | satisfied | evidence: combined answer ends with the exact literal \u201cHealth status: unknown.\u201d | correction: none\nR9 | satisfied | evidence: \u201cIndependent approaches: color-only; color+text; color+shape; color+text+shape.\u201d with pros and cons for each | correction: none\nR10 | satisfied | evidence: \u201cAudit: image-only evidence used; red identified; color insufficiency explained; text/shape compared; multiple approaches weighed; one conditional recommendation given; no compliance claim; word count under 250; required ending appears.\u201d | correction: none\nR11 | satisfied | evidence: answer evaluates the supplied red field as an indicator and discusses its service-health communication, redundancy, and replacement design options | correction: none"
+          }
+        ],
+        "ttft_s": 0.49111493601230904,
+        "e2e_s": 343.4987529909995,
+        "seed": 595,
+        "directory": "r0-image-requirements"
+      },
+      "answer": "The indicator displays a solid red field, but that hue alone cannot verify actual service health because color conveys no operational state without context or measurement.\n\nA solid red fill is only a displayed state, not verified telemetry: red can mean alert, warning, brand color, or default, and calibration or color-vision variation changes perception, so it cannot establish uptime, latency, or failure. Independent approaches: color-only; color+text; color+shape; color+text+shape. Color-only lacks a non-color channel; color+text is explicit but language-bound and space-heavy; color+shape is compact and locale-neutral but relies on learned meaning; layering all three reduces ambiguity at the cost of clutter. Comparing redundant signals, a text label is unambiguous but slower to scan, while a shape is faster and language-neutral but less precise. I recommend color+shape, conditionally: use it only when the surrounding UI already provides a contextual text label; under that condition it strengthens redundancy without occupying extra space. I make no measured accessibility compliance claim. Audit: image-only evidence used; red identified; color insufficiency explained; text/shape compared; multiple approaches weighed; one conditional recommendation given; no compliance claim; word count under 250; required ending appears.  \nHealth status: unknown.",
+      "trace": {
+        "trace_version": "2.0",
+        "request_id": "chatcmpl-898c744a40434e8a",
+        "started_at": "2026-09-08T07:53:09.036Z",
+        "completed_at": "2026-09-08T07:58:52.525Z",
+        "events": [
+          {
+            "seq": 1,
+            "node": "profile_judge",
+            "role": "profile_judge",
+            "kind": "classification",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:53:09.036Z",
+              "started_at": "2026-09-08T07:53:09.036Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:53:09.225Z"
+            },
+            "usage": {
+              "prompt_tokens": 429,
+              "completion_tokens": 4,
+              "cached_tokens": 0
+            },
+            "budget": null,
+            "detail": {
+              "verdict": "primary",
+              "offered": [
+                "QWEN",
+                "QWEN_THINK",
+                "ENSEMBLE"
+              ],
+              "fallback": null,
+              "message": "profile: primary"
+            },
+            "error": null
+          },
+          {
+            "seq": 2,
+            "node": "router",
+            "role": "router",
+            "kind": "routing",
+            "status": "success",
+            "attempt": 0,
+            "worker": null,
+            "engine": null,
+            "model": null,
+            "timing": {
+              "queued_at": null,
+              "started_at": "2026-09-08T07:53:09.248Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:53:09.248Z"
+            },
+            "usage": null,
+            "budget": null,
+            "detail": {
+              "target": "multi_agent",
+              "confidence": 1.0,
+              "reason": "auto-max: three tier1 proposals and tier2 synthesis",
+              "message": "multi_agent (auto-max: three tier1 proposals and tier2 synthesis)"
+            },
+            "error": null
+          },
+          {
+            "seq": 3,
+            "node": "head",
+            "role": "head",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:53:09.249Z",
+              "started_at": "2026-09-08T07:53:09.249Z",
+              "first_token_at": "2026-09-08T07:53:09.518Z",
+              "completed_at": "2026-09-08T07:53:10.131Z"
+            },
+            "usage": {
+              "prompt_tokens": 619,
+              "completion_tokens": 30,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 0,
+              "steps_consumed": 1,
+              "steps_remaining": 16,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "streamed": true,
+              "head": true,
+              "message": "attempt=0 streamed=true head=true"
+            },
+            "error": null
+          },
+          {
+            "seq": 4,
+            "node": "image_description",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:53:09.250Z",
+              "started_at": "2026-09-08T07:53:09.250Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:53:40.078Z"
+            },
+            "usage": {
+              "prompt_tokens": 670,
+              "completion_tokens": 1401,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 2,
+              "steps_consumed": 1,
+              "steps_remaining": 16,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 5,
+            "node": "draft",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:53:09.249Z",
+              "started_at": "2026-09-08T07:53:09.249Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:53:54.159Z"
+            },
+            "usage": {
+              "prompt_tokens": 687,
+              "completion_tokens": 2048,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 1,
+              "steps_consumed": 1,
+              "steps_remaining": 16,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 6,
+            "node": "requirements",
+            "role": "planner",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:53:09.251Z",
+              "started_at": "2026-09-08T07:53:09.251Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:54:54.083Z"
+            },
+            "usage": {
+              "prompt_tokens": 1085,
+              "completion_tokens": 4768,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 3,
+              "steps_consumed": 1,
+              "steps_remaining": 16,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 7,
+            "node": "critique",
+            "role": "synthesizer",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:54:54.089Z",
+              "started_at": "2026-09-08T07:54:54.089Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:54:58.404Z"
+            },
+            "usage": {
+              "prompt_tokens": 1722,
+              "completion_tokens": 695,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 5,
+              "steps_consumed": 1,
+              "steps_remaining": 14,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 8,
+            "node": "policies",
+            "role": "planner",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:54:54.089Z",
+              "started_at": "2026-09-08T07:54:54.089Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:54:59.644Z"
+            },
+            "usage": {
+              "prompt_tokens": 1662,
+              "completion_tokens": 884,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 4,
+              "steps_consumed": 1,
+              "steps_remaining": 14,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 9,
+            "node": "answer_1",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:54:59.646Z",
+              "started_at": "2026-09-08T07:54:59.646Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:55:40.280Z"
+            },
+            "usage": {
+              "prompt_tokens": 1873,
+              "completion_tokens": 1849,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 6,
+              "steps_consumed": 1,
+              "steps_remaining": 10,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 10,
+            "node": "answer_4",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:54:59.647Z",
+              "started_at": "2026-09-08T07:54:59.647Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:55:54.021Z"
+            },
+            "usage": {
+              "prompt_tokens": 1873,
+              "completion_tokens": 2472,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 9,
+              "steps_consumed": 1,
+              "steps_remaining": 10,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 11,
+            "node": "answer_3",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:54:59.647Z",
+              "started_at": "2026-09-08T07:54:59.647Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:55:59.971Z"
+            },
+            "usage": {
+              "prompt_tokens": 1873,
+              "completion_tokens": 2747,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 8,
+              "steps_consumed": 1,
+              "steps_remaining": 10,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 12,
+            "node": "answer_2",
+            "role": "proposal",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:54:59.646Z",
+              "started_at": "2026-09-08T07:54:59.646Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:56:29.461Z"
+            },
+            "usage": {
+              "prompt_tokens": 1873,
+              "completion_tokens": 4096,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 7,
+              "steps_consumed": 1,
+              "steps_remaining": 10,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 13,
+            "node": "synthesis",
+            "role": "publisher",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:56:29.465Z",
+              "started_at": "2026-09-08T07:56:29.465Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:56:33.742Z"
+            },
+            "usage": {
+              "prompt_tokens": 3114,
+              "completion_tokens": 928,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 10,
+              "steps_consumed": 1,
+              "steps_remaining": 9,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=0"
+            },
+            "error": null
+          },
+          {
+            "seq": 14,
+            "node": "audit",
+            "role": "verifier",
+            "kind": "verification",
+            "status": "success",
+            "attempt": 0,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:56:33.742Z",
+              "started_at": "2026-09-08T07:56:33.742Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:57:47.748Z"
+            },
+            "usage": {
+              "prompt_tokens": 2479,
+              "completion_tokens": 3368,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 11,
+              "steps_consumed": 1,
+              "steps_remaining": 8,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "pass": false,
+              "inconclusive": false,
+              "refinement_exhausted": false,
+              "message": "attempt=0 pass=False"
+            },
+            "error": null
+          },
+          {
+            "seq": 15,
+            "node": "synthesis",
+            "role": "publisher",
+            "kind": "generation",
+            "status": "success",
+            "attempt": 1,
+            "worker": "tier2",
+            "engine": "tier2",
+            "model": "deepseek-v4-flash-0731-thinking",
+            "timing": {
+              "queued_at": "2026-09-08T07:57:47.749Z",
+              "started_at": "2026-09-08T07:57:47.749Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:57:56.605Z"
+            },
+            "usage": {
+              "prompt_tokens": 3644,
+              "completion_tokens": 1795,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 12,
+              "steps_consumed": 1,
+              "steps_remaining": 7,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "message": "attempt=1"
+            },
+            "error": null
+          },
+          {
+            "seq": 16,
+            "node": "audit",
+            "role": "verifier",
+            "kind": "verification",
+            "status": "success",
+            "attempt": 1,
+            "worker": "tier1",
+            "engine": "tier1",
+            "model": "qwen3.8-27b",
+            "timing": {
+              "queued_at": "2026-09-08T07:57:56.608Z",
+              "started_at": "2026-09-08T07:57:56.608Z",
+              "first_token_at": null,
+              "completed_at": "2026-09-08T07:58:52.517Z"
+            },
+            "usage": {
+              "prompt_tokens": 2574,
+              "completion_tokens": 2541,
+              "cached_tokens": 0
+            },
+            "budget": {
+              "max_steps": 20,
+              "steps_before": 13,
+              "steps_consumed": 1,
+              "steps_remaining": 6,
+              "max_cost_usd": null,
+              "cost_before_usd": 0.0,
+              "cost_consumed_usd": 0.0,
+              "cost_remaining_usd": null
+            },
+            "detail": {
+              "pass": true,
+              "inconclusive": false,
+              "refinement_exhausted": false,
+              "message": "attempt=1 pass=True"
+            },
+            "error": null
+          }
+        ]
+      },
+      "manual_review": null
+    }
+  ],
+  "artifact_sha256": {
+    "qwen-1-requirements-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "qwen-0-requirements-budget.log": "4d4ee0fa22d56b2c39b1452ee1380e076543ef492c051a7d8324cbbaf2747198",
+    "launcher.log": "9608c275bc9e45bcae4fb1214d432fe2144ae5efb3ddc5a95abc60070cbc110c",
+    "run.json": "d21a75fadab9d623e62c3dadab7acb670dd31084fd843dba316df3bebacdde93",
+    "budget-application.json": "f83ca790447509ca1b4ba00e047167dae74c2fab7e70ee0dc753988569a04ab6",
+    "qwen-2-requirements-budget.log": "357c7b11211b28812a45509b44ff1e162f3d7f2a07934575bff19f8eeda82c0e",
+    "qwen-3-requirements-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+    "runtime.json": "6714b0552843fa93da5cf35058badb004956ef8915d5a7ca81a02e852e037bf5",
+    "requirements-quality/summary.json": "027815b9984a07bf90f597855dbb26bbbef17dc35a065b8d12385c54f6d5a355",
+    "requirements-quality/r0-headless-json/manual-review.json": "0366878fdc88fd68ae9f6d822e8a23ac336d3c8ac41a2d16bb67b01435b8024f",
+    "requirements-quality/r0-headless-json/validation.json": "d20d32b31bd6dfad2ef3652f1366c3adf95c74142a84e857cd47dbeffc5fcc12",
+    "requirements-quality/r0-headless-json/response.sse": "5011d7a57569ea0dcda74885e1116997da4db0e49422eb593e065efe3f7c25a8",
+    "requirements-quality/r0-headless-json/request.json": "d1f3b80358b9667d14a0e1a790135bb191e238f4bef8f3b4f3cd53e31f7c8d18",
+    "requirements-quality/r0-headless-json/result.json": "0f95d72a40b4e8bf21459f43d8f7c90a4020a46c4c6a7ff6d5c355358838568f",
+    "requirements-quality/r1-image-requirements/response.sse": "f9b9357d970c5fac82c0a96ab98324855be2e19d976623e22c94ffe04bc79d1b",
+    "requirements-quality/r1-image-requirements/request.json": "d150482db3c22d188ad07cc49247c86166940726d4111f8de57170f63e7637d2",
+    "requirements-quality/r0-image-requirements/validation.json": "a0713ad4b837914426464c83a9545079323a8a47020de2a3157a17c2718918c6",
+    "requirements-quality/r0-image-requirements/response.sse": "891d922eb706fb2663f73317d3abab56a692d5c0b90405eab8415c2e6a99dcca",
+    "requirements-quality/r0-image-requirements/request.json": "65733ec209145eea5898177253aec6731522f46dcca04d5ead925c7b91b38fed",
+    "requirements-quality/r0-image-requirements/result.json": "1db0461fa8185c9ff945a9b9c5a20ce631c9abfb9c8402f170554e3525ab3695",
+    "requirements-quality/r1-headed-comparison/response.sse": "e196bc119c468661ea347bd8c9ee666702b06cc93d97ce3aaeb4eebd2d4ffb01",
+    "requirements-quality/r1-headed-comparison/request.json": "b6131e49a3e0394dad56b108464be76a43e5f3a7ffd42aaba921cf7f0b5a2994",
+    "requirements-quality/r0-headed-comparison/manual-review.json": "ff61129186b6600379aeb501ec588fc3d906343ccbc9b239a79d03839bb31f74",
+    "requirements-quality/r0-headed-comparison/validation.json": "2a8d684d26efb6ef668b52c3f4eb984685d4fa0c52e2c5595476ee3696460d7c",
+    "requirements-quality/r0-headed-comparison/response.sse": "070c6f8059adaefc09482a88ce46f6b542cadb7baa60263662e0d84507388cc1",
+    "requirements-quality/r0-headed-comparison/request.json": "bced7e945cbbb0c9f52f98c0442baff4c43dc02d3d21fee0bd497ef2d80170ae",
+    "requirements-quality/r0-headed-comparison/result.json": "cfb127e38559258973c91edf6e911aeea3beba5f7a97ea3bc4c3a0ad502a3a96",
+    "requirements-quality/r1-headless-json/response.sse": "c3c13a76a9943a1e027c78f73e9433a67219dedd16a4dd97394a8a113731c7c9",
+    "requirements-quality/r1-headless-json/request.json": "b54278339ee6b13e5c5ade61fb7dbf8d6637aa88ddd361e2e9d4a64bf0ae3cb0"
+  }
+}

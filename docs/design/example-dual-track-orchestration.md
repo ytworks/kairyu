@@ -733,3 +733,9 @@ they remain failed evidence. Full API re-verification is still pending.
 The launcher hashes auto-max.yaml, example.json, and requirements_budget.py
 into the Qwen environment so Compose recreates workers after these mounted
 files change. The verification config digest also includes control.py.
+
+The subsequent JSON API trial passes memo and JSON answer checks, but the
+image criterion says "the specified literal" rather than copying its required
+ending. This remains a failed checklist-quality result even though the image
+answer is correct. Acceptance criteria now explicitly forbid source-only
+references and include an unrelated literal-copy example; no gate is relaxed.

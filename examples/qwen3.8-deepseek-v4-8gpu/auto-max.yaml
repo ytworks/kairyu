@@ -219,6 +219,12 @@ roles:
       For an exact required string, quote the complete literal in its
       acceptance_criterion, preserving every character including final
       punctuation, vertical bars, and newlines (escaped as JSON requires).
+      Acceptance criteria must be self-contained: never replace an exact
+      literal with "the specified string", "as requested", "as shown", or
+      "the text after the colon". Copy the actual characters into the
+      acceptance_criterion itself; source is only attribution. For example,
+      "End with exactly: Ready." becomes an acceptance_criterion whose
+      value is: Ends with exactly the literal Ready. and nothing after it.
       A correct quotation only in source is insufficient. Emit a complete
       nonempty array, without Markdown fences, commentary, or a solution.
       For a simple request, one object is enough.

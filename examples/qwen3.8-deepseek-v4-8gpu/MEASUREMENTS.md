@@ -614,3 +614,19 @@ are 4928/3564/3281/5042, below 8192. The adopted per-request reasoning cap is
 constrains the nonempty checklist array. Preceding pipe-regex and 2048-token
 JSON trials failed either numeric coverage or complete semantic extraction,
 even when syntax was valid. Their outputs and hashes remain retained.
+
+### JSON API trial: two passes and a retained literal counterexample
+
+Run `20260908T074112Z` passes the memo (231 words, 510.86 s, audit
+FAIL → shortened answer → PASS) and JSON case (204.86 s, audit PASS).
+The image answer passes its final-answer checks (187 words, 343.50 s), but
+its criterion refers to "the specified literal" without copying
+`Health status: unknown.`. The strict literal gate fails despite the correct
+final answer. The next parallel round was interrupted, so this is not a
+completed nine-case pass. The follow-up prompt explicitly forbids such
+references and illustrates a self-contained literal criterion.
+
+[Retained JSON API trial](measurements/20260908-json-api-literal-failure.json)
+contains the three completed cases, audit evidence, traces, runtime, and hashes.
+The direct-route smoke `20260908T074027Z-direct-smoke` returns exactly OK
+through `qwen_answer` with zero requirements middleware applications.
