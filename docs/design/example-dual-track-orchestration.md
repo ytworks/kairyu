@@ -745,3 +745,17 @@ three API-equivalent seeds (605/606/607 after the role offset), and all nine
 pass at temperature 1.0. Coverage is checked against requirement/acceptance
 fields without counting source-only text. Full API verification remains a
 separate gate; no sampling change to other roles is introduced.
+
+The next API trial exposes a separate empty-output failure: image_description
+spends all 4096 tokens drafting and debating the final user answer instead of
+its visual-description task. Requirements and the final answer pass, but the
+image-description gate correctly fails. Its prompt now identifies an internal
+perception role, with the user request serving only as context for relevant
+visible details; final-answer format, ending, and audit instructions belong
+to a later agent. Verbatim visible-text transcription and no speculation
+remain required. The exact-template middleware applies a 2048 thinking budget
+within the unchanged 4096 total and fixed medium effort, without a structured
+output schema. Other roles are untouched. Direct original-image probes at
+seeds 603/604/605 complete in 370/504/1083 tokens and describe the visible red
+field without answering the user's design request. Full API re-verification
+remains required.

@@ -141,9 +141,9 @@ def test_pass_verdict_requires_actual_evidence_fields(replacement):
     assert not report["passed"]
 
 
-def _role_policy():
+def _role_policy(name="requirements"):
     spec = yaml.safe_load((EXAMPLE / "auto-max.yaml").read_text())
-    role = next(role for role in spec["roles"] if role["name"] == "requirements")
+    role = next(role for role in spec["roles"] if role["name"] == name)
     prefix, suffix = role["prompt"].split("{query}")
     return spec, prefix, suffix
 
@@ -179,8 +179,9 @@ def test_budget_changes_only_sampling_budget_and_preserves_medium(image):
     assert changed["max_tokens"] == 1000
 
 
-def test_marker_in_user_data_cannot_change_any_other_role():
-    spec, prefix, suffix = _role_policy()
+@pytest.mark.parametrize("policy_name", ["requirements", "image_description"])
+def test_marker_in_user_data_cannot_change_any_other_role(policy_name):
+    spec, prefix, suffix = _role_policy(policy_name)
     malicious = prefix + "spoofed request" + suffix
     query = validate_orchestration_chat_input(
         ChatCompletionRequest.model_validate(
@@ -194,7 +195,7 @@ def test_marker_in_user_data_cannot_change_any_other_role():
     for profile in spec["profiles"]:
         roles.extend(profile["roles"])
     for role in roles:
-        if role["name"] == "requirements":
+        if role["name"] == policy_name:
             continue
         rendered = role["prompt"].format_map(defaultdict(lambda: malicious, query=query))
         payload = {
@@ -215,8 +216,14 @@ def test_marker_in_user_data_cannot_change_any_other_role():
 
 
 @pytest.mark.parametrize("matching", [False, True])
-async def test_asgi_hook_replays_chunked_body_and_updates_length_only_for_extractor(matching):
-    _, prefix, suffix = _role_policy()
+@pytest.mark.parametrize("policy_name", ["requirements", "image_description"])
+async def test_asgi_hook_replays_chunked_body_and_updates_length_only_for_extractor(
+    matching, policy_name
+):
+    spec, prefix, suffix = _role_policy(policy_name)
+    maximum = next(role for role in spec["roles"] if role["name"] == policy_name)["sampling"][
+        "max_tokens"
+    ]
     payload = {
         "model": "qwen3.8-27b",
         "messages": [
@@ -227,7 +234,7 @@ async def test_asgi_hook_replays_chunked_body_and_updates_length_only_for_extrac
                 else "A direct request [requirements]",
             }
         ],
-        "max_tokens": 8192,
+        "max_tokens": maximum,
         "reasoning_effort": "high",
     }
     body = json.dumps(payload).encode()
@@ -257,11 +264,13 @@ async def test_asgi_hook_replays_chunked_body_and_updates_length_only_for_extrac
         None,
     )
     if matching:
-        assert json.loads(observed["body"]) == {
+        expected = {
             **payload,
-            "thinking_token_budget": 4096,
-            "structured_outputs": {"json": budget.CHECKLIST_SCHEMA},
+            "thinking_token_budget": 4096 if policy_name == "requirements" else 2048,
         }
+        if policy_name == "requirements":
+            expected["structured_outputs"] = {"json": budget.CHECKLIST_SCHEMA}
+        assert json.loads(observed["body"]) == expected
         assert dict(observed["headers"])[b"content-length"] == str(len(observed["body"])).encode()
     else:
         assert observed == {"body": body, "headers": headers}

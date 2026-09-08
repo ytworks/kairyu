@@ -1,4 +1,4 @@
-"""Example-local vLLM middleware: reserve output space for the extractor only."""
+"""Example-local vLLM middleware: reserve output space for the two evidence roots."""
 
 from __future__ import annotations
 
@@ -32,7 +32,14 @@ CHECKLIST_SCHEMA = {
 }
 
 
-def budget_payload(payload: object, *, prefix: str, suffix: str, thinking_budget: int):
+def budget_payload(
+    payload: object,
+    *,
+    prefix: str,
+    suffix: str,
+    thinking_budget: int,
+    output_schema: dict | None = CHECKLIST_SCHEMA,
+):
     """Recognize the entire shipped role template, never a marker in user data."""
     if not isinstance(payload, dict) or payload.get("model") != "qwen3.8-27b":
         return None
@@ -64,11 +71,10 @@ def budget_payload(payload: object, *, prefix: str, suffix: str, thinking_budget
     # Short caller allowances still retain at least half for the body. This
     # does not enlarge the caller's or the role's total token allowance.
     limit = min(thinking_budget, maximum // 2)
-    return {
-        **payload,
-        "thinking_token_budget": limit,
-        "structured_outputs": {"json": CHECKLIST_SCHEMA},
-    }
+    changed = {**payload, "thinking_token_budget": limit}
+    if output_schema is not None:
+        changed["structured_outputs"] = {"json": output_schema}
+    return changed
 
 
 class RequirementsBudgetMiddleware:
@@ -78,20 +84,33 @@ class RequirementsBudgetMiddleware:
         self.app = app
         directory = config_dir or Path(__file__).resolve().parent
         spec = yaml.safe_load((directory / "auto-max.yaml").read_text())
-        roles = [role for role in spec["roles"] if role["name"] == "requirements"]
-        if len(roles) != 1 or roles[0].get("reasoning_effort") != "high":
-            raise ValueError("requirements middleware requires the fixed medium role")
-        prompt = roles[0]["prompt"]
-        if prompt.count("{query}") != 1:
-            raise ValueError("requirements prompt must contain exactly one query slot")
-        self.prefix, self.suffix = prompt.split("{query}")
-        if not self.prefix or "[requirements]" not in self.suffix:
-            raise ValueError("requirements prompt must have an unambiguous role suffix")
         metadata = json.loads((directory / "example.json").read_text())
-        self.budget = metadata["orchestration"]["requirements_thinking_token_budget"]
-        total = roles[0]["sampling"]["max_tokens"]
-        if type(self.budget) is not int or not 0 < self.budget < total:
-            raise ValueError("requirements thinking budget must leave completion tokens")
+        self.policies = []
+        for name, schema in (("requirements", CHECKLIST_SCHEMA), ("image_description", None)):
+            roles = [role for role in spec["roles"] if role["name"] == name]
+            if len(roles) != 1 or roles[0].get("reasoning_effort") != "high":
+                raise ValueError(f"{name} middleware requires the fixed medium role")
+            prompt = roles[0]["prompt"]
+            if prompt.count("{query}") != 1:
+                raise ValueError(f"{name} prompt must contain exactly one query slot")
+            prefix, suffix = prompt.split("{query}")
+            if not prefix or f"[{name}]" not in suffix:
+                raise ValueError(f"{name} prompt must have an unambiguous role suffix")
+            budget = metadata["orchestration"][f"{name}_thinking_token_budget"]
+            total = roles[0]["sampling"]["max_tokens"]
+            if type(budget) is not int or not 0 < budget < total:
+                raise ValueError(f"{name} thinking budget must leave completion tokens")
+            self.policies.append(
+                (
+                    name,
+                    {
+                        "prefix": prefix,
+                        "suffix": suffix,
+                        "thinking_budget": budget,
+                        "output_schema": schema,
+                    },
+                )
+            )
 
     async def __call__(self, scope, receive, send):
         if (
@@ -122,13 +141,15 @@ class RequirementsBudgetMiddleware:
             if not message.get("more_body", False):
                 break
         body = b"".join(message.get("body", b"") for message in messages)
+        changed = None
+        matched_role = None
         try:
-            changed = budget_payload(
-                json.loads(body),
-                prefix=self.prefix,
-                suffix=self.suffix,
-                thinking_budget=self.budget,
-            )
+            payload = json.loads(body)
+            for name, policy in self.policies:
+                changed = budget_payload(payload, **policy)
+                if changed is not None:
+                    matched_role = name
+                    break
         except (TypeError, ValueError):
             changed = None
         if changed is not None:
@@ -141,7 +162,8 @@ class RequirementsBudgetMiddleware:
             ]
             scope = {**scope, "headers": [*headers, (b"content-length", str(len(body)).encode())]}
             _LOGGER.info(
-                "Kairyu requirements budget: thinking=%d max_tokens=%d seed=%s messages_sha256=%s",
+                "Kairyu %s budget: thinking=%d max_tokens=%d seed=%s messages_sha256=%s",
+                matched_role,
                 changed["thinking_token_budget"],
                 changed["max_tokens"],
                 changed.get("seed"),

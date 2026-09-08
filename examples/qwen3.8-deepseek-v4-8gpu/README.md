@@ -249,7 +249,10 @@ high`, DTO-D14) and an 8192-token combined thinking/checklist cap. The example-l
 `requirements_budget.py` middleware applies the standard per-request
 `thinking_token_budget: 4096` only to the complete requirements role template,
 reserving room for its checklist while retaining fixed medium thinking.
-The other roles and direct profiles keep their sampling settings. This is an
+The image-description root uses the same exact-template hook with a 2048-token
+thinking reserve inside its existing 4096 total, retaining plain descriptive
+text rather than the checklist schema. Other roles and direct profiles keep
+their sampling settings. This is an
 agent judgment, not a mechanically enforced proof of requirement satisfaction:
 the head is already public before audit, exhausted/inconclusive verification
 retains the existing publication behavior, and the four direct routes do not

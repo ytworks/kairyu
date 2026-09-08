@@ -644,3 +644,20 @@ from 1632 to 5076. The illustrative prompt literal is absent from all outputs.
 [Direct nine-case evidence](measurements/20260908-requirements-direct9.json)
 includes all checklist objects, usage, validation, source and artifact hashes.
 This is a pre-check for the next public-API run, not a substitute for it.
+
+### Image-description failure and scoped correction
+
+Run `20260908T081511Z` passes the memo (299 words, 256.27 s) and JSON
+(443.56 s), but the image case fails `image_description_nonempty` (301.31 s).
+Its requirements use 4191 tokens and pass; the image description spends
+4096 tokens entirely in reasoning, repeatedly debating whether to answer
+the user's 250-word task or describe the image. The final answer and audit
+pass do not substitute for this missing visual evidence. Remaining cases
+were stopped and the run is retained as a failure.
+
+The scoped correction retains the requirements settings and gives the image
+role explicit internal-perception framing plus 2048 thinking within its
+existing 4096 total, fixed medium, with plain-text output. Direct probes
+`20260908T084021Z-image-description-probes` at seeds 603/604/605 all produce
+nonempty grounded descriptions, using 370/504/1083 tokens. See the
+[failed API run and image probes](measurements/20260908-image-description-failure-and-probes.json).

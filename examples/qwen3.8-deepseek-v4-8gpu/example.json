@@ -94,6 +94,7 @@
     "auto_max_model": "kairyu-auto-max",
     "internal_max_output_tokens": 65536,
     "requirements_thinking_token_budget": 4096,
+    "image_description_thinking_token_budget": 2048,
     "product_policy": "judged-five-route-dual-track",
     "roles": [
       "head",

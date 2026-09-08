@@ -93,13 +93,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
-- DTO-D16 GPU quality fails: two of three diagnostic requests exhaust the 4096-token requirements cap in reasoning and pass an empty checklist downstream despite successful stage traces and final audit PASS. Baseline generic and coding serving pass. Example-only tuning uses a JSON-schema checklist, 8192 total / 4096 thinking at fixed medium, a short committed opening, and strict per-ID/literal checks. The latest API trial passes memo/JSON but image criteria reference rather than reproduce the required literal; the self-contained-criterion fix passes matched 3-case × 3-seed direct extraction checks; full API and final-config serving re-verification remain pending. Evidence: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality.json`.
+- DTO-D16 GPU quality fails: two of three diagnostic requests exhaust the 4096-token requirements cap in reasoning and pass an empty checklist downstream despite successful stage traces and final audit PASS. Baseline generic and coding serving pass. Example-only tuning uses a JSON-schema checklist, 8192 total / 4096 thinking at fixed medium, a short committed opening, and strict per-ID/literal checks. Matched 3-case × 3-seed extraction checks pass. A later API trial exposes an empty image description; explicit perception-role framing and a 2048/4096 thinking/total reserve pass image seeds 603/604/605. Full API and final-config serving re-verification remain pending. Evidence: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality.json`.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-08 — [amendment] DTO-D16: reserve image-description output
+- What: the image root now clearly performs internal perception only and receives a 2048-token thinking budget within its unchanged 4096 total; the same exact-template example middleware applies the reserve without a JSON schema. Requirement settings remain unchanged. Matched image seeds 603/604/605 produce nonempty grounded descriptions in 370/504/1083 tokens.
+- Why: the API trial spent all 4096 image tokens debating the final-answer instructions and emitted no description, despite complete requirements and a final audit PASS. The image gate correctly rejects this separate empty-output failure.
+- Refs: DTO-D16; tiered example `measurements/20260908-image-description-failure-and-probes.json`; full API and serving re-verification pending.
 
 ### 2026-09-08 — [amendment] DTO-D16: preserve literal criteria and bounded openings
 - What: the first tuned API trial emits a complete checklist but exceeds the answer word limit and emits a misleading audit heading. Require exact literals in acceptance criteria (source-only matches fail), keep the committed opening within one short sentence, and reinforce single-word audit verdicts and combined-answer length limits.

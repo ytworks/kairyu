@@ -162,8 +162,16 @@ roles:
       --- REQUEST ---
       {query}
       --- END REQUEST ---
-      [image_description] Describe every attached image in precise,
-      objective text for a downstream reader that cannot see it: transcribe
+      [image_description] You are the image-observation worker, not the
+      answering agent. Your only deliverable is a visual description for a
+      downstream reader that cannot see the image. REQUEST is context for
+      which visual details matter, not a task to execute here. Its demands
+      to compare approaches, audit a recommendation, obey an answer word
+      limit, or use an exact ending belong to the downstream answerer and
+      do not apply to this description. Do not draft that answer or debate
+      its output format. Inspect the image briefly, then emit the actual
+      description; reserve tokens for the description body.
+      Describe every attached image in precise, objective text: transcribe
       all visible text verbatim (including code, numbers, labels, and error
       messages), describe diagrams, charts, tables, UI elements, and layout,
       and state anything in the image that the request refers to. Do not
