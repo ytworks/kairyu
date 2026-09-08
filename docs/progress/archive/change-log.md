@@ -11,6 +11,26 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-09-08 — [amendment] DTO-D16: preserve literal criteria and bounded openings
+- What: the first tuned API trial emits a complete checklist but exceeds the answer word limit and emits a misleading audit heading. Require exact literals in acceptance criteria (source-only matches fail), keep the committed opening within one short sentence, and reinforce single-word audit verdicts and combined-answer length limits.
+- Why: the first trial's correct source quotation hid a missing punctuation mark in its criterion; a 405-word answer and `PASS/FAIL assessment:` preceding FAIL were not caught by the framework's prefix verdict parsing. Example quality checks reject them; audit budgets were not exhausted (7309/9190 tokens).
+- Refs: DTO-D16; tiered example `measurements/20260908-first-tuned-api-failure.json`; repeated GPU re-verification pending.
+
+### 2026-09-08 — [amendment] DTO-D16: reserve checklist output tokens
+- What: example-local vLLM middleware caps requirements thinking at 2048 within an 8192-token total; fixed medium thinking and framework code stay unchanged. A repeated real-API gate checks complete checklist coverage, audit IDs/evidence, final minimum satisfaction, and image-root overlap.
+- Why: prompt-only extraction still exhausted its budget; explicit reasoning/output allocation completes all four adopted direct-worker probes without dropping mandatory constraints. Full tuned API and serving re-verification remains pending.
+- Refs: DTO-D16 tuning amendment in `docs/design/example-dual-track-orchestration.md`; tiered example `requirements_budget.py`, `requirements_quality.py`, `MEASUREMENTS.md`.
+
+### 2026-09-08 — [progress] DTO-D16: GPU checklist quality counterexamples
+- What: the current PR config passes 128 generic serving requests, but two of three diagnostic quality cases emit no requirement checklist after spending all 4096 tokens in reasoning; the image case produces R1–R11 with parallel image/checklist roots. Final-answer checks pass in all three cases, so final audit PASS does not close checklist quality.
+- Why: successful internal-stage traces do not require nonempty output, and internal requirements do not receive the final-unit empty-output retry; GPU evidence exposes a failure hidden by scripted responses.
+- Refs: `examples/qwen3.8-deepseek-v4-8gpu/MEASUREMENTS.md`; `measurements/20260908-requirements-quality.json` in that example; generic run `20260908T043120Z`.
+
+### 2026-09-08 — [amendment] DTO-D16: ensemble audits request requirements
+- What: the example adds a Qwen3.8 medium-thinking requirements root beside image description, passes stable criteria to answer stages, and asks the final audit to judge every item with evidence and repair guidance; call budget becomes 20 with two refinements.
+- Why: general task requirements need explicit minimum-quality checks independent of candidate drafts; no program execution or framework changes are required.
+- Refs: DTO-D16 in `docs/design/example-dual-track-orchestration.md`; `examples/qwen3.8-deepseek-v4-8gpu/`; `tests/unit/test_tiered_requirement_dag.py`; GPU gates and config digest re-pin pending
+
 ### 2026-09-04 — [amendment] FN-D9: vision examples GPU-verified; Qwen drops MTP k=3
 - What: both vision replica examples pinned (tree SHA, image ID `b47e2210`) and all gates
   PASS — DeepSeek c64 689 tok/s, Qwen c32 548 tok/s, placement 32/32 at every row ≥c8,
