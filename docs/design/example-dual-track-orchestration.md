@@ -1,8 +1,8 @@
 # Tiered Example Dual-Track Policy-Ensemble Orchestration
 
-Status: **Accepted; implemented; DTO-D16 nine-case GPU quality passes; final serving re-verification pending** (2026-09-08).
+Status: **Accepted; implemented; DTO-D16 nine-case quality and 128-request generic serving pass; default-launch focused verification in progress** (2026-09-08).
 
-Current DTO-D16 API run `20260908T094200Z` passes all nine original cases
+Quality-tuned DTO-D16 API run `20260908T094200Z` passes all nine original cases
 (one serial and two concurrent rounds) on served hash `20b800e49f68baf0…`.
 All actual final answers and audit attempts were manually reviewed; root
 budget correlation is 9/9 requirements and 3/3 images, and all 12 audit calls
@@ -811,3 +811,21 @@ environment overrides. Model placement, reasoning, sampling, and all framework
 code remain unchanged. This removes the measured host's undocumented cachefix
 image and secret dependency; a same-host normal launch is being verified, not
 an independent second-machine or fresh source-build claim.
+
+
+### DTO-D16 image-observation calibration (2026-09-08)
+
+Default launch and repeat launch succeed on the standard non-root image with
+the existing compaction key preserved privately. Focused run `20260908T104459Z`
+on `be39136a…` passes memo/JSON but fails the image case: audit treats a generated
+"no separate shape" observation as incompatible with the canvas boundary, then
+refinement produces a real contradiction with the already streamed opening.
+All three FAIL audits and the final answer are retained. No minimum check is
+relaxed. Clarify that generated descriptions are fallible observations and
+canvas/crop geometry differs from separately depicted objects. Prefer a
+request-supported decision criterion in an image opening; allow an explicit
+factual correction in the continuation when needed and compatible with the
+user's format. This is a general evidence/repair rule, not a fixture-specific
+shape exception. Bounded audit probes and the original three API cases will
+verify the amendment. Active DeepSeek descriptor metadata is also aligned with
+the actually deployed standard image; historical IDs remain in old evidence.

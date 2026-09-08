@@ -270,8 +270,10 @@ run this checklist. `n>1` also retains its existing audit bypass. Inspect the
 intermediate audit for unresolved requirements. The pre-tuning 2026-09-08 GPU diagnostic
 found empty checklists in two of three requests at the original 4096-token cap, even when the
 final audit passes. The served-config digest and generic latency results
-are recorded in [MEASUREMENTS.md](MEASUREMENTS.md). The final tuned configuration
+are recorded in [MEASUREMENTS.md](MEASUREMENTS.md). The quality-tuned configuration at served hash `20b800e4…`
 passes all nine API quality cases, with every answer and audit retained.
+Subsequent launcher portability changes have their own configuration hash
+and focused verification; the older nine-case result is not reattributed.
 
 Design notes (see
 [`docs/design/example-dual-track-orchestration.md`](../../docs/design/example-dual-track-orchestration.md)):
@@ -393,7 +395,7 @@ remain open. See
 Run this recipe on Linux with eight RTX PRO 6000 Blackwell Server Edition
 GPUs (indices 0–7, at least 90000 MiB each), a compatible NVIDIA driver,
 Docker Engine with the NVIDIA Container Toolkit configured, Docker Compose,
-and Python 3. GPU PCI devices must expose valid NUMA nodes and online CPU
+and Python 3.11+. GPU PCI devices must expose valid NUMA nodes and online CPU
 lists in sysfs. The launcher discovers those CPU lists on each host; it does
 not reuse this machine's CPU numbers. NUMA node `-1` is currently rejected.
 The launcher user needs Docker access and writable storage under `/mnt/nvme`
@@ -569,7 +571,7 @@ frontier APIs is owned by the external `kairyu-bench` repository.
   `sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f`
 - DeepSeek vLLM source: `jasl/vllm@aa0d51302747ea80f282e26949708b3253409fe2`
 - DeepSeek vLLM image digest:
-  `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`
+  `sha256:f16eaab2f2964d6917c7679157b53e0019581da8047cb9c4a0464d6f27561f9f`
 - Open WebUI: `v0.11.0-slim` plus the digest in `example.json`
 
 Set `KAIRYU_RESPONSES_COMPACTION_SECRET` to at least 32 random bytes before
@@ -595,7 +597,7 @@ The `requirements-quality` gate repeats the original text, JSON, and image
 cases three times (serial, then concurrent). It rejects empty or truncated
 checklists, missing minimum constraints, missing audit IDs/evidence, and a
 PASS that leaves minimum requirements unsatisfied. The final nine-case API
-run passes automated and manual review; direct worker probes alone would
+run on `20b800e4…` passes automated and manual review; direct worker probes alone would
 not close this gate.
 
 `KAIRYU_REQUIREMENTS_CONFIG_SHA256` is an internal container-lifecycle value,

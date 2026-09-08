@@ -1,5 +1,22 @@
 # Measurements
 
+## Default-launch verification and image counterexample (2026-09-08)
+
+Normal `run.sh up` and its repeat pass without the old image/secret overrides.
+The standard `f16eaab2…` image serves as UID2000/GID0, writes its dedicated
+cache while `/root` remains inaccessible, and reuses the original secret
+from a mode0600 private file. This is a same-host cached-image/model test,
+not a second-machine or fresh-source-build claim.
+
+Focused run `20260908T104459Z`, served hash `be39136a…`, passes 2/3 cases:
+memo295words and JSON86words pass; image211words fails all three audits due
+to an unresolved opening/continuation contradiction. The audit initially
+confuses canvas geometry with separately depicted objects, and refinement
+introduces a real contradiction. Requirements3/3, image1/1, and audit-format6/6
+applications correlate; direct-route smoke also passes. The failed result is
+retained in [complete evidence](measurements/20260908-default-launch-quality.json).
+Generic observation/repair prompt clarification is being verified.
+
 ## Current DTO-D16 GPU quality result (2026-09-08)
 
 **All nine API diagnostic cases pass automated and manual review** on the

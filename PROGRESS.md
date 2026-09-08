@@ -93,13 +93,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
-- DTO-D16 quality counterexamples are closed by nine-case GPU API verification and same-config direct-route smoke; generic serving passes 128/128 on the same quality-fixed config. Normal default-launch portability verification is in progress. Coding routes are unchanged; no new coding latency claim is made. Example-only root output reserves and audit regex preserve fixed medium thinking and caller totals. Full answers, audits, runtime/config hashes, and retained failed trials: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality-final.json`.
+- DTO-D16 quality counterexamples are closed by nine-case GPU API verification and same-config direct-route smoke; generic serving passes 128/128 on the same quality-fixed config. Normal default/repeated launch passes; a focused image case exposes an opening/description contradiction, with generic prompt repair verification in progress. Coding routes are unchanged; no new coding latency claim is made. Example-only root output reserves and audit regex preserve fixed medium thinking and caller totals. Full answers, audits, runtime/config hashes, and retained failed trials: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality-final.json`.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-08 — [amendment] DTO-D16: calibrate image evidence and opening repairs
+- What: default launch and repeat launch pass with the standard non-root image and preserved private key; focused quality is 2/3, retaining the failed image answer. Distinguish canvas geometry from depicted objects, treat generated descriptions as fallible, and allow explicit factual correction of a streamed opening.
+- Why: the audit mistook differing descriptive granularity for a contradiction and the refinement introduced a real contradiction; an instruction forbidding opening commentary obstructed repair. Minimum checks remain strict for material errors, without treating generated observations as ground truth.
+- Refs: tiered example `measurements/20260908-default-launch-quality.json`, run `20260908T104459Z` on `be39136a…`; generic prompt calibration and focused GPU recheck pending.
 
 ### 2026-09-08 — [amendment] DTO-D16: reproducible default example launch
 - What: explicitly select and validate the pinned non-root DeepSeek image recipe; move its cache to a dedicated UID-owned mount, use root only for storage setup/download, and persist/adopt the API compaction key privately.

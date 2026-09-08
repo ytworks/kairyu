@@ -260,7 +260,7 @@ def test_tiered_gateway_owns_l2_pools_templates_and_orchestrators() -> None:
     assert deepseek.replicas[0].options["expert_parallel_size"] == 4
     assert deepseek.replicas[0].options["dspark_enabled"] is True
     assert deepseek.replicas[0].options["container_image_digest"] == (
-        "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1"
+        "sha256:f16eaab2f2964d6917c7679157b53e0019581da8047cb9c4a0464d6f27561f9f"
     )
     assert "completion_reasoning_end_tag" not in deepseek.replicas[0].options
     thinking = deployment.pools["deepseek-v4-flash-0731-thinking"]
