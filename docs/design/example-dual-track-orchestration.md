@@ -739,3 +739,9 @@ image criterion says "the specified literal" rather than copying its required
 ending. This remains a failed checklist-quality result even though the image
 answer is correct. Acceptance criteria now explicitly forbid source-only
 references and include an unrelated literal-copy example; no gate is relaxed.
+
+The matched direct-worker check now covers all three original cases at the
+three API-equivalent seeds (605/606/607 after the role offset), and all nine
+pass at temperature 1.0. Coverage is checked against requirement/acceptance
+fields without counting source-only text. Full API verification remains a
+separate gate; no sampling change to other roles is introduced.

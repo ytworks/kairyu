@@ -138,7 +138,9 @@ def validate_result(case: dict, result: dict, *, requirement_cap: int) -> dict:
         checks["complete_checklist"] = False
         failures.append(str(error))
     minimum_text = "\n".join(
-        " | ".join(entry.values()) for entry in entries if entry["priority"] == "minimum"
+        entry["requirement"] + " | " + entry["acceptance"]
+        for entry in entries
+        if entry["priority"] == "minimum"
     )
     for group in case["checklist_coverage"]:
         checks["covers:" + group["name"]] = bool(entries) and all(

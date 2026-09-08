@@ -1,0 +1,923 @@
+{
+  "scope": "Direct worker extraction only; public API end-to-end validation remains pending. Coverage excludes source-only matches.",
+  "artifact_root": "/mnt/nvme/kairyu/model-volumes/qwen3.8-deepseek-v4-8gpu/verification-results/20260908T080657Z-requirements-direct9-t1.0",
+  "metadata": {
+    "started_at": "2026-09-08T08:06:57.991354+00:00",
+    "git_head": "2bd9ebae641092ba94629ebec1ea0a24e59fb0f0",
+    "temperature": 1.0,
+    "concurrency": 3,
+    "cases": 3,
+    "seeds": [
+      605,
+      606,
+      607
+    ],
+    "source_sha256": {
+      "auto-max.yaml": "1e909dbdd4d18b31d6d6862db54ccc94214fc7189303276beeec1e9a127fe1d9",
+      "requirements_budget.py": "bd02edc1732475a4405dae40922c9e7d510e8a842e114c3863e00ba41760413f",
+      "requirements_quality.py": "e6f776f9880d87f5674230bddd87ef3b856971ff5efe980e69401cece2e210e3",
+      "requirements-quality-cases.json": "75fdafea0d03c1ca12f1e7065f3e05d2e7d7daeca764bf6bafe4e6eb9e1fecbe"
+    }
+  },
+  "summary": {
+    "passed": true,
+    "reports": [
+      {
+        "case": "headed-comparison",
+        "repetition": 0,
+        "passed": true,
+        "missing": [],
+        "tokens": 3066
+      },
+      {
+        "case": "image-requirements",
+        "repetition": 0,
+        "passed": true,
+        "missing": [],
+        "tokens": 4191
+      },
+      {
+        "case": "headless-json",
+        "repetition": 0,
+        "passed": true,
+        "missing": [],
+        "tokens": 4266
+      },
+      {
+        "case": "image-requirements",
+        "repetition": 1,
+        "passed": true,
+        "missing": [],
+        "tokens": 3425
+      },
+      {
+        "case": "headed-comparison",
+        "repetition": 1,
+        "passed": true,
+        "missing": [],
+        "tokens": 5076
+      },
+      {
+        "case": "headless-json",
+        "repetition": 1,
+        "passed": true,
+        "missing": [],
+        "tokens": 5051
+      },
+      {
+        "case": "headless-json",
+        "repetition": 2,
+        "passed": true,
+        "missing": [],
+        "tokens": 2190
+      },
+      {
+        "case": "image-requirements",
+        "repetition": 2,
+        "passed": true,
+        "missing": [],
+        "tokens": 1632
+      },
+      {
+        "case": "headed-comparison",
+        "repetition": 2,
+        "passed": true,
+        "missing": [],
+        "tokens": 4950
+      }
+    ]
+  },
+  "cases": [
+    {
+      "case": "headed-comparison",
+      "repetition": 0,
+      "worker": 0,
+      "elapsed_s": 68.89007553999545,
+      "usage": {
+        "prompt_tokens": 1184,
+        "total_tokens": 4250,
+        "completion_tokens": 3066,
+        "prompt_tokens_details": null
+      },
+      "finish_reason": "stop",
+      "checklist": [
+        {
+          "id": "R1",
+          "priority": "minimum",
+          "requirement": "Write an English deployment decision memo",
+          "acceptance_criterion": "The response is a deployment decision memo written in English.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R2",
+          "priority": "minimum",
+          "requirement": "Use only the supplied facts",
+          "acceptance_criterion": "All factual claims are limited to the supplied facts, and any cited numbers are exactly: A = 40 units/month and 80 ms latency; B = 70 units/month and 30 ms latency; budget at most 60 units/month; latency target at most 50 ms.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R3",
+          "priority": "minimum",
+          "requirement": "Do not invent benchmark results or citations",
+          "acceptance_criterion": "The memo contains no invented benchmark results and no citations.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R4",
+          "priority": "minimum",
+          "requirement": "Compare several independent approaches and audit the merged recommendation",
+          "acceptance_criterion": "The memo considers multiple independent decision approaches and includes a critical audit of the final recommendation against each stated requirement.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R5",
+          "priority": "minimum",
+          "requirement": "Compare A and B",
+          "acceptance_criterion": "The memo explicitly compares option A and option B using the supplied cost and latency facts.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R6",
+          "priority": "minimum",
+          "requirement": "State that neither option is feasible",
+          "acceptance_criterion": "The memo explicitly states that neither A nor B is feasible.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R7",
+          "priority": "minimum",
+          "requirement": "Distinguish facts from assumptions",
+          "acceptance_criterion": "The memo clearly distinguishes supplied facts from assumptions.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R8",
+          "priority": "minimum",
+          "requirement": "Propose two different conditional next steps",
+          "acceptance_criterion": "The memo contains at least two distinct next steps, and each next step is explicitly conditional.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R9",
+          "priority": "minimum",
+          "requirement": "Do not silently relax either constraint",
+          "acceptance_criterion": "The memo does not silently treat the at-most-60 units/month budget or the at-most-50 ms latency target as relaxed; any relaxation is explicitly identified as a relaxation.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R10",
+          "priority": "minimum",
+          "requirement": "End with the exact required sentence",
+          "acceptance_criterion": "The memo ends with exactly the literal \u201cDecision: defer.\u201d and nothing after it.",
+          "source": "latest user message"
+        },
+        {
+          "id": "R11",
+          "priority": "minimum",
+          "requirement": "Keep the memo under 350 words",
+          "acceptance_criterion": "The complete memo is under 350 words.",
+          "source": "latest user message"
+        }
+      ],
+      "validation": {
+        "passed": true,
+        "missing": []
+      }
+    },
+    {
+      "case": "headless-json",
+      "repetition": 0,
+      "worker": 1,
+      "elapsed_s": 95.24588755299919,
+      "usage": {
+        "prompt_tokens": 1174,
+        "total_tokens": 5440,
+        "completion_tokens": 4266,
+        "prompt_tokens_details": null
+      },
+      "finish_reason": "stop",
+      "checklist": [
+        {
+          "id": "R1",
+          "priority": "minimum",
+          "requirement": "Return exactly one JSON object with only the required top-level keys.",
+          "acceptance_criterion": "The response is a single JSON object whose top-level keys are exactly \u201cfeasible\u201d, \u201cchoice\u201d, \u201cviolations\u201d, and \u201cnext_steps\u201d, with no extra keys and no missing keys.",
+          "source": "user"
+        },
+        {
+          "id": "R2",
+          "priority": "minimum",
+          "requirement": "Do not use Markdown or surrounding prose.",
+          "acceptance_criterion": "The response contains only the JSON object and no Markdown, prose, headings, or explanatory text.",
+          "source": "user"
+        },
+        {
+          "id": "R3",
+          "priority": "minimum",
+          "requirement": "Set feasible to false.",
+          "acceptance_criterion": "The value of feasible is exactly the JSON literal false.",
+          "source": "user"
+        },
+        {
+          "id": "R4",
+          "priority": "minimum",
+          "requirement": "Set choice to null.",
+          "acceptance_criterion": "The value of choice is exactly the JSON literal null.",
+          "source": "user"
+        },
+        {
+          "id": "R5",
+          "priority": "minimum",
+          "requirement": "Set violations to the exact specified object.",
+          "acceptance_criterion": "The value of violations is exactly the JSON object {\u201cA\u201d:\u201clatency\u201d,\u201cB\u201d:\u201cbudget\u201d}.",
+          "source": "user"
+        },
+        {
+          "id": "R6",
+          "priority": "minimum",
+          "requirement": "Provide exactly two distinct conditional evidence-gathering actions in next_steps.",
+          "acceptance_criterion": "The value of next_steps contains exactly two distinct conditional actions for obtaining evidence, and neither action asserts that an unmeasured design meets the budget or latency constraints.",
+          "source": "user"
+        },
+        {
+          "id": "R7",
+          "priority": "minimum",
+          "requirement": "Base the decision on the supplied design and constraint data.",
+          "acceptance_criterion": "The evaluation uses the supplied values A cost 40 latency 80, B cost 70 latency 30, budget <=60, and latency <=50 without substituting unmeasured assumptions as satisfying those limits.",
+          "source": "user"
+        },
+        {
+          "id": "R8",
+          "priority": "minimum",
+          "requirement": "Use a thorough multi-approach comparison and audit rather than a quick single-perspective answer.",
+          "acceptance_criterion": "The answer reflects a comparison of several independent approaches and a critical audit of the merged recommendation against every stated requirement, rather than a quick single-perspective choice.",
+          "source": "user"
+        }
+      ],
+      "validation": {
+        "passed": true,
+        "missing": []
+      }
+    },
+    {
+      "case": "image-requirements",
+      "repetition": 0,
+      "worker": 2,
+      "elapsed_s": 93.76993491500616,
+      "usage": {
+        "prompt_tokens": 1174,
+        "total_tokens": 5365,
+        "completion_tokens": 4191,
+        "prompt_tokens_details": null
+      },
+      "finish_reason": "stop",
+      "checklist": [
+        {
+          "id": "R1",
+          "priority": "minimum",
+          "requirement": "Provide a thorough multi-approach design decision rather than a quick single-perspective answer.",
+          "acceptance_criterion": "The response compares several independent approaches and does not substitute a quick single-perspective answer.",
+          "source": "Use the most thorough possible answer... compare several independent approaches... do not substitute a quick single-perspective answer."
+        },
+        {
+          "id": "R2",
+          "priority": "minimum",
+          "requirement": "Critically audit the merged recommendation against every requirement.",
+          "acceptance_criterion": "It includes a critical audit of the merged recommendation against each stated requirement.",
+          "source": "critically audit the merged recommendation against every requirement"
+        },
+        {
+          "id": "R3",
+          "priority": "minimum",
+          "requirement": "Audit a proposed status indicator for a product.",
+          "acceptance_criterion": "The response is framed as an audit of a proposed product status indicator.",
+          "source": "Audit a proposed status indicator for a product"
+        },
+        {
+          "id": "R4",
+          "priority": "minimum",
+          "requirement": "Use the attached image as the only visual evidence.",
+          "acceptance_criterion": "It treats the supplied image as the only visual evidence and does not assert other visual evidence or unseen system state.",
+          "source": "using the attached image as the only visual evidence"
+        },
+        {
+          "id": "R5",
+          "priority": "minimum",
+          "requirement": "Identify the status indicator's visible color as red.",
+          "acceptance_criterion": "It identifies the visible color of the status indicator as red.",
+          "source": "identify its visible color as red"
+        },
+        {
+          "id": "R6",
+          "priority": "minimum",
+          "requirement": "Explain why color alone cannot establish underlying service health.",
+          "acceptance_criterion": "It explains why color alone is insufficient to establish the underlying service health.",
+          "source": "explain why color alone cannot establish the underlying service health"
+        },
+        {
+          "id": "R7",
+          "priority": "minimum",
+          "requirement": "Compare a text label versus a shape as redundant signals.",
+          "acceptance_criterion": "It compares a text label and a shape as redundant signals to color.",
+          "source": "compare a text label versus a shape as redundant signals"
+        },
+        {
+          "id": "R8",
+          "priority": "minimum",
+          "requirement": "Recommend one approach conditionally.",
+          "acceptance_criterion": "It recommends one approach conditionally, with an explicit condition or limitation.",
+          "source": "recommend one approach conditionally"
+        },
+        {
+          "id": "R9",
+          "priority": "minimum",
+          "requirement": "Do not claim measured accessibility compliance.",
+          "acceptance_criterion": "It makes no claim of measured accessibility compliance, including no asserted WCAG, contrast, or accessibility test results.",
+          "source": "do not claim measured accessibility compliance"
+        },
+        {
+          "id": "R10",
+          "priority": "minimum",
+          "requirement": "Keep the answer under 250 English words.",
+          "acceptance_criterion": "It is written in English and contains fewer than 250 English words.",
+          "source": "In under 250 English words"
+        },
+        {
+          "id": "R11",
+          "priority": "minimum",
+          "requirement": "End with the exact required status string.",
+          "acceptance_criterion": "It ends with exactly the literal Health status: unknown. and nothing after it.",
+          "source": "End with exactly: Health status: unknown."
+        }
+      ],
+      "validation": {
+        "passed": true,
+        "missing": []
+      }
+    },
+    {
+      "case": "headed-comparison",
+      "repetition": 1,
+      "worker": 3,
+      "elapsed_s": 112.37841886101523,
+      "usage": {
+        "prompt_tokens": 1184,
+        "total_tokens": 6260,
+        "completion_tokens": 5076,
+        "prompt_tokens_details": null
+      },
+      "finish_reason": "stop",
+      "checklist": [
+        {
+          "id": "R1",
+          "priority": "minimum",
+          "requirement": "Write an English deployment decision memo.",
+          "acceptance_criterion": "The response is a deployment decision memo written entirely in English.",
+          "source": "user"
+        },
+        {
+          "id": "R2",
+          "priority": "minimum",
+          "requirement": "Use only the supplied facts.",
+          "acceptance_criterion": "Every factual claim is limited to the supplied facts: A costs 40 units/month and has 80 ms latency; B costs 70 units/month and has 30 ms latency; budget is at most 60 units/month; latency target is at most 50 ms.",
+          "source": "user"
+        },
+        {
+          "id": "R3",
+          "priority": "minimum",
+          "requirement": "Do not invent benchmark results or citations.",
+          "acceptance_criterion": "The response contains no invented benchmark results, test data, external data, or citations.",
+          "source": "user"
+        },
+        {
+          "id": "R4",
+          "priority": "minimum",
+          "requirement": "Compare A and B.",
+          "acceptance_criterion": "The memo explicitly compares option A and option B against both the at-most-60-units/month budget and the at-most-50-ms latency target.",
+          "source": "user"
+        },
+        {
+          "id": "R5",
+          "priority": "minimum",
+          "requirement": "Explicitly state that neither option is feasible.",
+          "acceptance_criterion": "The memo contains an explicit statement that neither option A nor option B is feasible under the stated constraints.",
+          "source": "user"
+        },
+        {
+          "id": "R6",
+          "priority": "minimum",
+          "requirement": "Do not silently relax either constraint.",
+          "acceptance_criterion": "The memo does not treat cost above 60 units/month or latency above 50 ms as acceptable without explicitly identifying a requested or conditional relaxation; the stated constraints remain at most 60 units/month and at most 50 ms.",
+          "source": "user"
+        },
+        {
+          "id": "R7",
+          "priority": "minimum",
+          "requirement": "Distinguish facts from assumptions.",
+          "acceptance_criterion": "The memo clearly separates or labels the supplied facts from any assumptions and does not present assumptions as supplied facts.",
+          "source": "user"
+        },
+        {
+          "id": "R8",
+          "priority": "minimum",
+          "requirement": "Propose two different conditional next steps.",
+          "acceptance_criterion": "The memo includes two distinct next steps, each explicitly conditional and different from the other.",
+          "source": "user"
+        },
+        {
+          "id": "R9",
+          "priority": "minimum",
+          "requirement": "End with the exact required sentence.",
+          "acceptance_criterion": "The memo ends with exactly the literal Decision: defer. and no characters after it.",
+          "source": "user"
+        },
+        {
+          "id": "R10",
+          "priority": "minimum",
+          "requirement": "Keep the complete memo under 350 words.",
+          "acceptance_criterion": "The complete memo is fewer than 350 words.",
+          "source": "user"
+        },
+        {
+          "id": "R11",
+          "priority": "minimum",
+          "requirement": "Use a thorough multi-constraint answer rather than a quick single-perspective answer.",
+          "acceptance_criterion": "The response uses a multi-constraint analysis that does not reduce the decision to a single constraint, single option, or quick superficial comparison.",
+          "source": "user"
+        },
+        {
+          "id": "R12",
+          "priority": "minimum",
+          "requirement": "Compare several independent approaches and critically audit the merged recommendation.",
+          "acceptance_criterion": "The response examines multiple independent approaches or perspectives and includes a critical audit checking the merged recommendation against every stated requirement and constraint.",
+          "source": "user"
+        }
+      ],
+      "validation": {
+        "passed": true,
+        "missing": []
+      }
+    },
+    {
+      "case": "headless-json",
+      "repetition": 1,
+      "worker": 0,
+      "elapsed_s": 110.64562142101931,
+      "usage": {
+        "prompt_tokens": 1174,
+        "total_tokens": 6225,
+        "completion_tokens": 5051,
+        "prompt_tokens_details": null
+      },
+      "finish_reason": "stop",
+      "checklist": [
+        {
+          "id": "R1",
+          "priority": "minimum",
+          "requirement": "The response must be one JSON object with exactly the required top-level keys.",
+          "acceptance_criterion": "The entire response is a single valid JSON object whose top-level keys are exactly feasible, choice, violations, and next_steps, with no missing or extra keys.",
+          "source": "Latest user message: 'Return one JSON object with exactly the keys feasible, choice, violations, next_steps.'"
+        },
+        {
+          "id": "R2",
+          "priority": "minimum",
+          "requirement": "The feasible field must be false.",
+          "acceptance_criterion": "The top-level feasible field has the JSON literal value false.",
+          "source": "Latest user message: 'feasible must be false.'"
+        },
+        {
+          "id": "R3",
+          "priority": "minimum",
+          "requirement": "The choice field must be null.",
+          "acceptance_criterion": "The top-level choice field has the JSON literal value null.",
+          "source": "Latest user message: 'choice must be null.'"
+        },
+        {
+          "id": "R4",
+          "priority": "minimum",
+          "requirement": "The violations field must exactly identify the required constraint failures.",
+          "acceptance_criterion": "The top-level violations field is exactly the JSON object {&quot;A&quot;:&quot;latency&quot;,&quot;B&quot;:&quot;budget&quot;}, meaning it has only key A with value &quot;latency&quot; and key B with value &quot;budget&quot;.",
+          "source": "Latest user message: 'violations must be {&quot;A&quot;:&quot;latency&quot;,&quot;B&quot;:&quot;budget&quot;}'."
+        },
+        {
+          "id": "R5",
+          "priority": "minimum",
+          "requirement": "next_steps must contain exactly two distinct conditional evidence-gathering actions.",
+          "acceptance_criterion": "The top-level next_steps field is a JSON array containing exactly two distinct items, each framed as a conditional action that obtains evidence, and no item asserts that an unmeasured design satisfies the budget or latency constraints.",
+          "source": "Latest user message: 'next_steps must contain exactly two distinct conditional actions that obtain evidence without asserting an unmeasured design meets the constraints.'"
+        },
+        {
+          "id": "R6",
+          "priority": "minimum",
+          "requirement": "The response must contain no Markdown or surrounding prose.",
+          "acceptance_criterion": "The response is raw JSON only, with no Markdown fences, headings, labels, commentary, or any text outside the single JSON object.",
+          "source": "Latest user message: 'No Markdown or surrounding prose.'"
+        },
+        {
+          "id": "R7",
+          "priority": "minimum",
+          "requirement": "The answer must be a thorough multi-approach audit rather than a quick single-perspective selection.",
+          "acceptance_criterion": "The visible content of the JSON response must be consistent with comparing several independent approaches and critically auditing the merged recommendation against every stated requirement, rather than substituting a quick single-perspective answer.",
+          "source": "Latest user message: 'Use the most thorough possible answer: compare several independent approaches and critically audit the merged recommendation against every requirement... do not substitute a quick single-perspective answer.'"
+        },
+        {
+          "id": "R8",
+          "priority": "minimum",
+          "requirement": "Feasibility and violations must be based only on the supplied data and mandatory limits.",
+          "acceptance_criterion": "The feasibility and violations values are derived only from A costs 40, A latency is 80, B costs 70, B latency is 30, budget <=60, and latency <=50, with budget and latency treated as mandatory, and no unmeasured design is treated as satisfying those limits.",
+          "source": "Latest user message: 'Given only: A costs 40 and latency is 80; B costs 70 and latency is 30; budget <=60 and latency <=50.'"
+        }
+      ],
+      "validation": {
+        "passed": true,
+        "missing": []
+      }
+    },
+    {
+      "case": "image-requirements",
+      "repetition": 1,
+      "worker": 1,
+      "elapsed_s": 75.15351773399743,
+      "usage": {
+        "prompt_tokens": 1174,
+        "total_tokens": 4599,
+        "completion_tokens": 3425,
+        "prompt_tokens_details": null
+      },
+      "finish_reason": "stop",
+      "checklist": [
+        {
+          "id": "R1",
+          "priority": "minimum",
+          "requirement": "Write the response in English and keep it under 250 words.",
+          "acceptance_criterion": "The response is written in English and contains fewer than 250 words in total.",
+          "source": "Latest user message: 'In under 250 English words'"
+        },
+        {
+          "id": "R2",
+          "priority": "minimum",
+          "requirement": "Use only the attached image as visual evidence.",
+          "acceptance_criterion": "The analysis treats the supplied red image as the sole visual evidence and does not present unseen product, service, or design-system details as observed visual facts.",
+          "source": "Latest user message: 'using the attached image as the only visual evidence'"
+        },
+        {
+          "id": "R3",
+          "priority": "minimum",
+          "requirement": "Identify the indicator's visible color as red.",
+          "acceptance_criterion": "The response explicitly identifies the attached status indicator's visible color as red.",
+          "source": "Latest user message: 'identify its visible color as red'"
+        },
+        {
+          "id": "R4",
+          "priority": "minimum",
+          "requirement": "Explain why color alone is insufficient for service health.",
+          "acceptance_criterion": "The response explains that the visible red color by itself cannot establish the underlying service health.",
+          "source": "Latest user message: 'explain why color alone cannot establish the underlying service health'"
+        },
+        {
+          "id": "R5",
+          "priority": "minimum",
+          "requirement": "Compare a text label and a shape as redundant signals.",
+          "acceptance_criterion": "The response compares using a text label versus using a shape as redundant status signals.",
+          "source": "Latest user message: 'compare a text label versus a shape as redundant signals'"
+        },
+        {
+          "id": "R6",
+          "priority": "minimum",
+          "requirement": "Recommend one approach conditionally.",
+          "acceptance_criterion": "The response makes exactly one primary recommendation and states at least one condition under which that recommendation applies.",
+          "source": "Latest user message: 'recommend one approach conditionally'"
+        },
+        {
+          "id": "R7",
+          "priority": "minimum",
+          "requirement": "Do not claim measured accessibility compliance.",
+          "acceptance_criterion": "The response does not assert or imply that the indicator has been measured or verified to comply with any accessibility standard.",
+          "source": "Latest user message: 'do not claim measured accessibility compliance'"
+        },
+        {
+          "id": "R8",
+          "priority": "minimum",
+          "requirement": "End with the exact required status line.",
+          "acceptance_criterion": "Ends with exactly the literal Health status: unknown. and nothing after it.",
+          "source": "Latest user message: 'End with exactly: Health status: unknown.'"
+        },
+        {
+          "id": "R9",
+          "priority": "minimum",
+          "requirement": "Compare several independent approaches.",
+          "acceptance_criterion": "The response compares multiple independent approaches to the proposed status indicator, not just one design option.",
+          "source": "Latest user message: 'compare several independent approaches'"
+        },
+        {
+          "id": "R10",
+          "priority": "minimum",
+          "requirement": "Critically audit the merged recommendation against the supplied requirements.",
+          "acceptance_criterion": "The response includes a critical audit of the final recommendation against the stated constraints, including color, health inference, redundant signals, conditionality, word limit, ending, and no measured accessibility compliance claim.",
+          "source": "Latest user message: 'critically audit the merged recommendation against every requirement'"
+        },
+        {
+          "id": "R11",
+          "priority": "minimum",
+          "requirement": "Avoid a quick single-perspective answer.",
+          "acceptance_criterion": "The response does not reduce the analysis to a single perspective; it addresses multiple constraints and tradeoffs before recommending.",
+          "source": "Latest user message: 'do not substitute a quick single-perspective answer'"
+        }
+      ],
+      "validation": {
+        "passed": true,
+        "missing": []
+      }
+    },
+    {
+      "case": "headed-comparison",
+      "repetition": 2,
+      "worker": 2,
+      "elapsed_s": 108.70487537101144,
+      "usage": {
+        "prompt_tokens": 1184,
+        "total_tokens": 6134,
+        "completion_tokens": 4950,
+        "prompt_tokens_details": null
+      },
+      "finish_reason": "stop",
+      "checklist": [
+        {
+          "id": "R1",
+          "priority": "minimum",
+          "requirement": "Provide the most thorough possible answer for the multi-constraint deployment decision.",
+          "acceptance_criterion": "The answer is thorough, compares several independent approaches, critically audits the merged recommendation against every requirement, and does not substitute a quick single-perspective answer.",
+          "source": "user message"
+        },
+        {
+          "id": "R2",
+          "priority": "minimum",
+          "requirement": "Write an English deployment decision memo.",
+          "acceptance_criterion": "The output is an English-language deployment decision memo.",
+          "source": "user message"
+        },
+        {
+          "id": "R3",
+          "priority": "minimum",
+          "requirement": "Use only the supplied facts.",
+          "acceptance_criterion": "No unsupported facts are introduced; the only asserted facts are: A costs 40 units/month and has 80 ms latency; B costs 70 units/month and has 30 ms latency; budget is at most 60 units/month; latency target is at most 50 ms.",
+          "source": "user message"
+        },
+        {
+          "id": "R4",
+          "priority": "minimum",
+          "requirement": "Neither constraint may silently be relaxed.",
+          "acceptance_criterion": "The memo does not relax the budget limit of at most 60 units/month or the latency limit of at most 50 ms without making that treatment explicit and non-silent.",
+          "source": "user message"
+        },
+        {
+          "id": "R5",
+          "priority": "minimum",
+          "requirement": "Compare A and B.",
+          "acceptance_criterion": "The memo explicitly compares options A and B.",
+          "source": "user message"
+        },
+        {
+          "id": "R6",
+          "priority": "minimum",
+          "requirement": "Explicitly state neither is feasible.",
+          "acceptance_criterion": "The memo contains an explicit statement that neither A nor B is feasible.",
+          "source": "user message"
+        },
+        {
+          "id": "R7",
+          "priority": "minimum",
+          "requirement": "Distinguish facts from assumptions.",
+          "acceptance_criterion": "The memo clearly distinguishes supplied facts from assumptions and does not present assumptions as supplied facts.",
+          "source": "user message"
+        },
+        {
+          "id": "R8",
+          "priority": "minimum",
+          "requirement": "Propose two different conditional next steps.",
+          "acceptance_criterion": "The memo proposes two different next steps, each explicitly conditional.",
+          "source": "user message"
+        },
+        {
+          "id": "R9",
+          "priority": "minimum",
+          "requirement": "End with exactly the sentence: Decision: defer.",
+          "acceptance_criterion": "The memo ends with exactly the literal 'Decision: defer.' and has no trailing text.",
+          "source": "user message"
+        },
+        {
+          "id": "R10",
+          "priority": "minimum",
+          "requirement": "Do not invent benchmark results or citations.",
+          "acceptance_criterion": "The memo contains no invented benchmark results or citations.",
+          "source": "user message"
+        },
+        {
+          "id": "R11",
+          "priority": "minimum",
+          "requirement": "Keep the complete memo under 350 words.",
+          "acceptance_criterion": "The complete memo is under 350 words.",
+          "source": "user message"
+        }
+      ],
+      "validation": {
+        "passed": true,
+        "missing": []
+      }
+    },
+    {
+      "case": "headless-json",
+      "repetition": 2,
+      "worker": 3,
+      "elapsed_s": 48.00877484699595,
+      "usage": {
+        "prompt_tokens": 1174,
+        "total_tokens": 3364,
+        "completion_tokens": 2190,
+        "prompt_tokens_details": null
+      },
+      "finish_reason": "stop",
+      "checklist": [
+        {
+          "id": "R1",
+          "priority": "minimum",
+          "requirement": "Output must be a single JSON object with no Markdown formatting and no surrounding prose",
+          "acceptance_criterion": "The entire response is one valid JSON object; no backtick fences, no headers, no explanatory text before or after the JSON",
+          "source": "User: 'Return one JSON object with exactly the keys feasible, choice, violations, next_steps.' and 'No Markdown or surrounding prose.'"
+        },
+        {
+          "id": "R2",
+          "priority": "minimum",
+          "requirement": "JSON object must contain exactly four keys: feasible, choice, violations, next_steps",
+          "acceptance_criterion": "The top-level JSON object has exactly the keys 'feasible', 'choice', 'violations', 'next_steps' and no additional keys",
+          "source": "User: 'Return one JSON object with exactly the keys feasible, choice, violations, next_steps.'"
+        },
+        {
+          "id": "R3",
+          "priority": "minimum",
+          "requirement": "feasible field must be the boolean false",
+          "acceptance_criterion": "The value of the 'feasible' key is exactly the JSON literal false",
+          "source": "User: 'feasible must be false'"
+        },
+        {
+          "id": "R4",
+          "priority": "minimum",
+          "requirement": "choice field must be null",
+          "acceptance_criterion": "The value of the 'choice' key is exactly the JSON literal null",
+          "source": "User: 'choice must be null'"
+        },
+        {
+          "id": "R5",
+          "priority": "minimum",
+          "requirement": "violations field must map A to latency and B to budget",
+          "acceptance_criterion": "The value of the 'violations' key is exactly the JSON object {  A: latency, B: budget } with string values 'latency' and 'budget'",
+          "source": "User: 'violations must be {  A: latency, B: budget }'"
+        },
+        {
+          "id": "R6",
+          "priority": "minimum",
+          "requirement": "next_steps must contain exactly two distinct conditional actions",
+          "acceptance_criterion": "The value of the 'next_steps' key is an array of exactly two elements, each a conditional action, and the two actions are distinct from each other",
+          "source": "User: 'next_steps must contain exactly two distinct conditional actions'"
+        },
+        {
+          "id": "R7",
+          "priority": "minimum",
+          "requirement": "Each conditional action in next_steps must obtain evidence without asserting an unmeasured design meets the constraints",
+          "acceptance_criterion": "Each of the two actions is framed conditionally (e.g. 'if\u2026 then measure\u2026') and seeks new data or evidence; neither action claims or assumes that any currently unmeasured design already satisfies budget \u226460 and latency \u226450",
+          "source": "User: 'conditional actions that obtain evidence without asserting an unmeasured design meets the constraints'"
+        },
+        {
+          "id": "R8",
+          "priority": "minimum",
+          "requirement": "The reasoning must compare several independent approaches rather than a single-perspective answer",
+          "acceptance_criterion": "The derivation of the answer (reflected in the logic behind violations and next_steps) considers multiple independent angles or candidate strategies rather than a single quick conclusion",
+          "source": "User: 'compare several independent approaches and critically audit the merged recommendation against every requirement' and 'do not substitute a quick single-perspective answer'"
+        },
+        {
+          "id": "R9",
+          "priority": "minimum",
+          "requirement": "The recommendation must be critically audited against every stated constraint",
+          "acceptance_criterion": "The final JSON is internally consistent with all constraints: budget \u226460, latency \u226450, A(cost=40, latency=80), B(cost=70, latency=30); violations correctly identify the binding constraint for each option, and next_steps are consistent with both options' failures",
+          "source": "User: 'critically audit the merged recommendation against every requirement' and the given constraint values"
+        },
+        {
+          "id": "R10",
+          "priority": "minimum",
+          "requirement": "The constraints used for feasibility are budget \u226460 and latency \u226450",
+          "acceptance_criterion": "Feasibility determination uses the numeric thresholds cost \u2264 60 and latency \u2264 50 as stated; A violates latency (80 > 50) and B violates budget (70 > 60)",
+          "source": "User: 'budget <=60 and latency <=50'; 'A costs 40 and latency is 80'; 'B costs 70 and latency is 30'"
+        }
+      ],
+      "validation": {
+        "passed": true,
+        "missing": []
+      }
+    },
+    {
+      "case": "image-requirements",
+      "repetition": 2,
+      "worker": 0,
+      "elapsed_s": 35.86411504301941,
+      "usage": {
+        "prompt_tokens": 1174,
+        "total_tokens": 2806,
+        "completion_tokens": 1632,
+        "prompt_tokens_details": null
+      },
+      "finish_reason": "stop",
+      "checklist": [
+        {
+          "id": "R1",
+          "priority": "minimum",
+          "requirement": "Compare several independent approaches and critically audit the merged recommendation against every requirement.",
+          "acceptance_criterion": "The answer presents at least two distinct independent approaches to the status-indicator design and includes a critical audit of the merged/final recommendation checked against each stated constraint.",
+          "source": "User: 'compare several independent approaches and critically audit the merged recommendation against every requirement'"
+        },
+        {
+          "id": "R2",
+          "priority": "minimum",
+          "requirement": "Do not substitute a quick single-perspective answer.",
+          "acceptance_criterion": "The answer does not rely on a single viewpoint; it addresses the design decision from multiple angles as required by R1.",
+          "source": "User: 'do not substitute a quick single-perspective answer'"
+        },
+        {
+          "id": "R3",
+          "priority": "minimum",
+          "requirement": "Use the attached image as the only visual evidence for the audit.",
+          "acceptance_criterion": "All visual claims in the answer are grounded solely in the attached image (a solid red square); no external or imagined visual evidence is introduced.",
+          "source": "User: 'using the attached image as the only visual evidence'"
+        },
+        {
+          "id": "R4",
+          "priority": "minimum",
+          "requirement": "Answer in under 250 English words.",
+          "acceptance_criterion": "The total word count of the answer is strictly fewer than 250 English words.",
+          "source": "User: 'In under 250 English words'"
+        },
+        {
+          "id": "R5",
+          "priority": "minimum",
+          "requirement": "Identify the visible color of the indicator as red.",
+          "acceptance_criterion": "The answer explicitly states that the visible color of the proposed status indicator is red.",
+          "source": "User: 'identify its visible color as red'"
+        },
+        {
+          "id": "R6",
+          "priority": "minimum",
+          "requirement": "Explain why color alone cannot establish the underlying service health.",
+          "acceptance_criterion": "The answer contains an explanation of why the red color by itself is insufficient to confirm or determine the actual service/health status.",
+          "source": "User: 'explain why color alone cannot establish the underlying service health'"
+        },
+        {
+          "id": "R7",
+          "priority": "minimum",
+          "requirement": "Compare a text label versus a shape as redundant signals.",
+          "acceptance_criterion": "The answer includes a comparison of at least two redundant-signal options: a text label and a shape (e.g., icon/symbol), discussing their relative strengths or trade-offs.",
+          "source": "User: 'compare a text label versus a shape as redundant signals'"
+        },
+        {
+          "id": "R8",
+          "priority": "minimum",
+          "requirement": "Recommend one approach conditionally.",
+          "acceptance_criterion": "The answer states a single recommended approach qualified by an explicit condition (e.g., 'if X, then Y').",
+          "source": "User: 'recommend one approach conditionally'"
+        },
+        {
+          "id": "R9",
+          "priority": "minimum",
+          "requirement": "Do not claim measured accessibility compliance.",
+          "acceptance_criterion": "The answer contains no assertion that the design meets or has been verified against measured accessibility standards (e.g., WCAG contrast ratios confirmed by tooling).",
+          "source": "User: 'do not claim measured accessibility compliance'"
+        },
+        {
+          "id": "R10",
+          "priority": "minimum",
+          "requirement": "End with the exact closing line.",
+          "acceptance_criterion": "The answer ends with exactly the literal Health status: unknown. and nothing after it.",
+          "source": "User: 'End with exactly: Health status: unknown.'"
+        }
+      ],
+      "validation": {
+        "passed": true,
+        "missing": []
+      }
+    }
+  ],
+  "artifact_sha256": {
+    "r2-headed-comparison.json": "a79c3e12fc4043506a66616978f383230822eca39df46f47845aadaab7b9a657",
+    "r1-image-requirements.json": "e8ecfd4789c91215b3816dbddfdf2045fcf09508ff3ee1f579ba4c03cd1f1843",
+    "r2-headless-json.json": "4aa08517c4417e6fb4d66f44952f598368ce7071a623dbcea719816e33df359e",
+    "metadata.json": "8fe9679b3396ab755a8507e6c813fc8efc6ff4f6f41e07fa51c9012aed41ea5a",
+    "r2-image-requirements.json": "b20a1da3de307b5c5d4fb1e1752eb424781f5f0b4cf446599b468e4dcc51fb68",
+    "r0-image-requirements.json": "3373ef6df9872464afd9486284a75a9710252bf3cb5482c120d655b970593ca8",
+    "r0-headless-json.json": "77a5aaa39354f21c2cee1e59ba4f08087c0c1a1057603ac672d802af4932779f",
+    "r1-headed-comparison.json": "1c9790b0275e56633627222433e68c41c2a0cd5169d353726de93e2a82336348",
+    "jobs.json": "18b83f9c8157004aac7e8bfe49ef89f56ee13514797f87b9e393f24cd7990b1c",
+    "auto-max.yaml": "1e909dbdd4d18b31d6d6862db54ccc94214fc7189303276beeec1e9a127fe1d9",
+    "r0-headed-comparison.json": "feb73a65aa5eb60200e6dbb4f3e56930f2127a6bc1bbb5a7c3cc010d783e46e2",
+    "summary.json": "a22a2f5733ade31dbf118490e5210d5c174d568f0ca84158f494eb82e4619995",
+    "probe.py": "a422b12d92e0c6f55a8321dc0422cc2c1ef47ff955545ec30784fa09ec1558fa",
+    "r1-headless-json.json": "44d8699bcb804ef12ecc2928a4e79d9bb2042874031bd0d0d9a5a47bad9c3389"
+  }
+}

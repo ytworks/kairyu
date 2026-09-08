@@ -322,3 +322,15 @@ def test_extractor_config_change_triggers_compose_recreation(tmp_path, monkeypat
         assert (
             "KAIRYU_REQUIREMENTS_CONFIG_SHA256" in spec["services"][f"qwen-{index}"]["environment"]
         )
+
+
+def test_source_only_constraint_does_not_count_as_checklist_coverage():
+    case, result = _fixture()
+    case["checklist_literals"] = []
+    line = json.dumps(
+        {**ENTRY, "requirement": "Answer concisely", "acceptance_criterion": "Answer is concise"}
+    )
+    result["reasoning"] = result["reasoning"].replace(LINE, line)
+    report = quality.validate_result(case, result, requirement_cap=8192)
+    assert not report["checks"]["covers:language"]
+    assert not report["passed"]

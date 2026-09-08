@@ -630,3 +630,17 @@ references and illustrates a self-contained literal criterion.
 contains the three completed cases, audit evidence, traces, runtime, and hashes.
 The direct-route smoke `20260908T074027Z-direct-smoke` returns exactly OK
 through `qwen_answer` with zero requirements middleware applications.
+
+### Matched nine-request extraction check
+
+`20260908T080657Z-requirements-direct9-t1.0` passes all original three cases
+at each requirements seed 605/606/607 (L3 seeds 595/596/597 plus offset 10),
+with concurrency 3. Temperature remains 1.0; medium thinking has a 4096
+allowance within 8192 total. All nine checklists complete with mandatory
+coverage in requirement/acceptance fields, excluding source-only matches,
+and exact required literals in acceptance criteria. Completion tokens range
+from 1632 to 5076. The illustrative prompt literal is absent from all outputs.
+
+[Direct nine-case evidence](measurements/20260908-requirements-direct9.json)
+includes all checklist objects, usage, validation, source and artifact hashes.
+This is a pre-check for the next public-API run, not a substitute for it.
