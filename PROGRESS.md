@@ -125,4 +125,3 @@ in `.claude/rules/progress-log.md`).
 - What: the example adds a Qwen3.8 medium-thinking requirements root beside image description, passes stable criteria to answer stages, and asks the final audit to judge every item with evidence and repair guidance; call budget becomes 20 with two refinements.
 - Why: general task requirements need explicit minimum-quality checks independent of candidate drafts; no program execution or framework changes are required.
 - Refs: DTO-D16 in `docs/design/example-dual-track-orchestration.md`; `examples/qwen3.8-deepseek-v4-8gpu/`; `tests/unit/test_tiered_requirement_dag.py`; GPU gates and config digest re-pin pending
-
