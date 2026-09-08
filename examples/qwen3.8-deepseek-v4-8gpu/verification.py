@@ -867,6 +867,7 @@ def _served_config_sha256() -> str:
         "deepseek-thinking.jinja",
         "deepseek-role-effort.jinja",
         "qwen3.8-chat.jinja",
+        "requirements_budget.py",
         "sandbox/Dockerfile",
         "sandbox/runner.py",
     ):
@@ -878,7 +879,19 @@ def _served_config_sha256() -> str:
     return digest.hexdigest()
 
 
+def requirements_quality(run_dir: Path) -> int:
+    return _run([
+        str(ROOT / ".venv/bin/python"), str(HERE / "requirements_quality.py"),
+        "--run-dir", str(run_dir), "--base-url",
+        f"http://127.0.0.1:{os.environ.get('API_PORT', SPEC['api_port'])}",
+    ])
+
+
 _VERIFICATIONS = {
+    "requirements-quality": (
+        requirements_quality,
+        "nonempty complete checklists and audited answers: serial plus repeated parallel cases",
+    ),
     "serving-auto-max": (
         serving_auto_max,
         "generic-workload product DAG serving matrix (head/synthesis stream)",
@@ -912,6 +925,12 @@ def main() -> None:
         "started_at": datetime.now(UTC).isoformat(),
         "requested": args.verification,
         "served_config_sha256": _served_config_sha256(),
+        "verification_files_sha256": {
+            name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
+            for name in (
+                "verification.py", "requirements_quality.py", "requirements-quality-cases.json",
+            )
+        },
         "spec": SPEC,
     }
     (run_dir / "run.json").write_text(

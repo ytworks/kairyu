@@ -155,10 +155,9 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         # Issue #509: c1/c4/c8 gains do not cover the deployed c16/c32
         # envelope, so Qwen MTP stays candidate-only.
         assert "--speculative-config" not in service["command"]
-        assert service["volumes"][-2]["target"] == "/root/.cache"
-        assert service["volumes"][-1] == (
-            "./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro"
-        )
+        assert any(isinstance(mount, dict) and mount.get("target") == "/root/.cache"
+                   for mount in service["volumes"])
+        assert "./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro" in service["volumes"]
         assert service["environment"] | {
             "XDG_CACHE_HOME": "/root/.cache",
             "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/torchinductor",
@@ -425,7 +424,8 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     requirements = by_name["requirements"]
     assert requirements.worker == "tier1"
     assert requirements.depends_on == () and requirements.requires is None
-    assert requirements.sampling.max_tokens == image_description.sampling.max_tokens == 4096
+    assert requirements.sampling.max_tokens == 8192
+    assert image_description.sampling.max_tokens == 4096
     for role_name in (
         "policies", "critique", "synthesis", "audit",
         *(f"answer_{i}" for i in range(1, 5)),

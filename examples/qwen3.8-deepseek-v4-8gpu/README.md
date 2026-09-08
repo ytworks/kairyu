@@ -241,13 +241,20 @@ that are not yet available. No program execution is added or required.
 This adds one Qwen call: 11 normal text-ensemble calls or 12 with an image,
 excluding the separately bounded route judge and refinement/retry calls.
 It uses the existing example's medium-thinking mapping (`reasoning_effort:
-high`, DTO-D14) and a 4096-token combined thinking/checklist cap. This is an
+high`, DTO-D14) and an 8192-token combined thinking/checklist cap. The example-local vLLM
+`requirements_budget.py` middleware applies the standard per-request
+`thinking_token_budget: 2048` only to the complete requirements role template,
+reserving room for its checklist while retaining fixed medium thinking.
+The other roles and direct profiles keep their sampling settings. This is an
 agent judgment, not a mechanically enforced proof of requirement satisfaction:
 the head is already public before audit, exhausted/inconclusive verification
 retains the existing publication behavior, and the four direct routes do not
 run this checklist. `n>1` also retains its existing audit bypass. Inspect the
-intermediate audit for unresolved requirements. GPU quality/latency validation
-and a served-config digest re-pin are pending for this changed configuration.
+intermediate audit for unresolved requirements. The pre-tuning 2026-09-08 GPU diagnostic
+found empty checklists in two of three requests at the original 4096-token cap, even when the
+final audit passes. The served-config digest and generic latency results
+are recorded in [MEASUREMENTS.md](MEASUREMENTS.md); checklist quality remains
+pending full API re-verification after tuning.
 
 Design notes (see
 [`docs/design/example-dual-track-orchestration.md`](../../docs/design/example-dual-track-orchestration.md)):
@@ -461,7 +468,16 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./verify.sh list
 ./verify.sh serving-auto-max
 ./verify.sh serving-auto-max-coding
+./verify.sh requirements-quality
 ```
+
+The pre-tuning 2026-09-08 DTO-D16 GPU runs pass generic and coding serving gates, but the
+requirement-checklist quality check **fails**: two of three diagnostic
+requests exhaust the 4096-token cap in reasoning and send an empty checklist
+downstream. A successful stage trace and final audit PASS do not prove that
+the shared checklist exists. The image case produces a checklist and shows
+parallel image/requirement roots. See [MEASUREMENTS.md](MEASUREMENTS.md) for
+the current served-config hash, latency results, and reproducible evidence.
 
 `serving-auto-max` records the generic-workload product serving matrix and
 proves, for every request, the route judge classification stage and exactly
@@ -525,3 +541,9 @@ two L1 images independently with `QWEN_VLLM_IMAGE` and
 
 See [MEASUREMENTS.md](MEASUREMENTS.md) for the historical runtime-selection
 and serving-performance analysis.
+
+The `requirements-quality` gate repeats the original text, JSON, and image
+cases three times (serial, then concurrent). It rejects empty or truncated
+checklists, missing minimum constraints, missing audit IDs/evidence, and a
+PASS that leaves minimum requirements unsatisfied. Full tuned API evidence
+is pending; direct worker probes alone do not close this gate.

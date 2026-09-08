@@ -1,0 +1,284 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "headed-comparison",
+      "request": {
+        "model": "kairyu-auto-max",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Use the most thorough possible answer: compare several independent approaches and critically audit the merged recommendation against every requirement. This is an ambiguous multi-constraint design decision; do not substitute a quick single-perspective answer. Write an English deployment decision memo using only these supplied facts: A costs 40 units/month and has 80 ms latency; B costs 70 units/month and has 30 ms latency. Budget is at most 60 units/month; latency target is at most 50 ms. Neither constraint may silently be relaxed. Compare A and B, explicitly state neither is feasible, distinguish facts from assumptions, propose two different conditional next steps, and end with exactly the sentence: Decision: defer. Do not invent benchmark results or citations. Keep the complete memo under 350 words."
+          }
+        ],
+        "max_tokens": 65536,
+        "reasoning_effort": "low",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        }
+      },
+      "checklist_coverage": [
+        {
+          "name": "English memo",
+          "patterns": [
+            "English",
+            "memo"
+          ]
+        },
+        {
+          "name": "supplied facts",
+          "patterns": [
+            "(supplied|provided|given)",
+            "facts"
+          ]
+        },
+        {
+          "name": "both options",
+          "patterns": [
+            "\\bA\\b",
+            "\\bB\\b",
+            "compar"
+          ]
+        },
+        {
+          "name": "hard limits",
+          "patterns": [
+            "\\b60\\b",
+            "\\b50\\b",
+            "(hard|relax|waiv|weaken|override)"
+          ]
+        },
+        {
+          "name": "infeasible",
+          "patterns": [
+            "(neither|infeasib|not.{0,30}feasible)"
+          ]
+        },
+        {
+          "name": "assumptions",
+          "patterns": [
+            "assum"
+          ]
+        },
+        {
+          "name": "two conditional next steps",
+          "patterns": [
+            "(two|\\b2\\b)",
+            "condition",
+            "next step"
+          ]
+        },
+        {
+          "name": "no invented evidence",
+          "patterns": [
+            "benchmark",
+            "citat"
+          ]
+        },
+        {
+          "name": "word limit",
+          "patterns": [
+            "\\b350\\b",
+            "(under|fewer|less than|<)"
+          ]
+        },
+        {
+          "name": "independent approaches",
+          "patterns": [
+            "(independent|multiple|several)",
+            "(approach|perspective)"
+          ]
+        },
+        {
+          "name": "audit",
+          "patterns": [
+            "audit"
+          ]
+        }
+      ],
+      "checklist_literals": [
+        "Decision: defer."
+      ]
+    },
+    {
+      "id": "headless-json",
+      "request": {
+        "model": "kairyu-auto-max",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Use the most thorough possible answer: compare several independent approaches and critically audit the merged recommendation against every requirement. This is an ambiguous multi-constraint design decision; do not substitute a quick single-perspective answer. Choose a storage design under conflicting mandatory constraints. Given only: A costs 40 and latency is 80; B costs 70 and latency is 30; budget <=60 and latency <=50. Return one JSON object with exactly the keys feasible, choice, violations, next_steps. feasible must be false, choice must be null, violations must be {\"A\":\"latency\",\"B\":\"budget\"}, and next_steps must contain exactly two distinct conditional actions that obtain evidence without asserting an unmeasured design meets the constraints. No Markdown or surrounding prose."
+          }
+        ],
+        "max_tokens": 65536,
+        "reasoning_effort": "low",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        },
+        "response_format": {
+          "type": "json_object"
+        }
+      },
+      "checklist_coverage": [
+        {
+          "name": "JSON only",
+          "patterns": [
+            "JSON",
+            "(Markdown|surrounding|prose|extra text)"
+          ]
+        },
+        {
+          "name": "exact keys",
+          "patterns": [
+            "(exact|only)",
+            "feasible",
+            "choice",
+            "violations",
+            "next_steps"
+          ]
+        },
+        {
+          "name": "fixed values",
+          "patterns": [
+            "false",
+            "null",
+            "\\bA\\b",
+            "latency",
+            "\\bB\\b",
+            "budget"
+          ]
+        },
+        {
+          "name": "two conditional evidence steps",
+          "patterns": [
+            "(two|\\b2\\b)",
+            "(condition|\\bif\\b)",
+            "evidence",
+            "(distinct|different)"
+          ]
+        },
+        {
+          "name": "numeric limits",
+          "patterns": [
+            "\\b60\\b",
+            "\\b50\\b"
+          ]
+        },
+        {
+          "name": "no unmeasured feasibility claim",
+          "patterns": [
+            "(unmeasured|without|not|no claim)",
+            "(feasib|satisf|meet|constraint)"
+          ]
+        },
+        {
+          "name": "thorough comparison and audit",
+          "patterns": [
+            "(approach|perspective)",
+            "audit"
+          ]
+        }
+      ],
+      "checklist_literals": [
+        "feasible",
+        "choice",
+        "violations",
+        "next_steps"
+      ]
+    },
+    {
+      "id": "image-requirements",
+      "request": {
+        "model": "kairyu-auto-max",
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Use the most thorough possible answer: compare several independent approaches and critically audit the merged recommendation against every requirement. This is an ambiguous multi-constraint design decision; do not substitute a quick single-perspective answer. Audit a proposed status indicator for a product using the attached image as the only visual evidence. In under 250 English words, identify its visible color as red; explain why color alone cannot establish the underlying service health; compare a text label versus a shape as redundant signals; recommend one approach conditionally; and do not claim measured accessibility compliance. End with exactly: Health status: unknown."
+              },
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKElEQVR4nO3NsQ0AAAzCMP5/un0CNkuZ41wybXsHAAAAAAAAAAAAxR4yw/wuPL6QkAAAAABJRU5ErkJggg=="
+                }
+              }
+            ]
+          }
+        ],
+        "max_tokens": 65536,
+        "reasoning_effort": "low",
+        "stream": true,
+        "stream_options": {
+          "include_usage": true
+        }
+      },
+      "checklist_coverage": [
+        {
+          "name": "language and length",
+          "patterns": [
+            "English",
+            "\\b250\\b",
+            "(under|fewer|less than|<)"
+          ]
+        },
+        {
+          "name": "red",
+          "patterns": [
+            "\\bred\\b"
+          ]
+        },
+        {
+          "name": "image evidence only",
+          "patterns": [
+            "image",
+            "(only|sole)"
+          ]
+        },
+        {
+          "name": "unknown health",
+          "patterns": [
+            "health",
+            "(cannot|insufficient|unknown|not|alone)"
+          ]
+        },
+        {
+          "name": "text and shape",
+          "patterns": [
+            "(text|label)",
+            "shape",
+            "compar"
+          ]
+        },
+        {
+          "name": "conditional recommendation",
+          "patterns": [
+            "recommend",
+            "condition"
+          ]
+        },
+        {
+          "name": "no measured compliance claim",
+          "patterns": [
+            "accessib",
+            "(measured|compliance)",
+            "(not|no|avoid|without)"
+          ]
+        },
+        {
+          "name": "independent comparison and audit",
+          "patterns": [
+            "(approach|perspective)",
+            "audit"
+          ]
+        }
+      ],
+      "checklist_literals": [
+        "Health status: unknown."
+      ]
+    }
+  ]
+}

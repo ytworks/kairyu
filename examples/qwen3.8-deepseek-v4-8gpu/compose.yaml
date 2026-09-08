@@ -4,6 +4,7 @@ x-qwen: &qwen
   image: ${QWEN_VLLM_IMAGE:-vllm/vllm-openai:v0.23.0@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f}
   ipc: host
   environment:
+    PYTHONPATH: /etc/kairyu
     HF_HOME: /models/.cache
     HF_HUB_OFFLINE: "1"
     HF_HUB_DISABLE_TELEMETRY: "1"
@@ -66,6 +67,8 @@ x-qwen: &qwen
     # medium reasoning preamble per request.
     - --reasoning-parser
     - qwen3
+    - --middleware
+    - requirements_budget.RequirementsBudgetMiddleware
     - --enable-auto-tool-choice
     - --tool-call-parser
     - qwen3_coder
@@ -124,6 +127,9 @@ services:
         source: ${QWEN_CACHE_0_PATH}
         target: /root/.cache
       - ./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
+      - ./requirements_budget.py:/etc/kairyu/requirements_budget.py:ro
+      - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
+      - ./example.json:/etc/kairyu/example.json:ro
     deploy:
       resources:
         reservations:
@@ -144,6 +150,9 @@ services:
         source: ${QWEN_CACHE_1_PATH}
         target: /root/.cache
       - ./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
+      - ./requirements_budget.py:/etc/kairyu/requirements_budget.py:ro
+      - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
+      - ./example.json:/etc/kairyu/example.json:ro
     deploy:
       resources:
         reservations:
@@ -164,6 +173,9 @@ services:
         source: ${QWEN_CACHE_2_PATH}
         target: /root/.cache
       - ./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
+      - ./requirements_budget.py:/etc/kairyu/requirements_budget.py:ro
+      - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
+      - ./example.json:/etc/kairyu/example.json:ro
     deploy:
       resources:
         reservations:
@@ -184,6 +196,9 @@ services:
         source: ${QWEN_CACHE_3_PATH}
         target: /root/.cache
       - ./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
+      - ./requirements_budget.py:/etc/kairyu/requirements_budget.py:ro
+      - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
+      - ./example.json:/etc/kairyu/example.json:ro
     deploy:
       resources:
         reservations:

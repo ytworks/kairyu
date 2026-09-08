@@ -1,6 +1,8 @@
 # Tiered Example Dual-Track Policy-Ensemble Orchestration
 
-Status: **Accepted; implemented and GPU-verified** (2026-08-25; runs
+Status: **Accepted; implemented; DTO-D16 baseline GPU checklist quality fails; tuning re-verification pending** (2026-09-08).
+
+Historical DTO-D8..D14 GPU verification (2026-08-25; runs
 `20260825T161729Z` coding + `20260825T173343Z` generic — both `verify.sh`
 serving gates green on the DTO-D8..D14 served config, digest
 `69702ab5af0ab3c0…`). The judge routes every coding-gate request to the
@@ -10,9 +12,14 @@ primary samples with the full internal DAG and the audit verdict. Manual
 Chat UI and Terminal-Bench passes remain on the next-window list. The
 previous green run (2026-08-18, `20260818T025710Z`) measured the pre-DTO-D8
 nine-role DAG.
-DTO-D15 and DTO-D16 change the served config after that green run; their
-GPU serving gates and digest re-pin remain pending. DTO-D16 is an example-only
-requirement checklist and per-item audit change (2026-09-08).
+DTO-D15 and DTO-D16 change the served config after that green run. On
+2026-09-08 the generic serving gate passes on the re-pinned DTO-D16 config,
+but checklist quality fails: two of three diagnostic requests spend all
+4096 requirement tokens in reasoning and send an empty checklist downstream.
+The image case produces R1–R11 and proves parallel image/checklist roots.
+Final-answer checks pass in all three cases, so final audit PASS alone is
+insufficient evidence. Baseline coding serving re-verification also passes; its TTFT gates are all not_applicable. See the
+example's `MEASUREMENTS.md` and `measurements/20260908-requirements-quality.json`.
 Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes.
 Supersedes the ECO-D2/D3/D5/D6 role graphs, profiles, and profile judge in
@@ -639,8 +646,10 @@ Status: accepted; implemented; serving gates GPU re-verify and digest re-pin pen
   four answers; synthesis with inline audit.
 - CPU checks exercise the shipped YAML with scripted engines: parallel
   image/checklist roots, fixed effort, text/image and headed/headless prompt
-  propagation, FAIL→repair→PASS and exhaustion. GPU quality/latency gates
-  and the served-config digest re-pin remain pending.
+  propagation, FAIL→repair→PASS and exhaustion. The 2026-09-08 GPU checks
+  reproduce empty checklists at the 4096-token cap in two of three requests;
+  successful traces and final audits mask the missing checklist. Quality
+  remains open despite the generic serving pass and served-config re-pin.
 
 ## Acceptance
 
@@ -680,3 +689,20 @@ Status: accepted; implemented; serving gates GPU re-verify and digest re-pin pen
   profile assertions were deleted with the features they protected; DTO-D13
   reintroduced profile/judge assertions and route-aware gate tests;
   base→head collection counts are reported in the change.
+
+### DTO-D16 GPU tuning amendment (2026-09-08)
+
+The failed baseline above remains evidence. Requirement extraction now has
+an 8192-token total and a 2048-token reasoning allowance through the standard
+vLLM per-request `thinking_token_budget`. An example-local ASGI middleware
+matches the full requirements prompt template, including its suffix, and
+injects the allowance only for that role. Qwen remains fixed medium; there
+are no framework changes or additional services. Original message priorities,
+literal constraints, and explicitly requested approaches/audits remain minimum
+requirements. The checklist ends with an explicit completion marker.
+
+Four adopted direct-worker probes complete with full mandatory coverage.
+A new `requirements-quality` gate repeats the original three cases serially
+and concurrently, rejecting empty/truncated outputs, missing minimum coverage,
+audit IDs or evidence, and PASS with unresolved minimum requirements. Full
+public-API and serving re-verification on this tuned config remains pending.

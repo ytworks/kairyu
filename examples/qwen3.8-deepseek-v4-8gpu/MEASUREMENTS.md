@@ -29,7 +29,87 @@
 > The DTO-D14 served config is GPU-verified — see the 2026-08-25 section
 > below; every older section predates it and does not transfer.
 
-## Judged five-route serving gates (current deployment, 2026-08-25)
+## DTO-D16 baseline GPU verification before tuning (2026-09-08)
+
+The generic serving gate passes on the PR #595 configuration. **The new
+requirement-checklist quality check fails:** two of three diagnostic requests
+consume all 4096 requirement-role tokens in reasoning and pass an empty
+checklist downstream. A successful generation trace and a final audit PASS
+do not establish that the checklist was produced. This configuration must
+not be described as quality-verified.
+
+- Measured commit: `8e09a924a8af1b01c255a97643e94e6db788306d`.
+- Served-config SHA-256:
+  `e38c58d1b1e1b6b0d85f93a0c15e897a9c587fa6394ba708ea4effc497d7b116`
+- Hardware: 8 × RTX PRO 6000 Blackwell, existing Qwen TP1 × 4 and
+  DeepSeek TP4/EP4 workers. All 183 container Python files match the checkout.
+- Generic run: `20260908T043120Z`, `./verify.sh serving-auto-max --no-start`,
+  exit 0. Readiness validated the twelve-role PR configuration first.
+- Artifact root: `/mnt/nvme/kairyu/model-volumes/qwen3.8-deepseek-v4-8gpu/verification-results/`.
+  The generic run includes `runtime.json` with GPU and container image IDs.
+
+Generic workload: 32 requests at each concurrency, 8K-token prompts, unchanged
+natural-completion configuration. All 128 traces pass the route-aware gate;
+seven requests execute `requirements` and `audit` in the ensemble.
+
+| c | routes | route TTFT p50 | overall E2E p99 |
+|---|---|---|---|
+| 1 | qwen_direct 32 | 2,276 ms | 12.32 s |
+| 8 | qwen_direct 30 / primary 2 | 6,378 / 17,550 ms | 746.91 s |
+| 16 | qwen_direct 27 / primary 5 | 14,003 / 18,142 ms | 741.81 s |
+| 32 | qwen_direct 32 | 31,457 ms | 57.68 s |
+
+The two c8 ensemble requests use the five-second judge-timeout fallback.
+Their requirement stages take 92.47/95.88 s; their complete responses take
+746.91/481.53 s. Across all seven ensemble requests, E2E ranges from
+297.13 to 746.91 s. Repeated audits contribute substantially to the tail;
+these results do not show a latency improvement over the historical config.
+
+### Requirement-checklist diagnostic quality checks
+
+Three sequential requests explicitly ask for a thorough comparison and audit,
+using the unchanged public API, `reasoning_effort: low`, `max_tokens: 65536`,
+and seed 595. The Qwen roots/audit retain their fixed medium effort. All three
+are judged into `primary`; no profile override or deployment mutation is used.
+These are diagnostic examples, not a statistical answer-quality benchmark.
+
+| case | requirement output | final-answer checks | audit verdicts | TTFT / E2E |
+|---|---|---|---|---|
+| English decision memo | **empty**, 4096 tokens spent | pass | FAIL → PASS | 0.36 / 675.01 s |
+| Exact JSON constraints | **empty**, 4096 tokens spent | pass | PASS | 268.35 / 268.35 s |
+| Image indicator audit | R1–R11, 1751 tokens spent | pass | FAIL → PASS | 0.42 / 322.49 s |
+
+The memo compares two infeasible options under hard cost/latency limits;
+JSON must preserve exact keys, values and two conditional next steps; the
+image case must identify red without inferring actual service health. The
+image and requirement roots start at the same timestamp and overlap for
+38.51 s. The memo/image answers contain 334/170 words, excluding Markdown-only
+table separators and standalone operators. `quality/validated-summary.json`
+corrects the initial probe's whitespace-only count, which counted table
+markup as words; the original raw summary remains retained.
+
+The failure is the missing checklist, even though final answers pass their
+checks. `requirements` is traced as `success` with exactly 4096 completion
+tokens but has an empty `Stage output`; downstream prompts consequently
+receive no checklist. Internal roles have no final-unit empty-output retry.
+The audit reconstructs requirements from the original request, so an audit
+PASS masks the missing shared criteria. In the memo case, audit R1 changes
+from the English-memo requirement to independent approaches after refinement;
+the reconstructed IDs are not stable between attempts. The next fix must ensure a usable
+checklist and verify its content, then repeat quality/serving checks on the
+changed served-config bytes. Increasing a budget alone is not evidence of
+closure.
+
+Reviewable inputs, answers, extracted checklists, audit outputs/events and
+raw-artifact hashes are in
+[`measurements/20260908-requirements-quality.json`](measurements/20260908-requirements-quality.json).
+Full SSE and traces are under the generic run's `quality/`; the exact
+`quality-probe.py` and `quality/kairyu_pr595_analyze_quality.py` scripts are
+retained with those artifacts. The targeted CPU suite passes 50 tests on the
+host; the sandbox run hit five-second thread-work timeouts in eight DAG
+cases, which all pass on the host (9 DAG tests in 0.80 s).
+
+## Judged five-route serving gates (historical DTO-D8..D14, 2026-08-25)
 
 Run IDs: `20260825T161729Z` (`./verify.sh serving-auto-max-coding`) and
 `20260825T173343Z` (`./verify.sh serving-auto-max`), both green (exit 0) on
@@ -476,3 +556,19 @@ is `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`; vLLM source revision is
 `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`.
 The externally reachable no-auth ChatUI validated after the run is
 `http://61.206.39.14:3000`; Kairyu L3 remains loopback-only.
+
+## DTO-D16 extraction tuning (2026-09-08; API verification pending)
+
+Prompt-only tuning could still exhaust 8192 tokens. The adopted role keeps
+Qwen fixed medium and uses the standard vLLM thinking budget (2048) within
+8192 total tokens. Four direct-worker probes in
+`20260908T064842Z-requirements-tuning` all complete, preserve minimum coverage
+and exact literals, and spend 2672/2578/2312/2619 total tokens. Earlier failed
+probes remain in the artifact root. These probes do not substitute for the
+repeated public-API quality gate or final-config serving measurements.
+
+The baseline coding run `20260908T052334Z` also exits zero: 128 product and
+128 paired DeepSeek requests. Every product request uses `qwen_think_medium`;
+all TTFT gates are `not_applicable`, not speed passes. Complete baseline
+route, latency, manifest and artifact hashes are retained in
+[20260908-serving-baseline.json](measurements/20260908-serving-baseline.json).

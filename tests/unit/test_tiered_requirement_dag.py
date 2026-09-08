@@ -122,7 +122,7 @@ async def test_example_checklist_survives_parallel_roots_and_refinement(
     for name in ("requirements", "image_description") if with_image else ("requirements",):
         request, _ = backend.requests[name][0]
         assert request.reasoning_effort == "high"  # Fixed medium alias, independent of caller.
-        assert request.sampling_params.max_tokens == 4096
+        assert request.sampling_params.max_tokens == (8192 if name == "requirements" else 4096)
         if with_image:
             assert request.chat_template_kwargs == {"enable_thinking": True}
     for name in (
