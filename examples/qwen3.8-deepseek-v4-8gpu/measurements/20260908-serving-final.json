@@ -1,0 +1,875 @@
+{
+  "schema_version": 1,
+  "phase": "quality-fixed configuration before launcher portability changes",
+  "served_config_sha256": "20b800e49f68baf0272db5bb3fd5b39d0cdd5e9e5817e11ce7490275b8ff533e",
+  "runs": [
+    {
+      "manifest": {
+        "schema_version": 1,
+        "run_id": "20260908T101744Z",
+        "started_at": "2026-09-08T10:17:44.580454+00:00",
+        "requested": "serving-auto-max",
+        "served_config_sha256": "20b800e49f68baf0272db5bb3fd5b39d0cdd5e9e5817e11ce7490275b8ff533e",
+        "verification_files_sha256": {
+          "verification.py": "69d5b85b4b166cdfbbafb405f9f13d9d55dcefb3ebe8008907bc305f51db9139",
+          "requirements_quality.py": "defd899794a93ff7963e5c88fa7e5619b1ed4f92e2823f77d184fbebcd3d5ee5",
+          "requirements-quality-cases.json": "75fdafea0d03c1ca12f1e7065f3e05d2e7d7daeca764bf6bafe4e6eb9e1fecbe"
+        },
+        "spec": {
+          "schema_version": 1,
+          "environment": "qwen3.8-deepseek-v4-8gpu",
+          "hardware": {
+            "gpu_count": 8,
+            "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+            "minimum_compute_capability": 12.0,
+            "minimum_vram_mib": 90000
+          },
+          "storage": {
+            "root": "/mnt/nvme/kairyu",
+            "minimum_free_gib": 220,
+            "deepseek_model_volume": "kairyu-models-deepseek-v4-flash-0731-8gpu"
+          },
+          "allocation": {
+            "tier1": {
+              "model": "qwen3.8-27b",
+              "gpu_ids": [
+                0,
+                1,
+                2,
+                3
+              ],
+              "replicas": 4,
+              "tensor_parallel_size": 1
+            },
+            "tier2": {
+              "model": "deepseek-v4-flash-0731",
+              "gpu_ids": [
+                4,
+                5,
+                6,
+                7
+              ],
+              "replicas": 1,
+              "tensor_parallel_size": 4,
+              "expert_parallel_size": 4
+            }
+          },
+          "models": {
+            "tier1": {
+              "repo": "Qwen/Qwen3.8-27B-FP8",
+              "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+              "tree_sha256": "9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e",
+              "slug": "qwen3.8-27b-fp8",
+              "served_name": "qwen3.8-27b",
+              "max_context_tokens": 262144,
+              "quantization": "fp8"
+            },
+            "tier2": {
+              "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+              "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+              "tree_sha256": "90bd164d6f778d798eeaecd3517d83b87d49d300756a9217ada14a2b15203754",
+              "slug": "deepseek-v4-flash-0731",
+              "served_name": "deepseek-v4-flash-0731",
+              "max_context_tokens": 1048576,
+              "quantization": "mixed-fp4-fp8"
+            }
+          },
+          "embedding": {
+            "served_name": "embed-small",
+            "backend": "fastembed",
+            "model": "sentence-transformers/all-MiniLM-L6-v2",
+            "model_path": "/opt/kairyu/models/all-MiniLM-L6-v2",
+            "repository": "Qdrant/all-MiniLM-L6-v2-onnx",
+            "revision": "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079",
+            "model_sha256": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+            "provenance_sha256": "57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c",
+            "dimensions": 384,
+            "batch_size": 64,
+            "threads": 2,
+            "max_concurrency": 2
+          },
+          "vllm": {
+            "qwen": {
+              "image": "vllm/vllm-openai:v0.23.0@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+              "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+              "image_revision": "91df0fad4dc98a67c7659d9dbd915245d5c43d96",
+              "distribution": "upstream",
+              "source_repository": "https://github.com/vllm-project/vllm.git",
+              "source_revision": "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
+              "source_ref": "v0.23.0",
+              "release": "v0.23.0"
+            },
+            "deepseek": {
+              "image": "local/vllm-openai:sm120-aa0d513027",
+              "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
+              "source_repository": "https://github.com/jasl/vllm.git",
+              "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
+              "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834"
+            },
+            "qwen_mtp_speculative_tokens": 0,
+            "qwen_max_num_batched_tokens": 32768,
+            "qwen_max_num_seqs": 32,
+            "qwen_kv_cache_dtype": "fp8",
+            "qwen_cudagraph_mode": "PIECEWISE",
+            "deepseek_dspark_speculative_tokens": 5,
+            "deepseek_max_num_batched_tokens": 16384,
+            "deepseek_max_num_seqs": 32,
+            "deepseek_kv_cache_dtype": "fp8",
+            "deepseek_cudagraph_mode": "FULL_AND_PIECEWISE"
+          },
+          "orchestration": {
+            "auto_max_model": "kairyu-auto-max",
+            "internal_max_output_tokens": 65536,
+            "requirements_thinking_token_budget": 4096,
+            "image_description_thinking_token_budget": 2048,
+            "product_policy": "judged-five-route-dual-track",
+            "roles": [
+              "head",
+              "draft",
+              "image_description",
+              "requirements",
+              "policies",
+              "answer_1",
+              "answer_2",
+              "answer_3",
+              "answer_4",
+              "critique",
+              "synthesis",
+              "audit"
+            ],
+            "stream_head": "head",
+            "max_steps": 20,
+            "product_normal_calls": 11,
+            "product_max_calls": 20,
+            "product_max_refinements": 2,
+            "product_exposes_intermediate_outputs": true,
+            "profiles": {
+              "qwen_direct": [
+                "qwen_answer"
+              ],
+              "qwen_think_medium": [
+                "qwen_think_answer"
+              ],
+              "deepseek_direct": [
+                "deepseek_answer"
+              ],
+              "deepseek_think": [
+                "deepseek_think_answer"
+              ]
+            },
+            "profile_judge": {
+              "worker": "tier1",
+              "fallback": "primary",
+              "choices": [
+                {
+                  "label": "QWEN",
+                  "profile": "qwen_direct"
+                },
+                {
+                  "label": "QWEN_THINK",
+                  "profile": "qwen_think_medium"
+                },
+                {
+                  "label": "DEEPSEEK",
+                  "profile": "deepseek_direct"
+                },
+                {
+                  "label": "DEEPSEEK_THINK",
+                  "profile": "deepseek_think"
+                },
+                {
+                  "label": "ENSEMBLE",
+                  "profile": "primary"
+                }
+              ]
+            },
+            "profile_final_roles": {
+              "primary": "synthesis",
+              "qwen_direct": "qwen_answer",
+              "qwen_think_medium": "qwen_think_answer",
+              "deepseek_direct": "deepseek_answer",
+              "deepseek_think": "deepseek_think_answer"
+            },
+            "ttft_gated_profiles": [
+              "primary",
+              "qwen_direct",
+              "deepseek_direct"
+            ],
+            "direct_route_max_tokens": {
+              "qwen_direct": 131072,
+              "qwen_think_medium": 131072,
+              "deepseek_direct": 393216,
+              "deepseek_think": 393216
+            },
+            "direct_route_sampling": {
+              "qwen_direct": {
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 20,
+                "presence_penalty": 1.5,
+                "max_tokens": 131072
+              },
+              "qwen_think_medium": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "top_k": 20,
+                "max_tokens": 131072
+              },
+              "deepseek_direct": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "max_tokens": 393216
+              },
+              "deepseek_think": {
+                "temperature": 1.0,
+                "top_p": 0.95,
+                "max_tokens": 393216
+              }
+            }
+          },
+          "executor": {
+            "image": "local/kairyu-executor:coding-v1",
+            "base_image": "python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65",
+            "pytest_version": "9.1.1",
+            "languages": [
+              "python"
+            ],
+            "transport": "unix",
+            "socket_path": "/run/kairyu-executor/executor.sock",
+            "max_concurrency": 8,
+            "queue_wait_s": 8
+          },
+          "webui": {
+            "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+            "port": 3000
+          },
+          "api_port": 8003,
+          "deepseek_l1_loopback_port": 8005,
+          "verification": {
+            "serving": {
+              "prompt_tokens_approx": 8192,
+              "output_tokens": 256,
+              "auto_max_combined_max_tokens": 65536,
+              "concurrency": [
+                1,
+                8,
+                16,
+                32
+              ],
+              "requests_per_concurrency": 32
+            },
+            "coding": {
+              "prompt_tokens_approx": 1536,
+              "auto_max_combined_max_tokens": 65536,
+              "concurrency": [
+                1,
+                8,
+                16,
+                32
+              ],
+              "requests_per_concurrency": 32,
+              "ttft_multiplier_vs_deepseek_direct": 2.0,
+              "deepseek_direct_ttft_p50_ms_fallback": {
+                "1": 779.22,
+                "8": 833.16,
+                "16": 2710.53,
+                "32": 12399.45
+              }
+            }
+          }
+        },
+        "completed_at": "2026-09-08T10:33:37.126181+00:00",
+        "exit_codes": {
+          "serving-auto-max": 0
+        }
+      },
+      "runtime": {
+        "collected_at": "2026-09-08T10:17:44.024625+00:00",
+        "git_head": "8c8fc1aebdf6c66f78928bf9238bf2b5ba0d0247",
+        "git_status": "",
+        "containers": [
+          {
+            "name": "qwen3-8-deepseek-v4-8gpu-kairyu-1",
+            "image_id": "sha256:d440d7838a89c1d09d66bcd7ac8127454cb8c8452f1e70e3fc83588d3bc19bfc",
+            "started_at": "2026-09-08T09:41:07.635532812Z",
+            "health": "healthy",
+            "mounted_files": [
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/kairyu.yaml",
+                "target": "/etc/kairyu/kairyu.yaml",
+                "sha256": "33f189f2ecfdb6591590d741b29393dcb4dee76c131bba1919501a87ca12cb57"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+                "target": "/etc/kairyu/auto-max.yaml",
+                "sha256": "6b57bb427b498761c19e66ae1400c326d9f0c9113f2b5917d4d3e1f0e6b41fe5"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/router.json",
+                "target": "/etc/kairyu/router.json",
+                "sha256": "9b3cc02780fd5a1cdf1073557b66900e14dd59b6dd655b961f6f85bc3cb51ca5"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/deepseek-thinking.jinja",
+                "target": "/etc/kairyu/deepseek-thinking.jinja",
+                "sha256": "5b3c37f08ae895028e6febdcc1642e8034e0871e23b2bc1b59c3b05a4eb942ee"
+              }
+            ],
+            "requirements_config_sha256": null
+          },
+          {
+            "name": "qwen3-8-deepseek-v4-8gpu-qwen-0-1",
+            "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+            "started_at": "2026-09-08T09:39:14.015710947Z",
+            "health": "healthy",
+            "mounted_files": [
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+                "target": "/etc/kairyu/qwen3.8-chat.jinja",
+                "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+                "target": "/etc/kairyu/requirements_budget.py",
+                "sha256": "b693f3a3c01319e32a5700d1e209e164f1d6bcf43a83ca0c6da19fd2c2127c07"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+                "target": "/etc/kairyu/auto-max.yaml",
+                "sha256": "6b57bb427b498761c19e66ae1400c326d9f0c9113f2b5917d4d3e1f0e6b41fe5"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+                "target": "/etc/kairyu/example.json",
+                "sha256": "69dee2ea3a57829e7ef1ae5b129158249a1664556266ea3f477ed267dc873645"
+              }
+            ],
+            "requirements_config_sha256": "90b05e69966e383dbd8deb29a9ac67c60a83f60841a0c3797451e9329ee96e0e"
+          },
+          {
+            "name": "qwen3-8-deepseek-v4-8gpu-qwen-2-1",
+            "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+            "started_at": "2026-09-08T09:39:14.014450496Z",
+            "health": "healthy",
+            "mounted_files": [
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+                "target": "/etc/kairyu/qwen3.8-chat.jinja",
+                "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+                "target": "/etc/kairyu/requirements_budget.py",
+                "sha256": "b693f3a3c01319e32a5700d1e209e164f1d6bcf43a83ca0c6da19fd2c2127c07"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+                "target": "/etc/kairyu/auto-max.yaml",
+                "sha256": "6b57bb427b498761c19e66ae1400c326d9f0c9113f2b5917d4d3e1f0e6b41fe5"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+                "target": "/etc/kairyu/example.json",
+                "sha256": "69dee2ea3a57829e7ef1ae5b129158249a1664556266ea3f477ed267dc873645"
+              }
+            ],
+            "requirements_config_sha256": "90b05e69966e383dbd8deb29a9ac67c60a83f60841a0c3797451e9329ee96e0e"
+          },
+          {
+            "name": "qwen3-8-deepseek-v4-8gpu-qwen-1-1",
+            "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+            "started_at": "2026-09-08T09:39:14.014868425Z",
+            "health": "healthy",
+            "mounted_files": [
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+                "target": "/etc/kairyu/example.json",
+                "sha256": "69dee2ea3a57829e7ef1ae5b129158249a1664556266ea3f477ed267dc873645"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+                "target": "/etc/kairyu/qwen3.8-chat.jinja",
+                "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+                "target": "/etc/kairyu/requirements_budget.py",
+                "sha256": "b693f3a3c01319e32a5700d1e209e164f1d6bcf43a83ca0c6da19fd2c2127c07"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+                "target": "/etc/kairyu/auto-max.yaml",
+                "sha256": "6b57bb427b498761c19e66ae1400c326d9f0c9113f2b5917d4d3e1f0e6b41fe5"
+              }
+            ],
+            "requirements_config_sha256": "90b05e69966e383dbd8deb29a9ac67c60a83f60841a0c3797451e9329ee96e0e"
+          },
+          {
+            "name": "qwen3-8-deepseek-v4-8gpu-qwen-3-1",
+            "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+            "started_at": "2026-09-08T09:39:14.01523872Z",
+            "health": "healthy",
+            "mounted_files": [
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/auto-max.yaml",
+                "target": "/etc/kairyu/auto-max.yaml",
+                "sha256": "6b57bb427b498761c19e66ae1400c326d9f0c9113f2b5917d4d3e1f0e6b41fe5"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/example.json",
+                "target": "/etc/kairyu/example.json",
+                "sha256": "69dee2ea3a57829e7ef1ae5b129158249a1664556266ea3f477ed267dc873645"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/qwen3.8-chat.jinja",
+                "target": "/etc/kairyu/qwen3.8-chat.jinja",
+                "sha256": "2b5abb67c8d9420c72f19718e652c9fa55b8f8f7623edc74c56125f3d6ae857d"
+              },
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/requirements_budget.py",
+                "target": "/etc/kairyu/requirements_budget.py",
+                "sha256": "b693f3a3c01319e32a5700d1e209e164f1d6bcf43a83ca0c6da19fd2c2127c07"
+              }
+            ],
+            "requirements_config_sha256": "90b05e69966e383dbd8deb29a9ac67c60a83f60841a0c3797451e9329ee96e0e"
+          },
+          {
+            "name": "qwen3-8-deepseek-v4-8gpu-executor-1",
+            "image_id": "sha256:3c26f28d9c3535fff582cdb7463996601b53fbecc002defadab455e8df2fe7a5",
+            "started_at": "2026-09-08T09:39:14.01082036Z",
+            "health": "healthy",
+            "mounted_files": [],
+            "requirements_config_sha256": null
+          },
+          {
+            "name": "qwen3-8-deepseek-v4-8gpu-deepseek-1",
+            "image_id": "sha256:b77f630cecd3945a046f0a89f642ee604639d29652cabfd79ccd4a1f4b81d78f",
+            "started_at": "2026-09-08T07:06:50.669471176Z",
+            "health": "healthy",
+            "mounted_files": [
+              {
+                "source": "/home/y-takagi/kairyu/examples/qwen3.8-deepseek-v4-8gpu/deepseek-role-effort.jinja",
+                "target": "/etc/kairyu/deepseek-role-effort.jinja",
+                "sha256": "1512e12bea2dcd54f128e83ac7b4415cc318140bf680733b22afe2effdf51f0f"
+              }
+            ],
+            "requirements_config_sha256": null
+          },
+          {
+            "name": "qwen3-8-deepseek-v4-8gpu-chat-ui-1",
+            "image_id": "sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+            "started_at": "2026-09-06T03:10:01.300013073Z",
+            "health": "healthy",
+            "mounted_files": [],
+            "requirements_config_sha256": null
+          }
+        ],
+        "gpus": "0, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-c2dec644-056f-5a18-64af-0dcb2d4b5aa1, 595.84\n1, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-7ca344d0-c282-61d7-446b-dcdf5c2dee16, 595.84\n2, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-8accd8d3-6791-1e54-af77-b229a199b1f1, 595.84\n3, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-7a56fbb4-fd9d-1f93-7bd6-f7e55579a964, 595.84\n4, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-d8ef7924-e297-e1ef-e51e-82c77b41715a, 595.84\n5, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-4884d626-ecaa-7fc1-49d2-158f6d118801, 595.84\n6, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-f212d821-c550-947e-904c-1ee6be110c96, 595.84\n7, NVIDIA RTX PRO 6000 Blackwell Server Edition, GPU-9813a152-84b7-57ef-3109-76b4a1d47673, 595.84\n",
+        "framework_attestation": {
+          "runtime_matches_checkout": true,
+          "python_files": 183,
+          "files_sha256": {
+            "__init__.py": "ee79ae06de2e11f6166b213d48f74b63d2f3bbc3cef917103adee00384da95b7",
+            "sse.py": "3536e91e471451de9f9b4e2940422956c7743cdde618c6a4a50ac017b238616f",
+            "sampling_params.py": "1f09f9d01dc202185c20c0fccbef84f721b588e080eadffa1c76d5128b54cb50",
+            "usage_reconciliation.py": "3a9f6b553bc629915e03c053cbcf0201d58757daf3a92fe305062c3fff1f2f3e",
+            "telemetry.py": "656da306825ac6d26132513c06a23a4653624849f7bf219abc6e13419b8e0cd1",
+            "pricing.py": "dda30baa7a875699c705425fbf1fa3a5719590ca905095a12a3e305bf905f84d",
+            "audit_io.py": "da5eb737f0e705e4e211a424a7136d0667f678e06503a12beaaf1247975992c7",
+            "async_thread.py": "d095e59e21601ae4a26880f59d0490a1f8cbc010ba5d096b5ce8bcfeedafee45",
+            "outputs.py": "ccdd0cc0fd9a4b9e14f4060d97f8b1809a9874224e143619e6f4c759ab15a2bd",
+            "engine/engine_loop.py": "85b8088949f0d553cb935961f3cf1133160522448525569b632d3b7d1b9ff416",
+            "engine/openai_capabilities.py": "9b896bd231d7f75b702347f0bd7d44f7661f71a642b835560c9b0fb8f110c322",
+            "engine/vision.py": "710dde06225d8a6ee836442f51463bd9b0211de129ce9a1dfe56ca23e69f52f2",
+            "engine/zmq_backend.py": "4b7220ccc2fdfd7c204245c17837cfb83a6c0a7381b72ff2e5679aca796cb99d",
+            "engine/__init__.py": "61e5b89c863fa75a41c6ba2f93125a245c512c1d35df79c606ef6df14a69aebc",
+            "engine/vllm_backend.py": "00f9601576fbba9a20be5be4c3c4d7303ad87a5d98b343b2953bc9bd53ae23d9",
+            "engine/embedding.py": "a8491f552d9aee5c15999b7a145cba0a06aaf033c980c6122aff1a88f5e61f07",
+            "engine/kairyu_backend.py": "88a9b46027b111e61b2083f58abcbc9e4692c4cecf5abac6f53e10b4d52d7c4d",
+            "engine/prompt.py": "5a61b75c295655c353cd96c315b76d5679d7f3020ca0d4a31856d425a45d5e24",
+            "engine/config_validation.py": "d9bf7f1912446482fc159943c8cf44dce1179972811f5b60e8e00c58cefdeaef",
+            "engine/registry.py": "88059526bb1621c6e87cf7272aeadf565d9f0991da21cd438f6c86b4bb99ef53",
+            "engine/backend.py": "80ac1e281dbf47b8efe16422159ae03541244eb436f7312ba7b40003f08ff896",
+            "engine/tokenizer.py": "3b8dc6b3bc58523aad656b7d2ea3680d71ed938415a8326b4e2b18546ca64f4e",
+            "engine/openai_backend.py": "ea95a91b4b5c44c98b576265949b4deb18855e824042a84cd789aba79705ef8e",
+            "engine/mock.py": "3c115f5c12ce42714427adb02ad36914d4bb0e55503365cfaf715fd8b655f45a",
+            "models/llama.py": "d3a0076e1e34e69d1a64334eafdc81452e85aa4c1d7123364560b19f88cc5048",
+            "models/__init__.py": "f56785052b2c34d6f5ad79401b7a444740d1a622bb10f24740e48b39d98b949b",
+            "models/parallel.py": "4f271b4606c2ab4695e4ec825ad0b267a810423d7d380cb8ec27714b2ae5d3dd",
+            "models/grouped_moe.py": "d7e2cf71e9e09de9bf272bf6144677571eb10165dde2d235471d44b8ccdc6686",
+            "models/layers.py": "24d7db68c24b972a17d33d813f4c8a7965abbef267bcd3ca584419ba49c2f0bf",
+            "models/deepseek_v4_cache.py": "e9e674cd2b508e67f74ffeecb41ceff837191dabae4f5e3286009d8c3b38ac95",
+            "models/attention.py": "3cfd64e9409c6b1eb47082d70174db8d97d8b0f8579ac1286a49e7ec04688c1b",
+            "models/packed_linear.py": "51f85d9dec54ac017610c6637c65fff8bb7f2ffc590489c6593a5d102c67f03a",
+            "models/eagle.py": "6f0d1169e95a8780198e718d61494b1ce1b7e20b54ec691ef31d232da8debc57",
+            "models/generation.py": "e84a6148cfcd30723c559d72acdeb40650ab7d875a78c7dae493ea7f8c2b0638",
+            "models/loader.py": "36a90860da517200cc409c28401c817433fdfd9f59ec3c801d202581a13a3afb",
+            "models/moe_parallel.py": "a89ab06e71b5562c45ae2b81373ae1f4915d539b5b85eccf2b9ffa52638af742",
+            "models/draft_quant.py": "decfe1f9fde24c429a9c3577f55d8c1b2543e4b370d8dc2605748afdfcda751d",
+            "models/moe.py": "d6500e9dc4f81d7d7ee2332cf2cecee8b7344f52d73a67a9d1e1dd4760ea46fa",
+            "models/deepseek_v4_checkpoint.py": "6b9d6e53001046f4bfd59d45e13d347b6b5d66b261a1d3c334d2432bd69a6570",
+            "models/mtp.py": "593eb65f4775ff766faa172681c1ee76c66d772c6e2316f4b91bca6a7a9274ad",
+            "models/deepseek_v4.py": "b30debb6f877fcd574f9d3c52ddb68b271f98cbea0b7eda55c958b317196581c",
+            "models/mla.py": "5796c0d9ff67560de894c4e9c79474b0f0922076234a79e87b984546ec85d9bd",
+            "models/config.py": "2ecee2d2a70c26109b450fc2fb8db817d6112f35f0e6077ab690dc8657bfc2ed",
+            "models/reference.py": "73006e67c19fdc4486cfafad7e3d707e4fe681bf80636c8d6293c54e786e4ca7",
+            "quant/linear.py": "8728a3cb99fdc1b6cb7d4aa1a434ab8abbcf9f1735176b7c790bc03b20b8867d",
+            "quant/gptq.py": "7534b53f28815b24fe02a1419e07a1c3c48ac6485854b75252fc8840d5016f6a",
+            "quant/__init__.py": "1b699fd5c8c001b6e8a616ade766c9ab10bb2b910cd0c945a34e16984659b82d",
+            "quant/fp8.py": "78cc5d35574da914027a5d2b408d4c60677979f0f1b5a337d484a2e036d8d943",
+            "quant/awq.py": "9e5b42b08307ddaf0ef1f6b45609c523d4b447f9c7382355d647d32fbb257d6d",
+            "quant/nvfp4.py": "6d328ec3b0bae80e3d9719bb78130778e056de67eb6d2675371b950f074b1e3d",
+            "quant/int8.py": "017c966a9dc262da686b1808b6e5b6efe89e058356bea8295596f4211dd7f508",
+            "orchestration/orchestrator.py": "8e6d3af12f851b04d13443a3f43a1db7b2fcbb0e949de5f185925250c1413ad5",
+            "orchestration/kv_routing.py": "f2443f21a661435afc3f4d8f2907f565807c4bc78e32d7cd880c331c335a0e3f",
+            "orchestration/cluster.py": "0e280e1d8f1bf11ade9d797075427acc072fb84957d190bf7d8f27ba24e0e539",
+            "orchestration/conductor.py": "27d44c2a20f8b34586192283813b7658858e116c85e6f45d41dcfc4b02c04f25",
+            "orchestration/__init__.py": "67398444ee6e80d816c9c6fbfc1d8fa81e714829b463cda8440fa30908800e17",
+            "orchestration/prefix_index.py": "b4f49c9634ad0c4bac36276d2d6085931eada5a82924f99e55b8cf7a5682ad41",
+            "orchestration/trace.py": "b301f38362fd63f45cfe30acb746a0ccc0a7a5a2890a23ea4ab139f164f70d71",
+            "orchestration/budget.py": "de3e0630192d390cc69aadd80cb18730968b689b59b903e461f8c16e010b6c34",
+            "orchestration/features.py": "e7942ff5c5c1f0a5b678b45932d11fb8543693d8a709744d865418ee637e37fc",
+            "orchestration/kv_index.py": "3b95873e1bd3c35377fa69ace103ac6f52cb06d909b0b100b6d274474541ec11",
+            "orchestration/execution.py": "dc55a85e19468125aa05142bd1b2c241ffa3a817d84312fa622bd887846bacd6",
+            "orchestration/replica.py": "4e2f81a15cecaeee7c01bcfcc7153e8db8b189a34f5255fba8f38527caa38577",
+            "orchestration/moa.py": "df8b5f8390fb3642fc5bf7dd3dfeeec6e2b53b75e444d0cbdae293189b0f5a81",
+            "orchestration/request.py": "283c009eb68dac4e6f7d8922407b7cc38a355a6f6cf99fb5283f4ed2b16d493c",
+            "orchestration/router.py": "a009f246a0e3be1b66085b79c83fb287918bb93117117472d153465f8851b210",
+            "dsl/__init__.py": "0e87aa708d35db71ac42e18e724c8ac60202bbc3551eb3836bd820cf750fa290",
+            "dsl/decorators.py": "2f15ced3866f785cbfe5c9eb81fd910a8d8b64db482e38525deb40f4fa398b25",
+            "dsl/loader.py": "c312614304ea1eb361f05a131a18a22d711b89832e6067e1b8af8144bde410a9",
+            "dsl/spec.py": "c4c2a1604a2812bd7e602cd5bfc9fd8d1fce9c15ad0e4809f70e00510f4d9233",
+            "entrypoints/chat_template.py": "ad9ad2aac93b36156f0c7657fab397b07260c8bcea7c8fd253e00523739cb5b2",
+            "entrypoints/__init__.py": "9c7770a92c57482024e8f01b86679d8eb3f4ca4b769533d0aca00431430b8a0b",
+            "entrypoints/llm.py": "800a10f67f98feefea91953ff1daa28950f5d1f79633e91e01c3e848229ee9ba",
+            "entrypoints/async_engine.py": "62ba4393be447afdb048b4c9a0733fbe8ed2e99e2fc90eb0ff9250652a349aa8",
+            "entrypoints/cli.py": "cdfc0e55e215df496c769d30461af3db91e78f4d98594d6370805c0be29d2582",
+            "deploy/__init__.py": "63a8f9a3f7216c863a101ed75be58a29cfe172981cfec71b6ded2bc24abeaaee",
+            "deploy/builder.py": "5886cfe54a4dfd6a582e3e63c5a16ff61bc5dcef43b0a2c15d826f6166ac9f8c",
+            "deploy/spec.py": "e4cb2127b3d48019d0a85b602a14aa59709ff78606ba5386377f031d0fee5798",
+            "deploy/validation.py": "d8ac0deb6443e0a5f522f0ef7d63c857bde1b6844750d034b2e187ecc7cef7fe",
+            "deploy/registry.py": "2e58b2bfe7bb851d09cd9ae5b08b54136429e523180bce9b7a23547e9542ea16",
+            "deploy/prober.py": "86ed69b578b19cbe6ebe94caa6df52f0a17bb3a3c7e562dc356f0d4728800969",
+            "kernels/awq_gemm_gpu.py": "1cb281d7af33f55af987b7234079f5d75bec5f6de055a415975ea1f72f263fe3",
+            "kernels/deepseek_v4_moe_gpu.py": "bf52018e4b2cdca44b9b5793997b32cfa9089ce59e65e6e6d99e43c1093ef68c",
+            "kernels/nvfp4_moe_gpu.py": "e2e33891c3b455d677c40d6371891bb6659da52638d0ea878a6d8ad168e4038f",
+            "kernels/sampling_gpu.py": "4b410ce7a4d7f286b03154d6c0cd00a34c40730b4e210989325b6de6aacbbb6e",
+            "kernels/fp8_gemm_gpu.py": "5e6d63d37c33cd49629c627af3077103b92c5cdf3f5501e6112e0fa96b896a7c",
+            "kernels/__init__.py": "a8b0cc3c4baecdc4aa435302ca792a7b1e5a8e29114f1f29d428baeecf2451f4",
+            "kernels/gptq_gemm_gpu.py": "843a4b9be51a39191ff4f9e80f73b98e9bcdefc4715168e9b12bf80fa24a5142",
+            "kernels/rms_norm_gpu.py": "b68900f200aac1c1379c43641e7f25ebd9e1eb8395d6ca8ebe82d1ab6c6f7bee",
+            "kernels/int8_gemm_gpu.py": "c9db2cc30026d892b2838bfdafbf8968fde73fbb899fe3918a79b33d3daab188",
+            "kernels/paged_kv_write_gpu.py": "eb3ee5970d12ed4a08c5e2c5edb74744b78f1ab2ce24766852edd45d5d5d71b3",
+            "kernels/rope_gpu.py": "10b63799130b20ab96bb333bc94345e77e8e3880b3c7fcda81fbb69298966585",
+            "kernels/flashinfer_decode_plan_gpu.py": "b27e50959820ec036ece10f6b4de5bfe18cc300287cfd3a481c888a7c8c06280",
+            "kernels/quant_gemm_gpu.py": "26784a297135404c6b27807bb9d8887e14ec664354944b4933cc6bdaad0aebff",
+            "kernels/nvfp4_gemm_gpu.py": "264fe0997d27a9d0a38f64ed55a31e713c47dcac981effec0e6fa8c06dcb3c2b",
+            "batch/__init__.py": "53b9d0f0187c4d4e315c109cd73014ed6dc54f3680d62aec9677f63fba04a4e1",
+            "batch/worker.py": "ddc2d832fba46017f2fc599887700e55c929b94b432a91119d77a13833012c4e",
+            "batch/store.py": "609a6462d194695387999008619862f629bc132f39801429760857609753b22f",
+            "batch/envelope.py": "4ff8a95ba38e65f247abd8bced2f925ea72eb8d6b1a104cd38d9354e5d030eeb",
+            "batch/postgres_store.py": "45e480d9c2a59b59c150b910d19bf91032a43218e1071694122b728f624ea80b",
+            "engine/core/sampling_types.py": "08f92155465737fc137b8d5c4520fc23528d76c3d6ce6018a84053d921aeba62",
+            "engine/core/sampler.py": "b6042795bba6dede367da5600cb23d37c452c10af86568b1a776760e3cc99b56",
+            "engine/core/engine_core.py": "b6aaf56f829535587bb3bed4221dc22298873cb1e3b52f50c1f31ad774617d44",
+            "engine/core/kv_transport_nixl_gpu.py": "e2c6329f0872750e28276b65d521f15b0425aacad3930476238f7a17246a7988",
+            "engine/core/draft.py": "8e3db9ea731c70287ed7a8149b60ab0839b831875caea23a0aac97a91b51bcc8",
+            "engine/core/tp_runner.py": "fe20e62c5e62faf0da7968ea8c50485f9eb66f4cb66eff30b9bdb337a674d321",
+            "engine/core/pd_loop.py": "3d7c034505130fe15a35cb830dadb7dcb45b19844d13096a2c25fcca3c134eee",
+            "engine/core/deepseek_v4_runner.py": "bfc10c47f2ffae835159e83b15bbcb17d432c447a93e04963599f8383b2f837d",
+            "engine/core/quant_config.py": "128df0b3a4ec084a9e09cbefb01fb3112fe00283f9e3bcf9e2e5c19835465973",
+            "engine/core/frontier_runner.py": "2e45af8e86cbdc6f1d9896b9ec44c1b98526e8a40418ac8ec9629c3d1f03fe15",
+            "engine/core/spec_runner.py": "31676d0e30d6bff8590f87d6b363123290b692e5531a658ea736903059ac1662",
+            "engine/core/weights.py": "36903c144f8935f7a1314d722d900af1e0a9984eabb8af0c8189564d618152dc",
+            "engine/core/radix_kv.py": "5cdb32a298f4d423a07e5f995556fc1c50a4cd4a1e9004854a6290b6c736391b",
+            "engine/core/__init__.py": "cdfd2ed4b5b4c36286c636d1d95ad9108001c00dd9becc25f604ffd5d11cc423",
+            "engine/core/step_executor.py": "2d113c663de17995859f52be6733b17c7003afee36dacc1bbf768c6e8665fef7",
+            "engine/core/pd_factory.py": "c01365f020f0fe2af64b68ccdf3d8c628e13d67b2c9d7681a8d6cba5625d18bc",
+            "engine/core/structured.py": "e6035911eeea075d7388f5693b628b32aff1ff07b34bb79faeb80360464a1a89",
+            "engine/core/scheduler.py": "0f7d1eb68a32dcbf85d106b568e2baa3f384c5794410a36a2fa71ce4269fbe04",
+            "engine/core/gpu_topology.py": "7d2b253bd67986b3ad2d025f730381d25c0223a833fd8e6cecf139438967eed8",
+            "engine/core/pages.py": "1a58fdf3907f86809257bdb6291fe40700e376003f1d81ec8825f568d370630f",
+            "engine/core/spec_decode.py": "56cb91322a4119d302cfdbcc75db8710c180b33dc9bf203056db6c131829fa43",
+            "engine/core/worker.py": "46ce9d7c8b027145f71b7c6b1331055f6517448b9050453d3c9a3c325bb04cee",
+            "engine/core/frozen_prefix.py": "5373bcb70add68a815244ff50f01cdc9a59da16168770b16ef15e812f7d72f82",
+            "engine/core/pipeline.py": "ebd96239bd448a91e7d07cb3a1ee0b2b6fc3bef710049ea3ec28fb7b551e3120",
+            "engine/core/comm.py": "18c04a1265e2da641bf273013ffc402911c7e72a396ed08409c00cb611059f86",
+            "engine/core/kv_serde.py": "305758365d27e5dacb832030993e747e28f1d87a8c1d0c8125301e019ba0fa1c",
+            "engine/core/kv_transport.py": "dfdb3a0b694de5244f34ec5ebf1ece58ae6f31ab127762a8e767877e0e54d529",
+            "engine/core/direct_nccl.py": "1b3a67deb98f4b13de0cadf2aca266937a2aac9090e9d83b0d67463b8ae3a550",
+            "engine/core/graph_buckets.py": "c778e77602f6849ffc8f2878b78549ad1fdb4d75285205d231a0c485bfe976c8",
+            "engine/core/torch_runner.py": "ecda2354eb182e2d6c9164a3649a0df8c2f0a82a15916b5ee5a841de6ec197e6",
+            "engine/core/pd_remote.py": "7c03d5fcc3f3eda77265c184624fdb5140d7dd6d6cea34a358774c03c4714727",
+            "engine/core/hw_profile.py": "f4592a3f1c672c692d6afa74c19423813ffb984c9baeab3c9a4e45ddd3d54ad2",
+            "engine/core/frontier_cache.py": "f2fc602308730810bde1ec055ead9f6ae5a95a0926d259abca5eec282526b557",
+            "engine/core/kv_pool.py": "ee1df02cae61b1ec141fbfc8dcbc0237d57324a9b346afb5e6607fcc5885755c",
+            "engine/core/cuda_graph_gpu.py": "4d06b775e3f86ef5c77eeaa1994913a445e1b519bc26bc86c1c6db29148c593c",
+            "engine/core/engine_service.py": "aee660ce525ba3429205153515175e4a202e19d4f4ff83171e9c4d731c79e735",
+            "engine/core/dist_comm.py": "6c435091103e77055dcca00ca6c5e25b30093d5c51f4fb7a641b2f56105273d7",
+            "engine/core/handoff_stream.py": "948ede688e9bbac81c6e5c516331e2dd0e3cbe310a258de4af49ce2170d5670c",
+            "engine/core/kv_scale_calibration.py": "81cfb3665b48c248b8ace56d52575aad012aa2cc14c5ec6a196fa12ee94eb1ec",
+            "engine/core/model_runner.py": "8f98efd84ee300c92d8d93784597e5416c0161b4b38fc8c6d7089dc1851271e8",
+            "engine/core/pp_worker.py": "1d801cb16f42e85f31de7add7add1b1c8bf661ee7e2cb43ddd71e111521cd368",
+            "engine/core/kv_tier_policy.py": "c1dd802753c7de9577e2b7d0b8388439005a56369343a95c95b6f528b1421eca",
+            "engine/core/attention_selector.py": "00edcb2bbd73bfc23d5d54fb968deb74e2a2054a6ce60414244d15481e040a30",
+            "engine/core/kv_cache_dtype.py": "c08cca86d1f26939b181bea4e5f2ce10881ad14bc51a4572ed128937fa09f486",
+            "engine/core/recompute_runner.py": "ccb95101e84330949af864ca06f1c980f0e69f8f1f982320849f10810e957766",
+            "engine/core/pd.py": "bf5ba17ceeff5d3d2dbab05e8a801c35224ad5c7352e8c0fc222d830444e9747",
+            "engine/core/numa.py": "16557d0e3e0523e6f8d623f0453fe3a5f0696c8fd483ef69eab1a0465f108c0d",
+            "engine/core/step_input.py": "99d9d18f66c76bd4f35b692fc99888102b9925b6ece5d69c549cb1efa0cb63b5",
+            "engine/core/overlap.py": "281d6199c9b5877d9098b5e68ffee6ca64d46894a5c00fc5b489a3ba73a4af50",
+            "engine/core/prefill.py": "1077f8f76d993df9760449dccd609e172e5202fc13c0d4409a73ee1949cdc17d",
+            "engine/core/kv_tier.py": "590c89a972c39384f50eab9dd24862c84d1631c9c53e04b0558047169d79320c",
+            "engine/core/nvfp4_accuracy.py": "6cc7a4394725b3f2508b5f8c9a954fdefa1da23616e3c034dca6b0877d47d886",
+            "engine/core/attention/mla_torch.py": "5e77b86cf2b19181aa53770ebe2815da7f9fbb5289c9bc54c7b82f23a972a994",
+            "engine/core/attention/flashattention_gpu.py": "03f5f8ba289c2de3f8110bdee3ed6dd5c195667b66b38423dcd513535ddf7cab",
+            "engine/core/attention/selector.py": "a342280c3927a30619300d89820fe50cd9521c97cd3bb7e6798ab044e44c0b3c",
+            "engine/core/attention/flashinfer_gpu.py": "12bcc3cec0ef3400d50ad3cb19be163ee21eab11b6c71db0ae6772d83a5797a6",
+            "engine/core/attention/__init__.py": "0f3b4555962609b132cd47c10f2f42a4476100859405df5e16950baedc4acbe2",
+            "engine/core/attention/torch_backend.py": "c08029fbd605b69b202dd5eb4b785cfdd0e5c6c83f2c19cefac868fbf08c4c04",
+            "orchestration/learning/classifier.py": "ea82ca3478ef57fb357fc312f17a3fa9570e794e21e9e52ef69296279c7f0698",
+            "orchestration/learning/__init__.py": "2ef98a20269e125fc06b14fed4be84805188648fa79dfdfad154258580a92bd2",
+            "orchestration/learning/dataset.py": "3896c2cb298c091d48af457169e5992a06ece11a7aef7adf86b61e394b1d6a4c",
+            "orchestration/learning/bandit.py": "912eb93a26e5cd87bb6c78632b0afe1e453142d78115ff04192ae397514fb22b",
+            "entrypoints/server/tenancy.py": "d14d9e0f537310694f079ca73b84c1f7a20e9890be57080e45f24f5a3bc60e2e",
+            "entrypoints/server/extra_routes.py": "da5efefecd03751e1757e0b845987525b318cfcf1d26fd84f4ad4194362f28cf",
+            "entrypoints/server/metering.py": "ddbaaa530c62e26fa1e59d6662594df9c95f886e243e3bc8974299ae455d424f",
+            "entrypoints/server/__init__.py": "879a416effd691d0bc005d7f4d61c7cb9c84ea43c025979c25d24af9fa8a6d57",
+            "entrypoints/server/errors.py": "54680b9a543e23df705c9e1b0da170e83e13170b805ab4f228a17fdb9aba7ed1",
+            "entrypoints/server/request_body.py": "4d07913bccacc8a7b68dc92a57f81eb901339f5dda2fa1b4ddd9d544abb13c7e",
+            "entrypoints/server/responses_service.py": "cd6b061c66d353b169c8a20030b63820cc67fc64bae8ef1017fe14a2d34231e8",
+            "entrypoints/server/sse_encode.py": "3f9ce473427248f04bed93adeeb2195935c12cb754d646cf4453b4682fa8c33d",
+            "entrypoints/server/batch_routes.py": "341884dd3ff5020393a1c1741d41580762639fe5cd31a1676e91b1e20a78bbef",
+            "entrypoints/server/health.py": "e944aa087a673d58874cacc44494e19a5aeea2aac8e2ddbcf260dedc77d7ecbb",
+            "entrypoints/server/messages_service.py": "0bb36b94377713e180a0a4fd4e35a91787e43536dfd505ff81b5ecfe539d046b",
+            "entrypoints/server/protocol.py": "3a56c9bf29ac4b0318aed06f450660aae94593513c000952dba5db7d3e98926c",
+            "entrypoints/server/messages_protocol.py": "e0333265cf49eb39dd8d89d6106041a2b46ec2e1f804c4b159e061e05e5f58c4",
+            "entrypoints/server/middleware.py": "8382a5bb6a933bb9fb2e4a6c5e2b3ef5c0f3ed615918af7ce29c18ed5ff91c80",
+            "entrypoints/server/chat_service.py": "0674ebb0b68239c403fa974a7f53e67a110b6ff60675ce37e55ad46f151cd58b",
+            "entrypoints/server/settings.py": "b6cb0e435266522e86a8f555496b1f1c0fe1a1e9294d45226709456d9e05605f",
+            "entrypoints/server/app.py": "a993a6dd05bf8895cbd5eca16cc08fe87e150d8bdc376bd4acd63ccc6621fcb5",
+            "entrypoints/server/sse_response.py": "0bd4c73f916d88823bef8543fa30c3b11ecc05bde03d69260a3bd54d7a317835",
+            "entrypoints/server/slo.py": "1808bc113c92cdf182e08c1df382276c1c94389e3019f21d2498cc6be61daf75",
+            "entrypoints/server/tool_stream.py": "06ab0398709a7f819ba2b0c48a4cfd9fdbfb341ca5c67039083ae61273814c94",
+            "entrypoints/server/metrics.py": "f3dc36b228ab666af7de5c8dbb33ac8dd09a73499175bec483fe02162d68c6fd"
+          }
+        }
+      },
+      "rows": [
+        {
+          "name": "serving-c1",
+          "summary": {
+            "requests": 32,
+            "wall_s": 263.767583149,
+            "ttft_p50_ms": 2270.24,
+            "ttft_p99_ms": 2294.16,
+            "e2e_p50_ms": 7987.4,
+            "e2e_p99_ms": 14228.8,
+            "tpot_mean_ms": 22.685,
+            "public_output_tokens_per_s": 32.12,
+            "success_rate": 1.0,
+            "trace_coverage": {
+              "total_requests": 32,
+              "requested": 32,
+              "not_requested": 0,
+              "valid": 32,
+              "partial": 0,
+              "missing": 0,
+              "invalid": 0,
+              "fraction": 1.0
+            }
+          },
+          "routes": {
+            "judge_total_ms_p50": 234.0,
+            "judged_samples": 32,
+            "routes": {
+              "qwen_direct": {
+                "requests": 32,
+                "ttft_p50_ms": 2270.24
+              }
+            },
+            "schema_version": 1
+          }
+        },
+        {
+          "name": "serving-c16",
+          "summary": {
+            "requests": 32,
+            "wall_s": 562.920381625,
+            "ttft_p50_ms": 12165.34,
+            "ttft_p99_ms": 20552.73,
+            "e2e_p50_ms": 25912.32,
+            "e2e_p99_ms": 536998.6,
+            "tpot_mean_ms": 117.359,
+            "public_output_tokens_per_s": 14.88,
+            "success_rate": 1.0,
+            "trace_coverage": {
+              "total_requests": 32,
+              "requested": 32,
+              "not_requested": 0,
+              "valid": 32,
+              "partial": 0,
+              "missing": 0,
+              "invalid": 0,
+              "fraction": 1.0
+            }
+          },
+          "routes": {
+            "judge_total_ms_p50": 513.0,
+            "judged_samples": 32,
+            "routes": {
+              "primary": {
+                "requests": 1,
+                "ttft_p50_ms": 12165.34
+              },
+              "qwen_direct": {
+                "requests": 31,
+                "ttft_p50_ms": 17267.17
+              }
+            },
+            "schema_version": 1
+          }
+        },
+        {
+          "name": "serving-c32",
+          "summary": {
+            "requests": 32,
+            "wall_s": 43.601586583,
+            "ttft_p50_ms": 32844.57,
+            "ttft_p99_ms": 33281.76,
+            "e2e_p50_ms": 39727.89,
+            "e2e_p99_ms": 43585.28,
+            "tpot_mean_ms": 36.527,
+            "public_output_tokens_per_s": 202.49,
+            "success_rate": 1.0,
+            "trace_coverage": {
+              "total_requests": 32,
+              "requested": 32,
+              "not_requested": 0,
+              "valid": 32,
+              "partial": 0,
+              "missing": 0,
+              "invalid": 0,
+              "fraction": 1.0
+            }
+          },
+          "routes": {
+            "judge_total_ms_p50": 1027.0,
+            "judged_samples": 32,
+            "routes": {
+              "qwen_direct": {
+                "requests": 32,
+                "ttft_p50_ms": 32844.57
+              }
+            },
+            "schema_version": 1
+          }
+        },
+        {
+          "name": "serving-c8",
+          "summary": {
+            "requests": 32,
+            "wall_s": 69.363978339,
+            "ttft_p50_ms": 6357.64,
+            "ttft_p99_ms": 8233.33,
+            "e2e_p50_ms": 16952.75,
+            "e2e_p99_ms": 22110.42,
+            "tpot_mean_ms": 43.071,
+            "public_output_tokens_per_s": 113.82,
+            "success_rate": 1.0,
+            "trace_coverage": {
+              "total_requests": 32,
+              "requested": 32,
+              "not_requested": 0,
+              "valid": 32,
+              "partial": 0,
+              "missing": 0,
+              "invalid": 0,
+              "fraction": 1.0
+            }
+          },
+          "routes": {
+            "judge_total_ms_p50": 304.0,
+            "judged_samples": 32,
+            "routes": {
+              "qwen_direct": {
+                "requests": 32,
+                "ttft_p50_ms": 6357.64
+              }
+            },
+            "schema_version": 1
+          }
+        }
+      ],
+      "raw_directory": "/mnt/nvme/kairyu/model-volumes/qwen3.8-deepseek-v4-8gpu/verification-results/20260908T101744Z",
+      "artifact_sha256": {
+        "image-budget-application.json": "b8dbaa59b5dd2388328685c87ba46e4e7d9de0c7ab0dc1783d872d8ba941f537",
+        "qwen-1-requirements-budget.log": "d5ace7eab629fd6b1293f44f00e69492259baadc620a4e8d5e1f0f7a2c838dbc",
+        "qwen-0-requirements-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "qwen-0-audit-format.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "launcher.log": "7db8ca96de2fc959ca0b86531b5d609c78a18916814097838b50acd1c0848ebc",
+        "qwen-1-audit-format.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "qwen-2-image-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "run.json": "7f678525fcde8db74874a98962dbe74488f160577f8b4a825d1464bc16bd705c",
+        "qwen-3-audit-format.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "qwen-2-audit-format.log": "d09a0257f12e181bd9611ed7aa0abbfc3bceed057b8ab30bb15137aa666c85c9",
+        "qwen-0-image-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "budget-application.json": "a6854d745ed666cbfa3a6e27068b20b3350ea9e8c0ab0e40631c9e74e04a9f83",
+        "audit-format-application.json": "f632d4379bc5d2570d4e0a1d6cde44b1b3a858bb50da71b094cd4661b55bbab9",
+        "qwen-2-requirements-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "qwen-3-requirements-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "runtime.json": "b5c1d7728286267e0f2d8a0e4b1fb4c37780257ada4fd6609660791db389db3e",
+        "qwen-1-image-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "qwen-3-image-budget.log": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+        "serving-auto-max/warmup-8k.json": "011f39eb9bb39698ed5853652208b4246d8c452de144d10aeb91cc88dd1ed72d",
+        "serving-auto-max/serving-c8-8k.json": "51f9a7f55edcb6a0ab8d208fb37a7f996f01155af3cedd8d1479aab51cb3f3aa",
+        "serving-auto-max/serving-c8.log": "126430957215309a73440bcce800fef2487264c05a207f796d304eb2986645c3",
+        "serving-auto-max/serving-c16.log": "8db6072b7bcd39c3afab71891f4637d8285cd7df398d8c701c6f000f77c0e237",
+        "serving-auto-max/serving-c32-8k.json": "ee2c133994f945852fd274d8c565c9cf59ac89f0f0162314ce838aeed45cfa9b",
+        "serving-auto-max/serving-c16-8k.json": "674945154e2ae93b1d960ff56585e60d93c63d36753aee03e4bf0a00e4fa50f3",
+        "serving-auto-max/serving-c1-8k.json": "7e833b9c7c906f491f3fd0177c1056564566da56950bb0cd971af3c9c835dabf",
+        "serving-auto-max/warmup.log": "f266d762013f1be955dce101fc1a27f19eba6a60138d6f8f97cacd124fd04bc8",
+        "serving-auto-max/serving-c32.log": "52b7ed10a5f71ae51ca8dfd19e7da5719291363c753bf90a564ce81478a2b282",
+        "serving-auto-max/serving-c1.log": "769369146f90d73e508279e84d4513f52c59f8c8c1a7a0b8cbe26e928d771bc2",
+        "serving-auto-max/serving-c32/routes.json": "423762c92d31d07606c02fa86aa5c661c1eeb27432ff7efba7674475cd9b6fb2",
+        "serving-auto-max/serving-c32/2026-09-08T103253.288688Z-serving.json": "182c150e1efb419c5f62af7bbbd0b1e8b9f64617b2f2db444a82b3b41ffc21d5",
+        "serving-auto-max/serving-c16/2026-09-08T102329.888089Z-serving.json": "6eabed28bf4c7a82da6c0917e4b41c4df8fd25ae86397a308c6635f2ac567096",
+        "serving-auto-max/serving-c16/routes.json": "33bfb8ed6735fb554738e074ea3ea6a2dab33497654cc5940715b41a1947a6f2",
+        "serving-auto-max/warmup/2026-09-08T101744.794123Z-serving.json": "83051c1577c9240cb5b151fddc5de174af2ca5b99f07172d4ea0e17866decb39",
+        "serving-auto-max/serving-c1/routes.json": "81bc9f9750c8e73e65bb85a0032df87ba4fdeb00781775b1ab32f113dcf36ba9",
+        "serving-auto-max/serving-c1/2026-09-08T101755.804331Z-serving.json": "92d41c82f6c3249ade62b09163024df934ff73a665a6daca4dabe4b54f2f7a0b",
+        "serving-auto-max/serving-c8/routes.json": "9da9cfdda03c19238abf28b5875fa314129f8e56711edd0876a8b8a2ab87f256",
+        "serving-auto-max/serving-c8/2026-09-08T102220.072006Z-serving.json": "5dcd2d02084ad939b2871b710d6d4c1fac0efe3122abbe5e64a555a67e378e0c"
+      },
+      "budget-application": {
+        "count": 1,
+        "records": [
+          {
+            "worker": 1,
+            "line": "2026-09-08T10:24:00.939769773Z (APIServer pid=1) INFO 09-08 10:24:00 [requirements_budget.py:226] Kairyu requirements budget: thinking=4096 max_tokens=8192 seed=10 messages_sha256=aeded4bfa70137cfd0334e2e9d1f12857a0f37aad36c2846a6189b8e125c12c3"
+          }
+        ]
+      },
+      "image-budget-application": {
+        "count": 0,
+        "records": []
+      },
+      "audit-format-application": {
+        "count": 2,
+        "records": [
+          {
+            "worker": 2,
+            "line": "2026-09-08T10:27:08.670545103Z (APIServer pid=1) INFO 09-08 10:27:08 [requirements_budget.py:219] Kairyu audit format: max_tokens=16384 seed=9 messages_sha256=6549b44f2a0999be1886e3cb307274337ca6b50361cc00f7926f0ba53b7181ed"
+          },
+          {
+            "worker": 2,
+            "line": "2026-09-08T10:30:16.769408007Z (APIServer pid=1) INFO 09-08 10:30:16 [requirements_budget.py:219] Kairyu audit format: max_tokens=16384 seed=9 messages_sha256=c160156a361f37536d91ab2858062a91a400060e8ea0eebbfe123983089348a5"
+          }
+        ]
+      }
+    }
+  ],
+  "limitations": [
+    "Serving harness retains stage traces and token counts, not intermediate response bodies; nonempty requirements JSON cannot be independently inspected for the one primary request. The separate nine-case quality artifact retains all bodies."
+  ]
+}

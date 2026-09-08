@@ -270,8 +270,8 @@ run this checklist. `n>1` also retains its existing audit bypass. Inspect the
 intermediate audit for unresolved requirements. The pre-tuning 2026-09-08 GPU diagnostic
 found empty checklists in two of three requests at the original 4096-token cap, even when the
 final audit passes. The served-config digest and generic latency results
-are recorded in [MEASUREMENTS.md](MEASUREMENTS.md); checklist quality remains
-pending full API re-verification after tuning.
+are recorded in [MEASUREMENTS.md](MEASUREMENTS.md). The final tuned configuration
+passes all nine API quality cases, with every answer and audit retained.
 
 Design notes (see
 [`docs/design/example-dual-track-orchestration.md`](../../docs/design/example-dual-track-orchestration.md)):
@@ -390,6 +390,34 @@ remain open. See
 
 ## Start
 
+Run this recipe on Linux with eight RTX PRO 6000 Blackwell Server Edition
+GPUs (indices 0–7, at least 90000 MiB each), a compatible NVIDIA driver,
+Docker Engine with the NVIDIA Container Toolkit configured, Docker Compose,
+and Python 3. GPU PCI devices must expose valid NUMA nodes and online CPU
+lists in sysfs. The launcher discovers those CPU lists on each host; it does
+not reuse this machine's CPU numbers. NUMA node `-1` is currently rejected.
+The launcher user needs Docker access and writable storage under `/mnt/nvme`
+(default `/mnt/nvme/kairyu`, at least 220 GiB free), access to the pinned
+container/source/model downloads, and available ports 8003, 8005, and 3000.
+Set `PUBLIC_HOST` when automatic outward-facing address discovery is unsuitable.
+
+The DeepSeek source build explicitly selects `vllm-openai-nonroot`. Existing
+images are checked for the pinned source revision and expected non-root
+user, entrypoint, and working directory; stale incompatible tags fail with an
+actionable error. Build image IDs may differ across builds; `image_id` records
+the measured local build, while the source revision and target define the recipe.
+DeepSeek caches live at `/var/cache/kairyu` in the container. A setup-only
+root container prepares ownership for UID 2000/GID 0, independently of the
+host launcher UID. Model download also runs as container root; serving stays
+non-root. No local cachefix image or `/root` permission patch is required.
+
+Without an explicit `KAIRYU_RESPONSES_COMPACTION_SECRET`, the launcher adopts
+the existing API container's key on upgrade, or generates one on first launch.
+It persists the key in the example's NVMe `private/compaction-secret` file
+(directory mode 0700, file mode 0600) and reuses it on subsequent runs.
+An explicit environment value takes precedence for that invocation and must
+remain consistently supplied; it does not overwrite the saved default key.
+
 ```sh
 ./run.sh
 ```
@@ -492,7 +520,9 @@ The current DTO-D16 configuration passes all nine API quality cases (the
 original memo, JSON, and image requests, one serial and two concurrent rounds)
 with complete shared checklists, grounded audit evidence, and manual review of
 every final answer. Same-config direct routing also passes without applying
-any evidence-root or audit hook. Final serving matrices are being re-measured.
+any evidence-root or audit hook. The final-config generic serving matrix is being re-measured. Coding routes
+and sampling are unchanged; historical coding measurements remain evidence
+for their original configuration, with no new coding latency claim.
 The earlier empty-output and semantic counterexamples remain preserved in
 [MEASUREMENTS.md](MEASUREMENTS.md), alongside full answers, audits, manifests,
 and the current served-config hash. These model-based checks are diagnostics,
@@ -564,11 +594,28 @@ and serving-performance analysis.
 The `requirements-quality` gate repeats the original text, JSON, and image
 cases three times (serial, then concurrent). It rejects empty or truncated
 checklists, missing minimum constraints, missing audit IDs/evidence, and a
-PASS that leaves minimum requirements unsatisfied. Full tuned API evidence
-is pending; direct worker probes alone do not close this gate.
+PASS that leaves minimum requirements unsatisfied. The final nine-case API
+run passes automated and manual review; direct worker probes alone would
+not close this gate.
 
-When extractor settings change, `control.py` passes their content hash into
-the Qwen Compose environment. Normal `./run.sh up` therefore recreates the
-affected workers and reloads the complete prompt matcher. The committed
+`KAIRYU_REQUIREMENTS_CONFIG_SHA256` is an internal container-lifecycle value,
+not a Kairyu framework setting or a hardware fingerprint. `control.py`
+automatically hashes the names and bytes of `auto-max.yaml`, `example.json`,
+and `requirements_budget.py` and supplies the result to Compose. Changes to
+these mounted files then change the container environment, so normal
+`./run.sh up` recreates Qwen workers and reloads their prompt matchers. Users
+do not need to choose or pin this value. Identical files produce the same
+hash on another machine. The hash does not probe GPUs or include the absolute
+checkout path; hardware/storage fields written in `example.json` are part
+of the file content being hashed.
+
+The hashing and request middleware use hardware-independent Python logic,
+but the hook deliberately targets this Qwen3.8/vLLM example. This deployment
+already specifies eight RTX PRO 6000 Blackwell GPUs, model placement, memory
+requirements, and compatible backend images. A different GPU family or
+machine topology requires suitable deployment configuration and its own
+validation; the example is not claimed to run unchanged on arbitrary hardware.
+Kairyu framework code is untouched, and the GPU evidence here is limited to
+the stated eight-GPU environment. The committed
 opening is limited to one sentence of at most 30 words; synthesis applies
 user length limits to that opening plus its remainder.

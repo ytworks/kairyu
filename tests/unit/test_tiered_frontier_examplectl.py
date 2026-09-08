@@ -184,13 +184,13 @@ def test_tiered_example_allocates_four_qwen_replicas_and_one_deepseek_tp4() -> N
         "./deepseek-role-effort.jinja:/etc/kairyu/deepseek-role-effort.jinja:ro"
         in deepseek["volumes"]
     )
-    assert deepseek["volumes"][1]["target"] == "/root/.cache"
+    assert deepseek["volumes"][1]["target"] == "/var/cache/kairyu"
     assert deepseek["environment"] | {
-        "XDG_CACHE_HOME": "/root/.cache",
-        "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/torchinductor",
-        "TRITON_CACHE_DIR": "/root/.cache/triton",
-        "TILELANG_CACHE_DIR": "/root/.cache/tilelang",
-        "TILELANG_TMP_DIR": "/root/.cache/tilelang/tmp",
+        "XDG_CACHE_HOME": "/var/cache/kairyu",
+        "TORCHINDUCTOR_CACHE_DIR": "/var/cache/kairyu/torchinductor",
+        "TRITON_CACHE_DIR": "/var/cache/kairyu/triton",
+        "TILELANG_CACHE_DIR": "/var/cache/kairyu/tilelang",
+        "TILELANG_TMP_DIR": "/var/cache/kairyu/tilelang/tmp",
     } == deepseek["environment"]
     assert json.loads(_option(deepseek["command"], "--speculative-config")) == {
         "method": "dspark",
@@ -858,6 +858,7 @@ def test_tiered_control_uses_explicit_public_ui_host(
         },
     }
     monkeypatch.setattr(control, "_storage_paths", lambda: storage)
+    monkeypatch.setattr(control, "_compaction_secret", lambda path: "x" * 64)
 
     assert control._public_ui_host() == "gpu.example.test"
     assert control._compose_env()["API_BIND_ADDRESS"] == "0.0.0.0"
@@ -1143,3 +1144,104 @@ def test_tiered_coding_gate_fails_when_ttft_exceeds_double_direct(
     assert benchmark.serving_auto_max_coding(tmp_path / "na") == 0
     gate = json.loads((tmp_path / "na" / "ttft-gate.json").read_text())["gates"]["1"]
     assert gate["status"] == "not_applicable" and gate["passed"] is None
+
+
+def test_compaction_secret_first_launch_persists_privately(monkeypatch, tmp_path):
+    import subprocess
+
+    control = _load(EXAMPLE / "control.py", "tiered_secret_first")
+    monkeypatch.delenv("KAIRYU_RESPONSES_COMPACTION_SECRET", raising=False)
+    calls = []
+    def absent(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, "", "No such container")
+    monkeypatch.setattr(control, "_run", absent)
+    state = tmp_path / "private"
+    first = control._compaction_secret(state)
+    assert len(bytes.fromhex(first)) == 32
+    assert control._compaction_secret(state) == first
+    assert len(calls) == 1
+    assert state.stat().st_mode & 0o777 == 0o700
+    assert (state / "compaction-secret").stat().st_mode & 0o777 == 0o600
+
+
+def test_compaction_secret_adopts_deployed_key_and_honors_override(monkeypatch, tmp_path):
+    import subprocess
+
+    control = _load(EXAMPLE / "control.py", "tiered_secret_migration")
+    key = "KAIRYU_RESPONSES_COMPACTION_SECRET"
+    monkeypatch.delenv(key, raising=False)
+    deployed = "existing-key-" * 8
+    monkeypatch.setattr(control, "_run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, 0,
+                            json.dumps([{"Config": {"Env": [f"{key}={deployed}"]}}]), ""))
+    state = tmp_path / "private"
+    assert control._compaction_secret(state) == deployed
+    monkeypatch.setenv(key, "explicit-key-" * 8)
+    assert control._compaction_secret(state) == "explicit-key-" * 8
+    monkeypatch.delenv(key)
+    assert control._compaction_secret(state) == deployed
+    (state / "compaction-secret").write_text("invalid")
+    with pytest.raises(SystemExit, match="refusing to rotate"):
+        control._compaction_secret(state)
+
+
+def test_compaction_secret_rejects_symlink_and_inspection_failure(monkeypatch, tmp_path):
+    import subprocess
+
+    control = _load(EXAMPLE / "control.py", "tiered_secret_failure")
+    monkeypatch.delenv("KAIRYU_RESPONSES_COMPACTION_SECRET", raising=False)
+    state = tmp_path / "private"
+    state.mkdir()
+    target = tmp_path / "outside"
+    target.write_text("unchanged")
+    (state / "compaction-secret").symlink_to(target)
+    with pytest.raises(OSError):
+        control._compaction_secret(state)
+    assert target.read_text() == "unchanged"
+    (state / "compaction-secret").unlink()
+    monkeypatch.setattr(control, "_run", lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, 1, "", "permission denied"))
+    with pytest.raises(SystemExit, match="inspect"):
+        control._compaction_secret(state)
+
+
+def test_deepseek_build_target_and_stale_image_validation(monkeypatch):
+    import subprocess
+
+    control = _load(EXAMPLE / "control.py", "tiered_image_target")
+    source = control.SPEC["vllm"]["deepseek"]
+    env = {"DEEPSEEK_VLLM_IMAGE": source["image"]}
+    config = {"Labels": {"org.opencontainers.image.revision": source["source_revision"]},
+              "User": "vllm", "Entrypoint": ["/usr/local/bin/vllm-nonroot-entrypoint.sh"],
+              "WorkingDir": "/home/vllm"}
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, json.dumps([{"Config": config}]), "")
+    monkeypatch.setattr(control, "_run", run)
+    monkeypatch.setattr(control, "_image_exists", lambda image: False)
+    control._ensure_vllm_image(env, "DEEPSEEK_VLLM_IMAGE", source)
+    assert _option(calls[0], "--target") == "vllm-openai-nonroot"
+    assert calls[0][-1].endswith("#" + source["source_revision"])
+    monkeypatch.setattr(control, "_image_exists", lambda image: True)
+    config["User"] = "root"
+    with pytest.raises(SystemExit, match="pinned non-root"):
+        control._ensure_vllm_image(env, "DEEPSEEK_VLLM_IMAGE", source)
+
+
+def test_download_and_cache_setup_use_container_root_only(monkeypatch):
+    control = _load(EXAMPLE / "control.py", "tiered_storage_setup")
+    calls = []
+    monkeypatch.setattr(control, "_run", lambda command, **kwargs: calls.append(command))
+    control._download_model("image", "/models-host", control.SPEC["models"]["tier2"])
+    control._prepare_deepseek_cache({"DEEPSEEK_CACHE_PATH": "/cache-host",
+                                    "DEEPSEEK_VLLM_IMAGE": "image"})
+    assert all(_option(command, "--user") == "0:0" for command in calls)
+    assert _option(calls[1], "--volume") == "/cache-host:/cache"
+    assert "2000, 0" in calls[1][-1]
+    compose = yaml.safe_load((EXAMPLE / "compose.yaml").read_text())
+    assert "user" not in compose["services"]["deepseek"]
+    assert compose["services"]["deepseek"]["environment"]["HF_HOME"].startswith(
+        "/var/cache/kairyu/"
+    )

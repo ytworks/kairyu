@@ -6,7 +6,7 @@
 configuration below. This closes the observed empty-checklist, empty-image,
 ambiguous-verdict, and final-answer counterexamples. Model-based audits are
 still probabilistic; format constraints and these fixtures do not prove
-universal semantic correctness. Final-config serving matrices are running.
+universal semantic correctness. The same-config generic serving matrix passes.
 
 - Measured code: `8c8fc1aebdf6c66f78928bf9238bf2b5ba0d0247`.
 - Served-config SHA-256:
@@ -45,8 +45,17 @@ contains all nine actual final answers, complete checklist objects, every
 audit attempt, requests, traces, manual reviews, manifests, correlations, and
 raw-file hashes. The raw SSE and generated reasoning remain on NVMe.
 
-Generic serving run `20260908T101744Z` is in progress; coding serving remains
-pending. The older serving matrices below remain tied to their own hashes.
+Generic serving run `20260908T101744Z` passes 128/128 requests at concurrency
+1/8/16/32. Only c16 selects the ensemble (one request); all other requests
+select `qwen_direct`. The harness retains stage traces/token counts, not
+intermediate response bodies, so this serving run alone does not independently
+establish nonempty checklist JSON. The separate quality run above retains it.
+[Serving evidence](measurements/20260908-serving-final.json) records all rows,
+runtime, hook applications, and raw artifact hashes. These measurements precede
+the default-launch cache/secret fixes and remain attributed to `20b800e4…`. The unchanged coding
+routes do not require a new full coding/paired-DeepSeek matrix for this
+ensemble-only change. No new coding latency claim is made; older coding
+measurements remain tied to their own hashes.
 
 ## Historical context and trials
 

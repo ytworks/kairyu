@@ -23,7 +23,7 @@ beat frontier APIs as measured by the committed harness (G6 gate P-C1).
 
 ## Current Status
 
-Snapshot date: 2026-08-17. Hardware context: all GPU evidence so far is on
+Snapshot date: 2026-09-08. Hardware context: all GPU evidence so far is on
 8× RTX PRO 6000 Blackwell (SM120), PCIe-only interconnect (P2P 30–37 GB/s);
 NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 `bench/results/` (see `index.json`); decisions and rationale in `docs/design/`.
@@ -93,13 +93,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
-- DTO-D16 quality counterexamples are closed by nine-case GPU API verification and same-config direct-route smoke; final-config generic/coding serving re-verification remains pending. Example-only root output reserves and audit regex preserve fixed medium thinking and caller totals. Full answers, audits, runtime/config hashes, and retained failed trials: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality-final.json`.
+- DTO-D16 quality counterexamples are closed by nine-case GPU API verification and same-config direct-route smoke; generic serving passes 128/128 on the same quality-fixed config. Normal default-launch portability verification is in progress. Coding routes are unchanged; no new coding latency claim is made. Example-only root output reserves and audit regex preserve fixed medium thinking and caller totals. Full answers, audits, runtime/config hashes, and retained failed trials: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality-final.json`.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-08 — [amendment] DTO-D16: reproducible default example launch
+- What: explicitly select and validate the pinned non-root DeepSeek image recipe; move its cache to a dedicated UID-owned mount, use root only for storage setup/download, and persist/adopt the API compaction key privately.
+- Why: the previous default image could not traverse `/root/.cache`, while the running stack relied on an unrecorded cachefix image and externally supplied secret. Same-GPU host portability requires a complete default recipe, not merely hardware-independent config hashes.
+- Refs: tiered example `control.py`, `compose.yaml`, README prerequisites; 138 focused CPU tests pass. Pre-change generic run `20260908T101744Z` passes 128/128; normal default-launch GPU validation pending.
 
 ### 2026-09-08 — [progress] DTO-D16: nine-case GPU quality verification passes
 - What: all nine original API cases pass automated and manual review on one served config; root budget logs correlate exactly 9/9 requirements and 3/3 images, all 12 audits use the regex format, and direct-route smoke passes without hook application. Every final answer, checklist, and audit is retained.

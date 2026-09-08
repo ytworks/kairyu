@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
 import os
+import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import urllib.error
 import urllib.request
@@ -87,6 +90,51 @@ def _requirements_config_sha256() -> str:
     return digest.hexdigest()
 
 
+def _compaction_secret(state: Path) -> str:
+    """Persist one private key; adopt an already running example's key on upgrade."""
+    key = "KAIRYU_RESPONSES_COMPACTION_SECRET"
+    explicit = os.environ.get(key)
+    if explicit:
+        if len(explicit.encode()) < 32:
+            raise SystemExit(f"{key} must contain at least 32 bytes")
+        return explicit
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = state.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise SystemExit("example private state must be a directory owned by the launcher user")
+    state.chmod(0o700)
+    path = state / "compaction-secret"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "r+") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise SystemExit("compaction secret must be a private regular file")
+        os.fchmod(stream.fileno(), 0o600)
+        value = stream.read()
+        if not value:
+            name = SPEC["environment"].replace(".", "-") + "-kairyu-1"
+            existing = _run(["docker", "container", "inspect", name], capture=True, check=False)
+            if existing.returncode and "No such" not in existing.stderr:
+                raise SystemExit(
+                    "cannot inspect existing API container; refusing to generate a replacement key"
+                )
+            if existing.returncode == 0:
+                entries = json.loads(existing.stdout)[0]["Config"].get("Env", [])
+                value = next((item.split("=", 1)[1] for item in entries
+                              if item.startswith(key + "=")), "")
+            if not value:
+                value = secrets.token_hex(32)
+            if len(value.encode()) < 32:
+                raise SystemExit("deployed compaction secret is too short; refusing to rotate it")
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if len(value.encode()) < 32:
+            raise SystemExit("stored compaction secret is invalid; refusing to rotate it")
+        return value
+
+
 def _compose_env() -> dict[str, str]:
     env = {
         key: value
@@ -97,6 +145,9 @@ def _compose_env() -> dict[str, str]:
     env.update(
         {
             "COMPOSE_DISABLE_ENV_FILE": "1",
+            "KAIRYU_RESPONSES_COMPACTION_SECRET": _compaction_secret(
+                paths["webui"].parent / "private"
+            ),
             "COMPOSE_PROJECT_NAME": SPEC["environment"].replace(".", "-"),
             "QWEN_MODEL_STORAGE_PATH": str(paths["qwen_models"]),
             "KAIRYU_REQUIREMENTS_CONFIG_SHA256": _requirements_config_sha256(),
@@ -225,6 +276,8 @@ def _image_exists(image: str) -> bool:
 def _ensure_vllm_image(env: dict[str, str], env_key: str, source: dict) -> None:
     image = env[env_key]
     if _image_exists(image):
+        if source.get("build_target"):
+            _validate_source_image(image, source)
         return
     if image != source["image"]:
         raise SystemExit(f"{env_key} does not exist locally: {image}")
@@ -240,6 +293,8 @@ def _ensure_vllm_image(env: dict[str, str], env_key: str, source: dict) -> None:
             "--pull",
             "--file",
             "docker/Dockerfile",
+            "--target",
+            source["build_target"],
             "--tag",
             image,
             "--label",
@@ -247,6 +302,33 @@ def _ensure_vllm_image(env: dict[str, str], env_key: str, source: dict) -> None:
             f"{source['source_repository']}#{source.get('source_ref', source['source_revision'])}",
         ]
     )
+
+    _validate_source_image(image, source)
+
+
+def _validate_source_image(image: str, source: dict) -> None:
+    inspected = json.loads(_run(["docker", "image", "inspect", image], capture=True).stdout)[0]
+    config = inspected["Config"]
+    if ((config.get("Labels") or {}).get("org.opencontainers.image.revision")
+            != source["source_revision"]
+            or config.get("User") != "vllm"
+            or config.get("Entrypoint") != ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
+            or config.get("WorkingDir") != "/home/vllm"):
+        raise SystemExit(
+            f"{image} does not match the pinned non-root source recipe; "
+            "remove the stale local tag or provide a matching image override"
+        )
+
+
+def _prepare_deepseek_cache(env: dict[str, str]) -> None:
+    # Docker's namespace owns the mount: the host launch UID need not be UID 2000.
+    _run(["docker", "run", "--rm", "--user", "0:0", "--entrypoint", "python3",
+          "--volume", f"{env['DEEPSEEK_CACHE_PATH']}:/cache",
+          env["DEEPSEEK_VLLM_IMAGE"], "-c",
+          "import os; from pathlib import Path; "
+          "paths = [Path('/cache'), *Path('/cache').rglob('*')]; "
+          "[(os.chown(p, 2000, 0), os.chmod(p, p.stat().st_mode | 0o700)) "
+          "for p in paths if not p.is_symlink()]"])
 
 
 _MODEL_PROGRAM = r"""
@@ -301,6 +383,8 @@ def _download_model(image: str, mount: str, model: dict) -> None:
         "docker",
         "run",
         "--rm",
+        "--user",
+        "0:0",
         "--entrypoint",
         "python3",
         "--volume",
@@ -665,6 +749,7 @@ def up() -> None:
     _ensure_vllm_image(env, "QWEN_VLLM_IMAGE", SPEC["vllm"]["qwen"])
     _ensure_vllm_image(env, "DEEPSEEK_VLLM_IMAGE", SPEC["vllm"]["deepseek"])
     _ensure_models(env)
+    _prepare_deepseek_cache(env)
     _run(
         [
             "docker",

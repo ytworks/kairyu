@@ -9,7 +9,9 @@ budget correlation is 9/9 requirements and 3/3 images, and all 12 audit calls
 use the constrained format with unchanged 16384-token totals. A same-config
 direct-route smoke passes with no hook applications. The full artifact is
 `measurements/20260908-requirements-quality-final.json` in the tiered example.
-Final-config generic/coding serving re-verification remains pending.
+Same-config generic serving passes 128/128 (`20260908T101744Z`). Coding routes
+are unchanged; historical coding measurements do not establish new-config
+coding latency, and no new coding latency claim is made.
 
 Historical DTO-D8..D14 GPU verification (2026-08-25; runs
 `20260825T161729Z` coding + `20260825T173343Z` generic — both `verify.sh`
@@ -701,6 +703,9 @@ Status: accepted; implemented; serving gates GPU re-verify and digest re-pin pen
 
 ### DTO-D16 GPU tuning amendment (2026-09-08)
 
+The chronological trial notes below retain their outcomes at the time of each
+trial. The accepted nine-case result and current validation scope are above.
+
 The failed baseline above remains evidence. Requirement extraction now has
 an 8192-token total and a 2048-token reasoning allowance through the standard
 vLLM per-request `thinking_token_budget`. An example-local ASGI middleware
@@ -792,3 +797,17 @@ no thinking budget is added. Semantic findings can add consecutive IDs after
 the original checklist; measurement validation rejects missing/duplicate IDs
 and unresolved added items in a final PASS. Repair-only text cannot count as
 satisfaction evidence. GPU positive/negative probes precede full API rollout.
+
+
+### DTO-D16 launch portability amendment (2026-09-08)
+
+The example must provide a complete default launch on a host satisfying its
+stated eight-card prerequisites. Explicitly select the pinned upstream
+`vllm-openai-nonroot` target and validate cached image metadata. Put DeepSeek
+caches under `/var/cache/kairyu`, preparing UID 2000/GID 0 ownership through a
+setup-only root container; download models as container root. Persist a private
+compaction key, adopting the deployed key during upgrade and respecting explicit
+environment overrides. Model placement, reasoning, sampling, and all framework
+code remain unchanged. This removes the measured host's undocumented cachefix
+image and secret dependency; a same-host normal launch is being verified, not
+an independent second-machine or fresh source-build claim.

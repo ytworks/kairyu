@@ -15,13 +15,23 @@
   "allocation": {
     "tier1": {
       "model": "qwen3.8-27b",
-      "gpu_ids": [0, 1, 2, 3],
+      "gpu_ids": [
+        0,
+        1,
+        2,
+        3
+      ],
       "replicas": 4,
       "tensor_parallel_size": 1
     },
     "tier2": {
       "model": "deepseek-v4-flash-0731",
-      "gpu_ids": [4, 5, 6, 7],
+      "gpu_ids": [
+        4,
+        5,
+        6,
+        7
+      ],
       "replicas": 1,
       "tensor_parallel_size": 4,
       "expert_parallel_size": 4
@@ -74,10 +84,11 @@
     },
     "deepseek": {
       "image": "local/vllm-openai:sm120-aa0d513027",
-      "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
+      "image_id": "sha256:f16eaab2f2964d6917c7679157b53e0019581da8047cb9c4a0464d6f27561f9f",
       "source_repository": "https://github.com/jasl/vllm.git",
       "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
-      "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834"
+      "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834",
+      "build_target": "vllm-openai-nonroot"
     },
     "qwen_mtp_speculative_tokens": 0,
     "qwen_max_num_batched_tokens": 32768,
@@ -117,20 +128,43 @@
     "product_max_refinements": 2,
     "product_exposes_intermediate_outputs": true,
     "profiles": {
-      "qwen_direct": ["qwen_answer"],
-      "qwen_think_medium": ["qwen_think_answer"],
-      "deepseek_direct": ["deepseek_answer"],
-      "deepseek_think": ["deepseek_think_answer"]
+      "qwen_direct": [
+        "qwen_answer"
+      ],
+      "qwen_think_medium": [
+        "qwen_think_answer"
+      ],
+      "deepseek_direct": [
+        "deepseek_answer"
+      ],
+      "deepseek_think": [
+        "deepseek_think_answer"
+      ]
     },
     "profile_judge": {
       "worker": "tier1",
       "fallback": "primary",
       "choices": [
-        {"label": "QWEN", "profile": "qwen_direct"},
-        {"label": "QWEN_THINK", "profile": "qwen_think_medium"},
-        {"label": "DEEPSEEK", "profile": "deepseek_direct"},
-        {"label": "DEEPSEEK_THINK", "profile": "deepseek_think"},
-        {"label": "ENSEMBLE", "profile": "primary"}
+        {
+          "label": "QWEN",
+          "profile": "qwen_direct"
+        },
+        {
+          "label": "QWEN_THINK",
+          "profile": "qwen_think_medium"
+        },
+        {
+          "label": "DEEPSEEK",
+          "profile": "deepseek_direct"
+        },
+        {
+          "label": "DEEPSEEK_THINK",
+          "profile": "deepseek_think"
+        },
+        {
+          "label": "ENSEMBLE",
+          "profile": "primary"
+        }
       ]
     },
     "profile_final_roles": {
@@ -140,7 +174,11 @@
       "deepseek_direct": "deepseek_answer",
       "deepseek_think": "deepseek_think_answer"
     },
-    "ttft_gated_profiles": ["primary", "qwen_direct", "deepseek_direct"],
+    "ttft_gated_profiles": [
+      "primary",
+      "qwen_direct",
+      "deepseek_direct"
+    ],
     "direct_route_max_tokens": {
       "qwen_direct": 131072,
       "qwen_think_medium": 131072,
@@ -148,17 +186,38 @@
       "deepseek_think": 393216
     },
     "direct_route_sampling": {
-      "qwen_direct": {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5, "max_tokens": 131072},
-      "qwen_think_medium": {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "max_tokens": 131072},
-      "deepseek_direct": {"temperature": 1.0, "top_p": 0.95, "max_tokens": 393216},
-      "deepseek_think": {"temperature": 1.0, "top_p": 0.95, "max_tokens": 393216}
+      "qwen_direct": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "presence_penalty": 1.5,
+        "max_tokens": 131072
+      },
+      "qwen_think_medium": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "max_tokens": 131072
+      },
+      "deepseek_direct": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_tokens": 393216
+      },
+      "deepseek_think": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "max_tokens": 393216
+      }
     }
   },
   "executor": {
     "image": "local/kairyu-executor:coding-v1",
     "base_image": "python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65",
     "pytest_version": "9.1.1",
-    "languages": ["python"],
+    "languages": [
+      "python"
+    ],
     "transport": "unix",
     "socket_path": "/run/kairyu-executor/executor.sock",
     "max_concurrency": 8,
@@ -175,13 +234,23 @@
       "prompt_tokens_approx": 8192,
       "output_tokens": 256,
       "auto_max_combined_max_tokens": 65536,
-      "concurrency": [1, 8, 16, 32],
+      "concurrency": [
+        1,
+        8,
+        16,
+        32
+      ],
       "requests_per_concurrency": 32
     },
     "coding": {
       "prompt_tokens_approx": 1536,
       "auto_max_combined_max_tokens": 65536,
-      "concurrency": [1, 8, 16, 32],
+      "concurrency": [
+        1,
+        8,
+        16,
+        32
+      ],
       "requests_per_concurrency": 32,
       "ttft_multiplier_vs_deepseek_direct": 2.0,
       "deepseek_direct_ttft_p50_ms_fallback": {
