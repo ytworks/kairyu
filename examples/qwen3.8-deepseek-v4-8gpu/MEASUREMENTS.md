@@ -29,6 +29,31 @@
 > The DTO-D14 served config is GPU-verified — see the 2026-08-25 section
 > below; every older section predates it and does not transfer.
 
+## DTO-D16 nine-case API trial: audit counterexample (2026-09-08)
+
+Run `20260908T084810Z`, served config
+`5040fafb283260c2f41ff62610f3a464e21f9e4ad0b4fed3a5967adc85f6a3ac`,
+completes all nine requirement checklists and all three image descriptions.
+Budget logs match each actual request exactly (9 requirements / 3 images).
+The original automated result is 8/9: one correct memo has concrete per-ID
+evidence in compact `R# | satisfied | evidence text` rows, without redundant
+field labels or a repair for satisfied items. The parser now accepts that
+bounded form while rejecting missing evidence and incomplete failure rows.
+Original validations remain preserved.
+
+**The run still fails manual quality review.** The last image answer says
+color is categorically invisible to color-vision-deficient users and offers
+two conditional recommendations despite the requested single recommendation.
+Its audit incorrectly passes both issues. Synthesis and audit now explicitly
+check claim scope and count recommended actions across conditional branches.
+This changes the served config; subsequent API/serving validation is pending.
+No framework, effort, temperature, or audit budget changes are introduced.
+
+[Full nine-case evidence](measurements/20260908-nine-case-audit-failure.json)
+contains every final answer, checklist, audit attempt, trace, manual review,
+runtime manifest, request/log correlation, and raw-file hashes. Automated
+pattern checks are diagnostics, not a replacement for semantic review.
+
 ## DTO-D16 baseline GPU verification before tuning (2026-09-08)
 
 The generic serving gate passes on the PR #595 configuration. **The new

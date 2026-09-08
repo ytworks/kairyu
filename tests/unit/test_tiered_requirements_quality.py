@@ -141,6 +141,35 @@ def test_pass_verdict_requires_actual_evidence_fields(replacement):
     assert not report["passed"]
 
 
+def test_compact_satisfied_audit_retains_concrete_evidence():
+    items = quality.parse_audit('PASS\nR1 | satisfied | The answer ends with "Ready."')
+    assert items == [{"id": "1", "status": "satisfied",
+                      "evidence": 'The answer ends with "Ready."', "correction": "none"}]
+
+
+@pytest.mark.parametrize("row", [
+    "R1 | satisfied |", "R1 | satisfied | none", "R1 | satisfied | N/A",
+    "R1 | satisfied | evidence:", "R1 | satisfied | evidence: missing",
+    "R1 | satisfied | correction: none",
+    "R1 | unsatisfied | The ending is absent",
+    "R1 | unverifiable | No measurement is available",
+    "R1 | unsupported | The request has no such constraint",
+    "R1 | unknown | The answer is English",
+])
+def test_compact_audit_cannot_hide_missing_evidence_or_repairs(row):
+    with pytest.raises(ValueError):
+        quality.parse_audit("PASS\n" + row)
+
+
+@pytest.mark.parametrize("correction", ["", "none", "n/a"])
+def test_failed_assessment_requires_a_concrete_repair(correction):
+    with pytest.raises(ValueError, match="concrete correction"):
+        quality.parse_audit(
+            "FAIL\nR1 | unsatisfied | evidence: The required ending is absent"
+            " | correction: " + correction
+        )
+
+
 def _role_policy(name="requirements"):
     spec = yaml.safe_load((EXAMPLE / "auto-max.yaml").read_text())
     role = next(role for role in spec["roles"] if role["name"] == name)

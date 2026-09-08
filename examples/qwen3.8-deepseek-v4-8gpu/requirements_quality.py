@@ -84,12 +84,33 @@ def parse_audit(text: str) -> list[dict[str, str]]:
             re.DOTALL | re.IGNORECASE,
         )
         if match is None:
-            raise ValueError("audit item lacks status, evidence, or correction field")
-        item = {key: value.strip() for key, value in match.groupdict().items()}
+            # A satisfied item needs evidence, but no repair. Accept the
+            # observed three-column form without guessing missing statuses
+            # or accepting incomplete failure assessments.
+            compact = re.fullmatch(
+                r"R(?P<id>[1-9]\d*)\s*\|\s*satisfied\s*\|\s*(?P<evidence>[^|\n]+)",
+                body[start.start() : end].strip(),
+                re.IGNORECASE,
+            )
+            if compact is None:
+                raise ValueError("audit item lacks status, evidence, or correction field")
+            item = {**compact.groupdict(), "status": "satisfied", "correction": "none"}
+        else:
+            item = match.groupdict()
+        item = {key: value.strip() for key, value in item.items()}
         item["status"] = item["status"].lower()
-        evidence = item["evidence"].strip(" .-'\"").lower()
+        evidence = re.sub(
+            r"^(?:evidence|correction):\s*", "", item["evidence"], flags=re.IGNORECASE
+        )
+        evidence = evidence.strip(" .-'\"").lower()
         if not re.search(r"\w", evidence) or evidence in ("none", "n/a", "unknown", "missing"):
             raise ValueError("audit evidence is empty or a placeholder")
+        correction = item["correction"].strip(" .-'\"").lower()
+        if item["status"] != "satisfied" and (
+            not re.search(r"\w", correction)
+            or correction in ("none", "n/a", "unknown", "missing")
+        ):
+            raise ValueError("non-satisfied audit item lacks a concrete correction")
         items.append(item)
     return items
 

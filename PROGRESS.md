@@ -93,13 +93,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
-- DTO-D16 GPU quality fails: two of three diagnostic requests exhaust the 4096-token requirements cap in reasoning and pass an empty checklist downstream despite successful stage traces and final audit PASS. Baseline generic and coding serving pass. Example-only tuning uses a JSON-schema checklist, 8192 total / 4096 thinking at fixed medium, a short committed opening, and strict per-ID/literal checks. Matched 3-case × 3-seed extraction checks pass. A later API trial exposes an empty image description; explicit perception-role framing and a 2048/4096 thinking/total reserve pass image seeds 603/604/605. Full API and final-config serving re-verification remain pending. Evidence: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality.json`.
+- DTO-D16 GPU quality fails: two of three diagnostic requests exhaust the 4096-token requirements cap in reasoning and pass an empty checklist downstream despite successful stage traces and final audit PASS. Baseline generic and coding serving pass. Example-only tuning uses a JSON-schema checklist, 8192 total / 4096 thinking at fixed medium, a short committed opening, and strict per-ID/literal checks. Matched 3-case × 3-seed extraction checks pass. A later API trial exposes an empty image description; explicit perception-role framing and a 2048/4096 thinking/total reserve pass image seeds 603/604/605. The nine-case API run completes every root, but manual review catches an unsupported categorical claim and excess conditional recommendations in one image answer; scoped synthesis/audit guidance is being verified. Full API and final-config serving re-verification remain pending. Evidence: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality.json`.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-08 — [amendment] DTO-D16: audit claim scope and recommendation counts
+- What: the nine-case API run produces all checklists and image descriptions, with exact 9/3 budget-log correlation. The measurement parser accepts concrete three-column satisfied assessments; synthesis/audit instructions check recommendation counts across branches and reject unsupported universal claims.
+- Why: compact satisfied rows retained all evidence but failed label parsing; separately, an image answer passed model audit despite overgeneralizing color perception and recommending two conditional alternatives when one was requested. The latter remains a real quality failure; all nine answers and audits are retained.
+- Refs: DTO-D16; tiered example `measurements/20260908-nine-case-audit-failure.json`; repeated GPU verification pending.
 
 ### 2026-09-08 — [amendment] DTO-D16: reserve image-description output
 - What: the image root now clearly performs internal perception only and receives a 2048-token thinking budget within its unchanged 4096 total; the same exact-template example middleware applies the reserve without a JSON schema. Requirement settings remain unchanged. Matched image seeds 603/604/605 produce nonempty grounded descriptions in 370/504/1083 tokens.

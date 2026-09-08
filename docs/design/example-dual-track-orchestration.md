@@ -759,3 +759,15 @@ output schema. Other roles are untouched. Direct original-image probes at
 seeds 603/604/605 complete in 370/504/1083 tokens and describe the visible red
 field without answering the user's design request. Full API re-verification
 remains required.
+
+The nine-case API trial produces every requirement checklist and image
+description with exact request/budget-log correlation. A compact satisfied
+assessment with concrete evidence is accepted by the measurement parser;
+missing evidence and incomplete failure assessments still fail. Separately,
+manual review catches an image answer whose categorical claim exceeds the
+evidence and whose two conditional recommendations violate a requested count
+of one. Synthesis and audit now explicitly preserve recommendation counts
+across branches and qualify context-dependent claims. This is an example
+prompt change, not a framework change or an audit-budget increase. Full
+API and final-config serving re-verification remain pending; all nine actual
+answers and audits are retained in `20260908-nine-case-audit-failure.json`.
