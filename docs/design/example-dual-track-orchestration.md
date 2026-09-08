@@ -1,6 +1,15 @@
 # Tiered Example Dual-Track Policy-Ensemble Orchestration
 
-Status: **Accepted; implemented; DTO-D16 baseline GPU checklist quality fails; tuning re-verification pending** (2026-09-08).
+Status: **Accepted; implemented; DTO-D16 nine-case GPU quality passes; final serving re-verification pending** (2026-09-08).
+
+Current DTO-D16 API run `20260908T094200Z` passes all nine original cases
+(one serial and two concurrent rounds) on served hash `20b800e49f68baf0…`.
+All actual final answers and audit attempts were manually reviewed; root
+budget correlation is 9/9 requirements and 3/3 images, and all 12 audit calls
+use the constrained format with unchanged 16384-token totals. A same-config
+direct-route smoke passes with no hook applications. The full artifact is
+`measurements/20260908-requirements-quality-final.json` in the tiered example.
+Final-config generic/coding serving re-verification remains pending.
 
 Historical DTO-D8..D14 GPU verification (2026-08-25; runs
 `20260825T161729Z` coding + `20260825T173343Z` generic — both `verify.sh`

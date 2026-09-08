@@ -93,13 +93,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
-- DTO-D16 GPU quality fails: two of three diagnostic requests exhaust the 4096-token requirements cap in reasoning and pass an empty checklist downstream despite successful stage traces and final audit PASS. Baseline generic and coding serving pass. Example-only tuning uses a JSON-schema checklist, 8192 total / 4096 thinking at fixed medium, a short committed opening, and strict per-ID/literal checks. Matched 3-case × 3-seed extraction checks pass. A later API trial exposes an empty image description; explicit perception-role framing and a 2048/4096 thinking/total reserve pass image seeds 603/604/605. The nine-case API run completes every root, but manual review catches an unsupported categorical claim and excess conditional recommendations in one image answer; scoped synthesis/audit guidance is being verified. Full API and final-config serving re-verification remain pending. Evidence: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality.json`.
+- DTO-D16 quality counterexamples are closed by nine-case GPU API verification and same-config direct-route smoke; final-config generic/coding serving re-verification remains pending. Example-only root output reserves and audit regex preserve fixed medium thinking and caller totals. Full answers, audits, runtime/config hashes, and retained failed trials: tiered example `MEASUREMENTS.md` and `measurements/20260908-requirements-quality-final.json`.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-08 — [progress] DTO-D16: nine-case GPU quality verification passes
+- What: all nine original API cases pass automated and manual review on one served config; root budget logs correlate exactly 9/9 requirements and 3/3 images, all 12 audits use the regex format, and direct-route smoke passes without hook application. Every final answer, checklist, and audit is retained.
+- Why: repeated serial/concurrent evidence closes the observed root-output and audit counterexamples; format constraints alone are not a semantic guarantee. Two JSON cases and one image case demonstrate FAIL → repair → PASS.
+- Refs: tiered example `measurements/20260908-requirements-quality-final.json`; run `20260908T094200Z`; final-config serving re-measurement remains pending.
 
 ### 2026-09-08 — [amendment] DTO-D16: constrain audit verdict serialization
 - What: an example-only vLLM regex constrains audit output to a bare verdict and complete evidence/repair rows, matching the full rendered template and exact bounded retry suffix. Existing medium effort, sampling, and 16384-token cap remain unchanged.

@@ -7048,5 +7048,286 @@
         "line": "2026-09-08T09:11:26.134299425Z (APIServer pid=1) INFO 09-08 09:11:26 [requirements_budget.py:164] Kairyu image_description budget: thinking=2048 max_tokens=4096 seed=605 messages_sha256=978c1a3a071315bded0a28ef19c1754f83bb1e312e1ed4e8816b89d9a18fac05"
       }
     ]
-  }
+  },
+  "run": {
+    "schema_version": 1,
+    "run_id": "20260908T084810Z",
+    "started_at": "2026-09-08T08:48:10.668607+00:00",
+    "requested": "requirements-quality",
+    "served_config_sha256": "5040fafb283260c2f41ff62610f3a464e21f9e4ad0b4fed3a5967adc85f6a3ac",
+    "verification_files_sha256": {
+      "verification.py": "69d5b85b4b166cdfbbafb405f9f13d9d55dcefb3ebe8008907bc305f51db9139",
+      "requirements_quality.py": "e6f776f9880d87f5674230bddd87ef3b856971ff5efe980e69401cece2e210e3",
+      "requirements-quality-cases.json": "75fdafea0d03c1ca12f1e7065f3e05d2e7d7daeca764bf6bafe4e6eb9e1fecbe"
+    },
+    "spec": {
+      "schema_version": 1,
+      "environment": "qwen3.8-deepseek-v4-8gpu",
+      "hardware": {
+        "gpu_count": 8,
+        "product": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "minimum_compute_capability": 12.0,
+        "minimum_vram_mib": 90000
+      },
+      "storage": {
+        "root": "/mnt/nvme/kairyu",
+        "minimum_free_gib": 220,
+        "deepseek_model_volume": "kairyu-models-deepseek-v4-flash-0731-8gpu"
+      },
+      "allocation": {
+        "tier1": {
+          "model": "qwen3.8-27b",
+          "gpu_ids": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "replicas": 4,
+          "tensor_parallel_size": 1
+        },
+        "tier2": {
+          "model": "deepseek-v4-flash-0731",
+          "gpu_ids": [
+            4,
+            5,
+            6,
+            7
+          ],
+          "replicas": 1,
+          "tensor_parallel_size": 4,
+          "expert_parallel_size": 4
+        }
+      },
+      "models": {
+        "tier1": {
+          "repo": "Qwen/Qwen3.8-27B-FP8",
+          "revision": "017b9c7af6b5689d5dd426a76e0bc077eb5ca20a",
+          "tree_sha256": "9825ce119c9693172e04dd2a1f2437884503ceab9bf55606141e6662c9fe301e",
+          "slug": "qwen3.8-27b-fp8",
+          "served_name": "qwen3.8-27b",
+          "max_context_tokens": 262144,
+          "quantization": "fp8"
+        },
+        "tier2": {
+          "repo": "deepseek-ai/DeepSeek-V4-Flash-0731",
+          "revision": "9e165c30e2704aec5d9d593cce3eebd58bbef1cb",
+          "tree_sha256": "90bd164d6f778d798eeaecd3517d83b87d49d300756a9217ada14a2b15203754",
+          "slug": "deepseek-v4-flash-0731",
+          "served_name": "deepseek-v4-flash-0731",
+          "max_context_tokens": 1048576,
+          "quantization": "mixed-fp4-fp8"
+        }
+      },
+      "embedding": {
+        "served_name": "embed-small",
+        "backend": "fastembed",
+        "model": "sentence-transformers/all-MiniLM-L6-v2",
+        "model_path": "/opt/kairyu/models/all-MiniLM-L6-v2",
+        "repository": "Qdrant/all-MiniLM-L6-v2-onnx",
+        "revision": "5f1b8cd78bc4fb444dd171e59b18f3a3af89a079",
+        "model_sha256": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+        "provenance_sha256": "57246a4990eb0f08755df06ba57c1fec161032bd588332435e89c7ece244639c",
+        "dimensions": 384,
+        "batch_size": 64,
+        "threads": 2,
+        "max_concurrency": 2
+      },
+      "vllm": {
+        "qwen": {
+          "image": "vllm/vllm-openai:v0.23.0@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+          "image_id": "sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f",
+          "image_revision": "91df0fad4dc98a67c7659d9dbd915245d5c43d96",
+          "distribution": "upstream",
+          "source_repository": "https://github.com/vllm-project/vllm.git",
+          "source_revision": "0fc695fc6d1d82e9a5ac6835ac8e4e1c83703665",
+          "source_ref": "v0.23.0",
+          "release": "v0.23.0"
+        },
+        "deepseek": {
+          "image": "local/vllm-openai:sm120-aa0d513027",
+          "image_id": "sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1",
+          "source_repository": "https://github.com/jasl/vllm.git",
+          "source_revision": "aa0d51302747ea80f282e26949708b3253409fe2",
+          "upstream_pr": "https://github.com/vllm-project/vllm/pull/41834"
+        },
+        "qwen_mtp_speculative_tokens": 0,
+        "qwen_max_num_batched_tokens": 32768,
+        "qwen_max_num_seqs": 32,
+        "qwen_kv_cache_dtype": "fp8",
+        "qwen_cudagraph_mode": "PIECEWISE",
+        "deepseek_dspark_speculative_tokens": 5,
+        "deepseek_max_num_batched_tokens": 16384,
+        "deepseek_max_num_seqs": 32,
+        "deepseek_kv_cache_dtype": "fp8",
+        "deepseek_cudagraph_mode": "FULL_AND_PIECEWISE"
+      },
+      "orchestration": {
+        "auto_max_model": "kairyu-auto-max",
+        "internal_max_output_tokens": 65536,
+        "requirements_thinking_token_budget": 4096,
+        "image_description_thinking_token_budget": 2048,
+        "product_policy": "judged-five-route-dual-track",
+        "roles": [
+          "head",
+          "draft",
+          "image_description",
+          "requirements",
+          "policies",
+          "answer_1",
+          "answer_2",
+          "answer_3",
+          "answer_4",
+          "critique",
+          "synthesis",
+          "audit"
+        ],
+        "stream_head": "head",
+        "max_steps": 20,
+        "product_normal_calls": 11,
+        "product_max_calls": 20,
+        "product_max_refinements": 2,
+        "product_exposes_intermediate_outputs": true,
+        "profiles": {
+          "qwen_direct": [
+            "qwen_answer"
+          ],
+          "qwen_think_medium": [
+            "qwen_think_answer"
+          ],
+          "deepseek_direct": [
+            "deepseek_answer"
+          ],
+          "deepseek_think": [
+            "deepseek_think_answer"
+          ]
+        },
+        "profile_judge": {
+          "worker": "tier1",
+          "fallback": "primary",
+          "choices": [
+            {
+              "label": "QWEN",
+              "profile": "qwen_direct"
+            },
+            {
+              "label": "QWEN_THINK",
+              "profile": "qwen_think_medium"
+            },
+            {
+              "label": "DEEPSEEK",
+              "profile": "deepseek_direct"
+            },
+            {
+              "label": "DEEPSEEK_THINK",
+              "profile": "deepseek_think"
+            },
+            {
+              "label": "ENSEMBLE",
+              "profile": "primary"
+            }
+          ]
+        },
+        "profile_final_roles": {
+          "primary": "synthesis",
+          "qwen_direct": "qwen_answer",
+          "qwen_think_medium": "qwen_think_answer",
+          "deepseek_direct": "deepseek_answer",
+          "deepseek_think": "deepseek_think_answer"
+        },
+        "ttft_gated_profiles": [
+          "primary",
+          "qwen_direct",
+          "deepseek_direct"
+        ],
+        "direct_route_max_tokens": {
+          "qwen_direct": 131072,
+          "qwen_think_medium": 131072,
+          "deepseek_direct": 393216,
+          "deepseek_think": 393216
+        },
+        "direct_route_sampling": {
+          "qwen_direct": {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "top_k": 20,
+            "presence_penalty": 1.5,
+            "max_tokens": 131072
+          },
+          "qwen_think_medium": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 20,
+            "max_tokens": 131072
+          },
+          "deepseek_direct": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 393216
+          },
+          "deepseek_think": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 393216
+          }
+        }
+      },
+      "executor": {
+        "image": "local/kairyu-executor:coding-v1",
+        "base_image": "python:3.12-slim@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65",
+        "pytest_version": "9.1.1",
+        "languages": [
+          "python"
+        ],
+        "transport": "unix",
+        "socket_path": "/run/kairyu-executor/executor.sock",
+        "max_concurrency": 8,
+        "queue_wait_s": 8
+      },
+      "webui": {
+        "image": "ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01",
+        "port": 3000
+      },
+      "api_port": 8003,
+      "deepseek_l1_loopback_port": 8005,
+      "verification": {
+        "serving": {
+          "prompt_tokens_approx": 8192,
+          "output_tokens": 256,
+          "auto_max_combined_max_tokens": 65536,
+          "concurrency": [
+            1,
+            8,
+            16,
+            32
+          ],
+          "requests_per_concurrency": 32
+        },
+        "coding": {
+          "prompt_tokens_approx": 1536,
+          "auto_max_combined_max_tokens": 65536,
+          "concurrency": [
+            1,
+            8,
+            16,
+            32
+          ],
+          "requests_per_concurrency": 32,
+          "ttft_multiplier_vs_deepseek_direct": 2.0,
+          "deepseek_direct_ttft_p50_ms_fallback": {
+            "1": 779.22,
+            "8": 833.16,
+            "16": 2710.53,
+            "32": 12399.45
+          }
+        }
+      }
+    },
+    "completed_at": "2026-09-08T09:17:34.186684+00:00",
+    "exit_codes": {
+      "requirements-quality": 1
+    }
+  },
+  "served_config_sha256": "5040fafb283260c2f41ff62610f3a464e21f9e4ad0b4fed3a5967adc85f6a3ac",
+  "manual_passed": false
 }

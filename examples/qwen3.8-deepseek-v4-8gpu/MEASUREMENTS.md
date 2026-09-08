@@ -1,5 +1,55 @@
 # Measurements
 
+## Current DTO-D16 GPU quality result (2026-09-08)
+
+**All nine API diagnostic cases pass automated and manual review** on the
+configuration below. This closes the observed empty-checklist, empty-image,
+ambiguous-verdict, and final-answer counterexamples. Model-based audits are
+still probabilistic; format constraints and these fixtures do not prove
+universal semantic correctness. Final-config serving matrices are running.
+
+- Measured code: `8c8fc1aebdf6c66f78928bf9238bf2b5ba0d0247`.
+- Served-config SHA-256:
+  `20b800e49f68baf0272db5bb3fd5b39d0cdd5e9e5817e11ce7490275b8ff533e`
+- Quality run: `20260908T094200Z`, original three cases at seeds 595/596/597;
+  one serial round followed by two three-request concurrent rounds.
+- Same 8 × RTX PRO 6000 Blackwell, Qwen TP1 × 4 + DeepSeek TP4/EP4.
+  All 183 API-container Python files match the checkout; no framework changes.
+  Runtime manifests record the existing DeepSeek cachefix image override.
+- Exact root request/budget correlation: 9/9 requirements and 3/3 images.
+  Audit format applications: 12/12, each retaining the 16384 total cap.
+- Direct-route smoke `20260908T101712Z-direct-smoke`: `OK`, `qwen_answer`,
+  zero requirements/image/audit hook applications, same served-config hash.
+- CPU validation: 133 related tests passed; ruff/progress/diff checks passed.
+
+| Case | Requirement tokens | Audit attempts | Answer words | E2E seconds | Result |
+|---|---:|---:|---:|---:|---|
+| r0-headed-comparison | 5003 | 1 | 254 | 461.7 | PASS |
+| r0-headless-json | 2439 | 2 | 88 | 471.7 | PASS |
+| r0-image-requirements | 2586 | 2 | 206 | 288.8 | PASS |
+| r1-headed-comparison | 5058 | 1 | 261 | 372.5 | PASS |
+| r1-headless-json | 4072 | 2 | 148 | 426.6 | PASS |
+| r1-image-requirements | 3654 | 1 | 217 | 260.8 | PASS |
+| r2-headed-comparison | 5148 | 1 | 311 | 401.0 | PASS |
+| r2-headless-json | 1854 | 1 | 75 | 198.3 | PASS |
+| r2-image-requirements | 1801 | 1 | 178 | 327.7 | PASS |
+
+All memo/image endings and length constraints hold. JSON objects retain the
+exact required fields and values, with two conditional evidence actions and
+no asserted unmeasured feasibility. Image answers select one conditional
+approach and make no measured accessibility-compliance claim. Two JSON cases
+and one image case demonstrate actual FAIL → repair → PASS behavior.
+
+[Complete final quality evidence](measurements/20260908-requirements-quality-final.json)
+contains all nine actual final answers, complete checklist objects, every
+audit attempt, requests, traces, manual reviews, manifests, correlations, and
+raw-file hashes. The raw SSE and generated reasoning remain on NVMe.
+
+Generic serving run `20260908T101744Z` is in progress; coding serving remains
+pending. The older serving matrices below remain tied to their own hashes.
+
+## Historical context and trials
+
 > **Scope note (2026-08-18):** the served L2 policy is now the dual-track
 > policy-ensemble DAG (`docs/design/example-dual-track-orchestration.md`,
 > DTO-D1..D5). The "Dual-track DAG serving matrices" section below is the

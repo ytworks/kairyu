@@ -488,13 +488,15 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./verify.sh requirements-quality
 ```
 
-The pre-tuning 2026-09-08 DTO-D16 GPU runs pass generic and coding serving gates, but the
-requirement-checklist quality check **fails**: two of three diagnostic
-requests exhaust the 4096-token cap in reasoning and send an empty checklist
-downstream. A successful stage trace and final audit PASS do not prove that
-the shared checklist exists. The image case produces a checklist and shows
-parallel image/requirement roots. See [MEASUREMENTS.md](MEASUREMENTS.md) for
-the current served-config hash, latency results, and reproducible evidence.
+The current DTO-D16 configuration passes all nine API quality cases (the
+original memo, JSON, and image requests, one serial and two concurrent rounds)
+with complete shared checklists, grounded audit evidence, and manual review of
+every final answer. Same-config direct routing also passes without applying
+any evidence-root or audit hook. Final serving matrices are being re-measured.
+The earlier empty-output and semantic counterexamples remain preserved in
+[MEASUREMENTS.md](MEASUREMENTS.md), alongside full answers, audits, manifests,
+and the current served-config hash. These model-based checks are diagnostics,
+not a guarantee of correctness on every request.
 
 `serving-auto-max` records the generic-workload product serving matrix and
 proves, for every request, the route judge classification stage and exactly
