@@ -1,6 +1,7 @@
 """Exercise the shipped example's checklist flow with scripted model responses."""
 
 import asyncio
+import json
 import re
 from dataclasses import fields
 from pathlib import Path
@@ -17,10 +18,10 @@ from kairyu.outputs import CompletionOutput
 from kairyu.sampling_params import SamplingParams
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/qwen3.8-deepseek-v4-8gpu"
-CHECKLIST = (
-    "R1 | priority: minimum | requirement: Compare both options | "
-    "acceptance_criterion: Discuss A and B | source: Compare A and B"
-)
+CHECKLIST = json.dumps([{
+    "id": "R1", "priority": "minimum", "requirement": "Compare both options",
+    "acceptance_criterion": "Discuss A and B", "source": "Compare A and B",
+}])
 DEFECT = "FAIL\nR1 | unsatisfied | evidence: B is absent | correction: Add B"
 ANSWER = "A is inexpensive. B is faster."
 
@@ -56,7 +57,7 @@ class ExampleBackend:
             output = "The chart labels A and B."
         elif role == "audit":
             output = DEFECT if len(self.requests[role]) <= self.fail_audits else (
-                "PASS\nR1 | satisfied | evidence: Both A and B are compared"
+                "PASS\nR1 | satisfied | evidence: Both A and B are compared | correction: none"
             )
         elif role == "synthesis":
             output = "A is inexpensive." if len(self.requests[role]) == 1 else ANSWER
@@ -79,7 +80,7 @@ class ExampleBackend:
 
 @pytest.mark.parametrize("with_image", [False, True])
 @pytest.mark.parametrize("head_enabled", [False, True])
-@pytest.mark.parametrize("fail_audits", [1, 3])
+@pytest.mark.parametrize("fail_audits", [0, 1, 3])
 async def test_example_checklist_survives_parallel_roots_and_refinement(
     with_image, head_enabled, fail_audits,
 ):
@@ -131,15 +132,23 @@ async def test_example_checklist_survives_parallel_roots_and_refinement(
     ):
         assert all(CHECKLIST in text for _, text in backend.requests[name])
     assert "{requirements}" not in backend.requests["audit"][0][1]
-    assert DEFECT in backend.requests["synthesis"][1][1]
-    expected_attempts = 2 if fail_audits == 1 else 3
+    if fail_audits:
+        assert DEFECT in backend.requests["synthesis"][1][1]
+    expected_attempts = min(fail_audits + 1, 3)
     assert len(backend.requests["audit"]) == expected_attempts
     assert len(backend.requests["synthesis"]) == expected_attempts
-    assert ANSWER in result.final_text
+    assert (ANSWER if fail_audits else "A is inexpensive.") in result.final_text
     assert CHECKLIST not in result.final_text and DEFECT not in result.final_text
     # Document the existing framework contract: exhausted FAIL is observable,
     # but the last answer is still returned. This config adds no hard gate.
-    assert result.outputs["audit"].startswith("PASS" if fail_audits == 1 else "FAIL")
+    assert result.outputs["audit"].startswith("FAIL" if fail_audits == 3 else "PASS")
+    verdicts = [event for event in result.trace
+                if event.node == "audit" and "pass" in event.metadata]
+    assert len(verdicts) == expected_attempts
+    assert verdicts[-1].metadata["pass"] is (fail_audits != 3)
+    assert verdicts[-1].metadata["refinement_exhausted"] is (fail_audits == 3)
+    # Initial PASS stops immediately even though the scripted answer omits B:
+    # this characterizes control flow, not the model judgment's correctness.
 
 
 def test_parallel_roots_render_the_existing_medium_thinking_template():

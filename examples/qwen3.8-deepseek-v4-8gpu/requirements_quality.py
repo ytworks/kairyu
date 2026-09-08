@@ -1,9 +1,10 @@
-"""Real-worker checklist quality gate, separate from successful serving traces."""
+"""Separate observable protocol contracts from model/task quality diagnostics."""
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import re
 import time
@@ -129,6 +130,33 @@ def _overlap(first: dict, second: dict) -> bool:
         return False
 
 
+_CONTRACT_CHECKS = frozenset({
+    "ensemble_executed", "one_successful_requirements_stage", "complete_checklist",
+    "requirements_finish_within_cap", "audit_covers_checklist_ids",
+    "audit_evidence_fields_present", "nonempty_final_answer", "checklist_not_published",
+    "image_root_and_checklist_overlap", "image_description_nonempty", "complete_sse",
+})
+
+
+def _assessment(checks: dict[str, bool]) -> dict:
+    return {"checks": checks, "passed": bool(checks) and all(checks.values()),
+            "failures": [name for name, passed in checks.items() if not passed]}
+
+
+def _separate_assessments(report: dict) -> dict:
+    checks = report["checks"]
+    report["contract"] = _assessment({k: v for k, v in checks.items() if k in _CONTRACT_CHECKS})
+    report["quality_diagnostics"] = _assessment(
+        {k: v for k, v in checks.items() if k not in _CONTRACT_CHECKS}
+    )
+    report["semantic_review"] = "not_performed_by_this_evaluator"
+    report["quality_diagnostics"]["scope"] = (
+        "Fixture heuristics and model self-reports, not independent factual verification "
+        "or a guarantee for unknown inputs."
+    )
+    return report
+
+
 def validate_result(case: dict, result: dict, *, requirement_cap: int) -> dict:
     checks = {}
     failures = []
@@ -198,13 +226,13 @@ def validate_result(case: dict, result: dict, *, requirement_cap: int) -> dict:
     assessed = []
     try:
         assessed = [parse_audit(audit["output"]) for audit in audits]
-        checks["audit_evidence_present"] = bool(assessed)
+        checks["audit_evidence_fields_present"] = bool(assessed)
     except ValueError as error:
-        checks["audit_evidence_present"] = False
+        checks["audit_evidence_fields_present"] = False
         failures.append(str(error))
     final_items = {item["id"]: item for item in assessed[-1]} if assessed else {}
     minimum_ids = [entry["id"] for entry in entries if entry["priority"] == "minimum"]
-    checks["final_minimum_items_satisfied"] = (
+    checks["model_reported_minimum_satisfied"] = (
         bool(minimum_ids)
         and all(
             final_items.get(identifier, {}).get("status") == "satisfied"
@@ -217,7 +245,7 @@ def validate_result(case: dict, result: dict, *, requirement_cap: int) -> dict:
         )
     )
     final_audit = audit_events[-1].get("detail", {}) if audit_events else {}
-    checks["final_audit_passes"] = (
+    checks["model_reported_audit_pass"] = (
         final_audit.get("pass") is True
         and not final_audit.get("inconclusive")
         and not final_audit.get("refinement_exhausted")
@@ -288,18 +316,24 @@ def validate_result(case: dict, result: dict, *, requirement_cap: int) -> dict:
             )
         )
     failures.extend(name for name, passed in checks.items() if not passed)
-    return {
+    return _separate_assessments({
         "case": case["id"],
         "checks": checks,
         "failures": failures,
-        "passed": all(checks.values()),
         "word_count": word_count,
         "requirements_tokens": spent,
         "checklist": entries,
         "stage_outputs": outputs,
         "ttft_s": result.get("ttft_s"),
         "e2e_s": result.get("e2e_s"),
-    }
+        "publication": {
+            "answer_present": bool(answer),
+            "model_reported_pass": final_audit.get("pass"),
+            "inconclusive": final_audit.get("inconclusive", False),
+            "refinement_exhausted": final_audit.get("refinement_exhausted", False),
+            "published_despite_failed_audit": bool(answer) and final_audit.get("pass") is False,
+        },
+    })
 
 
 def _request(
@@ -345,29 +379,40 @@ def _request(
         result["e2e_s"] = time.monotonic() - start
         report = validate_result(case, result, requirement_cap=requirement_cap)
         report["checks"]["complete_sse"] = done and traces == 1
-        report["passed"] = all(report["checks"].values())
+        _separate_assessments(report)
         if not report["checks"]["complete_sse"]:
             report["failures"].append("complete_sse")
     except (OSError, ValueError, urllib.error.HTTPError) as error:
-        report = {"case": case["id"], "passed": False, "error": str(error)}
+        report = _separate_assessments({
+            "case": case["id"], "checks": {"complete_sse": False}, "error": str(error),
+        })
     (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     report["seed"] = seed
     report["directory"] = directory.name
     (directory / "validation.json").write_text(json.dumps(report, indent=2) + "\n")
     print(
-        f"{directory.name}: {'PASS' if report['passed'] else 'FAIL'} "
-        f"{report.get('failures', report.get('error', ''))}",
+        f"{directory.name}: contract={'PASS' if report['contract']['passed'] else 'FAIL'} "
+        f"quality_diagnostics={'PASS' if report['quality_diagnostics']['passed'] else 'FAIL'} "
+        "semantic_review=not_performed",
         flush=True,
     )
     return report
 
 
-def run_quality(run_dir: Path, *, base_url: str, requirement_cap: int) -> int:
-    """Repeat each original counterexample: one serial and two parallel passes."""
+def run_quality(
+    run_dir: Path, *, base_url: str, requirement_cap: int, repetitions: int = 1,
+) -> int:
+    """One diagnostic pass by default; repeat only when explicitly requested.
+
+    Exit status covers observable protocol contracts only. Quality diagnostics
+    remain separately reported, including FAIL and exhausted publication.
+    """
+    if repetitions < 1:
+        raise ValueError("repetitions must be at least one")
     cases = json.loads((HERE / "requirements-quality-cases.json").read_text())["cases"]
     run_dir.mkdir(parents=True, exist_ok=True)
     reports = []
-    for repetition in range(3):
+    for repetition in range(repetitions):
         concurrency = 1 if repetition == 0 else len(cases)
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = [
@@ -389,26 +434,107 @@ def run_quality(run_dir: Path, *, base_url: str, requirement_cap: int) -> int:
                 (run_dir / "summary.json").write_text(
                     json.dumps(
                         {
-                            "schema_version": 1,
-                            "expected_requests": len(cases) * 3,
-                            "passed": len(reports) == len(cases) * 3
-                            and all(row["passed"] for row in reports),
+                            "schema_version": 2,
+                            "expected_requests": len(cases) * repetitions,
+                            "exit_status_scope": "contract_only",
+                            "semantic_review": "not_performed_by_this_evaluator",
+                            "contract_passed": len(reports) == len(cases) * repetitions
+                            and all(row["contract"]["passed"] for row in reports),
+                            "quality_diagnostics_passed": len(reports) == len(cases) * repetitions
+                            and all(row["quality_diagnostics"]["passed"] for row in reports),
                             "reports": reports,
                         },
                         indent=2,
                     )
                     + "\n"
                 )
-    return 0 if all(report["passed"] for report in reports) else 1
+    return 0 if all(report["contract"]["passed"] for report in reports) else 1
+
+
+def replay_run(run_dir: Path, *, requirement_cap: int) -> dict:
+    """Read existing results without making requests or changing source evidence."""
+    fixture = HERE / "requirements-quality-cases.json"
+    manifest = json.loads((run_dir / "run.json").read_text())
+    expected_hash = manifest["verification_files_sha256"][fixture.name]
+    if hashlib.sha256(fixture.read_bytes()).hexdigest() != expected_hash:
+        raise ValueError("fixture differs from the recorded run; cannot reinterpret its cases")
+    cases = {case["id"]: case for case in json.loads(fixture.read_text())["cases"]}
+    reports = []
+    for directory in sorted((run_dir / "requirements-quality").glob("r*-*")):
+        if not directory.is_dir():
+            continue
+        case_id = directory.name.split("-", 1)[1]
+        result_path = directory / "result.json"
+        if not result_path.exists():
+            reports.append({"case": case_id, "status": "incomplete"})
+            continue
+        result = json.loads(result_path.read_text())
+        report = validate_result(cases[case_id], result, requirement_cap=requirement_cap)
+        sse = directory / "response.sse"
+        done = traces = 0
+        if sse.exists():
+            for line in sse.read_text().splitlines():
+                if line == "data: [DONE]":
+                    done += 1
+                elif line.startswith("data:"):
+                    try:
+                        traces += "kairyu_trace_v2" in json.loads(line[5:])
+                    except ValueError:
+                        pass
+        report["checks"]["complete_sse"] = done == traces == 1
+        _separate_assessments(report)
+        report["status"] = "complete" if done == traces == 1 else "incomplete"
+        report["directory"] = directory.name
+        report["source_result_sha256"] = hashlib.sha256(result_path.read_bytes()).hexdigest()
+        # Keep observations compact; full original answers/audits remain in source artifacts.
+        report.pop("stage_outputs")
+        report.pop("checklist")
+        reports.append(report)
+    summary_path = run_dir / "requirements-quality/summary.json"
+    expected = json.loads(summary_path.read_text())["expected_requests"]
+    complete = expected > 0 and len(reports) == expected and all(
+        r["status"] == "complete" for r in reports
+    )
+    return {
+        "schema_version": 2, "source_run": str(run_dir),
+        "served_config_sha256": manifest["served_config_sha256"],
+        "source_manifest_sha256": hashlib.sha256((run_dir / "run.json").read_bytes()).hexdigest(),
+        "analyzer_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "requirement_cap": requirement_cap, "expected_requests": expected,
+        "complete": complete,
+        "contract_passed": complete and all(r["contract"]["passed"] for r in reports),
+        "quality_diagnostics_passed": complete and all(
+            r["quality_diagnostics"]["passed"] for r in reports
+        ),
+        "reports": reports,
+    }
 
 
 def main() -> None:
     from kairyu.dsl.loader import load_spec
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--base-url", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--run-dir", type=Path)
+    mode.add_argument("--replay-run", type=Path)
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--requirement-cap", type=int, default=8192)
+    parser.add_argument("--base-url")
+    parser.add_argument("--repetitions", type=int, default=1)
     args = parser.parse_args()
+    if args.replay_run:
+        if not args.report:
+            parser.error("--replay-run requires --report")
+        if args.report.resolve().is_relative_to(args.replay_run.resolve()):
+            parser.error("replay report must be outside the original evidence directory")
+        args.report.write_text(json.dumps(
+            replay_run(args.replay_run, requirement_cap=args.requirement_cap), indent=2,
+        ) + "\n")
+        return
+    if not args.base_url:
+        parser.error("--run-dir requires --base-url")
+    if args.repetitions < 1:
+        parser.error("--repetitions must be at least one")
     spec = load_spec(HERE / "auto-max.yaml")
     requirements = next(role for role in spec.roles if role.name == "requirements")
     raise SystemExit(
@@ -416,6 +542,7 @@ def main() -> None:
             args.run_dir,
             base_url=args.base_url,
             requirement_cap=requirements.sampling.max_tokens,
+            repetitions=args.repetitions,
         )
     )
 

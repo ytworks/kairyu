@@ -93,13 +93,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
-- DTO-D16: earlier quality-tuned config passes 9/9 quality and 128/128 generic serving; standard launch passes, but its focused image case fails (2/3). Generic image/repair calibration is deployed and CPU/CI-reviewed; final GPU quality recheck was stopped by explicit user instruction (only JSON completed automated PASS). A hard minimum-compliance publication guarantee is unachieved: existing FAIL/exhaustion publication and pre-audit streaming remain. No new coding latency or second-machine claim. Exact hashes, failed and partial evidence: tiered example `MEASUREMENTS.md`.
+- DTO-D16: earlier quality-tuned config passes 9/9 quality and 128/128 generic serving; standard launch passes, but its focused image case fails (2/3). Generic image/repair calibration is deployed and CPU/CI-reviewed; final GPU quality recheck was stopped by explicit user instruction (only JSON completed automated PASS). A hard minimum-compliance publication guarantee is unachieved: existing FAIL/exhaustion publication and pre-audit streaming remain. No new coding latency or second-machine claim. Protocol/quality results are now separated; CPU134 passes and offline replay preserves the image failure and latest incompleteness. Exact hashes and evidence: tiered example `MEASUREMENTS.md`.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-08 — [amendment] DTO-D16: separate protocol tests from model quality
+- What: schema-v2 diagnostics separate contract checks, fixture/model judgments, and unperformed independent semantic review; live diagnosis defaults to one pass. Scripted DAG responses now use JSON and cover initial PASS plus bounded repair/exhaustion. One related CPU run passes134; saved GPU evidence is reclassified offline without model calls.
+- Why: a model's PASS or fixture regex match is not independent factual verification, and repeated semantic examples cannot establish the simple requirement-checking mechanism's correctness or a hard publication guarantee. Preserve image FAIL and incomplete latest evidence as such.
+- Refs: tiered example `requirements_quality.py`, README, `measurements/20260908-contract-diagnostic-replay.json`; PR #595. No prompt/framework/deployment change for this amendment.
 
 ### 2026-09-08 — [progress] DTO-D16: stop further model verification by request
 - What: final image/repair calibration is deployed on the standard image; CPU138 and code CI7 pass. The user stopped optional probes and the final three-case GPU run; only JSON completed automated PASS, while memo/image remain incomplete. API services remain running.

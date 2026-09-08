@@ -847,3 +847,20 @@ The extraction → checklist propagation → audit → bounded refinement path e
 but it does not enforce rejection of every noncompliant answer. Conductor's
 existing FAIL/exhaustion publication and pre-audit streamed opening remain;
 additional model sampling cannot repair that structural guarantee gap.
+
+
+### DTO-D16 verification redesign (2026-09-08)
+
+The task is lightweight requirement checking, not general factual-quality
+certification. Verify orchestration contracts deterministically with the real
+Conductor and scripted JSON responses: concurrent roots, propagation, fixed
+medium effort, first PASS, repair, and exhausted FAIL publication. The diagnostic
+report separately records protocol checks and fixture/model-judgment checks;
+model self-reports are named accordingly, with independent semantic review
+explicitly unperformed. Schema2 removes ambiguous overall `passed`; the live
+command's exit status covers contracts only and repetition defaults to one pass.
+A saved-run replay mode verifies fixture provenance and retains incompleteness
+without model calls or rewriting old evidence. One related CPU run passes134;
+offline replay preserves earlier9/9 diagnostics, subsequent image FAIL, and
+latest incomplete GPU recheck. No prompt, model, deployment, or framework change
+is part of this redesign, and no hard publication guarantee is claimed.

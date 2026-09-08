@@ -533,17 +533,36 @@ checkpoint trees. Lifecycle commands are `./run.sh up`, `./run.sh status`,
 ./verify.sh requirements-quality
 ```
 
-The current DTO-D16 configuration passes all nine API quality cases (the
-original memo, JSON, and image requests, one serial and two concurrent rounds)
-with complete shared checklists, grounded audit evidence, and manual review of
-every final answer. Same-config direct routing also passes without applying
-any evidence-root or audit hook. The final-config generic serving matrix is being re-measured. Coding routes
-and sampling are unchanged; historical coding measurements remain evidence
-for their original configuration, with no new coding latency claim.
-The earlier empty-output and semantic counterexamples remain preserved in
-[MEASUREMENTS.md](MEASUREMENTS.md), alongside full answers, audits, manifests,
-and the current served-config hash. These model-based checks are diagnostics,
-not a guarantee of correctness on every request.
+`requirements-quality` now performs one serial pass of the three diagnostic
+cases by default. Its schema-version-2 report separates `contract` checks
+(protocol shape, execution, serialization, IDs, budgets, and transport) from
+`quality_diagnostics` (fixture heuristics and model self-reports). Exit status
+is **contract-only**; inspect both results. `semantic_review` is explicitly
+`not_performed_by_this_evaluator`, even if every heuristic and model verdict
+passes. A nonempty evidence field does not establish that its claim is true.
+
+The deterministic CPU suite uses scripted responses with the real example DAG
+to check concurrent roots, unchanged JSON checklist propagation, initial PASS,
+FAIL → refinement, exhausted FAIL publication, medium effort, and scoped
+middleware behavior. It tests control flow, not the correctness of a simulated
+model's opinion. Additional live repetitions require explicit `--repetitions N`
+on `requirements_quality.py`; there is no automatic improvement/retest loop.
+
+Replay saved GPU evidence without making any model request:
+
+```sh
+../../.venv/bin/python requirements_quality.py \
+  --replay-run /mnt/nvme/kairyu/model-volumes/qwen3.8-deepseek-v4-8gpu/verification-results/RUN_ID \
+  --requirement-cap 8192 --report /tmp/requirements-replay.json
+```
+
+The report must be outside the original run directory. Replay checks the saved
+fixture hash and records original provenance; incomplete runs cannot pass.
+Old results retain their original meaning and served hashes: `20b800e4…` has
+nine diagnostic/manual passes and 128 generic successes; `be39136a…` has a
+focused 2/3 result including image FAIL; final `85f6e652…` GPU recheck remains
+incomplete. No fresh GPU requests were made for this test redesign.
+See [MEASUREMENTS.md](MEASUREMENTS.md) for all failed/partial evidence.
 
 `serving-auto-max` records the generic-workload product serving matrix and
 proves, for every request, the route judge classification stage and exactly
@@ -608,12 +627,11 @@ two L1 images independently with `QWEN_VLLM_IMAGE` and
 See [MEASUREMENTS.md](MEASUREMENTS.md) for the historical runtime-selection
 and serving-performance analysis.
 
-The `requirements-quality` gate repeats the original text, JSON, and image
-cases three times (serial, then concurrent). It rejects empty or truncated
-checklists, missing minimum constraints, missing audit IDs/evidence, and a
-PASS that leaves minimum requirements unsatisfied. The final nine-case API
-run on `20b800e4…` passes automated and manual review; direct worker probes alone would
-not close this gate.
+The requirements diagnostic checks checklist serialization and audit field
+coverage separately from extracted-criteria coverage, task-specific heuristics,
+and the model's own minimum-satisfaction/verdict claims. It does not rename
+those claims into independent factual verification. FAIL/exhaustion publication
+is reported as existing behavior, not counted as a compliance guarantee.
 
 `KAIRYU_REQUIREMENTS_CONFIG_SHA256` is an internal container-lifecycle value,
 not a Kairyu framework setting or a hardware fingerprint. `control.py`

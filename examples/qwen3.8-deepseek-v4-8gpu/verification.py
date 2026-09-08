@@ -891,7 +891,7 @@ def requirements_quality(run_dir: Path) -> int:
 _VERIFICATIONS = {
     "requirements-quality": (
         requirements_quality,
-        "nonempty complete checklists and audited answers: serial plus repeated parallel cases",
+        "one pass: protocol-contract exit status plus separate model/task diagnostics",
     ),
     "serving-auto-max": (
         serving_auto_max,
@@ -934,6 +934,8 @@ def main() -> None:
         },
         "spec": SPEC,
     }
+    if args.verification == "requirements-quality":
+        manifest["exit_status_scope"] = "contract_only; inspect separate quality_diagnostics"
     (run_dir / "run.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

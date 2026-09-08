@@ -1,5 +1,29 @@
 # Measurements
 
+## Test redesign: contracts versus diagnostic judgments (2026-09-08)
+
+The final test redesign makes no model, prompt, framework, or deployment change.
+One related CPU invocation passes **134 tests**. Scripted real-Conductor tests
+use the actual JSON checklist schema and cover first PASS, bounded repair, and
+exhausted FAIL publication. Structural checks and model/task diagnostic checks
+have separate results and failure lists; model reports are named as self-reports.
+Semantic review is explicitly not performed by the evaluator. Live diagnosis
+defaults to one three-case pass, with repetition only by explicit request.
+
+[Offline reclassification](measurements/20260908-contract-diagnostic-replay.json)
+reads the existing results without modifying them or calling models:
+
+| Original run / config | Complete | Contract | Case/model diagnostics | Independent semantic verification by replay |
+|---|---|---|---|---|
+| 094200 / `20b800e4…` | yes, 9 cases | PASS | PASS | not performed |
+| 104459 / `be39136a…` | yes, 3 cases | PASS | FAIL (image) | not performed |
+| 110606 / `85f6e652…` | no | not passed | not passed | not performed |
+
+A contract PASS on the failed image trial means that the protocol and audit
+ran and recorded FAIL. It does not reverse the image failure or guarantee
+minimum-compliant publication. The latest prompt amendment still lacks a
+completed GPU quality recheck; earlier results are not reattributed to it.
+
 ## Final deployed state and unresolved publication limit (2026-09-08)
 
 Code `84777f13` is deployed through normal `run.sh up`, on served hash

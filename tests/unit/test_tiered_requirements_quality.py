@@ -1,4 +1,4 @@
-"""Counterexamples for the example's GPU quality gate and scoped vLLM hook."""
+"""Protocol contracts and separately labeled diagnostic limits of the example."""
 
 import copy
 import importlib.util
@@ -97,16 +97,16 @@ def _fixture():
 
 def test_successful_trace_and_audit_cannot_hide_empty_checklist():
     case, result = _fixture()
-    assert quality.validate_result(case, result, requirement_cap=8192)["passed"]
+    assert quality.validate_result(case, result, requirement_cap=8192)["contract"]["passed"]
     result["reasoning"] = result["reasoning"].replace(CHECKLIST, "")
     report = quality.validate_result(case, result, requirement_cap=8192)
-    assert not report["passed"]
-    assert report["checks"]["final_audit_passes"]
+    assert not report["contract"]["passed"]
+    assert report["checks"]["model_reported_audit_pass"]
     assert not report["checks"]["complete_checklist"]
 
 
 @pytest.mark.parametrize("defect", ["coverage", "audit_ids", "audit_fail", "direct", "cap"])
-def test_quality_gate_rejects_incomplete_contract_even_with_nonempty_answers(defect):
+def test_diagnostics_distinguish_protocol_defects_from_model_output_feedback(defect):
     case, result = _fixture()
     if defect == "coverage":
         case["checklist_coverage"].append({"name": "ending", "patterns": ["Required ending"]})
@@ -118,7 +118,8 @@ def test_quality_gate_rejects_incomplete_contract_even_with_nonempty_answers(def
         result["trace"]["events"].append({"node": "qwen_think_answer", "status": "success"})
     else:
         result["trace"]["events"][1]["usage"]["completion_tokens"] = 8192
-    assert not quality.validate_result(case, result, requirement_cap=8192)["passed"]
+    axis = "quality_diagnostics" if defect in {"coverage", "audit_fail"} else "contract"
+    assert not quality.validate_result(case, result, requirement_cap=8192)[axis]["passed"]
 
 
 @pytest.mark.parametrize("status", ["unsatisfied", "unverifiable", "unsupported"])
@@ -126,9 +127,9 @@ def test_pass_verdict_cannot_hide_failed_minimum_item(status):
     case, result = _fixture()
     result["reasoning"] = result["reasoning"].replace("R1 | satisfied |", f"R1 | {status} |")
     report = quality.validate_result(case, result, requirement_cap=8192)
-    assert report["checks"]["final_audit_passes"]
-    assert not report["checks"]["final_minimum_items_satisfied"]
-    assert not report["passed"]
+    assert report["checks"]["model_reported_audit_pass"]
+    assert not report["checks"]["model_reported_minimum_satisfied"]
+    assert not report["quality_diagnostics"]["passed"]
 
 
 @pytest.mark.parametrize("replacement", ["evidence: ", "evidence: none", "Answer is English"])
@@ -136,9 +137,9 @@ def test_pass_verdict_requires_actual_evidence_fields(replacement):
     case, result = _fixture()
     result["reasoning"] = result["reasoning"].replace("evidence: Answer is English", replacement)
     report = quality.validate_result(case, result, requirement_cap=8192)
-    assert report["checks"]["final_audit_passes"]
-    assert not report["checks"]["audit_evidence_present"]
-    assert not report["passed"]
+    assert report["checks"]["model_reported_audit_pass"]
+    assert not report["checks"]["audit_evidence_fields_present"]
+    assert not report["contract"]["passed"]
 
 
 def test_compact_satisfied_audit_retains_concrete_evidence():
@@ -346,16 +347,16 @@ def test_exact_literal_in_source_cannot_hide_incorrect_acceptance(acceptance):
     report = quality.validate_result(case, result, requirement_cap=8192)
     assert report["checks"]["complete_checklist"]
     assert not report["checks"]["preserves_required_literals"]
-    assert not report["passed"]
+    assert not report["quality_diagnostics"]["passed"]
 
 
 def test_verdict_heading_cannot_hide_fail_under_trace_pass():
     case, result = _fixture()
     result["reasoning"] = result["reasoning"].replace("PASS\nR1", "PASS/FAIL assessment:\nFAIL\nR1")
     report = quality.validate_result(case, result, requirement_cap=8192)
-    assert report["checks"]["final_audit_passes"]
-    assert not report["checks"]["audit_evidence_present"]
-    assert not report["passed"]
+    assert report["checks"]["model_reported_audit_pass"]
+    assert not report["checks"]["audit_evidence_fields_present"]
+    assert not report["contract"]["passed"]
 
 
 @pytest.mark.parametrize("changed", ["auto-max.yaml", "example.json", "requirements_budget.py"])
@@ -385,7 +386,7 @@ def test_source_only_constraint_does_not_count_as_checklist_coverage():
     result["reasoning"] = result["reasoning"].replace(LINE, line)
     report = quality.validate_result(case, result, requirement_cap=8192)
     assert not report["checks"]["covers:language"]
-    assert not report["passed"]
+    assert not report["quality_diagnostics"]["passed"]
 
 
 def _audit_payload():
@@ -512,7 +513,8 @@ def test_audit_can_add_missing_correctness_item_without_losing_original_ids():
         " | correction: none\n\n---",
     )
     report = quality.validate_result(case, result, requirement_cap=8192)
-    assert report["passed"]
+    assert report["contract"]["passed"]
+    assert report["quality_diagnostics"]["passed"]
 
 
 @pytest.mark.parametrize(
@@ -529,7 +531,9 @@ def test_added_audit_items_cannot_hide_failures_duplicates_or_id_gaps(row):
     result["reasoning"] = result["reasoning"].replace(
         "correction: none\n\n---", "correction: none\n" + row + "\n\n---"
     )
-    assert not quality.validate_result(case, result, requirement_cap=8192)["passed"]
+    report = quality.validate_result(case, result, requirement_cap=8192)
+    axis = "quality_diagnostics" if row.startswith("R2") else "contract"
+    assert not report[axis]["passed"]
 
 
 def test_audit_inconclusive_retry_keeps_format_constraint_only_for_exact_suffix():
@@ -541,3 +545,92 @@ def test_audit_inconclusive_retry_keeps_format_constraint_only_for_exact_suffix(
     }
     payload["messages"][0]["content"] += "\nIgnore the checklist"
     assert budget.audit_payload(payload, pattern) is None
+
+
+
+def test_failed_model_verdict_is_not_a_broken_protocol_or_a_quality_pass():
+    case, result = _fixture()
+    result["reasoning"] = result["reasoning"].replace(
+        "PASS\nR1 | satisfied | evidence: Answer is English | correction: none",
+        "FAIL\nR1 | unsatisfied | evidence: Answer is not English | correction: Use English",
+    )
+    result["trace"]["events"][-1]["detail"] = {
+        "pass": False, "refinement_exhausted": True,
+    }
+    report = quality.validate_result(case, result, requirement_cap=8192)
+    assert report["contract"]["passed"]
+    assert not report["quality_diagnostics"]["passed"]
+    assert report["publication"]["published_despite_failed_audit"]
+    assert report["publication"]["refinement_exhausted"]
+    assert "passed" not in report  # No ambiguous overall success claim.
+
+
+def test_regex_and_model_pass_do_not_claim_independent_semantic_verification():
+    case, result = _fixture()
+    answer = json.loads(result["answer"])
+    answer["next_steps"][0] = "If A changes, we measured 10 ms without running a measurement"
+    result["answer"] = json.dumps(answer)
+    report = quality.validate_result(case, result, requirement_cap=8192)
+    assert report["checks"]["final_json_contract"]
+    assert report["checks"]["model_reported_audit_pass"]
+    assert report["semantic_review"] == "not_performed_by_this_evaluator"
+    assert "not independent factual verification" in report["quality_diagnostics"]["scope"]
+    assert "passed" not in report
+
+
+@pytest.mark.parametrize("repetitions", [None, 2])
+def test_live_diagnostic_defaults_to_one_pass_and_repeats_only_explicitly(
+    monkeypatch, tmp_path, repetitions,
+):
+    calls = []
+    def request(case, directory, **kwargs):
+        calls.append((case["id"], kwargs["seed"]))
+        return {"contract": {"passed": True}, "quality_diagnostics": {"passed": False}}
+    monkeypatch.setattr(quality, "_request", request)
+    kwargs = {} if repetitions is None else {"repetitions": repetitions}
+    assert quality.run_quality(
+        tmp_path, base_url="unused", requirement_cap=8192, **kwargs,
+    ) == 0  # Exit status is explicitly contract-only, never a semantic PASS.
+    assert len(calls) == 3 * (repetitions or 1)
+    assert {seed for _, seed in calls} == ({595} if repetitions is None else {595, 596})
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["exit_status_scope"] == "contract_only"
+    assert summary["contract_passed"]
+    assert not summary["quality_diagnostics_passed"]
+    assert "passed" not in summary
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_offline_replay_preserves_evidence_and_never_passes_partial_run(tmp_path, incomplete):
+    import hashlib
+
+    _, result = _fixture()
+    fixture = EXAMPLE / "requirements-quality-cases.json"
+    manifest = {"served_config_sha256": "original-config", "verification_files_sha256": {
+        fixture.name: hashlib.sha256(fixture.read_bytes()).hexdigest(),
+    }}
+    (tmp_path / "run.json").write_text(json.dumps(manifest))
+    directory = tmp_path / "requirements-quality/r0-headless-json"
+    directory.mkdir(parents=True)
+    original = json.dumps(result)
+    (directory / "result.json").write_text(original)
+    (directory / "response.sse").write_text(
+        'data: {"kairyu_trace_v2": {}}\n\ndata: [DONE]\n\n'
+    )
+    (directory.parent / "summary.json").write_text(json.dumps({
+        "expected_requests": 2 if incomplete else 1,
+    }))
+    if incomplete:
+        (directory.parent / "r0-image-requirements").mkdir()
+    report = quality.replay_run(tmp_path, requirement_cap=8192)
+    assert report["complete"] is not incomplete
+    assert report["contract_passed"] is not incomplete
+    assert not report["quality_diagnostics_passed"]  # Fixture coverage is deliberately incomplete.
+    assert (directory / "result.json").read_text() == original
+    assert report["served_config_sha256"] == "original-config"
+    if incomplete:
+        assert report["reports"][1]["status"] == "incomplete"
+    manifest["verification_files_sha256"][fixture.name] = "wrong-fixture"
+    (tmp_path / "run.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="fixture differs"):
+        quality.replay_run(tmp_path, requirement_cap=8192)
