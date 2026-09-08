@@ -1,6 +1,6 @@
 # Tiered Example Dual-Track Policy-Ensemble Orchestration
 
-Status: **Accepted; implemented; DTO-D16 nine-case quality and 128-request generic serving pass; default-launch focused verification in progress** (2026-09-08).
+Status: **Accepted; implemented; earlier quality/serving pass; final image calibration GPU recheck stopped by user request** (2026-09-08).
 
 Quality-tuned DTO-D16 API run `20260908T094200Z` passes all nine original cases
 (one serial and two concurrent rounds) on served hash `20b800e49f68baf0…`.
@@ -829,3 +829,21 @@ user's format. This is a general evidence/repair rule, not a fixture-specific
 shape exception. Bounded audit probes and the original three API cases will
 verify the amendment. Active DeepSeek descriptor metadata is also aligned with
 the actually deployed standard image; historical IDs remain in old evidence.
+
+
+### DTO-D16 final verification boundary (2026-09-08)
+
+At the user's explicit instruction, stop further model tests and refinements.
+Final code `84777f13` is normally deployed on `85f6e652…`; CPU138, independent
+review, and code CI7 pass. Run `20260908T110606Z` is cancelled with only JSON
+completed automated PASS; memo/image remain incomplete. The latest image
+calibration is therefore not GPU-quality verified. Earlier `20b800e4…` quality
+9/9 and generic128/128, and `be39136a…` focused2/3 with image FAIL, remain exact
+historical outcomes. Preserve the running API and all failed/partial evidence;
+no framework change, merge, or second-physical-machine test is claimed.
+
+The stopping boundary is not a claim that the requested behavior is guaranteed.
+The extraction → checklist propagation → audit → bounded refinement path exists,
+but it does not enforce rejection of every noncompliant answer. Conductor's
+existing FAIL/exhaustion publication and pre-audit streamed opening remain;
+additional model sampling cannot repair that structural guarantee gap.

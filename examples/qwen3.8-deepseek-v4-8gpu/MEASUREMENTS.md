@@ -1,5 +1,35 @@
 # Measurements
 
+## Final deployed state and unresolved publication limit (2026-09-08)
+
+Code `84777f13` is deployed through normal `run.sh up`, on served hash
+`85f6e65268bd153cf378f68bd3c74cf2839d3aa43cc5e588ea6abbc5626dbb90`.
+Related CPU tests: 138 pass; independent review and all seven code CI checks
+pass. Standard image identity, preserved secret, and all 183 framework files
+were attested. No framework code changed.
+
+The user explicitly stopped further model tests. Optional audit probes and
+final three-case run `20260908T110606Z` were cancelled; only the JSON case
+completed automated validation (PASS). Memo/image remained incomplete, and
+no further manual review or rerun was performed. This does **not** establish
+GPU quality for the final image-observation/correction amendment.
+[Stopped-run evidence](measurements/20260908-final-verification-stopped.json)
+retains the completed case, cancellation, manifests, and partial-artifact hashes.
+API services remain running; no second physical machine or fresh source build
+was tested. Earlier results below retain their original configuration hashes.
+
+The scope is lightweight requirement checking. Mechanism validation (extraction,
+propagation, per-ID assessment) is distinct from whether the LLM interprets
+requirements, recognizes facts, and judges answers correctly on unknown inputs.
+Repeating these fixtures is not a general hallucination/quality evaluation.
+
+**Required-output guarantee is not achieved.** Checklist extraction, propagation,
+audit, and bounded refinement are implemented, but the existing Conductor can
+publish the last answer after FAIL/refinement exhaustion. The streamed opening
+is already public before audit. Successful repeated samples cannot turn that
+publication path into a hard minimum-requirement gate. The image FAIL above is
+concrete evidence of this limit; latest prompt changes do not remove it.
+
 ## Default-launch verification and image counterexample (2026-09-08)
 
 Normal `run.sh up` and its repeat pass without the old image/secret overrides.
@@ -15,9 +45,10 @@ confuses canvas geometry with separately depicted objects, and refinement
 introduces a real contradiction. Requirements3/3, image1/1, and audit-format6/6
 applications correlate; direct-route smoke also passes. The failed result is
 retained in [complete evidence](measurements/20260908-default-launch-quality.json).
-Generic observation/repair prompt clarification is being verified.
+Generic observation/repair prompt clarification is deployed, but its GPU
+quality recheck was stopped as described above.
 
-## Current DTO-D16 GPU quality result (2026-09-08)
+## Earlier quality-tuned DTO-D16 GPU result (2026-09-08)
 
 **All nine API diagnostic cases pass automated and manual review** on the
 configuration below. This closes the observed empty-checklist, empty-image,

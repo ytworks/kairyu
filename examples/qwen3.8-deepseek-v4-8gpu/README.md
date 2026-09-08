@@ -390,6 +390,21 @@ gate; native full-checkpoint correctness, recovery, soak, and performance gates
 remain open. See
 [`docs/design/example-layered-orchestration.md`](../../docs/design/example-layered-orchestration.md).
 
+## Verification status (2026-09-08)
+
+The final example is running on the standard image with the documented launch
+procedure. Its latest image-observation/correction prompt change passes CPU
+checks and review, but GPU quality re-verification was stopped at the user's
+request. Only JSON completed the final three-case rerun; memo/image did not.
+Earlier nine-case quality and 128-request serving passes belong to `20b800e4…`;
+the later standard-launch run on `be39136a…` was 2/3 with an image audit FAIL.
+See [MEASUREMENTS.md](MEASUREMENTS.md) for exact hashes and retained evidence.
+No different physical machine has been tested. This is not a hard publication
+gate: the existing Conductor can publish after a final FAIL when refinement
+is exhausted, and the opening is streamed before audit. Required-output
+compliance is therefore not guaranteed; more successful test samples alone
+cannot resolve that structural limitation.
+
 ## Start
 
 Run this recipe on Linux with eight RTX PRO 6000 Blackwell Server Edition
