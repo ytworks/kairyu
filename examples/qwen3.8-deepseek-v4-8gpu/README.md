@@ -14,7 +14,7 @@ Open WebUI
              DEEPSEEK_THINK -> deepseek_think  DeepSeek thinking at the L3 effort
              ENSEMBLE       -> primary         the dual-track ensemble DAG below
         -> Kairyu L2 primary profile: the dual-track ensemble DAG
-           (11 roles: 10 generation + 1 audit verifier)
+           (12 roles: 11 generation + 1 audit verifier)
             Track A: DeepSeek writes 4 maximally different answer policies;
                      4 Qwen replicas answer in parallel, one policy each
             Track B: a Qwen quick draft, critically refined by thinking
@@ -23,6 +23,8 @@ Open WebUI
                      the 5 peer candidates (refined answer + 4 policy
                      answers); a Qwen audit verifies it (PASS/FAIL,
                      <= 2 refinement rounds) before the remainder streams
+            Criteria: a Qwen requirements stage extracts a verifiable checklist
+                     beside image_description; audit checks every requirement
             Images:  a Qwen image_description stage runs on image requests
                      only and feeds the text-only DeepSeek roles
         -> deployment-owned L1 pools: 4 x Qwen3.8-27B-FP8 TP1 (GPU 0-3),
@@ -60,7 +62,7 @@ How a request flows:
 2. **Dispatch** — Kairyu attaches the verdict to the request once (before
    preflight and admission, so all three agree) and builds the Conductor DAG
    of that profile only. Four of the profiles are a single model call; the
-   fifth is the eleven-role ensemble below.
+   fifth is the twelve-role ensemble below.
 3. **Fallback** — if the judge times out, errors, or answers anything that is
    not exactly one offered label, the request runs the ensemble (`primary`),
    i.e. the quality-safe route.
@@ -71,7 +73,7 @@ How a request flows:
 | `QWEN_THINK` | `qwen_think_medium` | one Qwen3.8 call (`qwen_think_answer`) | fixed `medium` (spec `high`) | T=1.0, top_p=0.95, top_k=20 | 131,072 |
 | `DEEPSEEK` | `deepseek_direct` | one DeepSeek call on the non-thinking pool (`deepseek_answer`) | no | T=1.0, top_p=0.95 | 393,216 (384K) |
 | `DEEPSEEK_THINK` | `deepseek_think` | one DeepSeek call on the thinking pool (`deepseek_think_answer`) | caller's L3 effort (default `high`) | T=1.0, top_p=0.95 | 393,216 (384K) |
-| `ENSEMBLE` | `primary` | the eleven-role dual-track DAG below | as before | as before | as before |
+| `ENSEMBLE` | `primary` | the twelve-role dual-track DAG below | as before | as before | as before |
 
 ### What the judge optimizes — and what it is not
 
@@ -133,7 +135,7 @@ measured and the criteria adjusted from evidence.
   judge's verdict arrived empty and every request fell back to the ensemble.
 - **The ensemble is unchanged**: its roles, budgets (DeepSeek tiers
   8192/32768/65536, `internal_max_tokens` 65536, floor 256), head streaming,
-  and audit loop are exactly DTO-D1..D12. The spec-level `budget {19, 2}`
+  and audit loop are exactly DTO-D1..D12. The spec-level `budget {20, 2}`
   applies to every profile; a direct route spends one step plus the bounded
   empty-output re-dispatch.
 - **The Qwen thinking route keeps the floor too (DTO-D15)**: the vLLM chat
@@ -151,9 +153,11 @@ measured and the criteria adjusted from evidence.
 
 ## The ensemble profile: the dual-track DAG (DTO-D1)
 
-The `primary` profile is the full eleven-role ensemble in three waves. It runs
+The `primary` profile is the twelve-role ensemble in four scheduler waves. It runs
 only when the judge answers `ENSEMBLE` (or as the fallback); **inside the
-profile no role is skipped** except the image-only stage on text requests.
+profile the requirements stage always runs**, including on text-only requests.
+The image-only role is skipped without an image; tool/format turns disable the
+head, and `n>1` skips the single-verdict audit as described below.
 
 ```mermaid
 flowchart LR
@@ -161,16 +165,19 @@ flowchart LR
         H["head (Qwen non-thinking, T=0.7)<br/>streams public opening at t=0"]
         DR["draft (Qwen thinking-medium, T=1.0)<br/>quick internal draft"]
         ID["image_description (Qwen thinking-medium)<br/>image requests only; skipped otherwise"]
-        PO["policies (DeepSeek thinking, T=1.0)<br/>4 maximally different answer policies"]
+        RQ["requirements (Qwen thinking-medium)<br/>request-grounded checklist + acceptance criteria"]
     end
-    subgraph W2["Wave 2 — two tracks in parallel"]
+    subgraph W2["Wave 2 — planning and draft refinement"]
+        PO["policies (DeepSeek thinking, T=1.0)<br/>4 maximally different answer policies"]
+        CR["critique (DeepSeek thinking, T=1.0)<br/>critical analysis of the draft<br/>-> improved answer"]
+    end
+    subgraph W3["Wave 3 — four policy answers"]
         A1["answer_1 (Qwen thinking-medium, T=1.0)<br/>follows POLICY 1"]
         A2["answer_2 (Qwen thinking-medium, T=1.0)<br/>follows POLICY 2"]
         A3["answer_3 (Qwen thinking-medium, T=1.0)<br/>follows POLICY 3"]
         A4["answer_4 (Qwen thinking-medium, T=1.0)<br/>follows POLICY 4"]
-        CR["critique (DeepSeek thinking, T=1.0)<br/>critical analysis of the draft<br/>-> improved answer"]
     end
-    subgraph W3["Wave 3 — merge + audit"]
+    subgraph W4["Wave 4 — merge + audit"]
         CO["synthesis (DeepSeek thinking)<br/>one better answer from 5 peer<br/>UNTRUSTED candidates; remainder is<br/>published after the audit"]
         AU["audit (Qwen thinking-medium, verifier)<br/>PASS -> stream; FAIL -> refine (<= 2)"]
     end
@@ -178,6 +185,11 @@ flowchart LR
     ID -.image requests.-> CR
     ID -.image requests.-> CO
     ID -.image requests.-> AU
+    RQ --> PO
+    RQ --> CR
+    RQ --> A1 & A2 & A3 & A4
+    RQ --> CO
+    RQ --> AU
     PO --> A1
     PO --> A2
     PO --> A3
@@ -200,11 +212,42 @@ Role contracts:
 | `head` | Qwen TP1 | dependency-free; streams the committed public opening from t=0 (the TTFT gate) |
 | `draft` | Qwen TP1 | quick complete internal draft — Track B's input, never published |
 | `image_description` | Qwen TP1 | image requests only (`requires: image`; skipped entirely otherwise): precise textual description of the attached image for the text-only DeepSeek roles |
+| `requirements` | Qwen thinking (medium) | dependency-free on all ensemble requests; extracts stable requirement IDs, minimum/optional priority, acceptance criteria, and the source instruction; never answers the task |
 | `policies` | DeepSeek thinking | ONE call emitting POLICY 1..4, each a substantively different angle/method/priority set |
 | `answer_1..4` | Qwen TP1 x4 | four policy-bound answers in parallel, one per replica; the policy list steers HOW, the request alone defines WHAT |
 | `critique` | DeepSeek thinking | deliberates privately over the UNTRUSTED draft with critical thinking, then emits one improved complete answer |
 | `synthesis` | DeepSeek thinking | the selected final unit: examines the five UNTRUSTED candidates (critique's refined answer + the four policy answers) as peers, verifies them, and writes one better answer; the remainder after the committed opening is published once the audit passes |
-| `audit` | Qwen thinking (medium) | verifier on `synthesis`: judges opening + remainder as one public answer (correctness, completeness, consistency, reply format); first line `PASS`/`FAIL`; FAIL feedback drives up to 2 refinement rounds, after which the last attempt is published |
+| `audit` | Qwen thinking (medium) | verifier on `synthesis`: judges opening + remainder as one public answer (correctness, completeness, consistency, reply format); first line `PASS`/`FAIL`, followed by a verdict and evidence for every requirement ID; FAIL feedback drives up to 2 refinement rounds, after which the last attempt is published |
+
+Requirement verification (DTO-D16) is a lightweight model-based quality check
+for any task: writing, research, comparisons, image questions, or programming.
+The `requirements` role reads the original conversation independently of the
+candidate drafts and emits one line per item, for example:
+
+```text
+R1 | priority: minimum | requirement: Compare both options | acceptance_criterion: Discuss A and B and their differences | source: "Compare A and B"
+```
+
+The checklist travels to policies, all four answers, critique, both synthesis
+prompt variants, and every audit attempt. It is untrusted derived data: the
+original request remains authoritative. The audit checks coverage against that
+request, corrects omissions or invented constraints, and reports each ID as
+`satisfied`, `unsatisfied`, `unverifiable`, or `unsupported`, with concrete
+answer evidence and repair guidance. Only satisfied valid minimum requirements
+permit `PASS`; optional improvements alone do not require a revision. A tool
+call is judged against the required next action, without demanding results
+that are not yet available. No program execution is added or required.
+
+This adds one Qwen call: 11 normal text-ensemble calls or 12 with an image,
+excluding the separately bounded route judge and refinement/retry calls.
+It uses the existing example's medium-thinking mapping (`reasoning_effort:
+high`, DTO-D14) and a 4096-token combined thinking/checklist cap. This is an
+agent judgment, not a mechanically enforced proof of requirement satisfaction:
+the head is already public before audit, exhausted/inconclusive verification
+retains the existing publication behavior, and the four direct routes do not
+run this checklist. `n>1` also retains its existing audit bypass. Inspect the
+intermediate audit for unresolved requirements. GPU quality/latency validation
+and a served-config digest re-pin are pending for this changed configuration.
 
 Design notes (see
 [`docs/design/example-dual-track-orchestration.md`](../../docs/design/example-dual-track-orchestration.md)):
@@ -224,8 +267,8 @@ Design notes (see
   The TTFT gate stays on the non-thinking Qwen head, and each role's token
   cap now bounds its `<think>` span plus its output together.
 - Qwen sampling and thinking are fixed per role in `auto-max.yaml`, never
-  derived from the caller's request: `draft`, `image_description`, and
-  `answer_1..4` declare `reasoning_effort: high` (T=1.0) — the medium tier
+  derived from the caller's request: `draft`, `image_description`, `requirements`,
+  and `answer_1..4` declare `reasoning_effort: high` (T=1.0) — the medium tier
   under the L3 medium→high alias rule (DTO-D14) — so they think at medium
   effort: the example-local Qwen template (`qwen3.8-chat.jinja`) enables
   thinking for any explicit effort, prepends the medium reasoning preamble
@@ -256,13 +299,13 @@ Design notes (see
   and when the rounds are exhausted the last attempt is published. The
   remainder therefore reaches the stream only after the audit — the head
   still commits at t=0, so the TTFT gate is unaffected. Budget:
-  `max_steps: 19` (10 generation units + 1 empty-final-output re-dispatch
+  `max_steps: 20` (11 generation units + 1 empty-final-output re-dispatch
   + 3 audit verdicts + 3 bounded inconclusive re-verifies + 2 refinements),
   `moa_samples: 0`.
-- Per request the DeepSeek engine sees at most one in-flight call per wave
-  (policies -> critique -> synthesis, plus refinement rounds — the audit
-  verdict now lands on the Qwen pool, DTO-D14); the four concurrent Qwen
-  roles spread one-per-replica through `queue_depth_threshold: 0`.
+- The dependency-free Qwen roots run together; `policies` and `critique`
+  become ready after image description and requirements, followed by the four
+  Qwen policy answers and then synthesis with its inline audit. Up to four
+  concurrent Qwen roles spread through `queue_depth_threshold: 0`.
 
 On agent turns (declared tools, a plain-text structured-format demand, API
 `response_format`, `n>1`, or `logprobs`) the head is disabled for the call
@@ -344,8 +387,8 @@ Open WebUI listens on all host interfaces, requires no login, calls only
 Kairyu L3, and is explicitly limited to `kairyu-auto-max`. The public
 `/v1/models` endpoint additionally returns `embed-small`; the L1 pools are not
 public IDs or Chat UI choices. The launcher validates that exact public
-inventory, the explicit eleven-role dual-track primary DAG (including the
-streamed head and the `{max_steps: 19, max_refine_depth: 2}` budget), the
+inventory, the explicit twelve-role dual-track primary DAG (including the
+streamed head and the `{max_steps: 20, max_refine_depth: 2}` budget), the
 four direct-route profiles and the Qwen route judge with its five choices
 (DTO-D13), the `tier1`/`tier2`/`tier2-direct` engine bindings, and two
 ordered finite 384-dimensional embedding vectors with positive usage before

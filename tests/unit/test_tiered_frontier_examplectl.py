@@ -359,18 +359,19 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert maximum.expose_intermediate_outputs is True
     assert config["orchestration"]["internal_max_output_tokens"] == 65536
     assert config["orchestration"]["product_policy"] == "judged-five-route-dual-track"
-    # DTO-D10 budget: 10 generation units + 1 empty-output re-dispatch
+    # DTO-D16 budget: 11 generation units + 1 empty-output re-dispatch
     # + 3 audit verdicts + 3 inconclusive re-verifies + 2 refinements.
-    assert config["orchestration"]["product_normal_calls"] == 10
-    assert config["orchestration"]["product_max_calls"] == 19
+    assert config["orchestration"]["product_normal_calls"] == 11
+    assert config["orchestration"]["product_max_calls"] == 20
     assert config["orchestration"]["product_max_refinements"] == 2
-    assert maximum.budget.max_steps == 19
+    assert maximum.budget.max_steps == 20
     assert maximum.budget.max_refine_depth == 2
     expected_roles = list(config["orchestration"]["roles"])
     assert [role.name for role in maximum.roles] == expected_roles == [
         "head",
         "draft",
         "image_description",
+        "requirements",
         "policies",
         "answer_1",
         "answer_2",
@@ -392,6 +393,7 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
         "head": None,
         "draft": "high",
         "image_description": "high",
+        "requirements": "high",
         "answer_1": "high",
         "answer_2": "high",
         "answer_3": "high",
@@ -410,7 +412,7 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert draft.worker == "tier1" and draft.depends_on == ()
     critique = by_name["critique"]
     assert critique.worker == "tier2"
-    assert critique.depends_on == ("draft", "image_description")
+    assert critique.depends_on == ("draft", "image_description", "requirements")
     # DTO-D11: the Qwen image_description stage runs only on image requests
     # and feeds every text-only DeepSeek role; the Qwen answerers see the
     # image natively.
@@ -420,13 +422,26 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     assert image_description.depends_on == ()
     for role_name in ("policies", "critique", "synthesis", "audit"):
         assert "{image_description}" in by_name[role_name].prompt
+    requirements = by_name["requirements"]
+    assert requirements.worker == "tier1"
+    assert requirements.depends_on == () and requirements.requires is None
+    assert requirements.sampling.max_tokens == image_description.sampling.max_tokens == 4096
+    for role_name in (
+        "policies", "critique", "synthesis", "audit",
+        *(f"answer_{i}" for i in range(1, 5)),
+    ):
+        role = by_name[role_name]
+        assert "requirements" in role.depends_on
+        assert "{requirements}" in role.prompt
+    assert "{requirements}" in by_name["synthesis"].prompt_headless
     # Track A: one thinking DeepSeek policy call fans out to four Qwen
     # answerers, one per replica, each bound to its policy by prompt.
     policies = by_name["policies"]
-    assert policies.worker == "tier2" and policies.depends_on == ("image_description",)
+    assert policies.worker == "tier2"
+    assert policies.depends_on == ("image_description", "requirements")
     answerers = [by_name[f"answer_{index}"] for index in range(1, 5)]
     assert all(role.worker == "tier1" for role in answerers)
-    assert all(role.depends_on == ("policies",) for role in answerers)
+    assert all(role.depends_on == ("policies", "requirements") for role in answerers)
     assert {role.sampling.seed_offset for role in answerers} == {1, 2, 3, 4}
     for index, role in enumerate(answerers, start=1):
         assert f"POLICY {index}" in role.prompt
@@ -444,6 +459,7 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
         "answer_3",
         "answer_4",
         "image_description",
+        "requirements",
     )
     assert "UNTRUSTED CANDIDATE 5" in synthesis.prompt
     assert "REFINED ANSWER" not in synthesis.prompt
@@ -461,7 +477,7 @@ def test_tiered_l2_pins_only_the_dual_track_dag() -> None:
     audit = by_name["audit"]
     assert audit.role_type == "verifier" and audit.worker == "tier1"
     assert audit.verifies == "synthesis"
-    assert audit.depends_on == ("synthesis", "head", "image_description")
+    assert audit.depends_on == ("synthesis", "head", "image_description", "requirements")
     assert audit.sampling.temperature > 0.0
     assert "PASS" in audit.prompt and "FAIL" in audit.prompt
     assert audit.reasoning_effort == "high"
@@ -624,6 +640,7 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                             "head",
                             "draft",
                             "image_description",
+                            "requirements",
                             "policies",
                             "answer_1",
                             "answer_2",
@@ -663,7 +680,7 @@ def test_tiered_readiness_posts_two_input_embedding_probe(
                     },
                     "stream_head": "head",
                     "moa_samples": 0,
-                    "budget": {"max_steps": 19, "max_refine_depth": 2},
+                    "budget": {"max_steps": 20, "max_refine_depth": 2},
                     "expose_intermediate_outputs": True,
                     "configured_engines": {
                         "tier1": {"model": "qwen3.8-27b"},
@@ -895,6 +912,7 @@ def test_tiered_product_serving_requires_head_and_synthesis_trace(
                 "require_head": True,
                 "expected_generation_nodes": (
                     "draft",
+                    "requirements",
                     "policies",
                     "answer_1",
                     "answer_2",
@@ -930,6 +948,7 @@ def _write_product_serving_result(row_dir: Path, stages: list[dict]) -> None:
     "node",
     [
         "draft",
+        "requirements",
         "policies",
         "answer_1",
         "answer_2",

@@ -98,6 +98,7 @@
       "head",
       "draft",
       "image_description",
+      "requirements",
       "policies",
       "answer_1",
       "answer_2",
@@ -108,9 +109,9 @@
       "audit"
     ],
     "stream_head": "head",
-    "max_steps": 19,
-    "product_normal_calls": 10,
-    "product_max_calls": 19,
+    "max_steps": 20,
+    "product_normal_calls": 11,
+    "product_max_calls": 20,
     "product_max_refinements": 2,
     "product_exposes_intermediate_outputs": true,
     "profiles": {

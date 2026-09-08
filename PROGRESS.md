@@ -93,13 +93,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - NVLink-profile gates blocked on H100/A100-class hardware; PCIe-switch chassis and ≥400 Gb/s RDMA NICs gate E4/E5
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
-- DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
+- DTO-D15 (2026-08-26) and DTO-D16 (2026-09-08, parallel requirement checklist and per-item audit) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-08 — [amendment] DTO-D16: ensemble audits request requirements
+- What: the example adds a Qwen3.8 medium-thinking requirements root beside image description, passes stable criteria to answer stages, and asks the final audit to judge every item with evidence and repair guidance; call budget becomes 20 with two refinements.
+- Why: general task requirements need explicit minimum-quality checks independent of candidate drafts; no program execution or framework changes are required.
+- Refs: DTO-D16 in `docs/design/example-dual-track-orchestration.md`; `examples/qwen3.8-deepseek-v4-8gpu/`; `tests/unit/test_tiered_requirement_dag.py`; GPU gates and config digest re-pin pending
 
 ### 2026-09-04 — [amendment] FN-D9: vision examples GPU-verified; Qwen drops MTP k=3
 - What: both vision replica examples pinned (tree SHA, image ID `b47e2210`) and all gates

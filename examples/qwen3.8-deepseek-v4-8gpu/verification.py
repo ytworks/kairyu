@@ -21,6 +21,7 @@ SPEC = json.loads((HERE / "example.json").read_text(encoding="utf-8"))
 # DTO-D11; synthesis is that profile's final unit).
 _DUAL_TRACK_INTERNAL_NODES = (
     "draft",
+    "requirements",
     "policies",
     "answer_1",
     "answer_2",

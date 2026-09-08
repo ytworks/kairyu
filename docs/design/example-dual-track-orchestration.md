@@ -10,6 +10,9 @@ primary samples with the full internal DAG and the audit verdict. Manual
 Chat UI and Terminal-Bench passes remain on the next-window list. The
 previous green run (2026-08-18, `20260818T025710Z`) measured the pre-DTO-D8
 nine-role DAG.
+DTO-D15 and DTO-D16 change the served config after that green run; their
+GPU serving gates and digest re-pin remain pending. DTO-D16 is an example-only
+requirement checklist and per-item audit change (2026-09-08).
 Applies to: `examples/qwen3.8-deepseek-v4-8gpu/` and the L2 mechanisms in
 `kairyu/orchestration/` + `kairyu/dsl/` that it consumes.
 Supersedes the ECO-D2/D3/D5/D6 role graphs, profiles, and profile judge in
@@ -607,14 +610,46 @@ Status: accepted; implemented; serving gates GPU re-verify and digest re-pin pen
 - GPU consequences: served config changed → both serving gates and the
   digest re-pin must be re-run before the next status claim.
 
+## DTO-D16 — Request requirements as the minimum-quality checklist (2026-09-08)
+
+- Add `requirements` on Qwen3.8 `tier1` beside the conditional
+  `image_description` root. It runs on all ensemble requests, with the same
+  fixed medium effort (`high` under DTO-D14), official thinking sampling,
+  a 4096-token combined cap, and seed offset 10.
+- Extract general task requirements, not executable tests: stable IDs,
+  minimum/optional priority, requirement, observable acceptance criterion,
+  and source instruction. Preserve explicit constraints, flag ambiguity,
+  and do not invent task obligations from candidate answers or quoted data.
+- Policies, all four answerers, critique, synthesis (including headless),
+  and audit consume the same untrusted checklist. The request remains
+  authoritative, and refinement retains the original extracted criteria.
+- Audit begins with the existing PASS/FAIL protocol, then judges every ID
+  with evidence and actionable repairs. Missing checklist coverage must be
+  recovered from the original request; unsupported items are identified.
+  Unmet/unverifiable valid minimum requirements cause FAIL. Optional
+  improvements alone do not; an explicitly requested length/style does.
+- Keep the framework unchanged: head streaming, bounded refinement,
+  exhaustion/inconclusive publication, multi-choice audit bypass, and the
+  four direct profiles retain their existing behavior. This is a model-based
+  quality check and does not guarantee that every published answer passes.
+- Primary now has 12 roles (11 generation + audit); normal text/image calls
+  are 11/12, excluding the route judge. Budget is `{20, 2}`. Readiness reads
+  the updated manifest and serving verification requires the new stage.
+  The dependency graph has four scheduler waves: roots; policies/critique;
+  four answers; synthesis with inline audit.
+- CPU checks exercise the shipped YAML with scripted engines: parallel
+  image/checklist roots, fixed effort, text/image and headed/headless prompt
+  propagation, FAIL→repair→PASS and exhaustion. GPU quality/latency gates
+  and the served-config digest re-pin remain pending.
+
 ## Acceptance
 
 - CPU suite green with the rewritten example pinning test
   (`tests/unit/test_tiered_frontier_examplectl.py`): workers `tier1`,
-  `tier2`, `tier2-direct`, the ordered eleven-role dual-track primary list
+  `tier2`, `tier2-direct`, the ordered twelve-role dual-track primary list
   (DTO-D10/D11) cross-checked against `example.json`, the four direct-route
   profiles and the Qwen judge with its five choices (DTO-D13),
-  budget `{19, 2}`, `synthesis` on the thinking `tier2` worker with
+  budget `{20, 2}`, `synthesis` on the thinking `tier2` worker with
   non-empty `prompt_headless` (DTO-D7) and CANDIDATE 5 = critique, `audit`
   verifying `synthesis` with a non-greedy PASS/FAIL prompt,
   `image_description` on `tier1` with `requires: image` feeding every
@@ -622,9 +657,9 @@ Status: accepted; implemented; serving gates GPU re-verify and digest re-pin pen
   binding (`POLICY n` in `answer_n`), distinct answerer seed offsets, ensemble
   ceiling/Chat UI/harness caps 65536 (DTO-D12), and direct-route official
   sampling/output caps 131072/393216 (DTO-D13).
-- Launcher `_validate_ready` requires the eleven-role dual-track primary DAG,
+- Launcher `_validate_ready` requires the twelve-role dual-track primary DAG,
   `stream_head: head`, the four named direct-route profiles, the Qwen judge's
-  five choices with fallback `primary`, `max_steps: 19`,
+  five choices with fallback `primary`, `max_steps: 20`,
   `max_refine_depth: 2`, and the tier1/tier2/tier2-direct engine bindings.
 - Both serving gates are route-aware: every sample traces the `profile_judge`
   classification and exactly one profile's final unit; primary samples retain
