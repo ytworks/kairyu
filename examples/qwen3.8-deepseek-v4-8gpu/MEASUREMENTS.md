@@ -29,6 +29,28 @@
 > The DTO-D14 served config is GPU-verified — see the 2026-08-25 section
 > below; every older section predates it and does not transfer.
 
+## DTO-D16 audit format probes (2026-09-08)
+
+Prompt-only audit seed 606 detects the image defects but emits `PASS or FAIL?`
+before its FAIL verdict. This is a real format failure under the existing
+framework parser. The example-local hook now constrains audit serialization
+with vLLM `structured_outputs.regex`, preserving fixed medium thinking,
+official sampling, the existing 16384 total, and caller caps. It matches the
+full audit template and its exact inconclusive-retry suffix only.
+
+Saved-answer probes at seeds 604/605/606 reject the known bad image answer
+3/3 and accept the known good image answer 3/3. All three negative outputs
+identify both the excess conditional recommendation and categorical claim,
+with concrete repairs; one adds a properly numbered factual-error item.
+The parser preserves original checklist coverage and rejects duplicates,
+gaps, repair-only evidence, and unresolved added items. Initial diagnostic
+harness false failures (leading blank lines and an added valid ID) are retained
+with explicit revalidation; the ambiguous-verdict failure remains failed.
+
+[Full audit probe evidence](measurements/20260908-audit-format-probes.json)
+includes inputs, outputs, original and corrected validations, and raw hashes.
+Related CPU tests: 133 passed. Full API and final-config serving are pending.
+
 ## DTO-D16 nine-case API trial: audit counterexample (2026-09-08)
 
 Run `20260908T084810Z`, served config

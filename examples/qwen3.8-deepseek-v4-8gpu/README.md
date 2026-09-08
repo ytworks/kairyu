@@ -242,6 +242,16 @@ permit `PASS`; optional improvements alone do not require a revision. A tool
 call is judged against the required next action, without demanding results
 that are not yet available. No program execution is added or required.
 
+The same example-local vLLM hook constrains audit serialization with
+`structured_outputs.regex`: one bare `PASS` or `FAIL` line, followed by
+nonempty ID/status/evidence/correction rows. It matches every literal section
+of the shipped audit template (including its five input slots and the exact
+bounded retry suffix), so other roles retain their original output formats.
+Audit effort, sampling, thinking allocation, and the 16384 total cap are
+unchanged. This prevents ambiguous verdict headings; it does not prove that
+the model's assessments are correct. Semantic review remains necessary.
+
+
 This adds one Qwen call: 11 normal text-ensemble calls or 12 with an image,
 excluding the separately bounded route judge and refinement/retry calls.
 It uses the existing example's medium-thinking mapping (`reasoning_effort:

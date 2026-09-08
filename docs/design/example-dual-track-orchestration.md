@@ -771,3 +771,15 @@ across branches and qualify context-dependent claims. This is an example
 prompt change, not a framework change or an audit-budget increase. Full
 API and final-config serving re-verification remain pending; all nine actual
 answers and audits are retained in `20260908-nine-case-audit-failure.json`.
+
+A subsequent direct audit probe identifies the semantic defects but emits
+`PASS or FAIL?` before FAIL at one seed. The existing framework prefix parser
+can misread that output. The example-local hook now supplies a vLLM regex
+for the audit body: a bare PASS/FAIL line followed by complete per-ID rows.
+All static template sections are matched using Python's Formatter semantics,
+including escaped braces; the only accepted appended text is the Conductor's
+exact bounded inconclusive-retry suffix. Audit max_tokens remains 16384 and
+no thinking budget is added. Semantic findings can add consecutive IDs after
+the original checklist; measurement validation rejects missing/duplicate IDs
+and unresolved added items in a final PASS. Repair-only text cannot count as
+satisfaction evidence. GPU positive/negative probes precede full API rollout.

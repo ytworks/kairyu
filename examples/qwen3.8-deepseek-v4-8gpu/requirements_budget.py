@@ -1,16 +1,29 @@
-"""Example-local vLLM middleware: reserve output space for the two evidence roots."""
+"""Example-local vLLM hook: evidence-root budgets and the audit wire format."""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
+from string import Formatter
 
 import yaml
 
 _LOGGER = logging.getLogger("vllm.entrypoints.openai.api_server")
 _MAX_BUFFER_BYTES = 32 * 1024 * 1024
+
+_AUDIT_ROW = (
+    r"R[1-9][0-9]* \| (satisfied|unsatisfied|unverifiable|unsupported)"
+    r" \| evidence: [^\n]+ \| correction: [^\n]+"
+)
+AUDIT_REGEX = r"(PASS|FAIL)\n" + _AUDIT_ROW + r"(\n" + _AUDIT_ROW + r")*"
+AUDIT_RETRY_SUFFIX = (
+    "\nYour previous verification ran out of output budget "
+    "before emitting a verdict. Answer immediately: PASS or "
+    "FAIL on the first line, then at most three short bullet points."
+)
 
 
 CHECKLIST_SCHEMA = {
@@ -32,15 +45,7 @@ CHECKLIST_SCHEMA = {
 }
 
 
-def budget_payload(
-    payload: object,
-    *,
-    prefix: str,
-    suffix: str,
-    thinking_budget: int,
-    output_schema: dict | None = CHECKLIST_SCHEMA,
-):
-    """Recognize the entire shipped role template, never a marker in user data."""
+def _payload_content(payload: object) -> str | None:
     if not isinstance(payload, dict) or payload.get("model") != "qwen3.8-27b":
         return None
     messages = payload.get("messages")
@@ -59,11 +64,20 @@ def budget_payload(
         if len(texts) != 1:
             return None
         content = texts[0]
-    if (
-        not isinstance(content, str)
-        or not content.startswith(prefix)
-        or not content.endswith(suffix)
-    ):
+    return content if isinstance(content, str) else None
+
+
+def budget_payload(
+    payload: object,
+    *,
+    prefix: str,
+    suffix: str,
+    thinking_budget: int,
+    output_schema: dict | None = CHECKLIST_SCHEMA,
+):
+    """Recognize the entire shipped role template, never a marker in user data."""
+    content = _payload_content(payload)
+    if content is None or not content.startswith(prefix) or not content.endswith(suffix):
         return None
     maximum = payload.get("max_tokens")
     if type(maximum) is not int or maximum < 2:
@@ -77,6 +91,35 @@ def budget_payload(
     return changed
 
 
+def audit_template_pattern(prompt: str) -> re.Pattern:
+    """Match every literal in the shipped multi-input audit template."""
+    parts = []
+    fields = []
+    for literal, field, format_spec, conversion in Formatter().parse(prompt):
+        parts.append(re.escape(literal))
+        if field is not None:
+            if format_spec or conversion:
+                raise ValueError("audit template cannot format or convert input slots")
+            fields.append(field)
+            parts.append(r"[\s\S]*?")
+    if sorted(fields) != sorted(
+        ["query", "requirements", "image_description", "head", "synthesis"]
+    ):
+        raise ValueError("audit template must have exactly the five shipped input slots")
+    # The Conductor's one inconclusive-verdict retry appends this exact
+    # suffix. Keep the same per-ID format there; arbitrary suffixes fail.
+    return re.compile("".join(parts) + "(?:" + re.escape(AUDIT_RETRY_SUFFIX) + ")?")
+
+
+def audit_payload(payload: object, pattern: re.Pattern):
+    content = _payload_content(payload)
+    if content is None or pattern.fullmatch(content) is None:
+        return None
+    # Only serialization is constrained. Effort, sampling, total cap, and
+    # thinking allocation are preserved byte-for-value in the payload.
+    return {**payload, "structured_outputs": {"regex": AUDIT_REGEX}}
+
+
 class RequirementsBudgetMiddleware:
     """Standard vLLM --middleware hook; no change to the Kairyu framework."""
 
@@ -86,6 +129,10 @@ class RequirementsBudgetMiddleware:
         spec = yaml.safe_load((directory / "auto-max.yaml").read_text())
         metadata = json.loads((directory / "example.json").read_text())
         self.policies = []
+        audit = [role for role in spec["roles"] if role["name"] == "audit"]
+        if len(audit) != 1 or audit[0].get("reasoning_effort") != "high":
+            raise ValueError("audit middleware requires the fixed medium role")
+        self.audit_pattern = audit_template_pattern(audit[0]["prompt"])
         for name, schema in (("requirements", CHECKLIST_SCHEMA), ("image_description", None)):
             roles = [role for role in spec["roles"] if role["name"] == name]
             if len(roles) != 1 or roles[0].get("reasoning_effort") != "high":
@@ -150,6 +197,10 @@ class RequirementsBudgetMiddleware:
                 if changed is not None:
                     matched_role = name
                     break
+            if changed is None:
+                changed = audit_payload(payload, self.audit_pattern)
+                if changed is not None:
+                    matched_role = "audit"
         except (TypeError, ValueError):
             changed = None
         if changed is not None:
@@ -161,14 +212,23 @@ class RequirementsBudgetMiddleware:
                 if name.lower() not in (b"content-length", b"transfer-encoding")
             ]
             scope = {**scope, "headers": [*headers, (b"content-length", str(len(body)).encode())]}
-            _LOGGER.info(
-                "Kairyu %s budget: thinking=%d max_tokens=%d seed=%s messages_sha256=%s",
-                matched_role,
-                changed["thinking_token_budget"],
-                changed["max_tokens"],
-                changed.get("seed"),
-                hashlib.sha256(
-                    json.dumps(changed["messages"], ensure_ascii=False, sort_keys=True).encode()
-                ).hexdigest(),
-            )
+            messages_hash = hashlib.sha256(
+                json.dumps(changed["messages"], ensure_ascii=False, sort_keys=True).encode()
+            ).hexdigest()
+            if matched_role == "audit":
+                _LOGGER.info(
+                    "Kairyu audit format: max_tokens=%s seed=%s messages_sha256=%s",
+                    changed.get("max_tokens"),
+                    changed.get("seed"),
+                    messages_hash,
+                )
+            else:
+                _LOGGER.info(
+                    "Kairyu %s budget: thinking=%d max_tokens=%d seed=%s messages_sha256=%s",
+                    matched_role,
+                    changed["thinking_token_budget"],
+                    changed["max_tokens"],
+                    changed.get("seed"),
+                    messages_hash,
+                )
         await self.app(scope, replay, send)

@@ -99,16 +99,17 @@ def parse_audit(text: str) -> list[dict[str, str]]:
             item = match.groupdict()
         item = {key: value.strip() for key, value in item.items()}
         item["status"] = item["status"].lower()
-        evidence = re.sub(
-            r"^(?:evidence|correction):\s*", "", item["evidence"], flags=re.IGNORECASE
-        )
+        evidence = re.sub(r"^evidence:\s*", "", item["evidence"], flags=re.IGNORECASE)
         evidence = evidence.strip(" .-'\"").lower()
-        if not re.search(r"\w", evidence) or evidence in ("none", "n/a", "unknown", "missing"):
+        if (
+            not re.search(r"\w", evidence)
+            or evidence in ("none", "n/a", "unknown", "missing")
+            or evidence.startswith("correction:")
+        ):
             raise ValueError("audit evidence is empty or a placeholder")
         correction = item["correction"].strip(" .-'\"").lower()
         if item["status"] != "satisfied" and (
-            not re.search(r"\w", correction)
-            or correction in ("none", "n/a", "unknown", "missing")
+            not re.search(r"\w", correction) or correction in ("none", "n/a", "unknown", "missing")
         ):
             raise ValueError("non-satisfied audit item lacks a concrete correction")
         items.append(item)
@@ -183,13 +184,15 @@ def validate_result(case: dict, result: dict, *, requirement_cap: int) -> dict:
         isinstance(spent, int) and 0 < spent < requirement_cap
     )
     ids = [entry["id"] for entry in entries]
+    audit_ids = [re.findall(r"(?m)^R(\d+)\s*\|", audit["output"]) for audit in audits]
     checks["audit_covers_checklist_ids"] = (
         bool(ids)
         and bool(audits)
         and all(
-            sorted(re.findall(r"(?m)^R(\d+)\s*\|", audit["output"]), key=int) == ids
-            and audit["output"].splitlines()[0].strip() in ("PASS", "FAIL")
-            for audit in audits
+            set(ids).issubset(found)
+            and sorted(found, key=int) == [str(index) for index in range(1, len(found) + 1)]
+            and audit["output"].strip().splitlines()[0].strip() in ("PASS", "FAIL")
+            for audit, found in zip(audits, audit_ids, strict=True)
         )
     )
     assessed = []
@@ -201,8 +204,17 @@ def validate_result(case: dict, result: dict, *, requirement_cap: int) -> dict:
         failures.append(str(error))
     final_items = {item["id"]: item for item in assessed[-1]} if assessed else {}
     minimum_ids = [entry["id"] for entry in entries if entry["priority"] == "minimum"]
-    checks["final_minimum_items_satisfied"] = bool(minimum_ids) and all(
-        final_items.get(identifier, {}).get("status") == "satisfied" for identifier in minimum_ids
+    checks["final_minimum_items_satisfied"] = (
+        bool(minimum_ids)
+        and all(
+            final_items.get(identifier, {}).get("status") == "satisfied"
+            for identifier in minimum_ids
+        )
+        and all(
+            item["status"] in ("satisfied", "unsupported")
+            for identifier, item in final_items.items()
+            if identifier not in ids
+        )
     )
     final_audit = audit_events[-1].get("detail", {}) if audit_events else {}
     checks["final_audit_passes"] = (

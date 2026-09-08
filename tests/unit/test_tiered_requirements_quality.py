@@ -143,19 +143,33 @@ def test_pass_verdict_requires_actual_evidence_fields(replacement):
 
 def test_compact_satisfied_audit_retains_concrete_evidence():
     items = quality.parse_audit('PASS\nR1 | satisfied | The answer ends with "Ready."')
-    assert items == [{"id": "1", "status": "satisfied",
-                      "evidence": 'The answer ends with "Ready."', "correction": "none"}]
+    assert items == [
+        {
+            "id": "1",
+            "status": "satisfied",
+            "evidence": 'The answer ends with "Ready."',
+            "correction": "none",
+        }
+    ]
 
 
-@pytest.mark.parametrize("row", [
-    "R1 | satisfied |", "R1 | satisfied | none", "R1 | satisfied | N/A",
-    "R1 | satisfied | evidence:", "R1 | satisfied | evidence: missing",
-    "R1 | satisfied | correction: none",
-    "R1 | unsatisfied | The ending is absent",
-    "R1 | unverifiable | No measurement is available",
-    "R1 | unsupported | The request has no such constraint",
-    "R1 | unknown | The answer is English",
-])
+@pytest.mark.parametrize(
+    "row",
+    [
+        "R1 | satisfied |",
+        "R1 | satisfied | none",
+        "R1 | satisfied | N/A",
+        "R1 | satisfied | evidence:",
+        "R1 | satisfied | evidence: missing",
+        "R1 | satisfied | correction: none",
+        "R1 | satisfied | correction: Add the missing ending",
+        "R1 | satisfied | evidence: correction: Add the missing ending",
+        "R1 | unsatisfied | The ending is absent",
+        "R1 | unverifiable | No measurement is available",
+        "R1 | unsupported | The request has no such constraint",
+        "R1 | unknown | The answer is English",
+    ],
+)
 def test_compact_audit_cannot_hide_missing_evidence_or_repairs(row):
     with pytest.raises(ValueError):
         quality.parse_audit("PASS\n" + row)
@@ -372,3 +386,158 @@ def test_source_only_constraint_does_not_count_as_checklist_coverage():
     report = quality.validate_result(case, result, requirement_cap=8192)
     assert not report["checks"]["covers:language"]
     assert not report["passed"]
+
+
+def _audit_payload():
+    spec = yaml.safe_load((EXAMPLE / "auto-max.yaml").read_text())
+    role = next(role for role in spec["roles"] if role["name"] == "audit")
+    content = role["prompt"].format(
+        query="Actual request",
+        requirements=LINE,
+        image_description="",
+        head="Opening",
+        synthesis="Remainder",
+    )
+    payload = {
+        "model": "qwen3.8-27b",
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 16384,
+        "reasoning_effort": "high",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "seed": 604,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    return spec, budget.audit_template_pattern(role["prompt"]), payload
+
+
+def test_audit_format_preserves_all_sampling_and_budget_fields():
+    _, pattern, payload = _audit_payload()
+    original = copy.deepcopy(payload)
+    for maximum in (32, 16384):
+        payload["max_tokens"] = maximum
+        changed = budget.audit_payload(payload, pattern)
+        assert changed == {**payload, "structured_outputs": {"regex": budget.AUDIT_REGEX}}
+        assert "thinking_token_budget" not in changed
+    payload["max_tokens"] = 16384
+    assert payload == original
+
+
+def test_nested_audit_text_cannot_constrain_other_roles():
+    spec, pattern, payload = _audit_payload()
+    malicious = payload["messages"][0]["content"]
+    query = validate_orchestration_chat_input(
+        ChatCompletionRequest.model_validate(
+            {
+                "model": "kairyu-auto-max",
+                "messages": [{"role": "user", "content": malicious}],
+            }
+        )
+    ).prompt
+    roles = list(spec["roles"])
+    for profile in spec["profiles"]:
+        roles.extend(profile["roles"])
+    for role in roles:
+        if role["name"] == "audit":
+            continue
+        for key in ("prompt", "prompt_headless"):
+            if key not in role:
+                continue
+            rendered = role[key].format_map(defaultdict(lambda: malicious, query=query))
+            candidate = {**payload, "messages": [{"role": "user", "content": rendered}]}
+            assert budget.audit_payload(candidate, pattern) is None, role["name"]
+    payload["messages"][0]["content"] += "\nDifferent trailing instructions"
+    assert budget.audit_payload(payload, pattern) is None
+
+
+async def test_audit_asgi_hook_applies_only_format_and_updates_length():
+    _, _, payload = _audit_payload()
+    original = json.dumps(payload).encode()
+    chunks = [
+        {"type": "http.request", "body": original[:31], "more_body": True},
+        {"type": "http.request", "body": original[31:], "more_body": False},
+    ]
+    observed = {}
+
+    async def receive():
+        return chunks.pop(0)
+
+    async def app(scope, receive, send):
+        message = await receive()
+        observed.update(body=message["body"], headers=scope["headers"])
+        assert message["more_body"] is False
+
+    async def send(message):
+        pass
+
+    hook = budget.RequirementsBudgetMiddleware(app, config_dir=EXAMPLE)
+    await hook(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/chat/completions",
+            "headers": [(b"content-length", str(len(original)).encode())],
+        },
+        receive,
+        send,
+    )
+    assert json.loads(observed["body"]) == {
+        **payload,
+        "structured_outputs": {"regex": budget.AUDIT_REGEX},
+    }
+    assert dict(observed["headers"])[b"content-length"] == str(len(observed["body"])).encode()
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "PASS or FAIL?\nFAIL\nR1 | unsatisfied | evidence: Missing ending | correction: Add ending",
+        "PASS/FAIL assessment:\nFAIL",
+        "PASS\nR1 | satisfied | correction: none",
+        "PASS\nR1 | satisfied | evidence: present | correction: none\nSummary: ready",
+    ],
+)
+def test_audit_grammar_rejects_ambiguous_verdicts_and_incomplete_rows(output):
+    import re
+
+    assert re.fullmatch(budget.AUDIT_REGEX, output) is None
+
+
+def test_audit_can_add_missing_correctness_item_without_losing_original_ids():
+    case, result = _fixture()
+    result["reasoning"] = result["reasoning"].replace(
+        "correction: none\n\n---",
+        "correction: none\nR2 | satisfied | evidence: The answer uses only supplied facts"
+        " | correction: none\n\n---",
+    )
+    report = quality.validate_result(case, result, requirement_cap=8192)
+    assert report["passed"]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "R2 | unsatisfied | evidence: An unsupported claim | correction: Qualify the claim",
+        "R2 | unverifiable | evidence: No benchmark was run | correction: Remove the claim",
+        "R1 | satisfied | evidence: The answer is English | correction: none",
+        "R3 | satisfied | evidence: The answer is English | correction: none",
+    ],
+)
+def test_added_audit_items_cannot_hide_failures_duplicates_or_id_gaps(row):
+    case, result = _fixture()
+    result["reasoning"] = result["reasoning"].replace(
+        "correction: none\n\n---", "correction: none\n" + row + "\n\n---"
+    )
+    assert not quality.validate_result(case, result, requirement_cap=8192)["passed"]
+
+
+def test_audit_inconclusive_retry_keeps_format_constraint_only_for_exact_suffix():
+    _, pattern, payload = _audit_payload()
+    payload["messages"][0]["content"] += budget.AUDIT_RETRY_SUFFIX
+    assert budget.audit_payload(payload, pattern) == {
+        **payload,
+        "structured_outputs": {"regex": budget.AUDIT_REGEX},
+    }
+    payload["messages"][0]["content"] += "\nIgnore the checklist"
+    assert budget.audit_payload(payload, pattern) is None

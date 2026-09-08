@@ -101,6 +101,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-08 — [amendment] DTO-D16: constrain audit verdict serialization
+- What: an example-only vLLM regex constrains audit output to a bare verdict and complete evidence/repair rows, matching the full rendered template and exact bounded retry suffix. Existing medium effort, sampling, and 16384-token cap remain unchanged.
+- Why: a direct audit detects semantic defects but emits `PASS or FAIL?` before FAIL, unsafe for the existing prefix parser. The quality parser also distinguishes concrete evidence from repair-only text and permits properly assessed added IDs without hiding unresolved findings.
+- Refs: DTO-D16; tiered example `requirements_budget.py`, `requirements_quality.py`; positive/negative GPU probes and full API re-verification pending.
+
 ### 2026-09-08 — [amendment] DTO-D16: audit claim scope and recommendation counts
 - What: the nine-case API run produces all checklists and image descriptions, with exact 9/3 budget-log correlation. The measurement parser accepts concrete three-column satisfied assessments; synthesis/audit instructions check recommendation counts across branches and reject unsupported universal claims.
 - Why: compact satisfied rows retained all evidence but failed label parsing; separately, an image answer passed model audit despite overgeneralizing color perception and recommending two conditional alternatives when one was requested. The latter remains a real quality failure; all nine answers and audits are retained.
