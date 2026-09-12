@@ -34,8 +34,11 @@ CHECKLIST_SCHEMA = {
         "properties": {
             "id": {"type": "string", "pattern": "^R[1-9][0-9]*$"},
             "priority": {"type": "string", "enum": ["minimum", "optional"]},
+            # XGrammar 0.2.6 lowers minLength strings to a character class
+            # excluding JSON escapes. Keep arbitrary literal text representable;
+            # the smoke/quality validators still reject empty checklist fields.
             **{
-                name: {"type": "string", "minLength": 1}
+                name: {"type": "string"}
                 for name in ("requirement", "acceptance_criterion", "source")
             },
         },

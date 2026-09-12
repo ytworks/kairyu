@@ -108,5 +108,22 @@ cases. This is a shared lifecycle correction; existing model/routing policy
 and generated response bytes are unchanged. GPU public cleanup is a separate
 gate from the already-passing native cancellation tests.
 
+## V41E-D7 — Representable JSON literals in Requirement generation
+
+The pinned XGrammar 0.2.6 lowers string `minLength: 1` to a character class
+that excludes every JSON escape. Actual GPU criteria therefore truncate at an
+embedded quote; CPU character and native-token matchers reproduce rejection
+of otherwise valid quote, backslash and newline escapes. Remove `minLength`
+only from the three arbitrary-text fields in the example generation schema.
+Keep array cardinality, object shape, field types, ID pattern and priority enum.
+The unrestricted native JSON-string rule can represent complete user literals.
+
+The smoke and quality validators still reject empty/whitespace checklist fields;
+this is verification-time enforcement, not a new serving-time guarantee. The
+runtime grammar now permits empty strings, an explicit tradeoff to avoid
+silently excluding valid literal content. Original requests remain authoritative
+for synthesis/audit. Keep failed prompt trials and the exact grammar/source
+reproduction, and rerun actual fixed-high Requirement literals after deployment.
+
 References: `examples/qwen3.8-deepseek-v4.1-8gpu/README.md`, `L1-NOTES.md`,
 `MEASUREMENTS.md`, and implementation plan `2026-09-12-v41-ensemble-example.md`.

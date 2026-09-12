@@ -304,6 +304,14 @@ stop at `A|`, well below the output cap. These failures remain recorded rather
 than being counted as checklist-quality passes. Parser/grammar isolation and
 post-deployment literal checks follow separately.
 
+CPU isolation subsequently identifies XGrammar 0.2.6's `minLength` lowering as
+the cause: its generated character class excludes backslashes, so valid JSON
+escapes fail both character-level and native-token matching. The installed
+DeepSeek V4.1 parser preserves exact escaped strings in unary and fragmented
+streaming paths. V41E-D7 removes `minLength` from the three free-text fields;
+smoke/quality validators retain nonempty checks, while the runtime grammar now
+permits empty strings. Post-deployment literal replay remains required.
+
 | Literal diagnostic artifact | SHA256 |
 | --- | --- |
 | `results.json` | `0602b278644b957d5028d88543140a737b0b6531544828051dd23e538280778d` |

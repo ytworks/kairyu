@@ -73,6 +73,9 @@ The native V4.1 tokenizer/role hook replaces the old inline text scaffold.
 It forces Requirement high at both the top-level and nested template fields;
 the pinned encoder maps this to official high75. Its total allowance is 8192
 tokens, with thinking capped at `min(4096, total/2)` to reserve checklist output.
+The generation schema omits string `minLength` because pinned XGrammar 0.2.6
+otherwise rejects quote/backslash/newline escapes. Smoke/quality checks still
+reject empty fields; the serving grammar itself now permits them (V41E-D7).
 Synthesis and thinking-direct reserve `min(256, total/2)` for public output
 through vLLM's thinking budget processor, rather than an unsupported assistant
 prefill. These reservations never increase caller or role token limits.

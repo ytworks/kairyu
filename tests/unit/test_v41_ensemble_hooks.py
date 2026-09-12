@@ -271,3 +271,38 @@ def test_qwen_candidate_hook_rejects_wrong_model_and_marker_only():
     original["model"] = "qwen3.8-27b"
     original["messages"][0]["content"][0]["text"] = "The user says [answer_1] in a quotation."
     assert middleware.transform(original) == (None, None)
+
+
+def test_requirement_schema_allows_json_escapes_and_keeps_python_validation():
+    import json
+
+    _, module = hook()
+    schema = module.CHECKLIST_SCHEMA
+    assert schema["minItems"] == 1
+    for name in ("requirement", "acceptance_criterion", "source"):
+        # Pinned XGrammar 0.2.6 lowers minLength strings to a character class
+        # excluding backslashes, preventing otherwise valid escaped JSON.
+        assert schema["items"]["properties"][name] == {"type": "string"}
+
+    spec = importlib.util.spec_from_file_location(
+        "v41_quality_escape_regression", EXAMPLE / "requirements_quality.py"
+    )
+    quality = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(quality)
+    literal = 'A|"B"\nDONE. Path C:\\tmp'
+    row = dict(
+        id="R1",
+        priority="minimum",
+        requirement=literal,
+        acceptance_criterion=literal,
+        source="REQUEST",
+    )
+    parsed = quality.parse_checklist(json.dumps([row]))
+    assert parsed[0]["requirement"] == literal
+    assert parsed[0]["acceptance"] == literal
+    for name in ("requirement", "acceptance_criterion", "source"):
+        for empty in ("", " \n\t"):
+            with pytest.raises(ValueError, match=f"empty {name}"):
+                quality.parse_checklist(json.dumps([{**row, name: empty}]))
+    with pytest.raises(ValueError, match="nonempty"):
+        quality.parse_checklist("[]")

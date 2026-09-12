@@ -100,6 +100,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 ## Change Log
 
+### 2026-09-13 — [amendment] V4.1 Requirement JSON escape compatibility
+- What: remove string minLength from the three free-text generation-schema fields; preserve schema shape and verification-time nonempty validation.
+- Why: pinned XGrammar 0.2.6 excludes JSON escapes when lowering minLength, truncating actual quoted literals. CPU character/token matching reproduces the defect; the native parser preserves the same bytes. Runtime empty strings become possible, so this is not a universal serving-time nonempty guarantee.
+- Refs: V41E-D7, PR #598; example MEASUREMENTS preserves prompt trials and native grammar isolation; fixed-high GPU literal replay follows deployment.
+
 ### 2026-09-13 — [amendment] Deterministic head separation and deferred-audit cancellation
 - What: add a default-empty head continuation separator, opt in only the V4.1 example, and explicitly close owned SSE/Conductor iterators under cancellation shielding. Tighten Requirement literal checks and clarify JSON quoting. Include changed runtime sources in deployment attestation.
 - Why: GPU replay fixes candidate bodies but still joins `constraint.Facts:`; an interrupted keepalive leaves Qwen audit running 139 seconds after disconnect. Native unary cancellation works, isolating a shared iterator-ownership bug. CPU regressions cover both ASGI disconnect paths and pending-event cleanup; final GPU replay remains pending.
