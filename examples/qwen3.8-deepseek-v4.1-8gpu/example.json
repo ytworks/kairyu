@@ -102,11 +102,11 @@
       "release": "v0.23.0"
     },
     "deepseek": {
-      "image": "local/vllm-openai:deepseek-v41-sm120",
-      "image_id": "sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359",
+      "image": "local/vllm-openai:deepseek-v41-sm120-masked-kv",
+      "image_id": "sha256:8b8bcb200f3a77f289f2483526903df34c7f7b15f58691d8ab27c0ccb15e2eaf",
       "distribution": "overlay",
-      "dockerfile": "../deepseek-v4.1-flash-8gpu/vllm-sm120.Dockerfile",
-      "base_image": "vllm/vllm-openai:deepseekv41-flash-0909@sha256:00d577a6a63281e15336029d5bcee4e9a2cf182214a4f20ba6111b1c8e79893d",
+      "dockerfile": "vllm-sm120.Dockerfile",
+      "base_image": "local/vllm-openai:deepseek-v41-sm120",
       "source_repository": "https://github.com/vllm-project/vllm",
       "source_revision": "179dd0fa9",
       "flashinfer_repository": "https://github.com/flashinfer-ai/flashinfer.git",
@@ -120,15 +120,18 @@
       "kv_cache_dtype": "fp8",
       "block_size": 64,
       "source_version": "0.1.dev20904+g179dd0fa9",
-      "engram_cpu_offload": false,
+      "engram_cpu_offload": true,
       "flashinfer_version": "0.6.18",
       "adaptive_verification": false,
       "kv_cache_layout": "BLHNC",
       "sm120_swa_block_size": 64,
       "indexer_kv_dtype": "mxfp4",
-      "build_context": "../deepseek-v4.1-flash-8gpu",
+      "build_context": ".",
       "attention_data_parallel_size": 3,
-      "pipeline_parallel_size": 1
+      "pipeline_parallel_size": 1,
+      "parent_runtime_example": "../deepseek-v4.1-flash-8gpu/example.json",
+      "upstream_base_image": "vllm/vllm-openai:deepseekv41-flash-0909@sha256:00d577a6a63281e15336029d5bcee4e9a2cf182214a4f20ba6111b1c8e79893d",
+      "masked_kv_zero_fill": true
     },
     "qwen_mtp_speculative_tokens": 0,
     "qwen_max_num_batched_tokens": 32768,
@@ -296,8 +299,8 @@
     }
   },
   "validation": {
-    "gpu_status": "pending",
-    "gpu_tests_deferred": true,
+    "gpu_status": "in_progress",
+    "gpu_tests_deferred": false,
     "source_image_inspected": "sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359",
     "topology": "TP2 x internal DP3, EP6, PP1; one physical DeepSeek service",
     "static_checks": [
@@ -307,7 +310,7 @@
       "DSpark disabled: 128 draft experts do not divide EP6"
     ],
     "limitations": [
-      "No six-GPU startup, memory fit, numerical, multimodal, tool, restart, concurrency or performance evidence",
+      "GPU-resident Engram OOM is avoided by CPU offload; masked sparse-KV NaN fix undergoing native and composed correctness gates",
       "TP8 sibling measurements do not validate this topology",
       "PP3 is not selected: cross-layer KV/candidate cache groups constrain splits; stage memory balance unverified"
     ],

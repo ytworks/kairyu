@@ -1,7 +1,7 @@
 # V4.1 ensemble example
 
-Status: implemented and CPU-validated; GPU validation deferred by owner
-(2026-09-12). No six-GPU serving or quality claim.
+Status: GPU validation in progress (2026-09-13). The initial GPU-resident
+Engram candidate failed startup; no six-GPU serving or quality claim yet.
 
 ## V41E-D1 — Separate six-plus-two deployment
 
@@ -15,6 +15,24 @@ Reuse the pinned V4.1 SM120 overlay. DSpark is off: the draft's 128 experts
 do not divide EP6, and the TP8 result cannot establish draft support here.
 The initial context/memory limits are unverified candidates. GPU tests must
 establish startup, memory fit, kernel/collective correctness and performance.
+
+2026-09-13 amendment: the initial 16K-batch, GPU-resident Engram candidate
+loads 84.09 GiB of weights per GPU but fails sparse-indexer memory profiling
+(512 MiB allocation with only 377 MiB free). Select the existing pinned-runtime
+Engram CPU-offload option for the next trial, retaining TP2/DP3/EP6, 1M context,
+16K batching and all other limits. This uses pinned host tables and UVA lookup;
+the fixed source implements the same DP/TP gathers for resident and offloaded
+tables. Actual startup and performance remain gates.
+
+The offloaded runtime starts but exposes a masked sparse-KV failure: invalid
+indices gather slot zero, whose nonfinite values contaminate the attention value
+product even when its weight is zero. Eager/NCCL experiments reproduce it;
+stage instrumentation finds the first NaN at layer 0 Attention, and an independent
+GPU oracle reproduces all 12 poisoned masked cases. Add a source-hash-guarded
+example-local FlashInfer overlay that gathers a zero row for invalid candidates
+in decode and prefill. Preserve copy sizes/barrier accounting and all valid
+addresses. Keep the sibling example unchanged and isolate generated kernel caches.
+Both the numerical oracle and full serving gates must pass before selection.
 
 ## V41E-D2 — Two-policy ensemble with native images
 
@@ -48,7 +66,7 @@ does not guarantee minimum compliance or factual correctness for all requests.
 ## V41E-D4 — Transferable evidence
 
 CPU fixtures establish orchestration/wire contracts, not model quality. GPU
-verification is explicitly deferred. Later runs must compare startup config
+verification was authorized on 2026-09-13. Runs must compare startup config
 hashes and running image IDs against the checkout before recording measurements,
 including under `--no-start`. Paired latency baselines must be measured on the
 new configuration; no fallback to old-model measurements is allowed.

@@ -95,10 +95,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble example is CPU-validated only; all GPU gates deferred by owner. Static TP2×DP3/EP6 candidate, two-policy native-image DAG, fixed-high DeepSeek Requirement; handoff in its README/L1-NOTES/MEASUREMENTS.
+- V4.1 six-plus-two ensemble GPU validation is in progress after hardware release. Engram CPU offload resolves the initial memory fit issue; the example-local masked-KV fix passes 48 poison/parity and 16 existing numerical cases. Native/L2/context/performance gates continue; see its MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [amendment] Six-GPU V4.1 memory placement and masked-KV correction
+- What: offload Engram tables to host RAM and add a pinned child runtime that zero-fills invalid sparse-KV gathers. Add native/L2/capacity probes, exact parent-image checks and isolated kernel caches. The poison oracle passes 48/48 with bitwise baseline agreement; the existing numerical suite passes 16/16. Full-model gates remain in progress.
+- Why: the initial GPU-resident candidate OOMs during profiling; the offloaded runtime reveals NaNs from invalid indices reading slot zero. Eager/NCCL experiments and stage instrumentation isolate Attention, with independent GPU reproduction. Preserve all failed trials and keep the sibling runtime unchanged.
+- Refs: PR #598; V41E-D1 amendment; new example MEASUREMENTS/L1-NOTES; `verification-results/20260913-kernel-investigation` on the GPU host.
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
@@ -127,4 +132,3 @@ in `.claude/rules/progress-log.md`).
 - What: pin an example-local L1 overlay with 64-token SWA pages and C1 128-token dual-cache prefill instantiations; use manager blocks 128/BLHNC and disable unsupported adaptive verification. All 16 packed-cache GPU numerical cases pass at upstream DSV4 tolerances; full-model serving and tuning remain pending.
 - Why: the official V4.1 image's SWA pages and indexer layout assumptions fail startup on SM120 before serving. Source-anchored adaptations retain the existing kernel arithmetic and keep L2/L3 unchanged.
 - Refs: PR #597; `examples/deepseek-v4.1-flash-8gpu/{patch_runtime.py,check_sm120_pages.py,MEASUREMENTS.md}`; FN-D9 V4.1 amendment.
-

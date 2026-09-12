@@ -22,7 +22,7 @@ def test_six_gpu_topology_keeps_divisible_attention_and_experts():
     assert ds["attention_data_parallel_size"] == 3
     assert ds["expert_parallel_size"] == 6
     assert ds["pipeline_parallel_size"] == 1
-    assert manifest["validation"]["gpu_status"] == "pending"
+    assert manifest["vllm"]["deepseek"]["engram_cpu_offload"] is True
     assert "deepseek_direct_ttft_p50_ms_fallback" not in manifest["verification"]["coding"]
 
 

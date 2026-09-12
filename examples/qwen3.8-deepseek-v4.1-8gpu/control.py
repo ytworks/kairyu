@@ -61,7 +61,8 @@ def _storage_paths(*, prepare: bool = False) -> dict[str, Path]:
         "qwen_models": root / "model-volumes/qwen3.8-27b-1gpu/models",
         "deepseek_models": root / "model-volumes/deepseek-v4.1-flash-8gpu/models",
         "webui": environment / "webui-data",
-        "deepseek_cache": environment / "compile-cache/deepseek",
+        # Header-only FlashInfer fixes must never reuse previously compiled kernels.
+        "deepseek_cache": environment / "compile-cache/deepseek-masked-kv-v1",
         "placement_log": environment / "placement-log",
     }
     for index in range(SPEC["allocation"]["tier1"]["replicas"]):
@@ -86,6 +87,9 @@ CONFIG_FILES = (
     "requirements_budget.py",
     "control.py",
     "webui-reasoning-effort-filter.py",
+    "vllm-sm120.Dockerfile",
+    "patch_masked_kv.py",
+    "../deepseek-v4.1-flash-8gpu/example.json",
     "../deepseek-v4.1-flash-8gpu/vllm-sm120.Dockerfile",
     "../deepseek-v4.1-flash-8gpu/patch_runtime.py",
     "../qwen3.8-deepseek-v4-8gpu/sandbox/Dockerfile",
@@ -307,7 +311,7 @@ def _preflight(env: dict[str, str]) -> None:
     )
     print(
         f"hardware: 8 x {expected['product']} ({rows[0]['memory_mib']} MiB each); "
-        "DeepSeek GPUs 0-5, Qwen GPUs 6-7 (GPU validation pending)",
+        "DeepSeek GPUs 0-5, Qwen GPUs 6-7",
         flush=True,
     )
 
@@ -328,12 +332,20 @@ def _ensure_vllm_image(env: dict[str, str], env_key: str, source: dict) -> None:
         if source.get("distribution") == "upstream":
             _run(["docker", "pull", image])
         else:
+            parent_example = source.get("parent_runtime_example")
+            if parent_example:
+                parent_path = (HERE / parent_example).resolve()
+                parent = json.loads(parent_path.read_text())["vllm"]
+                if parent["image"] != source["base_image"]:
+                    raise SystemExit("parent runtime image does not match the overlay base")
+                parent["dockerfile"] = str(parent_path.parent / parent["dockerfile"])
+                _ensure_vllm_image({**env, env_key: parent["image"]}, env_key, parent)
             dockerfile = (HERE / source["dockerfile"]).resolve()
             _run(
                 [
                     "docker",
                     "build",
-                    "--pull",
+                    *([] if parent_example else ["--pull"]),
                     "--file",
                     str(dockerfile),
                     "--build-arg",

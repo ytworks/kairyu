@@ -1,7 +1,8 @@
-# Six-GPU V4.1 static deployment candidate
+# Six-GPU V4.1 deployment investigation
 
-GPU validation is **pending**. This change did not start or stop GPU services;
-only files and image metadata in an existing container were read over SSH.
+GPU validation is **in progress** after the owner released the host on
+2026-09-13. The initial GPU-resident Engram candidate failed memory profiling;
+the current trial uses the existing Engram CPU-offload option.
 The sibling eight-GPU example's measurements do not establish correctness,
 memory fit or performance for this topology.
 
@@ -40,8 +41,13 @@ changing PP/DP requires a separate source review and GPU experiment.
 
 The initial limits are 1,048,576 context tokens, 32 sequences per internal DP
 engine, 16,384 batched tokens, 90% GPU memory, FP8 KV, 64-token manager blocks,
-MXFP4 indexer cache and no engram CPU offload. Memory fit at these limits is
-unmeasured. Do not silently lower limits or switch topology after a failure;
+MXFP4 indexer cache. The initial GPU-resident Engram trial loaded 84.09 GiB
+per GPU, then failed a 512 MiB sparse-indexer profiling allocation with only
+377 MiB free. CPU offload reduces GPU model memory to 52.62 GiB and places
+approximately 189 GiB of tables in pinned host memory. It retains the same
+TP/DP collectives and UVA lookup implementation (engram.py lines 735–784).
+No other serving limit changed for this trial. Do not silently lower limits or
+switch topology after a failure;
 record the failure, revise the candidate explicitly and rerun its full gates.
 
 ## Fixed source and image provenance
@@ -52,12 +58,23 @@ The source was inspected in the already running container
 Its configured user is empty (Docker default root). Source version is
 `0.1.dev20904+g179dd0fa9`; current GitHub main was not substituted for it.
 
-The overlay build reuses `../deepseek-v4.1-flash-8gpu/vllm-sm120.Dockerfile`
-and `patch_runtime.py` unchanged. Build with that sibling directory as the
-context because the Dockerfile copies `patch_runtime.py` from its context.
-Pass `VLLM_BASE_IMAGE` and `FLASHINFER_REVISION` from `example.json`.
-The existing overlay fixes SM120 sparse-cache compatibility and the official
-high reasoning mapping (75); it does not implement new parallelism support.
+The parent overlay reuses `../deepseek-v4.1-flash-8gpu/vllm-sm120.Dockerfile`
+and `patch_runtime.py` unchanged. The lifecycle builds/attests that parent using
+the sibling directory as context, then builds this directory's child overlay.
+The existing parent supplies SM120 sparse-cache compatibility and the official
+high reasoning mapping (75). The child applies `patch_masked_kv.py`, checking
+the exact FlashInfer header hashes before replacing invalid candidate gathers
+with a zero device row in decode and prefill. Copy sizes and asynchronous barrier
+accounting remain unchanged; valid candidate addresses remain unchanged.
+Generated kernels use a new persistent cache namespace.
+
+The original offloaded runtime starts but produces intermittent NaN logprobs,
+corrupt text and grammar errors. Eager and NCCL-only diagnostics reproduce it.
+An instrumented temporary image locates the first nonfinite values at layer 0
+Attention. A separate sparse-attention oracle reproduces the masked-index failure
+with NaN-poisoned unused KV memory. See `MEASUREMENTS.md` for the failed candidates
+and subsequent numerical/serving evidence. Diagnostic images are never accepted
+as the pinned runtime by the verification launcher.
 
 Model revision: `dba1be0a40aa45a94ad051997016db3960a90277`.
 Model tree SHA256: `d21211ca29ad7eba1fda84e49b1a34a73214ec9b84b23928cde63902c3318bfd`.

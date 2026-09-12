@@ -1,4 +1,4 @@
-# Static TP2 x DP3 / EP6 candidate. Six-GPU startup and serving remain unverified.
+# TP2 x DP3 / EP6 with host-offloaded Engram and the masked-KV SM120 fix.
 # DSpark is disabled: its 128 draft experts do not divide EP6.
 name: kairyu-qwen38-deepseekv41-8gpu
 services:
@@ -224,7 +224,7 @@ services:
             capabilities:
             - gpu
   deepseek:
-    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-sm120}
+    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-sm120-masked-kv}
     ipc: host
     environment:
       HF_HOME: /models/.cache
@@ -239,6 +239,7 @@ services:
       TILELANG_CACHE_DIR: /root/.cache/tilelang
       TILELANG_TMP_DIR: /root/.cache/tilelang/tmp
       VLLM_ENGINE_READY_TIMEOUT_S: '3600'
+      FLASHINFER_WORKSPACE_BASE: /root/.cache/flashinfer-masked-kv-v1
       VLLM_USE_RUST_FRONTEND: '0'
       PYTHONPATH: /etc/kairyu
       KAIRYU_REQUIREMENTS_CONFIG: /etc/kairyu/auto-max.yaml
@@ -279,7 +280,7 @@ services:
     - '16384'
     - --disable-uvicorn-access-log
     - --engram-config
-    - '{"cpu_offload":false}'
+    - '{"cpu_offload":true}'
     - --limit-mm-per-prompt
     - '{"image":8}'
     - --data-parallel-size

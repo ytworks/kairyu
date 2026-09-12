@@ -70,6 +70,73 @@ def test_wrong_runtime_image_fails_before_serving(monkeypatch):
         )
 
 
+@pytest.mark.parametrize("parent_present", [True, False])
+def test_overlay_build_attests_parent_before_building_child(monkeypatch, tmp_path, parent_present):
+    control = load_control()
+    parent = {
+        "image": "local/parent:v1",
+        "image_id": "sha256:parent",
+        "distribution": "overlay",
+        "dockerfile": "parent.Dockerfile",
+        "base_image": "upstream@sha256:base",
+        "flashinfer_revision": "flashinfer-pinned",
+        "source_revision": "source-pinned",
+    }
+    (tmp_path / "parent.json").write_text(json.dumps({"vllm": parent}))
+    child = {
+        **parent,
+        "image": "local/child:v1",
+        "image_id": "sha256:child",
+        "base_image": parent["image"],
+        "dockerfile": "child.Dockerfile",
+        "parent_runtime_example": "parent.json",
+    }
+    images = {parent["image"]: parent["image_id"]} if parent_present else {}
+    builds = []
+
+    def run(command, **kwargs):
+        builds.append(command)
+        tag = command[command.index("--tag") + 1]
+        images[tag] = parent["image_id"] if tag == parent["image"] else child["image_id"]
+
+    monkeypatch.setattr(control, "HERE", tmp_path)
+    monkeypatch.setattr(control, "_image_id", images.get)
+    monkeypatch.setattr(control, "_run", run)
+    control._ensure_vllm_image(
+        {"DEEPSEEK_VLLM_IMAGE": child["image"]}, "DEEPSEEK_VLLM_IMAGE", child
+    )
+    assert len(builds) == (1 if parent_present else 2)
+    assert "--pull" not in builds[-1]  # The child must use the attested local parent.
+    if not parent_present:
+        assert "--pull" in builds[0]
+        assert str(tmp_path / "parent.Dockerfile") in builds[0]
+    assert "VLLM_BASE_IMAGE=local/parent:v1" in builds[-1]
+
+
+def test_overlay_rejects_wrong_parent_without_build(monkeypatch, tmp_path):
+    control = load_control()
+    parent = {"image": "local/parent:v1", "image_id": "sha256:expected", "dockerfile": "Dockerfile"}
+    (tmp_path / "parent.json").write_text(json.dumps({"vllm": parent}))
+    child = {
+        "image": "local/child:v1",
+        "image_id": "sha256:child",
+        "distribution": "overlay",
+        "base_image": parent["image"],
+        "parent_runtime_example": "parent.json",
+    }
+    monkeypatch.setattr(control, "HERE", tmp_path)
+    monkeypatch.setattr(
+        control, "_image_id", lambda name: "sha256:wrong" if name == parent["image"] else None
+    )
+    monkeypatch.setattr(
+        control, "_run", lambda *a, **k: pytest.fail("must not build with wrong parent")
+    )
+    with pytest.raises(SystemExit, match="expected sha256:expected"):
+        control._ensure_vllm_image(
+            {"DEEPSEEK_VLLM_IMAGE": child["image"]}, "DEEPSEEK_VLLM_IMAGE", child
+        )
+
+
 def test_config_digest_tracks_native_hook(monkeypatch, tmp_path):
     control = load_control()
     for name in control.CONFIG_FILES:

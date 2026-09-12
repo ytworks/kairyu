@@ -1,6 +1,6 @@
 # Qwen3.8 + DeepSeek V4.1 ensemble on eight GPUs
 
-**Implementation and CPU contracts are available; GPU validation is pending.**
+**GPU validation is in progress; see the measured results and remaining gates below.**
 Do not interpret the sibling V4.1 TP8 measurements as evidence for this topology.
 See [MEASUREMENTS.md](MEASUREMENTS.md) for the current evidence and
 [L1-NOTES.md](L1-NOTES.md) for the fixed-runtime inspection.
@@ -28,7 +28,11 @@ Qwen placement retains prefix indexing and the zero queue-depth overload valve.
 
 TP6 is invalid for 64 attention heads. The selected TP2/DP3/EP6 configuration
 passes static divisibility/source checks, but memory fit, collectives, kernels
-and numerical behavior still require hardware. DSpark is disabled because its
+and numerical behavior require hardware validation. The initial GPU-resident
+Engram configuration failed memory profiling; the current candidate uses the
+pinned runtime's Engram CPU offload (about 189 GiB of host RAM for the tables).
+The measured host has 1 TiB RAM; reserve table memory in addition to the models'
+loading/serving overhead and other processes. DSpark is disabled because its
 128 draft experts do not divide EP6. Qwen MTP remains disabled.
 
 The judge still selects Qwen direct, Qwen thinking-medium, DeepSeek direct,
@@ -93,7 +97,7 @@ cached models. Confirm the host memory/disk envelope before downloading.
 From the repository root:
 
 ```sh
-uv sync --extra dev
+uv sync --frozen --dev
 uv run pytest tests/unit/test_v41_ensemble_*.py --no-cov -q
 uv run ruff check examples/qwen3.8-deepseek-v4.1-8gpu tests/unit/test_v41_ensemble_*.py
 ./examples/qwen3.8-deepseek-v4.1-8gpu/run.sh config
@@ -128,14 +132,24 @@ Storage relative to `NVME_STORAGE_ROOT`:
   logs, WebUI data, private compaction key, benchmark temporaries and verification.
 
 Set `VERIFY_MODEL=1` to recompute the cached checkpoint tree attestation. The
-DeepSeek overlay builds with the **sibling V4.1 directory as context**, not the
-new directory. On another machine a rebuild may produce a different Docker image
-ID. The launcher fails closed; inspect the exact build and update `example.json`
-and both DeepSeek descriptors in `kairyu.yaml` together before testing. Record the
-new image ID and source hashes in that machine's evidence. Do not disable the check
-or claim that source-equivalent image bytes were already GPU-validated.
+DeepSeek runtime builds in two layers. The launcher first builds/attests the
+sibling V4.1 SM120 image using that sibling's directory as context, then applies
+this directory's `patch_masked_kv.py` through its own Dockerfile. The patch checks
+the original FlashInfer header hashes before editing. It prevents invalid sparse
+KV indices from reading potentially nonfinite data in recycled slot zero.
+The versioned `compile-cache/deepseek-masked-kv-v1` directory keeps old generated
+kernels out of the new runtime; FlashInfer uses a versioned subdirectory too.
 
-## Deferred GPU validation: execution order
+On another machine a rebuild may produce a different Docker image ID. The
+launcher fails closed; inspect the exact parent/child build and attest the parent
+in its sibling spec, then update the child's `example.json` and both DeepSeek
+descriptors in `kairyu.yaml` together before testing. Record the new image IDs and
+source hashes in that machine's evidence. Do not disable the check or claim that
+source-equivalent image bytes were already GPU-validated. To preserve the exact
+tested images, transfer them with `docker image save` / `docker image load` and
+confirm `docker image inspect --format '{{.Id}}'` against both pinned specs.
+
+## GPU validation: execution order
 
 1. **Inventory/provenance.** Record checkout SHA, `git status`, `nvidia-smi -q`,
    `nvidia-smi topo -m`, driver/Docker versions, model attestations, image IDs and
@@ -193,6 +207,42 @@ or claim that source-equivalent image bytes were already GPU-validated.
 ./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh serving-auto-max --no-start
 ./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh serving-auto-max-coding --no-start
 ```
+
+The native probes do not change running services. Choose a new output directory
+for each invocation; retain failures before retrying:
+
+```sh
+uv run python examples/qwen3.8-deepseek-v4.1-8gpu/gpu_smoke.py \
+  --base-url http://127.0.0.1:8009/v1 --logprobs --output /tmp/v41-native-run
+uv run python examples/qwen3.8-deepseek-v4.1-8gpu/capacity.py \
+  --container qwen3-8-deepseek-v4-1-8gpu-deepseek-1 \
+  --tokenizer /mnt/nvme/kairyu/model-volumes/deepseek-v4.1-flash-8gpu/models/deepseek-v4.1-flash/tokenizer.json \
+  --results-dir /tmp/v41-capacity-run
+```
+
+`gpu_smoke.py --case '^requirements-'` selects the twelve combinations of
+omitted/low/high/max API effort and omitted/low/max nested effort. Match each
+saved `messages_sha256` to the worker's `Kairyu role hook` log to establish
+the effective high override; a valid JSON response alone cannot establish it.
+The script distinguishes completed answers from output-limit truncation and
+client stream closure from server-side cancellation cleanup.
+
+Use `--data-parallel-rank 0`, `1`, or `2` to check each native DP rank. The
+`native-thinking-budget` case requires exactly 16 reported reasoning tokens
+before a completed public answer; a shorter/missing count is `not_exercised`,
+not proof of forced termination. `--suite l2 --base-url http://127.0.0.1:8008/v1`
+checks observed public routes, images, tools, JSON and cancel/recovery traces.
+Add `--l2-effort-matrix --case '^l2-route-primary'` for omitted/low/high/max
+public effort. A route targeted by the fixture but not chosen by the judge is
+reported as a coverage gap; there is no public force-route override.
+
+`capacity.py` checks the running DeepSeek container's image, topology, startup
+configuration hash, published loopback endpoint and tokenizer pin. It reports
+fixed 256-token throughput (including reasoning) separately from exact-key
+retrieval with a completed answer. Use `--cases serving retrieval-8k` or the
+individual `retrieval-32k`, `retrieval-128k`, `retrieval-256k`,
+`retrieval-near1m` cases to stage the work. The native probes complement the
+public L2/requirements checks; they do not establish ensemble behavior.
 
 Results default to the new example's `verification-results` directory.
 `VERIFICATION_RESULTS_ROOT` and `--run-id` can select a persistent run location.
