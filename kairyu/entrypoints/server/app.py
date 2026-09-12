@@ -1122,6 +1122,7 @@ async def _stream_orchestrator(
     completions: tuple[CompletionOutput, ...] = ()
     reported_usage: GenerationUsage | None = None
     terminal_error_type: str | None = None
+    stream = None
     prompt = call.prompt
     owner = _stream_usage_owner(
         http_request,
@@ -1356,7 +1357,12 @@ async def _stream_orchestrator(
             owner.mark_completed()
         yield "data: [DONE]\n\n"
     finally:
-        owner.finalize()
+        try:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
+        finally:
+            owner.finalize()
 
 
 async def _stream_choices(

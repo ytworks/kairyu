@@ -1,6 +1,7 @@
 """Validate smoke verdicts and request coverage without a live service."""
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -408,9 +409,30 @@ def test_headed_primary_rejects_observed_sentence_heading_seam():
     body = primary_response()
     body["choices"][0]["message"]["content"] = "Both options violate a constraint.**Facts**"
     assert not harness().validate_l2_trace(body, expect_headless=False)["passed"]
+    body["choices"][0]["message"]["content"] = "Both options fail.Facts: A is slower."
+    assert not harness().validate_l2_trace(body, expect_headless=False)["passed"]
     body["choices"][0]["message"]["content"] = "Both options violate a constraint.\n\n**Facts**"
     assert harness().validate_l2_trace(body, expect_headless=False)["passed"]
     body["choices"][0]["message"]["content"] = (
         "The requested literal follows.\n\n```text\nx.**A\n```"
     )
     assert harness().validate_l2_trace(body, expect_headless=False)["passed"]
+
+
+def test_requirement_literal_must_be_in_acceptance_not_only_source():
+    row = {
+        "id": "R1",
+        "priority": "minimum",
+        "requirement": "End with the required sentence.",
+        "acceptance_criterion": "Ends with exactly the literal ",
+        "source": "End with exactly: Ready.",
+    }
+    body = response(json.dumps([row]))
+    module = harness()
+    assert not module.validate_response(
+        "requirements", body, expected_literals=["Ready."]
+    )["passed"]
+    row["acceptance_criterion"] = "Ends with exactly the literal Ready. and nothing after it."
+    assert module.validate_response(
+        "requirements", response(json.dumps([row])), expected_literals=["Ready."]
+    )["passed"]

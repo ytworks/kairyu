@@ -177,6 +177,7 @@ def build_orchestrator(
             executor=_role_executor(role),
             prompt_suffix=role.prompt_suffix,
             prompt_headless=role.prompt_headless,
+            continuation_separator=role.continuation_separator,
             reasoning_closed=role.reasoning_closed,
             reasoning_effort=role.reasoning_effort,
             reasoning_close_tag=role.reasoning_close_tag,

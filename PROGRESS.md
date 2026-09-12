@@ -95,10 +95,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble GPU validation is in progress after hardware release. Engram CPU offload and the masked-KV correction pass native 30/30 plus kernel 48+16 cases. Initial L2 exposed an empty Qwen candidate; body reservations and stricter probes address it. Context/performance and composed revalidation continue; see its MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble GPU validation continues. Native 30/30, kernel 48+16, capacity 128/128, retrieval through 1,039,902 tokens, native cancellation 3/3 and both Qwen near-256K probes pass. Qwen body reservations fix empty candidates; an opt-in paragraph separator and explicit streaming-iterator cleanup address replay defects. Final composed/public-performance gates remain; see its MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [amendment] Deterministic head separation and deferred-audit cancellation
+- What: add a default-empty head continuation separator, opt in only the V4.1 example, and explicitly close owned SSE/Conductor iterators under cancellation shielding. Tighten Requirement literal checks and clarify JSON quoting. Include changed runtime sources in deployment attestation.
+- Why: GPU replay fixes candidate bodies but still joins `constraint.Facts:`; an interrupted keepalive leaves Qwen audit running 139 seconds after disconnect. Native unary cancellation works, isolating a shared iterator-ownership bug. CPU regressions cover both ASGI disconnect paths and pending-event cleanup; final GPU replay remains pending.
+- Refs: PR #598; V41E-D5/D6 and EO-D7 opt-in amendment; example MEASUREMENTS records native capacity/context/cancellation successes and preserved composed failures.
 
 ### 2026-09-13 — [amendment] V4.1 candidate body reservation and native measurement correction
 - What: reserve half the existing Qwen draft/answer caps for body text, preserving medium effort; reject empty or cap-exhausted candidate pools. Recognize native `reasoning` in the example-local capacity collector and keep raw SSE. Ask prose heads to emit a paragraph separator while exact-output heads remain exact.

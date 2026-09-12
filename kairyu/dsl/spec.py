@@ -155,6 +155,9 @@ class RoleNodeSpec(BaseModel):
     # writes the complete answer instead of continuing a committed opening
     # (issue #496). Uses the same placeholders and prompt_suffix.
     prompt_headless: str = ""
+    # Head-only opt-in whitespace at an otherwise touching public seam.
+    # Defaults to byte-exact concatenation; inserted formatting is not usage.
+    continuation_separator: str = ""
     # Declares that this role's rendered scaffold already closed the model's
     # private-reasoning span, so upstream reasoning-classified output with an
     # empty public text is the answer itself, not hidden deliberation.
@@ -190,6 +193,13 @@ class RoleNodeSpec(BaseModel):
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
+        if self.continuation_separator and (
+            self.role_type != "head" or not self.continuation_separator.isspace()
+        ):
+            raise ValueError(
+                f"role {self.name!r}: continuation_separator must be empty or "
+                "whitespace on a head role"
+            )
         if (self.role_type == "executor") != (self.executor is not None):
             raise ValueError(
                 f"role {self.name!r}: role_type 'executor' and an executor block "

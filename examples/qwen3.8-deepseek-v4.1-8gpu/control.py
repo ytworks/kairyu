@@ -94,6 +94,12 @@ CONFIG_FILES = (
     "../deepseek-v4.1-flash-8gpu/patch_runtime.py",
     "../qwen3.8-deepseek-v4-8gpu/sandbox/Dockerfile",
     "../qwen3.8-deepseek-v4-8gpu/sandbox/runner.py",
+    "../../kairyu/orchestration/conductor.py",
+    "../../kairyu/dsl/spec.py",
+    "../../kairyu/dsl/loader.py",
+    "../../kairyu/entrypoints/server/sse_response.py",
+    "../../kairyu/entrypoints/server/app.py",
+    "../../kairyu/orchestration/orchestrator.py",
 )
 
 

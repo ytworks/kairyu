@@ -78,5 +78,35 @@ hashes and running image IDs against the checkout before recording measurements,
 including under `--no-start`. Paired latency baselines must be measured on the
 new configuration; no fallback to old-model measurements is allowed.
 
+## V41E-D5 — Opt-in public paragraph separator
+
+GPU replay still joins a complete head to `Facts:` without whitespace despite
+both prompts requesting a separator. Add a head-only `continuation_separator`
+option to the DSL/Conductor, default empty, and enable two newlines here. This
+amends EO-D7 only when explicitly configured: exact head-prefix deduplication
+and `NO_CONTINUATION` suppression happen first, then the separator is inserted
+only between nonempty, non-whitespace adjacent text. Existing whitespace is
+preserved. Whole, deferred verified and live-stream publication agree.
+
+Head-only exact answers and headless JSON/tool responses gain no extra text;
+raw candidate bodies and audit inputs remain unchanged. These presentation
+bytes are not model-generated tokens and do not change usage or role budgets.
+The new example's deployment hash includes the Conductor/DSL source files so
+verification cannot silently use an older API image after this source change.
+
+## V41E-D6 — Streaming iterator ownership on disconnect
+
+A public client disconnect during the deferred Qwen audit leaves upstream
+inference running for about 139 seconds. Native unary cancellation, including
+the exact audit hook, clears promptly; a CPU ASGI reproduction identifies an
+unclosed body iterator when a keepalive send is interrupted. The shared SSE
+response must explicitly close its iterator under a cancellation shield. The
+chat renderer and Conductor event adapter likewise close their owned sources,
+draining keepalive cancellation into the outstanding backend generation.
+ASGI 2.3 disconnect, 2.4 send failure and normal exhaustion are regression
+cases. This is a shared lifecycle correction; existing model/routing policy
+and generated response bytes are unchanged. GPU public cleanup is a separate
+gate from the already-passing native cancellation tests.
+
 References: `examples/qwen3.8-deepseek-v4.1-8gpu/README.md`, `L1-NOTES.md`,
 `MEASUREMENTS.md`, and implementation plan `2026-09-12-v41-ensemble-example.md`.

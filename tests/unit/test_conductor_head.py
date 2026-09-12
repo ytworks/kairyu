@@ -1653,3 +1653,129 @@ async def test_verified_final_skips_verifier_for_multiple_choices(stream):
     skipped = next(e for e in result.trace if e.kind == "skipped:intent")
     assert skipped.node == "check"
     assert skipped.metadata == {"reason": "intent", "n": 2}
+
+
+@pytest.mark.parametrize("verified", [False, True])
+@pytest.mark.parametrize(
+    ("head", "body", "expected"),
+    [
+        ("Intro.", "Facts: body.", "Intro.\n\nFacts: body."),
+        ("Intro. ", "Facts: body.", "Intro. Facts: body."),
+        ("Intro.", "\nFacts: body.", "Intro.\nFacts: body."),
+        ("Intro.", "Intro.Facts: body.", "Intro.\n\nFacts: body."),
+        ("Intro.", "NO_CONTINUATION", "Intro."),
+        ("Intro.", "", "Intro."),
+        ("Intro.", "Intro.", "Intro."),
+        ("Intro.", "Int", "Intro.\n\nInt"),
+        ("Intro.", "NO_CONTINUATION extra", "Intro.\n\nNO_CONTINUATION extra"),
+        ("Intro.", "Intro.NO_CONTINUATION", "Intro."),
+        ("Intro.", " ", "Intro. "),
+    ],
+)
+async def test_opt_in_head_separator_run_stream_parity(verified, head, body, expected):
+    from dataclasses import replace
+
+    def build():
+        roles = _verified_final_roles() if verified else _head_roles()
+        roles = (replace(roles[0], continuation_separator="\n\n"), *roles[1:])
+        # Repeated cumulative chunks exercise empty deltas as well as a
+        # character-by-character duplicated prefix / NO_CONTINUATION sentinel.
+        chunks = [""] + [body[:i] for i in range(1, len(body) + 1)] + [body]
+        final = StreamScriptedBackend(chunks)
+        audit = StreamScriptedBackend(["PASS"])
+        return (
+            Conductor(
+                roles,
+                {
+                    "hw": StreamScriptedBackend([head]),
+                    "dw": StreamScriptedBackend(["draft"]),
+                    "cw": final,
+                    "vw": audit,
+                },
+            ),
+            final,
+            audit,
+        )
+
+    conductor, final, audit = build()
+    result = await conductor.run("task")
+    assert result.final_text == expected
+    final_name = "synthesis" if verified else "continuation"
+    assert result.outputs[final_name] == body  # formatting never mutates candidates
+    conductor, final, audit = build()
+    events = await _collect(conductor.stream("task"))
+    streamed = events[-1].result
+    assert streamed.final_text == expected
+    assert "".join(e.text for e in events if e.kind == "delta") == expected
+    assert streamed.outputs[final_name] == body
+    assert streamed.public_completion_tokens == result.public_completion_tokens
+    assert result.public_completion_tokens == len(head) + len(body)
+    if verified and body:
+        assert f" :: {body}" in audit.requests_seen[0].prompt
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_opt_in_separator_does_not_spend_or_invent_tokens(stream):
+    from dataclasses import replace
+
+    roles = _head_roles()
+    roles = (replace(roles[0], continuation_separator="\n\n"), *roles[1:])
+    final = StreamScriptedBackend(["Body."])
+    conductor = Conductor(
+        roles,
+        {
+            "hw": StreamScriptedBackend(["I"]),
+            "dw": StreamScriptedBackend(["draft"]),
+            "cw": final,
+        },
+        final_sampling_params=SamplingParams(max_tokens=1),
+    )
+    result = (
+        (await _collect(conductor.stream("task")))[-1].result
+        if stream
+        else await conductor.run("task")
+    )
+    assert result.final_text == "I"
+    assert not final.requests_seen
+    assert result.completions[0].finish_reason == "length"
+
+
+@pytest.mark.parametrize("headless", ["tools", "json"])
+async def test_opt_in_separator_preserves_headless_output(headless):
+    from dataclasses import replace
+
+    roles = _head_roles()
+    roles = (replace(roles[0], continuation_separator="\n\n"), *roles[1:])
+    head = StreamScriptedBackend(["Intro."])
+    kwargs = (
+        {"final_tools": ({"type": "function", "function": {"name": "add"}},)}
+        if headless == "tools"
+        else {
+            "final_sampling_params": SamplingParams(
+                extra_args={"response_format": {"type": "json_object"}}
+            )
+        }
+    )
+    conductor = Conductor(
+        roles,
+        {
+            "hw": head,
+            "dw": StreamScriptedBackend(["draft"]),
+            "cw": StreamScriptedBackend(['{"ok":true}']),
+        },
+        **kwargs,
+    )
+    events = await _collect(conductor.stream("task"))
+    assert events[-1].result.final_text == '{"ok":true}'
+    assert "".join(e.text for e in events if e.kind == "delta") == '{"ok":true}'
+    assert not head.requests_seen
+
+
+@pytest.mark.parametrize(
+    "role_type,separator", [("worker", "\n\n"), ("head", "text"), ("head", None)]
+)
+def test_head_separator_rejects_unsupported_configuration(role_type, separator):
+    with pytest.raises(ValueError, match="continuation_separator"):
+        RoleSpec(
+            name="h", worker="w", prompt="", role_type=role_type, continuation_separator=separator
+        )

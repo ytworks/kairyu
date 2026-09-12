@@ -154,6 +154,7 @@ def build_cases(directory: Path, model: str) -> list[dict]:
                     "payload": body,
                     "expected_effective_effort": "high",
                     "effort_observation": "Requires worker hook log/preamble evidence",
+                    "expected_literals": ["Ready."],
                 }
             )
     stream = base("What is 17 times 19? Return only the integer.")
@@ -391,7 +392,7 @@ def validate_l2_trace(
         public = (body["choices"][0].get("message") or {}).get("content") or ""
         opening_paragraph = public.split("\n\n", 1)[0]
         if expect_headless is False and re.search(
-            r"[.!?](?:\*\*[A-Z]|#{1,6} )", opening_paragraph
+            r"[.!?](?:\*\*[A-Z]|#{1,6} |[A-Z][a-z]+:)", opening_paragraph
         ):
             return {**result, "detail": "prose sentence touches a Markdown heading without spacing"}
     elif successful & {"requirements", "audit", "policies", "answer_1", "answer_2"}:
@@ -423,7 +424,7 @@ def validate_logprobs(value: object) -> None:
             validate_logprobs(item)
 
 
-def validate_response(kind: str, body: object) -> dict:
+def validate_response(kind: str, body: object, *, expected_literals=()) -> dict:
     verdict = {"passed": False, "truncated": False, "detail": "malformed response"}
     try:
         validate_logprobs(body)
@@ -508,6 +509,11 @@ def validate_response(kind: str, body: object) -> dict:
                     and row["id"] == f"R{i}"
                     and row["priority"] in {"minimum", "optional"}
                     for i, row in enumerate(rows, 1)
+                )
+            if valid:
+                valid = all(
+                    any(literal in row["acceptance_criterion"] for row in rows)
+                    for literal in expected_literals
                 )
         return {
             **verdict,
@@ -639,7 +645,11 @@ def execute_case(
             else:
                 body, done = json.loads(raw), True
             (target / "response.json").write_text(json.dumps(body, indent=2) + "\n")
-            result.update(validate_response(case["kind"], body))
+            result.update(
+                validate_response(
+                    case["kind"], body, expected_literals=case.get("expected_literals", ())
+                )
+            )
             if case.get("trace"):
                 route = validate_l2_trace(
                     body,

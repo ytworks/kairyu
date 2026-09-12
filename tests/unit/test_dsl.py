@@ -778,3 +778,43 @@ roles:
     result = await orchestrator.run(image_request)
     assert result.text == "done"
     assert isinstance(look_worker.requests_seen[0].prompt, MultimodalPrompt)
+
+
+@pytest.mark.parametrize("profile", [False, True])
+def test_head_separator_dsl_roundtrip_and_loader(profile):
+    spec = load_spec("""
+workers: [{name: tier1, backend: mock}]
+roles:
+  - {name: head, worker: tier1, prompt: head, role_type: head, continuation_separator: "\\n\\n"}
+  - {name: final, worker: tier1, prompt: final, role_type: publisher, depends_on: [head]}
+""")
+    if profile:
+        from kairyu.dsl.spec import RoleProfileSpec
+
+        spec = spec.model_copy(
+            update={"profiles": (RoleProfileSpec(name="alternate", roles=spec.roles),)}
+        )
+    assert spec.roles[0].continuation_separator == "\n\n"
+    assert (
+        type(spec).model_validate_json(spec.model_dump_json()).roles[0].continuation_separator
+        == "\n\n"
+    )
+    orchestrator = build_orchestrator(spec)
+    assert (
+        orchestrator._profiles["alternate" if profile else "primary"][0].continuation_separator
+        == "\n\n"
+    )
+
+
+@pytest.mark.parametrize("role_type,separator", [("worker", "\n"), ("head", "x")])
+def test_dsl_rejects_invalid_head_separator(role_type, separator):
+    from kairyu.dsl.spec import RoleNodeSpec
+
+    with pytest.raises(ValidationError, match="continuation_separator"):
+        RoleNodeSpec(
+            name="head",
+            worker="tier1",
+            prompt="head",
+            role_type=role_type,
+            continuation_separator=separator,
+        )

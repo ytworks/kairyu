@@ -27,6 +27,7 @@ roles:
 - name: head
   worker: tier1
   role_type: head
+  continuation_separator: "\n\n"
   sampling:
     temperature: 0.7
     top_p: 0.8
@@ -46,11 +47,8 @@ roles:
     comparison and recommendation for the continuation. For image requests,
     prefer a decision criterion supported by the request; defer descriptions
     of visual geometry and interpretations to the continuation. Respect any
-    shorter user limit. Do not mention any internal pipeline. For this prose
-    opening, end the sentence with punctuation, then emit two newline
-    characters before stopping: the answer continues directly after your
-    text. For exact or fixed output requests, omit this separator and obey
-    the requested output exactly.
+    shorter user limit. Do not mention any internal pipeline. End the
+    sentence and stop; the answer continues directly after your text.
 - name: draft
   worker: tier1
   role_type: proposal
@@ -119,9 +117,12 @@ roles:
     R1, R2, and so on. Each object has exactly these string fields:
     id, priority, requirement, acceptance_criterion, source.
     priority is minimum or optional. Keep each field concise and faithful.
-    For an exact required string, quote the complete literal in its
+    For an exact required string, copy the complete literal directly into
     acceptance_criterion, preserving every character including final
     punctuation, vertical bars, and newlines (escaped as JSON requires).
+    Do not add decorative quotation marks around the copied text: JSON's
+    outer quotes already delimit the field. If the required text itself
+    contains quotation marks, preserve them with proper JSON escaping.
     Acceptance criteria must be self-contained: never replace an exact
     literal with "the specified string", "as requested", "as shown", or
     "the text after the colon". Copy the actual characters into the

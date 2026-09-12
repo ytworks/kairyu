@@ -194,12 +194,24 @@ class RoleSpec:
     # call, no step), dependents run as if it were absent, and its template
     # slot renders as "" (DTO-D11).
     requires: str | None = None
+    # Opt-in head/continuation formatting. Inserted only when both adjacent
+    # characters lack whitespace, after exact-prefix/sentinel deduplication.
+    # These formatting bytes are not generated tokens and do not alter usage.
+    continuation_separator: str = ""
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, TemplatedPrompt):
             raise ValueError(
                 "Conductor role templates cannot be tokenizer-owned pre-rendered "
                 "chat prompts; provide a plain derivation template"
+            )
+        if not isinstance(self.continuation_separator, str) or (
+            self.continuation_separator
+            and (self.role_type != "head" or not self.continuation_separator.isspace())
+        ):
+            raise ValueError(
+                f"role {self.name!r}: continuation_separator must be empty or "
+                "whitespace on a head role"
             )
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
         if self.reasoning_effort not in {None, "low", "high", "max", "inherit"}:
@@ -343,6 +355,23 @@ class _SafeDict(dict):
         return ""
 
 
+def _separate_public_continuation(committed: str, continuation: str, separator: str) -> str:
+    """Apply optional seam formatting to an already deduplicated continuation.
+
+    Preserve model whitespace verbatim. The separator is presentation, not
+    generated output: raw role outputs, usage and token budgets stay unchanged.
+    """
+    if (
+        separator
+        and committed
+        and continuation
+        and not committed[-1].isspace()
+        and not continuation[0].isspace()
+    ):
+        return separator + continuation
+    return continuation
+
+
 class _ContinuationDeduper:
     """Drop only an exact verbatim repetition of the committed head prefix.
 
@@ -352,8 +381,10 @@ class _ContinuationDeduper:
     This is byte-identical prefix dedup, never rewriting (EO-D7).
     """
 
-    def __init__(self, committed: str) -> None:
+    def __init__(self, committed: str, separator: str = "") -> None:
         self._committed = committed
+        self._separator = separator
+        self._published = False
         self._buffer = ""
         self._matching = bool(committed)
         # With a committed opening the publisher may decline to continue by
@@ -363,7 +394,16 @@ class _ContinuationDeduper:
         self._sentinel_active = bool(committed)
         self._sentinel_buffer = ""
 
+    def _publish(self, text: str) -> str:
+        if text and not self._published:
+            self._published = True
+            return _separate_public_continuation(self._committed, text, self._separator)
+        return text
+
     def feed(self, delta: str) -> str:
+        return self._publish(self._feed(delta))
+
+    def _feed(self, delta: str) -> str:
         if not self._matching:
             return self._sentinel_feed(delta)
         candidate = self._buffer + delta
@@ -402,10 +442,10 @@ class _ContinuationDeduper:
             self._sentinel_active = False
             if combined.strip() == NO_CONTINUATION_SENTINEL:
                 return ""
-        return combined
+        return self._publish(combined)
 
 
-def dedup_public_continuation(committed: str, continuation: str) -> str:
+def dedup_public_continuation(committed: str, continuation: str, separator: str = "") -> str:
     """Whole-text equivalent of streaming ``_ContinuationDeduper`` semantics."""
 
     if not committed:
@@ -419,7 +459,7 @@ def dedup_public_continuation(committed: str, continuation: str) -> str:
         # The publisher declined to continue a complete committed opening
         # (EO-D7 amendment, issue #495).
         return ""
-    return stripped
+    return _separate_public_continuation(committed, stripped, separator)
 
 
 def _completion_tokens_for_public_budget(
@@ -2498,7 +2538,9 @@ class Conductor:
         continuation = run.outputs.get(self._selected_final_unit().name)
         if continuation is None:
             return head_text
-        return head_text + dedup_public_continuation(head_text, continuation)
+        return head_text + dedup_public_continuation(
+            head_text, continuation, self._head.continuation_separator
+        )
 
     def _public_completions(
         self,
@@ -2798,7 +2840,10 @@ class Conductor:
         first_token_at = None
         text_parts: list[str] = []
         legacy_text = ""
-        deduper = _ContinuationDeduper(dedupe_against if bare_deltas else "")
+        deduper = _ContinuationDeduper(
+            dedupe_against if bare_deltas else "",
+            self._head.continuation_separator if self._head is not None else "",
+        )
         from kairyu.telemetry import traced_span
 
         try:
@@ -2991,7 +3036,11 @@ class Conductor:
             # failed before any attempt completed: nothing to publish.
             return
         if bare_deltas:
-            text = dedup_public_continuation(head_text, continuation)
+            text = dedup_public_continuation(
+                head_text,
+                continuation,
+                self._head.continuation_separator if self._head is not None else "",
+            )
             if text:
                 yield ConductorEvent(kind="delta", text=text)
         elif continuation:

@@ -8,6 +8,8 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, replace
 
+import anyio
+
 from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
 from kairyu.engine.backend import (
     UNLIMITED_OUTPUT_ADMISSION_TOKENS,
@@ -2463,11 +2465,15 @@ class Orchestrator:
                 finally:
                     if not upcoming.done():
                         upcoming.cancel()
-                        await asyncio.gather(upcoming, return_exceptions=True)
+                        # A level-triggered ASGI disconnect would otherwise
+                        # cancel gather again, interrupting upstream HTTP cleanup.
+                        with anyio.CancelScope(shield=True):
+                            await asyncio.gather(upcoming, return_exceptions=True)
         finally:
             close = getattr(iterator, "aclose", None)
             if close is not None:
-                await close()
+                with anyio.CancelScope(shield=True):
+                    await close()
 
     async def _run_chat_stream(
         self,
@@ -3134,15 +3140,16 @@ class Orchestrator:
             decision,
         )
         conductor_result = None
+        events = self._with_keepalives(
+            conductor.stream(
+                prompt,
+                budget=self._budget,
+                session=conductor_session,
+                prepared_initial_requests=initial_requests,
+            )
+        )
         try:
-            async for event in self._with_keepalives(
-                conductor.stream(
-                    prompt,
-                    budget=self._budget,
-                    session=conductor_session,
-                    prepared_initial_requests=initial_requests,
-                )
-            ):
+            async for event in events:
                 if event is None:
                     yield OrchestratorEvent(kind="status", text="working")
                 elif event.kind == "reasoning":
@@ -3180,6 +3187,11 @@ class Orchestrator:
                 error_type=type(error.cause).__name__,
             )
             return
+        finally:
+            # Closing an async-for consumer does not close its source. Drain
+            # keepalive cancellation so deferred backend requests cannot outlive
+            # the public stream.
+            await events.aclose()
         if conductor_result is None:
             raise RuntimeError("Conductor stream did not produce a final result")
         notes.extend(
