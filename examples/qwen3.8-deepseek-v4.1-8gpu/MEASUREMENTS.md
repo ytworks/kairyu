@@ -515,6 +515,47 @@ it preserves effort, sampling and caps and requires native/composed replay.
 The failure check remains strict. This is not a verified universal remedy for
 deliberation continuing after forced thinking termination.
 
+The max case similarly fails after 425.7 seconds: `answer_1` reaches exactly
+4096 tokens while repeatedly counting words. Its exposed body continues a
+count, revises an embedded draft and counts again until cutoff, rather than
+finishing a clean peer. `answer_2` completes at 2517 tokens. The supplied policy
+does not demand word enumeration. The four-case matrix exits 1 at
+`2026-09-12T19:53:50.345345+00:00`; the parent driver stops before either formal
+Requirement quality or public performance. Both high/max failures remain at
+the original source/configuration, not the new prompt correction.
+
+Independent review matches all **32/32 role executions** to exactly one hook
+inside that role's closed trace window. Requirement is high in all four calls;
+other DeepSeek thinking roles inherit low/high/max (omitted becomes high),
+while Qwen keeps the same medium alias and budgets. All four final syntheses
+stop, retain the required ending and stay below 350 words; each receives its
+first audit PASS, with zero live repairs. These final-answer facts do not
+override the two peer failures. Source response SHA256 values are
+`23922e06e0e73479da0032f9c7ea206636495c22b37615d24dc40da5c9b687f2`
+(high) and `257c5e0bce993bfb63d3f81573a36b1aa0c1b011a3cc4ece7a982f52198201f0`
+(max). The local independent report is
+`/private/tmp/kairyu-v41-budget-review/independent-four-effort-review.json`,
+SHA256 `d8d60c59b88af2eb43d7738bf07f8e4029c1e045e99bffe1f277bfce72e95c93`;
+it has not been transferred to the GPU host. Raw responses/traces remain in
+the remote evidence tree and support repeating the review on another machine.
+
+The GPU checkout remains `05042b9b` and all six services are healthy after the
+matrix. Automatic approval review twice rejected transfer of the private Git
+difference to the already-used GPU host, even after checking its clean checkout
+and the narrow source/document payload. Explicit transfer approval has been
+requested; no alternative transfer was attempted. PR commit `b50e9863` contains
+the unverified prompt correction, and `499f8728` contains the verifier fix below.
+Selected CPU tests pass 526/526; the final prompt wording also passes 163 focused
+DAG/hook/probe tests. CI results are separate from GPU readiness.
+
+After approval, sync the full branch into the existing GPU checkout, preserving
+bind-mounted inodes until normal `run.sh up`. Verify the new configuration hash,
+unchanged pinned worker images, clean checkout and private-key persistence.
+Replay the same high/max fixtures first, then all four efforts, the three
+Requirement quality cases, generic/coding c1/8/16/32 matrices and final cleanup
+probes. Use fresh run IDs and preserve the current failures. If recounting or
+truncation persists, inspect the complete peer rather than weakening the gate.
+
 Before the fresh public performance matrix, the coding verifier was tightened
 to reject a failed paired native benchmark or a missing/nonfinite/nonpositive
 baseline TTFT, including rows whose public routes make the TTFT comparison N/A.

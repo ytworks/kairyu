@@ -95,10 +95,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble GPU validation continues. GPU-driven memory, sparse-KV, candidate-body, JSON-escape, top-p termination and stream-cleanup fixes pass focused checks; native 28/28 passes on the latest pinned child. Public cancellation and prior native capacity/context gates pass at their recorded revisions. Final L2 quality/effort and public-performance gates remain; see its MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble passes 28 native and 11 public route probes on the pinned child. Low/omitted effort passes; high/max expose Qwen candidate word-count truncation. A scoped prompt correction is pushed but unverified; transfer to the GPU checkout awaits explicit approval after automatic review rejection. Quality/public-performance gates have not run. Prior capacity/context/cancellation evidence retains its recorded revisions; see MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [progress] Preserve effort failures and deployment blocker
+- What: finish the four-effort replay: low/omitted pass, high/max fail strict candidate completion despite successful final synthesis/audit. Push the scoped prompt correction and retain healthy services at the last measured source.
+- Why: both failed peers continue self-initiated word counting after forced thinking termination. Automatic review twice rejects transferring the private source difference to the existing GPU checkout; explicit transfer approval is pending, so corrected replay and downstream quality/performance remain unrun.
+- Refs: PR #598, V41E-D9; example MEASUREMENTS, verification-results/20260913-budget-gates/l2-efforts.
 
 ### 2026-09-13 — [amendment] Bound candidate word-limit planning
 - What: add Qwen draft/answer guidance to avoid individual word recounts for maximum-length responses and transition to the requested body; preserve medium effort, sampling and token caps.
