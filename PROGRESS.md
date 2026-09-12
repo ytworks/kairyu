@@ -95,12 +95,18 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
+- V4.1 six-plus-two ensemble example is CPU-validated only; all GPU gates deferred by owner. Static TP2×DP3/EP6 candidate, two-policy native-image DAG, fixed-high DeepSeek Requirement; handoff in its README/L1-NOTES/MEASUREMENTS.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-12 — [amendment] Separate V4.1 six-plus-two ensemble example
+- What: add a TP2×DP3/EP6 DeepSeek V4.1 candidate on six GPUs plus two Qwen27B TP1 replicas; keep five routes, reduce to two policies, pass images natively and port PR #595 requirements onto fixed-high DeepSeek. Qwen effort and bounded audit publication behavior remain unchanged.
+- Why: the owner requested a separate configuration and deferred all GPU tests; TP6 cannot divide attention heads, and DSpark draft EP6 support is unverified. CPU/wire contracts and startup-hash attestation prepare a reproducible handoff without borrowing TP8 evidence.
+- Refs: V41E-D1..D4, `docs/design/example-v41-ensemble.md`; new example README/L1-NOTES/MEASUREMENTS; GPU startup, capacity, correctness and performance remain pending.
 
 ### 2026-09-11 — [progress] V4.1 L1 selection and final GPU gates complete
 - What: select TP8/EP8, DSpark 5, 16K batching and NCCL; the 320-request matrix, default/explicit reasoning, tools, images, cancellation, normal restart and four long-context retrieval smokes pass. Best measured aggregate throughput is 326.82 tok/s at c32; near-1M retrieval completes in 203.02 s.
@@ -171,15 +177,3 @@ in `.claude/rules/progress-log.md`).
   config change does not require a GPU rerun.
 - Why: the former 2× bound admitted materially skewed distributions as passing.
 - Refs: PR #585; FN-D9; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
-
-### 2026-09-01 — [amendment] FN-D9: two replica-pool 8-GPU examples (no orchestration)
-- What: `examples/qwen3.8-27b-dp8-8gpu` (Qwen3.8 TP1 × 8) and
-  `examples/deepseek-v4-flash-0731-dp2-8gpu` (DeepSeek TP4+EP4 × 2) expose one
-  public model each; L2 is only the `ReplicaPool` (`prefix_index: true`,
-  `queue_depth_threshold: 0`) and `verify.sh serving` gates the per-replica
-  split from `placement_log_path`. Same run/verify UX; no product code changed.
-- Why: a plain scale-out serving path (one API over N identical L1 replicas)
-  next to the orchestrated tiered example. GPU-verified 2026-09-01: gates green,
-  exact 8x8 / 32x2 splits; Qwen 313.7 tok/s at c8 (8.0x c1), DeepSeek 471 tok/s
-  at c32 (1.95x one replica) — MEASUREMENTS.md runs 20260901T133331Z / 20260901T140112Z.
-- Refs: FN-D9 (docs/design/frontier-native-runtime.md); tests/unit/test_replica_examplectl.py
