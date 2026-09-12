@@ -47,7 +47,8 @@ local regression set. These are CPU/static checks only.
 ## GPU startup investigation
 
 Hardware: 8 × RTX PRO 6000 Blackwell Server Edition, 97,887 MiB each, PCIe;
-1 TiB host RAM. Runtime image remains `027bf47b2bd6` (full ID in example.json).
+1 TiB host RAM. Initial trials use parent `027bf47b2bd6`; the selected child
+image is `8b8bcb200f3a` (full IDs in example.json).
 The previous DeepSWE run completed before its TP8 service was stopped.
 
 - `20260912-gpu-startup`: initial TP2/DP3/EP6, GPU-resident Engram, no DSpark,
@@ -119,17 +120,65 @@ Raw trial directories are under
 Each retains git state, hardware inventory, candidate spec/config hash and
 complete worker logs.
 
-## What remains unmeasured
+## Full-model native and initial L2 evidence
 
-TP2×DP3/EP6 initialization, memory fit, collective/kernel correctness, actual
-native tokenizer/schema/thinking-budget enforcement, image understanding, tool
-behavior on generated model outputs, restart/cancellation/co-residency, long
-context, concurrency, latency and throughput all remain open.
+`20260912-gpu-masked-kv-final-startup` runs the selected child with normal CUDA
+graphs and the shipped collective settings. DeepSeek and both Qwen replicas
+start successfully; Qwen loads 28.43 GiB per GPU. The native suite passes
+**30/30 cases**: default/non-thinking on each DP rank, then default/low/high/max,
+image identification, tool call/result, streaming, 12 Requirement effort
+combinations, client cancellation/recovery and a forced thinking-budget case.
+All 86,856 returned sample/top log probabilities are finite; no response hits
+its total cap. This is the first successful full-model evidence after the
+masked-KV fix. Client cancellation alone does not prove worker cleanup.
 
-The sibling TP8 V4.1 result and PR #595's Qwen Requirement measurements are **not**
-measurements of this example. No old outputs, throughput numbers or baseline
-fallbacks were copied here. The 1M DeepSeek and 256K Qwen settings are candidate
-limits, not verified usable capacity for this combined deployment.
+The 12 Requirement cases cross API omitted/low/high/max with nested
+omitted/low/max. Each matches exactly one fixed-high hook record by message
+SHA256 and its strict request time window. A separate native 16-token thinking
+budget reports exactly 16 reasoning tokens and completed public content.
+
+| Native artifact | SHA256 |
+| --- | --- |
+| `native-summary.json` | `a97bd034ba881f8b835736bde4e19ffd9c57f60c695f424cd52fb73654d71f25` |
+| `requirements-effort-correlation.json` | `2fe35dcc9953e8b497865e4d4f38d819949eea5908ed325a260cbed289522eff` |
+
+`20260913-l2-initial` returns 11/11 protocol successes and observes all five
+routes. However, detailed candidate inspection **fails primary completion**:
+the Qwen draft reaches 2048 tokens mid-sentence and answer_1 consumes all 4096
+tokens in reasoning with an empty body. The final 208-word answer satisfies
+this fixture's constraints and passes audit, which does not excuse the missing
+peer. The revised hook reserves body tokens without changing Qwen effort, and
+the revised probe requires completed nonempty draft and all three peers.
+The headed response also lacks whitespace before its first section; this is
+tracked separately from semantic correctness. The simple image and JSON cases
+route directly, so they do not establish primary image/headless behavior.
+
+The first native capacity run (`20260913-native-capacity`) reports 31/32 at c1.
+Its failed row is a complete 256-token all-thinking response: native V4.1 uses
+`delta.reasoning`, which the shared benchmark collector ignores. An example-local
+adapter now recognizes this alias while preserving original raw SSE. The saved
+row reparses correctly, but its old TTFT/TPOT values cannot be recovered from
+untimed SSE and are excluded. A fresh run is required; the original failed run
+is retained. Fixed-output throughput includes reasoning tokens and uses
+`ignore_eos`; it is not a completed-answer quality measurement.
+
+Open WebUI was exercised in a browser on port 3008: the effort valve displays
+server default high and default/low/high/max options; default was restored after
+inspection. A synthetic request displayed exactly `UI_READY_598`. This manual
+observation establishes basic UI connectivity, not every effort's downstream
+wire mapping.
+
+## Remaining gates
+
+Revalidate composed candidate completion after the Qwen reservation, primary
+image/headless and four-effort paths, audit/refinement, cancellation worker
+cleanup, normal restart, long-context retrieval and native/public concurrency
+with fresh same-topology baselines. Initial startup/NaN/candidate/measurement
+failures remain preserved even after a later successful rerun.
+
+The sibling TP8 result and PR #595's Qwen Requirement measurements are not
+measurements of this example. The configured 1M DeepSeek and 256K Qwen limits
+are not fully verified usable capacity until their corresponding probes pass.
 
 ## Next evidence record
 

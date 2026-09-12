@@ -95,10 +95,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble GPU validation is in progress after hardware release. Engram CPU offload resolves the initial memory fit issue; the example-local masked-KV fix passes 48 poison/parity and 16 existing numerical cases. Native/L2/context/performance gates continue; see its MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble GPU validation is in progress after hardware release. Engram CPU offload and the masked-KV correction pass native 30/30 plus kernel 48+16 cases. Initial L2 exposed an empty Qwen candidate; body reservations and stricter probes address it. Context/performance and composed revalidation continue; see its MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [amendment] V4.1 candidate body reservation and native measurement correction
+- What: reserve half the existing Qwen draft/answer caps for body text, preserving medium effort; reject empty or cap-exhausted candidate pools. Recognize native `reasoning` in the example-local capacity collector and keep raw SSE. Ask prose heads to emit a paragraph separator while exact-output heads remain exact.
+- Why: the first primary GPU request succeeds publicly but has a truncated draft and empty policy answer. A separate native capacity false failure ignores all-thinking deltas. Preserve these failures and rerun their gates; native 30/30 and fixed-high Requirement correlation are established independently.
+- Refs: PR #598; V41E-D3 amendment; example MEASUREMENTS, GPU smoke/capacity probes. Composed, context, performance and worker-cleanup gates remain in progress.
 
 ### 2026-09-13 — [amendment] Six-GPU V4.1 memory placement and masked-KV correction
 - What: offload Engram tables to host RAM and add a pinned child runtime that zero-fills invalid sparse-KV gathers. Add native/L2/capacity probes, exact parent-image checks and isolated kernel caches. The poison oracle passes 48/48 with bitwise baseline agreement; the existing numerical suite passes 16/16. Full-model gates remain in progress.

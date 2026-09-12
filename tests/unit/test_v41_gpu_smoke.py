@@ -350,3 +350,67 @@ def test_budget_probe_below_limit_is_not_exercised(tokens):
 )
 def test_budget_probe_excess_truncation_or_wrong_answer_fails(body):
     assert not harness().validate_response("thinking-budget", body)["passed"]
+
+
+def primary_response(*, empty=None, draft_tokens=512):
+    body = response("Final answer")
+    nodes = [
+        "profile_judge",
+        "head",
+        "draft",
+        "requirements",
+        "policies",
+        "answer_1",
+        "answer_2",
+        "critique",
+        "synthesis",
+        "audit",
+    ]
+    body["kairyu_trace_v2"] = {
+        "events": [
+            {
+                "node": node,
+                "status": "success",
+                "usage": {"completion_tokens": draft_tokens if node == "draft" else 100},
+            }
+            for node in nodes
+        ]
+    }
+    sections = []
+    for node in ["draft", "answer_1", "answer_2", "critique"]:
+        text = "" if node == empty else "A complete candidate answer."
+        sections.append(
+            f"### {node} — attempt 1\n\n- L2 role: `proposal`\n\n"
+            f"#### Model reasoning\n\nPrivate reasoning.\n\n#### Stage output\n{text}\n---\n"
+        )
+    body["choices"][0]["message"]["reasoning_content"] = "\n".join(sections)
+    return body
+
+
+def test_primary_requires_nonempty_three_peer_bodies_not_just_success_events():
+    module = harness()
+    assert module.validate_l2_trace(primary_response(), expected_profile="primary")["passed"]
+    verdict = module.validate_l2_trace(
+        primary_response(empty="answer_1"), expected_profile="primary"
+    )
+    assert not verdict["passed"] and "answer_1" in verdict["detail"]
+    assert "empty" in verdict["detail"]
+
+
+def test_primary_rejects_candidate_at_cap_without_complete_output_evidence():
+    verdict = harness().validate_l2_trace(
+        primary_response(draft_tokens=2048), expected_profile="primary"
+    )
+    assert not verdict["passed"] and "draft" in verdict["detail"] and "cap" in verdict["detail"]
+
+
+def test_headed_primary_rejects_observed_sentence_heading_seam():
+    body = primary_response()
+    body["choices"][0]["message"]["content"] = "Both options violate a constraint.**Facts**"
+    assert not harness().validate_l2_trace(body, expect_headless=False)["passed"]
+    body["choices"][0]["message"]["content"] = "Both options violate a constraint.\n\n**Facts**"
+    assert harness().validate_l2_trace(body, expect_headless=False)["passed"]
+    body["choices"][0]["message"]["content"] = (
+        "The requested literal follows.\n\n```text\nx.**A\n```"
+    )
+    assert harness().validate_l2_trace(body, expect_headless=False)["passed"]

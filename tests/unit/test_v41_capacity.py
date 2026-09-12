@@ -168,3 +168,59 @@ def test_runtime_guard_rejects_overridden_context_limit_with_current_hash():
     assert capacity.validate_runtime(record, "sha256:pin")
     command[command.index("--max-model-len") + 1] = "32768"
     assert not capacity.validate_runtime(record, "sha256:pin")
+
+
+def test_native_reasoning_alias_counts_as_model_output(tmp_path):
+    import asyncio
+    import json
+
+    import httpx
+
+    spec.loader.exec_module(capacity)
+
+    async def run():
+        chunks = [
+            {"choices": [{"delta": {"reasoning": "private"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "length"}]},
+            {"choices": [], "usage": {"prompt_tokens": 8222, "completion_tokens": 256}},
+        ]
+        raw = "".join("data: " + json.dumps(c) + "\n\n" for c in chunks) + "data: [DONE]\n\n"
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, text=raw))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test/v1/") as client:
+            directory = tmp_path / "native"
+            result = await capacity.request(client, {}, directory, 1)
+            assert result["transport_passed"]
+            assert result["reasoning_content"] == "private"
+            assert result["content"] == ""
+            assert result["content_ttft_ms"] is None
+            assert result["model_ttft_ms"] is not None
+            assert capacity.fixed_passed(result, 256, 8192)
+            assert (directory / "response.sse").read_text() == raw
+
+    asyncio.run(run())
+
+
+def test_reasoning_alias_precedes_content_timing_without_double_count(monkeypatch):
+    import asyncio
+    import json
+
+    spec.loader.exec_module(capacity)
+    clock = iter([1.0, 2.0, 3.0, 4.0])
+    monkeypatch.setattr(capacity.benchmark.time, "perf_counter", lambda: next(clock))
+
+    async def lines():
+        for delta, finish in [
+            ({"reasoning": "first"}, None),
+            ({"reasoning_content": "second", "reasoning": "second"}, None),
+            ({"content": "answer"}, "stop"),
+        ]:
+            yield "data: " + json.dumps({"choices": [{"delta": delta, "finish_reason": finish}]})
+        yield 'data: {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}'
+        yield "data: [DONE]"
+
+    result = asyncio.run(capacity.benchmark.collect(capacity.normalize_reasoning_alias(lines()), 0))
+    assert result["reasoning_content"] == "firstsecond"
+    assert result["content"] == "answer"
+    assert result["model_ttft_ms"] == 1000
+    assert result["content_ttft_ms"] == 3000
+    assert result["tpot_ms"] == 750

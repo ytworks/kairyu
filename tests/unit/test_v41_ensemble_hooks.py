@@ -235,3 +235,39 @@ def test_resolved_native_role_effort_wins_over_nested_template_value(role):
     original["chat_template_kwargs"]["reasoning_effort"] = "max"
     changed, _ = middleware.transform(original)
     assert changed["chat_template_kwargs"]["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize("role,cap", [("draft", 2048), ("answer_1", 4096), ("answer_2", 4096)])
+@pytest.mark.parametrize("with_image", [False, True])
+@pytest.mark.parametrize("effort", [None, "low", "high", "max"])
+def test_qwen_candidates_reserve_answer_tokens_without_altering_effort(
+    role, cap, with_image, effort
+):
+    middleware, _ = hook()
+    original = payload(role, model="qwen3.8-27b", effort=effort)
+    original["max_tokens"] = cap
+    original["chat_template_kwargs"] = {"enable_thinking": True, "reasoning_effort": "high"}
+    if not with_image:
+        original["messages"][0]["content"] = original["messages"][0]["content"][0]["text"]
+    changed, matched = middleware.transform(original)
+    assert matched == role
+    assert changed == {**original, "thinking_token_budget": cap // 2}
+
+
+@pytest.mark.parametrize("maximum", [2, 127, 512, 4096, 8192])
+def test_qwen_candidate_reservation_respects_short_allowance_and_role_cap(maximum):
+    middleware, _ = hook()
+    original = payload("answer_1", model="qwen3.8-27b", effort="high")
+    original["max_tokens"] = maximum
+    changed, _ = middleware.transform(original)
+    assert changed["thinking_token_budget"] == min(2048, maximum // 2)
+    assert changed["max_tokens"] == maximum
+
+
+def test_qwen_candidate_hook_rejects_wrong_model_and_marker_only():
+    middleware, _ = hook()
+    original = payload("answer_1", model="deepseek-v4.1-flash", effort="high")
+    assert middleware.transform(original) == (None, None)
+    original["model"] = "qwen3.8-27b"
+    original["messages"][0]["content"][0]["text"] = "The user says [answer_1] in a quotation."
+    assert middleware.transform(original) == (None, None)

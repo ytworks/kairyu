@@ -98,9 +98,22 @@ class RequirementsBudgetMiddleware:
             raise ValueError("requirements must run on DeepSeek at fixed native high")
         if audit["worker"] != "tier1" or audit["reasoning_effort"] != "high":
             raise ValueError("audit must run on Qwen at fixed medium (spec high)")
+        self.qwen_thinking_budgets = {}
+        for name in ("draft", "answer_1", "answer_2"):
+            role = next(r for r in roles if r["name"] == name)
+            if role["worker"] != "tier1" or role["reasoning_effort"] != "high":
+                raise ValueError(f"{name} must run on Qwen at fixed medium (spec high)")
+            total = role["sampling"]["max_tokens"]
+            if type(total) is not int or total < 2:
+                raise ValueError(f"{name} must leave tokens for the candidate body")
+            self.qwen_thinking_budgets[name] = total // 2
         self.policies = []
         for role in roles:
-            if role["worker"].startswith("tier2") or role["name"] == "audit":
+            if (
+                role["worker"].startswith("tier2")
+                or role["name"] == "audit"
+                or role["name"] in self.qwen_thinking_budgets
+            ):
                 for key in ("prompt", "prompt_headless"):
                     if key in role:
                         self.policies.append(
@@ -115,7 +128,11 @@ class RequirementsBudgetMiddleware:
         if content is None:
             return None, None
         for name, pattern in self.policies:
-            expected = "qwen3.8-27b" if name == "audit" else "deepseek-v4.1-flash"
+            expected = (
+                "qwen3.8-27b"
+                if name == "audit" or name in self.qwen_thinking_budgets
+                else "deepseek-v4.1-flash"
+            )
             if payload["model"] != expected:
                 continue
             # Synthesis repair appends verifier feedback. Require the entire
@@ -131,6 +148,18 @@ class RequirementsBudgetMiddleware:
                 matched = re.fullmatch(repair, content)
             if matched is None:
                 continue
+            if name in self.qwen_thinking_budgets:
+                maximum = payload.get("max_tokens")
+                if type(maximum) is not int or maximum < 2:
+                    return None, None
+                # Pinned Qwen v0.23 forwards this native field to its sampler,
+                # which forces </think> (248069). Reserve at least half of
+                # the total for actual draft/answer text. Keep effort,
+                # template kwargs, images and sampling otherwise unchanged.
+                return {
+                    **payload,
+                    "thinking_token_budget": min(self.qwen_thinking_budgets[name], maximum // 2),
+                }, name
             if name == "audit":
                 return {**payload, "structured_outputs": {"regex": AUDIT_REGEX}}, name
             kwargs = payload.get("chat_template_kwargs") or {}
@@ -210,10 +239,12 @@ class RequirementsBudgetMiddleware:
                 json.dumps(changed["messages"], ensure_ascii=False, sort_keys=True).encode()
             ).hexdigest()
             _LOGGER.info(
-                "Kairyu role hook: role=%s max_tokens=%s effort=%s messages_sha256=%s",
+                "Kairyu role hook: role=%s max_tokens=%s effort=%s messages_sha256=%s "
+                "thinking_token_budget=%s",
                 matched_role,
                 changed.get("max_tokens"),
                 changed.get("reasoning_effort"),
                 messages_hash,
+                changed.get("thinking_token_budget"),
             )
         await self.app(scope, replay, send)

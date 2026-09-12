@@ -157,6 +157,22 @@ def prompt_for(tokenizer, target, key, request_id):
     raise ValueError("Cannot construct the requested exact raw-token prompt size")
 
 
+async def normalize_reasoning_alias(lines):
+    """Adapt native V4.1's reasoning field to the pinned shared collector ABI."""
+    async for line in lines:
+        if line.startswith("data: ") and line[6:].strip() != "[DONE]":
+            event = json.loads(line[6:])
+            changed = False
+            for choice in event.get("choices", []):
+                delta = choice.get("delta") or {}
+                if not delta.get("reasoning_content") and delta.get("reasoning"):
+                    delta["reasoning_content"] = delta["reasoning"]
+                    changed = True
+            if changed:
+                line = "data: " + json.dumps(event)
+        yield line
+
+
 async def request(client, body, directory, timeout):
     directory.mkdir()
     dump(directory / "request.json", body)
@@ -180,7 +196,7 @@ async def request(client, body, directory, timeout):
                             raw.flush()
                             yield line
 
-                    result = await benchmark.collect(lines(), start)
+                    result = await benchmark.collect(normalize_reasoning_alias(lines()), start)
         result["transport_passed"] = True
     except Exception as error:
         result = {

@@ -293,7 +293,66 @@ def build_l2_cases(directory: Path, *, effort_matrix: bool = False) -> list[dict
     return cases
 
 
-def validate_l2_trace(body: dict, *, expected_profile=None, expect_headless=None) -> dict:
+def candidate_pool_report(
+    body: dict, events: list, *, request_max_tokens=None, reasoning_effort=None
+) -> dict:
+    """Read exposed stage bodies; a successful transport alone is not a candidate."""
+    message = body["choices"][0].get("message") or {}
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+    matches = list(
+        re.finditer(r"(?m)^### (?P<node>[\w:-]+) — attempt (?P<attempt>\d+)\n", reasoning)
+    )
+    outputs = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(reasoning)
+        section = reasoning[match.end() : end].split("\n### Final answer attribution", 1)[0]
+        if "#### Stage output\n" in section:
+            output = section.rsplit("#### Stage output\n", 1)[1].rsplit("\n---", 1)[0].strip()
+            outputs.setdefault(match["node"], []).append(output)
+    spec = yaml.safe_load(Path(__file__).with_name("auto-max.yaml").read_text())
+    roles = {role["name"]: role for role in spec["roles"]}
+    reports = {}
+    for name in ("draft", "answer_1", "answer_2", "critique"):
+        bodies = outputs.get(name, [])
+        sampling = roles[name].get("sampling") or {}
+        effort = reasoning_effort or spec.get("default_reasoning_effort")
+        cap = sampling.get("max_tokens_by_effort", {}).get(effort, sampling.get("max_tokens"))
+        if cap is not None:
+            cap = min(cap, spec["internal_max_tokens"])
+            if type(request_max_tokens) is int:
+                cap = min(cap, request_max_tokens)
+        usages = [
+            (e.get("usage") or {}).get("completion_tokens")
+            for e in events
+            if e.get("node") == name and e.get("status") == "success"
+        ]
+        report = {
+            "stage_body_count": len(bodies),
+            "stage_body_chars": [len(x) for x in bodies],
+            "completion_tokens": usages,
+            "configured_cap": cap,
+            "nonempty_body": len(bodies) == 1 and bool(bodies[0]),
+            "below_cap": cap is not None
+            and len(usages) == 1
+            and type(usages[0]) is int
+            and 0 < usages[0] < cap,
+        }
+        reports[name] = report
+    return {
+        "passed": all(r["nonempty_body"] and r["below_cap"] for r in reports.values()),
+        "stages": reports,
+        "scope": "Nonempty exposed bodies and usage below caps; no semantic quality assertion",
+    }
+
+
+def validate_l2_trace(
+    body: dict,
+    *,
+    expected_profile=None,
+    expect_headless=None,
+    request_max_tokens=None,
+    reasoning_effort=None,
+) -> dict:
     events = (body.get("kairyu_trace_v2") or {}).get("events", [])
     successful = {e.get("node") for e in events if e.get("status") == "success"}
     profiles = [profile for profile, node in ROUTE_FINAL_NODES.items() if node in successful]
@@ -315,8 +374,26 @@ def validate_l2_trace(body: dict, *, expected_profile=None, expect_headless=None
         }
         if not required <= successful or successful & {"answer_3", "answer_4"}:
             return {**result, "detail": "primary DAG stage coverage failed"}
+        pool = candidate_pool_report(
+            body, events, request_max_tokens=request_max_tokens, reasoning_effort=reasoning_effort
+        )
+        result["candidate_pool"] = pool
+        if not pool["passed"]:
+            defects = []
+            for name, stage in pool["stages"].items():
+                if not stage["nonempty_body"]:
+                    defects.append(f"{name}: missing or empty stage body")
+                if not stage["below_cap"]:
+                    defects.append(f"{name}: reached cap or completion usage unavailable")
+            return {**result, "detail": "; ".join(defects)}
         if expect_headless is False and "head" not in successful:
             return {**result, "detail": "headed primary omitted its head"}
+        public = (body["choices"][0].get("message") or {}).get("content") or ""
+        opening_paragraph = public.split("\n\n", 1)[0]
+        if expect_headless is False and re.search(
+            r"[.!?](?:\*\*[A-Z]|#{1,6} )", opening_paragraph
+        ):
+            return {**result, "detail": "prose sentence touches a Markdown heading without spacing"}
     elif successful & {"requirements", "audit", "policies", "answer_1", "answer_2"}:
         return {**result, "detail": "direct route executed ensemble stages"}
     if expect_headless is True and "head" in successful:
@@ -568,6 +645,8 @@ def execute_case(
                     body,
                     expected_profile=case.get("expected_profile"),
                     expect_headless=case.get("expect_headless"),
+                    request_max_tokens=case["payload"].get("max_tokens"),
+                    reasoning_effort=case["payload"].get("reasoning_effort"),
                 )
                 result["route_validation"] = route
                 result["observed_profile"] = route["observed_profile"]

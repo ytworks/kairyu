@@ -57,7 +57,14 @@ Qwen keeps its existing medium alias and non-thinking roles. Example middleware
 matches complete shipped role templates, including refinement forms, and sets
 native thinking/effort, JSON checklist and audit serialization policies. It
 reserves checklist/public output within existing total caps using vLLM's
-thinking-budget processor; hardware enforcement is still a pending gate.
+thinking-budget processor. Native DeepSeek enforcement passes; composed
+candidate completion is checked separately.
+
+Amendment (2026-09-13): reserve half the Qwen draft/answer allowance for actual
+candidate text, without changing effort or increasing total caps. The first
+GPU primary request produced a truncated draft and one all-thinking, empty
+policy answer. Require nonempty bodies and below-cap completions for draft
+and all three synthesis peers in the GPU probe; API success alone is insufficient.
 
 Existing publication behavior is preserved: the opening can precede audit,
 and an exhausted failing final answer can still be published. The mechanism

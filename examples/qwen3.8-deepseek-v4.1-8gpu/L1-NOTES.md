@@ -109,10 +109,17 @@ prove enforcement. The inspected enforcement chain is:
 - `v1/sample/thinking_budget_state.py` tracks budgeted requests and forces
   the configured end tokens when the budget is exhausted.
 
-This supports the implementation choice statically. GPU checks must confirm
-that high effort with a bounded thinking phase produces completed valid JSON,
-that grammar constraints apply to the answer, and that exhausted budgets do
-not leak private reasoning or truncate every result before a usable answer.
+Native GPU probes now confirm completed JSON for all 12 API/nested-effort
+combinations, with exact request-hash correlation to fixed-high hook records.
+A forced 16-token thinking budget reports exactly 16 reasoning tokens and a
+completed public answer. These probes do not establish arbitrary task quality.
+
+The pinned Qwen v0.23 protocol forwards `thinking_token_budget` to sampling
+(protocol lines 231/643). Its reasoning parser uses token IDs 248068/248069
+for `<think>`/`</think>`; the sampler forces the latter at the budget boundary.
+The example now reserves half the draft/answer cap for body text, keeping all
+effort and sampling defaults. Composed GPU revalidation is required because
+the initial unrestricted answer consumed all 4096 tokens in reasoning.
 
 ## Required GPU follow-up
 
