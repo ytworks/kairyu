@@ -156,16 +156,14 @@ def audit_hooks(raw, worker, started_utc, expected_hash=None):
     return found
 
 
-def audit_active(hooks, values, keepalive):
+def audit_workers_active(hooks, values):
     if len(hooks) > 1:
         raise ValueError(
             "Live audit requires one unique fresh audit hook; multiple dispatches observed"
         )
-    if not hooks or not keepalive:
+    if not hooks:
         return False
     hook = hooks[0]
-    if keepalive["monotonic_s"] <= hook["observed"]["monotonic_s"]:
-        return False
     if set(values) != {"deepseek", "qwen-0", "qwen-1"}:
         return False
     for name, rows in values.items():
@@ -177,6 +175,13 @@ def audit_active(hooks, values, keepalive):
         elif not idle(rows):
             return False
     return True
+
+
+def audit_active(hooks, values, keepalive, *, active_since=None):
+    if not audit_workers_active(hooks, values) or not keepalive:
+        return False
+    threshold = max(hooks[0]["observed"]["monotonic_s"], active_since or 0)
+    return keepalive["monotonic_s"] > threshold
 
 
 def audit_cursors(sources):
@@ -425,7 +430,16 @@ async def run_case(client, args, sources, rank):
             seen_active.update(names)
             state["workers_seen_active"] = sorted(seen_active)
             if audit_mode:
-                active = audit_active(hooks, values, audit_keepalive)
+                if audit_workers_active(hooks, values) and not state.get(
+                    "audit_active_before_keepalive"
+                ):
+                    state["audit_active_before_keepalive"] = {"metrics": values, **stamp()}
+                active = audit_active(
+                    hooks,
+                    values,
+                    audit_keepalive,
+                    active_since=state.get("audit_active_before_keepalive", {}).get("monotonic_s"),
+                )
             else:
                 active = (
                     rank_running(values["deepseek"], rank)

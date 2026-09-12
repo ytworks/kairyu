@@ -197,6 +197,8 @@ def test_live_audit_requires_unique_hook_matching_running_worker_and_later_keepa
     }
     assert probe.audit_active([hook], values, {"monotonic_s": 4})
     assert not probe.audit_active([hook], values, {"monotonic_s": 2})
+    assert not probe.audit_active([hook], values, {"monotonic_s": 4}, active_since=5)
+    assert probe.audit_active([hook], values, {"monotonic_s": 6}, active_since=5)
     assert not probe.audit_active([], values, {"monotonic_s": 4})
     assert not probe.audit_active([dict(hook, worker="qwen-1")], values, {"monotonic_s": 4})
     values["deepseek"]["0"]["running"] = 1
@@ -323,5 +325,10 @@ async def test_public_audit_waits_past_initial_parallel_work_then_checks_cleanup
     assert (
         result["live_audit"]["keepalive"]["monotonic_s"]
         > result["live_audit"]["hook"]["observed"]["monotonic_s"]
+    )
+    assert (
+        result["audit_active_before_keepalive"]["monotonic_s"]
+        < result["live_audit"]["keepalive"]["monotonic_s"]
+        < result["live_audit"]["monotonic_s"]
     )
     assert calls[-2:] == ["after", "recovery"]
