@@ -100,6 +100,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 ## Change Log
 
+### 2026-09-13 — [amendment] Bound candidate word-limit planning
+- What: add Qwen draft/answer guidance to avoid individual word recounts for maximum-length responses and transition to the requested body; preserve medium effort, sampling and token caps.
+- Why: explicit-high GPU replay exhausts one policy answer while continuing private word counting after the forced thinking boundary. Final synthesis/audit succeeds, but the strict peer-completion check correctly fails. The prompt correction needs fresh GPU replay.
+- Refs: V41E-D9, PR #598; example MEASUREMENTS retains the failed candidate and exact hook correlation.
+
 ### 2026-09-13 — [progress] Corrected-runtime native and primary replay
 - What: current pinned child passes 28 native and 11 public route probes, including complete primary candidates and escaped Requirement literals. Require a successful fresh coding baseline with finite positive TTFT even when all public routes are ungated.
 - Why: native and composed replay establish the GPU fixes; verification previously allowed a failed paired baseline to become a successful N/A row. Effort, quality and public performance measurements continue separately.

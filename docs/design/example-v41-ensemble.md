@@ -145,5 +145,21 @@ recorded in MEASUREMENTS; stochastic forced-budget cases join the native probe.
 The sibling/parent image remains unchanged. The corrected child is a new image
 and requires attested native/composed replay before closing its gates.
 
+## V41E-D9 — Candidate word-limit planning
+
+The explicit-high primary replay completes publicly, but one Qwen policy answer
+recounts individual words until its forced thinking boundary, continues that
+deliberation in its exposed body, then truncates the actual memo at the total
+4096-token cap. The policy does not request word enumeration. The final audit
+checks synthesis, so its PASS does not prove that every peer was complete.
+
+Add role-local guidance to the Qwen draft and two policy answers: for maximum
+word limits leave a margin rather than enumerate/recount words, and emit the
+complete requested answer after private reasoning. Preserve exact-length
+requests, medium effort, sampling, total caps and thinking reservations. This
+is a prompt correction requiring replay, not a guaranteed bound on model
+deliberation or a serving-time repair mechanism. Retain the failing peer and
+do not relax the candidate-completion check to hide it.
+
 References: `examples/qwen3.8-deepseek-v4.1-8gpu/README.md`, `L1-NOTES.md`,
 `MEASUREMENTS.md`, and implementation plan `2026-09-12-v41-ensemble-example.md`.

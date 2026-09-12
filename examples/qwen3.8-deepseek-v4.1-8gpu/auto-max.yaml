@@ -71,6 +71,10 @@ roles:
     syntax: state in one short sentence which tool would be called with
     which arguments, and nothing else — a downstream publisher emits the
     actual call. The original request alone defines the task.
+    For a maximum word limit, leave a generous margin instead of enumerating
+    or repeatedly recounting individual words. After private reasoning,
+    emit only the complete requested answer, without exposing private
+    planning or word-count commentary.
 - name: requirements
   worker: tier2
   role_type: planner
@@ -203,6 +207,10 @@ roles:
     conversation requires calling an external tool or function next, state
     in one short sentence which tool would be called with which arguments —
     a downstream publisher emits the actual call.
+    For a maximum word limit, leave a generous margin instead of enumerating
+    or repeatedly recounting individual words. After private reasoning,
+    emit only the complete requested answer, without exposing private
+    planning or word-count commentary.
 - name: answer_2
   worker: tier1
   role_type: proposal
@@ -239,6 +247,10 @@ roles:
     conversation requires calling an external tool or function next, state
     in one short sentence which tool would be called with which arguments —
     a downstream publisher emits the actual call.
+    For a maximum word limit, leave a generous margin instead of enumerating
+    or repeatedly recounting individual words. After private reasoning,
+    emit only the complete requested answer, without exposing private
+    planning or word-count commentary.
 - name: critique
   worker: tier2
   role_type: synthesizer

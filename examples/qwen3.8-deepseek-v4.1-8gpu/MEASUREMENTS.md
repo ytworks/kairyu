@@ -495,6 +495,26 @@ This is native c1 exact-key retrieval, not public ensemble long-context quality.
 
 ## Remaining gates
 
+The public effort matrix passes low (301.968 seconds) and omitted (347.8
+seconds), with exact per-stage hook correlation: Requirement stays high,
+other DeepSeek thinking roles follow low/default-high, and Qwen remains at
+its medium alias. The explicit-high case fails after 386.4 seconds because
+`answer_2` uses exactly 4096 tokens. Its body continues word-by-word counting
+after the forced 2048-token thinking boundary, emits another `</think>` and
+starts a memo that stops mid-audit, missing its next steps and required ending.
+The supplied policy never asks for word enumeration. `answer_1` completes at
+2479/4096; final synthesis and its 5799-token audit pass, which does not repair
+the incomplete peer. Preserve this failure under
+`20260913-budget-gates/l2-efforts/l2-route-primary-high/`.
+
+The Qwen hook inside the failed stage's closed UTC window records
+high/4096-total/2048-thinking and messages SHA256
+`5fa3d27184d666e21151d95b050a3d420ae4404c4e6d244067909b89c5a4542c`.
+V41E-D9 adds focused role guidance against repeated individual word counting;
+it preserves effort, sampling and caps and requires native/composed replay.
+The failure check remains strict. This is not a verified universal remedy for
+deliberation continuing after forced thinking termination.
+
 Before the fresh public performance matrix, the coding verifier was tightened
 to reject a failed paired native benchmark or a missing/nonfinite/nonpositive
 baseline TTFT, including rows whose public routes make the TTFT comparison N/A.
