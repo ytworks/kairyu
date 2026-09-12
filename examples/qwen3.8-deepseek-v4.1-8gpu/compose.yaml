@@ -224,7 +224,7 @@ services:
             capabilities:
             - gpu
   deepseek:
-    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-sm120-masked-kv}
+    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-sm120-masked-kv-budget}
     ipc: host
     environment:
       HF_HOME: /models/.cache

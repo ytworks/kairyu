@@ -100,6 +100,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 ## Change Log
 
+### 2026-09-13 — [amendment] V4.1 seeded top-p thinking termination
+- What: mirror the existing monolithic cutoff guard in the pinned child runtime's split top-p kernel; add positive-temperature forced-budget regressions without changing effort or token caps.
+- Why: FP32 reconstructs the cutoff as the forced 1e9 maximum, removes every token and emits invisible token zero until the total cap. Bounded native token-ID comparisons and an independent GPU oracle isolate the sampler defect; the corrected child needs fresh full-model replay.
+- Refs: V41E-D8, PR #598; patch_top_p.py and example MEASUREMENTS preserve source hashes, original failures, oracle/control comparisons and rollout evidence.
+
 ### 2026-09-13 — [amendment] V4.1 Requirement JSON escape compatibility
 - What: remove string minLength from the three free-text generation-schema fields; preserve schema shape and verification-time nonempty validation.
 - Why: pinned XGrammar 0.2.6 excludes JSON escapes when lowering minLength, truncating actual quoted literals. CPU character/token matching reproduces the defect; the native parser preserves the same bytes. Runtime empty strings become possible, so this is not a universal serving-time nonempty guarantee.

@@ -877,6 +877,7 @@ CONFIG_FILES = (
     "webui-reasoning-effort-filter.py",
     "vllm-sm120.Dockerfile",
     "patch_masked_kv.py",
+    "patch_top_p.py",
     "../deepseek-v4.1-flash-8gpu/example.json",
     "../deepseek-v4.1-flash-8gpu/vllm-sm120.Dockerfile",
     "../deepseek-v4.1-flash-8gpu/patch_runtime.py",

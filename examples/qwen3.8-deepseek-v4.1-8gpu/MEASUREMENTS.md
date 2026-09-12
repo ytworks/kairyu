@@ -56,7 +56,8 @@ separator equivalence. Whole-repository Ruff and progress/whitespace checks pass
 
 Hardware: 8 × RTX PRO 6000 Blackwell Server Edition, 97,887 MiB each, PCIe;
 1 TiB host RAM. Initial trials use parent `027bf47b2bd6`; the selected child
-image is `8b8bcb200f3a` (full IDs in example.json).
+image in the initial corrected runs is `8b8bcb200f3a` (full ID below).
+The subsequent seeded top-p correction uses `18dad57d5b3d`, pinned in example.json.
 The previous DeepSWE run completed before its TP8 service was stopped.
 
 - `20260912-gpu-startup`: initial TP2/DP3/EP6, GPU-resident Engram, no DSpark,
@@ -316,6 +317,83 @@ permits empty strings. Post-deployment literal replay remains required.
 | --- | --- |
 | `results.json` | `0602b278644b957d5028d88543140a737b0b6531544828051dd23e538280778d` |
 | `manifest.json` | `85054b81ed4d1086375a9fd5b6977d445e17aa06db5bbd1ac15508b3485c9cca` |
+
+## Escaped-literal rollout and public cancellation
+
+`20260913-escaped-startup` normally recreates the services with the separator,
+iterator ownership and unconstrained-JSON-string fixes. Private state is
+preserved. Checkout `3eb67062` is the startup revision; `9cbdf916` adds only the
+executed cancellation probe timing guard. Its exact executed script is preserved
+separately (SHA256 `d5ab6101249cab1b01993adb1ebbeabbe226309798e8b6698ffb1d33f33af05d`).
+The native model image remains `8b8bcb200f3a` for these runs.
+
+`20260913-escaped-literals` runs the actual mounted Requirement hook with API
+max, nested low and disabled-thinking inputs. All three requests correlate
+uniquely to fixed-high hook lines within their request windows. Quoted text plus
+newline and the backslash path now pass with `stop`. The decision fixture still
+fails at 8192 tokens with no public body, exposing the separate sampler defect
+below. The old prompt-only success did not establish reliable budget closure.
+
+Both public cancellation gates pass. Early parallel generation observes all
+three workers active. Deferred audit observes a unique fresh Qwen-0 audit,
+DeepSeek/other-Qwen idle, a later keepalive and another live audit snapshot
+immediately before closing. Audit hash:
+`66177df18c055a3d04d434619cac40653f00f14b1ee5d0e92484be66f67db1c0`.
+Hook time is 18:52:57.322595Z, first activity 18:52:58.420340Z, later keepalive
+18:53:09.461679Z, final activity 18:53:09.778392Z, close 18:53:09.778824Z,
+on 2026-09-12 UTC. Every subsequent metrics sample retains all three native
+DP ranks and both Qwen inventories and shows zero running/waiting requests;
+both recovery requests return exact `323` with `stop`.
+
+Cleanup is **1452.458 ms early-public / 1462.408 ms deferred-audit**, including
+one second of stable-idle confirmation. This closes the prior 139-second public
+cleanup failure for the tested Conductor path. The first wrapper's activation
+value 900 was CLI-rejected before any request; `cancellation-driver2` corrects
+it to the probe's 600-second bound and initializes all native rank metrics.
+
+| Independent evidence manifest | SHA256 |
+| --- | --- |
+| `20260913-escaped-startup` | `d528a0a1f61fcded5339aa6b756a992a7bc6ebef3f4b0a939b590a7c18091e7b` |
+| `20260913-escaped-literals` | `9ff8cf05ad3b73baa13329e940a9b55883c5b1d89ecaf4bd5c3cfd061c30e704` |
+| `20260913-escaped-cancellation-driver2` | `bd2e8e0b9a64daf148ba84a1b5be608f4e0fde2e4918de2a81e1fb71a3d75046` |
+| `20260913-escaped-public-cancel` | `f58e8ced4ebd515471dbecf1ced713a536b5907eadedf4e49dd9ee138c34493d` |
+| `20260913-escaped-public-audit-cancel` | `1960ea30517402417e062ba796bb698eacb5afa1cffb190f58411db80f641871` |
+
+## Seeded thinking-budget sampler investigation
+
+`20260913-thinking-budget-pair` requests actual native token IDs with a bounded
+128-token total and 16-token thinking allowance. Both structured/unstructured
+requests produce 16 ordinary tokens followed by 112 token-zero IDs. Their
+public bodies are empty. `20260913-thinking-budget-sampling` isolates sampling:
+greedy and positive-temperature `top_p=1` correctly emit end token 128822 once
+and begin a body; seeded `top_p=0.5` repeats the failure. These deliberately
+short diagnostics are expected to truncate a complete checklist and do not
+claim completed-answer success; the observed failure is missing termination.
+
+The active V2 budget kernel forces a `1e9` end logit. The split top-p kernel
+reconstructs its threshold as `log(pivot) + log(Z) + maximum`; FP32 rounds this
+back to the maximum, and strict `>` excludes every token. The existing
+monolithic sampler already handles this degenerate cutoff. `patch_top_p.py`
+copies that safeguard to the split path and keeps the forcing kernel unchanged.
+Input/output source hashes are in L1-NOTES and V41E-D8.
+
+`20260913-thinking-sampler-oracle` independently reproduces the defect without
+model inference. The exact committed patch passes **60/60 batch cases**:
+batches 1/8/16/32/65 cross the actual split threshold of 64; each tests forced
+1e9, normalized one-hot, finite-80 and ordinary logits at top-p .5/.95/1.
+Every corrected forced row selects token 128822 and matches the CPU reference
+probabilities exactly. All **45 control cases** retain bitwise masked logits
+and same-seed token IDs versus the original. The original approximate top-p
+algorithm's ordinary support/reference differences are retained, not claimed
+as new numerical parity. The earlier 12-case single-row oracle also passes.
+
+New child: `local/vllm-openai:deepseek-v41-sm120-masked-kv-budget`, image
+`sha256:18dad57d5b3d576797555e0e2c91f247ce4a39cba39ae20c79a4a2e09421a195`.
+Parent and previous child bytes remain unchanged. Selected CPU regressions now
+pass **518 tests**, and Ruff/progress/whitespace checks pass. Stochastic
+forced-budget probes with/without grammar join the native suite. Fresh native
+and composed replay on this new child is still required; older native/context
+measurements retain their original image provenance.
 
 ## Qwen native near-limit retrieval
 

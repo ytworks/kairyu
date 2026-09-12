@@ -125,5 +125,25 @@ silently excluding valid literal content. Original requests remain authoritative
 for synthesis/audit. Keep failed prompt trials and the exact grammar/source
 reproduction, and rerun actual fixed-high Requirement literals after deployment.
 
+## V41E-D8 — Seeded top-p retains a forced thinking terminator
+
+A fixed-high Requirement can exhaust 8192 tokens with an empty public body.
+Native token-ID diagnostics isolate 16 ordinary tokens followed by 112 special
+zero tokens at a 16-token thinking budget. Both structured and unstructured
+requests fail with seeded positive-temperature top-p sampling; greedy and
+`top_p=1` correctly emit the terminator. The active V2 budget kernel writes a
+large forced logit (`1e9`). In the split top-p kernel, FP32 cutoff reconstruction
+rounds up to that maximum, and the strict comparison removes every candidate.
+
+Add the existing monolithic cutoff guard to the split kernel in this example's
+pinned child runtime: if the cutoff is not below the true row maximum, use
+negative infinity as the cutoff. Keep the budget kernel and forcing value
+unchanged. This preserves the forced distribution without changing model effort,
+total caps, or the sampler's ordinary path. Exact input/output source hashes
+and idempotence fail closed. CPU/GPU oracle results and preserved failures are
+recorded in MEASUREMENTS; stochastic forced-budget cases join the native probe.
+The sibling/parent image remains unchanged. The corrected child is a new image
+and requires attested native/composed replay before closing its gates.
+
 References: `examples/qwen3.8-deepseek-v4.1-8gpu/README.md`, `L1-NOTES.md`,
 `MEASUREMENTS.md`, and implementation plan `2026-09-12-v41-ensemble-example.md`.

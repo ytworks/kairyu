@@ -54,7 +54,7 @@ def test_requirements_cases_use_exact_shipped_prompt_without_client_override():
 
     module = harness()
     cases = module.build_cases(EXAMPLE, "deepseek-v4.1-flash")
-    requirements = [c for c in cases if c["kind"] == "requirements"]
+    requirements = [c for c in cases if c["kind"] == "requirements" and "-nested-" in c["name"]]
     assert len(requirements) == 12
     prompt = next(
         r["prompt"]
@@ -429,10 +429,44 @@ def test_requirement_literal_must_be_in_acceptance_not_only_source():
     }
     body = response(json.dumps([row]))
     module = harness()
-    assert not module.validate_response(
-        "requirements", body, expected_literals=["Ready."]
-    )["passed"]
+    assert not module.validate_response("requirements", body, expected_literals=["Ready."])[
+        "passed"
+    ]
     row["acceptance_criterion"] = "Ends with exactly the literal Ready. and nothing after it."
     assert module.validate_response(
         "requirements", response(json.dumps([row])), expected_literals=["Ready."]
     )["passed"]
+
+
+def test_escaped_requirement_cases_exercise_the_shipped_hook():
+    module = harness()
+    cases = {c["name"]: c for c in module.build_cases(EXAMPLE, "deepseek-v4.1-flash")}
+    for name, literal in [
+        ("requirements-escaped-lines", 'A|"B"\nDONE.'),
+        ("requirements-backslash", "C:\\tmp"),
+    ]:
+        case = cases[name]
+        assert case["expected_literals"] == [literal]
+        assert literal in case["payload"]["messages"][0]["content"]
+        assert case["expected_effective_effort"] == "high"
+        assert case["payload"]["reasoning_effort"] == "max"
+        assert case["payload"]["chat_template_kwargs"] == {
+            "reasoning_effort": "low",
+            "thinking": False,
+            "enable_thinking": False,
+        }
+        assert "structured_outputs" not in case["payload"]
+        assert "thinking_token_budget" not in case["payload"]
+
+
+def test_forced_budget_covers_seeded_nucleus_with_and_without_grammar():
+    cases = {c["name"]: c for c in harness().build_cases(EXAMPLE, "deepseek-v4.1-flash")}
+    for suffix in ("sampled", "structured"):
+        body = cases["native-thinking-budget-" + suffix]["payload"]
+        assert body["thinking_token_budget"] == 16
+        assert body["temperature"] == 1.0 and body["top_p"] == 0.95
+        assert body["seed"] == 10 and body["max_tokens"] == 512
+        if suffix == "structured":
+            assert body["structured_outputs"] == {"json": {"type": "integer", "enum": [437]}}
+        else:
+            assert "structured_outputs" not in body

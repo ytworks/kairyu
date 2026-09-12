@@ -152,6 +152,8 @@ sibling V4.1 SM120 image using that sibling's directory as context, then applies
 this directory's `patch_masked_kv.py` through its own Dockerfile. The patch checks
 the original FlashInfer header hashes before editing. It prevents invalid sparse
 KV indices from reading potentially nonfinite data in recycled slot zero.
+The child also applies the source-pinned `patch_top_p.py` cutoff guard so seeded
+positive-temperature sampling can emit forced thinking terminators (V41E-D8).
 The versioned `compile-cache/deepseek-masked-kv-v1` directory keeps old generated
 kernels out of the new runtime; FlashInfer uses a versioned subdirectory too.
 
@@ -236,7 +238,9 @@ uv run python examples/qwen3.8-deepseek-v4.1-8gpu/capacity.py \
 ```
 
 `gpu_smoke.py --case '^requirements-'` selects the twelve combinations of
-omitted/low/high/max API effort and omitted/low/max nested effort. Match each
+omitted/low/high/max API effort and omitted/low/max nested effort, plus explicit
+quote/newline and backslash literal cases. Use `--case '^requirements-.*-nested-'`
+for just the effort matrix. Match each
 saved `messages_sha256` to the worker's `Kairyu role hook` log to establish
 the effective high override; a valid JSON response alone cannot establish it.
 The script distinguishes completed answers from output-limit truncation and
@@ -269,6 +273,18 @@ zero, then verify a recovery answer. For the composed API use `--suite public
 container. This requires overlapping DeepSeek/Qwen activity before cancellation
 and checks all three workers afterwards. It records worker cleanup separately
 from primary-route coverage, since cancelling prevents the final full trace.
+
+Use `--suite public-audit` with the same request/metrics arguments and both
+`--audit-log qwen-0=docker://qwen3-8-deepseek-v4-1-8gpu-qwen-0-1` and the analogous
+qwen-1 argument to cancel specifically during deferred audit. The probe requires
+an idle baseline, exactly one new audit hook, matching Qwen-only activity, a
+later pending-stream keepalive and another running snapshot immediately before
+close. It saves the observed audit message hash, raw hook, metrics and recovery.
+A short audit that completes before the required observation cannot pass. Run
+one probe at a time with fresh directories and no unrelated inference; initialize
+all native DP ranks first so the strict rank-inventory metrics are available.
+Activation/recovery timeouts are bounded to 600 seconds. Native/early-public
+cancellation success does not replace the deferred-audit check.
 
 Results default to the new example's `verification-results` directory.
 `VERIFICATION_RESULTS_ROOT` and `--run-id` can select a persistent run location.

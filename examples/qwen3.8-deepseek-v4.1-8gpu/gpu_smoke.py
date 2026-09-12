@@ -157,6 +157,38 @@ def build_cases(directory: Path, model: str) -> list[dict]:
                     "expected_literals": ["Ready."],
                 }
             )
+    for name, query, literal in (
+        (
+            "escaped-lines",
+            "Return exactly these two lines, including the vertical bar and quotation marks, "
+            'with no surrounding explanation:\nA|"B"\nDONE.',
+            'A|"B"\nDONE.',
+        ),
+        (
+            "backslash",
+            "Return exactly the following path, preserving the backslash: C:\\tmp",
+            "C:\\tmp",
+        ),
+    ):
+        body = base(role["prompt"].format(query=query))
+        body.update(
+            max_tokens=role["sampling"]["max_tokens"],
+            reasoning_effort="max",
+            chat_template_kwargs={
+                "reasoning_effort": "low",
+                "thinking": False,
+                "enable_thinking": False,
+            },
+        )
+        cases.append(
+            {
+                "name": "requirements-" + name,
+                "kind": "requirements",
+                "payload": body,
+                "expected_effective_effort": "high",
+                "expected_literals": [literal],
+            }
+        )
     stream = base("What is 17 times 19? Return only the integer.")
     stream.update(stream=True, chat_template_kwargs={"thinking": False, "enable_thinking": False})
     cases.append({"name": "native-stream", "kind": "arithmetic", "payload": stream})
@@ -182,6 +214,21 @@ def build_cases(directory: Path, model: str) -> list[dict]:
         chat_template_kwargs={"thinking": True, "enable_thinking": True},
     )
     cases.append({"name": "native-thinking-budget", "kind": "thinking-budget", "payload": budget})
+    sampled_budget = {**budget, "temperature": 1.0, "top_p": 0.95, "seed": 10}
+    for suffix, body in (
+        ("sampled", sampled_budget),
+        (
+            "structured",
+            {**sampled_budget, "structured_outputs": {"json": {"type": "integer", "enum": [437]}}},
+        ),
+    ):
+        cases.append(
+            {
+                "name": "native-thinking-budget-" + suffix,
+                "kind": "thinking-budget",
+                "payload": body,
+            }
+        )
     return cases
 
 

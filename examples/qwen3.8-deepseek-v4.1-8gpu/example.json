@@ -102,8 +102,8 @@
       "release": "v0.23.0"
     },
     "deepseek": {
-      "image": "local/vllm-openai:deepseek-v41-sm120-masked-kv",
-      "image_id": "sha256:8b8bcb200f3a77f289f2483526903df34c7f7b15f58691d8ab27c0ccb15e2eaf",
+      "image": "local/vllm-openai:deepseek-v41-sm120-masked-kv-budget",
+      "image_id": "sha256:18dad57d5b3d576797555e0e2c91f247ce4a39cba39ae20c79a4a2e09421a195",
       "distribution": "overlay",
       "dockerfile": "vllm-sm120.Dockerfile",
       "base_image": "local/vllm-openai:deepseek-v41-sm120",

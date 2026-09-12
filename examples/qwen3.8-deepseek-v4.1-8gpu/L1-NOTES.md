@@ -138,3 +138,26 @@ DeepSeek-direct baselines and ensemble concurrency 1/8/16/32, with original
 request/response traces and exact image/config/model provenance. Long-context
 capacity/retrieval is a separate gate. Update validation status only for gates
 actually run; never import the old example's throughput or TTFT evidence.
+
+## Seeded top-p cutoff correction
+
+The selected child also applies `patch_top_p.py` to
+`vllm/v1/sample/ops/topk_topp_triton.py`. Input SHA256 is
+`22c526541d72f3b66f4f10b989c103c0869ea501aae2ac05151782dd69469ee1`;
+corrected SHA256 is
+`13ef1b8ec91340ad7a9402e9ec66f605a7117b13c4ce287df0de661e77f0346f`.
+The V2 budget kernel (`thinking_budget.py`, SHA256
+`020513e1d3406f367de6ad995a95055008fd0c28f2873647e8283c9870e22404`)
+sets the forced end-token logit to `1e9`; other logits remain unchanged. Keep
+that forcing logic intact. FP32 cutoff reconstruction in the split top-p mask
+can round to the maximum and remove every token. Copy the existing monolithic
+cutoff guard into this split path, retaining candidates in that degenerate case.
+Normal-path masking and same-seed output are compared against the original;
+forced-token probabilities are compared against a CPU reference. See V41E-D8
+and MEASUREMENTS for the exact oracle and full-model gate scope.
+
+New child image: `local/vllm-openai:deepseek-v41-sm120-masked-kv-budget`,
+`sha256:18dad57d5b3d576797555e0e2c91f247ce4a39cba39ae20c79a4a2e09421a195`.
+Parent and prior masked-KV image bytes remain available unchanged. Triton's
+source-keyed compilation distinguishes the corrected sampler; masked-KV cache
+namespaces remain valid because those header/kernel sources are unchanged.
