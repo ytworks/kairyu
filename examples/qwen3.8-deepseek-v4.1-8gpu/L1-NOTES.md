@@ -106,8 +106,11 @@ prove enforcement. The inspected enforcement chain is:
   `DeepSeekV41Parser`, which inherits V4's `<think>` / `</think>` markers.
 - `parser/engine/adapters.py` exposes start/end strings;
   `config/reasoning.py` tokenizes them when initializing the reasoning config.
-- `v1/sample/thinking_budget_state.py` tracks budgeted requests and forces
-  the configured end tokens when the budget is exhausted.
+- The selected V2 Model Runner uses
+  `v1/worker/gpu/sample/thinking_budget.py` to track budgeted requests and
+  force the configured end token when the budget is exhausted. Its kernel
+  raises that token's logit to `1e9`; the selected child also corrects the
+  split top-p cutoff at this maximum (V41E-D8 below).
 
 Native GPU probes now confirm completed JSON for all 12 API/nested-effort
 combinations, with exact request-hash correlation to fixed-high hook records.
@@ -118,8 +121,9 @@ The pinned Qwen v0.23 protocol forwards `thinking_token_budget` to sampling
 (protocol lines 231/643). Its reasoning parser uses token IDs 248068/248069
 for `<think>`/`</think>`; the sampler forces the latter at the budget boundary.
 The example now reserves half the draft/answer cap for body text, keeping all
-effort and sampling defaults. Composed GPU revalidation is required because
-the initial unrestricted answer consumed all 4096 tokens in reasoning.
+effort and sampling defaults. The corrected-runtime public replay completes
+all three peers below their caps; the initial unrestricted answer that spent
+all 4096 tokens in reasoning remains preserved in MEASUREMENTS.
 
 ## Required GPU follow-up
 

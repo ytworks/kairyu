@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import subprocess
 import sys
@@ -765,8 +766,19 @@ def serving_auto_max_coding(run_dir: Path) -> int:
             stage_trace=False,
             public_tokenizer=False,
         )
+        if direct_code:
+            print(f"c{concurrency}: paired direct baseline failed", file=sys.stderr)
+            return direct_code
+        direct = _row_summary(direct_dir)
+        direct_ttft = direct.get("ttft_p50_ms") if isinstance(direct, dict) else None
+        if (
+            type(direct_ttft) not in (int, float)
+            or not math.isfinite(direct_ttft)
+            or direct_ttft <= 0
+        ):
+            print(f"c{concurrency}: paired direct baseline has no usable TTFT", file=sys.stderr)
+            return 1
         product = _row_summary(row_dir)
-        direct = _row_summary(direct_dir) if direct_code == 0 else None
         routes = _row_routes(row_dir)
         gated_ttft = _gated_ttft_p50(routes)
         product_ttft = (
@@ -774,10 +786,10 @@ def serving_auto_max_coding(run_dir: Path) -> int:
             if routes is not None
             else (product.get("ttft_p50_ms") if isinstance(product, dict) else None)
         )
-        direct_ttft = direct.get("ttft_p50_ms") if isinstance(direct, dict) else None
         denominator_source = "paired_direct"
         if routes is not None and gated_ttft is None:
             # Every sample took a thinking direct route: nothing to gate.
+            # The fresh paired measurement above remains mandatory.
             gates[str(concurrency)] = {
                 "product_semantic_ttft_p50_ms": None,
                 "deepseek_direct_ttft_p50_ms": direct_ttft,

@@ -8,7 +8,9 @@ See [MEASUREMENTS.md](MEASUREMENTS.md) for the current evidence and
 This separate example keeps the original five-route L2 judge while assigning
 six GPUs to DeepSeek-V4.1-Flash and two GPUs to Qwen3.8-27B-FP8. It ports
 Requirement extraction from PR #595 (`31f1adc`) onto DeepSeek at fixed high.
-The original example and shared Kairyu framework are unchanged.
+The original example configuration is preserved. Shared Kairyu changes add an
+opt-in paragraph separator and correct stream cleanup after client disconnects;
+see V41E-D5/D6 in the design and the regression evidence in MEASUREMENTS.
 
 ## Topology and behavior
 

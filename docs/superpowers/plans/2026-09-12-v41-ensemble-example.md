@@ -1,7 +1,10 @@
 # V4.1 ensemble example implementation
 
-User amendment: implement locally now; GPU validation is deferred. Create a PR
-with a complete cross-machine handoff. Do not interrupt existing GPU workloads.
+Original user amendment: implement locally and defer GPU validation; create a
+PR with a complete cross-machine handoff. On 2026-09-13 the user released all
+eight GPUs and requested the remaining development/validation and fixes pushed
+to that PR (#598). GPU work is now authorized and active; preserve unrelated
+workloads and record exact evidence for the selected configuration.
 
 ## Contract
 
@@ -26,14 +29,23 @@ with a complete cross-machine handoff. Do not interrupt existing GPU workloads.
 3. Integration: lifecycle, verification commands, documentation, progress log.
 4. Review all interfaces, run focused CPU/regression checks, create draft PR with
    remaining GPU gates and reproducible handoff instructions.
+5. After hardware release, isolate startup/numerical/runtime defects with bounded
+   experiments; review and pin corrections before native and composed replay.
+6. Complete route/effort/image/tool/quality, context/capacity, cancellation and
+   performance gates. Preserve failed trials, separate contract/model quality,
+   update the PR with actual results and any remaining limitations; do not merge.
 
 ## Acceptance
 
 CPU tests exercise actual DAG effort propagation, fixed Requirement effort,
 multimodal forwarding, direct-route bypass, PASS/repair/exhaustion, strict role
 hook matching, deployment inventory, lifecycle isolation and measurement
-provenance. No test or status claims that model quality or six-GPU serving has
-been verified. Existing examples and framework behavior stay unchanged.
+provenance. CPU checks alone do not establish model quality or six-GPU serving.
+GPU conclusions must identify the exact runtime and workload. V41E-D5/D6 amend
+the initial shared-framework scope with an opt-in public paragraph separator
+and streaming-iterator ownership fixes required by observed GPU failures.
+V41E-D7/D8 address native grammar escape and forced-termination defects; details
+and preserved experiments are in the design record and MEASUREMENTS.
 
 ## GPU handoff
 

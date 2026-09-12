@@ -351,7 +351,9 @@ cleanup failure for the tested Conductor path. The first wrapper's activation
 value 900 was CLI-rejected before any request; `cancellation-driver2` corrects
 it to the probe's 600-second bound and initializes all native rank metrics.
 
-| Independent evidence manifest | SHA256 |
+Each directory below contains `independent-review-manifest.json`.
+
+| Independent evidence directory | SHA256 |
 | --- | --- |
 | `20260913-escaped-startup` | `d528a0a1f61fcded5339aa6b756a992a7bc6ebef3f4b0a939b590a7c18091e7b` |
 | `20260913-escaped-literals` | `9ff8cf05ad3b73baa13329e940a9b55883c5b1d89ecaf4bd5c3cfd061c30e704` |
@@ -387,13 +389,92 @@ and same-seed token IDs versus the original. The original approximate top-p
 algorithm's ordinary support/reference differences are retained, not claimed
 as new numerical parity. The earlier 12-case single-row oracle also passes.
 
+Independent preservation manifests retain the exact temporary diagnostic
+scripts alongside raw events and source/image provenance. Each hash below is
+for `independent-preservation-manifest.json` in the named directory.
+
+| Sampler evidence directory | SHA256 |
+| --- | --- |
+| `20260913-thinking-sampler-oracle` | `d7ef8ae6d709c3533831aab2e1823349a3b9834dbba421b9afa664e2976974e9` |
+| `20260913-thinking-budget-pair` | `820e7f68fbcdc11945a86c04c38ba4f3c7c6990a135c94d65dd7fb8b5f701a87` |
+| `20260913-thinking-budget-sampling` | `a7238908f1a6f0759b54dbf16570bac34cae7eb5aa44bb5ba33654fbc89ce432` |
+
+The expanded comparison repairs eight failing cases (114 all-masked rows) and
+retains identical masks/samples in the other 52 cases. An independent image
+check confirms the expected patched sampler and unchanged budget source in
+vLLM `0.1.dev20904+g179dd0fa9`, Triton 3.7.1, Torch 2.13.0+cu130 and XGrammar 0.2.6.
+
 New child: `local/vllm-openai:deepseek-v41-sm120-masked-kv-budget`, image
 `sha256:18dad57d5b3d576797555e0e2c91f247ce4a39cba39ae20c79a4a2e09421a195`.
 Parent and previous child bytes remain unchanged. Selected CPU regressions now
 pass **518 tests**, and Ruff/progress/whitespace checks pass. Stochastic
-forced-budget probes with/without grammar join the native suite. Fresh native
-and composed replay on this new child is still required; older native/context
-measurements retain their original image provenance.
+forced-budget probes with/without grammar join the native suite. Fresh replay
+on this child is recorded below; older native/context measurements retain
+their original image provenance.
+
+## Corrected-runtime native replay
+
+`20260913-budget-startup` deploys source `05042b9b` and child `18dad57d5b3d`
+with configuration
+`8948a65760d0308e87a3397503f57f12035b7e50574f893bfc36fa4cb9dbe8b3`.
+Normal startup succeeds and preserves the private key fingerprint/mode.
+`20260913-budget-literals` passes all three actual-hook cases. The previously
+empty decision checklist now completes in 71.138 seconds with 4908 generated
+tokens, exactly 4096 reasoning tokens and `stop`. Independent semantic review
+finds all R1–R13 criteria intact, including numeric limits and the complete
+`Decision: defer.` ending; no rendering-scaffold requirement leaks into the list.
+Decision response SHA256:
+`314b4f4239ba4ae30bc1ff2e600f755933136c575aab702470de2210faf9120d`.
+
+`20260913-budget-gates/native-restart` passes **28/28**, with no total-cap
+failures. The three forced-budget probes (greedy, seeded nucleus, and seeded
+nucleus with JSON grammar) each report exactly 16 reasoning tokens and return
+public `437` with `stop`. All 14 Requirement calls (12 effort combinations plus
+two escaped-literal cases) uniquely match fixed-high/8192-total/4096-thinking
+hook records within their closed UTC request windows. These independent checks
+use canonical message hashes and exact same-host timestamps.
+
+All **89,730 raw returned logprob values** are finite. The normalized response
+summary counts 89,724 because six wire values are lost by normalization; use
+the raw-count addendum for the complete count. Native stream closure in this
+suite remains client-close evidence; the separate all-worker public/native
+cancellation probes establish cleanup at their recorded runtime revisions.
+
+Files below are relative to `20260913-budget-gates/native-restart/`:
+
+| Native replay artifact | SHA256 |
+| --- | --- |
+| `independent-native-manifest.json` | `0d38aba5417fae7bc7596baa84cef62956c49b11df1cf76dac01bb5149d73b7d` |
+| `independent-hook-correlations.json` | `fbc938556a25cd0907d32e52908ee1de463587330488c278a846e38e58662ae1` |
+| `independent-worker-window.log` | `a2860fab3b9c3d264a194eeda4a187f3ccda5f06c1da4485cb0d4d3388c3953d` |
+| `independent-raw-logprob-count.json` | `67dab0a935d9b8fa24ecda518bbded2ce2465fe8f238574fc594b1382e2d76fc` |
+
+## Corrected-runtime public replay
+
+`20260913-budget-gates/l2-replay` passes **11/11** and observes all five
+routes, including native-image, tool/result, headless JSON and stream recovery
+cases. The primary request completes in 295.1 seconds. Its opening and body
+have the intended `constraint.\n\n**Facts.**` boundary, and its two distinct
+policies produce three complete, nonempty peers. Generated-token counts are
+1372/2048 for the original draft, 2466/4096 and 2442/4096 for policy answers,
+and 1449/8192 for the refined draft. None exhausts its cap.
+
+Independent semantic review confirms the complete required ending, correct
+arithmetic and infeasibility, two distinct conditional next steps, and a
+253-word memo. The first audit passes after 4444 generated tokens; this case
+does **not** exercise live repair or exhaustion. The public answer labels some
+supplied constraints as assumptions and does not explicitly enumerate every
+format requirement in its critical audit. These are recorded quality caveats,
+not evidence of universal task compliance.
+
+Artifacts below are relative to
+`20260913-budget-gates/l2-replay/l2-route-primary/`:
+
+| Primary replay artifact | SHA256 |
+| --- | --- |
+| `independent-semantic-review.json` | `4a520603c36a739c4e53e32ce86bffea2a99c98b7fedab21bdcda70ffbd8a5b8` |
+| `response.json` | `8a65f377f779b9ebe3feac141272161a0f0d7b7ca0984f2de52e06d4da8e6a8f` |
+| `result.json` | `bf4e6792ec4dd016e7b1db0881703e742b85bd9fd72f5c8cbce70bc8a24f8d40` |
 
 ## Qwen native near-limit retrieval
 
@@ -413,6 +494,13 @@ This is native c1 exact-key retrieval, not public ensemble long-context quality.
 | `20260913-qwen-context-medium/manifest.json` | `017ef51366c0b7a7ebaf7da1f5335d7c7b64241f8dc62000fa54a61584a45800` |
 
 ## Remaining gates
+
+Before the fresh public performance matrix, the coding verifier was tightened
+to reject a failed paired native benchmark or a missing/nonfinite/nonpositive
+baseline TTFT, including rows whose public routes make the TTFT comparison N/A.
+Eight CPU regressions cover failure cases and the valid N/A case. This changes
+verification only; it does not change the serving configuration or any recorded
+model measurement.
 
 Native fixed-output capacity at c1/8/16/32, the five native retrieval sizes,
 and native DP-rank cancellation cleanup now have the successful evidence above.

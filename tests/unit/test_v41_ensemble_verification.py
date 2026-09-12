@@ -117,3 +117,49 @@ def test_ttft_gate_has_no_borrowed_baseline(monkeypatch, tmp_path):
     )
     module.SPEC["verification"]["coding"]["concurrency"] = [1]
     assert module.serving_auto_max_coding(tmp_path) == 1
+
+
+@pytest.mark.parametrize(
+    ("direct_code", "direct_ttft", "expected"),
+    [
+        (7, 100.0, 7),
+        (0, None, 1),
+        (0, float("inf"), 1),
+        (0, float("nan"), 1),
+        (0, 0, 1),
+        (0, -1, 1),
+        (0, True, 1),
+        (0, 100.0, 0),
+    ],
+)
+def test_ungated_coding_row_still_requires_usable_paired_baseline(
+    monkeypatch, tmp_path, direct_code, direct_ttft, expected
+):
+    module = load("verification")
+    module.SPEC["verification"]["coding"]["concurrency"] = [1]
+    calls = []
+
+    def bench(**kwargs):
+        target = kwargs["results_dir"]
+        calls.append(target.name)
+        target.mkdir()
+        value = direct_ttft if target.name.startswith("deepseek-direct") else 150.0
+        (target / "result-serving.json").write_text(json.dumps({"summary": {"ttft_p50_ms": value}}))
+        return direct_code if target.name.startswith("deepseek-direct") else 0
+
+    monkeypatch.setattr(module, "_bench_row", bench)
+    monkeypatch.setattr(module, "_validate_serving_row", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        module,
+        "_row_routes",
+        lambda _: {"routes": {"deepseek_think": {"requests": 32, "ttft_p50_ms": 150.0}}},
+    )
+    assert module.serving_auto_max_coding(tmp_path) == expected
+    assert calls == ["warmup", "coding-c1", "deepseek-direct-c1"]
+    gate = tmp_path / "ttft-gate.json"
+    if expected:
+        assert not gate.exists(), "A missing baseline must not become a successful N/A row"
+    else:
+        row = json.loads(gate.read_text())["gates"]["1"]
+        assert row["status"] == "not_applicable"
+        assert row["deepseek_direct_ttft_p50_ms"] == 100.0

@@ -95,10 +95,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble GPU validation continues. Native 30/30, kernel 48+16, capacity 128/128, retrieval through 1,039,902 tokens, native cancellation 3/3 and both Qwen near-256K probes pass. Qwen body reservations fix empty candidates; an opt-in paragraph separator and explicit streaming-iterator cleanup address replay defects. Final composed/public-performance gates remain; see its MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble GPU validation continues. GPU-driven memory, sparse-KV, candidate-body, JSON-escape, top-p termination and stream-cleanup fixes pass focused checks; native 28/28 passes on the latest pinned child. Public cancellation and prior native capacity/context gates pass at their recorded revisions. Final L2 quality/effort and public-performance gates remain; see its MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [progress] Corrected-runtime native and primary replay
+- What: current pinned child passes 28 native and 11 public route probes, including complete primary candidates and escaped Requirement literals. Require a successful fresh coding baseline with finite positive TTFT even when all public routes are ungated.
+- Why: native and composed replay establish the GPU fixes; verification previously allowed a failed paired baseline to become a successful N/A row. Effort, quality and public performance measurements continue separately.
+- Refs: PR #598; V41E-D5..D8; example MEASUREMENTS and baseline regressions.
 
 ### 2026-09-13 — [amendment] V4.1 seeded top-p thinking termination
 - What: mirror the existing monolithic cutoff guard in the pinned child runtime's split top-p kernel; add positive-temperature forced-budget regressions without changing effort or token caps.
@@ -127,4 +132,3 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
-
