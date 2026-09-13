@@ -46,6 +46,7 @@ from kairyu.engine.openai_capabilities import (
     resolve_openai_capabilities,
 )
 from kairyu.engine.prompt import (
+    ChatPrompt,
     MultimodalPrompt,
     TemplatedPrompt,
     TextPrompt,
@@ -61,6 +62,12 @@ from kairyu.sampling_params import (
     resolve_parallel_tool_calls,
 )
 from kairyu.sse import iter_sse_data
+
+
+def _has_media(prompt: object) -> bool:
+    return isinstance(prompt, MultimodalPrompt) or (
+        isinstance(prompt, ChatPrompt) and bool(prompt.items)
+    )
 
 
 def _raise_for_status(base_url: str, status_code: int, body: str) -> None:
@@ -695,10 +702,11 @@ class OpenAICompatBackend:
         unsupported_prompt_kinds = self._capabilities.prompt_kinds - {
             "text",
             "multimodal",
+            "chat",
         }
         if unsupported_prompt_kinds:
             raise ValueError(
-                "OpenAICompatBackend currently implements text and multimodal "
+                "OpenAICompatBackend currently implements text, native chat and multimodal "
                 "chat prompts; "
                 "unsupported configured prompt kinds: "
                 f"{sorted(unsupported_prompt_kinds)}"
@@ -861,10 +869,15 @@ class OpenAICompatBackend:
                 "does not support assistant_prefill (a vLLM chat-template "
                 "continuation of the final assistant message)",
             )
-        if isinstance(request.prompt, MultimodalPrompt):
-            if type(request.prompt.base) is not str and not isinstance(
-                request.prompt.base,
-                TextPrompt,
+        if _has_media(request.prompt):
+            if "multimodal" not in self._capabilities.prompt_kinds:
+                raise _client_error(
+                    self._capabilities.upstream,
+                    "does not support media in native chat prompts",
+                )
+            if isinstance(request.prompt, MultimodalPrompt) and (
+                type(request.prompt.base) is not str
+                and not isinstance(request.prompt.base, TextPrompt)
             ):
                 raise _client_error(
                     self._capabilities.upstream,
@@ -912,7 +925,7 @@ class OpenAICompatBackend:
     def admission_upper_bound(self, request: GenerationRequest) -> AdmissionUpperBound:
         """Reserve a configured processor ceiling, never media-byte heuristics."""
 
-        if not isinstance(request.prompt, MultimodalPrompt):
+        if not _has_media(request.prompt):
             return default_admission_upper_bound(
                 request,
                 fallback_output_tokens=self.max_model_len,
@@ -1182,7 +1195,7 @@ class OpenAICompatBackend:
             return
         shared = self._peek_shared_prepared_payload(request)
         if shared is not None:
-            if isinstance(request.prompt, MultimodalPrompt):
+            if _has_media(request.prompt):
                 await self._prepare_image_urls(request)
             self._retain_prepared_payload(request, shared)
             return
@@ -1244,7 +1257,7 @@ class OpenAICompatBackend:
         payload = self._take_prepared_payload(request)
         if payload is None:
             raise RuntimeError("prepared OpenAI request payload was lost before dispatch")
-        if isinstance(request.prompt, MultimodalPrompt):
+        if _has_media(request.prompt):
             self._take_prepared_image_urls(request)
         if not stream:
             return payload
@@ -1259,7 +1272,7 @@ class OpenAICompatBackend:
         request: GenerationRequest,
     ) -> tuple[str, ...] | None:
         prompt = request.prompt
-        if not isinstance(prompt, MultimodalPrompt):
+        if not _has_media(prompt):
             return None
         assert self._image_input_policy is not None
         try:
@@ -1387,7 +1400,7 @@ class OpenAICompatBackend:
         self,
         request: GenerationRequest,
     ) -> tuple[str, ...] | None:
-        if not isinstance(request.prompt, MultimodalPrompt):
+        if not _has_media(request.prompt):
             return None
         await self._prepare_image_urls(request)
         image_urls = self._take_prepared_image_urls(request)
@@ -1409,19 +1422,27 @@ class OpenAICompatBackend:
     ) -> dict:
         prompt = request.prompt
         use_completions = self._uses_vllm_completions(request)
-        if isinstance(prompt, MultimodalPrompt):
-            if image_urls is None:
+        if isinstance(prompt, (MultimodalPrompt, ChatPrompt)):
+            if _has_media(prompt) and image_urls is None:
                 raise RuntimeError(
                     "multimodal payload requires fully validated image data"
                 )
             messages: list[dict[str, object]] = []
             for message in prompt.messages:
+                native = (
+                    message.to_wire()
+                    if isinstance(prompt, ChatPrompt)
+                    else {"role": message.role}
+                )
+                if not isinstance(message.content, tuple):
+                    messages.append(native)
+                    continue
                 content: list[dict[str, object]] = []
                 for part in message.content:
                     if part.type == "text":
                         content.append({"type": "text", "text": part.text})
                         continue
-                    assert part.item_index is not None
+                    assert part.item_index is not None and image_urls is not None
                     image_url: dict[str, object] = {
                         "url": image_urls[part.item_index],
                     }
@@ -1433,7 +1454,7 @@ class OpenAICompatBackend:
                             "image_url": image_url,
                         }
                     )
-                messages.append({"role": message.role, "content": content})
+                messages.append({**native, "content": content})
         else:
             text = prompt_text(prompt)
             assert text is not None
@@ -1519,7 +1540,7 @@ class OpenAICompatBackend:
     async def _build_wire_payload(self, request: GenerationRequest) -> bytes:
         validated = await run_prompt_work(self._dispatch_preflight, request)
         image_urls = None
-        if isinstance(request.prompt, MultimodalPrompt):
+        if _has_media(request.prompt):
             await self._prepare_image_urls(request)
             image_urls = self._peek_prepared_image_urls(request)
             if image_urls is None:
@@ -1553,7 +1574,7 @@ class OpenAICompatBackend:
         request: GenerationRequest,
         usage: GenerationUsage | None,
     ) -> None:
-        if isinstance(request.prompt, MultimodalPrompt) and (
+        if _has_media(request.prompt) and (
             usage is None or usage.prompt_tokens < 1
         ):
             raise RuntimeError(

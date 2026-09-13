@@ -65,6 +65,8 @@ class MockBackend:
     @staticmethod
     def _execution_text(request: GenerationRequest) -> str:
         prompt = prompt_with_tool_intent(request)
+        if prompt_kind(prompt) == "chat":
+            raise ValueError("MockBackend does not support native chat prompts")
         if prompt_kind(prompt) == "multimodal":
             raise ValueError(
                 "MockBackend does not support multimodal image prompts; "

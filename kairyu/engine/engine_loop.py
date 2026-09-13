@@ -585,6 +585,10 @@ class EngineLoop:
     def resolve_prompt_token_ids(self, prompt: PromptInput) -> tuple[int, ...]:
         """Resolve public input while preserving caller-owned token IDs."""
 
+        if prompt_kind(prompt) == "chat":
+            raise ValueError(
+                "Kairyu backend requires a model-rendered prompt, not native chat messages"
+            )
         if prompt_kind(prompt) == "multimodal":
             raise ValueError(
                 "Kairyu backend does not support multimodal prompts; "

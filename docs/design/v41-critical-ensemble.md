@@ -69,6 +69,35 @@ then report failure. This also applies to the deferred verifier path; an
 actual backend rejection must not become a successful head-only response.
 Empty continuation without a backend exception retains its existing policy.
 
+## V41C-D4 — Native chat is a typed backend input
+
+Shared contract: an ordinary `GenerationRequest` sent to a chat-capable
+backend must preserve message roles, nullable assistant content, reasoning
+history, tool-call arguments/IDs, tool results and ordered image parts.
+Main's string input becomes one user message. `MultimodalPrompt` preserves
+roles and media parts but requires media and cannot carry tool metadata;
+using it for text-only chat would weaken its existing contract. A rendered
+string or JSON transcript is not equivalent to a native conversation.
+
+Add `ChatPrompt` and `ChatMessage` to the existing prompt union, tagged wire
+format and capability validation. Metadata is an immutable request-local
+JSON snapshot; tool argument strings remain verbatim. Reuse the existing
+media items, validation, preparation cache, transport and cancellation
+lifecycle. Text-only chat does not imply image support. Engines without
+a native chat renderer reject the input instead of flattening it.
+
+The independently reusable use is an ordinary OpenAI-compatible backend
+call with an assistant/tool conversation, with or without an image. Tests
+cross the prompt wire and backend dispatch boundaries and assert the
+actual upstream message payload. Existing image safety, usage and cleanup
+cases cover both carriers. Token accounting must not replace native chat
+with a whitespace estimate when the renderer's usage is unavailable.
+
+This slice does not change L3 routing, select model templates, derive role
+inputs or implement the ensemble DAG. Those policies and derivations remain
+separate work. Admission work estimates are not exact rendered token counts;
+per-dispatch capacity fitting remains open.
+
 ## Open implementation conditions
 
 - Establish a supported six-GPU topology from the pinned main runtime and
@@ -118,3 +147,17 @@ this branch. No six-GPU startup or performance gate has passed on these bytes.
 - Reservations now reflect the larger configured private work when a caller
   requests a small public answer; a deployment must provision tenant limits
   for that work. Public MAX cannot be used to understate its private cost.
+
+### Native chat carrier
+
+- 545 related tests pass across prompt/OpenAI transport, backend validation,
+  media preparation, native/mock engines, LLM/AsyncLLM compatibility and
+  tenant metering. The literal unary/SSE transcript assertions also pass.
+- New coverage protects native tool history and exact argument strings
+  through wire serialization and dispatch, image part ordering and the
+  existing image rejection/usage contracts, plus missing-usage accounting
+  on failed or cancelled chat streams. No static configuration-list tests
+  or example-specific workflow tests were added.
+- Independent review found no actionable regression in this slice. Ruff
+  and whitespace checks pass. AUTO derivation and exact input-capacity
+  accounting are still pending.

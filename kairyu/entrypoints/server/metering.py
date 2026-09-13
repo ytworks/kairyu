@@ -58,6 +58,11 @@ def _approx_tokens(text: str) -> int:
 
 
 def _fallback_prompt_tokens(prompt: PromptInput) -> int:
+    if prompt_kind(prompt) == "chat":
+        raise ValueError(
+            "a native chat backend must report prompt usage after rendering; "
+            "Kairyu will not guess chat-template token counts"
+        )
     if prompt_kind(prompt) == "multimodal":
         raise ValueError(
             "a multimodal backend must report exact prompt usage after media "
@@ -212,10 +217,10 @@ class StreamUsageOwner:
         if (
             not self._completed
             and self._usage is None
-            and prompt_kind(self._prompt) == "multimodal"
+            and prompt_kind(self._prompt) in {"multimodal", "chat"}
         ):
-            # A failed/disconnected multimodal stream has no safe fallback
-            # token count: processor output depends on decoded image geometry.
+            # A failed/disconnected native chat or media stream has no safe
+            # fallback count: rendering and processing belong to the backend.
             # Leave the dispatched reservation unsettled so request teardown
             # consumes its complete pre-dispatch bound; do not turn the
             # already-sanitized SSE error into a second ASGI exception.

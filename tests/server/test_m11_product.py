@@ -1,6 +1,7 @@
 """m11 gates: streaming orchestrator usage, tiers, tenancy, responses,
 embeddings, vision wire, F5 logic, bench schema."""
 
+import asyncio
 import base64
 import contextlib
 import json
@@ -802,6 +803,56 @@ class TestTenancy:
 
         assert counts == (3, 5)
         assert (wire.prompt_tokens, wire.completion_tokens) == counts
+
+    def test_native_chat_usage_requires_backend_rendered_counts(self):
+        from kairyu.engine.prompt import ChatMessage, ChatPrompt
+        from kairyu.entrypoints.server.metering import resolve_usage_counts
+
+        prompt = ChatPrompt((ChatMessage("user", "three prompt words"),))
+        with pytest.raises(ValueError, match="will not guess chat-template"):
+            resolve_usage_counts(None, prompt=prompt, completions=())
+        assert resolve_usage_counts(
+            GenerationUsage(prompt_tokens=19, completion_tokens=7),
+            prompt=prompt,
+            completions=(),
+        ) == (19, 7)
+
+    @pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+    def test_native_chat_failed_stream_preserves_error_and_charges_reserved_work(
+        self, tmp_path, failure_type
+    ):
+        from kairyu.engine.prompt import ChatMessage, ChatPrompt
+        from kairyu.entrypoints.server.metering import StreamUsageOwner
+
+        limiter = TenantLimiter(
+            TenantConfig(limits={"t": TenantLimits(tokens_per_minute=100, token_burst=100)}),
+            now=lambda: 0.0,
+        )
+        admission = limiter.acquire("t")
+        assert admission.reserve_tokens(40)
+        ledger = UsageLedger(tmp_path / "usage.jsonl")
+        owner = StreamUsageOwner(
+            tenant="t",
+            model="m",
+            prompt=ChatPrompt((ChatMessage("user", "template-owned prompt"),)),
+            ledger=ledger,
+            reservation=admission,
+        )
+        failure = failure_type("original failure")
+        with pytest.raises(failure_type) as caught:
+            try:
+                owner.mark_dispatched()
+                owner.observe(None, (CompletionOutput(index=0, text="partial", token_ids=()),))
+                raise failure
+            finally:
+                owner.finalize()
+                admission.release()
+
+        assert caught.value is failure
+        assert ledger.totals() == {}
+        assert limiter.token_balance("t") == 60
+        assert limiter.in_flight("t") == 0
+        assert limiter.reservation_snapshot()["t"] == 0
 
     def test_config_repr_excludes_api_key_mapping(self):
         api_secret = "tenant-config-api-secret"

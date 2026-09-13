@@ -2,6 +2,7 @@ import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -21,6 +22,8 @@ from kairyu.engine.openai_capabilities import (
     known_openai_upstreams,
 )
 from kairyu.engine.prompt import (
+    ChatMessage,
+    ChatPrompt,
     MultimodalItem,
     MultimodalMessage,
     MultimodalMessagePart,
@@ -28,6 +31,8 @@ from kairyu.engine.prompt import (
     PromptInput,
     TemplatedPrompt,
     TokensPrompt,
+    prompt_from_wire,
+    prompt_to_wire,
 )
 from kairyu.engine.vision import ImageInputPolicy
 from kairyu.orchestration.replica import ReplicaPool
@@ -148,6 +153,14 @@ def _multimodal_prompt(image_url: str = _RED_PNG_DATA_URL) -> MultimodalPrompt:
                 ),
             ),
         ),
+    )
+
+
+def _chat_image_prompt(image_url: str = _RED_PNG_DATA_URL) -> ChatPrompt:
+    source = _multimodal_prompt(image_url)
+    return ChatPrompt(
+        [ChatMessage(message.role, message.content) for message in source.messages],
+        source.items,
     )
 
 
@@ -1669,7 +1682,7 @@ def test_resolved_capability_policy_is_deeply_immutable():
     )
     assert isinstance(backend.capabilities.sampling_fields, frozenset)
     assert isinstance(backend.capabilities.extra_args, frozenset)
-    assert backend.capabilities.prompt_kinds == frozenset({"text"})
+    assert isinstance(backend.capabilities.prompt_kinds, frozenset)
 
 
 def test_adapter_rejects_a_capability_contract_it_cannot_execute():
@@ -1679,7 +1692,7 @@ def test_adapter_rejects_a_capability_contract_it_cannot_execute():
         prompt_kinds={"text", "tokens"},
     )
 
-    with pytest.raises(ValueError, match="text and multimodal"):
+    with pytest.raises(ValueError, match="text.*multimodal"):
         OpenAICompatBackend(
             base_url="https://api.example.com/v1",
             model="m",
@@ -1687,7 +1700,8 @@ def test_adapter_rejects_a_capability_contract_it_cannot_execute():
         )
 
 
-async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage():
+@pytest.mark.parametrize("native_chat", [False, True])
+async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage(native_chat):
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1726,7 +1740,7 @@ async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage():
         },
     )
     request = _request(
-        _multimodal_prompt(),
+        _chat_image_prompt() if native_chat else _multimodal_prompt(),
         chat_template_kwargs={"enable_thinking": False},
     )
 
@@ -2034,7 +2048,8 @@ async def test_replica_prepares_each_instance_but_validates_shared_image_once(
         await pool.shutdown()
 
 
-async def test_multimodal_remote_url_is_400_before_http_client_or_transport():
+@pytest.mark.parametrize("native_chat", [False, True])
+async def test_multimodal_remote_url_is_400_before_http_client_or_transport(native_chat):
     transport_calls: list[httpx.Request] = []
     backend = OpenAICompatBackend(
         base_url="http://vlm:8000/v1",
@@ -2053,7 +2068,11 @@ async def test_multimodal_remote_url_is_400_before_http_client_or_transport():
 
     with pytest.raises(UpstreamClientError, match="remote and local") as exc_info:
         await backend.generate(
-            _request(_multimodal_prompt("https://example.test/image.png"))
+            _request(
+                (_chat_image_prompt if native_chat else _multimodal_prompt)(
+                    "https://example.test/image.png"
+                )
+            )
         )
 
     assert exc_info.value.status_code == 400
@@ -2169,7 +2188,8 @@ def _chunked_sse_transport(*chunks: bytes) -> httpx.MockTransport:
     )
 
 
-async def test_multimodal_stream_requires_and_returns_exact_final_usage(monkeypatch):
+@pytest.mark.parametrize("native_chat", [False, True])
+async def test_multimodal_stream_requires_and_returns_exact_final_usage(monkeypatch, native_chat):
     captured: dict = {}
     validation_calls = 0
     original_validate = ImageInputPolicy.validate_prompt
@@ -2206,7 +2226,7 @@ async def test_multimodal_stream_requires_and_returns_exact_final_usage(monkeypa
         image_input_policy={"max_images": 1},
     )
 
-    request = _request(_multimodal_prompt())
+    request = _request(_chat_image_prompt() if native_chat else _multimodal_prompt())
     await backend.prepare_request(request)
     results = [result async for result in backend.stream(request)]
 
@@ -3176,6 +3196,79 @@ async def test_text_chat_forwards_allowlisted_template_kwargs():
     assert captured["body"]["messages"] == [{"role": "user", "content": "route me"}]
     assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
     assert result.text == "QWEN"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_native_chat_transcript_and_continuation_reach_upstream_once(stream):
+    calls = [{"id": "call_7", "type": "function", "function": {
+        "name": "lookup", "arguments": '{ "key": "a\\nb" }',
+    }}]
+    source = ChatPrompt([
+        ChatMessage("system", "Retain constraints."),
+        ChatMessage("developer", "Keep IDs exact."),
+        ChatMessage("user", (MultimodalMessagePart("text", text="lookup a\nb"),)),
+        ChatMessage("assistant", None, reasoning_content="need evidence", tool_calls=calls),
+        ChatMessage("tool", "found", tool_call_id="call_7", name="lookup"),
+        ChatMessage("user", "Use that result."),
+    ])
+    prompt = prompt_from_wire(prompt_to_wire(source))
+    expected_messages = [
+        {"role": "system", "content": "Retain constraints."},
+        {"role": "developer", "content": "Keep IDs exact."},
+        {"role": "user", "content": [{"type": "text", "text": "lookup a\nb"}]},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "need evidence",
+            "tool_calls": [{
+                "id": "call_7", "type": "function",
+                "function": {"name": "lookup", "arguments": '{ "key": "a\\nb" }'},
+            }],
+        },
+        {"role": "tool", "content": "found", "tool_call_id": "call_7", "name": "lookup"},
+        {"role": "user", "content": "Use that result."},
+    ]
+    captured = {}
+    backend = OpenAICompatBackend(
+        base_url="http://vllm:8000/v1", model="m", api_key_env=None, upstream="vllm",
+        transport=(_sse_transport if stream else _ok_transport)(captured),
+        capabilities={"allow_chat_template_kwargs": ["enable_thinking"]},
+    )
+    tool = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}
+    request = replace(
+        _request(prompt), tools=(tool,), tool_choice="auto", reasoning_effort="high",
+        chat_template_kwargs={"enable_thinking": True}, assistant_prefill="answer starts",
+    )
+    bound = backend.admission_upper_bound(request)
+    assert bound.tokens > len("found") + 64
+    assert bound.refundable_on_exact_usage
+    await backend.prepare_request(request)
+    calls[0]["function"]["arguments"] = "mutated after preparation"
+    if stream:
+        results = [result async for result in backend.stream(request)]
+        assert results[-1].finished
+    else:
+        assert (await backend.generate(request)).text == "hello from api"
+    assert captured["body"]["messages"] == expected_messages + [
+        {"role": "assistant", "content": "answer starts"},
+    ]
+    assert captured["body"]["tools"] == [tool]
+    assert captured["body"]["tool_choice"] == "auto"
+    assert captured["body"]["reasoning_effort"] == "high"
+    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": True}
+    assert captured["body"]["continue_final_message"] is True
+    assert captured["body"]["add_generation_prompt"] is False
+    await backend.shutdown()
+
+
+async def test_native_chat_cannot_bypass_backend_image_capability():
+    backend = OpenAICompatBackend(
+        base_url="http://text-only:8000/v1", model="m", api_key_env=None,
+        upstream="vllm", transport=_ok_transport({}),
+    )
+    with pytest.raises(UpstreamClientError, match="does not support media"):
+        await backend.generate(_request(_chat_image_prompt()))
+    assert backend._client is None
 
 
 def test_template_kwargs_rejected_on_pre_rendered_prompt():

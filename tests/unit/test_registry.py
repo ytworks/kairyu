@@ -387,7 +387,7 @@ def test_openai_multimodal_capability_and_image_policy_must_be_paired():
                 "request_stream_usage": False,
             },
         )
-    with pytest.raises(ValueError, match="text and multimodal"):
+    with pytest.raises(ValueError, match="text.*multimodal"):
         validate_backend_options(
             "openai",
             {

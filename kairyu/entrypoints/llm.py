@@ -20,6 +20,7 @@ from kairyu.engine.backend import (
     validate_backend_request_before_prepare,
 )
 from kairyu.engine.prompt import (
+    ChatPrompt,
     MultimodalPrompt,
     PromptInput,
     TemplatedPrompt,
@@ -221,7 +222,7 @@ class LLM:
     ) -> tuple[tuple[PromptInput, ...], tuple[SamplingParams, ...]]:
         if isinstance(
             prompts,
-            (str, TextPrompt, TemplatedPrompt, TokensPrompt, MultimodalPrompt),
+            (str, TextPrompt, TemplatedPrompt, TokensPrompt, MultimodalPrompt, ChatPrompt),
         ):
             prompt_list = (prompts,)
         elif isinstance(prompts, Mapping) or not isinstance(prompts, Sequence):

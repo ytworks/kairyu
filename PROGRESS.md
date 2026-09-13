@@ -103,6 +103,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-13 — [progress] V41C: preserve native chat at the backend boundary
+- What: add immutable ChatPrompt/ChatMessage and native OpenAI wire support for conversation, reasoning, tool history and ordered media. Reuse existing media lifecycle; unsupported engines reject explicitly. Missing-usage failures retain reserved charges and the original error. Related validation passes 545 tests.
+- Why: text flattening and the existing media-only carrier cannot preserve an ordinary assistant/tool conversation; AUTO derivation and exact capacity accounting remain separate work.
+- Refs: PR #601; V41C-D4 and validation record in `docs/design/v41-critical-ensemble.md`.
+
 ### 2026-09-13 — [progress] V41C: separate configured private generation budgets
 - What: Conductor and MoA use their configured internal ceiling independently of public completion MAX. Final intent and the no-private-ceiling fallback remain unchanged. Three small-public-MAX regressions fail before the fix; combined related validation passes 588 tests.
 - Why: a short requested public answer must not truncate planning, proposals or verification; resource reservations must reflect the actual configured private work.

@@ -29,7 +29,7 @@ SAMPLING_FIELD_NAMES = frozenset(
         "top_p",
     }
 )
-PROMPT_KINDS = frozenset({"text", "tokens", "multimodal"})
+PROMPT_KINDS = frozenset({"text", "tokens", "multimodal", "chat"})
 
 _OPENAI_CORE = frozenset(
     {
@@ -96,10 +96,9 @@ class OpenAIRequestCapabilities:
     forward_neutral_fields: frozenset[str] = frozenset()
     strict_tools: bool = False
     priority: bool = False
-    # The current adapter targets Chat Completions, whose portable request
-    # contract is text-only. Keeping prompt kinds in the immutable validation
-    # key makes future modality/token support an explicit capability change.
-    prompt_kinds: frozenset[str] = frozenset({"text"})
+    # Text may arrive as a single prompt or a native role-preserving chat.
+    # Media remains a separate, explicitly configured processor capability.
+    prompt_kinds: frozenset[str] = frozenset({"text", "chat"})
     # Appended to preserve the positional ABI of the existing capability key.
     parallel_tool_calls: bool = False
     chat_template_kwargs: frozenset[str] = frozenset()
