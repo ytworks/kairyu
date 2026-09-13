@@ -8,10 +8,9 @@ Accepted plan: `docs/superpowers/plans/2026-09-13-v41-six-gpu-critical-ensemble.
 
 The owner accepted the six-GPU V4.1 plus two TP1 Qwen replica plan on
 2026-09-13 and requested a draft PR with incremental commits and pushes.
-The existing tiered example owns the four policies, four Qwen candidates,
+The new `examples/qwen3.8-deepseek-v4.1-8gpu/` example owns the four policies, four Qwen candidates,
 independent DeepSeek candidate, Requirement extraction, critical comparison,
-reconstruction, DeepSeek audit and bounded repair policy. Keep its DSL and
-existing operational entry points; do not add example Python files or an
+reconstruction, DeepSeek audit and bounded repair policy. Use its DSL/configuration and thin shell entrypoints over existing tools; do not add example Python files or an
 alternative orchestration/input/HTTP/lifecycle stack.
 
 Only the Requirement specification from closed PR #595 is inherited:
@@ -122,7 +121,7 @@ The existing deployment has been restored healthy. Full-model startup
 and all six-GPU API/performance gates remain pending.
 
 Evidence, exact identities, unchanged tolerances, reproduction method and
-durable artifact location are recorded in the existing example's
+durable artifact location are recorded in the new example's
 `MEASUREMENTS.md`, section "V41C six-GPU preflight".
 
 ## V41C-D6 — Derive ordinary AUTO roles from native conversation
@@ -205,6 +204,71 @@ is 19 steps and each additional choice reserves 9 (two repairs, at most six
 verdicts and one floor continuation); headless requests conservatively retain
 one unused head slot. Capacity traversal will need its own measured reservation.
 
+## V41C-D10 — Fit the actual rendered native dispatch
+
+Shared contract: an ordinary OpenAI-compatible native chat request with tool
+history, media or an assistant continuation must fit its actual upstream
+context. The existing prompt-only count hook cannot represent those inputs;
+byte-based admission ceilings do not establish remaining generation capacity.
+This also affects direct and MoA calls independently of the ensemble.
+
+An explicit `capabilities.chat_context_fit: vllm_template` attests a decoder-only
+runtime whose chat and `/tokenize` endpoints use the same template and media
+processor. `vllm_template_excludes_tools_none` additionally matches the server's
+`exclude_tools_when_tool_choice_none` setting. Neither is enabled by default or
+inferred from a model name. A positive `max_model_len` must match the tokenization
+response. Runtime/template version and configuration verification remain the
+deployment's responsibility; other renderers cannot claim this projection.
+
+Prepare the complete existing native payload and validated image data once.
+Project messages, tools, template/continuation controls and processor inputs to
+the existing `/tokenize` transport. Both pinned request builders add documents,
+reasoning effort and effort-derived `enable_thinking` to template kwargs; the
+projection does likewise, preserving an explicit thinking override. HF and
+DeepSeekV4 renderers do not consume top-level tool choice or response format as
+template inputs; generation retains both fields. Parser adjustment occurs after
+rendering. Unrecognized vendor fields fail before tokenization or generation.
+
+Validate the returned token IDs, count and context, then set the wire completion
+cap to `min(requested/configured cap, context - rendered input)`. Reject inputs
+that leave no output space or cannot satisfy `min_tokens`. Immutable prepared
+payloads carry the exact count and fitted cap into admission and dispatch; shared
+cache identity includes origin, context and configured model/runtime identity.
+Streaming retains known usage before a terminal count mismatch or incomplete
+response. Upstream prompt usage must agree with the prepared count. The original
+request is unchanged, and no source, candidate or private reasoning is truncated.
+Document traversal and publication policy are separate work.
+
+Actual CPU renderer/processor checks compared complete token-ID sequences for
+43 cases on each pinned runtime: native tool history, none/auto/required/named
+tool choice, response format, effort/default/explicit override, documents,
+ordered images and assistant continuation. Qwen's immutable v0.23.0 image passed
+without adaptation. DeepSeek image `027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359`
+first failed because `TokenizeChatRequest` left assistant tool calls as Pydantic
+`ValidatorIterator`, which its tokenizer cannot deepcopy. The existing standalone
+V4.1 `patch_runtime.py` now reuses the generation request's before/after message
+validators, including the reasoning alias; all 43 cases then passed. This is an
+example-owned pinned-runtime compatibility fix, requiring a new image pin.
+
+Reference SHA-256 values (full source and per-case result hashes are retained in
+`/tmp/kairyu-context-fit/{ds,qwen}-renderer-equality.json` pending evidence archive):
+
+| Source | SHA-256 |
+| --- | --- |
+| DeepSeek chat protocol | `8a1f1138f79557aa5b5add12e81b9745fd5e286fa35f0502a97f2a377d41665b` |
+| DeepSeek original tokenize protocol | `0bb4ddf2c0b1412e88c9d853e2ef7163f62665df0b8bbef86df5bdbdd9a76e44` |
+| DeepSeek corrected tokenize protocol | `77672d5daeafbc1039f5989e2168e6cda88bc6df1ea3fe6338a44eb15fcc31ee` |
+| DeepSeek online renderer | `643e974eae3b48a711ed55b9178922222b4a8ffa0d5f761c1406ba248af71afe` |
+| Qwen chat protocol | `c4bfefd3ae9898b77fbe075fe1719d33b4d4f57a14ab75aff818b05b64d8c9ac` |
+| Qwen tokenize protocol | `5cc5cb021b827ae34e5e3ce8fdd72ee0e07b6e6b95de74d3f075f3b3edb8ac21` |
+
+The shared HTTP regressions protect input preservation, cap and admission
+accounting, origin-bound reuse, cancellation, malformed counts, unsupported
+projection, minimum-output refusal and late stream failures. The combined
+OpenAI, registry, replica pool and native orchestration HTTP suites pass 399
+tests. CPU projection equality does not establish GPU generation or capacity
+traversal closure.
+
 ## Open implementation conditions
 
 - Complete six-GPU full-model startup, native API checks and performance gates.
@@ -276,3 +340,14 @@ this branch. No six-GPU startup or performance gate has passed on these bytes.
   exact usage, continuation, cancellation and second-choice failure without leaking
   an unaudited draft. Ruff and whitespace checks pass. These are CPU contract tests,
   not evidence that the example's GPU or performance gates pass.
+
+## Scope correction — 2026-09-14
+
+The owner explicitly excluded both existing examples. Commit 9417a6ea restores
+`qwen3.8-deepseek-v4-8gpu`, `deepseek-v4.1-flash-8gpu` and the legacy operational
+tests exactly to main. Their earlier modification was an incorrect scope choice.
+The implementation is being separated into the new V4.1 ensemble directory;
+no new Python files are permitted there. Runtime corrections belong to its own
+source-bound patch/derived image; operations use Compose and existing tools.
+Historical progress entries remain unchanged; their statements about modifying
+the old example and deleting its tests are superseded by this correction.

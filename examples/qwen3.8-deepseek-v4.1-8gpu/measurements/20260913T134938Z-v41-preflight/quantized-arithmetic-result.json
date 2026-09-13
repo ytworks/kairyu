@@ -1,0 +1,103 @@
+{
+  "fixture_sha256": "5e0d936bc47f1afbf8862f580714611d66fc6fb6b24d16f05cb8a84cf8618979",
+  "device": "cpu",
+  "tolerance": {
+    "atol": 0.05,
+    "rtol": 0.05
+  },
+  "original_gate_status": "FAIL retained",
+  "comparisons": {
+    "float_reference_cpu_reconstruction": {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 9.5367431640625e-07,
+      "max_tolerance_ratio": 1.1084117431892082e-05
+    },
+    "original_kernel_vs_float_reference": {
+      "passed": false,
+      "mismatched_elements": 1,
+      "elements": 16384,
+      "max_abs_error": 0.16298317909240723,
+      "max_tolerance_ratio": 1.179914951324463
+    },
+    "kernel_vs_q_quantized_only": {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.021284908056259155,
+      "max_tolerance_ratio": 0.3325238525867462
+    },
+    "q_and_p_quantized": {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.0010986328125,
+      "max_tolerance_ratio": 0.02146434411406517
+    },
+    "quantized_arithmetic_vs_original_reference": {
+      "passed": false,
+      "mismatched_elements": 1,
+      "elements": 16384,
+      "max_abs_error": 0.16298317909240723,
+      "max_tolerance_ratio": 1.179914951324463
+    },
+    "q_quantized_bf16_split": {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.021484375,
+      "max_tolerance_ratio": 0.3322712779045105
+    },
+    "p_quantized_only": {
+      "passed": false,
+      "mismatched_elements": 2,
+      "elements": 16384,
+      "max_abs_error": 0.171875,
+      "max_tolerance_ratio": 1.256157636642456
+    },
+    "q_and_p_quantized_without_split_round": {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.0078125,
+      "max_tolerance_ratio": 0.07326007634401321
+    },
+    "q_and_p_quantized_cpb2": {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.0078125,
+      "max_tolerance_ratio": 0.07518796622753143
+    },
+    "q_and_p_quantized_cpb4": {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.0078125,
+      "max_tolerance_ratio": 0.07352940738201141
+    }
+  },
+  "outlier_coordinate": [
+    0,
+    26,
+    425
+  ],
+  "outlier": {
+    "original_reference": -0.5795126557350159,
+    "kernel": -0.486328125,
+    "cpu_float_reference": -0.5795130729675293,
+    "q_only": -0.489356130361557,
+    "q_and_p_quantized": -0.486328125,
+    "q_quantized_bf16_split": -0.486328125,
+    "p_quantized_only": -0.5859375,
+    "q_and_p_quantized_without_split_round": -0.484375,
+    "q_and_p_quantized_cpb2": -0.486328125,
+    "q_and_p_quantized_cpb4": -0.484375
+  },
+  "limitations": [
+    "Original split selection inferred as cpb1 from uncalibrated C++ C1 heuristic; actual runner scratch requires GPU confirmation.",
+    "FP32 reduction and CUDA exp2 instruction rounding are not simulated bitwise."
+  ],
+  "full_model_startup_attempted": false
+}

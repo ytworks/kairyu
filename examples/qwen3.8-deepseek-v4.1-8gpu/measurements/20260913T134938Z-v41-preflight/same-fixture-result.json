@@ -1,0 +1,94 @@
+{
+  "original_tolerance": {
+    "atol": 0.05,
+    "rtol": 0.05
+  },
+  "preceding_cases": [
+    {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.0502856969833374,
+      "max_tolerance_ratio": 0.7092046737670898
+    },
+    {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.0496448278427124,
+      "max_tolerance_ratio": 0.6423444151878357
+    },
+    {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.04797625541687012,
+      "max_tolerance_ratio": 0.7020009756088257
+    },
+    {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 16384,
+      "max_abs_error": 0.057766735553741455,
+      "max_tolerance_ratio": 0.885840117931366
+    },
+    {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 2097152,
+      "max_abs_error": 0.04518568515777588,
+      "max_tolerance_ratio": 0.4910576343536377
+    },
+    {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 2097152,
+      "max_abs_error": 0.08560752868652344,
+      "max_tolerance_ratio": 0.9532144665718079
+    },
+    {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 2097152,
+      "max_abs_error": 0.029544353485107422,
+      "max_tolerance_ratio": 0.43278998136520386
+    },
+    {
+      "passed": true,
+      "mismatched_elements": 0,
+      "elements": 2097152,
+      "max_abs_error": 0.06506574153900146,
+      "max_tolerance_ratio": 0.8816258907318115
+    }
+  ],
+  "head32_vs_reference": {
+    "passed": false,
+    "mismatched_elements": 1,
+    "elements": 16384,
+    "max_abs_error": 0.16298317909240723,
+    "max_tolerance_ratio": 1.179914951324463
+  },
+  "head8_vs_same_reference_slice": {
+    "passed": false,
+    "mismatched_elements": 1,
+    "elements": 4096,
+    "max_abs_error": 0.16298317909240723,
+    "max_tolerance_ratio": 1.179914951324463
+  },
+  "head8_vs_head32_slice": {
+    "passed": true,
+    "mismatched_elements": 0,
+    "elements": 4096,
+    "max_abs_error": 0.0,
+    "max_tolerance_ratio": 0.0
+  },
+  "head8_exactly_matches_head32_slice": true,
+  "original_outlier": {
+    "reference": -0.5795126557350159,
+    "head32": -0.486328125,
+    "head8": -0.486328125
+  },
+  "torch_peak_allocated_bytes": 315577856,
+  "fixture_sha256": "5e0d936bc47f1afbf8862f580714611d66fc6fb6b24d16f05cb8a84cf8618979",
+  "full_model_startup_attempted": false
+}

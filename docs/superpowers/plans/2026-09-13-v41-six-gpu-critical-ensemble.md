@@ -1,8 +1,10 @@
 # DeepSeek V4.1 6 GPU＋Qwen3.8-27B 2レプリカのアンサンブル実装計画
 
-更新日: 2026-09-13。基準はローカル／リモートで一致を確認した
+更新日: 2026-09-14。基準はローカル／リモートで一致を確認した
 `main = 99c5eadbc67d32d57823accd89aac34215e2c720`。
 2026-09-13にユーザーが本計画を承認し、draft PRを作成して小さな単位でpushしながら実装するよう指示した。
+2026-09-14のユーザー指示により、新規 `examples/qwen3.8-deepseek-v4.1-8gpu/` を作る。
+既存のV4 ensembleとV4.1 standalone exampleへの変更はスコープ外とし、mainから変更しない。
 実装・GPU検証の状態は[実装記録](../../design/v41-critical-ensemble.md)に記録する。
 
 ## 1. 目的と今回の基準
@@ -19,7 +21,7 @@
 |---|---|---|
 | PR #600 | 境界ルールの追加としてマージ済み。モデル・アンサンブル実装は含まない | open draftとして維持する指示を削除。実装時は新しいbranch／draft PRを使う |
 | PR #595／#598 | ともにclosed・未マージ | #595のRequirementの仕様を参照する。旧実装・独自helper・測定結果は新実装へ持ち込まない |
-| 既存アンサンブル | `examples/qwen3.8-deepseek-v4-8gpu/`。Qwen TP1×4＋V4 TP4/EP4、5ルート、Qwen audit | このexampleのDSL・設定・既存運用入口を変更の出発点にする |
+| 既存アンサンブル | `examples/qwen3.8-deepseek-v4-8gpu/`。Qwen TP1×4＋V4 TP4/EP4、5ルート、Qwen audit | DSL・設定の参照元とする。既存example自体は変更しない |
 | Requirement | mainには存在しない | #595の要求抽出・ID・監査契約を、DeepSeekで動く新しいDSL roleとして設定する |
 | V4.1 runtime | `examples/deepseek-v4.1-flash-8gpu/` のTP8/EP8を実測済み | L1の基準として参照する。6 GPUの成立性・性能は別途検証する |
 | 既存ensembleのGPU証拠 | 最終greenはDTO-D8..D14。mainのDTO-D15は再検証待ち | main全体がGPU検証済みという前提を置かない |
@@ -29,13 +31,13 @@
 
 - mainから実装を組み立てる。ユーザー指定により、クローズ済み#595のRequirementの**仕様**は継承するが、破棄した実装を復元・cherry-pickしない。
 - exampleのオーケストレーションはKairyuのDSL、Conductor、ReplicaPool、既存の監査・修正機構で記述する。exampleにPythonファイルを新規作成しない。
-- 既存の`control.py`／`verification.py`等は運用・検証の必要箇所を更新する。そこへ推論runner、scheduler、入力・HTTP・ライフサイクルの別基盤を作らない。
+- 新exampleは設定と薄いshell入口からCompose・既存共有検証ツールを使う。既存exampleのPython helperを変更・複製せず、新しいPythonファイルや独自推論基盤を追加しない。
 - framework修正ゼロを出発点とする。既存拡張点で構成できない共有契約だけを、第7節の採用条件で評価し、最小限修正する。
 - モデル・GPU・候補数、Requirementスキーマ、役割prompt、探索順、批判・監査方針、予算方針はexampleが所有する。名前を汎用化しただけのexample固有処理はframeworkへ入れない。
 - 原文・候補の圧縮、要約による置換、切り捨て、容量を理由としたルート回避・アンサンブル省略は行わない。
 - 境界ruleの本文は[framework-boundary.md](../../../.claude/rules/framework-boundary.md)に一本化済み。`CLAUDE.md`の読み込みと`AGENTS.md`の参照関係を維持し、規則を重複追加しない。
 
-主変更先は既存の`examples/qwen3.8-deepseek-v4-8gpu/`とする。V4.1単体exampleのモデル・runtime pin・既存build資産を参照し、helper群を複製した新規exampleは作らない。
+主変更先は新規の`examples/qwen3.8-deepseek-v4.1-8gpu/`とする。既存V4/V4.1 exampleは参照元として保持する。runtime補正が必要なら新exampleのsource hash付きpatchと派生Dockerfileに置き、既存exampleのbuild/helperを変更しない。
 
 ## 3. GPU配置とV4.1の接続
 
@@ -44,7 +46,7 @@
 | Qwen 0／1 | GPU 6／7、TP1×2 | `answer_1..4`の4候補を同じ2レプリカpoolへ投入する |
 | DeepSeek V4.1 | GPU 0–5、1物理サービス | Requirement、独立候補、policies、批判、再構成、監査とDeepSeek直答を担当する |
 
-2026-09-13の事前検証では現稼働のGPU配置を維持する案へ具体化した。TP2／DP3／EP6とCPU Engram offloadは検証候補であり、[数値事前検証の未通過](../../../examples/qwen3.8-deepseek-v4-8gpu/MEASUREMENTS.md#v41c-six-gpu-preflight-numerical-gate-fail-2026-09-13)を理由に、フルモデル起動と構成選定は未完了としている。
+2026-09-13の事前検証では現稼働のGPU配置を維持する案へ具体化した。TP2／DP3／EP6とCPU Engram offloadは検証候補であり、[数値事前検証の未通過](../../../examples/qwen3.8-deepseek-v4.1-8gpu/MEASUREMENTS.md#v41c-six-gpu-preflight-numerical-gate-fail-2026-09-13)を理由に、フルモデル起動と構成選定は未完了としている。
 
 候補数とレプリカ数を分ける。4方針は`POLICY 1..4`を維持し、4候補を2候補に減らさない。配置は既存ReplicaPoolのqueue-depth／affinity機構に任せ、候補とGPUを固定対応させない。4候補が4 GPUで同時に動く場合と同じ性能は仮定しない。
 
@@ -250,13 +252,13 @@ E2E、TPOT、スループット、TTFT・E2Eのp99、成功率、route別TTFT、
 ## 9. 実装順序・成果物・PR
 
 1. **設計を具体化する。** 本書のmain基準を再確認し、6 GPUの並列成立性、native構造入力、Requirement effort、V4.1非thinking、容量超過処理、choice別監査を解決する。採用不可のframework拡張を含めず、未解決条件を隠さない。
-2. **exampleを設定で構成する。** 計画承認後、最新mainから`codex/` prefixの新branchを作る。既存ensembleの`compose.yaml`, `kairyu.yaml`, `auto-max.yaml`, `example.json`、必要な既存運用・検証ファイルを更新する。V4.1 runtime資産はmainを基準に再利用する。
+2. **exampleを設定で構成する。** 計画承認後、最新mainから`codex/` prefixの新branchを作る。新exampleに`compose.yaml`, `kairyu.yaml`, `auto-max.yaml`, `example.json`と必要なshell入口を作成する。既存exampleのファイルは変更しない。V4.1 runtime資産はmainを基準に再利用する。
 3. **採用条件を満たす共有修正を行う。** 原因ごとに小さく実装し、対象example以外の既存経路で回帰を確認する。main-to-PR全差分で所有権を確認する。
 4. **検証可能な単位でcommit・pushする。** 新しいdraft PRへ構成、変更理由、framework契約の根拠、未検証項目を記載する。#600はmerged、#595／#598はclosedの状態を維持する。
 5. **8 GPU環境へ配置する。** 現稼働の設定・stateと復帰方法を記録し、pull後にL1全3サービス、Kairyu L2/L3、UIを更新構成で再起動する。通常の入口・readinessから起動できることを確認する。
 6. **稼働物を照合する。** ローカルhashの記録に加え、全3 L1サービスの実Docker Image／Cmd／Env、古いopt-in設定の残存、GPU割当、稼働revisionとcheckpoint manifest、全poolのbackendを照合する。mounted L2設定・template・rendering処理とUI filterもcheckoutに一致することを確認し、不一致なら測定を開始しない。その後に機能・容量・取消検証を行う。
 7. **性能とagent利用を検証する。** fresh native baseline、自然routing、primary必須matrix、900秒条件を実行する。必要なチェックが通った後の追加・再実行は、変更や失敗の影響に応じて行う。
-8. **証拠を保存する。** 新しい構成と結果を既存`MEASUREMENTS.md`へ追記し、過去結果を上書きしない。README、設計文書、PRを最終実装に合わせ、設計決定・障害・進捗は規則に従って`PROGRESS.md`へ記録する。
+8. **証拠を保存する。** 新しい構成と結果を新exampleの`MEASUREMENTS.md`へ記録し、既存exampleの測定記録を変更しない。README、設計文書、PRを最終実装に合わせ、設計決定・障害・進捗は規則に従って`PROGRESS.md`へ記録する。
 
 容量起因の400、誤った502、必須工程の省略、内部推論の公開MAXによる不当な制限、未解決の容量超過処理、未検証の6 GPU構成または性能が残る状態を実装完了としない。監査が常に正しいという保証や113タスクの再実行は追加しない。
 
