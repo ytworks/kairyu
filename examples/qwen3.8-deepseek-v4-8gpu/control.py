@@ -56,16 +56,14 @@ def _storage_paths() -> dict[str, Path]:
     qwen_models = root / "model-volumes/qwen3.8-27b-1gpu/models"
     paths = {
         "qwen_models": qwen_models,
-        "deepseek_models": (
-            root / "model-volumes" / SPEC["storage"]["deepseek_model_environment"] / "models"
-        ),
+        "deepseek_models": root / "model-volumes/deepseek-v4-flash-0731-8gpu",
         "webui": environment / "webui-data",
         "deepseek_cache": environment / "compile-cache/deepseek",
     }
     paths.update(
         {
             f"qwen_cache_{index}": environment / f"compile-cache/qwen-{index}"
-            for index in range(SPEC["allocation"]["tier1"]["replicas"])
+            for index in range(4)
         }
     )
     for path in paths.values():
@@ -92,14 +90,11 @@ def _compose_env() -> dict[str, str]:
             "COMPOSE_DISABLE_ENV_FILE": "1",
             "COMPOSE_PROJECT_NAME": SPEC["environment"].replace(".", "-"),
             "QWEN_MODEL_STORAGE_PATH": str(paths["qwen_models"]),
-            "DEEPSEEK_MODEL_STORAGE_PATH": str(paths["deepseek_models"]),
+            "DEEPSEEK_MODEL_VOLUME": os.environ.get(
+                "DEEPSEEK_MODEL_VOLUME", SPEC["storage"]["deepseek_model_volume"]
+            ),
             "WEBUI_STORAGE_PATH": str(paths["webui"]),
             "DEEPSEEK_CACHE_PATH": str(paths["deepseek_cache"]),
-            # Verification may mount an archived, temporary profile matrix;
-            # its lifecycle restores the default spec after the dedicated run.
-            "KAIRYU_ORCHESTRATOR_SPEC_PATH": os.environ.get(
-                "KAIRYU_ORCHESTRATOR_SPEC_PATH", str(HERE / "auto-max.yaml")
-            ),
             "QWEN_VLLM_IMAGE": os.environ.get(
                 "QWEN_VLLM_IMAGE", SPEC["vllm"]["qwen"]["image"]
             ),
@@ -119,7 +114,7 @@ def _compose_env() -> dict[str, str]:
             "DEEPSEEK_CPUSET": os.environ.get("DEEPSEEK_CPUSET", "0"),
         }
     )
-    for index in range(SPEC["allocation"]["tier1"]["replicas"]):
+    for index in range(4):
         env[f"QWEN_CACHE_{index}_PATH"] = str(paths[f"qwen_cache_{index}"])
         env[f"QWEN_{index}_CPUSET"] = os.environ.get(f"QWEN_{index}_CPUSET", "0")
     return env
@@ -203,16 +198,12 @@ def _preflight(env: dict[str, str]) -> None:
         if row["compute_capability"] < expected["minimum_compute_capability"]:
             raise SystemExit(f"GPU {index} has insufficient compute capability")
     cpusets = {index: _numa_cpuset(str(row["pci_bus_id"])) for index, row in rows.items()}
-    allocation = SPEC["allocation"]
-    for replica, gpu in enumerate(allocation["tier1"]["gpu_ids"]):
-        env[f"QWEN_{replica}_CPUSET"] = cpusets[gpu]
-    env["DEEPSEEK_CPUSET"] = ",".join(
-        dict.fromkeys(cpusets[index] for index in allocation["tier2"]["gpu_ids"])
-    )
+    for index in range(4):
+        env[f"QWEN_{index}_CPUSET"] = cpusets[index]
+    env["DEEPSEEK_CPUSET"] = ",".join(dict.fromkeys(cpusets[index] for index in range(4, 8)))
     print(
         f"hardware: 8 x {expected['product']} ({rows[0]['memory_mib']} MiB each); "
-        f"Qwen GPUs {allocation['tier1']['gpu_ids']}, "
-        f"DeepSeek GPUs {allocation['tier2']['gpu_ids']}",
+        "Qwen GPUs 0-3, DeepSeek GPUs 4-7",
         flush=True,
     )
 
@@ -223,33 +214,6 @@ def _image_exists(image: str) -> bool:
 
 def _ensure_vllm_image(env: dict[str, str], env_key: str, source: dict) -> None:
     image = env[env_key]
-    if source.get("distribution") == "overlay":
-        if not _image_exists(image):
-            if image != source["image"]:
-                raise SystemExit(f"{env_key} does not exist locally: {image}")
-            context = (HERE / source["build_context"]).resolve()
-            print("vLLM image is absent; building the pinned V4.1 SM120 overlay", flush=True)
-            _run(
-                [
-                    "docker", "build", "--pull",
-                    "--file", str(context / source["dockerfile"]),
-                    "--build-arg", f"VLLM_BASE_IMAGE={source['base_image']}",
-                    "--build-arg", f"FLASHINFER_REVISION={source['flashinfer_revision']}",
-                    "--tag", image,
-                    "--label",
-                    f"org.opencontainers.image.revision={source['source_revision']}",
-                    str(context),
-                ]
-            )
-        actual = _run(
-            ["docker", "image", "inspect", "--format", "{{.Id}}", image], capture=True
-        ).stdout.strip()
-        if actual != source["image_id"]:
-            raise SystemExit(
-                f"vLLM image {image} has ID {actual}; example.json and kairyu.yaml pin "
-                f"{source['image_id']} (attest and update both before serving)"
-            )
-        return
     if _image_exists(image):
         return
     if image != source["image"]:
@@ -258,7 +222,21 @@ def _ensure_vllm_image(env: dict[str, str], env_key: str, source: dict) -> None:
         print("vLLM image is absent; pulling the pinned upstream release", flush=True)
         _run(["docker", "pull", image])
         return
-    raise SystemExit(f"unsupported vLLM distribution: {source.get('distribution')!r}")
+    print("vLLM image is absent; building the pinned SM120 source revision", flush=True)
+    _run(
+        [
+            "docker",
+            "build",
+            "--pull",
+            "--file",
+            "docker/Dockerfile",
+            "--tag",
+            image,
+            "--label",
+            f"org.opencontainers.image.revision={source['source_revision']}",
+            f"{source['source_repository']}#{source.get('source_ref', source['source_revision'])}",
+        ]
+    )
 
 
 _MODEL_PROGRAM = r"""
@@ -336,17 +314,48 @@ def _download_model(image: str, mount: str, model: dict) -> None:
     _run(command)
 
 
+def _ensure_deepseek_volume(env: dict[str, str]) -> str:
+    name = env["DEEPSEEK_MODEL_VOLUME"]
+    desired = str(_storage_paths()["deepseek_models"])
+    inspected = _run(["docker", "volume", "inspect", name], capture=True, check=False)
+    if inspected.returncode:
+        _run(
+            [
+                "docker",
+                "volume",
+                "create",
+                "--driver",
+                "local",
+                "--opt",
+                "type=none",
+                "--opt",
+                "o=bind",
+                "--opt",
+                f"device={desired}",
+                name,
+            ],
+            capture=True,
+        )
+        inspected = _run(["docker", "volume", "inspect", name], capture=True)
+    payload = json.loads(inspected.stdout)
+    options = payload[0].get("Options") if len(payload) == 1 else None
+    expected = {"device": desired, "o": "bind", "type": "none"}
+    if options != expected:
+        raise SystemExit(
+            f"existing volume {name} is not the expected NVMe bind: "
+            f"expected {expected}, found {options}"
+        )
+    return name
+
+
 def _ensure_models(env: dict[str, str]) -> None:
     _download_model(
         env["QWEN_VLLM_IMAGE"],
         env["QWEN_MODEL_STORAGE_PATH"],
         SPEC["models"]["tier1"],
     )
-    _download_model(
-        env["DEEPSEEK_VLLM_IMAGE"],
-        env["DEEPSEEK_MODEL_STORAGE_PATH"],
-        SPEC["models"]["tier2"],
-    )
+    volume = _ensure_deepseek_volume(env)
+    _download_model(env["DEEPSEEK_VLLM_IMAGE"], volume, SPEC["models"]["tier2"])
 
 
 def _json_url(url: str) -> dict:
@@ -516,7 +525,7 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         )
         token_count = _post_json_url(
             tokenizer_url,
-            {"model": SPEC["models"]["tier2"]["served_name"], "prompt": "kairyu"},
+            {"model": "deepseek-v4-flash-0731", "prompt": "kairyu"},
         )["count"]
     except (KeyError, OSError, ValueError, urllib.error.URLError) as error:
         raise SystemExit(f"Kairyu readiness evidence is incomplete: {error}") from error
@@ -538,9 +547,9 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
     if [role.get("name") for role in policy.get("roles", ())] != expected_roles:
         raise SystemExit(
             "Kairyu L2 does not report the required "
-            f"{len(expected_roles)}-role critical-ensemble product DAG"
+            f"{len(expected_roles)}-role dual-track product DAG"
         )
-    # The critical-ensemble DAG is the primary profile behind a Qwen route
+    # DTO-D13: the dual-track DAG is the primary profile behind a Qwen route
     # judge that selects among four single-role direct routes and the
     # ensemble; a missing profile or judge means the wrong policy is live.
     expected_profiles = {
@@ -587,9 +596,10 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         raise SystemExit("Kairyu product policy must stream the head role publicly")
     if policy.get("moa_samples") != 0:
         raise SystemExit("Kairyu product policy must use the explicit DAG, not MoA")
-    for key in ("max_steps", "max_steps_per_additional_choice"):
-        if policy.get("budget", {}).get(key) != orchestration[key]:
-            raise SystemExit(f"Kairyu product policy {key} must be {orchestration[key]}")
+    if policy.get("budget", {}).get("max_steps") != orchestration["max_steps"]:
+        raise SystemExit(
+            f"Kairyu product policy max_steps must be {orchestration['max_steps']}"
+        )
     expected_refinements = orchestration["product_max_refinements"]
     if policy.get("budget", {}).get("max_refine_depth") != expected_refinements:
         raise SystemExit(
@@ -602,12 +612,12 @@ def _validate_ready(api_url: str, tokenizer_url: str) -> None:
         raise SystemExit("Kairyu Tier1 L2 worker is not bound to the Qwen L1 pool")
     if (
         configured.get("tier2", {}).get("model")
-        != f"{SPEC['models']['tier2']['served_name']}-thinking"
+        != "deepseek-v4-flash-0731-thinking"
     ):
         raise SystemExit(
             "Kairyu Tier2 L2 worker is not bound to the thinking DeepSeek L1 pool"
         )
-    if configured.get("tier2-direct", {}).get("model") != SPEC["models"]["tier2"]["served_name"]:
+    if configured.get("tier2-direct", {}).get("model") != "deepseek-v4-flash-0731":
         raise SystemExit(
             "Kairyu tier2-direct L2 worker is not bound to the non-thinking DeepSeek L1 pool"
         )

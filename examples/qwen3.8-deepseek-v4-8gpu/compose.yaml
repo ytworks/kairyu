@@ -61,7 +61,7 @@ x-qwen: &qwen
     - --chat-template
     - /etc/kairyu/qwen3.8-chat.jinja
     # No default chat-template kwargs: thinking L2 roles declare
-    # reasoning_effort: high (the existing Qwen medium tier) in auto-max.yaml,
+    # reasoning_effort: high (the medium tier, DTO-D14) in auto-max.yaml,
     # which the example-local template turns into thinking mode with the
     # medium reasoning preamble per request.
     - --reasoning-parser
@@ -129,7 +129,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["6"]
+              device_ids: ["0"]
               capabilities: [gpu]
 
   qwen-1:
@@ -149,108 +149,125 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["7"]
+              device_ids: ["1"]
               capabilities: [gpu]
 
-  # Six-GPU candidate; arithmetic gate passes, full-model gates pending (MEASUREMENTS.md).
+  qwen-2:
+    <<: *qwen
+    cpuset: ${QWEN_2_CPUSET}
+    volumes:
+      - type: bind
+        source: ${QWEN_MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - type: bind
+        source: ${QWEN_CACHE_2_PATH}
+        target: /root/.cache
+      - ./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["2"]
+              capabilities: [gpu]
+
+  qwen-3:
+    <<: *qwen
+    cpuset: ${QWEN_3_CPUSET}
+    volumes:
+      - type: bind
+        source: ${QWEN_MODEL_STORAGE_PATH}
+        target: /models
+        read_only: true
+      - type: bind
+        source: ${QWEN_CACHE_3_PATH}
+        target: /root/.cache
+      - ./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["3"]
+              capabilities: [gpu]
+
   deepseek:
-    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:deepseek-v41-sm120}
+    image: ${DEEPSEEK_VLLM_IMAGE:-local/vllm-openai:sm120-aa0d513027}
     ipc: host
+    cpuset: ${DEEPSEEK_CPUSET}
     environment:
       HF_HOME: /models/.cache
-      HF_HUB_OFFLINE: '1'
-      HF_HUB_DISABLE_TELEMETRY: '1'
-      VLLM_NO_USAGE_STATS: '1'
+      HF_HUB_OFFLINE: "1"
+      HF_HUB_DISABLE_TELEMETRY: "1"
+      VLLM_NO_USAGE_STATS: "1"
+      # MegaMoE currently rejects SM120 as SM100-only in the pinned build.
+      VLLM_USE_DEEP_GEMM: "0"
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
-      SAFETENSORS_FAST_GPU: '1'
+      SAFETENSORS_FAST_GPU: "1"
       XDG_CACHE_HOME: /root/.cache
       TORCHINDUCTOR_CACHE_DIR: /root/.cache/torchinductor
       TRITON_CACHE_DIR: /root/.cache/triton
       TILELANG_CACHE_DIR: /root/.cache/tilelang
       TILELANG_TMP_DIR: /root/.cache/tilelang/tmp
-      VLLM_ENGINE_READY_TIMEOUT_S: '3600'
-      VLLM_USE_RUST_FRONTEND: '0'
-    command:
-    - /models/deepseek-v4.1-flash
-    - --served-model-name
-    - deepseek-v4.1-flash
-    - --max-model-len
-    - '1048576'
-    - --trust-remote-code
-    - --kv-cache-dtype
-    - fp8
-    - --attention-config
-    - '{"indexer_kv_dtype":"mxfp4"}'
-    - --block-size
-    - '64'
-    - --tensor-parallel-size
-    - '2'
-    - --enable-expert-parallel
-    - --moe-backend
-    - marlin
-    - --speculative-config
-    - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
-    - --tokenizer-mode
-    - deepseek_v41
-    - --reasoning-parser
-    - deepseek_v41
-    - --enable-auto-tool-choice
-    - --tool-call-parser
-    - deepseek_v41
-    - --default-chat-template-kwargs
-    - '{"thinking":false}'
-    - --enable-prefix-caching
-    - --gpu-memory-utilization
-    - '0.90'
-    - --max-num-seqs
-    - '32'
-    - --max-num-batched-tokens
-    - '16384'
-    - --disable-uvicorn-access-log
-    - --engram-config
-    - '{"cpu_offload":true}'
-    - --limit-mm-per-prompt
-    - '{"image":1,"video":0}'
-    - --data-parallel-size
-    - '3'
-    - --data-parallel-backend
-    - mp
-    healthcheck:
-      test:
-      - CMD
-      - python3
-      - -c
-      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)
-      interval: 5s
-      timeout: 3s
-      retries: 1440
-      start_period: 30s
-    restart: unless-stopped
-    cpuset: ${DEEPSEEK_CPUSET}
     volumes:
-    - type: bind
-      source: ${DEEPSEEK_MODEL_STORAGE_PATH}
-      target: /models
-      read_only: true
-    - type: bind
-      source: ${DEEPSEEK_CACHE_PATH}
-      target: /root/.cache
+      - deepseek-models:/models:ro
+      - type: bind
+        source: ${DEEPSEEK_CACHE_PATH}
+        target: /root/.cache
+      - ./deepseek-role-effort.jinja:/etc/kairyu/deepseek-role-effort.jinja:ro
+    command:
+      - /models/deepseek-v4-flash-0731
+      - --served-model-name
+      - deepseek-v4-flash-0731
+      - --max-model-len
+      - "1048576"
+      - --trust-remote-code
+      - --kv-cache-dtype
+      - fp8
+      - --block-size
+      - "256"
+      - --tensor-parallel-size
+      - "4"
+      - --enable-expert-parallel
+      - --attention-config
+      - '{"use_fp4_indexer_cache":false}'
+      - --speculative-config
+      - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"greedy"}'
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+      - --tokenizer-mode
+      - deepseek_v4
+      - --reasoning-parser
+      - deepseek_v4
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - deepseek_v4
+      # Passthrough plus inherited-effort preamble injection for thinking
+      # role calls (see deepseek-role-effort.jinja and auto-max.yaml).
+      - --chat-template
+      - /etc/kairyu/deepseek-role-effort.jinja
+      - --enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.95"
+      - --max-num-seqs
+      - "32"
+      - --max-num-batched-tokens
+      - "16384"
+      - --disable-uvicorn-access-log
+    healthcheck: *health
+    # Loopback-only L1 access lets the benchmark count the final L3 answer with
+    # DeepSeek's exact tokenizer. ChatUI still has only the Kairyu L3 endpoint.
+    ports:
+      - 127.0.0.1:${DEEPSEEK_L1_PORT:-8005}:8000
     deploy:
       resources:
         reservations:
           devices:
-          - driver: nvidia
-            device_ids:
-            - '0'
-            - '1'
-            - '2'
-            - '3'
-            - '4'
-            - '5'
-            capabilities:
-            - gpu
-    ports:
-    - 127.0.0.1:${DEEPSEEK_L1_PORT:-8005}:8000
+            - driver: nvidia
+              device_ids: ["4", "5", "6", "7"]
+              capabilities: [gpu]
+    restart: unless-stopped
 
   kairyu:
     build:
@@ -276,13 +293,18 @@ services:
         source: ${QWEN_MODEL_STORAGE_PATH}
         target: /models/qwen
         read_only: true
+      - deepseek-models:/models/deepseek:ro
       - ./kairyu.yaml:/etc/kairyu/kairyu.yaml:ro
-      - ${KAIRYU_ORCHESTRATOR_SPEC_PATH:-./auto-max.yaml}:/etc/kairyu/auto-max.yaml:ro
+      - ./auto-max.yaml:/etc/kairyu/auto-max.yaml:ro
       - ./router.json:/etc/kairyu/router.json:ro
+      - ./deepseek-thinking.jinja:/etc/kairyu/deepseek-thinking.jinja:ro
+      - ../deepseek-v4-flash-0731-8gpu/deepseek-v4-0731.jinja:/etc/kairyu/deepseek-v4-0731.jinja:ro
       - executor-socket:/run/kairyu-executor:ro
     depends_on:
       qwen-0: {condition: service_healthy}
       qwen-1: {condition: service_healthy}
+      qwen-2: {condition: service_healthy}
+      qwen-3: {condition: service_healthy}
       deepseek: {condition: service_healthy}
       # Startup-strict so a broken sandbox is caught at launch; a runtime
       # outage degrades executor stages instead of failing requests.
@@ -303,7 +325,7 @@ services:
       OPENAI_API_KEY: sk-local-kairyu
       OPENAI_API_CONFIGS: '{"0":{"model_ids":["kairyu-auto-max"]}}'
       DEFAULT_MODELS: kairyu-auto-max
-      DEFAULT_MODEL_PARAMS: '{"stream_response":false}'
+      DEFAULT_MODEL_PARAMS: '{"max_tokens":65536,"stream_response":false}'
       ENABLE_PERSISTENT_CONFIG: "false"
       RESET_CONFIG_ON_START: "true"
       ENABLE_SIGNUP: "false"
@@ -328,3 +350,6 @@ services:
 
 volumes:
   executor-socket:
+  deepseek-models:
+    external: true
+    name: ${DEEPSEEK_MODEL_VOLUME:-kairyu-models-deepseek-v4-flash-0731-8gpu}
