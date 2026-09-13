@@ -99,7 +99,9 @@ pools:
           expert_parallel_size: 6
           attention_data_parallel_size: 3
           dspark_enabled: false
-          container_image_digest: sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359
+          # Image ID of the build the measurements were taken on (informational;
+          # another host rebuilds the same recipe under its own ID).
+          container_image_digest: sha256:18dad57d5b3d576797555e0e2c91f247ce4a39cba39ae20c79a4a2e09421a195
     unhealthy_after: 1
     queue_depth_threshold: 0
     prefix_index: true

@@ -39,11 +39,11 @@
       "expert_parallel_size": 6,
       "topology": "TP2 x attention-DP3, EP6, PP1; one vLLM service on GPUs 0-5",
       "dspark_speculative_tokens": 0,
-      "engram_cpu_offload": false,
-      "gpu_memory_utilization": 0.97,
-      "max_num_batched_tokens": 2048,
-      "max_num_seqs": 8,
-      "topology_status": "BLOCKED: candidates 1-4 failed on the unpatched pinned image (see MEASUREMENTS.md); this configuration (candidate 4) is the last one tried, not a verified one"
+      "engram_cpu_offload": true,
+      "gpu_memory_utilization": 0.9,
+      "max_num_batched_tokens": 16384,
+      "max_num_seqs": 32,
+      "topology_status": "adopted (owner decision 2026-09-14): the configuration PR #598 measured on its masked-KV overlay; this example's GPU gates pending"
     }
   },
   "models": {
@@ -97,17 +97,27 @@
       "release": "v0.23.0"
     },
     "deepseek": {
-      "image": "local/vllm-openai:deepseek-v41-sm120",
-      "image_id": "sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359",
+      "image": "local/vllm-openai:deepseek-v41-sm120-masked-kv-budget",
+      "image_id": "sha256:18dad57d5b3d576797555e0e2c91f247ce4a39cba39ae20c79a4a2e09421a195",
+      "image_id_note": "ID of the build the measurements were taken on; other hosts rebuild from the same recipe and record their own ID",
       "distribution": "overlay",
-      "parent_example": "deepseek-v4.1-flash-8gpu",
       "dockerfile": "vllm-sm120.Dockerfile",
-      "base_image": "vllm/vllm-openai:deepseekv41-flash-0909@sha256:00d577a6a63281e15336029d5bcee4e9a2cf182214a4f20ba6111b1c8e79893d",
+      "patches": {
+        "patch_masked_kv.py": "cd4e913b2d9f523f2637c404a9cb2209638fffa078fc9234a1151c4761d6337d",
+        "patch_top_p.py": "ac87bd4437ba72903fbfbe7d43efc4c9494de4869b62f1250dc5d1fde68cac17"
+      },
+      "base_image": "local/vllm-openai:deepseek-v41-sm120",
+      "base_image_id": "sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359",
+      "parent_example": "deepseek-v4.1-flash-8gpu",
+      "upstream_base_image": "vllm/vllm-openai:deepseekv41-flash-0909@sha256:00d577a6a63281e15336029d5bcee4e9a2cf182214a4f20ba6111b1c8e79893d",
       "source_repository": "https://github.com/vllm-project/vllm",
       "source_revision": "179dd0fa9",
       "source_version": "0.1.dev20904+g179dd0fa9",
       "flashinfer_repository": "https://github.com/flashinfer-ai/flashinfer.git",
-      "flashinfer_revision": "60b49158ab4fb81718aef486c2d3c89aec4c1901"
+      "flashinfer_revision": "60b49158ab4fb81718aef486c2d3c89aec4c1901",
+      "masked_kv_zero_fill": true,
+      "top_p_forced_terminator_fix": true,
+      "flashinfer_workspace": "/root/.cache/flashinfer-masked-kv-v1"
     },
     "qwen_mtp_speculative_tokens": 0,
     "qwen_max_num_batched_tokens": 32768,
@@ -115,14 +125,14 @@
     "qwen_kv_cache_dtype": "fp8",
     "qwen_cudagraph_mode": "PIECEWISE",
     "deepseek_dspark_speculative_tokens": 0,
-    "deepseek_max_num_batched_tokens": 2048,
-    "deepseek_max_num_seqs": 8,
+    "deepseek_max_num_batched_tokens": 16384,
+    "deepseek_max_num_seqs": 32,
     "deepseek_kv_cache_dtype": "fp8",
     "deepseek_block_size": 64,
     "deepseek_indexer_kv_dtype": "mxfp4",
     "deepseek_moe_backend": "marlin",
     "deepseek_default_chat_template_kwargs": null,
-    "deepseek_engram_cpu_offload": false
+    "deepseek_engram_cpu_offload": true
   },
   "deepseek_generation": {
     "temperature": 1.0,

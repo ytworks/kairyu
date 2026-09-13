@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -62,9 +63,7 @@ def _storage_paths() -> dict[str, Path]:
     environment = root / "model-volumes" / SPEC["environment"]
     storage = SPEC["storage"]
     paths = {
-        "qwen_models": (
-            root / "model-volumes" / storage["qwen_model_environment"] / "models"
-        ),
+        "qwen_models": (root / "model-volumes" / storage["qwen_model_environment"] / "models"),
         "deepseek_models": (
             root / "model-volumes" / storage["deepseek_model_environment"] / "models"
         ),
@@ -173,9 +172,7 @@ def _numa_cpuset(pci_bus_id: str) -> str:
             raise ValueError("negative NUMA node")
         cpuset = Path(f"/sys/devices/system/node/node{node}/cpulist").read_text().strip()
     except (OSError, ValueError) as error:
-        raise SystemExit(
-            f"cannot determine NUMA affinity for GPU {pci_bus_id}: {error}"
-        ) from error
+        raise SystemExit(f"cannot determine NUMA affinity for GPU {pci_bus_id}: {error}") from error
     if not cpuset:
         raise SystemExit(f"NUMA CPU set for GPU {pci_bus_id} is empty")
     return cpuset
@@ -205,9 +202,7 @@ def _preflight(env: dict[str, str]) -> None:
         raise SystemExit("exactly eight contiguous GPU indices 0..7 are required")
     for index, row in rows.items():
         if row["name"] != expected["product"]:
-            raise SystemExit(
-                f"GPU {index} is {row['name']!r}; expected {expected['product']!r}"
-            )
+            raise SystemExit(f"GPU {index} is {row['name']!r}; expected {expected['product']!r}")
         if row["memory_mib"] < expected["minimum_vram_mib"]:
             raise SystemExit(f"GPU {index} has insufficient VRAM")
         if row["compute_capability"] < expected["minimum_compute_capability"]:
@@ -243,56 +238,124 @@ def _ensure_qwen_image(env: dict[str, str]) -> None:
     _run(["docker", "pull", image])
 
 
-def _ensure_deepseek_image(env: dict[str, str]) -> None:
-    """Reuse the sibling V4.1 example's pinned SM120 overlay by image ID.
+def _image_file_sha256(image: str, paths: list[str]) -> dict[str, str]:
+    """SHA-256 of files inside an image (no GPU, no model), keyed by basename."""
 
-    When the tag is absent, build it exactly as that example does: its
-    Dockerfile, its build arguments, and its directory as the build context.
-    The sibling directory is never written to. Any ID other than the pinned
-    one is rejected, so a locally rebuilt or patched image cannot serve
-    under this example's evidence.
-    """
+    output = _run(
+        ["docker", "run", "--rm", "--entrypoint", "sha256sum", image, *paths],
+        capture=True,
+    ).stdout
+    return {
+        line.split()[1].rsplit("/", 1)[-1]: line.split()[0]
+        for line in output.splitlines()
+        if line.strip()
+    }
 
-    image = env["DEEPSEEK_VLLM_IMAGE"]
-    source = SPEC["vllm"]["deepseek"]
-    actual = _image_id(image)
-    if actual is None:
-        if image != source["image"]:
-            raise SystemExit(f"DEEPSEEK_VLLM_IMAGE does not exist locally: {image}")
-        parent = json.loads((PARENT_EXAMPLE / "example.json").read_text(encoding="utf-8"))
-        parent_source = parent["vllm"]
-        if (
-            parent_source["image"] != source["image"]
-            or parent_source["image_id"] != source["image_id"]
-        ):
+
+def _attest_overlay(image: str, expected: dict[str, str], *, prefix: str = "/opt/kairyu/") -> None:
+    """The image must carry exactly the patch scripts this checkout ships."""
+
+    actual = _image_file_sha256(image, [prefix + name for name in expected])
+    for name, digest in expected.items():
+        if actual.get(name) != digest:
             raise SystemExit(
-                "the sibling example no longer pins the DeepSeek image this example "
-                "reuses; update example.json/kairyu.yaml after re-validating"
+                f"image {image} carries {name} with SHA-256 {actual.get(name)}; this checkout "
+                f"ships {digest} — rebuild the overlay from these files before serving"
             )
-        print("DeepSeek vLLM image is absent; building the sibling's pinned overlay", flush=True)
+
+
+def _ensure_parent_image(env: dict[str, str]) -> str:
+    """The sibling example's SM120 overlay, built exactly as that example builds
+    it (its Dockerfile, its build arguments, its directory as context) when the
+    tag is absent. The sibling directory is never written to."""
+
+    source = SPEC["vllm"]["deepseek"]
+    parent = json.loads((PARENT_EXAMPLE / "example.json").read_text(encoding="utf-8"))["vllm"]
+    if parent["image"] != source["base_image"]:
+        raise SystemExit(
+            "the sibling example no longer builds the image this overlay is based on; "
+            "re-validate before updating example.json"
+        )
+    image = parent["image"]
+    if _image_id(image) is None:
+        print("parent SM120 overlay is absent; building it from the sibling example", flush=True)
         _run(
             [
                 "docker",
                 "build",
                 "--pull",
                 "--file",
-                str(PARENT_EXAMPLE / parent_source["dockerfile"]),
+                str(PARENT_EXAMPLE / parent["dockerfile"]),
                 "--build-arg",
-                f"VLLM_BASE_IMAGE={parent_source['base_image']}",
+                f"VLLM_BASE_IMAGE={parent['base_image']}",
                 "--build-arg",
-                f"FLASHINFER_REVISION={parent_source['flashinfer_revision']}",
+                f"FLASHINFER_REVISION={parent['flashinfer_revision']}",
                 "--tag",
                 image,
                 "--label",
-                f"org.opencontainers.image.revision={parent_source['source_revision']}",
+                f"org.opencontainers.image.revision={parent['source_revision']}",
                 str(PARENT_EXAMPLE),
             ]
         )
-        actual = _image_id(image)
-    if actual != source["image_id"]:
+    _attest_overlay(
+        image,
+        {
+            "patch_runtime.py": hashlib.sha256(
+                (PARENT_EXAMPLE / "patch_runtime.py").read_bytes()
+            ).hexdigest()
+        },
+    )
+    return image
+
+
+def _ensure_deepseek_image(env: dict[str, str]) -> None:
+    """Build this example's DeepSeek runtime on any host: the sibling's SM120
+    overlay plus this directory's masked-KV / top-p overlay (vllm-sm120.Dockerfile).
+
+    Attestation is by content — the patch scripts inside the image must match
+    the files in this checkout — because a rebuild on another host yields a
+    different image ID. The ID recorded in example.json is the one the
+    measurements were taken on; a different local ID is reported, not refused.
+    """
+
+    image = env["DEEPSEEK_VLLM_IMAGE"]
+    source = SPEC["vllm"]["deepseek"]
+    expected = {
+        name: hashlib.sha256((HERE / name).read_bytes()).hexdigest() for name in source["patches"]
+    }
+    if expected != source["patches"]:
         raise SystemExit(
-            f"vLLM image {image} has ID {actual}; example.json and kairyu.yaml pin "
-            f"{source['image_id']}"
+            "example.json pins different patch-script hashes than the files in this "
+            "directory; update the pins together with the scripts"
+        )
+    if _image_id(image) is None:
+        if image != source["image"]:
+            raise SystemExit(f"DEEPSEEK_VLLM_IMAGE does not exist locally: {image}")
+        parent = _ensure_parent_image(env)
+        print("DeepSeek overlay is absent; building it from this example's Dockerfile", flush=True)
+        _run(
+            [
+                "docker",
+                "build",
+                "--file",
+                str(HERE / source["dockerfile"]),
+                "--build-arg",
+                f"VLLM_BASE_IMAGE={parent}",
+                "--tag",
+                image,
+                "--label",
+                f"org.opencontainers.image.revision={source['source_revision']}",
+                str(HERE),
+            ]
+        )
+    _attest_overlay(image, expected)
+    actual = _image_id(image)
+    if actual != source["image_id"]:
+        print(
+            f"note: {image} has ID {actual}; the measurements in MEASUREMENTS.md were taken on "
+            f"{source['image_id']} (same recipe, different build). Evidence produced here "
+            "records this host's ID.",
+            flush=True,
         )
 
 
@@ -429,25 +492,19 @@ def _provision_chat_ui_effort_selector(ui_url: str) -> None:
 
     filter_source = (HERE / "webui-reasoning-effort-filter.py").read_text(encoding="utf-8")
     try:
-        signin = _webui_api(
-            ui_url, "/api/v1/auths/signin", payload={"email": "", "password": ""}
-        )
+        signin = _webui_api(ui_url, "/api/v1/auths/signin", payload={"email": "", "password": ""})
         if not isinstance(signin, dict) or not signin.get("token"):
             raise SystemExit("Chat UI signin did not return an auth-disabled session token")
         if signin.get("role") != "admin":
             raise SystemExit("Chat UI auth-disabled session must be the admin user")
         token = signin["token"]
         listed = _webui_api(ui_url, "/api/v1/functions/", token=token)
-        existing = next(
-            (row for row in listed if row.get("id") == _CHAT_UI_EFFORT_FILTER_ID), None
-        )
+        existing = next((row for row in listed if row.get("id") == _CHAT_UI_EFFORT_FILTER_ID), None)
         body = {
             "id": _CHAT_UI_EFFORT_FILTER_ID,
             "name": "Reasoning Effort",
             "content": filter_source,
-            "meta": {
-                "description": "Select the Kairyu reasoning effort from a dropdown."
-            },
+            "meta": {"description": "Select the Kairyu reasoning effort from a dropdown."},
         }
         if existing is None:
             state = _webui_api(ui_url, "/api/v1/functions/create", token=token, payload=body)
@@ -488,8 +545,7 @@ def _provision_chat_ui_effort_selector(ui_url: str) -> None:
         raise SystemExit(f"Chat UI effort selector provisioning failed: {error}") from error
     if enum != _CHAT_UI_EFFORT_LEVELS:
         raise SystemExit(
-            "Chat UI effort selector must expose exactly "
-            f"{_CHAT_UI_EFFORT_LEVELS!r}, got {enum!r}"
+            f"Chat UI effort selector must expose exactly {_CHAT_UI_EFFORT_LEVELS!r}, got {enum!r}"
         )
 
 
@@ -510,12 +566,8 @@ def _validate_embedding_smoke(payload: dict) -> None:
     for row in data:
         vector = row.get("embedding")
         if not isinstance(vector, list) or len(vector) != dimensions:
-            raise SystemExit(
-                f"Kairyu embedding response vectors must have {dimensions} dimensions"
-            )
-        if not all(
-            type(value) in {int, float} and math.isfinite(value) for value in vector
-        ):
+            raise SystemExit(f"Kairyu embedding response vectors must have {dimensions} dimensions")
+        if not all(type(value) in {int, float} and math.isfinite(value) for value in vector):
             raise SystemExit("Kairyu embedding response vectors must contain finite numbers")
     usage = payload.get("usage")
     prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
@@ -545,9 +597,7 @@ def _validate_policy(policy: dict, *, judged: bool) -> None:
     }
     judge = policy.get("profile_judge") or {}
     if judged:
-        expected_profiles = {
-            name: list(roles) for name, roles in orchestration["profiles"].items()
-        }
+        expected_profiles = {name: list(roles) for name, roles in orchestration["profiles"].items()}
         if served_profiles != expected_profiles:
             raise SystemExit(
                 "Kairyu L2 does not report the required direct-route profiles "
@@ -563,9 +613,7 @@ def _validate_policy(policy: dict, *, judged: bool) -> None:
             for name, roles in (policy.get("profiles") or {}).items()
         }
         if served_sampling != expected_sampling:
-            raise SystemExit(
-                "Kairyu L2 does not report the required direct-route sampling policy"
-            )
+            raise SystemExit("Kairyu L2 does not report the required direct-route sampling policy")
         expected_judge = orchestration["profile_judge"]
         served_choices = [
             {"label": choice.get("label"), "profile": choice.get("profile")}
@@ -656,18 +704,14 @@ def _public_ui_host() -> str:
             "cannot discover an externally reachable Chat UI host; set PUBLIC_HOST"
         ) from error
     if detected == "0.0.0.0" or detected.startswith("127."):
-        raise SystemExit(
-            "cannot discover an externally reachable Chat UI host; set PUBLIC_HOST"
-        )
+        raise SystemExit("cannot discover an externally reachable Chat UI host; set PUBLIC_HOST")
     return detected
 
 
 def up() -> None:
     env = _compose_env()
     ui_host = _public_ui_host()
-    env["WEBUI_URL"] = os.environ.get(
-        "WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}"
-    )
+    env["WEBUI_URL"] = os.environ.get("WEBUI_URL", f"http://{ui_host}:{env['CHAT_UI_PORT']}")
     _preflight(env)
     _ensure_qwen_image(env)
     _ensure_deepseek_image(env)
@@ -699,13 +743,9 @@ def up() -> None:
     tokenizer_url = f"http://127.0.0.1:{env['DEEPSEEK_L1_PORT']}/tokenize"
     _validate_ready(api_url, tokenizer_url)
     validation_ui_host = (
-        "127.0.0.1"
-        if env["CHAT_UI_BIND_ADDRESS"] == "0.0.0.0"
-        else env["CHAT_UI_BIND_ADDRESS"]
+        "127.0.0.1" if env["CHAT_UI_BIND_ADDRESS"] == "0.0.0.0" else env["CHAT_UI_BIND_ADDRESS"]
     )
-    _provision_chat_ui_effort_selector(
-        f"http://{validation_ui_host}:{env['CHAT_UI_PORT']}"
-    )
+    _provision_chat_ui_effort_selector(f"http://{validation_ui_host}:{env['CHAT_UI_PORT']}")
     print("\nEnvironment is ready.")
     print(f"OpenAI API: http://{advertised_api_host}:{env['API_PORT']}/v1")
     print(f"Chat UI:    http://{ui_host}:{env['CHAT_UI_PORT']} (no authentication)")
