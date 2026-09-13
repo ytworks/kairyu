@@ -95,7 +95,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble validates native Requirement high-floor/max behavior and all four public effort contracts. Typed orchestration context fixes an image marker merged into user text; bounded image integration and serving measurements remain. Per owner correction, model-answer quality and audit accuracy are not implementation completion gates; stop extra semantic reviews/retries and reuse applicable completed evidence. Details: V41E-D12/D13, MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble validates native Requirement high-floor/max behavior, all four public effort contracts and typed native-image integration. The generic serving matrix completes all 128 measured requests; coding/paired baselines and final idle/readiness/metadata remain. Per owner correction, model-answer quality and audit accuracy are not implementation completion gates; reuse applicable completed evidence. Details: V41E-D12/D13, MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log

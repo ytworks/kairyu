@@ -2,7 +2,9 @@
 
 GPU validation is **in progress** after the owner released the host on
 2026-09-13. The initial GPU-resident Engram candidate failed memory profiling;
-the current trial uses the existing Engram CPU-offload option.
+the deployed configuration uses the existing Engram CPU-offload option.
+Startup and native contract evidence is recorded in [MEASUREMENTS.md](MEASUREMENTS.md);
+the generic serving matrix is complete and coding measurements remain in progress.
 The sibling eight-GPU example's measurements do not establish correctness,
 memory fit or performance for this topology.
 
@@ -90,8 +92,10 @@ Inspected files, relative to `/usr/local/lib/python3.12/dist-packages/`:
 `common/engram.py` lines 704–719 compute `num_shards = tp_size * dp_size`,
 ceil-divide hash columns and reject ranks left without heads. `nvidia/model.py`
 lines 158–166 enable sequence parallelism for PP1 + EP + TP>1 with DP>1.
-These are static constraints; collectives, sequence parallelism and SM120
-Marlin with this six-rank shape still need GPU validation.
+These are static constraints. Separate GPU evidence records full-model native
+execution on this topology and the selected patched child; the SP diagnostic
+exercises NCCL fallback, not the custom communication path. See MEASUREMENTS
+for the exact numerical and execution scope.
 
 ## Native requirements request contract
 
@@ -120,8 +124,10 @@ The later V41E-D10 amendment preserves API max instead of forcing it down to
 high. Fresh native replay at `f737e0b0` passes all 14 high-floor cases: five max
 and nine high, uniquely correlated with their role-hook records. All returned
 logprobs are finite and all answers complete. The existing total and thinking
-token reservations remain independent of effort. Composed effort/quality and
-performance are separate gates; see MEASUREMENTS for exact hashes.
+token reservations remain independent of effort. All four composed effort
+contracts now have separate GPU evidence; public serving measurements remain
+incomplete. Model-quality diagnostics are not completion gates (V41E-D13).
+See MEASUREMENTS for exact hashes.
 
 The pinned Qwen v0.23 protocol forwards `thinking_token_budget` to sampling
 (protocol lines 231/643). Its reasoning parser uses token IDs 248068/248069
@@ -132,6 +138,12 @@ all three peers below their caps; the initial unrestricted answer that spent
 all 4096 tokens in reasoning remains preserved in MEASUREMENTS.
 
 ## Required GPU follow-up
+
+This procedure describes reproduction on a fresh machine. The current campaign
+reuses the applicable completed native, effort, cancellation and image-wiring
+checks under V41E-D13. Only the default coding measurements and paired baselines, all-worker
+idle reading, final metadata-only normal restart/readiness and CI remain;
+the steps below are not an instruction to repeat completed checks.
 
 On a machine with all eight GPUs explicitly available, verify the checkpoint,
 image and config hashes first. Start DeepSeek alone on GPUs 0–5 and capture

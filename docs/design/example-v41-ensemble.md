@@ -1,10 +1,11 @@
 # V4.1 ensemble example
 
-Status: GPU validation in progress (2026-09-13). Native high-floor and all four
-composed effort contracts pass. V41E-D12 fixes an image-reference rendering
-defect; its bounded integration check and public serving measurements remain.
-Per the owner's correction, V41E-D13 limits completion to implementation behavior;
-model-answer quality is not a completion gate. Earlier evidence remains preserved.
+Status: GPU validation in progress (2026-09-13). Native high-floor, all four
+composed effort contracts and the bounded V41E-D12 image integration pass.
+The generic serving matrix completes all 128 measured requests; coding and its
+paired native baselines are running. Final idle/readiness and metadata/CI remain.
+V41E-D13 limits completion to implementation behavior; model-answer quality is
+not a completion gate. Earlier evidence remains preserved in MEASUREMENTS.
 
 ## V41E-D1 — Separate six-plus-two deployment
 

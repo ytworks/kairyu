@@ -15,8 +15,10 @@ six GPUs to DeepSeek-V4.1-Flash and two GPUs to Qwen3.8-27B-FP8. It ports
 Requirement extraction from PR #595 (`31f1adc`) onto DeepSeek with a high
 minimum effort: API max is preserved, while omitted/low/high use high.
 The original example configuration is preserved. Shared Kairyu changes add an
-opt-in paragraph separator and correct stream cleanup after client disconnects;
-see V41E-D5/D6 in the design and the regression evidence in MEASUREMENTS.
+opt-in paragraph separator, correct stream cleanup after client disconnects,
+and keep verbatim user text separate from typed image references in L3
+orchestration context. Native images are still forwarded directly. See
+V41E-D5/D6/D12 in the design and the regression evidence in MEASUREMENTS.
 
 ## Topology and behavior
 
@@ -35,9 +37,10 @@ DeepSeek pools select thinking/non-thinking modes against that same endpoint.
 Qwen placement retains prefix indexing and the zero queue-depth overload valve.
 
 TP6 is invalid for 64 attention heads. The selected TP2/DP3/EP6 configuration
-passes static divisibility/source checks, but memory fit, collectives, kernels
-and numerical behavior require hardware validation. The initial GPU-resident
-Engram configuration failed memory profiling; the current candidate uses the
+has measured startup, native contract and kernel evidence at the revisions
+recorded in MEASUREMENTS; the generic serving matrix is complete and coding
+measurements remain in progress. The initial GPU-resident Engram configuration failed memory
+profiling; the deployed configuration uses the
 pinned runtime's Engram CPU offload (about 189 GiB of host RAM for the tables).
 The measured host has 1 TiB RAM; reserve table memory in addition to the models'
 loading/serving overhead and other processes. DSpark is disabled because its
@@ -177,6 +180,13 @@ tested images, transfer them with `docker image save` / `docker image load` and
 confirm `docker image inspect --format '{{.Id}}'` against both pinned specs.
 
 ## GPU validation: execution order
+
+This is a fresh-machine reproduction procedure. Under V41E-D13, the current
+campaign reuses completed native, four-effort, cancellation and bounded image
+integration evidence where the relevant implementation is unchanged. Its
+remaining work is the default coding measurements and paired baselines, an
+all-worker idle reading, final metadata-only normal restart/readiness and CI; the procedure
+below does not add more current-campaign tests or model-quality conditions.
 
 1. **Inventory/provenance.** Record checkout SHA, `git status`, `nvidia-smi -q`,
    `nvidia-smi topo -m`, driver/Docker versions, model attestations, image IDs and

@@ -4,9 +4,9 @@ Status: **GPU validation in progress.**
 
 Current scope (V41E-D13): implementation behavior and existing serving
 measurements. Model-answer quality, checklist completeness and audit accuracy
-are not implementation completion gates. The remaining work is a bounded
-image-rendering integration check, the public serving measurements, applicable
-lifecycle checks and final documentation/CI. Reuse the completed effort/native
+are not implementation completion gates. The image-rendering integration check
+and generic serving matrix are complete; remaining work is the coding serving
+matrix, applicable lifecycle checks and final documentation/CI. Reuse the completed effort/native
 evidence when the relevant implementation is unchanged.
 
 The user released all eight GPUs on 2026-09-13 (JST). GPU trials are recorded
@@ -921,6 +921,101 @@ idle. `operator-user-scope-stop.json` and `user-scope-stop/` retain that record.
 Partial artifacts remain; completing those controls is **not a remaining task**.
 The previous campaign's performance steps had not started. Do not launch the
 prepared continuation script that requires semantic audit-control approval.
+
+## Current deployment and image integration
+
+The normally deployed source is
+`53ec3720ccef72e0fcc1630ec0958187bfb90dc2`, with served configuration
+`5b85e296ca6077d95af7f701b48c846b63f61023b851156d17a8adb485f39528`.
+The Kairyu image is
+`sha256:9dfcf165c39a14d4add3e6d8acdcd5c47a7023c77162b48861232f0a77dcf45c`.
+DeepSeek remains pinned to `18dad57d` and both Qwen workers to `6d8429e3`, with
+their full image IDs recorded in `20260913-contract-startup/runtime.json`.
+Normal startup exits zero at **2026-09-13 05:26:58.945656 UTC** and records
+`compaction_secret_preserved: true`; that field concerns the compaction key,
+not an assertion that every private-state file was compared.
+
+The single unchanged image request in `20260913-contract-image` completes in
+**429.276569 seconds**, from 05:28:12.490734 to **05:35:21.767301 UTC** on
+2026-09-13. It returns HTTP 200, SSE `[DONE]` and `finish_reason=stop`.
+Serialization checks preserve the original text parts and native image detail,
+keep one image reference at index 0, and omit the duplicate flattened latest-user
+view. The exact native root message hashes match one hook inside each stage's
+UTC window:
+
+- Requirement: `ffeb6d681f804a9db5340bf477c7bd68abecd16d55c84f31fdabab800f8695e2`.
+- Draft: `63ed4efd09af88a774dad235651ed327c5d7fcc6bb137d3dd4e7188e7a99083d`.
+
+The saved trace records 11 distinct successful nodes: profile judge, router,
+head, draft, requirements, policies, critique, both answers, synthesis and audit.
+There are 13 successful events: synthesis and audit each execute attempts 0
+and 1, recording one traversal of the existing L2 retry path. This is an
+execution count, with no assessment of generated answer text or audit accuracy.
+The four-service runtime attestation is identical before and after the request.
+This closes the bounded transport, typed-image serialization and native/DAG
+wiring check; it adds no model-answer quality criterion.
+
+Earlier native, all-four-effort and cancellation evidence is reused at its
+recorded revisions where the relevant implementation is unchanged. The image
+boundary fix does not change the L2 prompts/effort policies or native image pins.
+At this update, the standard `20260913-contract-generic` serving measurement is
+**COMPLETED** with exit code 0 and `20260913-contract-coding` is **RUNNING** in
+the serial `20260913-contract-serving` driver. Coding is not yet complete.
+
+Paths below are relative to the persistent verification-results root. The image
+manifest binds its serialization/result records, native hook metadata and saved
+request/response/trace artifacts; this update reads no generated output text.
+
+| Evidence file | SHA256 |
+| --- | --- |
+| `20260913-contract-startup/startup-result.json` | `47c3f32e57eb3d97bac889d6d1f6f91e699b1343855259d6ec2a1233e21a0ee1` |
+| `20260913-contract-startup/runtime.json` | `cd81dbd71d52b838d05cb3cf2a59c5edc7a388c816a3b0aaf97ee76b07f86265` |
+| `20260913-contract-image/manifest.json` | `d1c450c7ce2a0bafa9c07daf4baf6d52b0fd885b74ac1dcd0206f2cc37a8d7d1` |
+| `20260913-contract-generic/run.json` | `84a8ed01d32311f6dfb7c2a55ab587f827fade09d33803d840d5cb6bbea293bb` |
+| `20260913-contract-serving/serving-auto-max-runtime-after.json` | `62512e227ec30a877f754f4e9fe07265978a9c59b7195b19c3a3b6eebafd8f5b` |
+| `20260913-contract-generic/serving-auto-max/serving-c1/2026-09-13T053537.466457Z-serving.json` | `d02b6ca25a48334b13ad090b37030cabe8fec7d6a9b785702a4ca067e89ab31e` |
+| `20260913-contract-generic/serving-auto-max/serving-c8/2026-09-13T053940.002623Z-serving.json` | `d71e20336c79bff0bb3d6fd908923b48df61c53e87fdf21c3f3c5973c790bd67` |
+| `20260913-contract-generic/serving-auto-max/serving-c16/2026-09-13T060453.691675Z-serving.json` | `45fad41fb4cef4c54301621c2ce96bb60fb9dd3ae5f1befef7eecb8e1612bbcc` |
+| `20260913-contract-generic/serving-auto-max/serving-c32/2026-09-13T061437.879706Z-serving.json` | `ac5b75838b94f6b12bcc8bb92c7921f98eaf078ae2051731acbbd5e96086c891` |
+
+### Default serving matrix: completed rows
+
+The following matrix uses the source, configuration and API image above.
+`20260913-contract-generic` completes at **2026-09-13 06:16:01.902402 UTC**
+with exit code 0: 128/128 measured requests and 128/128 valid traces across
+c1/8/16/32, plus a separate successful four-request warmup. Its post-generic
+runtime snapshot confirms the clean source, configuration and all four service
+image IDs. The `20260913-contract-coding` matrix remains in progress; its completion
+and TTFT comparison are not yet claimed.
+
+Visible TTFT is time to the first nonempty public content delta, not the first
+reasoning token. Public tokens are the retokenized visible output; API completion
+usage can include internal stages and reasoning, so their difference is not a
+reasoning-token count. Both throughput columns use the row's wall time. E2E is
+per-request latency. These measurements do not assess generated answer quality.
+
+| Workload / concurrency | Successful requests | Visible TTFT p50 / p99 (ms) | E2E p50 (ms) | Wall (s) | Public tokens / tok/s | API completion tokens / tok/s | Observed routes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Generic c1 | 32/32 | 2249.11 / 2290.20 | 7688.28 | 242.071424 | 7519 / 31.06 | 7672 / 31.69 | `qwen_direct`: 32 |
+| Generic c8 | 32/32 | 9813.41 / 26640.72 | 28600.93 | 1513.256295 | 8572 / 5.66 | 79833 / 52.76 | `qwen_direct`: 27; `primary`: 5 |
+| Generic c16 | 32/32 | 12425.43 / 47253.41 | 58226.53 | 583.747396 | 7700 / 13.19 | 11761 / 20.15 | `qwen_direct`: 29; `primary`: 3 |
+| Generic c32 | 32/32 | 56110.80 / 73465.71 | 75493.72 | 83.831745 | 8163 / 97.37 | 8324 / 99.29 | `qwen_direct`: 32 |
+| Coding c1 | Incomplete | — | — | — | — | — | — |
+| Coding c8 | Incomplete | — | — | — | — | — | — |
+| Coding c16 | Incomplete | — | — | — | — | — | — |
+| Coding c32 | Incomplete | — | — | — | — | — | — |
+
+At c1 and c32 all profile-judge events succeed. There are five failed judge
+events at c8 and three at c16; all eight requests use `primary`. The other 120
+requests use `qwen_direct`. At c8, route-specific visible TTFT p50 is 17583.82 ms
+for `primary` and 8231.80 ms for `qwen_direct`; at c16 it is 11960.32 ms and
+12435.11 ms respectively. The saved v2 samples do not record the error type or
+fallback reason.
+
+The result files above retain each row's summary and samples; their request
+counts, token totals and sample-derived TTFT p50 agree. The existing coding
+comparison continues to require its own fresh paired native baseline at each
+concurrency; no sibling or earlier baseline is substituted.
 
 ## Next evidence record
 
