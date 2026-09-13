@@ -1,10 +1,10 @@
 # Six-GPU V4.1 deployment investigation
 
-GPU validation is **in progress** after the owner released the host on
-2026-09-13. The initial GPU-resident Engram candidate failed memory profiling;
+The recorded GPU implementation checks and serving measurements are **complete**
+on 2026-09-13. Final metadata-only normal startup/readiness is pending. The initial GPU-resident Engram candidate failed memory profiling;
 the deployed configuration uses the existing Engram CPU-offload option.
 Startup and native contract evidence is recorded in [MEASUREMENTS.md](MEASUREMENTS.md);
-the generic serving matrix is complete and coding measurements remain in progress.
+both default serving matrices and the all-worker idle check are complete.
 The sibling eight-GPU example's measurements do not establish correctness,
 memory fit or performance for this topology.
 
@@ -125,8 +125,7 @@ high. Fresh native replay at `f737e0b0` passes all 14 high-floor cases: five max
 and nine high, uniquely correlated with their role-hook records. All returned
 logprobs are finite and all answers complete. The existing total and thinking
 token reservations remain independent of effort. All four composed effort
-contracts now have separate GPU evidence; public serving measurements remain
-incomplete. Model-quality diagnostics are not completion gates (V41E-D13).
+contracts and the default public serving measurements have recorded GPU evidence. Model-quality diagnostics are not completion gates (V41E-D13).
 See MEASUREMENTS for exact hashes.
 
 The pinned Qwen v0.23 protocol forwards `thinking_token_budget` to sampling
@@ -141,8 +140,8 @@ all 4096 tokens in reasoning remains preserved in MEASUREMENTS.
 
 This procedure describes reproduction on a fresh machine. The current campaign
 reuses the applicable completed native, effort, cancellation and image-wiring
-checks under V41E-D13. Only the default coding measurements and paired baselines, all-worker
-idle reading, final metadata-only normal restart/readiness and CI remain;
+checks under V41E-D13. The default serving measurements and all-worker idle
+check are complete; only final metadata-only normal restart/readiness and CI remain;
 the steps below are not an instruction to repeat completed checks.
 
 On a machine with all eight GPUs explicitly available, verify the checkpoint,

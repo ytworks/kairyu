@@ -1,13 +1,14 @@
 # V4.1 ensemble evidence
 
-Status: **GPU validation in progress.**
+Status: **GPU measurements complete; final metadata, normal readiness and CI pending.**
 
 Current scope (V41E-D13): implementation behavior and existing serving
 measurements. Model-answer quality, checklist completeness and audit accuracy
 are not implementation completion gates. The image-rendering integration check
-and generic serving matrix are complete; remaining work is the coding serving
-matrix, applicable lifecycle checks and final documentation/CI. Reuse the completed effort/native
-evidence when the relevant implementation is unchanged.
+and both default serving matrices are complete. Final metadata, normal
+restart/readiness and documentation/CI remain. Completed native, four-effort and
+cancellation evidence is reused where the relevant implementation is unchanged;
+the stopped extra quality controls are not unfinished implementation work.
 
 The user released all eight GPUs on 2026-09-13 (JST). GPU trials are recorded
 below. The original CPU-only implementation and the sibling TP8 results do not
@@ -958,9 +959,10 @@ wiring check; it adds no model-answer quality criterion.
 Earlier native, all-four-effort and cancellation evidence is reused at its
 recorded revisions where the relevant implementation is unchanged. The image
 boundary fix does not change the L2 prompts/effort policies or native image pins.
-At this update, the standard `20260913-contract-generic` serving measurement is
-**COMPLETED** with exit code 0 and `20260913-contract-coding` is **RUNNING** in
-the serial `20260913-contract-serving` driver. Coding is not yet complete.
+The standard `20260913-contract-generic` and `20260913-contract-coding`
+measurements are **COMPLETED** with exit code 0 in the serial
+`20260913-contract-serving` driver. Final deployment metadata, normal
+restart/readiness and CI are recorded separately from these completed measurements.
 
 Paths below are relative to the persistent verification-results root. The image
 manifest binds its serialization/result records, native hook metadata and saved
@@ -972,21 +974,46 @@ request/response/trace artifacts; this update reads no generated output text.
 | `20260913-contract-startup/runtime.json` | `cd81dbd71d52b838d05cb3cf2a59c5edc7a388c816a3b0aaf97ee76b07f86265` |
 | `20260913-contract-image/manifest.json` | `d1c450c7ce2a0bafa9c07daf4baf6d52b0fd885b74ac1dcd0206f2cc37a8d7d1` |
 | `20260913-contract-generic/run.json` | `84a8ed01d32311f6dfb7c2a55ab587f827fade09d33803d840d5cb6bbea293bb` |
+| `20260913-contract-coding/run.json` | `d4d2fbfeeb2af1cf8abd2de18edc6473691131d3c86bca45db8848b296a85504` |
+| `20260913-contract-campaign/result.json` | `74396475105103234a7527d6b1dc5bdd511d617d220bead19f4bbd09d8c27cb1` |
+| `20260913-contract-campaign/steps.json` | `a38d1e2b1b381e77ff8abcd7a09ec56dbf9841b51533b950e4930199d0cefc67` |
+| `20260913-contract-serving/driver-result.json` | `e24959200a4ebc61561bf0c23069cd4592eba2ffbb0a35e36cde4b6435e957d0` |
+| `20260913-contract-serving/runtime-after.json` | `3960af0f6cb1466403762d0c86b0b028d990cc0b1a93e77632922e4a64d3d6ae` |
 | `20260913-contract-serving/serving-auto-max-runtime-after.json` | `62512e227ec30a877f754f4e9fe07265978a9c59b7195b19c3a3b6eebafd8f5b` |
+| `20260913-contract-serving/serving-auto-max-coding-runtime-after.json` | `507550076fcb5467f17999314498fe1a4f379f016356988dffadec7c82abb991` |
+| `20260913-contract-generic/serving-auto-max/warmup/2026-09-13T053522.434693Z-serving.json` | `d4fdb576a73742b61b308232616ce6c9ef4d88fbb9d87af1f08ad6c31d1660f7` |
+| `20260913-contract-coding/serving-auto-max-coding/warmup/2026-09-13T061602.442322Z-serving.json` | `cde843e6309e8081878e7156ef4ec7d02bee11f7a8a92e3b24bbceff5fd89bec` |
 | `20260913-contract-generic/serving-auto-max/serving-c1/2026-09-13T053537.466457Z-serving.json` | `d02b6ca25a48334b13ad090b37030cabe8fec7d6a9b785702a4ca067e89ab31e` |
 | `20260913-contract-generic/serving-auto-max/serving-c8/2026-09-13T053940.002623Z-serving.json` | `d71e20336c79bff0bb3d6fd908923b48df61c53e87fdf21c3f3c5973c790bd67` |
 | `20260913-contract-generic/serving-auto-max/serving-c16/2026-09-13T060453.691675Z-serving.json` | `45fad41fb4cef4c54301621c2ce96bb60fb9dd3ae5f1befef7eecb8e1612bbcc` |
 | `20260913-contract-generic/serving-auto-max/serving-c32/2026-09-13T061437.879706Z-serving.json` | `ac5b75838b94f6b12bcc8bb92c7921f98eaf078ae2051731acbbd5e96086c891` |
+| `20260913-contract-coding/serving-auto-max-coding/coding-c1/2026-09-13T062106.929681Z-serving.json` | `efb16975ff6b1e50ea85a6b8e824a584189e08b059c1b07d3a17f4df2345e830` |
+| `20260913-contract-coding/serving-auto-max-coding/deepseek-direct-c1/2026-09-13T070219.269033Z-serving.json` | `38fb283c0ed9802fed649975f8da2b10a54d2eb164642f1ba86fb11f888546ba` |
+| `20260913-contract-coding/serving-auto-max-coding/coding-c8/2026-09-13T070455.920670Z-serving.json` | `441f9b4cf470e4cc6db702baea5706f5348b4033ecb80a5d6011f20d298f843c` |
+| `20260913-contract-coding/serving-auto-max-coding/deepseek-direct-c8/2026-09-13T071254.003601Z-serving.json` | `4649eaac84046038ee271050b15744cde44ada149a44b9f3b054785c02c3743d` |
+| `20260913-contract-coding/serving-auto-max-coding/coding-c16/2026-09-13T071327.172286Z-serving.json` | `b30b48725f509069f34b281ebadafb2bd874ab495955a0e35fb5def3ea6ab25d` |
+| `20260913-contract-coding/serving-auto-max-coding/deepseek-direct-c16/2026-09-13T072018.390843Z-serving.json` | `be5c95548e327d24b69c4e9599b1941bebe6239ab120c78fd1191cc8b8d7c708` |
+| `20260913-contract-coding/serving-auto-max-coding/coding-c32/2026-09-13T072043.254511Z-serving.json` | `4c6eca2f2e9f0c665d5ddfcfa0235d3665223dee45914ad8ee97c8b6adc5713e` |
+| `20260913-contract-coding/serving-auto-max-coding/deepseek-direct-c32/2026-09-13T072629.263588Z-serving.json` | `f5705fec1e9249e866cc5ee9b8c714872b9902f629d5beb02295a12a4c9852bc` |
+| `20260913-contract-coding/serving-auto-max-coding/ttft-gate.json` | `3f974d73e6ab426d0eaeb4258ef59b3ada9851e42ffadcabec99562785d944e9` |
 
 ### Default serving matrix: completed rows
 
 The following matrix uses the source, configuration and API image above.
 `20260913-contract-generic` completes at **2026-09-13 06:16:01.902402 UTC**
-with exit code 0: 128/128 measured requests and 128/128 valid traces across
-c1/8/16/32, plus a separate successful four-request warmup. Its post-generic
-runtime snapshot confirms the clean source, configuration and all four service
-image IDs. The `20260913-contract-coding` matrix remains in progress; its completion
-and TTFT comparison are not yet claimed.
+with exit code 0. `20260913-contract-coding` completes at
+**2026-09-13 07:26:46.463435 UTC**, also with exit code 0. Both cover c1/8/16/32.
+The original samples account for **392/392 successful standard requests**:
+128 generic public, 128 coding public, 128 fresh paired native coding requests,
+and two four-request warmups. All 256 measured public requests have valid traces.
+This count excludes the separate image integration request, internal DAG calls,
+tokenization and earlier reused probes.
+
+The serving driver completes both steps with code 0 at
+**07:26:46.662884 UTC**. Its final runtime snapshot retains the clean measured
+source, configuration and four service image IDs, matching both run manifests.
+The enclosing `20260913-contract-campaign` records `passed: true` at
+**07:26:46.676527 UTC**, with code 0 for both image integration and serving.
 
 Visible TTFT is time to the first nonempty public content delta, not the first
 reasoning token. Public tokens are the retokenized visible output; API completion
@@ -1000,22 +1027,74 @@ per-request latency. These measurements do not assess generated answer quality.
 | Generic c8 | 32/32 | 9813.41 / 26640.72 | 28600.93 | 1513.256295 | 8572 / 5.66 | 79833 / 52.76 | `qwen_direct`: 27; `primary`: 5 |
 | Generic c16 | 32/32 | 12425.43 / 47253.41 | 58226.53 | 583.747396 | 7700 / 13.19 | 11761 / 20.15 | `qwen_direct`: 29; `primary`: 3 |
 | Generic c32 | 32/32 | 56110.80 / 73465.71 | 75493.72 | 83.831745 | 8163 / 97.37 | 8324 / 99.29 | `qwen_direct`: 32 |
-| Coding c1 | Incomplete | — | — | — | — | — | — |
-| Coding c8 | Incomplete | — | — | — | — | — | — |
-| Coding c16 | Incomplete | — | — | — | — | — | — |
-| Coding c32 | Incomplete | — | — | — | — | — | — |
+| Coding c1 | 32/32 | 31531.93 / 217583.74 | 44050.11 | 2471.828703 | 14956 / 6.05 | 111495 / 45.11 | `qwen_think_medium`: 32 |
+| Coding c8 | 32/32 | 48555.85 / 359195.55 | 75073.34 | 477.636950 | 18941 / 39.66 | 131639 / 275.60 | `qwen_think_medium`: 32 |
+| Coding c16 | 32/32 | 34824.96 / 405049.30 | 46426.23 | 410.761588 | 15493 / 37.72 | 120850 / 294.21 | `qwen_think_medium`: 32 |
+| Coding c32 | 32/32 | 48888.91 / 340709.90 | 59881.22 | 345.592656 | 16051 / 46.44 | 96131 / 278.16 | `qwen_think_medium`: 32 |
 
-At c1 and c32 all profile-judge events succeed. There are five failed judge
-events at c8 and three at c16; all eight requests use `primary`. The other 120
-requests use `qwen_direct`. At c8, route-specific visible TTFT p50 is 17583.82 ms
-for `primary` and 8231.80 ms for `qwen_direct`; at c16 it is 11960.32 ms and
+In the generic matrix, all profile-judge events succeed at c1 and c32. There are
+five failed judge events at c8 and three at c16; all eight requests use `primary`.
+The other 120 requests use `qwen_direct`. At c8, route-specific visible TTFT p50
+is 17583.82 ms for `primary` and 8231.80 ms for `qwen_direct`; at c16 it is 11960.32 ms and
 12435.11 ms respectively. The saved v2 samples do not record the error type or
 fallback reason.
+
+Coding c1 has 32/32 successful public requests and 32/32 valid traces. All 32
+profile-judge events succeed and select `qwen_think_medium`. Its fresh paired
+DeepSeek native c1 baseline also completes 32/32 requests, with finite positive
+TTFT in every sample: p50/p99 259.04/292.93 ms, E2E p50 4607.22 ms and wall
+156.316967 s. Native API completion usage is 10297 tokens, or 65.87 tok/s;
+public output is not separately retokenized for this baseline. The same-run
+baseline and public records match the configuration and all four image IDs above.
+
+Coding c8 likewise has 32/32 successful public requests and 32/32 valid traces,
+with all 32 profile-judge events succeeding and selecting `qwen_think_medium`.
+Its fresh paired native c8 baseline completes 32/32 requests with finite positive
+TTFT in every sample: p50/p99 273.02/1213.36 ms, E2E p50 7964.38 ms and wall
+32.840121 s. Native API completion usage is 10605 tokens, or 322.93 tok/s.
+The same run/concurrency, configuration and four service image IDs are confirmed;
+the observed source remains `53ec3720ccef72e0fcc1630ec0958187bfb90dc2`.
+
+Coding c16 has 32/32 successful public requests and 32/32 valid traces, with all
+32 profile-judge events succeeding and selecting `qwen_think_medium`. Its fresh
+paired native c16 baseline completes 32/32 requests with finite positive TTFT in
+every sample: p50/p99 301.51/2220.61 ms, E2E p50 9040.77 ms and wall 24.569421 s.
+Native API completion usage is 10685 tokens, or 434.89 tok/s. The same
+run/concurrency, configuration, four image IDs and observed source are confirmed.
+
+Coding c32 has 32/32 successful public requests and 32/32 valid traces, with all
+32 profile-judge events succeeding and selecting `qwen_think_medium`. Its fresh
+paired native c32 baseline completes 32/32 requests with finite positive TTFT in
+every sample: p50/p99 2526.46/4048.09 ms, E2E p50 12951.36 ms and wall 17.076237 s.
+Native API completion usage is 10552 tokens, or 617.93 tok/s. Across the complete
+coding matrix, all 128 public requests select `qwen_think_medium`, with zero
+failed profile-judge events.
+
+All four entries in
+`20260913-contract-coding/serving-auto-max-coding/ttft-gate.json` record
+`status=not_applicable`, `passed=null`, `denominator_source=paired_direct` and
+baseline p50 259.04 ms, 273.02 ms, 301.51 ms and 2526.46 ms for c1/8/16/32.
+Each same-run, same-concurrency DeepSeek baseline succeeds on all 32 requests
+with finite positive TTFT. These baselines and exclusively ungated
+`qwen_think_medium` routes establish the four N/A results; they do not establish
+that the primary route meets the TTFT limit. The saved gate and independently
+recomputed route/baseline conditions agree.
 
 The result files above retain each row's summary and samples; their request
 counts, token totals and sample-derived TTFT p50 agree. The existing coding
 comparison continues to require its own fresh paired native baseline at each
 concurrency; no sibling or earlier baseline is substituted.
+
+### Post-measurement worker idle
+
+`20260913-contract-final-idle/result.json` records `passed: true` at
+**2026-09-13 07:28:09.443634 UTC**, on the same measured source/configuration.
+Its SHA256 is `7b63e7875cfac926edf7b2cdb1c1760496605138e616cdb4d64e3460fe11a55e`.
+The existing `wait_idle` check uses a one-second stability requirement and saves
+three snapshots: running and waiting counts are zero for DeepSeek engine IDs
+0/1/2 and engine 0 in each Qwen worker. This is a read-only worker-idle check,
+with zero additional generations and zero service changes. Final metadata and
+normal restart/readiness are separate remaining records.
 
 ## Next evidence record
 

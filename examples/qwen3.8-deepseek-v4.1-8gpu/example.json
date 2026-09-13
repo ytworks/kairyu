@@ -300,7 +300,7 @@
     }
   },
   "validation": {
-    "gpu_status": "in_progress",
+    "gpu_status": "passed",
     "gpu_tests_deferred": false,
     "source_image_inspected": "sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359",
     "topology": "TP2 x internal DP3, EP6, PP1; one physical DeepSeek service",
@@ -311,9 +311,11 @@
       "DSpark disabled: 128 draft experts do not divide EP6"
     ],
     "limitations": [
-      "GPU-resident Engram OOM is avoided by CPU offload; masked sparse-KV NaN fix undergoing native and composed correctness gates",
+      "GPU-resident Engram exceeds this topology's startup memory envelope; the measured configuration requires Engram CPU offload (about 189 GiB of host RAM for the tables).",
       "TP8 sibling measurements do not validate this topology",
-      "PP3 is not selected: cross-layer KV/candidate cache groups constrain splits; stage memory balance unverified"
+      "PP3 is not selected: cross-layer KV/candidate cache groups constrain splits; stage memory balance unverified",
+      "Native long-context retrieval does not establish comparable public-ensemble capacity; near-limit ensemble requests remain unmeasured.",
+      "GPU validation covers the recorded implementation contracts and serving measurements; it does not guarantee model-generated requirement, answer or audit quality."
     ],
     "source_files_sha256": {
       "vllm/models/deepseek_v4_1/nvidia/model.py": "530ed24c8fd2e9daeb5c3d340ef52246618786f19eace8ec217c8d3bdf271110",

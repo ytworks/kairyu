@@ -1,6 +1,8 @@
 # Qwen3.8 + DeepSeek V4.1 ensemble on eight GPUs
 
-**GPU validation is in progress; see the measured results and remaining checks below.**
+**GPU implementation checks and the default serving measurements are complete.**
+
+Final metadata deployment/readiness and CI are being completed; see MEASUREMENTS.
 
 Validation covers implementation behavior and the recorded serving measurements.
 It does not guarantee the quality of generated requirements, answers or audit
@@ -38,8 +40,7 @@ Qwen placement retains prefix indexing and the zero queue-depth overload valve.
 
 TP6 is invalid for 64 attention heads. The selected TP2/DP3/EP6 configuration
 has measured startup, native contract and kernel evidence at the revisions
-recorded in MEASUREMENTS; the generic serving matrix is complete and coding
-measurements remain in progress. The initial GPU-resident Engram configuration failed memory
+recorded in MEASUREMENTS, including both completed default serving matrices. The initial GPU-resident Engram configuration failed memory
 profiling; the deployed configuration uses the
 pinned runtime's Engram CPU offload (about 189 GiB of host RAM for the tables).
 The measured host has 1 TiB RAM; reserve table memory in addition to the models'
@@ -184,9 +185,9 @@ confirm `docker image inspect --format '{{.Id}}'` against both pinned specs.
 This is a fresh-machine reproduction procedure. Under V41E-D13, the current
 campaign reuses completed native, four-effort, cancellation and bounded image
 integration evidence where the relevant implementation is unchanged. Its
-remaining work is the default coding measurements and paired baselines, an
-all-worker idle reading, final metadata-only normal restart/readiness and CI; the procedure
-below does not add more current-campaign tests or model-quality conditions.
+serving measurements and all-worker idle check are complete. Only final
+metadata deployment/readiness and CI remain; the procedure below does not add
+more current-campaign tests or model-quality conditions.
 
 1. **Inventory/provenance.** Record checkout SHA, `git status`, `nvidia-smi -q`,
    `nvidia-smi topo -m`, driver/Docker versions, model attestations, image IDs and
@@ -229,27 +230,35 @@ below does not add more current-campaign tests or model-quality conditions.
    Requirement stage with the DeepSeek hook log and verify high for
    omitted/low/high and max for API max.
    Verify that other DeepSeek thinking roles inherit effort and Qwen stays medium.
-5. **Composed protocol checks.** Run the commands below. Requirement
-   diagnostics run one three-case pass by default and report protocol contracts
-   separately from heuristic/model judgments. Inspect failed/exhausted audits and
-   full final answers as diagnostics; an exit code of zero is not independent
-   factual validation. Semantic diagnostics do not create additional completion
-   gates or require repeated tuning until a model's answers satisfy a reviewer.
-   If the judge does not select ensemble, the ensemble-specific check should fail;
-   record route coverage rather than declaring unexercised roles tested.
-6. **Capacity/recovery/performance.** Validate clean restart and key persistence,
-   context/retrieval at 8K/32K/128K/256K plus the claimed DS-only 1M envelope,
-   concurrency 1/8/16/32, cancellation resource release and sustained operation.
-   Only then investigate speculation or tuning, one recorded variable at a time.
+5. **Composed implementation contracts.** Use the existing `gpu_smoke.py
+   --suite l2`, its effort matrix and matching native hook records to check
+   observed routes, Requirement dependencies and effort mapping. Keep image
+   checks limited to typed serialization, native forwarding and API transport.
+   Record route coverage when the judge chooses a different profile; unexercised
+   roles are not verified. Reuse the applicable completed evidence in the current
+   campaign; model-answer review is not a prerequisite.
+6. **Deployment and serving measurements.** Record clean normal restart/readiness
+   and compaction-key persistence. The two standard serving commands below use
+   concurrency 1/8/16/32, with fresh paired native baselines for coding. Record
+   all-worker idle after measurements and reuse applicable cancellation evidence.
 
 ```sh
-./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh requirements-quality --no-start
 ./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh serving-auto-max --no-start
 ./examples/qwen3.8-deepseek-v4.1-8gpu/verify.sh serving-auto-max-coding --no-start
 ```
 
+`requirements-quality` is an optional diagnostic command. Its default three-case
+pass reports protocol checks separately from heuristic/model judgments. It is
+not part of the standard execution above or a completion prerequisite under
+V41E-D13, and does not require repeated model reviews or prompt tuning.
+
+The native capacity and cancellation tools below reproduce separately recorded
+evidence when needed on another machine. The 8K/32K/128K/256K and DS-only near-1M
+retrieval cases are selectable native measurements, not additional requirements
+for the current campaign or evidence of composed long-context behavior. No
+sustained-operation campaign, speculation experiment or tuning is required here.
 The native probes do not change running services. Choose a new output directory
-for each invocation; retain failures before retrying:
+for each selected invocation; retain any failure artifacts:
 
 ```sh
 uv run python examples/qwen3.8-deepseek-v4.1-8gpu/gpu_smoke.py \

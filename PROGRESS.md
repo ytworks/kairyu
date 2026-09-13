@@ -95,10 +95,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble validates native Requirement high-floor/max behavior, all four public effort contracts and typed native-image integration. The generic serving matrix completes all 128 measured requests; coding/paired baselines and final idle/readiness/metadata remain. Per owner correction, model-answer quality and audit accuracy are not implementation completion gates; reuse applicable completed evidence. Details: V41E-D12/D13, MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble validates native Requirement high-floor/max behavior, all four public effort contracts and typed native-image integration. Both public matrices (128 requests each), fresh paired native baselines (128) and all-worker idle complete; final metadata deployment/readiness and CI remain. Model-answer quality and audit accuracy are not implementation completion gates. Details: V41E-D12/D13, MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [progress] Complete scoped V4.1 serving measurements
+- What: complete both 128-request public matrices, 128 fresh native comparisons and eight warmups; image integration and all-worker idle also complete on the measured six-plus-two configuration.
+- Why: close the implementation/measurement scope under V41E-D13 using applicable prior effort/native/cancellation evidence, without adding semantic reviews or model-quality guarantees. Final metadata deployment/readiness and CI remain.
+- Refs: PR #598; MEASUREMENTS records measured source 53ec3720, runtime/config bindings, actual routing and comparison limits.
 
 ### 2026-09-13 — [amendment] Bound verification to implementation behavior
 - What: stop extra semantic audits and quality-driven retries; keep deployment, effort, Requirement propagation, image/API/lifecycle behavior and existing serving measurements as the verification scope.
