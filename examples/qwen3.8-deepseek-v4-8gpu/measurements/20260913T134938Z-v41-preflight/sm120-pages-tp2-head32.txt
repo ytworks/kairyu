@@ -1,7 +1,7 @@
- Network kairyu-v41-main-sixgpu-trial_default Creating 
- Network kairyu-v41-main-sixgpu-trial_default Created 
- Container kairyu-v41-main-sixgpu-numerical Creating 
- Container kairyu-v41-main-sixgpu-numerical Created 
+ Network kairyu-v41-main-sixgpu-trial_default Creating
+ Network kairyu-v41-main-sixgpu-trial_default Created
+ Container kairyu-v41-main-sixgpu-numerical Creating
+ Container kairyu-v41-main-sixgpu-numerical Created
 2026-09-13 13:49:38,799 - INFO - core.py:430 - flashinfer.jit: Building JIT module sparse_mla_sm120; this can take several minutes on first use.
 {"extra_page": 32, "tokens": 1, "topk": 128, "masked": false, "max_abs_error": 0.0502856969833374}
 {"extra_page": 32, "tokens": 1, "topk": 128, "masked": true, "max_abs_error": 0.0496448278427124}
@@ -24,4 +24,3 @@ AssertionError: Tensor-likes are not close!
 Mismatched elements: 1 / 16384 (0.0%)
 Greatest absolute difference: 0.09318453073501587 at index (0, 26, 425) (up to 0.05 allowed)
 Greatest relative difference: 0.1607980877161026 at index (0, 26, 425) (up to 0.05 allowed)
-

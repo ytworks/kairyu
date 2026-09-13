@@ -549,11 +549,14 @@ and diagnostic GPU memory was released at 14:06 UTC.
 
 Selected evidence is committed under
 [`measurements/20260913T134938Z-v41-preflight/`](measurements/20260913T134938Z-v41-preflight/):
-the original failure, its log (`.txt`, unchanged bytes), same-fixture result
+the original failure, its log (`.txt`, trailing whitespace removed), same-fixture result
 and artifact manifest. Full scripts, synthetic tensors, source excerpts,
 candidate compose and setup logs are retained at
 `/mnt/nvme/kairyu/model-volumes/qwen3.8-deepseek-v4-8gpu/verification-results/20260913T134938Z/v41-sixgpu-preflight/`.
-All manifest hashes were verified after archival. In particular the
+All manifest hashes refer to the raw archived files and were verified after
+archival. The normalized repository log has 1,931 bytes and SHA-256
+`9c92806ce6bc5ed5c516f850f4eabce64bb88875845c2cdace01f624a038721b`;
+the raw log remains unchanged in the archive. In particular the
 744,468-byte fixture SHA-256 is
 `5e0d936bc47f1afbf8862f580714611d66fc6fb6b24d16f05cb8a84cf8618979`.
 
