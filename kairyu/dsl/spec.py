@@ -187,6 +187,13 @@ class RoleNodeSpec(BaseModel):
     # slot renders as "" (DTO-D11). Head, final, verifier, and executor roles
     # cannot be conditional.
     requires: Literal["image"] | None = None
+    # Conversation mode carries original message roles/media separately from
+    # the role instruction; an empty instruction forwards the original input.
+    prompt_input: Literal["rendered", "conversation"] = "rendered"
+    # Private proposals may need the caller's output grammar/tool contract
+    # even though their sampling and publication remain private.
+    response_contract: Literal["internal", "inherit"] = "internal"
+    reasoning_effort_floor: Literal["low", "high", "max"] | None = None
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
@@ -218,8 +225,20 @@ class RoleNodeSpec(BaseModel):
                     f"executor role {self.name!r} references roles outside its "
                     f"depends_on: {sorted(missing)}"
                 )
-        elif not self.prompt:
+        elif not self.prompt and self.prompt_input != "conversation":
             raise ValueError(f"role {self.name!r} requires a prompt")
+        if self.prompt_input == "conversation":
+            if self.executor is not None or self.prompt_suffix or self.reasoning_closed:
+                raise ValueError("conversation input cannot use an executor or rendered scaffold")
+            for template in (self.prompt, self.prompt_headless):
+                if any(name == "query" for _, name, _, _ in Formatter().parse(template)):
+                    raise ValueError("conversation input already carries query; omit {query}")
+        if self.reasoning_effort_floor is not None and self.reasoning_effort != "inherit":
+            raise ValueError("reasoning_effort_floor requires reasoning_effort: inherit")
+        if self.response_contract == "inherit" and self.role_type in {
+            "head", "executor", "verifier"
+        }:
+            raise ValueError("head, executor and verifier roles cannot inherit response_contract")
         for field_name in ("prompt", "prompt_headless"):
             _check_prompt_placeholders(self.name, field_name, getattr(self, field_name))
         if self.requires is not None and self.role_type in {"verifier", "executor"}:

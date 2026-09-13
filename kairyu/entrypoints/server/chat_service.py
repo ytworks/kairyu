@@ -25,6 +25,10 @@ from kairyu.engine.backend import (
     validate_backend_request_before_prepare,
 )
 from kairyu.engine.prompt import (
+    ChatMessage as NativeChatMessage,
+)
+from kairyu.engine.prompt import (
+    ChatPrompt,
     MultimodalItem,
     MultimodalMessage,
     MultimodalMessagePart,
@@ -138,6 +142,7 @@ class ValidatedChatInput:
     # distinguishes tasks that share a long agent-harness preamble while
     # keeping appended turns on the same replica.
     conversation_affinity_key: str | None = None
+    orchestration_conversation: ChatPrompt | None = None
 
 
 @dataclass(frozen=True)
@@ -904,8 +909,32 @@ def _conversation_affinity_key(messages: _PreparedChatMessages) -> str | None:
     return "conv-" + hashlib.sha256(payload).hexdigest()[:16]
 
 
+def _native_conversation(prepared: _PreparedChatMessages) -> ChatPrompt:
+    """Use the existing validated snapshot without text/tool/media flattening."""
+
+    messages: list[NativeChatMessage] = []
+    for message in prepared.messages:
+        wire = dict(message.text_message)
+        if message.content_kind == "list":
+            wire["content"] = tuple(
+                MultimodalMessagePart("text", text=part.text)
+                if part.type == "text"
+                else MultimodalMessagePart("item", item_index=part.item_index, detail=part.detail)
+                for part in message.content_parts
+            )
+        else:
+            wire.setdefault("content", None)
+        messages.append(NativeChatMessage(**wire))
+    return ChatPrompt(
+        messages=messages,
+        items=tuple(MultimodalItem("image", "uri", url) for url in prepared.image_urls),
+    )
+
+
 def validate_orchestration_chat_input(
     request: ChatCompletionRequest,
+    *,
+    native_chat: bool = False,
 ) -> ValidatedChatInput:
     """Render a role-preserving L2 conversation, not a model chat template."""
 
@@ -920,6 +949,13 @@ def validate_orchestration_chat_input(
         raise ChatRequestError("top_logprobs requires logprobs to be true")
     _validate_response_format(request.response_format)
     prepared = _prepare_chat_messages(request, validate_message_fields=True)
+    conversation = None
+    if native_chat:
+        try:
+            validate_upstream_chat_template_kwargs(request.chat_template_kwargs)
+            conversation = _native_conversation(prepared)
+        except (TypeError, ValueError) as error:
+            raise ChatRequestError(str(error)) from error
     messages = [dict(message.text_message) for message in prepared.messages]
     if prepared.has_images:
         for message, wire in zip(prepared.messages, messages, strict=True):
@@ -966,7 +1002,7 @@ def validate_orchestration_chat_input(
         include_usage=bool(request.stream_options and request.stream_options.include_usage),
         orchestration_multimodal_prompt=(
             _render_multimodal_prompt(request, None, prepared)
-            if prepared.has_images
+            if prepared.has_images and not native_chat
             else None
         ),
         structured_format_in_prompt=any(
@@ -975,13 +1011,18 @@ def validate_orchestration_chat_input(
             for message in prepared.messages
         ),
         conversation_affinity_key=_conversation_affinity_key(prepared),
+        orchestration_conversation=conversation,
     )
 
 
 async def validate_orchestration_chat_input_async(
     request: ChatCompletionRequest,
+    *,
+    native_chat: bool = False,
 ) -> ValidatedChatInput:
-    return await run_prompt_work(validate_orchestration_chat_input, request)
+    return await run_prompt_work(
+        validate_orchestration_chat_input, request, native_chat=native_chat
+    )
 
 
 def _chat_engine(

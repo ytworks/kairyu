@@ -71,6 +71,7 @@ RESERVED_EXTRA_ARGS = frozenset(
         "prompt_logprobs",
         "forced_token_ids",
         "priority",
+        "return_token_ids",
         *SAMPLING_FIELD_NAMES,
         *PROMPT_OWNED_EXTRA_ARGS,
     }
@@ -102,6 +103,8 @@ class OpenAIRequestCapabilities:
     # Appended to preserve the positional ABI of the existing capability key.
     parallel_tool_calls: bool = False
     chat_template_kwargs: frozenset[str] = frozenset()
+    # An explicitly attested response extension, never inferred from usage.
+    return_token_ids: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_fields", frozenset(self.sampling_fields))
@@ -121,6 +124,8 @@ class OpenAIRequestCapabilities:
             raise ValueError("upstream must be a non-empty string")
         if type(self.parallel_tool_calls) is not bool:
             raise ValueError("parallel_tool_calls capability must be a boolean")
+        if type(self.return_token_ids) is not bool:
+            raise ValueError("return_token_ids capability must be a boolean")
         if any(
             not isinstance(key, str) or not key
             for key in self.chat_template_kwargs
@@ -236,6 +241,7 @@ _OVERRIDE_KEYS = frozenset(
         "parallel_tool_calls",
         "allow_chat_template_kwargs",
         "strict_tools",
+        "return_token_ids",
     }
 )
 
@@ -351,6 +357,7 @@ def resolve_openai_capabilities(
             base.chat_template_kwargs | allow_chat_template_kwargs
         ),
         prompt_kinds=base.prompt_kinds | allow_prompt_kinds,
+        return_token_ids=overrides.get("return_token_ids", base.return_token_ids),
     )
 
 

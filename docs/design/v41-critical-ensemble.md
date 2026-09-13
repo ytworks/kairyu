@@ -1,6 +1,7 @@
 # V4.1 critical ensemble
 
-Status: implementation started from main `99c5eadb`; GPU gates pending.
+Status: native example DAG and shared request/choice contracts implemented from
+main `99c5eadb`; capacity, mandatory execution and GPU gates in progress.
 Accepted plan: `docs/superpowers/plans/2026-09-13-v41-six-gpu-critical-ensemble.md`.
 
 ## V41C-D1 — Scope and ownership
@@ -124,34 +125,75 @@ Evidence, exact identities, unchanged tolerances, reproduction method and
 durable artifact location are recorded in the existing example's
 `MEASUREMENTS.md`, section "V41C six-GPU preflight".
 
+## V41C-D6 — Derive ordinary AUTO roles from native conversation
+
+Shared contract: L3's validated conversation must survive OrchestrationRequest,
+profile selection and Conductor dispatch. Main derives every role from a rendered
+string; even a one-role AUTO profile changes native system/tool semantics. The
+existing media carrier rejects assistant/tool history and cannot represent a
+text-only conversation. YAML prompt text cannot recover erased structure.
+
+Append an optional typed conversation to OrchestrationRequest and an opt-in
+`prompt_input: conversation` role field. Reuse the validated L3 snapshot and the
+ordinary backend. An empty role instruction forwards the original messages;
+a nonempty instruction appends one task message after those unchanged messages.
+Conversation prompts cannot interpolate `{query}` or text-template suffixes.
+Legacy rendered roles retain their contract. Direct native AUTO tool/vision
+requests are the independent observable use, regardless of ensemble policy.
+
+Two narrow role controls preserve independently useful request intent: private
+structured proposals can inherit the caller's tool/format contract while keeping
+private sampling and n=1; inherited effort can declare an ordered minimum using
+`reasoning_effort_floor`. Other private roles receive the response contract as
+explicit task data, without a forced tool/schema that would prevent their own
+output. The existing global default handles omitted effort. The example selects
+which roles use these controls and supplies every prompt, model and effort.
+
+## V41C-D7 — Preserve actual per-choice generated token counts
+
+Shared contract: OpenAICompatBackend currently synthesizes token IDs from text,
+although parser-hidden reasoning and native candidate selection consume tokens.
+Batch usage cannot truthfully measure a retained choice after another choice is
+replaced. Backend capability configuration cannot itself ingest upstream IDs.
+
+An opt-in `return_token_ids` capability requests and validates upstream IDs for
+each unary/streamed choice. CompletionOutput distinguishes actual from estimated
+IDs; existing guessed producers explicitly mark estimates. Preserve native n,
+best_of and seed, validate complete choice/stream termination, and retain known
+aggregate usage on failure. Ordinary n/best_of native calls and adapter usage
+accounting independently need this contract. No model-specific accounting or
+aggregate division is admitted. Actual rendered prompt usage is required for
+native chat, including text-only chat. Live producer verification remains open.
+
+## V41C-D8 — Audit and continue every ordinary final choice
+
+Shared contract: Conductor currently bypasses verification and the public-output
+floor for n>1. A verified publisher must apply its existing bounded loop to every
+returned choice. Splitting the initial request changes native best_of/seed
+selection and does not implement the original request. DSL prompts cannot fix
+that control-flow bypass.
+
+Keep one initial native n call; run the existing audit/repair/continuation loop
+with separate choice state, n=1 follow-ups and stable choice indices. Retain
+aggregate internal work once, count selected output only from actual per-choice
+IDs when replacements prevent retaining the original aggregate, and withhold
+publication until every choice resolves. Ordinary verified n-choice publishers
+are the independent regression. Per-choice verdict budget refusal is terminal;
+the legacy single-choice optional best-so-far policy remains unchanged. The
+example still owns verdict content, repair depth and publication-on-exhaustion.
+
 ## Open implementation conditions
 
-- Establish a supported six-GPU topology from the pinned main runtime and
-  checkpoint; resolve the numerical preflight failure and measure startup
-  memory before selection. Draft expert mapping is source-checked only.
-- Keep the exact native message/tool/image structure through AUTO derivation
-  and token accounting, including assistant continuation and tool metadata.
-- Express V4.1 non-thinking and Requirement's high floor via existing
-  settings (non-thinking renderer checked in V41C-D5) and an independently
-  justified minimum request contract if needed for the high floor.
-- Verify each final choice and keep its repair, continuation, usage and
-  publication state separate. Existing n>1 audit/floor bypass is insufficient.
-- Identify a minimal shared input-capacity contract for MoA and verifier
-  overflow. Main has no lossless range traversal/editing facility; a generic
-  name or similarity of overflow is not admission of a document runner.
-- Preserve all mandatory stages without silently weakening shared best-so-far
-  semantics. Record unresolved policy expression instead of adding a
-  workflow-specific framework switch.
-
-For all-choice verification, preserve the first native `n`/`best_of`/seed
-call and factor the existing audit/repair loop per returned choice. The
-current OpenAI adapter only has batch usage and cannot truthfully apportion
-it after replacing one choice. Both pinned V4.1 and Qwen v0.23 source/schema
-support per-choice `return_token_ids`; capability-controlled ingestion and
-validation of these IDs is the next transport prerequisite. It has not
-been implemented or live-generation verified. Dividing aggregate usage,
-silently estimating counts, or returning unaudited choices on a fixed-step
-budget refusal does not satisfy the contract.
+- Complete six-GPU full-model startup, native API checks and performance gates.
+  Quantized-arithmetic preflight now explains the original floating-reference
+  discrepancy; preserve both verdicts and archive the new evidence.
+- Fit each actual rendered native dispatch to its model context; implement and
+  validate lossless over-context handling through admitted shared primitives and
+  example-owned traversal policy. No source/candidate truncation or stage bypass.
+- Enforce mandatory role completion without changing optional best-so-far defaults,
+  and provision explicit step budgets for per-choice worst-case work.
+- Validate public reasoning-plus-continuation accounting, head exhaustion and
+  every choice through the real native API, then complete the full plan's gates.
 
 ## Validation record
 
@@ -199,3 +241,15 @@ this branch. No six-GPU startup or performance gate has passed on these bytes.
 - Independent review found no actionable regression in this slice. Ruff
   and whitespace checks pass. AUTO derivation and exact input-capacity
   accounting are still pending.
+
+### Native AUTO and all-choice dispatch
+
+- The HTTP-to-native-OpenAI regression passes all six unary/SSE and omitted/low/max
+  cases: original system/assistant-null/reasoning/tool/image structure is preserved
+  exactly once; independent proposal and final intent remain distinct from private
+  planning; Requirement-style inherited effort receives the configured high floor.
+- Combined Conductor/head/executor/output/mock/OpenAI/registry/server usage checks
+  pass 465 tests. They exercise selective n=2 repair, complete unary/SSE publication,
+  exact usage, continuation, cancellation and second-choice failure without leaking
+  an unaudited draft. Ruff and whitespace checks pass. These are CPU contract tests,
+  not evidence that the example's GPU or performance gates pass.

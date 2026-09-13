@@ -1217,6 +1217,7 @@ async def _stream_orchestrator(
                                 index=0,
                                 text=_lazy_text(completion_parts),
                                 token_ids=(),
+                                token_ids_exact=False,
                                 finish_reason=None,
                                 text_delta=event.text,
                                 text_offset=completion_length,
@@ -1250,6 +1251,7 @@ async def _stream_orchestrator(
                                 index=0,
                                 text=completion_text,
                                 token_ids=(),
+                                token_ids_exact=False,
                                 finish_reason="stop",
                             ),
                         )
@@ -1323,7 +1325,9 @@ async def _stream_orchestrator(
             yield "data: [DONE]\n\n"
             return
         final_completions = completions or (
-            CompletionOutput(index=0, text="", token_ids=(), finish_reason="stop"),
+            CompletionOutput(
+                index=0, text="", token_ids=(), token_ids_exact=False, finish_reason="stop",
+            ),
         )
         for completion in sorted(final_completions, key=lambda item: item.index):
             yield _sse_chunk(
@@ -2263,7 +2267,9 @@ def create_app(
             validation_started_ns = time.perf_counter_ns()
             try:
                 prompt = (
-                    await validate_orchestration_chat_input_async(chat_request)
+                    await validate_orchestration_chat_input_async(
+                        chat_request, native_chat=selected.uses_native_chat
+                    )
                     if request.model in orchestration_chat_models
                     else await validate_chat_input_async(
                         chat_request,
@@ -2335,7 +2341,9 @@ def create_app(
             validation_started_ns = time.perf_counter_ns()
             try:
                 validated_input = (
-                    await validate_orchestration_chat_input_async(request)
+                    await validate_orchestration_chat_input_async(
+                        request, native_chat=auto_models[request.model].uses_native_chat
+                    )
                     if request.model in orchestration_chat_models
                     else await validate_chat_input_async(
                         request,
@@ -2376,9 +2384,13 @@ def create_app(
                     tool_call_protocol=validated_input.tool_call_protocol.value,
                     reasoning_effort=request.reasoning_effort,
                     multimodal_prompt=validated_input.orchestration_multimodal_prompt,
+                    conversation=validated_input.orchestration_conversation,
                     chat_template_kwargs=(
                         request.chat_template_kwargs
-                        if validated_input.orchestration_multimodal_prompt is not None
+                        if (
+                            validated_input.orchestration_multimodal_prompt is not None
+                            or validated_input.orchestration_conversation is not None
+                        )
                         else None
                     ),
                 )
@@ -2497,6 +2509,7 @@ def create_app(
                         index=0,
                         text=result.text,
                         token_ids=(),
+                        token_ids_exact=False,
                         finish_reason=None,
                     ),
                 )
@@ -2552,7 +2565,10 @@ def create_app(
             except Exception as error:
                 return upstream_error(error)
             completions = result.completions or (
-                CompletionOutput(index=0, text=result.text, token_ids=(), finish_reason="stop"),
+                CompletionOutput(
+                    index=0, text=result.text, token_ids=(),
+                    token_ids_exact=False, finish_reason="stop",
+                ),
             )
             # Standard usage keeps the OpenAI public meaning; cumulative AUTO
             # totals ride the orchestration_* extensions and metering below

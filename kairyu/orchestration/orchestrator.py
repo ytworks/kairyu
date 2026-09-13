@@ -28,6 +28,8 @@ from kairyu.engine.backend import (
     admission_upper_bound as generation_admission_upper_bound,
 )
 from kairyu.engine.prompt import (
+    ChatMessage,
+    ChatPrompt,
     MultimodalPrompt,
     TemplatedPrompt,
     derive_multimodal_prompt,
@@ -784,6 +786,16 @@ class Orchestrator:
     def _roles_for(self, call: OrchestrationRequest) -> tuple[RoleSpec, ...]:
         return self._profiles[self._role_profile(call)]
 
+    @property
+    def uses_native_chat(self) -> bool:
+        """Whether any configured role needs the original typed conversation."""
+
+        return any(
+            role.prompt_input == "conversation"
+            for roles in self._profiles.values()
+            for role in self._generation_roles(roles)
+        )
+
     def _profile_accepts_images(self, name: str) -> bool:
         fallback = next(iter(self._engines))
         return any(
@@ -802,7 +814,7 @@ class Orchestrator:
 
         assert self._profile_judge is not None
         choices = self._profile_judge.choices
-        if call.multimodal_prompt is None:
+        if not call.has_images:
             return choices
         return tuple(
             choice for choice in choices if self._profile_accepts_images(choice.profile)
@@ -834,7 +846,7 @@ class Orchestrator:
                 self._offered_choices(call),
                 view,
                 tools=bool(call.tools or call.tools_in_prompt),
-                image=call.multimodal_prompt is not None,
+                image=call.has_images,
             )
             + self._profile_judge.prompt_suffix
         )
@@ -1033,7 +1045,9 @@ class Orchestrator:
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> None:
-        if call.multimodal_prompt is not None:
+        if call.conversation is not None and self._moa_samples > 0:
+            raise ValueError("native conversation orchestration requires role-based execution")
+        if call.has_images:
             if self._moa_samples > 0 and (decision is None or decision.target == "multi_agent"):
                 raise ValueError("multimodal orchestration does not support MoA sampling")
             if decision is not None and decision.target != "multi_agent":
@@ -1137,7 +1151,7 @@ class Orchestrator:
                 if conductor is not None
                 else (
                     call.chat_template_kwargs
-                    if isinstance(prompt, MultimodalPrompt)
+                    if isinstance(prompt, (MultimodalPrompt, ChatPrompt))
                     else None
                 )
             )
@@ -1198,7 +1212,9 @@ class Orchestrator:
             tool_call_protocol=call.tool_call_protocol,
             reasoning_effort=self._effective_reasoning_effort(call),
             chat_template_kwargs=(
-                call.chat_template_kwargs if isinstance(prompt, MultimodalPrompt) else None
+                call.chat_template_kwargs
+                if isinstance(prompt, (MultimodalPrompt, ChatPrompt))
+                else None
             ),
         )
 
@@ -1208,6 +1224,13 @@ class Orchestrator:
         call: OrchestrationRequest,
         text: str,
     ):
+        if call.conversation is not None:
+            if not self._shared_prefix:
+                return call.conversation
+            return ChatPrompt(
+                messages=(*call.conversation.messages, ChatMessage("user", self._shared_prefix)),
+                items=call.conversation.items,
+            )
         if call.multimodal_prompt is None or not backend_supports_prompt_kind(
             self._engines[engine_key],
             "multimodal",
@@ -1250,7 +1273,7 @@ class Orchestrator:
                         reasoning_effort=self._effective_reasoning_effort(call),
                         chat_template_kwargs=(
                             call.chat_template_kwargs
-                            if isinstance(prompt, MultimodalPrompt)
+                            if isinstance(prompt, (MultimodalPrompt, ChatPrompt))
                             else None
                         ),
                     ),
@@ -1750,7 +1773,7 @@ class Orchestrator:
                 intent.request,
             ).tokens
             for intent in self._internal_intent_requests(call, None)
-            if call.multimodal_prompt is not None
+            if call.has_images
             and backend_supports_prompt_kind(
                 self._engines[intent.engine_key],
                 "multimodal",
@@ -1837,6 +1860,7 @@ class Orchestrator:
             affinity_key=self._conversation_affinity_key(call),
             expose_intermediate_outputs=self._expose_intermediate_outputs,
             multimodal_prompt=call.multimodal_prompt,
+            conversation=call.conversation,
             chat_template_kwargs=call.chat_template_kwargs,
             execution_workers=self._execution_workers,
             reasoning_effort=self._effective_reasoning_effort(call),
@@ -2128,6 +2152,7 @@ class Orchestrator:
                                     index=0,
                                     text=moa.final_text,
                                     token_ids=(),
+                                    token_ids_exact=False,
                                 ),
                             ),
                             usage=GenerationUsage(
@@ -2275,6 +2300,7 @@ class Orchestrator:
                                 index=0,
                                 text=moa.final_text,
                                 token_ids=(),
+                                token_ids_exact=False,
                                 finish_reason="stop",
                             ),
                         )
@@ -2352,7 +2378,7 @@ class Orchestrator:
                 decision.target == "tier1"
                 and "tier2" in self._engines
                 and (
-                    call.multimodal_prompt is None
+                    not call.has_images
                     or backend_supports_prompt_kind(
                         self._engines["tier2"],
                         "multimodal",
@@ -2641,7 +2667,7 @@ class Orchestrator:
                     and "tier2" in self._engines
                     and not "".join(text_parts)
                     and (
-                        call.multimodal_prompt is None
+                        not call.has_images
                         or backend_supports_prompt_kind(
                             self._engines["tier2"],
                             "multimodal",
@@ -2955,6 +2981,7 @@ class Orchestrator:
                                 index=0,
                                 text=moa_result.final_text,
                                 token_ids=(),
+                                token_ids_exact=False,
                             ),
                         ),
                         usage=GenerationUsage(
@@ -3124,6 +3151,7 @@ class Orchestrator:
                                 index=0,
                                 text=moa_result.final_text,
                                 token_ids=(),
+                                token_ids_exact=False,
                                 finish_reason="stop",
                             ),
                         )

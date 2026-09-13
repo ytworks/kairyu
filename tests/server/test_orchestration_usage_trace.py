@@ -18,6 +18,149 @@ COMPLEX = (
 )
 
 
+@pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+@pytest.mark.parametrize("effort,expected", [(None, "high"), ("low", "high"), ("max", "max")])
+def test_native_role_dsl_preserves_original_transcript_and_independent_response_contract(
+    tmp_path, stream, effort, expected
+):
+    import httpx
+    from fastapi.testclient import TestClient
+
+    from kairyu.dsl.loader import build_orchestrator, load_spec
+    from kairyu.engine.openai_backend import OpenAICompatBackend
+    from kairyu.entrypoints.server.app import create_app
+
+    captured = []
+
+    def upstream(request):
+        payload = json.loads(request.content)
+        captured.append(payload)
+        last = payload["messages"][-1]["content"]
+        text = (
+            "PASS" if isinstance(last, str) and last.startswith("[audit]")
+            else "plan output" if isinstance(last, str) and last.startswith("[plan]")
+            else '{"ok":true}' if isinstance(last, str) and last.startswith("[write]")
+            else '{"candidate":true}'
+        )
+        choice = {
+            "index": 0, "message": {"role": "assistant", "content": text},
+            "finish_reason": "stop", "token_ids": [31, 32],
+        }
+        usage = {"prompt_tokens": 30, "completion_tokens": 2, "total_tokens": 32}
+        if payload.get("stream"):
+            chunk = {"choices": [{**choice, "delta": choice.pop("message")}], "usage": usage}
+            return httpx.Response(
+                200, text=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(200, json={"choices": [choice], "usage": usage})
+
+    backend = OpenAICompatBackend(
+        base_url="http://native.test/v1", model="native", api_key_env=None,
+        upstream="vllm", transport=httpx.MockTransport(upstream),
+        capabilities={
+            "allow_prompt_kinds": ["multimodal"],
+            "allow_chat_template_kwargs": ["enable_thinking"],
+            "return_token_ids": True,
+        },
+        image_input_policy={"max_processed_prompt_tokens": 1024},
+    )
+    spec = load_spec("""
+workers: [{name: tier1, engine_ref: native}, {name: tier2, engine_ref: native}]
+internal_max_tokens: 64
+default_reasoning_effort: high
+roles:
+  - name: source
+    worker: tier2
+    prompt_input: conversation
+    response_contract: inherit
+    reasoning_effort: inherit
+    prompt: ""
+  - name: plan
+    worker: tier2
+    prompt_input: conversation
+    reasoning_effort: inherit
+    reasoning_effort_floor: high
+    prompt: "[plan] Output contract data: {response_contract}"
+  - name: write
+    worker: tier2
+    role_type: synthesizer
+    prompt_input: conversation
+    reasoning_effort: inherit
+    depends_on: [source, plan]
+    prompt: "[write] Draft: {source}; plan: {plan}"
+  - name: audit
+    worker: tier2
+    role_type: verifier
+    prompt_input: conversation
+    reasoning_effort: inherit
+    depends_on: [write]
+    verifies: write
+    prompt: "[audit] {write}"
+budget: {max_steps: 8, max_refine_depth: 1}
+""")
+    app = create_app(
+        {}, orchestrators={"auto": build_orchestrator(spec, engine_refs={"native": backend})},
+        orchestration_chat_models={"auto"},
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+    )
+    image_url = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGP8z8DAwMDA"
+        "xMDAwMDAAAANHQEDasKb6QAAAABJRU5ErkJggg=="
+    )
+    messages = [
+        {"role": "system", "content": "Keep original facts and quoted literals."},
+        {"role": "assistant", "content": None, "reasoning_content": "prior reasoning",
+         "tool_calls": [{"id": "call_1", "type": "function", "function": {
+             "name": "inspect", "arguments": '{ "value": "line1\\nline2" }',
+         }}]},
+        {"role": "tool", "content": "line1\nline2", "tool_call_id": "call_1"},
+        {"role": "user", "content": [
+            {"type": "text", "text": COMPLEX},
+            {"type": "image_url", "image_url": {"url": image_url, "detail": "high"}},
+            {"type": "text", "text": "Preserve this trailing literal: <= 007."},
+        ]},
+    ]
+    tools = [{"type": "function", "function": {
+        "name": "inspect", "parameters": {"type": "object", "properties": {}},
+    }}]
+    body = {
+        "model": "auto", "messages": messages, "tools": tools, "tool_choice": "none",
+        "response_format": {"type": "json_object"}, "max_tokens": 17, "stream": stream,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    if effort is not None:
+        body["reasoning_effort"] = effort
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", json=body)
+    assert response.status_code == 200, response.text
+    assert len(captured) == 4
+    independent = next(payload for payload in captured if len(payload["messages"]) == 4)
+    assert independent["messages"] == messages
+    assert independent["tools"] == tools
+    assert independent["tool_choice"] == "none"
+    assert independent["response_format"] == {"type": "json_object"}
+    assert independent["max_tokens"] == 64
+    planning = next(payload for payload in captured if isinstance(
+        payload["messages"][-1]["content"], str
+    ) and payload["messages"][-1]["content"].startswith("[plan]"))
+    assert planning["reasoning_effort"] == expected
+    assert planning["chat_template_kwargs"]["enable_thinking"] is True
+    assert "response_format" not in planning and "tools" not in planning
+    assert json.loads(planning["messages"][-1]["content"].split(": ", 1)[1])["tools"] == tools
+    for payload in captured:
+        assert payload["messages"][:4] == messages
+        assert len(payload["messages"]) <= 5
+    writing = next(payload for payload in captured if isinstance(
+        payload["messages"][-1]["content"], str
+    ) and payload["messages"][-1]["content"].startswith("[write]"))
+    assert writing["max_tokens"] == 17
+    assert writing["messages"][-1]["content"] == (
+        '[write] Draft: {"candidate":true}; plan: plan output'
+    )
+
+
 class AccountingBackend:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -1079,3 +1222,107 @@ def test_trace_v2_event_accepts_list_detail_values() -> None:
         },
     )
     assert '"offered":["QWEN","ENSEMBLE"]' in chunk.model_dump_json()
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["unary", "stream"])
+@pytest.mark.parametrize("reject_second_audit", [False, True], ids=["repair", "audit-error"])
+def test_native_choices_audit_separately_and_keep_public_usage_distinct(
+    tmp_path, stream, reject_second_audit,
+):
+    import httpx
+    from fastapi.testclient import TestClient
+
+    from kairyu.engine.openai_backend import OpenAICompatBackend
+    from kairyu.entrypoints.server.app import create_app
+
+    captured = []
+
+    def upstream(request):
+        body = json.loads(request.content)
+        captured.append(body)
+        instruction = body["messages"][-1]["content"]
+        if instruction.startswith("[audit]"):
+            if "private rejected one" in instruction:
+                if reject_second_audit:
+                    return httpx.Response(422, text="PRIVATE_DIAGNOSTIC credential=secret")
+                text = "FAIL: fix the second answer"
+            else:
+                text = "PASS"
+            outputs = [(text, [900])]
+        elif body.get("n", 1) == 2:
+            outputs = [("retained zero", [100, 101]), ("private rejected one", [200, 201, 202])]
+        else:
+            outputs = [("repaired one", [300, 301, 302, 303])]
+        choices = [
+            {"index": index, "message": {"role": "assistant", "content": text},
+             "token_ids": ids, "finish_reason": "stop"}
+            for index, (text, ids) in enumerate(outputs)
+        ]
+        return httpx.Response(200, json={
+            "choices": choices,
+            "usage": {"prompt_tokens": 7, "completion_tokens": sum(len(ids) for _, ids in outputs)},
+        })
+
+    backend = OpenAICompatBackend(
+        base_url="http://native.test/v1", model="native", api_key_env=None,
+        upstream="vllm", transport=httpx.MockTransport(upstream),
+        capabilities={"return_token_ids": True},
+    )
+    roles = (
+        RoleSpec("answer", "tier2", "[write]", role_type="synthesizer",
+                 prompt_input="conversation"),
+        RoleSpec("audit", "tier2", "[audit] {answer}", role_type="verifier",
+                 depends_on=("answer",), verifies="answer", prompt_input="conversation"),
+    )
+    app = create_app(
+        {}, orchestration_chat_models={"auto"},
+        orchestrators={"auto": Orchestrator(
+            {"tier1": backend, "tier2": backend}, roles=roles,
+            sampling_params=SamplingParams(max_tokens=8), budget=Budget(max_steps=8),
+        )},
+        settings=ServerSettings(usage_ledger_path=str(tmp_path / "usage.jsonl")),
+    )
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", headers={"X-Kairyu-Trace": "1"}, json={
+            "model": "auto", "messages": [{"role": "user", "content": COMPLEX}],
+            "n": 2, "max_tokens": 32, "seed": 23, "stream": stream,
+            **({"stream_options": {"include_usage": True}} if stream else {}),
+        })
+        totals = app.state.usage_ledger.totals()["default"]
+    assert response.status_code == (422 if reject_second_audit and not stream else 200)
+    if stream:
+        payloads = _sse_payloads(response.text)
+        payload = next(item for item in payloads if item.get("kairyu_trace_v2"))
+        content = {}
+        for item in payloads:
+            for choice in item.get("choices", ()):
+                content[choice["index"]] = content.get(choice["index"], "") + (
+                    choice.get("delta", {}).get("content") or ""
+                )
+        if reject_second_audit:
+            assert not any(content.values())
+            assert any(item.get("error") for item in payloads)
+        else:
+            assert content == {0: "retained zero", 1: "repaired one"}
+    else:
+        payload = response.json()
+        if reject_second_audit:
+            assert payload.get("error") and "choices" not in payload
+        else:
+            assert [choice["message"]["content"] for choice in payload["choices"]] == [
+                "retained zero", "repaired one",
+            ]
+    expected_work = (14, 6) if reject_second_audit else (35, 12)
+    assert payload["usage"]["orchestration_input_tokens"] == expected_work[0]
+    assert payload["usage"]["orchestration_output_tokens"] == expected_work[1]
+    assert (totals["prompt_tokens"], totals["completion_tokens"]) == expected_work
+    if not reject_second_audit:
+        assert payload["usage"]["completion_tokens"] == 6
+        assert [(body.get("n", 1), body["max_tokens"], body.get("seed")) for body in captured] == [
+            (2, 32, 23), (1, 8, 23), (1, 8, 23), (1, 32, 23), (1, 8, 23),
+        ]
+    assert len(captured) == (3 if reject_second_audit else 5)
+    assert all(body["return_token_ids"] is True for body in captured)
+    assert not any(body.get("stream") for body in captured)
+    assert "PRIVATE_DIAGNOSTIC" not in response.text
+    assert "private rejected one" not in response.text

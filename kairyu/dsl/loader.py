@@ -183,6 +183,9 @@ def build_orchestrator(
             reasoning_continuation=role.reasoning_continuation,
             reasoning_open_tag=role.reasoning_open_tag,
             requires=role.requires,
+            prompt_input=role.prompt_input,
+            response_contract=role.response_contract,
+            reasoning_effort_floor=role.reasoning_effort_floor,
         )
 
     roles = tuple(_role_spec(role) for role in spec.roles) or None

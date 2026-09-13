@@ -109,6 +109,7 @@ class MockBackend:
                     index=i,
                     text=(text := self._text_for(execution_text, i)),
                     token_ids=_fake_token_ids(text),
+                    token_ids_exact=False,
                     cumulative_logprob=0.0,
                     finish_reason="stop",
                 )
@@ -192,6 +193,7 @@ class MockBackend:
                     index=completion.index,
                     text=completion.text[:end],
                     token_ids=_fake_token_ids(completion.text[:end]),
+                    token_ids_exact=False,
                     cumulative_logprob=0.0,
                 )
                 for completion in final.completions
