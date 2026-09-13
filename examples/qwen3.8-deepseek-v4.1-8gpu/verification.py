@@ -760,9 +760,13 @@ def _route_report(samples: list[dict]) -> dict:
                     )
                 ) is not None:
                     judge_ms.append(total)
-            if event.get("node") == "audit" and event.get("kind") == "verification":
+            # The bounded re-audit after an inconclusive verdict is traced as
+            # node "audit:reverify" (Conductor contract).
+            if str(event.get("node")).startswith("audit") and event.get("kind") == "verification":
                 detail = event.get("detail") or {}
-                if "pass" in detail:
+                if detail.get("inconclusive"):
+                    audit_verdicts["inconclusive"] += 1
+                elif "pass" in detail:
                     audit_verdicts["PASS" if detail.get("pass") else "FAIL"] += 1
                 if detail.get("refinement_exhausted"):
                     audit_verdicts["exhausted"] += 1
