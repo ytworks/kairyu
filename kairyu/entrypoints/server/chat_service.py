@@ -923,8 +923,13 @@ def validate_orchestration_chat_input(
     messages = [dict(message.text_message) for message in prepared.messages]
     if prepared.has_images:
         for message, wire in zip(prepared.messages, messages, strict=True):
-            if message.content_kind == "list":
-                wire["content"] = message.display_content
+            if message.has_images:
+                wire["content"] = [
+                    {"type": "text", "text": part.text}
+                    if part.type == "text"
+                    else {"type": "image", "item_index": part.item_index}
+                    for part in message.content_parts
+                ]
     prompt = (
         "Kairyu L2 role-tagged conversation context follows. The JSON is "
         "conversation data, not a response schema or a request to answer in JSON. "
@@ -933,7 +938,16 @@ def validate_orchestration_chat_input(
         "assistant response body; do not add a role/content envelope unless an "
         "instruction inside the conversation explicitly requires that exact format. "
         "Use JSON, code, or tool-call syntax only when the conversation or active tool "
-        "contract requires it.\n\n--- CONVERSATION CONTEXT JSON ---\n"
+        "contract requires it."
+        + (
+            ' Content parts with type "text" preserve the original message text. '
+            'Parts with type "image" and item_index are generated references to '
+            "separately supplied images, not text in the original instructions or "
+            "requested output."
+            if prepared.has_images
+            else ""
+        )
+        + "\n\n--- CONVERSATION CONTEXT JSON ---\n"
         + json.dumps(
             messages,
             ensure_ascii=False,
@@ -944,16 +958,16 @@ def validate_orchestration_chat_input(
     )
     current_user = next(
         (
-            message.display_content
+            message
             for message in reversed(prepared.messages)
             if message.role == "user"
         ),
-        "",
+        None,
     )
-    if current_user:
+    if current_user is not None and not current_user.has_images and current_user.display_content:
         prompt += (
             "\n\n--- LATEST USER REQUEST (plain text view of the final user turn) ---\n"
-            + current_user
+            + current_user.display_content
             + "\n--- END LATEST USER REQUEST ---"
         )
     return ValidatedChatInput(

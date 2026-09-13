@@ -2,6 +2,13 @@
 
 Status: **GPU validation in progress.**
 
+Current scope (V41E-D13): implementation behavior and existing serving
+measurements. Model-answer quality, checklist completeness and audit accuracy
+are not implementation completion gates. The remaining work is a bounded
+image-rendering integration check, the public serving measurements, applicable
+lifecycle checks and final documentation/CI. Reuse the completed effort/native
+evidence when the relevant implementation is unchanged.
+
 The user released all eight GPUs on 2026-09-13 (JST). GPU trials are recorded
 below. The original CPU-only implementation and the sibling TP8 results do not
 establish GPU correctness for this example.
@@ -503,8 +510,8 @@ top-level effort and applies a high floor: omitted/low/high become high,
 max remains max, and nested template effort is overwritten consistently.
 The 8192-token total, 4096-token thinking reservation and Qwen settings remain
 unchanged. The amended CPU suite passes **560 tests**, with Ruff and progress/
-whitespace checks passing. The fresh native replay below passes; composed
-effort, quality and public-performance checks continue.
+whitespace checks passing. Native and four composed effort results are recorded
+below; the current remaining work is summarized at the top of this file.
 
 The preceding wordcount campaign completed high, max and low (347.7 seconds)
 under the original fixed-high Requirement policy. The user amendment arrived
@@ -620,6 +627,137 @@ and subsequent all-worker stable idle. This partial high is an operator
 interruption, not a model failure verdict. Quality/performance/final cleanup
 were not started in this campaign. The new source-status campaign must retain
 these failures and review the actual statements rather than a model's PASS.
+
+### Source-status startup and native replay
+
+The correction is committed as `e79dee15226b78e3bb39f8b9521f6e0b52df0296`,
+with served configuration
+`415382672aa77c425078118dea195b6dad3ce10ab070a39105ad5aa78ca4449c`.
+`20260913-source-status-startup` completes a normal restart with private state
+preserved. DeepSeek and Qwen pinned images remain unchanged; the rebuilt Kairyu
+image is `sha256:20d1dc96b1f3369906ce20dd409557090e158b672842b48b642aab191fb21e7d`.
+Independent comparison against `f737e0b0` confirms that the only served changes
+are synthesis's headed/headless prompts and the audit prompt. Requirement's
+native hook, template, effort policy and budgets are byte/structurally unchanged;
+`20260913-source-status-gates/source-scope.json` records the scope check.
+
+The new run passes **12 per-rank basic probes plus two native Requirement
+conflict probes**. All 18,861 returned logprob values are finite: 549 from the
+basic probes and 18,312 from Requirement. All six forced-budget basics use
+exactly 16 thinking tokens and finish with `437`. The conflict requests each
+uniquely match a hook in their closed UTC windows: low/nested-max becomes high;
+max/nested-low remains max. Both complete JSON with `stop`. The full earlier
+14-case Requirement matrix retains its `f737e0b0` evidence; these two new cases
+are a scoped replay, not a renamed repeat of that full matrix.
+
+The table hashes `independent-review-manifest.json` in each directory. Use the
+conflict directory's corrected `independent-conflict-review.json` for its mixed
+effort summary (SHA256
+`b56ae6601938dfa3a118308d6d9a7484b49f6f6e5cfedf2ef366a5cb24cf248c`);
+the original generic helper's final-effort label did not describe both cases,
+while its actual per-case high/max correlations were correct.
+
+| Source-status evidence directory | SHA256 |
+| --- | --- |
+| `20260913-source-status-startup` | `7624df35401f9bca8e7de597601c241528029813af6933b1cf10c254bc788274` |
+| `20260913-source-status-gates/native-rank-0` | `ee7a4c715f24906823d966c48f23daa7eaeabba53954a40f19a370c1441ed2cb` |
+| `20260913-source-status-gates/native-rank-1` | `183fd3e168809fc3c4db55ed79a0cb5e9572cf217273c68bfc65e35ab584d629` |
+| `20260913-source-status-gates/native-rank-2` | `da1d24bc430728ef9e6979bddcf177e022684fbdbc3e6fbd265e759e18a3cc4e` |
+| `20260913-source-status-gates/native-requirements-conflicts` | `39541ff295652f10832e66d00aa44b39ca2993567585ed84ab93ed81ae4f98d0` |
+
+The following records retain the campaign chronology. Per V41E-D13, model-content
+reviews are observations, not implementation completion gates. Subsequent work
+uses bounded checks for changed behavior and the existing serving measurements.
+
+### Source-status four-effort replay
+
+All four public `primary` requests complete at the `e79dee15` source and
+`41538267` served configuration recorded above. Each returns HTTP 200, SSE
+`[DONE]`, `finish_reason=stop`, and passes the route/DAG and candidate-completion
+contracts. Independent review reads the actual request, response, trace and
+stage bodies, rather than treating the protocol verdict as a semantic verdict.
+
+| API effort | Elapsed seconds | Final words, including head | Draft / answer 1 / answer 2 / critique tokens | Audit IDs / tokens |
+| --- | ---: | ---: | --- | --- |
+| low | 289.594 | 246 | 1391 / 2497 / 2388 / 1802 | R1–R11 / 5626 |
+| omitted | 420.724 | 243 | 1391 / 2510 / 3767 / 2417 | R1–R13 / 6753 |
+| high | 292.898 | 243 | 1391 / 2455 / 1866 / 1930 | R1–R14 / 5293 |
+| max | 444.806 | 267 | 1391 / 2403 / 2388 / 7919 | R1–R10 / 4700 |
+
+Draft cap is 2048; each policy answer cap is 4096. Critique caps are 8192 for
+low, 32768 for omitted/high and 65536 for max. All four candidates contain a
+complete memo below their token caps; omitted's answer 2 also contains the
+private-counting spill described below. Each request has two distinct policy
+framings, with one formal constraint-analysis policy and one adversarial or
+stakeholder review policy. Each audit returns PASS on its first attempt:
+**four audits, zero live repairs, no refinement exhaustion**.
+
+All eight role hooks in each case uniquely correlate with their own closed
+UTC trace windows. Requirement applies high to low/omitted/high and retains
+max for API max, with 8192 total tokens and 4096 reserved thinking tokens.
+Other DeepSeek roles inherit low/high/high/max respectively. Qwen draft,
+answers and audit retain wire `high`, translated by the unchanged template
+to its existing medium reasoning preamble. HIGH synthesis has 65518 total /
+65262 thinking tokens after its 18-token head; MAX has 65512 / 65256 after its
+24-token head. These observed hooks establish the effort/budget contract;
+they do not prove reasoning quality or byte-for-byte reconstruction of the
+expanded internal messages, which was not established by the bounded review.
+
+All four final memos preserve A's 40 units/month and 80 ms, B's 70 units/month
+and 30 ms, the current budget cap of 60 and latency cap of 50, and the explicit
+conclusion that neither option is feasible. Each has a clean head/remainder
+seam, remains under 350 whitespace-delimited words, proposes two distinct
+conditional next steps, invents no benchmarks or citations, and ends exactly
+`Decision: defer.`. The targeted final source-status defects from the preserved
+`f737e0b0` runs are not observed: supplied hard limits remain requirements, and
+missing evidence is not converted into a categorical absence claim. LOW's
+redundant scope premises concern the current A/B decision and current limits;
+they do not assert that alternatives or approved changes cannot exist.
+
+Residual limitations remain and are not erased by these passes:
+
+- Omitted `answer_2` spends part of its exposed body counting individual words,
+  includes the literal `</think>`, then supplies a complete memo. It uses
+  3767/4096 tokens, so the completion/cap gate passes despite contaminated peer
+  content. The final memo omits this spill; V41E-D9 is not a universal guarantee.
+- Omitted's final step 2 says the latency target is revised to "at most 80 ms or
+  looser". A revised ceiling must be at least 80 ms to admit A, so this wording
+  is ambiguous. The step requires re-evaluation and preserves the budget cap;
+  it does not claim automatic feasibility. Audit misses this wording defect
+  and overstates the separately developed comparison of a merely named
+  Pareto-style lens.
+- Peers still misclassify given constraints as assumptions or add unnecessary
+  premises. LOW critique and MAX answer 2 also assert unsupported absence of
+  alternatives; HIGH answer 2 overstates each option's failure as a gap in both
+  dimensions. These statements are removed or narrowed in the final memos.
+  Complete candidates do not imply semantically correct candidates.
+
+These are bounded fixture results, not full quality assurance or evidence that
+every audit detects defects. In particular, the first-pass results exercise no
+live repair or exhaustion behavior. Quality, public performance and stability
+gates require their own completed evidence; prior semantic failures remain
+preserved above.
+
+The following files are beside their cases under
+`20260913-source-status-gates/`; SHA256 values bind the independent reviews.
+
+| Case / review file | SHA256 |
+| --- | --- |
+| `l2-low/l2-route-primary/independent-source-status-low-review.json` | `be462dd2782b3552cd75b794741d45eb37635a9ebd6a42f8cfd06fda846da935` |
+| `l2-omitted/l2-route-primary-omitted/independent-source-status-omitted-review.json` | `21fa7b1976117be9395c3b28fb653344587cc6614f97b6473ba16b2155cf1457` |
+| `l2-omitted/l2-route-primary-omitted/independent-source-status-omitted-wording.json` | `cdce42f8a53116969b35c54e3582abd961ceb3b9380bbe4e2d7025779546d872` |
+| `l2-high/l2-route-primary-high/independent-review-metadata-manifest.json` | `bc86eab3fcd22a5c8ad620e99a5523e5a1c2479bfb596f83e67bde86f93d9cdd` |
+| `l2-max/l2-route-primary-max/independent-review-metadata-manifest.json` | `b52aba02af5b8ee5c68229412f0510f05769ad851e33d2b12b27fbd7944e865e` |
+
+HIGH/MAX metadata manifests bind the original request/response/result files,
+body review, allowlisted hook observations and hook review; all eight remote
+file hashes match the local copies. Their derived `stage-bodies.json` files
+remain **local-only** under `/private/tmp/kairyu-v41-source-status-review/high/`
+and `/private/tmp/kairyu-v41-source-status-review/max/`; each is extracted from
+the original `response.json` already preserved in the same remote case. The
+manifests explicitly distinguish those local-derived hashes. For HIGH/MAX,
+raw Docker logs remain on the GPU host; the transferred hook evidence contains
+only timestamps, roles, efforts, numeric budgets and message hashes.
 
 ### Earlier fixed-high replay after transfer approval
 
@@ -747,12 +885,11 @@ model measurement.
 
 Native fixed-output capacity at c1/8/16/32, the five native retrieval sizes,
 and native DP-rank cancellation cleanup now have the successful evidence above.
-Final composed L2 validation remains open: revalidate candidate completion after
-the Qwen reservation, primary image/headless and four-effort paths,
-audit/refinement, public cancellation propagation, normal restart and public
-concurrency with fresh same-topology baselines. Do not infer these gates from
-native results or the initial L2 fixture's final-answer success. Initial
-startup/NaN/candidate/measurement failures remain preserved.
+Those native measurements do not establish composed L2 behavior. The later
+effort/headless/protocol and cancellation records above provide the applicable
+composed evidence at their stated revisions. Public serving measurements still
+need fresh same-topology baselines. Initial startup/NaN/candidate/measurement
+failures remain preserved; model-content review is not a new completion gate.
 
 The sibling TP8 result and PR #595's Qwen Requirement measurements are not
 measurements of this example. Native DeepSeek retrieval has passed with
@@ -760,11 +897,36 @@ measurements of this example. Native DeepSeek retrieval has passed with
 the ensemble. Qwen's near-limit native retrieval passes as recorded above;
 composed requests with similarly large inputs remain unmeasured.
 
+## Completed diagnostic pass and verification scope correction
+
+`20260913-source-status-quality` finishes at 2026-09-13 04:58:09 UTC on
+`e79dee15`/configuration `41538267`. All three requests complete the protocol
+checks. The image fixture's heuristic ending check fails because L3 inserts
+`<image:0>` into the user's required literal; its native Requirement input,
+checklist and final response contain that appended marker. V41E-D12 corrects
+the reproducible text/image serialization defect. Related CPU request and DAG
+tests pass 94/94 before deployment.
+
+Content review also observes unsupported premises in the headed memo despite
+the model's audit PASS. This is retained as an observation about model behavior,
+not a required quality guarantee or a reason for more prompt-tuning campaigns.
+The owner explicitly corrected that overreach. V41E-D13 defines the remaining
+verification scope; no additional semantic reviewer approval is required.
+
+The extra native audit-control run `20260913-source-status-audit-controls`
+was stopped at the owner's instruction at 05:08:30 UTC, before either case
+produced a completed summary. Its owned HTTP client and runner were stopped;
+all five engine instances across the three worker services returned to stable
+idle. `operator-user-scope-stop.json` and `user-scope-stop/` retain that record.
+Partial artifacts remain; completing those controls is **not a remaining task**.
+The previous campaign's performance steps had not started. Do not launch the
+prepared continuation script that requires semantic audit-control approval.
+
 ## Next evidence record
 
 Follow [README.md](README.md#gpu-validation-execution-order). Record
 checkout SHA, exact runtime image IDs, checkpoint attestation, configuration
 hash, request/response/trace artifacts, first failures and explicit skipped
-gates. Preserve protocol results separately from model/task quality and human
-semantic review. Mark only completed gates as passed; a completed implementation
-or a healthy process alone is insufficient to close the remaining gates.
+checks. Record the behavior actually exercised and observed metrics. Preserve
+content diagnostics separately, without presenting them as guarantees or making
+them prerequisites for implementation completion.

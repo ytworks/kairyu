@@ -1,9 +1,9 @@
 # Five judged routes; both native models accept images. The primary DAG has
-# head + draft + fixed-high DeepSeek requirements roots, then policies/critique,
+# head + draft + high-floor DeepSeek requirements roots, then policies/critique,
 # two policy answers, and synthesis with inline fixed-medium Qwen audit.
 # DeepSeek uses native /chat/completions and the role middleware, never a raw
 # chat scaffold. Explicit caller effort reaches inherited roles (default high);
-# requirements remains native high (official high75). Qwen spec high is mapped
+# requirements uses native high (official high75) or caller max. Qwen spec high is mapped
 # to native medium by the unchanged qwen3.8-chat.jinja.
 # max_steps: 8 generation units + 1 empty-output retry + 3 audits + 3 audit
 # retries + 2 refinements = 17, with one spare; exhaustion publishes last answer.

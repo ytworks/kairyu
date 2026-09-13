@@ -154,7 +154,11 @@ def test_orchestration_conversation_json_is_context_not_response_schema():
     assert "Kairyu L2 conversation (JSON)" not in validated.prompt
 
 
-def test_orchestration_preserves_image_input_separately_from_role_context():
+@pytest.mark.parametrize(
+    "text",
+    ["Read the chart.", "End with exactly: Health status: unknown.", "Repeat literal <image:0>."],
+)
+def test_orchestration_preserves_image_input_separately_from_role_context(text):
     request = ChatCompletionRequest.model_validate(
         {
             "model": "auto",
@@ -162,7 +166,7 @@ def test_orchestration_preserves_image_input_separately_from_role_context():
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": "Read the chart."},
+                        {"type": "text", "text": text},
                         {
                             "type": "image_url",
                             "image_url": {
@@ -179,11 +183,102 @@ def test_orchestration_preserves_image_input_separately_from_role_context():
     validated = validate_orchestration_chat_input(request)
 
     assert isinstance(validated.prompt, str)
-    assert "Read the chart.<image:0>" in validated.prompt
+    context = json.loads(
+        validated.prompt.split("--- CONVERSATION CONTEXT JSON ---\n", 1)[1].split(
+            "\n--- END CONVERSATION CONTEXT JSON ---", 1
+        )[0]
+    )
+    assert context == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "image", "item_index": 0},
+            ],
+        }
+    ]
+    assert "LATEST USER REQUEST" not in validated.prompt
+    assert "data:image" not in validated.prompt
     media = validated.orchestration_multimodal_prompt
     assert media is not None
     assert media.items[0].data == "data:image/png;base64,AAAA"
+    assert media.messages[0].content[0].text == text
+    assert media.messages[0].content[1].item_index == 0
     assert media.messages[0].content[1].detail == "high"
+
+
+@pytest.mark.parametrize(
+    ("parts", "expected"),
+    [
+        (
+            [{"type": "image_url", "image_url": {"url": "https://example.test/one.png"}}],
+            [{"type": "image", "item_index": 0}],
+        ),
+        (
+            [
+                {"type": "text", "text": "Before\n"},
+                {"type": "image_url", "image_url": {"url": "https://example.test/one.png"}},
+                {"type": "text", "text": " between "},
+                {"type": "image_url", "image_url": {"url": "https://example.test/two.png"}},
+                {"type": "text", "text": "Last literal."},
+            ],
+            [
+                {"type": "text", "text": "Before\n"},
+                {"type": "image", "item_index": 0},
+                {"type": "text", "text": " between "},
+                {"type": "image", "item_index": 1},
+                {"type": "text", "text": "Last literal."},
+            ],
+        ),
+    ],
+)
+def test_orchestration_image_context_preserves_order_and_image_only_turn(parts, expected):
+    request = ChatCompletionRequest.model_validate(
+        {"model": "auto", "messages": [{"role": "user", "content": parts}]}
+    )
+
+    validated = validate_orchestration_chat_input(request)
+
+    context = json.loads(
+        validated.prompt.split("--- CONVERSATION CONTEXT JSON ---\n", 1)[1].split(
+            "\n--- END CONVERSATION CONTEXT JSON ---", 1
+        )[0]
+    )
+    assert context == [{"role": "user", "content": expected}]
+    assert "LATEST USER REQUEST" not in validated.prompt
+    assert "https://example.test/" not in validated.prompt
+    media = validated.orchestration_multimodal_prompt
+    assert media is not None
+    assert [item.data for item in media.items] == [
+        "https://example.test/one.png",
+        *(["https://example.test/two.png"] if len(expected) > 1 else []),
+    ]
+    assert [part.item_index for part in media.messages[0].content if part.type == "item"] == (
+        [0, 1] if len(expected) > 1 else [0]
+    )
+
+
+@pytest.mark.parametrize("with_prior_image", [False, True])
+def test_orchestration_latest_text_view_preserves_user_image_marker_literals(with_prior_image):
+    messages = []
+    if with_prior_image:
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.test/one.png"}}
+                ],
+            }
+        )
+    messages.append({"role": "user", "content": "Repeat the literal <image:0>."})
+    request = ChatCompletionRequest.model_validate({"model": "auto", "messages": messages})
+
+    validated = validate_orchestration_chat_input(request)
+
+    assert validated.prompt.endswith(
+        "--- LATEST USER REQUEST (plain text view of the final user turn) ---\n"
+        "Repeat the literal <image:0>.\n--- END LATEST USER REQUEST ---"
+    )
 
 
 def test_batch_worker_rejects_template_and_legacy_policy_overlap(tmp_path):

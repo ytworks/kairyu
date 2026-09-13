@@ -1,9 +1,10 @@
 # V4.1 ensemble example
 
-Status: GPU validation in progress (2026-09-13). Native high-floor and composed
-effort contracts pass at their recorded revisions; repeated semantic errors in
-LOW/omitted synthesis and audit require V41E-D11 replay before quality/performance
-closure. Initial startup and numerical failures remain preserved.
+Status: GPU validation in progress (2026-09-13). Native high-floor and all four
+composed effort contracts pass. V41E-D12 fixes an image-reference rendering
+defect; its bounded integration check and public serving measurements remain.
+Per the owner's correction, V41E-D13 limits completion to implementation behavior;
+model-answer quality is not a completion gate. Earlier evidence remains preserved.
 
 ## V41E-D1 — Separate six-plus-two deployment
 
@@ -204,3 +205,52 @@ composed replay; it does not guarantee arbitrary model correctness.
 
 References: `examples/qwen3.8-deepseek-v4.1-8gpu/README.md`, `L1-NOTES.md`,
 `MEASUREMENTS.md`, and implementation plan `2026-09-12-v41-ensemble-example.md`.
+
+## V41E-D12 — Preserve text/image boundaries in orchestration context
+
+The formal image quality case ends its actual user text with the required
+literal `Health status: unknown.` and then attaches an image. L3's flattened
+display representation appends `<image:0>` directly to that text in both
+conversation JSON and the duplicate latest-user view. Requirement extracts the
+combined string as the required ending; synthesis publishes it and audit
+accepts it. Exact native message/trace correlation establishes that the extra
+characters originate in rendering, not in the user's instruction.
+
+Keep ordered text and image-reference parts separate in the L2 conversation
+JSON. Preserve each text part verbatim and represent attachment indices as
+non-text metadata, without copying image payloads into the role prompt. For a
+latest user turn containing images, use that structured view rather than a
+second flattened text view. Actual typed image forwarding, direct VLM input,
+plain-text requests and literal marker-like user text retain their behavior.
+Do not strip strings from generated answers or weaken exact-ending checks.
+
+This changes shared L3 orchestration rendering for image requests. Native
+models, Requirement effort, Qwen defaults, L2 roles, prompts and token caps
+stay unchanged. Verify the original text boundary and image order in CPU
+request tests, then confirm image forwarding and response completion with a
+bounded integration request. Observations about the headed memo's assumptions
+remain examples of model behavior, not additional implementation blockers.
+
+## V41E-D13 — Verify implementation behavior without promising model quality
+
+The owner explicitly rejects treating model-answer quality as an implementation
+completion condition. Additional independent semantic reviews, negative/positive
+audit controls and repeated prompt tuning exceeded the requested scope. Stop
+those additions, preserve existing artifacts and do not require their completion
+before serving measurements or PR handoff. An interrupted diagnostic is neither
+a model failure nor an unfinished requirement of this example.
+
+Verify the requested deployment and mechanisms: model/replica topology, effort
+selection and propagation, Requirement generation and consumption, native image
+forwarding, API completion, cancellation/resource release, startup and the
+existing serving measurements. Use scoped regressions for reproducible code
+defects, such as altered input text. Reuse applicable completed evidence when
+the relevant implementation is unchanged; do not repeat broad matrices merely
+because documentation or an unrelated input path changes.
+
+Model-generated requirements, answers and audit judgments may be wrong. A
+model's PASS, a fixture diagnostic or successful execution is not a guarantee
+of factual correctness, requirement completeness or reliable self-correction.
+Report observed behavior and its limits without turning content preferences or
+unprovable quality claims into new gates. Retain this distinction in the PR's
+remaining tasks and handoff.

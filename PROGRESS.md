@@ -95,10 +95,20 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble validates native Requirement high-floor/max behavior and complete max/low/omitted public candidates at the recorded revision. LOW/omitted synthesis misclassifies supplied constraints as assumptions and audit misses it; a general source-status prompt correction needs replay. Quality/public-performance gates remain; earlier capacity/context/cancellation evidence retains its revisions in MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble validates native Requirement high-floor/max behavior and all four public effort contracts. Typed orchestration context fixes an image marker merged into user text; bounded image integration and serving measurements remain. Per owner correction, model-answer quality and audit accuracy are not implementation completion gates; stop extra semantic reviews/retries and reuse applicable completed evidence. Details: V41E-D12/D13, MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [amendment] Bound verification to implementation behavior
+- What: stop extra semantic audits and quality-driven retries; keep deployment, effort, Requirement propagation, image/API/lifecycle behavior and existing serving measurements as the verification scope.
+- Why: the owner reiterates that model quality cannot be guaranteed and must not become an implementation completion gate. Preserve observations without expanding the task or claiming reliable model self-correction.
+- Refs: V41E-D13, PR #598; the added audit-control process was stopped and all workers returned to stable idle. Scope applies to the remaining work and handoff.
+
+### 2026-09-13 — [amendment] Preserve image attachment boundaries in L2 context
+- What: keep image references as typed metadata beside verbatim text in orchestration conversation JSON; omit the duplicate flattened latest-user view for image turns. Preserve native image forwarding and text-only input.
+- Why: the image quality case promotes an appended internal marker into its exact required ending, Requirement checklist and accepted final answer. The separate headed unsupported-premise/audit failure remains recorded.
+- Refs: V41E-D12, PR #598; source-status quality evidence and chat-template request regressions. Corrected GPU replay is pending.
 
 ### 2026-09-13 — [amendment] Preserve evidential status in synthesis and audit
 - What: clarify that supplied facts/requirements are not assumptions, missing evidence does not establish absence, and an assumptions heading cannot justify an unnecessary premise. Keep effort, reservations, schemas and fixtures unchanged.

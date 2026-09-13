@@ -1,6 +1,11 @@
 # Qwen3.8 + DeepSeek V4.1 ensemble on eight GPUs
 
-**GPU validation is in progress; see the measured results and remaining gates below.**
+**GPU validation is in progress; see the measured results and remaining checks below.**
+
+Validation covers implementation behavior and the recorded serving measurements.
+It does not guarantee the quality of generated requirements, answers or audit
+judgments. Model-content reviews and repeated prompt tuning are not completion
+conditions; reuse completed checks when the relevant implementation is unchanged.
 Do not interpret the sibling V4.1 TP8 measurements as evidence for this topology.
 See [MEASUREMENTS.md](MEASUREMENTS.md) for the current evidence and
 [L1-NOTES.md](L1-NOTES.md) for the fixed-runtime inspection.
@@ -214,10 +219,12 @@ confirm `docker image inspect --format '{{.Id}}'` against both pinned specs.
    Requirement stage with the DeepSeek hook log and verify high for
    omitted/low/high and max for API max.
    Verify that other DeepSeek thinking roles inherit effort and Qwen stays medium.
-5. **Protocol and quality diagnostics.** Run the commands below. Requirement
+5. **Composed protocol checks.** Run the commands below. Requirement
    diagnostics run one three-case pass by default and report protocol contracts
    separately from heuristic/model judgments. Inspect failed/exhausted audits and
-   full final answers; an exit code of zero is not independent factual validation.
+   full final answers as diagnostics; an exit code of zero is not independent
+   factual validation. Semantic diagnostics do not create additional completion
+   gates or require repeated tuning until a model's answers satisfy a reviewer.
    If the judge does not select ensemble, the ensemble-specific check should fail;
    record route coverage rather than declaring unexercised roles tested.
 6. **Capacity/recovery/performance.** Validate clean restart and key persistence,
