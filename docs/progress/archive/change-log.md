@@ -11,6 +11,32 @@ header (above the existing entries), keeping their original order.
 
 <!-- ARCHIVE-INSERT-POINT: new trimmed entries go directly below this line -->
 
+### 2026-09-13 — [amendment] V4.1 seeded top-p thinking termination
+- What: mirror the existing monolithic cutoff guard in the pinned child runtime's split top-p kernel; add positive-temperature forced-budget regressions without changing effort or token caps.
+- Why: FP32 reconstructs the cutoff as the forced 1e9 maximum, removes every token and emits invisible token zero until the total cap. Bounded native token-ID comparisons and an independent GPU oracle isolate the sampler defect; the corrected child needs fresh full-model replay.
+- Refs: V41E-D8, PR #598; patch_top_p.py and example MEASUREMENTS preserve source hashes, original failures, oracle/control comparisons and rollout evidence.
+
+### 2026-09-13 — [amendment] V4.1 Requirement JSON escape compatibility
+- What: remove string minLength from the three free-text generation-schema fields; preserve schema shape and verification-time nonempty validation.
+- Why: pinned XGrammar 0.2.6 excludes JSON escapes when lowering minLength, truncating actual quoted literals. CPU character/token matching reproduces the defect; the native parser preserves the same bytes. Runtime empty strings become possible, so this is not a universal serving-time nonempty guarantee.
+- Refs: V41E-D7, PR #598; example MEASUREMENTS preserves prompt trials and native grammar isolation; fixed-high GPU literal replay follows deployment.
+
+### 2026-09-13 — [amendment] Deterministic head separation and deferred-audit cancellation
+- What: add a default-empty head continuation separator, opt in only the V4.1 example, and explicitly close owned SSE/Conductor iterators under cancellation shielding. Tighten Requirement literal checks and clarify JSON quoting. Include changed runtime sources in deployment attestation.
+- Why: GPU replay fixes candidate bodies but still joins `constraint.Facts:`; an interrupted keepalive leaves Qwen audit running 139 seconds after disconnect. Native unary cancellation works, isolating a shared iterator-ownership bug. CPU regressions cover both ASGI disconnect paths and pending-event cleanup; final GPU replay remains pending.
+- Refs: PR #598; V41E-D5/D6 and EO-D7 opt-in amendment; example MEASUREMENTS records native capacity/context/cancellation successes and preserved composed failures.
+
+### 2026-09-13 — [amendment] V4.1 candidate body reservation and native measurement correction
+- What: reserve half the existing Qwen draft/answer caps for body text, preserving medium effort; reject empty or cap-exhausted candidate pools. Recognize native `reasoning` in the example-local capacity collector and keep raw SSE. Ask prose heads to emit a paragraph separator while exact-output heads remain exact.
+- Why: the first primary GPU request succeeds publicly but has a truncated draft and empty policy answer. A separate native capacity false failure ignores all-thinking deltas. Preserve these failures and rerun their gates; native 30/30 and fixed-high Requirement correlation are established independently.
+- Refs: PR #598; V41E-D3 amendment; example MEASUREMENTS, GPU smoke/capacity probes. Composed, context, performance and worker-cleanup gates remain in progress.
+
+### 2026-09-13 — [amendment] Six-GPU V4.1 memory placement and masked-KV correction
+- What: offload Engram tables to host RAM and add a pinned child runtime that zero-fills invalid sparse-KV gathers. Add native/L2/capacity probes, exact parent-image checks and isolated kernel caches. The poison oracle passes 48/48 with bitwise baseline agreement; the existing numerical suite passes 16/16. Full-model gates remain in progress.
+- Why: the initial GPU-resident candidate OOMs during profiling; the offloaded runtime reveals NaNs from invalid indices reading slot zero. Eager/NCCL experiments and stage instrumentation isolate Attention, with independent GPU reproduction. Preserve all failed trials and keep the sibling runtime unchanged.
+- Refs: PR #598; V41E-D1 amendment; new example MEASUREMENTS/L1-NOTES; `verification-results/20260913-kernel-investigation` on the GPU host.
+
+
 ### 2026-09-12 — [amendment] Separate V4.1 six-plus-two ensemble example
 - What: add a TP2×DP3/EP6 DeepSeek V4.1 candidate on six GPUs plus two Qwen27B TP1 replicas; keep five routes, reduce to two policies, pass images natively and port PR #595 requirements onto fixed-high DeepSeek. Qwen effort and bounded audit publication behavior remain unchanged.
 - Why: the owner requested a separate configuration and deferred all GPU tests; TP6 cannot divide attention heads, and DSpark draft EP6 support is unverified. CPU/wire contracts and startup-hash attestation prepare a reproducible handoff without borrowing TP8 evidence.
