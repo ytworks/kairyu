@@ -96,11 +96,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6): CPU contracts only; the six-GPU DeepSeek topology selection (`verify.sh native`) and every public gate are pending; the unpatched pinned image showed NaN output on one six-GPU candidate in the closed PR #598 campaign — if all candidates fail the finite-output gate the example stops and reports (no patch layer)
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-14 — [design] V41T-D1..D6: DeepSeek V4.1 (6 GPU) + Qwen3.8 (2 GPU) tiered example
+- What: new `examples/qwen3.8-deepseek-v4.1-8gpu` keeps the judged five routes; the ensemble is DeepSeek-led (PR #595 requirements checklist, four policies, four Qwen + one DeepSeek candidates, critical synthesis, final continuing the streamed Qwen head, DeepSeek audit with ≤2 refinements); a judge-free `kairyu-ensemble-max` forces the ensemble for verification; Qwen direct routes drop their fixed `max_tokens` (Issue #599); the DeepSeek image is the sibling's pinned overlay reused by ID. CPU contracts pass; no GPU evidence yet.
+- Why: owner requirements (2026-09-14) with Kairyu, sibling examples, and shared scripts unchanged; the DSL offers no caller-side profile forcing and no effort floor, so a second orchestrator and `inherit` + default high are used; TP6 is invalid for the checkpoint and DSpark cannot divide EP6.
+- Refs: `docs/design/example-v41-tiered-orchestration.md`; PR #602; `tests/unit/test_v41_tiered_examplectl.py`
 
 ### 2026-09-11 — [progress] V4.1 L1 selection and final GPU gates complete
 - What: select TP8/EP8, DSpark 5, 16K batching and NCCL; the 320-request matrix, default/explicit reasoning, tools, images, cancellation, normal restart and four long-context retrieval smokes pass. Best measured aggregate throughput is 326.82 tok/s at c32; near-1M retrieval completes in 203.02 s.
