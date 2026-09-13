@@ -248,9 +248,11 @@ def test_v41_tiered_l2_pins_the_deepseek_led_dag_and_its_forced_twin() -> None:
     assert ensemble.workers == spec.workers and ensemble.router == spec.router
     assert ensemble.budget == spec.budget
     assert ensemble.profiles == () and ensemble.profile_judge is None
+    # The floor needs a final unit with a reasoning_close_tag; only the judged
+    # spec has one (the Qwen thinking route), so the twin omits the setting.
+    assert spec.public_output_floor == 256 and ensemble.public_output_floor is None
     for field_name in (
         "internal_max_tokens",
-        "public_output_floor",
         "default_reasoning_effort",
         "expose_intermediate_outputs",
         "moa_samples",

@@ -95,7 +95,10 @@ original requirement on purpose; see V41T-D4 in the design document.
   every internal role (Kairyu contract), so the Chat UI's 65536 is the
   effective ceiling from the UI.
 
-`kairyu-ensemble-max` serves the same DAG without the judge (V41T-D5) so
+`kairyu-ensemble-max` serves the same DAG without the judge (V41T-D5; it also
+omits `public_output_floor`, which Kairyu only accepts when some final unit
+declares a `reasoning_close_tag` — in `auto-max.yaml` that is the Qwen
+thinking route) so
 `verify.sh serving-ensemble` can prove the full flow on every request. It is
 API-only; the Chat UI lists `kairyu-auto-max` alone.
 

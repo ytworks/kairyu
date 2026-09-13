@@ -519,7 +519,10 @@ internal_max_tokens: 131072
 # inert for the DeepSeek final unit until a reasoning_close_tag is declared,
 # and inert whenever the caller sends no max_tokens; it applies to the Qwen
 # thinking route (qwen_think_answer).
-public_output_floor: 256
+# No public_output_floor here: Kairyu requires a final unit with a
+# reasoning_close_tag to carry the floor, and this spec has none (the DeepSeek
+# final unit declares no close tag until native-chat continuation is verified;
+# auto-max.yaml satisfies the rule through its Qwen thinking route).
 expose_intermediate_outputs: true
 
 # Primary profile under the level-synchronous scheduler: wave 1 = head +
