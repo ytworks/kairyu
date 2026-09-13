@@ -186,14 +186,17 @@ services:
       # OR over the enable_thinking=false that non-thinking roles send.
       - --enable-prefix-caching
       - --gpu-memory-utilization
-      - "0.95"
+      - "0.90"
       - --max-num-seqs
       - "32"
       - --max-num-batched-tokens
-      - "8192"
+      - "16384"
       - --disable-uvicorn-access-log
+      # Candidate 2: Engram tables in pinned host memory (~189 GiB measured by
+      # the closed PR #598 campaign). GPU-resident tables (candidate 1) left no
+      # memory for the KV cache on this topology; see MEASUREMENTS.md.
       - --engram-config
-      - '{"cpu_offload":false}'
+      - '{"cpu_offload":true}'
       - --limit-mm-per-prompt
       - '{"image":1}'
     healthcheck: *health

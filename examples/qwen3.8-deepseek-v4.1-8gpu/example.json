@@ -39,11 +39,11 @@
       "expert_parallel_size": 6,
       "topology": "TP2 x attention-DP3, EP6, PP1; one vLLM service on GPUs 0-5",
       "dspark_speculative_tokens": 0,
-      "engram_cpu_offload": false,
-      "gpu_memory_utilization": 0.95,
-      "max_num_batched_tokens": 8192,
+      "engram_cpu_offload": true,
+      "gpu_memory_utilization": 0.9,
+      "max_num_batched_tokens": 16384,
       "max_num_seqs": 32,
-      "topology_status": "candidate 1 of the L1 selection procedure; not GPU-verified yet (see MEASUREMENTS.md)"
+      "topology_status": "candidate 2 of the L1 selection procedure (candidate 1 failed KV profiling); GPU gates pending (see MEASUREMENTS.md)"
     }
   },
   "models": {
@@ -115,13 +115,14 @@
     "qwen_kv_cache_dtype": "fp8",
     "qwen_cudagraph_mode": "PIECEWISE",
     "deepseek_dspark_speculative_tokens": 0,
-    "deepseek_max_num_batched_tokens": 8192,
+    "deepseek_max_num_batched_tokens": 16384,
     "deepseek_max_num_seqs": 32,
     "deepseek_kv_cache_dtype": "fp8",
     "deepseek_block_size": 64,
     "deepseek_indexer_kv_dtype": "mxfp4",
     "deepseek_moe_backend": "marlin",
-    "deepseek_default_chat_template_kwargs": null
+    "deepseek_default_chat_template_kwargs": null,
+    "deepseek_engram_cpu_offload": true
   },
   "deepseek_generation": {
     "temperature": 1.0,

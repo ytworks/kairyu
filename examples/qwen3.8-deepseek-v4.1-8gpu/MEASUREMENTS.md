@@ -27,8 +27,8 @@ that passes every gate is adopted and recorded in `example.json`,
 
 | # | Topology | Engram | `gpu-memory-utilization` | `max-num-batched-tokens` | Status |
 |---|---|---|---|---|---|
-| 1 | TP2 × attention-DP3, EP6 | GPU-resident | 0.95 | 8192 | not run |
-| 2 | TP2 × attention-DP3, EP6 | CPU offload (`cpu_offload: true`, ~189 GiB pinned host RAM measured by the closed PR #598 campaign) | 0.90 | 16384 | not run |
+| 1 | TP2 × attention-DP3, EP6 | GPU-resident | 0.95 | 8192 | **FAILED** 2026-09-13 17:22 UTC: every worker loads 83.92 GiB of weights per GPU (36–38 s), then all three DP engines raise `ValueError: No available memory for the cache blocks` after profiling (0.95 is equivalent to 0.9429 with CUDA-graph memory profiling); the container never became healthy. Evidence: `verification-results/20260913T172300Z-l1-candidate1/{worker.log,launch.log,summary.txt}` |
+| 2 | TP2 × attention-DP3, EP6 | CPU offload (`cpu_offload: true`, ~189 GiB pinned host RAM measured by the closed PR #598 campaign) | 0.90 | 16384 | running |
 | 3 | TP1 × attention-DP6, EP6 | GPU-resident, then CPU offload | 0.95 | 8192 | not run |
 
 Constraints established by source inspection (closed PR #598 notes, checkpoint
