@@ -41,8 +41,10 @@
 
 | サービス | 配置案 | 候補生成との関係 |
 |---|---|---|
-| Qwen 0／1 | GPU 0／1、TP1×2 | `answer_1..4`の4候補を同じ2レプリカpoolへ投入する |
-| DeepSeek V4.1 | GPU 2–7、1物理サービス | Requirement、独立候補、policies、批判、再構成、監査とDeepSeek直答を担当する |
+| Qwen 0／1 | GPU 6／7、TP1×2 | `answer_1..4`の4候補を同じ2レプリカpoolへ投入する |
+| DeepSeek V4.1 | GPU 0–5、1物理サービス | Requirement、独立候補、policies、批判、再構成、監査とDeepSeek直答を担当する |
+
+2026-09-13の事前検証では現稼働のGPU配置を維持する案へ具体化した。TP2／DP3／EP6とCPU Engram offloadは検証候補であり、[数値事前検証の未通過](../../../examples/qwen3.8-deepseek-v4-8gpu/MEASUREMENTS.md#v41c-six-gpu-preflight-numerical-gate-fail-2026-09-13)を理由に、フルモデル起動と構成選定は未完了としている。
 
 候補数とレプリカ数を分ける。4方針は`POLICY 1..4`を維持し、4候補を2候補に減らさない。配置は既存ReplicaPoolのqueue-depth／affinity機構に任せ、候補とGPUを固定対応させない。4候補が4 GPUで同時に動く場合と同じ性能は仮定しない。
 

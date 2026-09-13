@@ -1,5 +1,10 @@
 # Measurements
 
+> **V41C scope note (2026-09-13):** the new main-derived six-GPU V4.1
+> candidate has not passed its numerical preflight. The final section
+> records the failure and a controlled same-fixture comparison. No full-model
+> six-GPU startup, API gate or ensemble performance result is claimed.
+
 > **Scope note (2026-08-18):** the served L2 policy is now the dual-track
 > policy-ensemble DAG (`docs/design/example-dual-track-orchestration.md`,
 > DTO-D1..D5). The "Dual-track DAG serving matrices" section below is the
@@ -476,3 +481,105 @@ is `9e165c30e2704aec5d9d593cce3eebd58bbef1cb`; vLLM source revision is
 `sha256:99756b54424a4697f69476b29aa02fb7f8112aaa74fa8203a7bf8a0bae4ca6f1`.
 The externally reachable no-auth ChatUI validated after the run is
 `http://61.206.39.14:3000`; Kairyu L3 remains loopback-only.
+
+## V41C six-GPU preflight: numerical gate FAIL (2026-09-13)
+
+These results belong to draft PR #601, starting from main `99c5eadb`.
+They use the main V4.1 runtime and checkpoint assets, not the closed
+ensemble branch. The existing deployment was preserved for restoration;
+its successful restart does not validate this candidate.
+
+| Identity / candidate setting | Value |
+|---|---|
+| Image ID | `sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359` |
+| vLLM source | `179dd0fa9` from the pinned image |
+| Checkpoint revision | `dba1be0a40aa45a94ad051997016db3960a90277` |
+| Checkpoint config SHA-256 | `8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879` |
+| Candidate topology | GPU 0–5, TP2 × attention DP3, EP6, one frontend; Qwen remains on 6/7 |
+| Runtime candidate | CPU Engram offload, DSpark 5, NCCL, Marlin, 16,384 batch tokens, 32 sequences per DP engine, utilization 0.90 |
+| Native input | `deepseek_v41` tokenizer/reasoning/tool parsers, context 1,048,576; default template `thinking:false` |
+| Cache configuration | 64-token blocks, BLHNC, FP8 MLA KV, MXFP4 indexer |
+
+The checkpoint has 64 attention heads and 8 output groups, so TP6 is not
+a supported partition. Pinned source supports TP2/DP3 with EP6. Its ordinary
+MoE mapping distributes 384 target experts evenly and 128 draft experts
+as 22/22/21/21/21/21; EPLB stays disabled. Uneven draft placement is therefore
+not a source-level reason to remove DSpark, but startup correctness is open.
+Header-only weight accounting found 475.241 GiB total, including 188.833 GiB
+Engram; offload and runtime memory overhead still require actual startup
+measurement. This table describes an unselected candidate.
+
+The numerical probe runs on one SM120 GPU with the candidate's **32 local
+attention heads**. It is not a six-GPU collective or full-model test.
+It uses the existing main
+`examples/deepseek-v4.1-flash-8gpu/check_sm120_pages.py` with only the Q-head
+and sink dimensions changed from 8 to 32. Seed 4175, case order, packed
+cache construction and the independent reference remain unchanged.
+
+At 13:49 UTC, eight cases passed before the first secondary-page-64,
+one-token, top-k-128, unmasked case failed `atol=0.05, rtol=0.05`.
+One of 16,384 elements failed: index `[0, 26, 425]`, reference
+`-0.5795126557350159`, kernel `-0.486328125`, absolute error
+`0.09318453073501587`. The original PyTorch exception reports the greatest
+error among failing elements; the global maximum absolute error is
+`0.16298317909240723` at an element that passes its relative tolerance.
+
+The reference unpacks the **actual** FP8 KV bytes and BF16 RoPE values,
+then uses original BF16 Q promoted to FP32 for QK/softmax/PV. Pinned kernel
+source additionally quantizes Q NoPE and softmax-weight/value-scale
+products to FP8 and rounds split/output values to BF16. These differences
+are relevant to further diagnosis; they do not establish which operation
+caused this outlier or justify relaxing the gate.
+
+At 14:04 UTC, a controlled diagnostic retained the failing fixture and
+passed its heads 24–31, corresponding sinks, identical packed KV bytes
+and indices through the eight-head kernel. Its 4,096 outputs were
+**bit-exact** to the corresponding 32-head outputs. Both fail the same
+reference element. This fixture's failure is not specific to 32 heads;
+the original numerical gate remains **FAIL**.
+
+The first probe stopped the idle old gateway/DeepSeek and retained their
+original containers. They were restored healthy by 13:55 UTC; gateway
+`/readyz` returned `ready`, and both Qwen workers and UI were healthy.
+The follow-up ran without stopping services, with a 2% PyTorch GPU allocator
+cap, 8 GiB container memory and four CPUs. A read-only Triton cache setup
+error was recorded and corrected before numerical execution. Peak PyTorch
+allocation was 315,577,856 bytes; all original services remained healthy
+and diagnostic GPU memory was released at 14:06 UTC.
+
+Selected evidence is committed under
+[`measurements/20260913T134938Z-v41-preflight/`](measurements/20260913T134938Z-v41-preflight/):
+the original failure, its log (`.txt`, unchanged bytes), same-fixture result
+and artifact manifest. Full scripts, synthetic tensors, source excerpts,
+candidate compose and setup logs are retained at
+`/mnt/nvme/kairyu/model-volumes/qwen3.8-deepseek-v4-8gpu/verification-results/20260913T134938Z/v41-sixgpu-preflight/`.
+All manifest hashes were verified after archival. In particular the
+744,468-byte fixture SHA-256 is
+`5e0d936bc47f1afbf8862f580714611d66fc6fb6b24d16f05cb8a84cf8618979`.
+
+No full-model six-GPU startup, native API gates, AUTO deployment,
+natural/forced-primary performance matrix or paired baseline was attempted.
+The remaining numerical discrepancy must be resolved before promoting
+this runtime candidate; previous TP8/V4/closed-branch results do not close it.
+
+### Native non-thinking configuration: CPU rendering only
+
+The immutable image's `ChatCompletionRequest.build_chat_params` and exact
+checkpoint tokenizer were exercised with default template kwargs
+`{"thinking":false}`. Omitted effort closes thinking; explicit effort enables
+it with the checkpoint's native budgets. No framework or tokenizer patch
+is needed for this setting. This applies to the candidate ensemble L1;
+the standalone example's default remains unchanged.
+
+| Top-level request effort | Thinking enabled | Native budget | Final marker |
+|---|---|---:|---|
+| omitted | false | none | `</think>` |
+| low | true | 50 | `<think>` |
+| high | true | 75 | `<think>` |
+| max | true | 100 | `<think>` |
+
+[`native-thinking-render.json`](measurements/20260913T134938Z-v41-preflight/native-thinking-render.json)
+records image/checkpoint/source identities and rendered-prompt hashes;
+SHA-256 `bd743b479f98b2470fa857c7a2f56e35589d9abddfb43e71fa07a29c7f70b83c`.
+These are CPU renderer results, not live generated-response gates. The
+Requirement high floor with explicit max inheritance remains separate work.

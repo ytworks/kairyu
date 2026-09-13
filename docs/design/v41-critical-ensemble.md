@@ -98,14 +98,42 @@ inputs or implement the ensemble DAG. Those policies and derivations remain
 separate work. Admission work estimates are not exact rendered token counts;
 per-dispatch capacity fitting remains open.
 
+## V41C-D5 — Runtime settings require new six-GPU evidence
+
+The main-pinned runtime's existing options admit a TP2/attention-DP3/EP6
+candidate with CPU Engram offload and DSpark 5. Preserve the current physical
+placement (DeepSeek 0–5, Qwen 6/7). Source-level divisibility and memory
+accounting are preparation evidence, not a selected or working topology.
+
+Native non-thinking is expressible with the existing L1 option
+`--default-chat-template-kwargs '{"thinking":false}'`: the pinned native
+request builder/tokenizer closes thinking when effort is omitted and
+enables native budgets 50/75/100 for explicit low/high/max. No middleware,
+alternate template or shared framework switch is admitted for this task.
+Thinking roles must still explicitly receive their intended default/effort;
+Requirement's high floor and max inheritance remain to be expressed.
+
+The 32-local-head numerical preflight failed one reference element. An
+eight-head call on the same fixture is bit-exact to its corresponding
+32-head slice and fails the same reference element. Retain the original
+FAIL; this fixture does not demonstrate a head-count-specific defect.
+The existing deployment has been restored healthy. Full-model startup
+and all six-GPU API/performance gates remain pending.
+
+Evidence, exact identities, unchanged tolerances, reproduction method and
+durable artifact location are recorded in the existing example's
+`MEASUREMENTS.md`, section "V41C six-GPU preflight".
+
 ## Open implementation conditions
 
 - Establish a supported six-GPU topology from the pinned main runtime and
-  checkpoint; confirm draft expert divisibility and memory before selection.
+  checkpoint; resolve the numerical preflight failure and measure startup
+  memory before selection. Draft expert mapping is source-checked only.
 - Keep the exact native message/tool/image structure through AUTO derivation
   and token accounting, including assistant continuation and tool metadata.
 - Express V4.1 non-thinking and Requirement's high floor via existing
-  extension points or an independently justified minimal request contract.
+  settings (non-thinking renderer checked in V41C-D5) and an independently
+  justified minimum request contract if needed for the high floor.
 - Verify each final choice and keep its repair, continuation, usage and
   publication state separate. Existing n>1 audit/floor bypass is insufficient.
 - Identify a minimal shared input-capacity contract for MoA and verifier
@@ -114,6 +142,16 @@ per-dispatch capacity fitting remains open.
 - Preserve all mandatory stages without silently weakening shared best-so-far
   semantics. Record unresolved policy expression instead of adding a
   workflow-specific framework switch.
+
+For all-choice verification, preserve the first native `n`/`best_of`/seed
+call and factor the existing audit/repair loop per returned choice. The
+current OpenAI adapter only has batch usage and cannot truthfully apportion
+it after replacing one choice. Both pinned V4.1 and Qwen v0.23 source/schema
+support per-choice `return_token_ids`; capability-controlled ingestion and
+validation of these IDs is the next transport prerequisite. It has not
+been implemented or live-generation verified. Dividing aggregate usage,
+silently estimating counts, or returning unaudited choices on a fixed-step
+budget refusal does not satisfy the contract.
 
 ## Validation record
 

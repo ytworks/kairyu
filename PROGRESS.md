@@ -85,7 +85,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 ### Open items / blockers
 
-- V41C six-plus-two critical ensemble implementation is started from main; native input/capacity contracts, six-GPU selection and mandatory primary performance gates remain pending (`docs/design/v41-critical-ensemble.md`).
+- V41C six-plus-two critical ensemble implementation is started from main: budgets, terminal errors and the typed chat backend contract are implemented. Six-GPU numerical preflight remains FAIL; native AUTO/capacity contracts, topology selection and mandatory primary performance gates remain pending (`docs/design/v41-critical-ensemble.md`).
 - G2 A6 performance gap vs vLLM is the open hard gate; full TP4/8 HTTP matrix deferred until closed
 - Issue #333 verdict: process-split is not the A6 cause (`no_material_reduction`, ratio 0.92 vs ≤0.90 line)
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
@@ -102,6 +102,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-13 — [progress] V41C: retain failed six-GPU numerical preflight
+- What: main-pinned TP2/DP3/EP6 preparation stopped on one numerical-reference outlier. A same-fixture eight-head slice is bit-exact to the 32-head slice; both retain FAIL. Original services are healthy. Native non-thinking and explicit 50/75/100 budgets pass CPU rendering checks using existing settings.
+- Why: source feasibility and successful service restoration cannot substitute for candidate startup or GPU correctness; preserve exact failed evidence and distinguish a reference discrepancy from a head-shape defect.
+- Refs: PR #601; V41C-D5; existing ensemble `MEASUREMENTS.md` and `measurements/20260913T134938Z-v41-preflight/`.
 
 ### 2026-09-13 — [progress] V41C: preserve native chat at the backend boundary
 - What: add immutable ChatPrompt/ChatMessage and native OpenAI wire support for conversation, reasoning, tool history and ordered media. Reuse existing media lifecycle; unsupported engines reject explicitly. Missing-usage failures retain reserved charges and the original error. Related validation passes 545 tests.
