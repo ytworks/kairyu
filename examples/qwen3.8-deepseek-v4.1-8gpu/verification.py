@@ -651,7 +651,17 @@ def sample_problems(
     if route != "primary":
         return problems
     for node in PRIMARY_GENERATION_ROLES:
-        if node == "head" and not require_head:
+        if node == "head" and (
+            not require_head
+            or any(
+                e.get("node") == "head"
+                and e.get("status") == "skipped"
+                and (e.get("detail") or {}).get("reason") == "intent"
+                for e in events
+            )
+        ):
+            # A head the Conductor skipped for caller intent (tools,
+            # response_format, structured-format demand) is a valid trace.
             continue
         if not any(
             e.get("node") == node and e.get("kind") == "generation" and e.get("status") == "success"
@@ -1138,15 +1148,19 @@ def _rendered_prompt(chat_template_kwargs: dict | None, reasoning_effort: str | 
     """Render one user turn through the L1 tokenizer and detokenize it, so the
     official thinking/effort encoding is observed rather than assumed."""
 
+    # /tokenize has no top-level reasoning_effort field; the encoder reads it
+    # from the template kwargs, which is also where the chat endpoint puts
+    # the request's top-level value before rendering.
+    kwargs = dict(chat_template_kwargs or {})
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
     payload: dict = {
         "model": DEEPSEEK_MODEL,
         "messages": [{"role": "user", "content": "ping"}],
         "add_generation_prompt": True,
     }
-    if chat_template_kwargs is not None:
-        payload["chat_template_kwargs"] = chat_template_kwargs
-    if reasoning_effort is not None:
-        payload["reasoning_effort"] = reasoning_effort
+    if kwargs:
+        payload["chat_template_kwargs"] = kwargs
     status, body, _ = _post_json(f"{_l1_url()}/tokenize", payload, timeout_s=60)
     if status != 200 or not isinstance(body, dict):
         raise ValueError(f"tokenize failed: HTTP {status} {str(body)[:200]}")

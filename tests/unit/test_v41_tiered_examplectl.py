@@ -552,6 +552,23 @@ def test_v41_tiered_row_validator_requires_every_role_and_flags_cut_offs(verific
     problems = verification.sample_problems(cut_off, judged=True, require_head=True, caps=caps)
     assert any("answer_1 ended at its 16384-token cap" in problem for problem in problems)
 
+    headless = _primary_sample()
+    headless["trace"]["events"] = [
+        e for e in headless["trace"]["events"] if e["node"] != "head"
+    ] + [
+        {
+            **_event("head", role="head", status="skipped", tokens=0),
+            "detail": {"reason": "intent", "head": True},
+        }
+    ]
+    assert verification.sample_problems(headless, judged=True, require_head=True, caps=caps) == []
+    no_head = _primary_sample()
+    no_head["trace"]["events"] = [e for e in no_head["trace"]["events"] if e["node"] != "head"]
+    assert any(
+        "head" in p
+        for p in verification.sample_problems(no_head, judged=True, require_head=True, caps=caps)
+    )
+
     unjudged = _primary_sample(judged=False)
     assert verification.sample_problems(unjudged, judged=True, require_head=True, caps=caps)
     assert verification.sample_problems(unjudged, judged=False, require_head=True, caps=caps) == []
