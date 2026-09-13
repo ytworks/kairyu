@@ -900,6 +900,7 @@ CONFIG_FILES = (
     "../../kairyu/dsl/loader.py",
     "../../kairyu/entrypoints/server/sse_response.py",
     "../../kairyu/entrypoints/server/app.py",
+    "../../kairyu/entrypoints/server/chat_service.py",
     "../../kairyu/orchestration/orchestrator.py",
 )
 

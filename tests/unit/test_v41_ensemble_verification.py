@@ -18,6 +18,12 @@ def load(name):
     return module
 
 
+def test_startup_and_verification_agree_on_served_configuration():
+    control = load("control")
+    verification = load("verification")
+    assert control._requirements_config_sha256() == verification._served_config_sha256()
+
+
 @pytest.mark.parametrize("missing", ["requirements", "answer_1", "answer_2", "critique", "audit"])
 def test_serving_gate_rejects_missing_required_stage(tmp_path, missing):
     module = load("verification")
