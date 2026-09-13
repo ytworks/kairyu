@@ -85,6 +85,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 ### Open items / blockers
 
+- V41C six-plus-two critical ensemble implementation is started from main; native input/capacity contracts, six-GPU selection and mandatory primary performance gates remain pending (`docs/design/v41-critical-ensemble.md`).
 - G2 A6 performance gap vs vLLM is the open hard gate; full TP4/8 HTTP matrix deferred until closed
 - Issue #333 verdict: process-split is not the A6 cause (`no_material_reduction`, ratio 0.92 vs ≤0.90 line)
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
@@ -101,6 +102,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-13 — [design] V41C: six-plus-two critical ensemble implementation
+- What: accept four Qwen candidates on two replicas plus an independent V4.1 candidate, DeepSeek requirements/review/reconstruction/audit, and incremental draft implementation from main. Admission records cover private-budget separation and terminal error propagation; remaining contracts and GPU gates are open.
+- Why: preserve full input, reasoning budgets and required stages while replacing the legacy V4 topology without restoring closed example-specific infrastructure.
+- Refs: `docs/design/v41-critical-ensemble.md`; approved plan `2026-09-13-v41-six-gpu-critical-ensemble.md`; issues/PRs #595, #598, #599, #600.
 
 ### 2026-09-11 — [progress] V4.1 L1 selection and final GPU gates complete
 - What: select TP8/EP8, DSpark 5, 16K batching and NCCL; the 320-request matrix, default/explicit reasoning, tools, images, cancellation, normal restart and four long-context retrieval smokes pass. Best measured aggregate throughput is 326.82 tok/s at c32; near-1M retrieval completes in 203.02 s.
@@ -126,4 +132,3 @@ in `.claude/rules/progress-log.md`).
 - What: add a separate V4.1 example with the existing V4 vision ReplicaPool/API/UI path; default thinking is the official high (75). Pin the checkpoint manifest and isolate runtime encoder alignment. Fixed-token measurements distinguish model output from visible content; completed-answer gates stay separate. CPU contracts pass; GPU selection is pending.
 - Why: the owner revised the initial two-replica request to one TP8 replica; the initial vLLM encoder maps high differently from the checkpoint, and content-only timing mismeasures all-reasoning output.
 - Refs: FN-D9 amendment in `docs/design/frontier-native-runtime.md`; `examples/deepseek-v4.1-flash-8gpu/`; implementation plan `2026-09-11-deepseek-v41-flash-example.md`.
-
