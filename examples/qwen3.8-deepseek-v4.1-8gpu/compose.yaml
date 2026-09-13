@@ -167,9 +167,9 @@ services:
       - --block-size
       - "64"
       - --tensor-parallel-size
-      - "1"
+      - "2"
       - --data-parallel-size
-      - "6"
+      - "3"
       - --data-parallel-backend
       - mp
       - --enable-expert-parallel
@@ -187,17 +187,17 @@ services:
       # OR over the enable_thinking=false that non-thinking roles send.
       - --enable-prefix-caching
       - --gpu-memory-utilization
-      - "0.90"
+      - "0.97"
       - --max-num-seqs
-      - "32"
+      - "8"
       - --max-num-batched-tokens
-      - "16384"
+      - "2048"
       - --disable-uvicorn-access-log
       # Engram tables in pinned host memory (15.74 GiB x 2 per rank, ~189 GiB
       # total). GPU-resident tables left no memory for the KV cache at TP2
       # (candidate 1) and cannot fit at TP1 at all; see MEASUREMENTS.md.
       - --engram-config
-      - '{"cpu_offload":true}'
+      - '{"cpu_offload":false}'
       - --limit-mm-per-prompt
       - '{"image":1}'
     healthcheck: *health

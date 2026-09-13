@@ -95,9 +95,9 @@ pools:
           cache_descriptor:
             family: deepseek-v41-swa-csa-engram
             block_size: 64
-          tensor_parallel_size: 1
+          tensor_parallel_size: 2
           expert_parallel_size: 6
-          attention_data_parallel_size: 6
+          attention_data_parallel_size: 3
           dspark_enabled: false
           container_image_digest: sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359
     unhealthy_after: 1

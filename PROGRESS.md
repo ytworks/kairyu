@@ -96,7 +96,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
-- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6): CPU contracts only; the six-GPU DeepSeek topology selection (`verify.sh native`) and every public gate are pending; the unpatched pinned image showed NaN output on one six-GPU candidate in the closed PR #598 campaign — if all candidates fail the finite-output gate the example stops and reports (no patch layer)
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6): **blocked** — on the unpatched pinned V4.1 image all four six-GPU DeepSeek candidates fail (KV allocation at TP2×DP3 GPU-resident 0.95; illegal memory access + NCCL error in the TP sequence-parallel path with offload; NaN log-probabilities and garbage text from the second request per engine at TP1×DP6 and at TP2×DP3 GPU-resident); CPU contracts pass, no public gate run; needs an owner decision (runtime patch, different split, or newer upstream image)
 
 ## Change Log
 

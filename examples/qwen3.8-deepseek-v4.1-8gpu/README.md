@@ -20,11 +20,17 @@ Open WebUI ── API ─────┤
 
 ## Status
 
-CPU contracts only. **No GPU evidence exists for this example yet**; the
-6-GPU DeepSeek topology in `compose.yaml` is candidate 3 of the selection
-procedure in `MEASUREMENTS.md` (candidates 1 and 2 failed), not a verified
-configuration. Do
-not reuse the sibling examples' measurements for this topology.
+**Blocked (2026-09-13).** CPU contracts pass, but every six-GPU DeepSeek
+configuration tried on the unpatched pinned image produces corrupt output
+from the second request per engine onward (NaN log-probabilities, garbage
+or empty text): TP2 × DP3 with GPU-resident Engram cannot allocate a KV
+cache at 0.95, TP2 × DP3 with CPU-offloaded Engram crashes in the TP
+sequence-parallel path on the first request, and both TP1 × DP6 (offload)
+and TP2 × DP3 (GPU-resident, reduced activations) start but corrupt. The
+closed PR #598 reached the same point and only continued with a FlashInfer
+kernel patch, which this example's constraints forbid. `compose.yaml` holds
+the last candidate tried, not a verified configuration; no public gate was
+run. Details and evidence paths: `MEASUREMENTS.md`.
 
 ## The five routes (unchanged judge, DTO-D13)
 
