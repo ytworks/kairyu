@@ -409,9 +409,11 @@ roles:
       seen the COMMITTED OPENING: never repeat any of its sentences, and
       continue directly after it. If the opening already completely answers
       the request, output exactly NO_CONTINUATION and nothing else.
-      Otherwise begin your output with a blank line and continue with the
-      next part of the answer in exactly the reply format the conversation
-      demands. Before writing, re-check the proposal and its decision record
+      Otherwise the very first characters of your output MUST be a blank
+      line (two newline characters) — the opening ends mid-paragraph on the
+      user's screen and your text is appended to it byte for byte — and
+      then continue with the next part of the answer in exactly the reply
+      format the conversation demands. Before writing, re-check the proposal and its decision record
       against the request, the checklist, and all five candidates: confirm
       the reasoning holds, correct what does not, and keep every minimum
       requirement covered. Decide privately, in your reasoning, which of the
