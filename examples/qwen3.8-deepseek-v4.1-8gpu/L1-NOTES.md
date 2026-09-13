@@ -1,7 +1,8 @@
 # Six-GPU V4.1 deployment investigation
 
 The recorded GPU implementation checks and serving measurements are **complete**
-on 2026-09-13. Final metadata-only normal startup/readiness is pending. The initial GPU-resident Engram candidate failed memory profiling;
+on 2026-09-13. Final metadata-only normal startup/readiness also passed.
+The initial GPU-resident Engram candidate failed memory profiling;
 the deployed configuration uses the existing Engram CPU-offload option.
 Startup and native contract evidence is recorded in [MEASUREMENTS.md](MEASUREMENTS.md);
 both default serving matrices and the all-worker idle check are complete.
@@ -141,8 +142,9 @@ all 4096 tokens in reasoning remains preserved in MEASUREMENTS.
 This procedure describes reproduction on a fresh machine. The current campaign
 reuses the applicable completed native, effort, cancellation and image-wiring
 checks under V41E-D13. The default serving measurements and all-worker idle
-check are complete; only final metadata-only normal restart/readiness and CI remain;
-the steps below are not an instruction to repeat completed checks.
+check are complete, as is final metadata-only normal restart/readiness.
+PR #598 carries the current CI checks; the steps below are not an instruction
+to repeat completed checks.
 
 On a machine with all eight GPUs explicitly available, verify the checkpoint,
 image and config hashes first. Start DeepSeek alone on GPUs 0–5 and capture

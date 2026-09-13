@@ -2,7 +2,8 @@
 
 **GPU implementation checks and the default serving measurements are complete.**
 
-Final metadata deployment/readiness and CI are being completed; see MEASUREMENTS.
+Final validation metadata is deployed and normal startup/readiness passed.
+See MEASUREMENTS for the measured revisions and PR #598 for current CI checks.
 
 Validation covers implementation behavior and the recorded serving measurements.
 It does not guarantee the quality of generated requirements, answers or audit
@@ -185,9 +186,9 @@ confirm `docker image inspect --format '{{.Id}}'` against both pinned specs.
 This is a fresh-machine reproduction procedure. Under V41E-D13, the current
 campaign reuses completed native, four-effort, cancellation and bounded image
 integration evidence where the relevant implementation is unchanged. Its
-serving measurements and all-worker idle check are complete. Only final
-metadata deployment/readiness and CI remain; the procedure below does not add
-more current-campaign tests or model-quality conditions.
+serving measurements, all-worker idle and final metadata deployment/readiness
+are complete. No implementation or GPU verification work remains in this scope;
+the procedure below is for reproduction after a relevant environment or code change.
 
 1. **Inventory/provenance.** Record checkout SHA, `git status`, `nvidia-smi -q`,
    `nvidia-smi topo -m`, driver/Docker versions, model attestations, image IDs and

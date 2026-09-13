@@ -95,10 +95,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble validates native Requirement high-floor/max behavior, all four public effort contracts and typed native-image integration. Both public matrices (128 requests each), fresh paired native baselines (128) and all-worker idle complete; final metadata deployment/readiness and CI remain. Model-answer quality and audit accuracy are not implementation completion gates. Details: V41E-D12/D13, MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble validates native Requirement high-floor/max behavior, all four public effort contracts and typed native-image integration. Both public matrices (128 requests each), fresh paired native baselines (128) and all-worker idle complete; final metadata deployment and normal readiness pass. The implementation scope is complete; PR #598 carries current CI. Model-answer quality and audit accuracy are not implementation completion gates. Details: V41E-D12/D13, MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [progress] Finalize V4.1 ensemble deployment
+- What: deploy final validation metadata and complete normal startup/readiness with all four services attested; preserve the compaction-key hash, mode and size. The agreed implementation and GPU verification scope is complete.
+- Why: the final source differs from the measured source only in documentation and validation metadata; all other configuration inputs are byte-identical. Preserve measured results at their original source instead of repeating unaffected inference.
+- Refs: PR #598; MEASUREMENTS binds tested source 53ec3720 to normal-startup source 97a9d50f, with exact configuration/image hashes and preservation scope. CI is tracked by the PR checks.
 
 ### 2026-09-13 — [progress] Complete scoped V4.1 serving measurements
 - What: complete both 128-request public matrices, 128 fresh native comparisons and eight warmups; image integration and all-worker idle also complete on the measured six-plus-two configuration.

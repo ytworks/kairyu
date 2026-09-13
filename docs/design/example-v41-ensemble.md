@@ -3,8 +3,10 @@
 Status: GPU implementation checks and default serving measurements complete
 (2026-09-13). Native high-floor, all four composed effort contracts and bounded
 image integration pass; both public matrices, paired native baselines and the
-all-worker idle check complete. Final metadata deployment/readiness and CI remain.
-V41E-D13 excludes model-answer quality from completion gates. Exact measured
+all-worker idle check complete. Final metadata deployment and normal
+startup/readiness pass; current CI is reported in PR #598. No implementation or
+GPU verification work remains in the agreed scope. V41E-D13 excludes model-answer
+quality from completion gates. Exact measured
 revisions, routing, comparison scope and earlier evidence remain in MEASUREMENTS.
 
 ## V41E-D1 — Separate six-plus-two deployment

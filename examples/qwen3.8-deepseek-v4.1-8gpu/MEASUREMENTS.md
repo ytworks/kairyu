@@ -1,12 +1,15 @@
 # V4.1 ensemble evidence
 
-Status: **GPU measurements complete; final metadata, normal readiness and CI pending.**
+Status: **Implementation checks, GPU measurements and final normal startup complete.**
+
+See [PR #598 checks](https://github.com/ytworks/kairyu/pull/598/checks) for CI
+results at each commit.
 
 Current scope (V41E-D13): implementation behavior and existing serving
 measurements. Model-answer quality, checklist completeness and audit accuracy
-are not implementation completion gates. The image-rendering integration check
-and both default serving matrices are complete. Final metadata, normal
-restart/readiness and documentation/CI remain. Completed native, four-effort and
+are not implementation completion gates. The image-rendering integration check,
+both default serving matrices, final metadata comparison and normal
+restart/readiness are complete. Completed native, four-effort and
 cancellation evidence is reused where the relevant implementation is unchanged;
 the stopped extra quality controls are not unfinished implementation work.
 
@@ -923,12 +926,12 @@ Partial artifacts remain; completing those controls is **not a remaining task**.
 The previous campaign's performance steps had not started. Do not launch the
 prepared continuation script that requires semantic audit-control approval.
 
-## Current deployment and image integration
+## Measured deployment and image integration
 
-The normally deployed source is
+The deployment used for the following image and serving measurements was source
 `53ec3720ccef72e0fcc1630ec0958187bfb90dc2`, with served configuration
 `5b85e296ca6077d95af7f701b48c846b63f61023b851156d17a8adb485f39528`.
-The Kairyu image is
+Its Kairyu image was
 `sha256:9dfcf165c39a14d4add3e6d8acdcd5c47a7023c77162b48861232f0a77dcf45c`.
 DeepSeek remains pinned to `18dad57d` and both Qwen workers to `6d8429e3`, with
 their full image IDs recorded in `20260913-contract-startup/runtime.json`.
@@ -961,8 +964,8 @@ recorded revisions where the relevant implementation is unchanged. The image
 boundary fix does not change the L2 prompts/effort policies or native image pins.
 The standard `20260913-contract-generic` and `20260913-contract-coding`
 measurements are **COMPLETED** with exit code 0 in the serial
-`20260913-contract-serving` driver. Final deployment metadata, normal
-restart/readiness and CI are recorded separately from these completed measurements.
+`20260913-contract-serving` driver. The final metadata comparison and normal
+restart/readiness are recorded separately below, preserving these measured revisions.
 
 Paths below are relative to the persistent verification-results root. The image
 manifest binds its serialization/result records, native hook metadata and saved
@@ -1093,10 +1096,44 @@ Its SHA256 is `7b63e7875cfac926edf7b2cdb1c1760496605138e616cdb4d64e3460fe11a55e`
 The existing `wait_idle` check uses a one-second stability requirement and saves
 three snapshots: running and waiting counts are zero for DeepSeek engine IDs
 0/1/2 and engine 0 in each Qwen worker. This is a read-only worker-idle check,
-with zero additional generations and zero service changes. Final metadata and
-normal restart/readiness are separate remaining records.
+with zero additional generations and zero service changes. The subsequent
+metadata comparison and normal restart/readiness are recorded below.
 
-## Next evidence record
+## Final metadata comparison and normal startup
+
+The source used for final normal startup is
+`97a9d50f3944dce1602b2c69750174f437723cd5`, with served configuration
+`2488538624a6eb286d3a6a679bad479730a6750c2310d927c988f45adb55cdd7`.
+Its rebuilt Kairyu image is
+`sha256:be231063bd7be159288d903fa17a90895b020955b76e40c9f4e060a470b77c70`.
+The DeepSeek and both Qwen image pins match the measured deployment above.
+
+The comparison covers 24 configuration/source entries: 23 are byte-identical,
+and `example.json` is equal after excluding its `validation` metadata. The Git
+difference consists of documentation and that validation update. The measured
+`53ec3720`/`5b85e296` results therefore retain their original provenance; they are
+not represented as repeated measurements on the final revision.
+
+Normal startup completes with return code 0 at
+**2026-09-13 07:41:25.822693 UTC**, with all four model/API services attested to
+the final configuration and image IDs. The compaction key's SHA256, file mode
+and size are preserved; this is not a comparison of all persistent volume
+contents. This pass covers metadata equivalence and normal startup/readiness
+only, with zero additional inference tests.
+
+The following paths are relative to the persistent verification-results root.
+The source binding connects the measured runtime input to the final revision;
+`runtime-after.json` records the final deployment after normal startup.
+
+| Evidence file | SHA256 |
+| --- | --- |
+| `20260913-contract-final-metadata/result.json` | `7e330679636a6c49c522dca2a7c313f889b6d446aadca06b0127855b7047d7c9` |
+| `20260913-contract-final-metadata/metadata-comparison.json` | `fe9ea873b923c48e61cf8176ad039fdf8689dfee110677ae0a263086a1c56e2c` |
+| `20260913-contract-final-metadata/source-binding.json` | `c0a20083fc61ade6a934aaa65ac3733c7af549d977e90f089d4a351d88843ae4` |
+| `20260913-contract-final-metadata/runtime-after.json` | `f93b38ba775f622c9c99b0477094cdaa697466216afeb057e7c02c1d165100ec` |
+| `20260913-contract-final-metadata/tested-runtime.json` | `cd81dbd71d52b838d05cb3cf2a59c5edc7a388c816a3b0aaf97ee76b07f86265` |
+
+## Future reproduction records
 
 Follow [README.md](README.md#gpu-validation-execution-order). Record
 checkout SHA, exact runtime image IDs, checkpoint attestation, configuration
