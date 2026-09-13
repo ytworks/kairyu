@@ -103,6 +103,11 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
+### 2026-09-13 — [progress] V41C: separate configured private generation budgets
+- What: Conductor and MoA use their configured internal ceiling independently of public completion MAX. Final intent and the no-private-ceiling fallback remain unchanged. Three small-public-MAX regressions fail before the fix; combined related validation passes 588 tests.
+- Why: a short requested public answer must not truncate planning, proposals or verification; resource reservations must reflect the actual configured private work.
+- Refs: PR #601; V41C-D2 and validation record in `docs/design/v41-critical-ensemble.md`.
+
 ### 2026-09-13 — [progress] V41C: terminal AUTO errors retain their cause
 - What: preserve selected-final/verifier failures through Conductor and unary/SSE APIs; safe upstream 400/422 remain validation errors, including after a committed head. Internal draft text cannot leak as a failed final stream's fallback. Related tests pass; capacity prevention and GPU gates remain pending.
 - Why: a known upstream rejection must not become an unrelated empty-output 502 or successful head-only response; retain partial public output and known usage while preserving optional-role best-so-far policy.

@@ -103,3 +103,18 @@ this branch. No six-GPU startup or performance gate has passed on these bytes.
 - The judge/preflight accounting fixture now explicitly configures its
   eight-token internal budget; it no longer relies on a public limit to
   shrink private work. Its tenant burst and accounting assertions remain.
+
+### Independent private budgets
+
+- Before the correction, all three new small-public-MAX cases failed: unary
+  Conductor, streamed Conductor, and MoA proposals inherited 17 instead of
+  their configured 64 tokens. The existing eight-token private limit passed.
+- The configured private ceiling now applies in both directions while final
+  completion MAX and caller intent remain unchanged. Existing tests also
+  retain the no-explicit-private-ceiling fallback.
+- 32 request/MoA tests pass. Combined validation with the final headed-error
+  correction passes 588 tests across request, MoA, Conductor/head,
+  Orchestrator, usage/trace and public Chat/Responses API suites. Ruff is clean.
+- Reservations now reflect the larger configured private work when a caller
+  requests a small public answer; a deployment must provision tenant limits
+  for that work. Public MAX cannot be used to understate its private cost.

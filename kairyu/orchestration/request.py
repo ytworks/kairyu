@@ -111,8 +111,10 @@ class OrchestrationRequest:
         generating ``n`` copies or retaining token logprobs only wastes work.
         A final-output grammar must likewise apply only at the answer boundary;
         constraining planner/verifier text can corrupt the orchestration DAG.
-        Their token ceiling is an orchestration policy: a large public final
-        allowance must not let private control text run past backend timeouts.
+        Their token ceiling is an orchestration policy, independent of the
+        final answer allowance: a small public MAX must not truncate a planner
+        or verifier, and a large one must not increase configured private work.
+        Without a configured ceiling, retain the caller-derived fallback.
         """
 
         extra_args = dict(self.sampling_params.extra_args)
@@ -120,7 +122,7 @@ class OrchestrationRequest:
         extra_args.pop(PARALLEL_TOOL_CALLS_EXTRA_ARG, None)
         max_tokens = self.sampling_params.max_tokens
         if max_tokens_cap is not None:
-            max_tokens = max_tokens_cap if max_tokens is None else min(max_tokens, max_tokens_cap)
+            max_tokens = max_tokens_cap
         return self.sampling_params.clone(
             n=1,
             best_of=None,
