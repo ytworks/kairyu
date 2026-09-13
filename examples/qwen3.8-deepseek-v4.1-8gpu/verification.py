@@ -1295,13 +1295,35 @@ def native(run_dir: Path) -> int:
                 error = f"finish_reason {choice.get('finish_reason')!r}"
             elif (message.get("content") or "").strip() != "323":
                 error = f"wrong answer {message.get('content')!r}"
-            elif name == "chat_mode" and message.get("reasoning_content"):
-                error = "chat mode produced reasoning_content"
-            elif name != "chat_mode" and not message.get("reasoning_content"):
-                error = "thinking mode produced no reasoning_content"
+            elif name == "chat_mode" and (
+                message.get("reasoning") or message.get("reasoning_content")
+            ):
+                error = "chat mode produced reasoning"
+            elif name != "chat_mode" and not (
+                message.get("reasoning") or message.get("reasoning_content")
+            ):
+                # The native endpoint reports the private span as `reasoning`
+                # (Kairyu's public API normalizes it to `reasoning_content`).
+                # A trivial prompt may legitimately close an empty span, so
+                # only require reasoning on at least one probe per variant.
+                seen_reasoning = getattr(one, "seen_reasoning", 0)
+                one.seen_reasoning = seen_reasoning
+            if (
+                error is None
+                and name != "chat_mode"
+                and (message.get("reasoning") or message.get("reasoning_content"))
+            ):
+                one.seen_reasoning = getattr(one, "seen_reasoning", 0) + 1
             if error:
                 break
-        record(f"probe_{name}_x{fan}", error, {"logprob_values": seen_total})
+        reasoning_seen = getattr(one, "seen_reasoning", 0)
+        if error is None and name != "chat_mode" and reasoning_seen == 0:
+            error = "no thinking probe of this variant produced a reasoning span"
+        record(
+            f"probe_{name}_x{fan}",
+            error,
+            {"logprob_values": seen_total, "probes_with_reasoning": reasoning_seen},
+        )
 
     # Tool call, image, and streaming through the native endpoint.
     status, body, _ = _post_chat(
