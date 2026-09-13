@@ -95,10 +95,15 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - G6 remaining P-C gates still in progress
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
-- V4.1 six-plus-two ensemble passes native/public probes and corrected high/max/low candidate replay at their recorded revisions. The user changed Requirement to a high floor that preserves API max; implementation and fresh effort verification are in progress. Quality/public-performance gates remain. Earlier fixed-high, capacity/context/cancellation evidence retains its recorded revisions; see MEASUREMENTS and L1-NOTES.
+- V4.1 six-plus-two ensemble validates native Requirement high-floor/max behavior and complete max/low/omitted public candidates at the recorded revision. LOW/omitted synthesis misclassifies supplied constraints as assumptions and audit misses it; a general source-status prompt correction needs replay. Quality/public-performance gates remain; earlier capacity/context/cancellation evidence retains its revisions in MEASUREMENTS and L1-NOTES.
 - Human sign-off pending on M2–M4 design reviews
 
 ## Change Log
+
+### 2026-09-13 — [amendment] Preserve evidential status in synthesis and audit
+- What: clarify that supplied facts/requirements are not assumptions, missing evidence does not establish absence, and an assumptions heading cannot justify an unnecessary premise. Keep effort, reservations, schemas and fixtures unchanged.
+- Why: fresh high-floor native14 and public max/low/omitted contracts pass, but LOW/omitted final answers repeatedly misclassify explicit constraints and receive false audit acceptance. Preserve those semantic failures, stop partial high, and replay the scoped correction.
+- Refs: V41E-D11, PR #598; example MEASUREMENTS and source-status operator record.
 
 ### 2026-09-13 — [amendment] Preserve Requirement effort above high
 - What: per user amendment, inherit the canonical API effort into Requirement and apply a high floor in the native hook: omitted/low/high become high, max remains max. Top-level effort overrides nested template kwargs; token caps and Qwen defaults remain unchanged.

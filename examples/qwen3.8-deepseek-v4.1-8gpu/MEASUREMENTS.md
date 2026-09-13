@@ -6,7 +6,7 @@ The user released all eight GPUs on 2026-09-13 (JST). GPU trials are recorded
 below. The original CPU-only implementation and the sibling TP8 results do not
 establish GPU correctness for this example.
 
-## What is established
+## CPU and static evidence
 
 Local validation on 2026-09-12: **202 tests passed** in one invocation:
 
@@ -49,8 +49,10 @@ separator equivalence. Whole-repository Ruff and progress/whitespace checks pass
   native OpenAI-compatible tool/image forwarding with an HTTP mock transport;
   role-specific mode/schema/budget middleware; lifecycle isolation and runtime
   attestation; stage coverage and measurement provenance.
-- Requirement is fixed DeepSeek high, while Qwen retains its existing effort
-  mapping. The removed image-description stage is not part of the new DAG.
+- Requirement now applies a DeepSeek high floor and preserves canonical API max
+  (V41E-D10); the earlier fixed-high evidence below remains historical. Qwen
+  retains its existing effort mapping. The removed image-description stage is
+  not part of the new DAG.
 
 ## GPU startup investigation
 
@@ -493,7 +495,7 @@ This is native c1 exact-key retrieval, not public ensemble long-context quality.
 | `20260913-qwen-context-medium/provenance.json` | `dadcf9ecf631fbdd8802d09a3d899ccf6dac2cc1393c76c9291d00e73b0e23b1` |
 | `20260913-qwen-context-medium/manifest.json` | `017ef51366c0b7a7ebaf7da1f5335d7c7b64241f8dc62000fa54a61584a45800` |
 
-## Remaining gates
+## High-floor replay and remaining gates
 
 **Latest contract amendment (V41E-D10):** the user now requires Requirement
 to retain effort above high. The implementation inherits the canonical
@@ -501,7 +503,8 @@ top-level effort and applies a high floor: omitted/low/high become high,
 max remains max, and nested template effort is overwritten consistently.
 The 8192-token total, 4096-token thinking reservation and Qwen settings remain
 unchanged. The amended CPU suite passes **560 tests**, with Ruff and progress/
-whitespace checks passing. New native/public effort replay is required.
+whitespace checks passing. The fresh native replay below passes; composed
+effort, quality and public-performance checks continue.
 
 The preceding wordcount campaign completed high, max and low (347.7 seconds)
 under the original fixed-high Requirement policy. The user amendment arrived
@@ -511,15 +514,124 @@ the parent stopped with code -2 before quality/performance/final cleanup.
 and all-worker stable idle afterward. This is an intentional interruption,
 not a model failure, and the completed cases do not validate the new high floor.
 
-The user explicitly approved the transfer on 2026-09-13. The same GPU checkout
-is now clean at `121bec4f`, with the V41E-D9 prompt correction and fail-closed
+### Fresh high-floor runtime and native evidence
+
+`20260913-effort-floor-startup` normally restarts the clean GPU checkout
+`f737e0b083200cb12ed194c79663d19471a908bd` with served configuration
+`4216bf457bdf6082b8545c67783e1df3ed6344318efa258c14799fc8e061423f`.
+The selected DeepSeek child remains
+`sha256:18dad57d5b3d576797555e0e2c91f247ce4a39cba39ae20c79a4a2e09421a195`;
+all worker image pins and private-state persistence pass independent review.
+The serial driver and executed final-check script are copied into
+`20260913-effort-floor-gates/` for reproducibility.
+
+Initial per-rank checks pass **12/12** (four cases on each DP rank): all 546
+returned logprob values are finite, and all six sampled/structured forced-budget
+cases report exactly 16 thinking tokens, return `437`, and finish with `stop`.
+Requirement replay then passes **14/14**: five API-max/literal cases preserve
+max; nine omitted/low/high combinations use high, including conflicting nested
+values. Each request hash uniquely matches the correct role hook inside its
+closed UTC window. All 89,658 returned logprob values are finite (34,953 max;
+54,705 high); all requests stop normally with complete JSON and no truncation.
+The native hook retains the 8192 total / 4096 thinking reservation.
+
+The table hashes each directory's `independent-review-manifest.json`, relative
+to the persistent evidence root. These native contracts do not establish the
+subsequent composed quality or performance gates.
+
+| High-floor evidence directory | SHA256 |
+| --- | --- |
+| `20260913-effort-floor-startup` | `23a4e78a4c797bc8e400196f882b5bab7b3d046a17bb2df1846dfc96c40567d9` |
+| `20260913-effort-floor-gates/native-rank-0` | `373e54b24fa6746bc63cb980683c46d5412e941e4121fc70ee6e46e866bf7b80` |
+| `20260913-effort-floor-gates/native-rank-1` | `3220d965d9f6a4b3cf8ba86f083ecca5991e91fc04ae6db57ee70c3b732a124c` |
+| `20260913-effort-floor-gates/native-rank-2` | `905b32c954d993bfbadf9aba3f32abb80f74e361d7888f0feeb3f1dfe11c1fae` |
+| `20260913-effort-floor-gates/native-requirements-max` | `e367d997589c0aab30d5a4e9c8dfbf9c6ef11417e1c6c64d84db6e4afd490f24` |
+| `20260913-effort-floor-gates/native-requirements-floor` | `8812e93ea46f5dac0846435ed437d540e8a78e39a98cdf0902cadfafcd0ae841` |
+
+### Fresh composed effort replay
+
+`20260913-effort-floor-gates/l2-max/l2-route-primary-max` passes in
+**322.576 seconds**. Independent review matches all eight role executions to
+exactly one hook inside that role's trace window: Requirement is now max with
+8192 total / 4096 thinking, other thinking DeepSeek roles inherit max, and
+Qwen retains its existing high-to-medium alias. All 16 extracted checklist
+entries retain the requested constraints and literals.
+
+The draft uses 1341/2048 tokens; the three synthesis peers use 2425/4096,
+2357/4096 and 3145/65536. All are complete, with no deliberation spill in this
+draft. The final memo has 248 whitespace-delimited words, preserves the clean
+paragraph seam and exact `Decision: defer.` ending, and proposes distinct
+conditional evidence-gathering actions for A's latency and B's cost while
+retaining both hard limits. Audit returns its first PASS; **zero live repairs**
+were exercised. Minor limitations remain: the draft omits the closing period,
+some peers add unnecessary but labeled assumptions, and the audit loosely
+paraphrases one criterion. The final avoids those stronger unsupported claims.
+This case is a bounded semantic review, not proof of universal correctness.
+
+The add-only `independent-max-review.json` beside the case has SHA256
+`0657cf176978469e9d400ce54166ef997b21391a1616965dd6cd609757e6aed4`;
+its source `response.json` has SHA256
+`361c7cfea9ad60cb6f864b0df819f460d6de05ed75fe491fdf1bd5221d9c4a48`.
+The separate `l2-other-efforts` directory completes low and omitted, but their
+semantic review finds repeated source-status errors below. High is then stopped
+intentionally before formal quality, public performance or final cleanup.
+
+### Preserved semantic failures and source-status correction
+
+At the same `f737e0b0` source/config, low completes in **332.992 seconds** and
+omitted in **396.676 seconds**. Each has eight uniquely correlated role hooks:
+Requirement high with 8192 total / 4096 thinking; other DeepSeek roles follow
+low or default high; Qwen retains its existing medium alias. All draft/peer
+bodies are complete and below caps, with no counting or private deliberation
+spill. LOW's three peers use 2437/4096, 2429/4096, 1772/8192; omitted uses
+1722/4096, 2583/4096, 4316/32768. Final memos are 249 and 236 whitespace words,
+with clean seams, exact endings, correct numeric comparisons and neither option
+claimed feasible. Each receives its first audit PASS; zero repairs occur.
+
+These are **protocol/effort passes, not complete semantic passes**. Both final
+memos classify the explicitly supplied hard constraints as assumptions, and
+both audits incorrectly accept that classification. LOW additionally converts
+"not supplied" into the unsupported categorical claim that no other options
+or revisions exist; omitted correctly retains "are supplied" scope. The
+Requirement checklists contain the original facts and constraints, so extraction
+and forwarding are not the cause. Omitted audit's extra R15 memo-format row is
+a redundant supported interpretation, permitted by the template's missing-ID
+recovery; an extra ID alone is not an invented requirement.
+
+| Independent report beside the case | SHA256 |
+| --- | --- |
+| `l2-other-efforts/l2-route-primary/independent-low-review.json` | `fc1ae6cdcd70e9c538218d946aa6a3bc9e1cf6814fd4534270555f837ec75543` |
+| `l2-other-efforts/l2-route-primary/independent-low-semantic-addendum.json` | `89fa83815a343415e33994bf9138ba2eaac380218696c24336e23dd361ae30df` |
+| `l2-other-efforts/l2-route-primary-omitted/independent-omitted-review.json` | `8b1ced0988816859dd765996ac376cd0b9913088ccc33bac75feb1227329ca1e` |
+
+The source response hashes are
+`65c6eb60e1f63a3605f075fa1f9ea34de91133ede121f4e1536dc6eb0849e30a`
+(low) and `098f80e3accf7d9fe80f6cbaad7bc6a12b4f58561e7df5a610e64954f27f3e0d`
+(omitted). Preserve the raw reports, including the initial LOW review's minor
+classification; the stricter semantic conclusion above supersedes any implied
+all-requirements pass.
+
+V41E-D11 clarifies source status in both synthesis templates and audit, without
+changing roles, effort, caps, schemas or fixtures. Existing actual-DAG/native
+full-template-hook tests pass **148/148**. The new prompt needs fresh served
+replay. `20260913-effort-floor-gates/operator-source-status-change/` records
+SIGINT sent only to the active high-case child, the parent stop with code -2,
+and subsequent all-worker stable idle. This partial high is an operator
+interruption, not a model failure verdict. Quality/performance/final cleanup
+were not started in this campaign. The new source-status campaign must retain
+these failures and review the actual statements rather than a model's PASS.
+
+### Earlier fixed-high replay after transfer approval
+
+The user explicitly approved the transfer on 2026-09-13. That campaign used the
+clean GPU checkout `121bec4f`, with the V41E-D9 prompt correction and fail-closed
 paired-baseline verifier. `20260913-wordcount-startup` completes normal restart
 at approximately `2026-09-13T03:06Z`, verifies all pinned worker images and
 preserves the private key fingerprint/mode. Its new configuration hash is
 `9072c5dac44545f68926af9f5826cbeac8b3ed67d101b4cdd8c7ac34247de23f`.
-Fresh serial replay is under `20260913-wordcount-gates`; previous effort
-failures below remain tied to `05042b9b`. The transfer blocker is resolved,
-while the candidate correction still requires the fresh measurements.
+Its serial replay is under `20260913-wordcount-gates`; the intentional stop is
+recorded above. Previous effort failures below remain tied to `05042b9b`. The
+transfer blocker is resolved; the later high-floor policy uses separate evidence.
 
 Initial restarted-worker checks pass **12/12**: default, nonthinking, sampled
 thinking-budget and structured sampled thinking-budget requests on each DP
@@ -563,7 +675,9 @@ Reports are saved add-only below `20260913-wordcount-gates/l2-high-max/`:
 | `l2-route-primary-high/independent-high-review.json` | `d4614a1aa7ccceb80bd7d63b1ebebdf728216681074962396794dc82d9ca543c` |
 | `l2-route-primary-max/independent-max-review.json` | `8f0c8a7beefa1fbb695dad5cb66e8ed3162f5d6b2453887ca8c59d6fc4f7508b` |
 
-The public effort matrix passes low (301.968 seconds) and omitted (347.8
+### Preserved failures before the candidate prompt correction
+
+The earlier public effort matrix passes low (301.968 seconds) and omitted (347.8
 seconds), with exact per-stage hook correlation: Requirement stays high,
 other DeepSeek thinking roles follow low/default-high, and Qwen remains at
 its medium alias. The explicit-high case fails after 386.4 seconds because
@@ -607,22 +721,22 @@ SHA256 `d8d60c59b88af2eb43d7738bf07f8e4029c1e045e99bffe1f277bfce72e95c93`;
 it has not been transferred to the GPU host. Raw responses/traces remain in
 the remote evidence tree and support repeating the review on another machine.
 
-The GPU checkout remains `05042b9b` and all six services are healthy after the
-matrix. Automatic approval review twice rejected transfer of the private Git
-difference to the already-used GPU host, even after checking its clean checkout
-and the narrow source/document payload. Explicit transfer approval has been
-requested; no alternative transfer was attempted. PR commit `b50e9863` contains
-the unverified prompt correction, and `499f8728` contains the verifier fix below.
+At that failed matrix checkpoint, the GPU checkout was `05042b9b` and all six
+services were healthy. Automatic approval review twice rejected transfer of
+the private Git difference to the already-used GPU host, even after checking its clean checkout
+and the narrow source/document payload. Explicit transfer approval was
+requested and later granted as recorded above; no alternative transfer was
+attempted. PR commit `b50e9863` contains the then-unverified prompt correction,
+and `499f8728` contains the verifier fix below.
 Selected CPU tests pass 526/526; the final prompt wording also passes 163 focused
 DAG/hook/probe tests. CI results are separate from GPU readiness.
 
-After approval, sync the full branch into the existing GPU checkout, preserving
-bind-mounted inodes until normal `run.sh up`. Verify the new configuration hash,
-unchanged pinned worker images, clean checkout and private-key persistence.
-Replay the same high/max fixtures first, then all four efforts, the three
-Requirement quality cases, generic/coding c1/8/16/32 matrices and final cleanup
-probes. Use fresh run IDs and preserve the current failures. If recounting or
-truncation persists, inspect the complete peer rather than weakening the gate.
+After approval, the full branch was synchronized into the existing GPU checkout
+with bind-mounted inodes preserved until normal `run.sh up`. The restarted
+configuration, unchanged pinned worker images, clean checkout and private-key
+persistence were verified above. Fresh replay retains the original failed
+artifacts. Candidate completion remains a strict gate even when synthesis and
+audit succeed.
 
 Before the fresh public performance matrix, the coding verifier was tightened
 to reject a failed paired native benchmark or a missing/nonfinite/nonpositive

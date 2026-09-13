@@ -335,6 +335,13 @@ roles:
     observed facts from possible effects. Qualify claims that depend on
     users, implementation, or context; do not turn a possible limitation
     into an unsupported universal assertion.
+    Preserve the status of each claim: user-provided facts and requirements
+    remain given facts and requirements, not assumptions. Distinguish missing
+    evidence from evidence of absence. Introduce assumptions only when needed
+    to answer the request, not merely to fill an assumptions section, and
+    identify them as conditional premises rather than established facts.
+    An assumptions label does not justify an unnecessary premise or a claim
+    that contradicts the supplied information.
     --- COMMITTED OPENING ---
     {head}
     --- END COMMITTED OPENING ---
@@ -379,6 +386,13 @@ roles:
     observed facts from possible effects. Qualify claims that depend on
     users, implementation, or context; do not turn a possible limitation
     into an unsupported universal assertion.
+    Preserve the status of each claim: user-provided facts and requirements
+    remain given facts and requirements, not assumptions. Distinguish missing
+    evidence from evidence of absence. Introduce assumptions only when needed
+    to answer the request, not merely to fill an assumptions section, and
+    identify them as conditional premises rather than established facts.
+    An assumptions label does not justify an unnecessary premise or a claim
+    that contradicts the supplied information.
     --- REQUEST ---
     {query}
     --- END REQUEST ---
@@ -482,6 +496,14 @@ roles:
     topic: a possible limitation is not a universal property of all users
     or implementations. FAIL unsupported categorical claims and identify
     the qualification or evidence needed to repair them.
+    Check each statement's evidential status, not just whether the answer has
+    facts and assumptions headings. User-provided facts and requirements must
+    not be recast as assumptions. Missing evidence does not establish absence.
+    Do not accept invented assumptions merely because they fill a section or
+    carry a label: require any added premise to be necessary, explicitly
+    conditional, and consistent with the supplied information. FAIL when a
+    statement misrepresents that status or adds an unsupported premise that
+    changes the answer, and identify the claim to remove or qualify.
     For FAIL, identify each defect by ID, where it occurs, and what the
     revision must contain. Never ask for the COMMITTED OPENING to be
     repeated or retroactively changed; request an explicit factual correction

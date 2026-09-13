@@ -1,7 +1,9 @@
 # V4.1 ensemble example
 
-Status: GPU validation in progress (2026-09-13). The initial GPU-resident
-Engram candidate failed startup; no six-GPU serving or quality claim yet.
+Status: GPU validation in progress (2026-09-13). Native high-floor and composed
+effort contracts pass at their recorded revisions; repeated semantic errors in
+LOW/omitted synthesis and audit require V41E-D11 replay before quality/performance
+closure. Initial startup and numerical failures remain preserved.
 
 ## V41E-D1 — Separate six-plus-two deployment
 
@@ -179,6 +181,26 @@ thinking reservation unchanged; native effort and the safety cap are separate.
 Other DeepSeek and all Qwen effort settings remain unchanged. Preserve older
 fixed-high measurements at their revisions and rerun native/conflicting-input
 and public effort cases before claiming this amended behavior GPU-validated.
+
+## V41E-D11 — Preserve supplied facts, assumptions and unknowns
+
+The high-floor replay produces complete candidates and correct effort forwarding,
+but LOW and omitted final memos label explicitly supplied hard constraints as
+assumptions. LOW also strengthens "not supplied" into a categorical claim that
+no other options or revisions exist. The checklist retains the original facts
+and constraints; audit nevertheless accepts these statements because they sit
+under an assumptions heading. This is a semantic synthesis/audit defect, not
+loss of Requirement data. Preserve the successful protocol evidence separately
+from these failed semantic checks and the intentional interruption of high.
+
+Clarify both synthesis templates and audit generically: supplied facts and
+requirements keep that status; missing evidence does not establish absence;
+added assumptions must be necessary, conditional and consistent with the given
+information. Do not invent premises to fill a section. Audit must assess the
+actual statements rather than treating headings as evidence of compliance.
+Keep native effort, reservations, caps, schemas, other roles and fixtures
+unchanged. This prompt correction needs a new served configuration and fresh
+composed replay; it does not guarantee arbitrary model correctness.
 
 References: `examples/qwen3.8-deepseek-v4.1-8gpu/README.md`, `L1-NOTES.md`,
 `MEASUREMENTS.md`, and implementation plan `2026-09-12-v41-ensemble-example.md`.

@@ -117,8 +117,11 @@ combinations, with exact request-hash correlation to fixed-high hook records.
 A forced 16-token thinking budget reports exactly 16 reasoning tokens and a
 completed public answer. These probes do not establish arbitrary task quality.
 The later V41E-D10 amendment preserves API max instead of forcing it down to
-high; its native and public effort replay is a new gate. The existing total
-and thinking-token reservations remain independent of native effort selection.
+high. Fresh native replay at `f737e0b0` passes all 14 high-floor cases: five max
+and nine high, uniquely correlated with their role-hook records. All returned
+logprobs are finite and all answers complete. The existing total and thinking
+token reservations remain independent of effort. Composed effort/quality and
+performance are separate gates; see MEASUREMENTS for exact hashes.
 
 The pinned Qwen v0.23 protocol forwards `thinking_token_budget` to sampling
 (protocol lines 231/643). Its reasoning parser uses token IDs 248068/248069

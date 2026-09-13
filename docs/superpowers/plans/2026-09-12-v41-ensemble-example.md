@@ -53,6 +53,6 @@ and preserved experiments are in the design record and MEASUREMENTS.
 After hardware is free, attest the exact image/model/config, validate DeepSeek
 alone without speculation, then Qwen co-residency. Exercise text/images/tools,
 streaming/cancellation, explicit/default efforts, all five routes, Requirement
-high, restart and concurrency; record TTFT/TPOT/token throughput and capacity.
+high-floor/max preservation, restart and concurrency; record TTFT/TPOT/token throughput and capacity.
 Only investigate DSpark after the base configuration passes. Unsupported
 topology or memory failures require a new evidence-backed L1 decision.
