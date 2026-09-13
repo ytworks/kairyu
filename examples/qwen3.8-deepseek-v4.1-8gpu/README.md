@@ -20,17 +20,16 @@ Open WebUI ── API ─────┤
 
 ## Status
 
-**Blocked (2026-09-13).** CPU contracts pass, but every six-GPU DeepSeek
-configuration tried on the unpatched pinned image produces corrupt output
-from the second request per engine onward (NaN log-probabilities, garbage
-or empty text): TP2 × DP3 with GPU-resident Engram cannot allocate a KV
-cache at 0.95, TP2 × DP3 with CPU-offloaded Engram crashes in the TP
-sequence-parallel path on the first request, and both TP1 × DP6 (offload)
-and TP2 × DP3 (GPU-resident, reduced activations) start but corrupt. The
-closed PR #598 reached the same point and only continued with a FlashInfer
-kernel patch, which this example's constraints forbid. `compose.yaml` holds
-the last candidate tried, not a verified configuration; no public gate was
-run. Details and evidence paths: `MEASUREMENTS.md`.
+**GPU gates in progress (2026-09-14).** CPU contracts pass. The DeepSeek
+runtime is this example's own overlay image (`vllm-sm120.Dockerfile` on the
+sibling `deepseek-v4.1-flash-8gpu` SM120 overlay): PR #598's masked
+sparse-KV zero-row fix and seeded top-p terminator fix, which `run.sh up`
+builds from the files here when the tag is absent. Without it every six-GPU
+topology corrupts output from the second request per engine onward
+(`MEASUREMENTS.md`, candidates 1–5). Topology: TP2 × attention-DP3, EP6,
+Engram tables in pinned host memory, 0.90 utilization, 16384 batched tokens,
+32 sequences — the configuration PR #598 measured. Gate results are recorded
+in `MEASUREMENTS.md` as they complete.
 
 ## The five routes (unchanged judge, DTO-D13)
 
@@ -118,9 +117,9 @@ API-only; the Chat UI lists `kairyu-auto-max` alone.
 | non-thinking | `chat_template_kwargs.enable_thinking=false` (the encoder's `thinking_mode: chat`, an immediately closed span). Kairyu sends it for every role that declares no effort | same encoder README; pinned vLLM `tokenizers/deepseek_v41.py` reads `thinking or enable_thinking` |
 | context / max output | 1,048,576 / 393,216 | model card ("1M context", "384K max output") |
 
-The pinned overlay image (built by `../deepseek-v4.1-flash-8gpu`) aligns
-vLLM's effort aliases with the checkpoint's table; this example reuses that
-image by ID and never patches it. `compose.yaml` sets **no**
+The sibling's SM120 overlay (built by `../deepseek-v4.1-flash-8gpu`) aligns
+vLLM's effort aliases with the checkpoint's table; this example's overlay
+builds on it. `compose.yaml` sets **no**
 `--default-chat-template-kwargs`: the encoder thinks at high on its own,
 and a server-side `thinking: true` default would override the
 `enable_thinking=false` that non-thinking roles send. `verify.sh native`
@@ -236,12 +235,14 @@ row is only a valid denominator when all 32 requests completed with
   `9825ce11…`); DeepSeek `deepseek-ai/DeepSeek-V4.1-Flash` @ `dba1be0a…`
   (tree `d21211ca…`). Both attested by the sibling examples' manifests.
 - Images: Qwen `vllm/vllm-openai:v0.23.0@sha256:6d8429e3…`; DeepSeek
-  `local/vllm-openai:deepseek-v41-sm120` ID `sha256:027bf47b…` (vLLM
-  `179dd0fa9`, FlashInfer `60b49158`, built by
-  `../deepseek-v4.1-flash-8gpu/vllm-sm120.Dockerfile`); Open WebUI
-  `v0.11.0-slim@sha256:3698bd4e…`.
+  `local/vllm-openai:deepseek-v41-sm120-masked-kv-budget` = this directory's
+  `vllm-sm120.Dockerfile` (+ `patch_masked_kv.py`, `patch_top_p.py`, SHA-256
+  pinned in `example.json`) on the sibling's `local/vllm-openai:deepseek-v41-sm120`
+  (vLLM `179dd0fa9`, FlashInfer `60b49158`). The reference build measured here
+  has ID `sha256:18dad57d…`; another host rebuilds the same recipe and records
+  its own ID (`run.json` → `runtime`). Open WebUI `v0.11.0-slim@sha256:3698bd4e…`.
 - Served-config hash: `verification.py` hashes `example.json`,
   `compose.yaml`, `kairyu.yaml`, `auto-max.yaml`, `ensemble-max.yaml`,
   `router.json`, `l1-qwen3.8-27b-vllm-chat-template.jinja`, `webui-reasoning-effort-filter.py`,
-  and `benchmark.py` into every `run.json`, and attests the running images,
+  and `benchmark.py`, `vllm-sm120.Dockerfile`, and both patch scripts into every `run.json`, and attests the running images,
   commands, and mounted files before measuring.

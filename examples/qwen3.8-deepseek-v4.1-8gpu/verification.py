@@ -51,6 +51,9 @@ SERVED_CONFIG_FILES = (
     "l1-qwen3.8-27b-vllm-chat-template.jinja",
     "webui-reasoning-effort-filter.py",
     "benchmark.py",
+    "vllm-sm120.Dockerfile",
+    "patch_masked_kv.py",
+    "patch_top_p.py",
 )
 
 
@@ -2223,12 +2226,37 @@ def runtime_evidence() -> dict:
         container = json.loads(
             subprocess.check_output(["docker", "inspect", _container(service)], text=True)
         )[0]
-        if container["Image"] != pin:
+        if service == "deepseek":
+            # The DeepSeek overlay is rebuilt per host: attest its content (the
+            # patch scripts inside the container equal this checkout's files)
+            # and record the actual ID; the pinned ID is the reference build.
+            expected = SPEC["vllm"]["deepseek"]["patches"]
+            listed = subprocess.check_output(
+                [
+                    "docker",
+                    "exec",
+                    _container(service),
+                    "sha256sum",
+                    *(f"/opt/kairyu/{name}" for name in expected),
+                ],
+                text=True,
+            )
+            found = {
+                line.split()[1].rsplit("/", 1)[-1]: line.split()[0]
+                for line in listed.splitlines()
+                if line.strip()
+            }
+            for name, digest in expected.items():
+                local = hashlib.sha256((HERE / name).read_bytes()).hexdigest()
+                if found.get(name) != digest or local != digest:
+                    raise ValueError(f"deepseek overlay content differs at {name}")
+        elif container["Image"] != pin:
             raise ValueError(f"{service} runs image {container['Image']}, evidence pins {pin}")
         if container["Config"]["Cmd"] != compose["services"][service]["command"]:
             raise ValueError(f"{service} command differs from compose.yaml")
         rows[service] = {
             "image_id": container["Image"],
+            "reference_image_id": pin,
             "started_at": container["State"]["StartedAt"],
             "devices": container["HostConfig"]["DeviceRequests"],
         }

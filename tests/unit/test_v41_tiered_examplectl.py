@@ -703,6 +703,25 @@ def _served_policy(*, judged: bool) -> dict:
     return policy
 
 
+def test_v41_tiered_deepseek_overlay_recipe_is_self_contained() -> None:
+    """run.sh must rebuild the DeepSeek runtime on any host from files in this
+    directory: the child Dockerfile applies exactly the pinned patch scripts on
+    the sibling example's overlay, and the pins equal the shipped files."""
+
+    source = SPEC["vllm"]["deepseek"]
+    dockerfile = (EXAMPLE / source["dockerfile"]).read_text()
+    assert "ARG VLLM_BASE_IMAGE" in dockerfile and "FROM ${VLLM_BASE_IMAGE}" in dockerfile
+    for name, digest in source["patches"].items():
+        assert f"COPY {name} /opt/kairyu/{name}" in dockerfile
+        assert f"RUN python3 /opt/kairyu/{name}" in dockerfile
+        assert hashlib.sha256((EXAMPLE / name).read_bytes()).hexdigest() == digest
+    parent = json.loads((ROOT / "examples" / source["parent_example"] / "example.json").read_text())
+    assert parent["vllm"]["image"] == source["base_image"]
+    assert parent["vllm"]["image_id"] == source["base_image_id"]
+    control = _load(EXAMPLE / "control.py", "v41_tiered_control_overlay")
+    assert control.PARENT_EXAMPLE == ROOT / "examples" / source["parent_example"]
+
+
 def test_v41_tiered_readiness_gate_pins_both_served_policies() -> None:
     control = _load(EXAMPLE / "control.py", "v41_tiered_control_policy")
     control._validate_policy(_served_policy(judged=True), judged=True)

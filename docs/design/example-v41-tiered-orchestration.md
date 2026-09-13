@@ -1,6 +1,6 @@
 # DeepSeek V4.1 (6 GPUs) + Qwen3.8-27B (2 GPUs): judged five routes with a DeepSeek-led critical ensemble
 
-Status: **Accepted plan; CPU contracts implemented; GPU selection and gates pending** (2026-09-14).
+Status: **Accepted; CPU contracts implemented; L1 recipe amended by the owner (V41T-D1 amendment, 2026-09-14); GPU gates in progress.**
 Applies to: `examples/qwen3.8-deepseek-v4.1-8gpu/` only. Consumes the L2 DSL,
 Conductor, ReplicaPool, and L3 server exactly as shipped in `main`; no
 framework, sibling-example, or shared-script change. Inherits DTO-D3
