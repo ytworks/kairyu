@@ -201,6 +201,7 @@ class RoleSpec:
     prompt_input: str = "rendered"
     response_contract: str = "internal"
     reasoning_effort_floor: str | None = None
+    required: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, TemplatedPrompt):
@@ -209,6 +210,8 @@ class RoleSpec:
                 "chat prompts; provide a plain derivation template"
             )
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
+        if self.required and self.role_type in {"head", "executor"}:
+            raise ValueError("required applies to generation and verifier roles")
         if self.prompt_input not in {"rendered", "conversation"}:
             raise ValueError("prompt_input must be rendered or conversation")
         if self.response_contract not in {"internal", "inherit"}:
@@ -689,7 +692,14 @@ class Conductor:
             return False
         if params.extra_args.get("response_format") is not None:
             return False
+        if self._selected_final_unit().required:
+            limit = self._final_public_params().max_tokens
+            if limit is not None and limit <= self._public_output_floor_or_one():
+                return False
         return True
+
+    def _public_output_floor_or_one(self) -> int:
+        return self._public_output_floor or 1
 
     def _head_sampling_params(self) -> SamplingParams:
         """The head derives from the caller's PUBLIC sampling so its style
@@ -703,6 +713,10 @@ class Conductor:
         # it exactly like the continuation (issue #496): the role override may
         # only shrink below that cap, never exceed it.
         public_cap = self._final_sampling_params.max_tokens
+        if self._selected_final_unit().required:
+            public_cap = self._final_public_params().max_tokens
+            if public_cap is not None:
+                public_cap = max(1, public_cap - self._public_output_floor_or_one())
         base_max = self._sampling_params.max_tokens
         if public_cap is not None:
             base_max = public_cap if base_max is None else min(base_max, public_cap)
@@ -897,7 +911,8 @@ class Conductor:
         if spent:
             budget = max(1, budget - spent)
         floor = self._think_close_floor()
-        if floor is not None and budget - floor >= 1:
+        if floor is not None and budget > 1:
+            floor = min(floor, budget - 1)
             # Reserve the floor for public output (issue #542): attempt 0 may
             # think within budget - floor, and the empty-output re-dispatch
             # answers with the reserve after a forced reasoning close. At or
@@ -1937,6 +1952,8 @@ class Conductor:
         """
 
         if run.budget.is_exhausted:
+            if spec.required:
+                raise RuntimeError("required generation could not reserve budget")
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -2136,6 +2153,16 @@ class Conductor:
         *,
         event_sink: Callable[[ConductorEvent], Awaitable[None]] | None = None,
     ) -> None:
+        if run.final_error is not None:
+            return
+        if spec.required:
+            missing = [
+                name for name in spec.depends_on if name not in run.outputs
+                and not (self._by_name[name].role_type == "head" and not self._head_enabled())
+                and not (self._by_name[name].requires == "image" and not self._has_images())
+            ]
+            if missing:
+                raise RuntimeError("required generation is missing a dependency result")
         if spec.role_type == "executor":
             await self._run_executor_unit(run, session, spec, event_sink=event_sink)
             return
@@ -2164,6 +2191,8 @@ class Conductor:
                 )
                 return
         if run.budget.is_exhausted:
+            if spec.required:
+                raise RuntimeError("required generation could not reserve budget")
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -2203,10 +2232,10 @@ class Conductor:
     def _selected_completion_tokens(self, observed: _GenerationObservation) -> int | None:
         """Count one selected candidate without assigning hidden best_of work to it."""
 
-        if len(observed.completions) == 1 and observed.completions[0].token_ids_exact:
-            return len(observed.completions[0].token_ids)
         if self._final_sampling_params.best_of in (None, 1) and observed.usage is not None:
             return observed.usage.completion_tokens
+        if len(observed.completions) == 1 and observed.completions[0].token_ids_exact:
+            return len(observed.completions[0].token_ids)
         return None
 
     async def _run_choice_units(
@@ -2318,6 +2347,7 @@ class Conductor:
         dispatch_spec = spec
         retry_max_tokens: int | None = None
         retry_prefill: str | None = None
+        continued_tokens = 0
         while True:
             from_initial = initial is not None
             try:
@@ -2339,6 +2369,8 @@ class Conductor:
                     )
                     generated = True
             except _BudgetRefused:
+                if spec.required:
+                    raise RuntimeError("required generation could not reserve budget") from None
                 refused_attempt = depth + (1 if empty_retry_used else 0)
                 run.trace.append(
                     trace_event(
@@ -2411,10 +2443,18 @@ class Conductor:
                         reasoning_continuation="prefix",
                         reasoning_open_tag="",
                     )
-                    remaining = self._public_budget_remaining(run)
-                    retry_max_tokens = (
-                        floor if remaining is None else max(1, min(floor, remaining))
+                    consumed = (
+                        initial_completion_tokens if from_initial
+                        else self._selected_completion_tokens(observed)
                     )
+                    if consumed is None:
+                        raise RuntimeError("thinking continuation requires exact completion usage")
+                    continued_tokens = consumed
+                    remaining = self._public_budget_remaining(run)
+                    available = None if remaining is None else remaining - consumed
+                    if available is not None and available < 1:
+                        raise RuntimeError("thinking exhausted the public completion allowance")
+                    retry_max_tokens = floor if available is None else min(floor, available)
                     metadata.update(
                         continuation="think_close",
                         mode=spec.reasoning_continuation,
@@ -2433,6 +2473,11 @@ class Conductor:
                     )
                 )
                 continue
+            if spec.required and not is_final_unit and (
+                not self._has_public_output(text, completions)
+                or any(c.finish_reason == "length" for c in completions)
+            ):
+                raise RuntimeError("required generation returned empty or truncated output")
             run.outputs[spec.name] = text
             intermediate = self._record_intermediate(
                 run, spec, depth, observed, choice_index=choice_index,
@@ -2452,9 +2497,9 @@ class Conductor:
                 elif choice_index is not None:
                     run.final_unit_completion_tokens = self._selected_completion_tokens(observed)
                 else:
-                    run.final_unit_completion_tokens = (
-                        observed.usage.completion_tokens if observed.usage is not None else None
-                    )
+                    run.final_unit_completion_tokens = self._selected_completion_tokens(observed)
+                if run.final_unit_completion_tokens is not None:
+                    run.final_unit_completion_tokens += continued_tokens
             if not from_initial:
                 run.trace.append(
                     trace_event(
@@ -2514,9 +2559,9 @@ class Conductor:
                         metadata={"reason": "budget"},
                     )
                 )
-                if choice_index is not None:
+                if choice_index is not None or verifier.required:
                     raise RuntimeError(
-                        "required per-choice verification could not reserve budget"
+                        "required verification could not reserve budget"
                     ) from None
                 break
             verdict = verifier_observed.text
@@ -2524,7 +2569,10 @@ class Conductor:
             verdict_trace_observed: _GenerationObservation | None = (
                 verifier_observed
             )
-            if _verdict_is_inconclusive(verdict):
+            if _verdict_is_inconclusive(verdict) or (
+                verifier.required
+                and any(c.finish_reason == "length" for c in verifier_observed.completions)
+            ):
                 # A truncated or empty verdict is not evidence of a draft
                 # defect, and counting it as FAIL burns a full refinement
                 # round (issue #495). One bounded re-verification demands an
@@ -2581,6 +2629,10 @@ class Conductor:
                     verdict_trace_spec = retry_spec
                     verdict_trace_observed = retry_observed
                 except _BudgetRefused:
+                    if verifier.required:
+                        raise RuntimeError(
+                            "required re-verification could not reserve budget"
+                        ) from None
                     run.trace.append(
                         trace_event(
                             retry_spec,
@@ -2593,10 +2645,14 @@ class Conductor:
                         )
                     )
                 except _ObservedGenerationError:
-                    pass
+                    if verifier.required:
+                        raise
             run.outputs[verifier.name] = verdict
-            passed = _is_pass(verdict)
-            verdict_inconclusive = _verdict_is_inconclusive(verdict)
+            verdict_inconclusive = _verdict_is_inconclusive(verdict) or (
+                verifier.required
+                and any(c.finish_reason == "length" for c in verifier_observed.completions)
+            )
+            passed = _is_pass(verdict) and not verdict_inconclusive
             # One immediate re-verification is the bounded recovery for a
             # missing verdict. If that attempt is also inconclusive, retain
             # the best draft instead of converting missing control output
@@ -2650,6 +2706,11 @@ class Conductor:
                 )
             )
             await self._emit_intermediate(event_sink, verifier_intermediate)
+            if (
+                verifier.required and not passed and not verdict_inconclusive
+                and depth < run.budget.budget.max_refine_depth and not can_refine
+            ):
+                raise RuntimeError("required refinement could not reserve budget")
             if passed or not can_refine:
                 break
             depth += 1
@@ -2666,6 +2727,7 @@ class Conductor:
             dispatch_spec = spec
             retry_max_tokens = None
             retry_prefill = None
+            continued_tokens = 0
         if (
             is_final_unit
             and not self._has_public_output(
@@ -2737,6 +2799,14 @@ class Conductor:
         keeps its best-so-far contract (EO-D7).
         """
 
+        if spec.required:
+            final = self._selected_final_unit()
+            run.final_error = error
+            run.final_unit_unusable = True
+            run.outputs.pop(final.name, None)
+            run.final_completions = ()
+            run.final_unit_completion_tokens = None
+            return
         if spec.name != self._selected_final_unit().name:
             return
         run.final_error = error
@@ -2859,7 +2929,7 @@ class Conductor:
         """Skip a publisher when a verified draft adds nothing to the head."""
 
         head_text = self._head_committed_text(run)
-        if not head_text or final.role_type != "publisher":
+        if final.required or not head_text or final.role_type != "publisher":
             return False
         for target, verifier in self._verifier_for.items():
             if target not in final.depends_on or verifier.name not in final.depends_on:
@@ -2964,6 +3034,8 @@ class Conductor:
                     for name in ready
                 )
             )
+            if run.final_error is not None:
+                return
             for name in ready:
                 del pending[name]
             for deps in pending.values():
@@ -2981,6 +3053,8 @@ class Conductor:
         attempt: int = 0,
         think_continuation: str | None = None,
     ) -> AsyncIterator[ConductorEvent]:
+        if run.final_error is not None:
+            raise run.final_error
         remaining = self._public_budget_remaining(run)
         if remaining is not None and remaining < 1:
             run.public_budget_exhausted = True
@@ -2997,6 +3071,8 @@ class Conductor:
             )
             return
         if run.budget.is_exhausted:
+            if spec.required:
+                raise RuntimeError("required generation could not reserve budget")
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -3020,7 +3096,16 @@ class Conductor:
             )
         max_tokens_override: int | None = None
         assistant_prefill: str | None = None
+        continued_tokens = 0
         if think_continuation is not None:
+            consumed = run.final_unit_completion_tokens
+            if consumed is None:
+                raise RuntimeError("thinking continuation requires exact completion usage")
+            continued_tokens = consumed
+            if remaining is not None:
+                remaining -= consumed
+                if remaining < 1:
+                    raise RuntimeError("thinking exhausted the public completion allowance")
             # Public-output floor (issue #542): continue the captured
             # deliberation after a forced reasoning close, answering with the
             # reserved public tokens; the reasoning_closed reclaim publishes
@@ -3055,6 +3140,8 @@ class Conductor:
         unknown_cost = run.budget.budget.max_cost_usd is not None
         reserved = run.budget.try_reserve(unknown_cost=unknown_cost)
         if reserved is None:
+            if spec.required:
+                raise RuntimeError("required generation could not reserve budget")
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -3229,9 +3316,17 @@ class Conductor:
         )
         run.completion_order.append(spec.name)
         run.final_completions = unit_completions
-        run.final_unit_completion_tokens = (
-            latest_usage.completion_tokens if latest_usage is not None else None
-        )
+        if self._final_sampling_params.best_of not in (None, 1):
+            run.final_unit_completion_tokens = (
+                sum(len(c.token_ids) for c in unit_completions)
+                if all(c.token_ids_exact for c in unit_completions) else None
+            )
+        else:
+            run.final_unit_completion_tokens = (
+                latest_usage.completion_tokens if latest_usage is not None else None
+            )
+        if run.final_unit_completion_tokens is not None:
+            run.final_unit_completion_tokens += continued_tokens
 
     async def _deferred_final_events(
         self,
@@ -3295,7 +3390,9 @@ class Conductor:
         if prepared_initial_requests and session is None:
             raise ValueError("prepared initial requests require their bound session")
         run = _RunState(
-            budget=BudgetState(budget=budget or Budget()),
+            budget=BudgetState(
+                budget=(budget or Budget()).for_choices(self._final_sampling_params.n)
+            ),
             prepared_initial_requests=dict(prepared_initial_requests or {}),
         )
         session = session or uuid.uuid4().hex[:12]
@@ -3346,7 +3443,9 @@ class Conductor:
         if prepared_initial_requests and session is None:
             raise ValueError("prepared initial requests require their bound session")
         run = _RunState(
-            budget=BudgetState(budget=budget or Budget()),
+            budget=BudgetState(
+                budget=(budget or Budget()).for_choices(self._final_sampling_params.n)
+            ),
             prepared_initial_requests=dict(prepared_initial_requests or {}),
         )
         session = session or uuid.uuid4().hex[:12]

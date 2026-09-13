@@ -1727,7 +1727,10 @@ class Orchestrator:
             )
             or UNLIMITED_OUTPUT_ADMISSION_TOKENS
         )
-        steps = max(1, self._budget.max_steps, self._moa_samples + 1)
+        steps = max(
+            1, self._budget.for_choices(call.sampling_params.n).max_steps,
+            self._moa_samples + 1,
+        )
         candidates = max(
             call.sampling_params.n,
             call.sampling_params.best_of or call.sampling_params.n,

@@ -1,0 +1,131 @@
+{
+  "captured_at": "2026-09-13T14:52:27.930366+00:00",
+  "image_id": "sha256:027bf47b2bd6f0d0abe54b296e7e9e3d31ee103bb6e46fa0a9807117681c2359",
+  "flashinfer_revision": "60b49158ab4fb81718aef486c2d3c89aec4c1901",
+  "heads": 32,
+  "cases": 16,
+  "quantized_arithmetic_passed": true,
+  "original_float_reference_passed": false,
+  "original_float_reference_passed_cases": 14,
+  "original_tolerance": {
+    "atol": 0.05,
+    "rtol": 0.05
+  },
+  "max_arithmetic_abs_error": 0.0078125,
+  "integrated_entrypoint_validated": true,
+  "full_model_startup_attempted": false,
+  "service_stop_executed": false,
+  "startup_status": "automatic approval review rejected outage action; original services retained",
+  "artifacts": [
+    {
+      "path": "quantized-arithmetic-result.json",
+      "bytes": 3113,
+      "sha256": "741d14bd0486c80219dc9291861fd0a3db2c7cf76e735f57115e47ce28f1e24c"
+    },
+    {
+      "path": "quantized-arithmetic.pt",
+      "bytes": 396319,
+      "sha256": "59cb14b407eed9ed4b2d4534540285254ad9c6d0569d8eccc712857226b99e94"
+    },
+    {
+      "path": "quantized-arithmetic-diagnostic.py",
+      "bytes": 5948,
+      "sha256": "ab63e1664310109c1511a7a8b995d7868b65e657373b3a7272ae00b7434cb574"
+    },
+    {
+      "path": "quantized-matrix-result.json",
+      "bytes": 12616,
+      "sha256": "07b039d04293e3e99f92f41fc10f270d8da7a091b2c65ab3802b534015bd7cd2"
+    },
+    {
+      "path": "quantized-matrix.log",
+      "bytes": 9612,
+      "sha256": "7cc841e5e1742e3a3051d26bbc7f78fa53d73f3162f050435b97d629cf442d65"
+    },
+    {
+      "path": "quantized-matrix-scratch-reader-error.log",
+      "bytes": 5124,
+      "sha256": "aa730e8d1be5237dcbdb4a6c19bfb9ec13cc43fd1c2dd15b9595f174d70a0525"
+    },
+    {
+      "path": "quantized-main-oracle.log",
+      "bytes": 5834,
+      "sha256": "574c62172a124c2ece22b88d2030927e30ae59ad47ca77a13b34625e1d1c4f34"
+    },
+    {
+      "path": "quantized-main-oracle-planner-argument-error.log",
+      "bytes": 544,
+      "sha256": "1234693067fd8366585d0479aceb065e3afbcbd9f9688588de03be3b46a47e41"
+    },
+    {
+      "path": "quantized_oracle.py",
+      "bytes": 4708,
+      "sha256": "50593ac3a4ed8115f485c5c4f390e119088e4dafa7312840a49b39417efea8bf"
+    },
+    {
+      "path": "run_quantized_matrix.py",
+      "bytes": 4864,
+      "sha256": "976e17652c4def339226ea6e7f729981a7412a2ccc3cd57f2827bbadc29b2aea"
+    },
+    {
+      "path": "check_sm120_pages_arithmetic.py",
+      "bytes": 13091,
+      "sha256": "d2ab3aeb10d189b6fd6b52510a8603d23c049a8f6a4615b9a70c500d57c17a1e"
+    },
+    {
+      "path": "arithmetic-analysis.md",
+      "bytes": 4138,
+      "sha256": "2958fed8a2587672b5584a00ecb64f5412f16423f0b1df1efbb38bcd50722bcd"
+    },
+    {
+      "path": "same-fixture.pt",
+      "bytes": 744468,
+      "sha256": "5e0d936bc47f1afbf8862f580714611d66fc6fb6b24d16f05cb8a84cf8618979"
+    },
+    {
+      "path": "arithmetic-source/data/csrc/sparse_mla_sm120_decode_dsv4.cu",
+      "bytes": 13436,
+      "sha256": "db56398e1d96ad1a405ec0e3e1c88f93f3756cd0f17e9e493e7472986e97da28"
+    },
+    {
+      "path": "arithmetic-source/data/csrc/sparse_mla_sm120_prefill.cu",
+      "bytes": 31440,
+      "sha256": "36e56cc133d90add4ebd8727514a63d5d55dd3b42cfebd592450f4bdcaec95e6"
+    },
+    {
+      "path": "arithmetic-source/data/include/flashinfer/attention/sparse_mla_sm120/common/fp8_quant.cuh",
+      "bytes": 11163,
+      "sha256": "4de8f104e3ccdfa6c5b82eb340929a010a35d1ed73a87b62c85709cc2e7af745"
+    },
+    {
+      "path": "arithmetic-source/data/include/flashinfer/attention/sparse_mla_sm120/decode_dsv4_kernel.cuh",
+      "bytes": 50982,
+      "sha256": "e9d939bd6cc23cdfb1c8a9be0811e0d8ee3307a930a67ff02c30c4450299ab7d"
+    },
+    {
+      "path": "arithmetic-source/data/include/flashinfer/attention/sparse_mla_sm120/model/scale_convert.cuh",
+      "bytes": 3005,
+      "sha256": "d431d62d1c400f74bf4b1f9986ec7d5ff47f2669f0aac0248fd481ffb07cd82a"
+    },
+    {
+      "path": "arithmetic-source/data/include/flashinfer/attention/sparse_mla_sm120/prefill_common.cuh",
+      "bytes": 11008,
+      "sha256": "7ca57dea73afa2f3866bad50b029bb612e4a0b295cbe181a3f095273ec197081"
+    },
+    {
+      "path": "arithmetic-source/data/include/flashinfer/attention/sparse_mla_sm120/prefill_mg_kernel.cuh",
+      "bytes": 101301,
+      "sha256": "0ec1603dca10cdbdec9795d82736a9e3662a91dfb212220e381ee1696e12a179"
+    },
+    {
+      "path": "arithmetic-source/mla/_sparse_mla_sm120.py",
+      "bytes": 54851,
+      "sha256": "588535a7497bae88ef67fb91410c4b7f7e03e4496f6b02d5c98ccdaddf02455d"
+    },
+    {
+      "path": "arithmetic-source/mla/_sparse_mla_sm120_plan.py",
+      "bytes": 24138,
+      "sha256": "6c313cda2051e563906ad47b0a736f51e97dba7dbb86dd7c242a774e29dfb6a1"
+    }
+  ]
+}

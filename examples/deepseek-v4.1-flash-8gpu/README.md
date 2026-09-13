@@ -75,6 +75,15 @@ against independently dequantized PyTorch logits by
 decode and prefill against independent PyTorch attention using the actual
 packed cache bytes, C1/C2 page sizes, padded block strides, masks and sinks.
 Its tolerances follow the pinned FlashInfer DSV4 correctness tests.
+The default remains the eight-head floating-reference gate. For the TP2
+candidate's 32 local heads, `--heads 32 --arithmetic` separately checks the
+pinned intermediate formats with the same tolerances: FP8-Q decode with
+BF16 split/merge rounding, and BF16-QK dual-cache prefill with FP8 PV.
+It reports the original floating-reference verdict independently and checks
+the actual planner branch. The 32-head arithmetic gate passes 16 cases;
+the original floating-reference gate retains two one-element failures.
+See the [ensemble's numerical evidence](../qwen3.8-deepseek-v4-8gpu/MEASUREMENTS.md)
+for the controlled fixture, source hashes and remaining model-level gates.
 
 To reproduce the two kernel gates before starting the stack, from this
 directory with GPU 0 available:

@@ -1143,3 +1143,50 @@ async def test_non_thinking_text_roles_disable_thinking_on_capable_workers():
     assert by_prompt["think"].reasoning_effort == "low"
     assert all(r.chat_template_kwargs is None for r in plain.requests_seen)
     assert result.final_text == "final"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("failure", ["upstream", "empty", "length", "budget"])
+@pytest.mark.parametrize("required", [False, True])
+async def test_required_dependency_failure_blocks_publisher_without_changing_optional_fallback(
+    stream, failure, required,
+):
+    class Extractor(ScriptedBackend):
+        async def generate(self, request):
+            if failure == "upstream":
+                self.requests_seen.append(request)
+                raise ValueError("original extraction rejection")
+            result = await super().generate(request)
+            return replace(result, completions=(replace(
+                result.completions[0], finish_reason="length" if failure == "length" else "stop",
+            ),))
+
+    extractor = Extractor(["" if failure == "empty" else "extracted source"])
+    publisher = ScriptedBackend(["public answer"])
+    conductor = Conductor((
+        RoleSpec("extract", "e", "extract {query}", required=required),
+        RoleSpec("publish", "p", "answer {extract}", role_type="publisher",
+                 depends_on=("extract",), required=required),
+    ), {"e": extractor, "p": publisher})
+    budget = Budget(max_steps=1 if failure == "budget" else 4)
+    if stream:
+        try:
+            events = [event async for event in conductor.stream("original", budget=budget)]
+            result = events[-1].result
+        except conductor_module.ConductorStreamError as error:
+            assert required
+            result = error.result
+    else:
+        result = await conductor.run("original", budget=budget)
+    assert result is not None
+    if required:
+        assert result.final_error is not None
+        assert not result.final_unit_ok
+        assert not result.final_text
+        assert not publisher.requests_seen
+        if failure == "upstream":
+            assert str(result.final_error) == "original extraction rejection"
+    else:
+        assert result.final_error is None
+        assert result.final_unit_ok
+        assert result.final_text

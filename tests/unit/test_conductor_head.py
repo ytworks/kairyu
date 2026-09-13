@@ -1130,7 +1130,9 @@ class ThinkExhaustedBackend:
                     reasoning_offset=0,
                 ),
             ),
-            usage=GenerationUsage(prompt_tokens=3, completion_tokens=4),
+            usage=GenerationUsage(
+                prompt_tokens=3, completion_tokens=min(4, request.sampling_params.max_tokens),
+            ),
             finished=True,
         )
 
@@ -1208,7 +1210,7 @@ def _floor_roles() -> tuple[RoleSpec, ...]:
     ("caller_cap", "expected_attempt0_max", "expected_retry_max"),
     [
         (512, 448, 64),  # floor reserved out of the thinking budget
-        (32, 32, 32),  # at or below the floor: unclamped, retry gets it all
+        (32, 1, 31),  # small public MAX still reserves a bounded continuation
     ],
 )
 async def test_public_output_floor_reserves_answer_budget_and_closes_think(
@@ -1232,6 +1234,8 @@ async def test_public_output_floor_reserves_answer_budget_and_closes_think(
     assert first.sampling_params.max_tokens == expected_attempt0_max
     assert retry.prompt == "[cont] task<THINK>deliberating...</THINK>\n\n"
     assert retry.sampling_params.max_tokens == expected_retry_max
+    assert result.public_completion_tokens == min(4, expected_attempt0_max) + 4
+    assert result.public_completion_tokens <= caller_cap
     retry_events = [e for e in result.trace if e.kind == "retry:empty_output"]
     assert [e.metadata.get("continuation") for e in retry_events] == ["think_close"]
 
@@ -1267,7 +1271,7 @@ async def test_public_output_floor_continues_only_the_empty_choice(stream):
     ]
     assert retry.request_id.endswith("-choice-1")
     assert result.usage == (6, 7)
-    assert result.public_completion_tokens == 4
+    assert result.public_completion_tokens == 7
     assert backend.generate_calls == 2 and backend.stream_calls == 0
     retry_event = next(event for event in result.trace if event.kind == "retry:empty_output")
     assert retry_event.metadata["continuation"] == "think_close"
@@ -1757,3 +1761,53 @@ async def test_verified_choices_cancel_the_active_audit_without_publishing_sibli
     assert (usage[-1].prompt_tokens, usage[-1].completion_tokens) == (6, 9)
     assert len(final.requests_seen) == 1
     assert audit.requests_seen[-1].request_id.endswith("-choice-1")
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_required_final_keeps_small_public_limit_and_runs_its_verifier(stream):
+    from dataclasses import replace
+
+    head = StreamScriptedBackend(["opening"])
+    final = ScriptedFinalBackend([("text", "answer")])
+    audit = ScriptedFinalBackend([("text", "PASS")])
+    roles = (RoleSpec("head", "hw", "opening {query}", role_type="head",
+                      sampling=RoleSamplingOverrides(max_tokens=256)),) + tuple(
+        replace(role, required=True, depends_on=("head",) + role.depends_on)
+        for role in _verified_floor_roles()
+    )
+    conductor = Conductor(roles, {"hw": head, "cw": final, "vw": audit},
+                          final_sampling_params=SamplingParams(max_tokens=17),
+                          public_output_floor=256)
+    if stream:
+        result = (await _collect(conductor.stream("task")))[-1].result
+    else:
+        result = await conductor.run("task")
+    assert result.final_unit_ok and result.final_error is None
+    assert not head.requests_seen
+    assert len(final.requests_seen) == len(audit.requests_seen) == 1
+    assert final.requests_seen[0].sampling_params.max_tokens <= 17
+    assert result.final_text == "answer"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_explicit_additional_choice_budget_preserves_all_native_verdicts(stream):
+    from dataclasses import replace
+
+    final = MultiChoiceThinkBackend([
+        (("answer-0", None, (10,)), ("answer-1", None, (20,))),
+    ])
+    audit = ScriptedFinalBackend([("text", "PASS"), ("text", "PASS")])
+    conductor = Conductor(
+        tuple(replace(role, required=True) for role in _verified_floor_roles()),
+        {"cw": final, "vw": audit}, final_sampling_params=SamplingParams(n=2, max_tokens=64),
+    )
+    budget = Budget(max_steps=2, max_steps_per_additional_choice=1)
+    if stream:
+        result = (await _collect(conductor.stream("task", budget=budget)))[-1].result
+    else:
+        result = await conductor.run("task", budget=budget)
+    assert result.final_unit_ok and result.final_error is None
+    assert final.requests_seen[0].sampling_params.n == 2
+    assert len(audit.requests_seen) == 2
+    assert result.budget_state.steps_used == result.budget_state.budget.max_steps == 3
+    assert budget.max_steps == 2

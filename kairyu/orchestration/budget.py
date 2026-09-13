@@ -16,6 +16,21 @@ class Budget:
     max_steps: int = 16
     max_refine_depth: int = 2
     max_cost_usd: float | None = None
+    max_steps_per_additional_choice: int = 0
+
+    def __post_init__(self) -> None:
+        if self.max_steps_per_additional_choice < 0:
+            raise ValueError("per-choice step allowance must be non-negative")
+
+    def for_choices(self, n: int) -> Budget:
+        """Resolve an explicitly configured allowance, once per public request."""
+        if n < 1:
+            raise ValueError("choice count must be positive")
+        return dataclasses.replace(
+            self,
+            max_steps=self.max_steps + (n - 1) * self.max_steps_per_additional_choice,
+            max_steps_per_additional_choice=0,
+        )
 
 
 @dataclass(frozen=True)

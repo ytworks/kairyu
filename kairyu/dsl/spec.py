@@ -194,9 +194,13 @@ class RoleNodeSpec(BaseModel):
     # even though their sampling and publication remain private.
     response_contract: Literal["internal", "inherit"] = "internal"
     reasoning_effort_floor: Literal["low", "high", "max"] | None = None
+    # A missing/failed/incomplete generation is terminal, not optional input.
+    required: bool = False
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
+        if self.required and self.role_type in {"head", "executor"}:
+            raise ValueError("required applies to generation and verifier roles")
         if (self.role_type == "executor") != (self.executor is not None):
             raise ValueError(
                 f"role {self.name!r}: role_type 'executor' and an executor block "
@@ -280,6 +284,7 @@ class BudgetSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     max_steps: int = Field(default=16, ge=1)
+    max_steps_per_additional_choice: int = Field(default=0, ge=0)
     max_refine_depth: int = Field(default=2, ge=0)
     max_cost_usd: float | None = Field(default=None, gt=0)
     cost_per_1k_chars_usd: float | None = Field(default=None, gt=0)

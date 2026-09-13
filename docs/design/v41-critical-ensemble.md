@@ -182,6 +182,29 @@ are the independent regression. Per-choice verdict budget refusal is terminal;
 the legacy single-choice optional best-so-far policy remains unchanged. The
 example still owns verdict content, repair depth and publication-on-exhaustion.
 
+## V41C-D9 — Required dependencies and explicitly sized choice budgets
+
+Shared contract: an ordinary publisher depending on a failed extraction stage
+currently receives an empty template slot and may publish success. Main's
+`_run_unit_safe` and wave scheduler deliberately permit optional best-so-far;
+there is no extension point by which a DSL graph can require successful input.
+Add opt-in `required` to a generation/verifier role. A failed, missing, empty or
+truncated required dependency terminates the request and retains its cause;
+optional roles retain existing semantics. The independent regression is a
+publisher requiring an extraction result, with a failed or truncated extractor.
+The shared mechanism does not interpret a checklist, candidate or audit schema.
+The example chooses required roles and still permits the documented bounded
+inconclusive-verdict/final-FAIL publication policy after actual verification.
+
+A required publisher cannot be skipped by a completed head: with a finite public
+budget, keep room for its generation or disable a head that would consume the
+entire allowance. Append an explicit per-additional-choice step allowance to
+Budget, resolved consistently for admission and execution. Default zero preserves
+existing fixed budgets; no automatic quota inflation. The example's n=1 ceiling
+is 19 steps and each additional choice reserves 9 (two repairs, at most six
+verdicts and one floor continuation); headless requests conservatively retain
+one unused head slot. Capacity traversal will need its own measured reservation.
+
 ## Open implementation conditions
 
 - Complete six-GPU full-model startup, native API checks and performance gates.
