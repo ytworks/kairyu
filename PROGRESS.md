@@ -96,12 +96,17 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Qwen3.8-Flash-Next MTP speculative decoding stays off in `qwen3.8-flash-next-dp2-8gpu` until upstream fixes vllm#53912 (prefix caching + MTP output corruption on hybrid GDN); single-stream decode 104 vs 175 tok/s
 - DTO-D15 (2026-08-26) changed the served tiered-example config: verify.sh coding/generic gates and the digest re-pin are pending before the example status can be claimed green again
 - Human sign-off pending on M2–M4 design reviews
-- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6): **blocked** — on the unpatched pinned V4.1 image all four six-GPU DeepSeek candidates fail (KV allocation at TP2×DP3 GPU-resident 0.95; illegal memory access + NCCL error in the TP sequence-parallel path with offload; NaN log-probabilities and garbage text from the second request per engine at TP1×DP6 and at TP2×DP3 GPU-resident); CPU contracts pass, no public gate run; needs an owner decision (runtime patch, different split, or newer upstream image)
+- `qwen3.8-deepseek-v4.1-8gpu` (PR #602, V41T-D1..D6 + D1 amendment): the sibling's unpatched SM120 overlay corrupts output on every six-GPU DeepSeek topology (five candidates recorded); by owner decision the example now owns PR #598's masked-KV overlay recipe and serves TP2×DP3/EP6 with Engram in pinned host memory; CPU contracts pass; GPU gates in progress
 
 ## Change Log
 
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
+
+### 2026-09-14 — [amendment] V41T-D1: the V4.1 tiered example owns a masked-KV DeepSeek overlay
+- What: on the sibling's unpatched SM120 overlay every six-GPU DeepSeek topology fails (KV allocation at 0.95 GPU-resident; illegal memory access + NCCL error in the TP sequence-parallel path with offload; NaN log-probabilities / garbage text from the second request per engine at TP1×DP6 and TP2×DP3 GPU-resident; FlashMLA rejects 64-token pages). The example now ships PR #598's overlay recipe (Dockerfile + `patch_masked_kv.py` + `patch_top_p.py`, SHA-256 pinned) built by `run.sh` on any host and attested by content; served topology TP2×DP3, EP6, Engram in pinned host memory, 0.90, 16384 batching.
+- Why: owner decision — restricting the example to the sibling's image was not a requirement, and PR #598 had served six GPUs correctly on that overlay; Kairyu stays unchanged. Supersedes the plan's stop rule.
+- Refs: PR #602; `docs/design/example-v41-tiered-orchestration.md` (V41T-D1 amendment); example `MEASUREMENTS.md` candidates 1–6
 
 ### 2026-09-14 — [design] V41T-D1..D6: DeepSeek V4.1 (6 GPU) + Qwen3.8 (2 GPU) tiered example
 - What: new `examples/qwen3.8-deepseek-v4.1-8gpu` keeps the judged five routes; the ensemble is DeepSeek-led (PR #595 requirements checklist, four policies, four Qwen + one DeepSeek candidates, critical synthesis, final continuing the streamed Qwen head, DeepSeek audit with ≤2 refinements); a judge-free `kairyu-ensemble-max` forces the ensemble for verification; Qwen direct routes drop their fixed `max_tokens` (Issue #599); the DeepSeek image is the sibling's pinned overlay reused by ID. CPU contracts pass; no GPU evidence yet.
