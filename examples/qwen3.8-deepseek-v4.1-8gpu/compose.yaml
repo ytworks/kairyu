@@ -53,8 +53,13 @@ x-qwen: &qwen
     - '{"cudagraph_mode":"PIECEWISE"}'
     - --generation-config
     - vllm
+    # The L1 (vLLM) chat template for the Qwen worker: the checkpoint's own
+    # template with Kairyu's effort words mapped onto it (the stock template
+    # accepts only low/medium/xhigh and rejects Kairyu's high/max; DTO-D14
+    # renders high as the medium tier). L3 does not render Qwen chats and the
+    # Chat UI never touches this service.
     - --chat-template
-    - /etc/kairyu/qwen3.8-chat.jinja
+    - /etc/kairyu/l1-qwen3.8-27b-vllm-chat-template.jinja
     # No default chat-template kwargs: thinking L2 roles declare
     # reasoning_effort: high (the medium tier, DTO-D14) in auto-max.yaml,
     # which the example-local template turns into thinking mode per request.
@@ -84,7 +89,7 @@ services:
       - type: bind
         source: ${QWEN_CACHE_0_PATH}
         target: /root/.cache
-      - ./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
+      - ./l1-qwen3.8-27b-vllm-chat-template.jinja:/etc/kairyu/l1-qwen3.8-27b-vllm-chat-template.jinja:ro
     deploy:
       resources:
         reservations:
@@ -104,7 +109,7 @@ services:
       - type: bind
         source: ${QWEN_CACHE_1_PATH}
         target: /root/.cache
-      - ./qwen3.8-chat.jinja:/etc/kairyu/qwen3.8-chat.jinja:ro
+      - ./l1-qwen3.8-27b-vllm-chat-template.jinja:/etc/kairyu/l1-qwen3.8-27b-vllm-chat-template.jinja:ro
     deploy:
       resources:
         reservations:
@@ -245,6 +250,9 @@ services:
       retries: 120
     restart: unless-stopped
 
+  # The Chat UI talks ONLY to Kairyu L3 (the `kairyu` service). It never
+  # reaches the L1 vLLM services; the Qwen L1 template above is vLLM's own
+  # rendering for the Qwen worker and has nothing to do with this UI.
   chat-ui:
     image: ${OPEN_WEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0-slim@sha256:3698bd4e9628b7ae3768808721098616e669b4a05a6bceb2f5da2d84a3282a01}
     environment:

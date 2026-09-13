@@ -48,7 +48,7 @@ SERVED_CONFIG_FILES = (
     "auto-max.yaml",
     "ensemble-max.yaml",
     "router.json",
-    "qwen3.8-chat.jinja",
+    "l1-qwen3.8-27b-vllm-chat-template.jinja",
     "webui-reasoning-effort-filter.py",
     "benchmark.py",
 )
