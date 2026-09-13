@@ -9,11 +9,9 @@ gates its target with a bounded refine loop. All prompts are rendered as
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
-from string import Formatter
 
 from kairyu.async_thread import run_prompt_work
 from kairyu.engine.backend import (
@@ -26,8 +24,6 @@ from kairyu.engine.backend import (
     backend_supports_prompt_kind,
 )
 from kairyu.engine.prompt import (
-    ChatMessage,
-    ChatPrompt,
     MultimodalPrompt,
     TemplatedPrompt,
     derive_multimodal_prompt,
@@ -198,10 +194,6 @@ class RoleSpec:
     # call, no step), dependents run as if it were absent, and its template
     # slot renders as "" (DTO-D11).
     requires: str | None = None
-    prompt_input: str = "rendered"
-    response_contract: str = "internal"
-    reasoning_effort_floor: str | None = None
-    required: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.prompt, TemplatedPrompt):
@@ -210,26 +202,6 @@ class RoleSpec:
                 "chat prompts; provide a plain derivation template"
             )
         object.__setattr__(self, "depends_on", tuple(self.depends_on))
-        if self.required and self.role_type in {"head", "executor"}:
-            raise ValueError("required applies to generation and verifier roles")
-        if self.prompt_input not in {"rendered", "conversation"}:
-            raise ValueError("prompt_input must be rendered or conversation")
-        if self.response_contract not in {"internal", "inherit"}:
-            raise ValueError("response_contract must be internal or inherit")
-        if self.prompt_input == "conversation":
-            if self.executor is not None or self.prompt_suffix:
-                raise ValueError("conversation input cannot use an executor or prompt_suffix")
-            for template in (self.prompt, self.prompt_headless):
-                if any(name == "query" for _, name, _, _ in Formatter().parse(template)):
-                    raise ValueError("conversation input already carries query; omit {query}")
-        if self.reasoning_effort_floor not in {None, "low", "high", "max"}:
-            raise ValueError("reasoning_effort_floor must be low, high, max or null")
-        if self.reasoning_effort_floor is not None and self.reasoning_effort != "inherit":
-            raise ValueError("reasoning_effort_floor requires reasoning_effort: inherit")
-        if self.response_contract == "inherit" and self.role_type in {
-            "head", "executor", "verifier"
-        }:
-            raise ValueError("head, executor and verifier roles cannot inherit response_contract")
         if self.reasoning_effort not in {None, "low", "high", "max", "inherit"}:
             raise ValueError(
                 f"role {self.name!r}: reasoning_effort must be low, high, max, "
@@ -306,9 +278,6 @@ class ConductorResult:
     # (issue #496): the caller must see an explicit error, never an internal
     # stage's text or an empty "stop".
     final_unit_ok: bool = True
-    # Retain the terminal failure for transport-specific error translation.
-    # This is internal state; arbitrary backend diagnostics never enter trace.
-    final_error: BaseException | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -323,7 +292,6 @@ class IntermediateOutput:
     model: str | None
     text: str
     model_reasoning: str | None = None
-    choice_index: int | None = None
 
     def as_markdown(self) -> str:
         model = self.model or "unspecified"
@@ -335,8 +303,6 @@ class IntermediateOutput:
             f"- Engine: `{self.engine}`",
             f"- Model: `{model}`",
         ]
-        if self.choice_index is not None:
-            lines.append(f"- Choice: `{self.choice_index}`")
         if self.model_reasoning:
             lines.extend(("", "#### Model reasoning", "", self.model_reasoning))
         lines.extend(("", "#### Stage output", "", self.text))
@@ -475,11 +441,7 @@ def _completion_tokens_for_public_budget(
 
     if usage is not None:
         return usage.completion_tokens
-    token_count = (
-        sum(len(completion.token_ids) for completion in completions)
-        if all(completion.token_ids_exact for completion in completions)
-        else 0
-    )
+    token_count = sum(len(completion.token_ids) for completion in completions)
     if token_count:
         return token_count
     if unreported_upper_bound is not None:
@@ -510,7 +472,6 @@ class _RunState:
     final_unit_completion_tokens: int | None = None
     public_budget_exhausted: bool = False
     final_unit_unusable: bool = False
-    final_error: BaseException | None = None
 
 
 class _BudgetRefused(Exception):
@@ -528,7 +489,6 @@ class _GenerationObservation:
     timing: TraceTiming
     usage: TraceUsage | None
     budget: TraceBudget
-    reasoning_effort: str | None = None
 
 
 def _is_pass(verdict_text: str) -> bool:
@@ -570,7 +530,6 @@ class Conductor:
         execution_workers: Mapping[str, ExecutionBackend] | None = None,
         reasoning_effort: str | None = None,
         public_output_floor: int | None = None,
-        conversation: ChatPrompt | None = None,
     ) -> None:
         if isinstance(shared_prefix, TemplatedPrompt):
             raise ValueError(
@@ -606,11 +565,6 @@ class Conductor:
         self._affinity_key = affinity_key
         self._expose_intermediate_outputs = expose_intermediate_outputs
         self._multimodal_prompt = multimodal_prompt
-        self._conversation = conversation
-        if conversation is not None and not isinstance(conversation, ChatPrompt):
-            raise TypeError("conversation must be a ChatPrompt or null")
-        if conversation is not None and multimodal_prompt is not None:
-            raise ValueError("conversation and multimodal_prompt cannot both own input")
         self._chat_template_kwargs = (
             None if chat_template_kwargs is None else dict(chat_template_kwargs)
         )
@@ -692,14 +646,7 @@ class Conductor:
             return False
         if params.extra_args.get("response_format") is not None:
             return False
-        if self._selected_final_unit().required:
-            limit = self._final_public_params().max_tokens
-            if limit is not None and limit <= self._public_output_floor_or_one():
-                return False
         return True
-
-    def _public_output_floor_or_one(self) -> int:
-        return self._public_output_floor or 1
 
     def _head_sampling_params(self) -> SamplingParams:
         """The head derives from the caller's PUBLIC sampling so its style
@@ -713,10 +660,6 @@ class Conductor:
         # it exactly like the continuation (issue #496): the role override may
         # only shrink below that cap, never exceed it.
         public_cap = self._final_sampling_params.max_tokens
-        if self._selected_final_unit().required:
-            public_cap = self._final_public_params().max_tokens
-            if public_cap is not None:
-                public_cap = max(1, public_cap - self._public_output_floor_or_one())
         base_max = self._sampling_params.max_tokens
         if public_cap is not None:
             base_max = public_cap if base_max is None else min(base_max, public_cap)
@@ -812,22 +755,7 @@ class Conductor:
                 self._final_parallel_tool_calls,
                 self._final_tool_call_protocol,
             )
-        params = self._role_sampling_params(spec)
-        if spec.response_contract == "inherit":
-            extra_args = dict(params.extra_args)
-            if "response_format" in self._final_sampling_params.extra_args:
-                extra_args["response_format"] = (
-                    self._final_sampling_params.extra_args["response_format"]
-                )
-            return (
-                params.clone(extra_args=extra_args),
-                self._final_tools,
-                self._final_tool_choice,
-                self._final_tools_in_prompt,
-                self._final_parallel_tool_calls,
-                self._final_tool_call_protocol,
-            )
-        return params, (), None, False, None, "generic"
+        return self._role_sampling_params(spec), (), None, False, None, "generic"
 
     def _final_public_params(self) -> SamplingParams:
         """The caller's public params with the final unit's policy overrides.
@@ -911,8 +839,7 @@ class Conductor:
         if spent:
             budget = max(1, budget - spent)
         floor = self._think_close_floor()
-        if floor is not None and budget > 1:
-            floor = min(floor, budget - 1)
+        if floor is not None and budget - floor >= 1:
             # Reserve the floor for public output (issue #542): attempt 0 may
             # think within budget - floor, and the empty-output re-dispatch
             # answers with the reserve after a forced reasoning close. At or
@@ -933,6 +860,9 @@ class Conductor:
         if not final.reasoning_close_tag or final.reasoning_closed:
             return None
         if self._final_public_params().max_tokens is None:
+            return None
+        if self._final_sampling_params.n != 1:
+            # One prompt cannot continue multiple independent reasoning branches.
             return None
         return self._public_output_floor
 
@@ -1141,21 +1071,7 @@ class Conductor:
                 deps.difference_update(ready)
 
     def _render(self, template: str, query: str, outputs: Mapping[str, str]) -> str:
-        values = _SafeDict(query=query, **outputs)
-        if "{response_contract" in template and "response_contract" not in values:
-            values["response_contract"] = json.dumps(
-                {
-                    "tools": list(self._final_tools),
-                    "tool_choice": self._final_tool_choice,
-                    "parallel_tool_calls": self._final_parallel_tool_calls,
-                    "response_format": self._final_sampling_params.extra_args.get(
-                        "response_format"
-                    ),
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        body = template.format_map(values)
+        body = template.format_map(_SafeDict(query=query, **outputs))
         return f"{self._shared_prefix}{body}"
 
     def _rendered_role_prompt(
@@ -1184,17 +1100,6 @@ class Conductor:
         return rendered
 
     def _worker_prompt(self, spec: RoleSpec, text: str):
-        if spec.prompt_input == "conversation":
-            if self._conversation is None:
-                raise ValueError("conversation role input requires a native chat conversation")
-            if not backend_supports_prompt_kind(self._workers[spec.worker], "chat"):
-                raise ValueError(f"worker {spec.worker!r} does not support native chat input")
-            if not text:
-                return self._conversation
-            return ChatPrompt(
-                messages=(*self._conversation.messages, ChatMessage("user", text)),
-                items=self._conversation.items,
-            )
         if self._multimodal_prompt is None or not backend_supports_prompt_kind(
             self._workers[spec.worker],
             "multimodal",
@@ -1210,17 +1115,7 @@ class Conductor:
         if isinstance(prompt, TemplatedPrompt):
             # Pre-rendered scaffolds bypass the upstream template.
             return None
-        kwargs = (
-            self._chat_template_kwargs
-            if isinstance(prompt, (MultimodalPrompt, ChatPrompt))
-            else None
-        )
-        if kwargs is not None and isinstance(prompt, ChatPrompt):
-            # Top-level per-role effort owns this policy. Nested client values
-            # cannot lower a declared floor or turn a fixed non-thinking role on.
-            kwargs = {key: value for key, value in kwargs.items() if key not in {
-                "reasoning_effort", "thinking", "thinking_mode", "enable_thinking"
-            }}
+        kwargs = self._chat_template_kwargs if isinstance(prompt, MultimodalPrompt) else None
         effort = self._role_reasoning_effort(spec)
         if effort is None:
             # A non-thinking role must say so explicitly: upstream reasoning
@@ -1232,13 +1127,8 @@ class Conductor:
                 frozenset({"enable_thinking"}),
             ):
                 kwargs = {**(kwargs or {}), "enable_thinking": False}
-        elif (
-            isinstance(prompt, ChatPrompt)
-            and backend_supports_chat_template_kwargs(
-                self._workers[spec.worker], frozenset({"enable_thinking"})
-            )
-        ) or (kwargs is not None and "enable_thinking" in kwargs):
-            kwargs = {**(kwargs or {}), "enable_thinking": True}
+        elif kwargs is not None and "enable_thinking" in kwargs:
+            kwargs = {**kwargs, "enable_thinking": True}
         if kwargs is not None and not backend_supports_chat_template_kwargs(
             self._workers[spec.worker],
             frozenset(kwargs),
@@ -1250,12 +1140,7 @@ class Conductor:
 
     def _role_reasoning_effort(self, spec: RoleSpec) -> str | None:
         if spec.reasoning_effort == "inherit":
-            effort = self._reasoning_effort
-            if spec.reasoning_effort_floor is not None:
-                levels = (None, "low", "high", "max")
-                if levels.index(effort) < levels.index(spec.reasoning_effort_floor):
-                    return spec.reasoning_effort_floor
-            return effort
+            return self._reasoning_effort
         return spec.reasoning_effort
 
     def _cache_hint(self, session: str, *, multimodal: bool = False) -> CacheHint:
@@ -1298,7 +1183,7 @@ class Conductor:
         conditional_excluded = {
             spec.name
             for spec in self._units
-            if spec.requires == "image" and not self._has_images()
+            if spec.requires == "image" and self._multimodal_prompt is None
         }
         for spec in self._units:
             if spec.name in conditional_excluded:
@@ -1336,7 +1221,7 @@ class Conductor:
                         sampling_params=sampling_params,
                         cache_hint=self._cache_hint(
                             session,
-                            multimodal=prompt_kind(role_prompt) != "text",
+                            multimodal=isinstance(role_prompt, MultimodalPrompt),
                         ),
                         chat_template_kwargs=self._worker_chat_template_kwargs(
                             spec,
@@ -1362,7 +1247,6 @@ class Conductor:
         attempt: int,
         max_tokens_override: int | None = None,
         assistant_prefill: str | None = None,
-        choice_index: int | None = None,
     ) -> GenerationRequest:
         """Consume an exact first-wave preflight request when one is bound."""
 
@@ -1378,19 +1262,14 @@ class Conductor:
         )
         if max_tokens_override is not None:
             sampling_params = sampling_params.clone(max_tokens=max_tokens_override)
-        if choice_index is not None and spec.name == self._selected_final_unit().name:
-            sampling_params = sampling_params.clone(n=1)
         request_prompt = self._worker_prompt(spec, prompt)
         candidate = GenerationRequest(
-            request_id=(
-                f"{session}-{spec.name}-{attempt}"
-                + (f"-choice-{choice_index}" if choice_index is not None else "")
-            ),
+            request_id=f"{session}-{spec.name}-{attempt}",
             prompt=request_prompt,
             sampling_params=sampling_params,
             cache_hint=self._cache_hint(
                 session,
-                multimodal=prompt_kind(request_prompt) != "text",
+                multimodal=isinstance(request_prompt, MultimodalPrompt),
             ),
             chat_template_kwargs=self._worker_chat_template_kwargs(
                 spec,
@@ -1404,7 +1283,7 @@ class Conductor:
             reasoning_effort=self._role_reasoning_effort(spec),
             assistant_prefill=assistant_prefill,
         )
-        if attempt != 0 or choice_index is not None:
+        if attempt != 0:
             return candidate
         prepared = run.prepared_initial_requests.pop(spec.name, None)
         if prepared is None:
@@ -1425,11 +1304,6 @@ class Conductor:
         if prepared is None:
             return None
         prompt = prepared.prompt
-        if isinstance(prompt, ChatPrompt):
-            # The original conversation and role text have separate ownership.
-            # Re-render only the deterministic instruction; generation verifies
-            # equality before consuming the exact prepared request.
-            return None
         text = (
             prompt_text(prompt.base)
             if isinstance(prompt, MultimodalPrompt)
@@ -1562,7 +1436,6 @@ class Conductor:
         spec: RoleSpec,
         attempt: int,
         observed: _GenerationObservation,
-        choice_index: int | None = None,
     ) -> IntermediateOutput | None:
         if (
             not self._expose_intermediate_outputs
@@ -1582,7 +1455,6 @@ class Conductor:
             model=identity.model,
             text=observed.text,
             model_reasoning=self._model_reasoning(observed.completions),
-            choice_index=choice_index,
         )
         run.intermediate_outputs.append(output)
         return output
@@ -1647,7 +1519,6 @@ class Conductor:
         operation: str = "generation",
         max_tokens_override: int | None = None,
         assistant_prefill: str | None = None,
-        choice_index: int | None = None,
     ) -> _GenerationObservation:
         event_spec = spec or RoleSpec(name=node, worker=worker, prompt="")
         backend = self._workers[worker]
@@ -1659,7 +1530,6 @@ class Conductor:
             attempt,
             max_tokens_override=max_tokens_override,
             assistant_prefill=assistant_prefill,
-            choice_index=choice_index,
         )
         queued_at = utc_now_iso()
         budget_before = run.budget
@@ -1682,7 +1552,6 @@ class Conductor:
                     "kairyu.stage.operation": operation,
                     "kairyu.stage.attempt": attempt,
                     "kairyu.stream": False,
-                    **({"kairyu.choice_index": choice_index} if choice_index is not None else {}),
                 },
             ) as span:
                 result = await backend.generate(request)
@@ -1710,10 +1579,6 @@ class Conductor:
                     ),
                     budget=TraceBudget.between(budget_before, run.budget),
                     error=TraceError(type=type(error).__name__),
-                    metadata={
-                        "reasoning_effort": request.reasoning_effort,
-                        **({"choice_index": choice_index} if choice_index is not None else {}),
-                    },
                 )
             )
             raise _ObservedGenerationError from error
@@ -1747,7 +1612,6 @@ class Conductor:
                 steps_consumed=1,
                 cost_consumed_usd=actual_cost,
             ),
-            reasoning_effort=request.reasoning_effort,
         )
 
     async def _run_executor_unit(
@@ -1758,7 +1622,6 @@ class Conductor:
         *,
         depth: int = 0,
         event_sink: Callable[[ConductorEvent], Awaitable[None]] | None = None,
-        choice_index: int | None = None,
     ) -> None:
         """Run one sandbox execution stage (ECO-D3).
 
@@ -1796,8 +1659,6 @@ class Conductor:
             metadata: dict,
             record: bool = True,
         ) -> IntermediateOutput | None:
-            if choice_index is not None:
-                metadata = {**metadata, "choice_index": choice_index}
             run.outputs[spec.name] = report_text
             run.trace.append(
                 self._trace_event(
@@ -1825,7 +1686,6 @@ class Conductor:
                         usage=None,
                         budget=budget,
                     ),
-                    choice_index=choice_index,
                 )
             if depth == 0 and spec.name not in run.completion_order:
                 run.completion_order.append(spec.name)
@@ -1873,10 +1733,7 @@ class Conductor:
 
         def execution_request(name: str, code: str) -> ExecutionRequest:
             return ExecutionRequest(
-                request_id=(
-                    f"{session}-{spec.name}-{depth}-{name}"
-                    + (f"-choice-{choice_index}" if choice_index is not None else "")
-                ),
+                request_id=f"{session}-{spec.name}-{depth}-{name}",
                 language="python",
                 files={"solution.py": code, "test_solution.py": tests},
                 entry="pytest",
@@ -1952,8 +1809,6 @@ class Conductor:
         """
 
         if run.budget.is_exhausted:
-            if spec.required:
-                raise RuntimeError("required generation could not reserve budget")
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -2153,16 +2008,6 @@ class Conductor:
         *,
         event_sink: Callable[[ConductorEvent], Awaitable[None]] | None = None,
     ) -> None:
-        if run.final_error is not None:
-            return
-        if spec.required:
-            missing = [
-                name for name in spec.depends_on if name not in run.outputs
-                and not (self._by_name[name].role_type == "head" and not self._head_enabled())
-                and not (self._by_name[name].requires == "image" and not self._has_images())
-            ]
-            if missing:
-                raise RuntimeError("required generation is missing a dependency result")
         if spec.role_type == "executor":
             await self._run_executor_unit(run, session, spec, event_sink=event_sink)
             return
@@ -2191,8 +2036,6 @@ class Conductor:
                 )
                 return
         if run.budget.is_exhausted:
-            if spec.required:
-                raise RuntimeError("required generation could not reserve budget")
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -2213,167 +2056,48 @@ class Conductor:
                 query,
                 dict(run.outputs),
             )
-        if (
-            spec.name == self._selected_final_unit().name
-            and self._final_sampling_params.n > 1
-            and (
-                self._verifier_for.get(spec.name) is not None
-                or self._think_close_floor() is not None
-            )
-        ):
-            await self._run_choice_units(
-                run, session, query, spec, rendered, event_sink=event_sink,
-            )
-            return
-        await self._run_unit_attempts(
-            run, session, query, spec, rendered, event_sink=event_sink,
-        )
-
-    def _selected_completion_tokens(self, observed: _GenerationObservation) -> int | None:
-        """Count one selected candidate without assigning hidden best_of work to it."""
-
-        if self._final_sampling_params.best_of in (None, 1) and observed.usage is not None:
-            return observed.usage.completion_tokens
-        if len(observed.completions) == 1 and observed.completions[0].token_ids_exact:
-            return len(observed.completions[0].token_ids)
-        return None
-
-    async def _run_choice_units(
-        self,
-        run: _RunState,
-        session: str,
-        query: str,
-        spec: RoleSpec,
-        rendered: str,
-        *,
-        event_sink: Callable[[ConductorEvent], Awaitable[None]] | None,
-    ) -> None:
-        """Keep native candidate selection, then finish each choice independently."""
-
-        observed = await self._generate(
-            run, session, spec.name, spec.worker, rendered, 0, spec=spec,
-        )
-        choices = {completion.index: completion for completion in observed.completions}
-        n = self._final_sampling_params.n
-        if (
-            any(type(index) is not int for index in choices)
-            or len(choices) != len(observed.completions)
-            or set(choices) != set(range(n))
-        ):
-            raise RuntimeError("final worker did not return each requested choice exactly once")
-        run.trace.append(self._trace_event(
-            spec, "generated", operation="generation", status="success", attempt=0,
-            timing=observed.timing, usage=observed.usage, budget=observed.budget,
-            metadata={"n": n, "reasoning_effort": observed.reasoning_effort},
-        ))
-        completed = []
-        counts: list[int | None] = []
-        replaced = False
-        order_length = len(run.completion_order)
-        try:
-            for index in range(n):
-                choice = choices[index]
-                run.outputs.pop(spec.name, None)
-                run.final_completions = ()
-                run.final_unit_completion_tokens = None
-                # The native batch already charged its aggregate work once.
-                # Branch observations carry no duplicated usage or timing.
-                initial = _GenerationObservation(
-                    text=choice.text, completions=(choice,), timing=TraceTiming(),
-                    usage=None, budget=TraceBudget.between(run.budget, run.budget),
-                )
-                initial_count = len(choice.token_ids) if choice.token_ids_exact else None
-                replaced |= await self._run_unit_attempts(
-                    run, session, query, spec, rendered, event_sink=event_sink,
-                    initial=initial, initial_completion_tokens=initial_count,
-                    choice_index=index,
-                )
-                if run.final_unit_unusable or len(run.final_completions) != 1:
-                    raise RuntimeError("a final choice remained unusable after its bounded retry")
-                completed.append(replace(run.final_completions[0], index=index))
-                counts.append(run.final_unit_completion_tokens)
-            if all(count is not None for count in counts):
-                completion_tokens = sum(count for count in counts if count is not None)
-            elif (
-                not replaced
-                and observed.usage is not None
-                and self._final_sampling_params.best_of in (None, n)
-            ):
-                # All native choices survived: the unsplit native aggregate is
-                # still the exact public total even without per-choice IDs.
-                completion_tokens = observed.usage.completion_tokens
-            else:
-                raise RuntimeError("final choices lack exact per-choice completion usage")
-        except BaseException:
-            # No choice is public until every requested choice has finished.
-            run.outputs.pop(spec.name, None)
-            run.final_completions = ()
-            run.final_unit_completion_tokens = None
-            raise
-        finally:
-            del run.completion_order[order_length:]
-        run.outputs[spec.name] = completed[0].text
-        run.final_completions = tuple(completed)
-        run.final_unit_completion_tokens = completion_tokens
-        run.completion_order.append(spec.name)
-
-    async def _run_unit_attempts(
-        self,
-        run: _RunState,
-        session: str,
-        query: str,
-        spec: RoleSpec,
-        rendered: str,
-        *,
-        event_sink: Callable[[ConductorEvent], Awaitable[None]] | None,
-        initial: _GenerationObservation | None = None,
-        initial_completion_tokens: int | None = None,
-        choice_index: int | None = None,
-    ) -> bool:
-        """The existing bounded generation/verifier loop for one candidate."""
-
-        def trace_event(*args, metadata=None, **kwargs):
-            if choice_index is not None:
-                metadata = {**(metadata or {}), "choice_index": choice_index}
-            return self._trace_event(*args, metadata=metadata, **kwargs)
-
         base_prompt = self._prompt_body(spec, rendered)
         verifier = self._verifier_for.get(spec.name)
         prompt = rendered
         depth = 0
         is_final_unit = spec.name == self._selected_final_unit().name
+        if verifier is not None and is_final_unit and self._final_sampling_params.n != 1:
+            # One verdict cannot judge independent choices, and one refinement
+            # prompt cannot continue them (same boundary as the n>1 floor
+            # rule): the multi-choice final publishes unverified.
+            run.trace.append(
+                self._trace_event(
+                    verifier,
+                    "skipped:intent",
+                    operation="verification",
+                    status="skipped",
+                    attempt=0,
+                    metadata={"reason": "intent", "n": self._final_sampling_params.n},
+                )
+            )
+            verifier = None
         empty_retry_used = False
-        generated = False
         dispatch_spec = spec
         retry_max_tokens: int | None = None
         retry_prefill: str | None = None
-        continued_tokens = 0
         while True:
-            from_initial = initial is not None
             try:
-                if initial is not None:
-                    observed, initial = initial, None
-                else:
-                    observed = await self._generate(
-                        run,
-                        session,
-                        spec.name,
-                        spec.worker,
-                        prompt,
-                        depth + (1 if empty_retry_used else 0),
-                        spec=dispatch_spec,
-                        operation="generation",
-                        max_tokens_override=retry_max_tokens,
-                        assistant_prefill=retry_prefill,
-                        choice_index=choice_index,
-                    )
-                    generated = True
+                observed = await self._generate(
+                    run,
+                    session,
+                    spec.name,
+                    spec.worker,
+                    prompt,
+                    depth + (1 if empty_retry_used else 0),
+                    spec=dispatch_spec,
+                    operation="generation",
+                    max_tokens_override=retry_max_tokens,
+                    assistant_prefill=retry_prefill,
+                )
             except _BudgetRefused:
-                if spec.required:
-                    raise RuntimeError("required generation could not reserve budget") from None
                 refused_attempt = depth + (1 if empty_retry_used else 0)
                 run.trace.append(
-                    trace_event(
+                    self._trace_event(
                         spec,
                         "skipped:budget",
                         operation="generation",
@@ -2392,7 +2116,7 @@ class Conductor:
                         # internal stage as a successful answer.
                         run.final_unit_unusable = True
                         run.trace.append(
-                            trace_event(
+                            self._trace_event(
                                 spec,
                                 "failed",
                                 operation="generation",
@@ -2402,7 +2126,7 @@ class Conductor:
                                 error=TraceError(type="EmptyFinalOutput"),
                             )
                         )
-                    return generated
+                    return
                 break
             text, completions = self._unit_public_output(
                 dispatch_spec,
@@ -2443,25 +2167,17 @@ class Conductor:
                         reasoning_continuation="prefix",
                         reasoning_open_tag="",
                     )
-                    consumed = (
-                        initial_completion_tokens if from_initial
-                        else self._selected_completion_tokens(observed)
-                    )
-                    if consumed is None:
-                        raise RuntimeError("thinking continuation requires exact completion usage")
-                    continued_tokens = consumed
                     remaining = self._public_budget_remaining(run)
-                    available = None if remaining is None else remaining - consumed
-                    if available is not None and available < 1:
-                        raise RuntimeError("thinking exhausted the public completion allowance")
-                    retry_max_tokens = floor if available is None else min(floor, available)
+                    retry_max_tokens = (
+                        floor if remaining is None else max(1, min(floor, remaining))
+                    )
                     metadata.update(
                         continuation="think_close",
                         mode=spec.reasoning_continuation,
                         reserved_tokens=floor,
                     )
                 run.trace.append(
-                    trace_event(
+                    self._trace_event(
                         spec,
                         "retry:empty_output",
                         operation="generation",
@@ -2473,15 +2189,8 @@ class Conductor:
                     )
                 )
                 continue
-            if spec.required and not is_final_unit and (
-                not self._has_public_output(text, completions)
-                or any(c.finish_reason == "length" for c in completions)
-            ):
-                raise RuntimeError("required generation returned empty or truncated output")
             run.outputs[spec.name] = text
-            intermediate = self._record_intermediate(
-                run, spec, depth, observed, choice_index=choice_index,
-            )
+            intermediate = self._record_intermediate(run, spec, depth, observed)
             if spec.role_type == "head":
                 run.head_completion_tokens = _completion_tokens_for_public_budget(
                     observed.usage,
@@ -2492,29 +2201,24 @@ class Conductor:
                 run.head_usage_reported = observed.usage is not None
             if is_final_unit:
                 run.final_completions = completions
-                if from_initial:
-                    run.final_unit_completion_tokens = initial_completion_tokens
-                elif choice_index is not None:
-                    run.final_unit_completion_tokens = self._selected_completion_tokens(observed)
-                else:
-                    run.final_unit_completion_tokens = self._selected_completion_tokens(observed)
-                if run.final_unit_completion_tokens is not None:
-                    run.final_unit_completion_tokens += continued_tokens
-            if not from_initial:
-                run.trace.append(
-                    trace_event(
-                        spec,
-                        "generated",
-                        operation="generation",
-                        status="success",
-                        attempt=depth,
-                        detail=f"attempt={depth}",
-                        timing=observed.timing,
-                        usage=observed.usage,
-                        budget=observed.budget,
-                        metadata={"reasoning_effort": observed.reasoning_effort},
-                    )
+                run.final_unit_completion_tokens = (
+                    observed.usage.completion_tokens
+                    if observed.usage is not None
+                    else None
                 )
+            run.trace.append(
+                self._trace_event(
+                    spec,
+                    "generated",
+                    operation="generation",
+                    status="success",
+                    attempt=depth,
+                    detail=f"attempt={depth}",
+                    timing=observed.timing,
+                    usage=observed.usage,
+                    budget=observed.budget,
+                )
+            )
             await self._emit_intermediate(event_sink, intermediate)
             if verifier is None:
                 break
@@ -2527,7 +2231,6 @@ class Conductor:
                     exec_spec,
                     depth=depth,
                     event_sink=event_sink,
-                    choice_index=choice_index,
                 )
             verifier_prompt = await run_prompt_work(
                 self._rendered_role_prompt,
@@ -2545,11 +2248,10 @@ class Conductor:
                     depth,
                     spec=verifier,
                     operation="verification",
-                    choice_index=choice_index,
                 )
             except _BudgetRefused:
                 run.trace.append(
-                    trace_event(
+                    self._trace_event(
                         verifier,
                         "skipped:budget",
                         operation="verification",
@@ -2559,20 +2261,13 @@ class Conductor:
                         metadata={"reason": "budget"},
                     )
                 )
-                if choice_index is not None or verifier.required:
-                    raise RuntimeError(
-                        "required verification could not reserve budget"
-                    ) from None
                 break
             verdict = verifier_observed.text
             verdict_trace_spec = verifier
             verdict_trace_observed: _GenerationObservation | None = (
                 verifier_observed
             )
-            if _verdict_is_inconclusive(verdict) or (
-                verifier.required
-                and any(c.finish_reason == "length" for c in verifier_observed.completions)
-            ):
+            if _verdict_is_inconclusive(verdict):
                 # A truncated or empty verdict is not evidence of a draft
                 # defect, and counting it as FAIL burns a full refinement
                 # round (issue #495). One bounded re-verification demands an
@@ -2586,7 +2281,7 @@ class Conductor:
                     + verifier.prompt_suffix
                 )
                 run.trace.append(
-                    trace_event(
+                    self._trace_event(
                         verifier,
                         "verified:inconclusive",
                         operation="verification",
@@ -2600,7 +2295,6 @@ class Conductor:
                             "pass": False,
                             "inconclusive": True,
                             "reverification": False,
-                            "reasoning_effort": verifier_observed.reasoning_effort,
                         },
                     )
                 )
@@ -2622,19 +2316,14 @@ class Conductor:
                         depth,
                         spec=retry_spec,
                         operation="verification",
-                        choice_index=choice_index,
                     )
                     verifier_observed = retry_observed
                     verdict = verifier_observed.text
                     verdict_trace_spec = retry_spec
                     verdict_trace_observed = retry_observed
                 except _BudgetRefused:
-                    if verifier.required:
-                        raise RuntimeError(
-                            "required re-verification could not reserve budget"
-                        ) from None
                     run.trace.append(
-                        trace_event(
+                        self._trace_event(
                             retry_spec,
                             "skipped:budget",
                             operation="verification",
@@ -2645,14 +2334,10 @@ class Conductor:
                         )
                     )
                 except _ObservedGenerationError:
-                    if verifier.required:
-                        raise
+                    pass
             run.outputs[verifier.name] = verdict
-            verdict_inconclusive = _verdict_is_inconclusive(verdict) or (
-                verifier.required
-                and any(c.finish_reason == "length" for c in verifier_observed.completions)
-            )
-            passed = _is_pass(verdict) and not verdict_inconclusive
+            passed = _is_pass(verdict)
+            verdict_inconclusive = _verdict_is_inconclusive(verdict)
             # One immediate re-verification is the bounded recovery for a
             # missing verdict. If that attempt is also inconclusive, retain
             # the best draft instead of converting missing control output
@@ -2665,10 +2350,9 @@ class Conductor:
                 verifier,
                 depth,
                 verifier_observed,
-                choice_index=choice_index,
             )
             run.trace.append(
-                trace_event(
+                self._trace_event(
                     verdict_trace_spec,
                     "verified",
                     operation="verification",
@@ -2692,10 +2376,6 @@ class Conductor:
                     ),
                     metadata={
                         "pass": passed,
-                        **(
-                            {"reasoning_effort": verdict_trace_observed.reasoning_effort}
-                            if verdict_trace_observed is not None else {}
-                        ),
                         "inconclusive": verdict_inconclusive,
                         "refinement_exhausted": (
                             not passed
@@ -2706,11 +2386,6 @@ class Conductor:
                 )
             )
             await self._emit_intermediate(event_sink, verifier_intermediate)
-            if (
-                verifier.required and not passed and not verdict_inconclusive
-                and depth < run.budget.budget.max_refine_depth and not can_refine
-            ):
-                raise RuntimeError("required refinement could not reserve budget")
             if passed or not can_refine:
                 break
             depth += 1
@@ -2727,7 +2402,6 @@ class Conductor:
             dispatch_spec = spec
             retry_max_tokens = None
             retry_prefill = None
-            continued_tokens = 0
         if (
             is_final_unit
             and not self._has_public_output(
@@ -2742,7 +2416,7 @@ class Conductor:
             # exempt: EO-D7 already defines the head-only best-so-far answer.
             run.final_unit_unusable = True
             run.trace.append(
-                trace_event(
+                self._trace_event(
                     spec,
                     "failed",
                     operation="generation",
@@ -2753,8 +2427,6 @@ class Conductor:
                 )
             )
         run.completion_order.append(spec.name)
-
-        return generated
 
     async def _run_unit_safe(
         self,
@@ -2770,10 +2442,10 @@ class Conductor:
         # result produced so far (O4). Sibling units keep their completed work.
         try:
             await self._run_unit(run, session, query, spec, event_sink=event_sink)
-        except _ObservedGenerationError as error:
-            self._mark_failed_final_unit(run, spec, error.__cause__)
+        except _ObservedGenerationError:
+            self._mark_failed_final_unit(run, spec)
         except Exception as error:
-            self._mark_failed_final_unit(run, spec, error)
+            self._mark_failed_final_unit(run, spec)
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -2786,12 +2458,7 @@ class Conductor:
                 )
             )
 
-    def _mark_failed_final_unit(
-        self,
-        run: _RunState,
-        spec: RoleSpec,
-        error: BaseException | None,
-    ) -> None:
+    def _mark_failed_final_unit(self, run: _RunState, spec: RoleSpec) -> None:
         """A failed selected final unit must not fall back to internal stages.
 
         Without this the last completed internal stage would be published as
@@ -2799,17 +2466,8 @@ class Conductor:
         keeps its best-so-far contract (EO-D7).
         """
 
-        if spec.required:
-            final = self._selected_final_unit()
-            run.final_error = error
-            run.final_unit_unusable = True
-            run.outputs.pop(final.name, None)
-            run.final_completions = ()
-            run.final_unit_completion_tokens = None
-            return
         if spec.name != self._selected_final_unit().name:
             return
-        run.final_error = error
         if spec.name in self._verifier_for:
             # A verify/refine-loop failure may happen after an earlier attempt
             # was stored in outputs. That attempt is either unverified or was
@@ -2867,7 +2525,6 @@ class Conductor:
                 index=0,
                 text=public_text,
                 token_ids=(),
-                token_ids_exact=False,
                 finish_reason=finish_reason or "stop",
             ),
         )
@@ -2889,15 +2546,10 @@ class Conductor:
         )
         return frozenset({self._head.name})
 
-    def _has_images(self) -> bool:
-        return self._multimodal_prompt is not None or bool(
-            self._conversation is not None and self._conversation.items
-        )
-
     def _conditional_exclusions(self, run: _RunState) -> frozenset[str]:
         """Skip image-conditional roles when the request carries no image (DTO-D11)."""
 
-        if self._has_images():
+        if self._multimodal_prompt is not None:
             return frozenset()
         excluded = frozenset(unit.name for unit in self._units if unit.requires == "image")
         for name in sorted(excluded):
@@ -2929,7 +2581,7 @@ class Conductor:
         """Skip a publisher when a verified draft adds nothing to the head."""
 
         head_text = self._head_committed_text(run)
-        if final.required or not head_text or final.role_type != "publisher":
+        if not head_text or final.role_type != "publisher":
             return False
         for target, verifier in self._verifier_for.items():
             if target not in final.depends_on or verifier.name not in final.depends_on:
@@ -3034,8 +2686,6 @@ class Conductor:
                     for name in ready
                 )
             )
-            if run.final_error is not None:
-                return
             for name in ready:
                 del pending[name]
             for deps in pending.values():
@@ -3053,8 +2703,6 @@ class Conductor:
         attempt: int = 0,
         think_continuation: str | None = None,
     ) -> AsyncIterator[ConductorEvent]:
-        if run.final_error is not None:
-            raise run.final_error
         remaining = self._public_budget_remaining(run)
         if remaining is not None and remaining < 1:
             run.public_budget_exhausted = True
@@ -3071,8 +2719,6 @@ class Conductor:
             )
             return
         if run.budget.is_exhausted:
-            if spec.required:
-                raise RuntimeError("required generation could not reserve budget")
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -3096,16 +2742,7 @@ class Conductor:
             )
         max_tokens_override: int | None = None
         assistant_prefill: str | None = None
-        continued_tokens = 0
         if think_continuation is not None:
-            consumed = run.final_unit_completion_tokens
-            if consumed is None:
-                raise RuntimeError("thinking continuation requires exact completion usage")
-            continued_tokens = consumed
-            if remaining is not None:
-                remaining -= consumed
-                if remaining < 1:
-                    raise RuntimeError("thinking exhausted the public completion allowance")
             # Public-output floor (issue #542): continue the captured
             # deliberation after a forced reasoning close, answering with the
             # reserved public tokens; the reasoning_closed reclaim publishes
@@ -3140,8 +2777,6 @@ class Conductor:
         unknown_cost = run.budget.budget.max_cost_usd is not None
         reserved = run.budget.try_reserve(unknown_cost=unknown_cost)
         if reserved is None:
-            if spec.required:
-                raise RuntimeError("required generation could not reserve budget")
             run.trace.append(
                 self._trace_event(
                     spec,
@@ -3316,17 +2951,9 @@ class Conductor:
         )
         run.completion_order.append(spec.name)
         run.final_completions = unit_completions
-        if self._final_sampling_params.best_of not in (None, 1):
-            run.final_unit_completion_tokens = (
-                sum(len(c.token_ids) for c in unit_completions)
-                if all(c.token_ids_exact for c in unit_completions) else None
-            )
-        else:
-            run.final_unit_completion_tokens = (
-                latest_usage.completion_tokens if latest_usage is not None else None
-            )
-        if run.final_unit_completion_tokens is not None:
-            run.final_unit_completion_tokens += continued_tokens
+        run.final_unit_completion_tokens = (
+            latest_usage.completion_tokens if latest_usage is not None else None
+        )
 
     async def _deferred_final_events(
         self,
@@ -3390,9 +3017,7 @@ class Conductor:
         if prepared_initial_requests and session is None:
             raise ValueError("prepared initial requests require their bound session")
         run = _RunState(
-            budget=BudgetState(
-                budget=(budget or Budget()).for_choices(self._final_sampling_params.n)
-            ),
+            budget=BudgetState(budget=budget or Budget()),
             prepared_initial_requests=dict(prepared_initial_requests or {}),
         )
         session = session or uuid.uuid4().hex[:12]
@@ -3414,7 +3039,6 @@ class Conductor:
             reasoning_content=self._reasoning_content(run),
             public_completion_tokens=self._public_completion_tokens(run),
             final_unit_ok=not run.final_unit_unusable,
-            final_error=run.final_error,
         )
 
     async def stream(
@@ -3443,17 +3067,24 @@ class Conductor:
         if prepared_initial_requests and session is None:
             raise ValueError("prepared initial requests require their bound session")
         run = _RunState(
-            budget=BudgetState(
-                budget=(budget or Budget()).for_choices(self._final_sampling_params.n)
-            ),
+            budget=BudgetState(budget=budget or Budget()),
             prepared_initial_requests=dict(prepared_initial_requests or {}),
         )
         session = session or uuid.uuid4().hex[:12]
         final = self._selected_final_unit()
         final_verifier = self._verifier_for.get(final.name)
-        deferred_final = final_verifier is not None or (
-            self._final_sampling_params.n > 1 and self._think_close_floor() is not None
-        )
+        deferred_final = final_verifier is not None and self._final_sampling_params.n == 1
+        if final_verifier is not None and not deferred_final:
+            run.trace.append(
+                self._trace_event(
+                    final_verifier,
+                    "skipped:intent",
+                    operation="verification",
+                    status="skipped",
+                    attempt=0,
+                    metadata={"reason": "intent", "n": self._final_sampling_params.n},
+                )
+            )
         head_active = self._head is not None and self._head_enabled()
         exclude = (
             frozenset({final.name})
@@ -3478,7 +3109,6 @@ class Conductor:
                 ),
                 public_completion_tokens=self._public_completion_tokens(run),
                 final_unit_ok=not run.final_unit_unusable,
-                final_error=run.final_error,
             )
 
         # Phase A (EO-D7/EO-D8): one producer task runs the pre-final DAG.  The
@@ -3636,7 +3266,6 @@ class Conductor:
                         )
                     )
         except Exception as error:
-            self._mark_failed_final_unit(run, final, error)
             raise ConductorStreamError(
                 error,
                 partial_result(emitted_text if head_active else self._final_text(run)),
@@ -3665,6 +3294,5 @@ class Conductor:
                 ),
                 public_completion_tokens=self._public_completion_tokens(run),
                 final_unit_ok=not run.final_unit_unusable,
-                final_error=run.final_error,
             ),
         )

@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from kairyu.engine.prompt import (
-    ChatPrompt,
     PromptInput,
     TemplatedPrompt,
     TextPrompt,
@@ -262,7 +261,7 @@ class GenerationRequest:
         ):
             raise ValueError(
                 "CacheHint.prefix_fingerprint is an xxh3 fingerprint of a "
-                "text prefix and cannot be used with token, multimodal or chat prompts; "
+                "text prefix and cannot be used with token or multimodal prompts; "
                 "use a session-only CacheHint instead"
             )
 
@@ -597,11 +596,6 @@ def validate_native_request_surface_before_prepare(
     the serving event loop.
     """
 
-    if isinstance(request.prompt, ChatPrompt):
-        raise ValueError(
-            "Kairyu backend does not support native chat prompts; "
-            "render messages with a model-owned chat template first"
-        )
     params = request.sampling_params
     unsupported: list[str] = []
     if params.best_of is not None:
@@ -669,11 +663,7 @@ def admission_upper_bound(
     if max_tokens is None:
         max_tokens = fallback_output_tokens or UNLIMITED_OUTPUT_ADMISSION_TOKENS
     candidates = max(params.n, params.best_of or params.n)
-    prompt = (
-        request.prompt
-        if isinstance(request.prompt, ChatPrompt)
-        else prompt_with_tool_intent(request)
-    )
+    prompt = prompt_with_tool_intent(request)
     metadata = json.dumps(
         params.extra_args,
         ensure_ascii=False,
@@ -681,7 +671,7 @@ def admission_upper_bound(
         separators=(",", ":"),
     )
     kind = prompt_kind(prompt)
-    if kind == "multimodal" or (isinstance(prompt, ChatPrompt) and prompt.items):
+    if kind == "multimodal":
         # A media processor can expand one item into a model-specific number of
         # placeholder tokens. Guessing from bytes would under-reserve some
         # models and overstate usage for others.
@@ -695,26 +685,6 @@ def admission_upper_bound(
         # tool rendering. Their exact sequence length is therefore the truthful
         # prefill reservation; optional display text is never counted.
         prompt_upper = len(token_ids)
-    elif isinstance(prompt, ChatPrompt):
-        # Count all structured text and metadata, with an envelope per turn.
-        # This is a reservation ceiling, never a rendered-token count.
-        serialized = json.dumps(
-            {
-                "messages": [message.to_wire() for message in prompt.messages],
-                "tools": list(request.tools),
-                "tool_choice": request.tool_choice,
-                "chat_template_kwargs": request.chat_template_kwargs,
-                "reasoning_effort": request.reasoning_effort,
-                "assistant_prefill": request.assistant_prefill,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        prompt_upper = (
-            len(serialized.encode("utf-8"))
-            + len(metadata.encode("utf-8"))
-            + 256 * (len(prompt.messages) + 1)
-        )
     else:
         text = prompt_text(prompt)
         assert text is not None

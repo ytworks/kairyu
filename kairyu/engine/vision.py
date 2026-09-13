@@ -21,7 +21,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from io import BytesIO
 
-from kairyu.engine.prompt import ChatPrompt, MultimodalItem, MultimodalPrompt
+from kairyu.engine.prompt import MultimodalItem, MultimodalPrompt
 
 _DATA_URL = re.compile(
     r"\Adata:(image/(?:png|jpeg|webp));base64,([A-Za-z0-9+/]*={0,2})\Z"
@@ -68,7 +68,7 @@ class _PreparedImageInput:
 _prepared_image_cache: dict[
     int,
     tuple[
-        weakref.ReferenceType[MultimodalPrompt | ChatPrompt],
+        weakref.ReferenceType[MultimodalPrompt],
         dict[ImageInputPolicy, _PreparedImageInput],
     ],
 ] = {}
@@ -327,7 +327,7 @@ class ImageInputPolicy:
 
     def _cached_preparation(
         self,
-        prompt: MultimodalPrompt | ChatPrompt,
+        prompt: MultimodalPrompt,
     ) -> _PreparedImageInput | None:
         with _prepared_image_cache_lock:
             entry = _prepared_image_cache.get(id(prompt))
@@ -337,12 +337,12 @@ class ImageInputPolicy:
 
     def _remember_preparation(
         self,
-        prompt: MultimodalPrompt | ChatPrompt,
+        prompt: MultimodalPrompt,
         prepared: _PreparedImageInput,
     ) -> None:
         prompt_id = id(prompt)
 
-        def discard(reference: weakref.ReferenceType[MultimodalPrompt | ChatPrompt]) -> None:
+        def discard(reference: weakref.ReferenceType[MultimodalPrompt]) -> None:
             with _prepared_image_cache_lock:
                 current = _prepared_image_cache.get(prompt_id)
                 if current is not None and current[0] is reference:
@@ -360,7 +360,7 @@ class ImageInputPolicy:
 
     def _prepare_prompt(
         self,
-        prompt: MultimodalPrompt | ChatPrompt,
+        prompt: MultimodalPrompt,
     ) -> _PreparedImageInput:
         cached = self._cached_preparation(prompt)
         if cached is not None:
@@ -426,7 +426,7 @@ class ImageInputPolicy:
         self._remember_preparation(prompt, prepared)
         return prepared
 
-    def validate_prompt_headers(self, prompt: MultimodalPrompt | ChatPrompt) -> None:
+    def validate_prompt_headers(self, prompt: MultimodalPrompt) -> None:
         """Perform only constant-memory shape/encoded-size checks in-loop."""
 
         if not prompt.messages:
@@ -496,7 +496,7 @@ class ImageInputPolicy:
                     f"{self.max_total_image_bytes}-byte limit"
                 )
 
-    def validate_prompt(self, prompt: MultimodalPrompt | ChatPrompt) -> tuple[str, ...]:
+    def validate_prompt(self, prompt: MultimodalPrompt) -> tuple[str, ...]:
         """Fully decode and canonicalize images before an upstream dispatch."""
 
         prepared = self._prepare_prompt(prompt)
@@ -517,7 +517,7 @@ class ImageInputPolicy:
 
     def cached_validated_prompt(
         self,
-        prompt: MultimodalPrompt | ChatPrompt,
+        prompt: MultimodalPrompt,
     ) -> tuple[str, ...] | None:
         """Return a fully verified exact-prompt result without decoding work."""
 

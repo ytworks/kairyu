@@ -183,10 +183,6 @@ def build_orchestrator(
             reasoning_continuation=role.reasoning_continuation,
             reasoning_open_tag=role.reasoning_open_tag,
             requires=role.requires,
-            prompt_input=role.prompt_input,
-            response_contract=role.response_contract,
-            reasoning_effort_floor=role.reasoning_effort_floor,
-            required=role.required,
         )
 
     roles = tuple(_role_spec(role) for role in spec.roles) or None
@@ -219,7 +215,6 @@ def build_orchestrator(
     )
     budget = Budget(
         max_steps=spec.budget.max_steps,
-        max_steps_per_additional_choice=spec.budget.max_steps_per_additional_choice,
         max_refine_depth=spec.budget.max_refine_depth,
         max_cost_usd=spec.budget.max_cost_usd,
     )

@@ -187,20 +187,9 @@ class RoleNodeSpec(BaseModel):
     # slot renders as "" (DTO-D11). Head, final, verifier, and executor roles
     # cannot be conditional.
     requires: Literal["image"] | None = None
-    # Conversation mode carries original message roles/media separately from
-    # the role instruction; an empty instruction forwards the original input.
-    prompt_input: Literal["rendered", "conversation"] = "rendered"
-    # Private proposals may need the caller's output grammar/tool contract
-    # even though their sampling and publication remain private.
-    response_contract: Literal["internal", "inherit"] = "internal"
-    reasoning_effort_floor: Literal["low", "high", "max"] | None = None
-    # A missing/failed/incomplete generation is terminal, not optional input.
-    required: bool = False
 
     @model_validator(mode="after")
     def _executor_shape(self) -> RoleNodeSpec:
-        if self.required and self.role_type in {"head", "executor"}:
-            raise ValueError("required applies to generation and verifier roles")
         if (self.role_type == "executor") != (self.executor is not None):
             raise ValueError(
                 f"role {self.name!r}: role_type 'executor' and an executor block "
@@ -229,20 +218,8 @@ class RoleNodeSpec(BaseModel):
                     f"executor role {self.name!r} references roles outside its "
                     f"depends_on: {sorted(missing)}"
                 )
-        elif not self.prompt and self.prompt_input != "conversation":
+        elif not self.prompt:
             raise ValueError(f"role {self.name!r} requires a prompt")
-        if self.prompt_input == "conversation":
-            if self.executor is not None or self.prompt_suffix or self.reasoning_closed:
-                raise ValueError("conversation input cannot use an executor or rendered scaffold")
-            for template in (self.prompt, self.prompt_headless):
-                if any(name == "query" for _, name, _, _ in Formatter().parse(template)):
-                    raise ValueError("conversation input already carries query; omit {query}")
-        if self.reasoning_effort_floor is not None and self.reasoning_effort != "inherit":
-            raise ValueError("reasoning_effort_floor requires reasoning_effort: inherit")
-        if self.response_contract == "inherit" and self.role_type in {
-            "head", "executor", "verifier"
-        }:
-            raise ValueError("head, executor and verifier roles cannot inherit response_contract")
         for field_name in ("prompt", "prompt_headless"):
             _check_prompt_placeholders(self.name, field_name, getattr(self, field_name))
         if self.requires is not None and self.role_type in {"verifier", "executor"}:
@@ -284,7 +261,6 @@ class BudgetSpec(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     max_steps: int = Field(default=16, ge=1)
-    max_steps_per_additional_choice: int = Field(default=0, ge=0)
     max_refine_depth: int = Field(default=2, ge=0)
     max_cost_usd: float | None = Field(default=None, gt=0)
     cost_per_1k_chars_usd: float | None = Field(default=None, gt=0)

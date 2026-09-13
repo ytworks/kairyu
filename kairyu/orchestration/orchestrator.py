@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
 
 from kairyu.async_thread import run_prompt_work, run_serialized_prompt_work
 from kairyu.engine.backend import (
@@ -28,8 +28,6 @@ from kairyu.engine.backend import (
     admission_upper_bound as generation_admission_upper_bound,
 )
 from kairyu.engine.prompt import (
-    ChatMessage,
-    ChatPrompt,
     MultimodalPrompt,
     TemplatedPrompt,
     derive_multimodal_prompt,
@@ -152,8 +150,6 @@ class OrchestratorEvent:
     completions: tuple[CompletionOutput, ...] = ()
     result: OrchestratorResult | None = None
     error_type: str | None = None
-    # Internal cause for safe translation at the interface boundary.
-    error: BaseException | None = field(default=None, repr=False, compare=False)
 
 
 class OrchestratorExecutionError(RuntimeError):
@@ -786,16 +782,6 @@ class Orchestrator:
     def _roles_for(self, call: OrchestrationRequest) -> tuple[RoleSpec, ...]:
         return self._profiles[self._role_profile(call)]
 
-    @property
-    def uses_native_chat(self) -> bool:
-        """Whether any configured role needs the original typed conversation."""
-
-        return any(
-            role.prompt_input == "conversation"
-            for roles in self._profiles.values()
-            for role in self._generation_roles(roles)
-        )
-
     def _profile_accepts_images(self, name: str) -> bool:
         fallback = next(iter(self._engines))
         return any(
@@ -814,7 +800,7 @@ class Orchestrator:
 
         assert self._profile_judge is not None
         choices = self._profile_judge.choices
-        if not call.has_images:
+        if call.multimodal_prompt is None:
             return choices
         return tuple(
             choice for choice in choices if self._profile_accepts_images(choice.profile)
@@ -846,7 +832,7 @@ class Orchestrator:
                 self._offered_choices(call),
                 view,
                 tools=bool(call.tools or call.tools_in_prompt),
-                image=call.has_images,
+                image=call.multimodal_prompt is not None,
             )
             + self._profile_judge.prompt_suffix
         )
@@ -1045,9 +1031,7 @@ class Orchestrator:
         call: OrchestrationRequest,
         decision: RouteDecision | None,
     ) -> None:
-        if call.conversation is not None and self._moa_samples > 0:
-            raise ValueError("native conversation orchestration requires role-based execution")
-        if call.has_images:
+        if call.multimodal_prompt is not None:
             if self._moa_samples > 0 and (decision is None or decision.target == "multi_agent"):
                 raise ValueError("multimodal orchestration does not support MoA sampling")
             if decision is not None and decision.target != "multi_agent":
@@ -1151,7 +1135,7 @@ class Orchestrator:
                 if conductor is not None
                 else (
                     call.chat_template_kwargs
-                    if isinstance(prompt, (MultimodalPrompt, ChatPrompt))
+                    if isinstance(prompt, MultimodalPrompt)
                     else None
                 )
             )
@@ -1212,9 +1196,7 @@ class Orchestrator:
             tool_call_protocol=call.tool_call_protocol,
             reasoning_effort=self._effective_reasoning_effort(call),
             chat_template_kwargs=(
-                call.chat_template_kwargs
-                if isinstance(prompt, (MultimodalPrompt, ChatPrompt))
-                else None
+                call.chat_template_kwargs if isinstance(prompt, MultimodalPrompt) else None
             ),
         )
 
@@ -1224,13 +1206,6 @@ class Orchestrator:
         call: OrchestrationRequest,
         text: str,
     ):
-        if call.conversation is not None:
-            if not self._shared_prefix:
-                return call.conversation
-            return ChatPrompt(
-                messages=(*call.conversation.messages, ChatMessage("user", self._shared_prefix)),
-                items=call.conversation.items,
-            )
         if call.multimodal_prompt is None or not backend_supports_prompt_kind(
             self._engines[engine_key],
             "multimodal",
@@ -1273,7 +1248,7 @@ class Orchestrator:
                         reasoning_effort=self._effective_reasoning_effort(call),
                         chat_template_kwargs=(
                             call.chat_template_kwargs
-                            if isinstance(prompt, (MultimodalPrompt, ChatPrompt))
+                            if isinstance(prompt, MultimodalPrompt)
                             else None
                         ),
                     ),
@@ -1727,10 +1702,7 @@ class Orchestrator:
             )
             or UNLIMITED_OUTPUT_ADMISSION_TOKENS
         )
-        steps = max(
-            1, self._budget.for_choices(call.sampling_params.n).max_steps,
-            self._moa_samples + 1,
-        )
+        steps = max(1, self._budget.max_steps, self._moa_samples + 1)
         candidates = max(
             call.sampling_params.n,
             call.sampling_params.best_of or call.sampling_params.n,
@@ -1776,7 +1748,7 @@ class Orchestrator:
                 intent.request,
             ).tokens
             for intent in self._internal_intent_requests(call, None)
-            if call.has_images
+            if call.multimodal_prompt is not None
             and backend_supports_prompt_kind(
                 self._engines[intent.engine_key],
                 "multimodal",
@@ -1863,7 +1835,6 @@ class Orchestrator:
             affinity_key=self._conversation_affinity_key(call),
             expose_intermediate_outputs=self._expose_intermediate_outputs,
             multimodal_prompt=call.multimodal_prompt,
-            conversation=call.conversation,
             chat_template_kwargs=call.chat_template_kwargs,
             execution_workers=self._execution_workers,
             reasoning_effort=self._effective_reasoning_effort(call),
@@ -2155,7 +2126,6 @@ class Orchestrator:
                                     index=0,
                                     text=moa.final_text,
                                     token_ids=(),
-                                    token_ids_exact=False,
                                 ),
                             ),
                             usage=GenerationUsage(
@@ -2303,7 +2273,6 @@ class Orchestrator:
                                 index=0,
                                 text=moa.final_text,
                                 token_ids=(),
-                                token_ids_exact=False,
                                 finish_reason="stop",
                             ),
                         )
@@ -2324,28 +2293,18 @@ class Orchestrator:
             )
             notes.extend(f"{event.node}: {event.kind} {event.detail}" for event in result.trace)
             trace_events.extend(result.trace)
-            if result.final_error is not None or (
-                not result.final_unit_ok and not result.final_text
-            ):
+            if not result.final_unit_ok and not result.final_text:
                 # The selected final unit failed or produced no public text
                 # after its retry; publishing an internal stage or an empty
                 # "stop" would be a silent lie to the caller (issue #496).
-                # A committed head is retained as partial output, but cannot
-                # turn a terminal backend rejection into a successful answer.
                 raise OrchestratorExecutionError(
-                    result.final_error
-                    or RuntimeError("orchestration final unit produced no public output"),
+                    RuntimeError("orchestration final unit produced no public output"),
                     result_with_trace(
-                        text=result.final_text,
-                        completions=_public_multistage_completions(
-                            result.completions,
-                            result.reasoning_content,
-                        ),
+                        text="",
                         prompt_tokens=result.usage[0],
                         completion_tokens=result.usage[1],
                         cached_tokens=result.cached_tokens,
                         reasoning_content=result.reasoning_content,
-                        public_completion_tokens=result.public_completion_tokens,
                     ),
                 )
             return result_with_trace(
@@ -2381,7 +2340,7 @@ class Orchestrator:
                 decision.target == "tier1"
                 and "tier2" in self._engines
                 and (
-                    not call.has_images
+                    call.multimodal_prompt is None
                     or backend_supports_prompt_kind(
                         self._engines["tier2"],
                         "multimodal",
@@ -2670,7 +2629,7 @@ class Orchestrator:
                     and "tier2" in self._engines
                     and not "".join(text_parts)
                     and (
-                        not call.has_images
+                        call.multimodal_prompt is None
                         or backend_supports_prompt_kind(
                             self._engines["tier2"],
                             "multimodal",
@@ -2984,7 +2943,6 @@ class Orchestrator:
                                 index=0,
                                 text=moa_result.final_text,
                                 token_ids=(),
-                                token_ids_exact=False,
                             ),
                         ),
                         usage=GenerationUsage(
@@ -3154,7 +3112,6 @@ class Orchestrator:
                                 index=0,
                                 text=moa_result.final_text,
                                 token_ids=(),
-                                token_ids_exact=False,
                                 finish_reason="stop",
                             ),
                         )
@@ -3221,7 +3178,6 @@ class Orchestrator:
                     reasoning_content=conductor_result.reasoning_content,
                 ),
                 error_type=type(error.cause).__name__,
-                error=error.cause,
             )
             return
         if conductor_result is None:
@@ -3230,31 +3186,19 @@ class Orchestrator:
             f"{event.node}: {event.kind} {event.detail}" for event in conductor_result.trace
         )
         trace_events.extend(conductor_result.trace)
-        if conductor_result.final_error is not None or (
-            not conductor_result.final_unit_ok and not conductor_result.final_text
-        ):
+        if not conductor_result.final_unit_ok and not conductor_result.final_text:
             # Same contract as the unary route (issue #496): an empty final
             # unit becomes an explicit error event, never a silent empty stop.
             yield OrchestratorEvent(
                 kind="error",
                 result=result_with_trace(
-                    text=conductor_result.final_text,
-                    completions=_public_multistage_completions(
-                        conductor_result.completions,
-                        conductor_result.reasoning_content,
-                    ),
+                    text="",
                     prompt_tokens=conductor_result.usage[0],
                     completion_tokens=conductor_result.usage[1],
                     cached_tokens=conductor_result.cached_tokens,
                     reasoning_content=conductor_result.reasoning_content,
-                    public_completion_tokens=conductor_result.public_completion_tokens,
                 ),
-                error_type=(
-                    type(conductor_result.final_error).__name__
-                    if conductor_result.final_error is not None
-                    else "EmptyFinalOutput"
-                ),
-                error=conductor_result.final_error,
+                error_type="EmptyFinalOutput",
             )
             return
         yield OrchestratorEvent(

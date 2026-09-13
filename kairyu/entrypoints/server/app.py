@@ -1122,7 +1122,6 @@ async def _stream_orchestrator(
     completions: tuple[CompletionOutput, ...] = ()
     reported_usage: GenerationUsage | None = None
     terminal_error_type: str | None = None
-    terminal_error: BaseException | None = None
     prompt = call.prompt
     owner = _stream_usage_owner(
         http_request,
@@ -1217,7 +1216,6 @@ async def _stream_orchestrator(
                                 index=0,
                                 text=_lazy_text(completion_parts),
                                 token_ids=(),
-                                token_ids_exact=False,
                                 finish_reason=None,
                                 text_delta=event.text,
                                 text_offset=completion_length,
@@ -1251,7 +1249,6 @@ async def _stream_orchestrator(
                                 index=0,
                                 text=completion_text,
                                 token_ids=(),
-                                token_ids_exact=False,
                                 finish_reason="stop",
                             ),
                         )
@@ -1278,7 +1275,6 @@ async def _stream_orchestrator(
                         owner.observe(reported_usage, completions)
                     if event.kind == "error":
                         terminal_error_type = event.error_type or "RuntimeError"
-                        terminal_error = event.error
                         break
         except Exception as error:  # surface as an SSE error event, then close
             logger.exception("orchestrator stream error")
@@ -1318,16 +1314,11 @@ async def _stream_orchestrator(
                     "code": "backend_error",
                 }
             }
-            if isinstance(terminal_error, UpstreamClientError):
-                chat_error = chat_error_from_upstream_client_error(terminal_error)
-                payload["error"] = chat_error.payload()
             yield f"data: {json.dumps(payload)}\n\n"
             yield "data: [DONE]\n\n"
             return
         final_completions = completions or (
-            CompletionOutput(
-                index=0, text="", token_ids=(), token_ids_exact=False, finish_reason="stop",
-            ),
+            CompletionOutput(index=0, text="", token_ids=(), finish_reason="stop"),
         )
         for completion in sorted(final_completions, key=lambda item: item.index):
             yield _sse_chunk(
@@ -2267,9 +2258,7 @@ def create_app(
             validation_started_ns = time.perf_counter_ns()
             try:
                 prompt = (
-                    await validate_orchestration_chat_input_async(
-                        chat_request, native_chat=selected.uses_native_chat
-                    )
+                    await validate_orchestration_chat_input_async(chat_request)
                     if request.model in orchestration_chat_models
                     else await validate_chat_input_async(
                         chat_request,
@@ -2341,9 +2330,7 @@ def create_app(
             validation_started_ns = time.perf_counter_ns()
             try:
                 validated_input = (
-                    await validate_orchestration_chat_input_async(
-                        request, native_chat=auto_models[request.model].uses_native_chat
-                    )
+                    await validate_orchestration_chat_input_async(request)
                     if request.model in orchestration_chat_models
                     else await validate_chat_input_async(
                         request,
@@ -2384,13 +2371,9 @@ def create_app(
                     tool_call_protocol=validated_input.tool_call_protocol.value,
                     reasoning_effort=request.reasoning_effort,
                     multimodal_prompt=validated_input.orchestration_multimodal_prompt,
-                    conversation=validated_input.orchestration_conversation,
                     chat_template_kwargs=(
                         request.chat_template_kwargs
-                        if (
-                            validated_input.orchestration_multimodal_prompt is not None
-                            or validated_input.orchestration_conversation is not None
-                        )
+                        if validated_input.orchestration_multimodal_prompt is not None
                         else None
                     ),
                 )
@@ -2509,7 +2492,6 @@ def create_app(
                         index=0,
                         text=result.text,
                         token_ids=(),
-                        token_ids_exact=False,
                         finish_reason=None,
                     ),
                 )
@@ -2537,17 +2519,8 @@ def create_app(
                     completions=completions,
                     usage_exact=False,
                 )
-                chat_error = (
-                    chat_error_from_upstream_client_error(error.cause)
-                    if isinstance(error.cause, UpstreamClientError)
-                    else None
-                )
                 payload = {
-                    "error": (
-                        chat_error.payload()
-                        if chat_error is not None
-                        else sanitize_backend_error(error.cause)
-                    ),
+                    "error": sanitize_backend_error(error.cause),
                     "usage": usage.model_dump(
                         mode="json",
                         exclude=_unset_orchestration_usage_fields(usage),
@@ -2558,17 +2531,11 @@ def create_app(
                     if result.structured_trace is not None:
                         payload["kairyu_trace_v2"] = result.structured_trace.as_dict()
                     payload["kairyu_route"] = _route_payload(result.route).model_dump(mode="json")
-                return JSONResponse(
-                    status_code=chat_error.status_code if chat_error is not None else 502,
-                    content=payload,
-                )
+                return JSONResponse(status_code=502, content=payload)
             except Exception as error:
                 return upstream_error(error)
             completions = result.completions or (
-                CompletionOutput(
-                    index=0, text=result.text, token_ids=(),
-                    token_ids_exact=False, finish_reason="stop",
-                ),
+                CompletionOutput(index=0, text=result.text, token_ids=(), finish_reason="stop"),
             )
             # Standard usage keeps the OpenAI public meaning; cumulative AUTO
             # totals ride the orchestration_* extensions and metering below

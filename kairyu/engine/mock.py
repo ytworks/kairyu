@@ -65,8 +65,6 @@ class MockBackend:
     @staticmethod
     def _execution_text(request: GenerationRequest) -> str:
         prompt = prompt_with_tool_intent(request)
-        if prompt_kind(prompt) == "chat":
-            raise ValueError("MockBackend does not support native chat prompts")
         if prompt_kind(prompt) == "multimodal":
             raise ValueError(
                 "MockBackend does not support multimodal image prompts; "
@@ -109,7 +107,6 @@ class MockBackend:
                     index=i,
                     text=(text := self._text_for(execution_text, i)),
                     token_ids=_fake_token_ids(text),
-                    token_ids_exact=False,
                     cumulative_logprob=0.0,
                     finish_reason="stop",
                 )
@@ -193,7 +190,6 @@ class MockBackend:
                     index=completion.index,
                     text=completion.text[:end],
                     token_ids=_fake_token_ids(completion.text[:end]),
-                    token_ids_exact=False,
                     cumulative_logprob=0.0,
                 )
                 for completion in final.completions

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from kairyu.engine.prompt import ChatPrompt, MultimodalPrompt
+from kairyu.engine.prompt import MultimodalPrompt
 from kairyu.orchestration.trace import TraceEvent
 from kairyu.sampling_params import (
     PARALLEL_TOOL_CALLS_EXTRA_ARG,
@@ -54,13 +54,6 @@ class OrchestrationRequest:
     # None means the judge was deterministically skipped, not that a dispatched
     # call necessarily failed to return a verdict.
     role_profile_judge_event: TraceEvent | None = None
-    conversation: ChatPrompt | None = None
-
-    @property
-    def has_images(self) -> bool:
-        return self.multimodal_prompt is not None or bool(
-            self.conversation is not None and self.conversation.items
-        )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", tuple(self.tools))
@@ -94,16 +87,9 @@ class OrchestrationRequest:
             MultimodalPrompt,
         ):
             raise TypeError("multimodal_prompt must be a MultimodalPrompt or null")
-        if self.conversation is not None:
-            if not isinstance(self.conversation, ChatPrompt):
-                raise TypeError("conversation must be a ChatPrompt or null")
-            if self.multimodal_prompt is not None:
-                raise ValueError("conversation and multimodal_prompt cannot both own input")
         if self.chat_template_kwargs is not None:
-            if self.multimodal_prompt is None and self.conversation is None:
-                raise ValueError(
-                    "chat_template_kwargs require a multimodal or chat orchestration prompt"
-                )
+            if self.multimodal_prompt is None:
+                raise ValueError("chat_template_kwargs require a multimodal orchestration prompt")
             if not isinstance(self.chat_template_kwargs, Mapping) or any(
                 not isinstance(key, str) or not key for key in self.chat_template_kwargs
             ):
@@ -125,10 +111,8 @@ class OrchestrationRequest:
         generating ``n`` copies or retaining token logprobs only wastes work.
         A final-output grammar must likewise apply only at the answer boundary;
         constraining planner/verifier text can corrupt the orchestration DAG.
-        Their token ceiling is an orchestration policy, independent of the
-        final answer allowance: a small public MAX must not truncate a planner
-        or verifier, and a large one must not increase configured private work.
-        Without a configured ceiling, retain the caller-derived fallback.
+        Their token ceiling is an orchestration policy: a large public final
+        allowance must not let private control text run past backend timeouts.
         """
 
         extra_args = dict(self.sampling_params.extra_args)
@@ -136,7 +120,7 @@ class OrchestrationRequest:
         extra_args.pop(PARALLEL_TOOL_CALLS_EXTRA_ARG, None)
         max_tokens = self.sampling_params.max_tokens
         if max_tokens_cap is not None:
-            max_tokens = max_tokens_cap
+            max_tokens = max_tokens_cap if max_tokens is None else min(max_tokens, max_tokens_cap)
         return self.sampling_params.clone(
             n=1,
             best_of=None,

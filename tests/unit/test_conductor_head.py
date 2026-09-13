@@ -1130,9 +1130,7 @@ class ThinkExhaustedBackend:
                     reasoning_offset=0,
                 ),
             ),
-            usage=GenerationUsage(
-                prompt_tokens=3, completion_tokens=min(4, request.sampling_params.max_tokens),
-            ),
+            usage=GenerationUsage(prompt_tokens=3, completion_tokens=4),
             finished=True,
         )
 
@@ -1148,34 +1146,32 @@ class ThinkExhaustedBackend:
         return None
 
 class MultiChoiceThinkBackend:
-    """Native multi-choice batch followed by explicitly scripted single repairs."""
+    """Returns two independent reasoning branches, then two public answers."""
 
-    def __init__(self, batches, *, exact_ids=True) -> None:
-        self._batches = list(batches)
-        self._exact_ids = exact_ids
+    def __init__(self) -> None:
         self.requests_seen: list[GenerationRequest] = []
         self.generate_calls = 0
         self.stream_calls = 0
 
     def _result(self, request):
-        batch = self._batches.pop(0)
-        if isinstance(batch, Exception):
-            raise batch
+        if len(self.requests_seen) == 1:
+            choices = (("", "choice-0 thought"), ("", "choice-1 thought"))
+        else:
+            choices = (("answer-0", None), ("answer-1", None))
         return GenerationResult(
             request_id=request.request_id,
             prompt=request.prompt,
             completions=tuple(
                 CompletionOutput(
-                    index=index, text=text, token_ids=token_ids,
-                    token_ids_exact=self._exact_ids,
+                    index=index,
+                    text=text,
+                    token_ids=(),
                     finish_reason="length" if reasoning else "stop",
                     reasoning_content=reasoning,
                 )
-                for index, (text, reasoning, token_ids) in enumerate(batch)
+                for index, (text, reasoning) in enumerate(choices)
             ),
-            usage=GenerationUsage(
-                prompt_tokens=3, completion_tokens=sum(len(item[2]) for item in batch),
-            ),
+            usage=GenerationUsage(prompt_tokens=3, completion_tokens=4),
             finished=True,
         )
 
@@ -1210,7 +1206,7 @@ def _floor_roles() -> tuple[RoleSpec, ...]:
     ("caller_cap", "expected_attempt0_max", "expected_retry_max"),
     [
         (512, 448, 64),  # floor reserved out of the thinking budget
-        (32, 1, 31),  # small public MAX still reserves a bounded continuation
+        (32, 32, 32),  # at or below the floor: unclamped, retry gets it all
     ],
 )
 async def test_public_output_floor_reserves_answer_budget_and_closes_think(
@@ -1234,48 +1230,36 @@ async def test_public_output_floor_reserves_answer_budget_and_closes_think(
     assert first.sampling_params.max_tokens == expected_attempt0_max
     assert retry.prompt == "[cont] task<THINK>deliberating...</THINK>\n\n"
     assert retry.sampling_params.max_tokens == expected_retry_max
-    assert result.public_completion_tokens == min(4, expected_attempt0_max) + 4
-    assert result.public_completion_tokens <= caller_cap
     retry_events = [e for e in result.trace if e.kind == "retry:empty_output"]
     assert [e.metadata.get("continuation") for e in retry_events] == ["think_close"]
 
 @pytest.mark.parametrize("stream", [False, True])
-async def test_public_output_floor_continues_only_the_empty_choice(stream):
-    backend = MultiChoiceThinkBackend([
-        (("answer-0", None, (10, 11)), ("", "choice-1 thought", (20, 21, 22))),
-        (("answer-1", None, (30, 31)),),
-    ])
+async def test_public_output_floor_uses_legacy_retry_for_multiple_choices(stream):
+    backend = MultiChoiceThinkBackend()
     conductor = Conductor(
-        _floor_roles(), {"cw": backend},
-        final_sampling_params=SamplingParams(n=2, best_of=4, seed=37, max_tokens=64),
+        _floor_roles(),
+        {"cw": backend},
+        final_sampling_params=SamplingParams(n=2, max_tokens=64),
         public_output_floor=16,
     )
+
     if stream:
         events = await _collect(conductor.stream("task"))
         result = events[-1].result
         assert result is not None
-        deltas = [event for event in events if event.kind == "delta"]
-        assert len(deltas) == 1 and deltas[0].completions == result.completions
     else:
         result = await conductor.run("task")
+
     assert result.final_unit_ok
-    assert [(choice.index, choice.text, choice.token_ids) for choice in result.completions] == [
-        (0, "answer-0", (10, 11)), (1, "answer-1", (30, 31)),
+    assert [(choice.index, choice.text) for choice in result.completions] == [
+        (0, "answer-0"),
+        (1, "answer-1"),
     ]
     first, retry = backend.requests_seen
-    assert first.prompt == "[cont] task<THINK>"
-    assert retry.prompt == "[cont] task<THINK>choice-1 thought</THINK>\n\n"
-    assert [(r.sampling_params.n, r.sampling_params.best_of, r.sampling_params.seed,
-             r.sampling_params.max_tokens) for r in (first, retry)] == [
-        (2, 4, 37, 48), (1, 4, 37, 16),
-    ]
-    assert retry.request_id.endswith("-choice-1")
-    assert result.usage == (6, 7)
-    assert result.public_completion_tokens == 7
-    assert backend.generate_calls == 2 and backend.stream_calls == 0
+    assert first.prompt == retry.prompt == "[cont] task<THINK>"
+    assert [request.sampling_params.max_tokens for request in (first, retry)] == [64, 64]
     retry_event = next(event for event in result.trace if event.kind == "retry:empty_output")
-    assert retry_event.metadata["continuation"] == "think_close"
-    assert retry_event.metadata["choice_index"] == 1
+    assert retry_event.metadata.get("continuation") is None
 
 
 async def test_public_output_floor_streaming_retry_streams_reclaimed_answer():
@@ -1642,172 +1626,30 @@ async def test_verified_final_floor_retry_runs_with_committed_head():
 
 
 @pytest.mark.parametrize("stream", [False, True])
-async def test_verified_final_audits_each_choice_and_refines_only_the_failed_choice(stream):
-    final = MultiChoiceThinkBackend([
-        (("answer-0", None, (10, 11)), ("answer-1", None, (20, 21, 22))),
-        (("answer-1 revised", None, (30, 31, 32, 33)),),
-    ])
-    audit = ScriptedFinalBackend([("text", "PASS"), ("text", "FAIL: wrong"), ("text", "PASS")])
+async def test_verified_final_skips_verifier_for_multiple_choices(stream):
+    final = MultiChoiceThinkBackend()
+    audit = ScriptedFinalBackend([("text", "PASS")])
     conductor = Conductor(
-        _verified_floor_roles(), {"cw": final, "vw": audit},
-        final_sampling_params=SamplingParams(n=2, best_of=4, seed=17, max_tokens=64),
-        public_output_floor=16, expose_intermediate_outputs=True,
+        _verified_floor_roles(),
+        {"cw": final, "vw": audit},
+        final_sampling_params=SamplingParams(n=2, max_tokens=64),
+        public_output_floor=16,
     )
+
     if stream:
         events = await _collect(conductor.stream("task"))
         result = events[-1].result
         assert result is not None
-        deltas = [event for event in events if event.kind == "delta"]
-        assert len(deltas) == 1 and deltas[0].completions == result.completions
+        assert final.generate_calls == 0
+        assert final.stream_calls == 2
     else:
         result = await conductor.run("task")
+        assert final.generate_calls == 2
+        assert final.stream_calls == 0
+
     assert result.final_unit_ok
-    assert [choice.text for choice in result.completions] == ["answer-0", "answer-1 revised"]
-    assert [request.prompt for request in audit.requests_seen] == [
-        "[check] answer-0", "[check] answer-1", "[check] answer-1 revised",
-    ]
-    assert [request.request_id.rsplit("-choice-", 1)[-1] for request in audit.requests_seen] == [
-        "0", "1", "1",
-    ]
-    first, repair = final.requests_seen
-    assert [(r.sampling_params.n, r.sampling_params.best_of, r.sampling_params.seed,
-             r.sampling_params.max_tokens) for r in (first, repair)] == [
-        (2, 4, 17, 48), (1, 4, 17, 48),
-    ]
-    assert "answer-1" in repair.prompt and "answer-0" not in repair.prompt
-    assert result.public_completion_tokens == 6
-    assert result.usage == (15, 21)
-    assert sum(event.usage.completion_tokens for event in result.trace if event.usage) == 21
-    assert [
-        event.metadata["choice_index"] for event in result.trace if event.kind == "verified"
-    ] == [0, 1, 1]
-    assert "- Choice: `0`" in result.reasoning_content
-    assert "- Choice: `1`" in result.reasoning_content
-    assert final.generate_calls == 2 and final.stream_calls == 0
-
-
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("failure", ["budget", "repair", "unknown_usage"])
-async def test_verified_choices_fail_without_publishing_unfinished_or_unmetered_choice(
-    stream, failure,
-):
-    final = MultiChoiceThinkBackend([
-        (("answer-0", None, (10, 11)), ("answer-1", None, (20, 21, 22))),
-        RuntimeError("private backend failure") if failure == "repair"
-        else (("answer-1 revised", None, (30, 31, 32, 33)),),
-    ], exact_ids=failure != "unknown_usage")
-    audit = ScriptedFinalBackend([("text", "PASS"), ("text", "FAIL: wrong"), ("text", "PASS")])
-    conductor = Conductor(
-        _verified_floor_roles(), {"cw": final, "vw": audit},
-        final_sampling_params=SamplingParams(n=2, max_tokens=64),
-    )
-    budget = Budget(max_steps=2 if failure == "budget" else 10)
-    if stream:
-        events = await _collect(conductor.stream("task", budget=budget))
-        result = events[-1].result
-        assert not [event for event in events if event.kind == "delta"]
-    else:
-        result = await conductor.run("task", budget=budget)
-    assert result is not None and not result.final_unit_ok
-    assert result.final_error is not None
-    assert result.final_text == "" and result.completions == ()
-    assert "continuation" not in result.outputs
-    assert result.usage == {"budget": (6, 9), "repair": (9, 13), "unknown_usage": (15, 21)}[failure]
-    if failure == "budget":
-        assert "verification could not reserve budget" in str(result.final_error)
-        assert len(final.requests_seen) == len(audit.requests_seen) == 1
-    elif failure == "unknown_usage":
-        assert "exact per-choice completion usage" in str(result.final_error)
-
-
-async def test_verified_choices_cancel_the_active_audit_without_publishing_siblings():
-    started = asyncio.Event()
-    cancelled = asyncio.Event()
-
-    class BlockingAudit(ScriptedFinalBackend):
-        async def generate(self, request):
-            if not self.requests_seen:
-                return await super().generate(request)
-            self.requests_seen.append(request)
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.set()
-
-    final = MultiChoiceThinkBackend([
-        (("answer-0", None, (10, 11)), ("answer-1", None, (20, 21, 22))),
-    ])
-    audit = BlockingAudit([("text", "PASS")])
-    usage = []
-    conductor = Conductor(
-        _verified_floor_roles(), {"cw": final, "vw": audit},
-        final_sampling_params=SamplingParams(n=2, max_tokens=64),
-        usage_observer=usage.append,
-    )
-    events = []
-
-    async def consume():
-        async for event in conductor.stream("task"):
-            events.append(event)
-
-    task = asyncio.create_task(consume())
-    await asyncio.wait_for(started.wait(), timeout=2)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert cancelled.is_set()
-    assert not [event for event in events if event.kind == "delta"]
-    assert (usage[-1].prompt_tokens, usage[-1].completion_tokens) == (6, 9)
-    assert len(final.requests_seen) == 1
-    assert audit.requests_seen[-1].request_id.endswith("-choice-1")
-
-
-@pytest.mark.parametrize("stream", [False, True])
-async def test_required_final_keeps_small_public_limit_and_runs_its_verifier(stream):
-    from dataclasses import replace
-
-    head = StreamScriptedBackend(["opening"])
-    final = ScriptedFinalBackend([("text", "answer")])
-    audit = ScriptedFinalBackend([("text", "PASS")])
-    roles = (RoleSpec("head", "hw", "opening {query}", role_type="head",
-                      sampling=RoleSamplingOverrides(max_tokens=256)),) + tuple(
-        replace(role, required=True, depends_on=("head",) + role.depends_on)
-        for role in _verified_floor_roles()
-    )
-    conductor = Conductor(roles, {"hw": head, "cw": final, "vw": audit},
-                          final_sampling_params=SamplingParams(max_tokens=17),
-                          public_output_floor=256)
-    if stream:
-        result = (await _collect(conductor.stream("task")))[-1].result
-    else:
-        result = await conductor.run("task")
-    assert result.final_unit_ok and result.final_error is None
-    assert not head.requests_seen
-    assert len(final.requests_seen) == len(audit.requests_seen) == 1
-    assert final.requests_seen[0].sampling_params.max_tokens <= 17
-    assert result.final_text == "answer"
-
-
-@pytest.mark.parametrize("stream", [False, True])
-async def test_explicit_additional_choice_budget_preserves_all_native_verdicts(stream):
-    from dataclasses import replace
-
-    final = MultiChoiceThinkBackend([
-        (("answer-0", None, (10,)), ("answer-1", None, (20,))),
-    ])
-    audit = ScriptedFinalBackend([("text", "PASS"), ("text", "PASS")])
-    conductor = Conductor(
-        tuple(replace(role, required=True) for role in _verified_floor_roles()),
-        {"cw": final, "vw": audit}, final_sampling_params=SamplingParams(n=2, max_tokens=64),
-    )
-    budget = Budget(max_steps=2, max_steps_per_additional_choice=1)
-    if stream:
-        result = (await _collect(conductor.stream("task", budget=budget)))[-1].result
-    else:
-        result = await conductor.run("task", budget=budget)
-    assert result.final_unit_ok and result.final_error is None
-    assert final.requests_seen[0].sampling_params.n == 2
-    assert len(audit.requests_seen) == 2
-    assert result.budget_state.steps_used == result.budget_state.budget.max_steps == 3
-    assert budget.max_steps == 2
+    assert [choice.text for choice in result.completions] == ["answer-0", "answer-1"]
+    assert audit.requests_seen == []
+    skipped = next(e for e in result.trace if e.kind == "skipped:intent")
+    assert skipped.node == "check"
+    assert skipped.metadata == {"reason": "intent", "n": 2}

@@ -13,8 +13,6 @@ from kairyu.engine.backend import (
     backend_admission_upper_bound_async,
 )
 from kairyu.engine.prompt import (
-    ChatMessage,
-    ChatPrompt,
     MultimodalItem,
     MultimodalMessage,
     MultimodalMessagePart,
@@ -29,44 +27,6 @@ from kairyu.engine.prompt import (
     supplied_prompt_token_ids,
     token_prompt_fingerprint,
 )
-
-
-def test_chat_wire_preserves_transcript_and_detaches_mutable_metadata():
-    calls = [{"id": "call_1", "type": "function", "function": {
-        "name": "inspect", "arguments": '{ "line": "a\\nb", "id": 9007199254740993 }',
-    }}]
-    parts = [MultimodalMessagePart("text", text="before"),
-             MultimodalMessagePart("item", item_index=0, detail="high"),
-             MultimodalMessagePart("text", text="after")]
-    prompt = ChatPrompt([
-        ChatMessage("system", "Keep exact text."),
-        ChatMessage("assistant", None, reasoning_content="check", tool_calls=calls),
-        ChatMessage("tool", "a\nb", tool_call_id="call_1", name="inspect"),
-        ChatMessage("user", parts),
-    ], [MultimodalItem("image", "bytes", b"opaque image")])
-    wire = prompt_to_wire(prompt)
-    decoded = prompt_from_wire(wire)
-    calls[0]["function"]["arguments"] = "changed"
-    parts.clear()
-    wire["messages"][1]["tool_calls"][0]["id"] = "changed"
-
-    assert decoded == prompt
-    assert prompt_to_wire(decoded)["messages"][1] == {
-        "role": "assistant", "content": None, "reasoning_content": "check",
-        "tool_calls": [{"id": "call_1", "type": "function", "function": {
-            "name": "inspect", "arguments": '{ "line": "a\\nb", "id": 9007199254740993 }',
-        }}],
-    }
-    assert decoded.messages[0].content == "Keep exact text."
-    assert decoded.messages[2].content == "a\nb"
-    assert decoded.messages[2].tool_call_id == "call_1"
-    assert decoded.messages[3].content[1].item_index == 0
-    assert decoded.items == prompt.items
-    with pytest.raises(TypeError):
-        decoded.messages[1].tool_calls[0]["function"]["arguments"] = "changed"
-    assert prompt_kind(decoded) == "chat"
-    assert prompt_text(decoded) is None
-    assert supplied_prompt_token_ids(decoded) is None
 
 
 @pytest.mark.parametrize(
@@ -269,14 +229,6 @@ def test_multimodal_prompt_requires_a_nonempty_typed_item_sequence():
         {"kind": "unknown"},
         {"prompt": "missing kind"},
         {"kind": "text", "prompt": "x", "extra": True},
-        {
-            "kind": "chat", "items": [],
-            "messages": [{"role": "user", "content": "x", "extra": True}],
-        },
-        {
-            "kind": "chat", "items": [],
-            "messages": [{"role": "user", "content": [{"type": "item", "item_index": 0}]}],
-        },
         {"kind": "tokens", "prompt_token_ids": [1]},
         {"kind": "tokens", "prompt_token_ids": [1], "prompt": None, "extra": True},
         {"kind": "multimodal", "base": "x"},
@@ -305,14 +257,11 @@ def test_prompt_from_wire_rejects_untagged_non_strings(wire):
         prompt_from_wire(wire)
 
 
-@pytest.mark.parametrize(
-    "prompt", [TokensPrompt((1, 2, 3)), ChatPrompt([ChatMessage("user", "hi")])]
-)
-def test_text_prefix_fingerprint_cannot_be_attached_to_non_text_prompt(prompt):
+def test_text_prefix_fingerprint_cannot_be_attached_to_non_text_prompt():
     with pytest.raises(ValueError, match="text prefix"):
         GenerationRequest(
             request_id="invalid-cache-domain",
-            prompt=prompt,
+            prompt=TokensPrompt((1, 2, 3)),
             sampling_params=SamplingParams(max_tokens=1),
             cache_hint=CacheHint(
                 session_id="session",

@@ -29,7 +29,7 @@ SAMPLING_FIELD_NAMES = frozenset(
         "top_p",
     }
 )
-PROMPT_KINDS = frozenset({"text", "tokens", "multimodal", "chat"})
+PROMPT_KINDS = frozenset({"text", "tokens", "multimodal"})
 
 _OPENAI_CORE = frozenset(
     {
@@ -71,7 +71,6 @@ RESERVED_EXTRA_ARGS = frozenset(
         "prompt_logprobs",
         "forced_token_ids",
         "priority",
-        "return_token_ids",
         *SAMPLING_FIELD_NAMES,
         *PROMPT_OWNED_EXTRA_ARGS,
     }
@@ -97,14 +96,13 @@ class OpenAIRequestCapabilities:
     forward_neutral_fields: frozenset[str] = frozenset()
     strict_tools: bool = False
     priority: bool = False
-    # Text may arrive as a single prompt or a native role-preserving chat.
-    # Media remains a separate, explicitly configured processor capability.
-    prompt_kinds: frozenset[str] = frozenset({"text", "chat"})
+    # The current adapter targets Chat Completions, whose portable request
+    # contract is text-only. Keeping prompt kinds in the immutable validation
+    # key makes future modality/token support an explicit capability change.
+    prompt_kinds: frozenset[str] = frozenset({"text"})
     # Appended to preserve the positional ABI of the existing capability key.
     parallel_tool_calls: bool = False
     chat_template_kwargs: frozenset[str] = frozenset()
-    # An explicitly attested response extension, never inferred from usage.
-    return_token_ids: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sampling_fields", frozenset(self.sampling_fields))
@@ -124,8 +122,6 @@ class OpenAIRequestCapabilities:
             raise ValueError("upstream must be a non-empty string")
         if type(self.parallel_tool_calls) is not bool:
             raise ValueError("parallel_tool_calls capability must be a boolean")
-        if type(self.return_token_ids) is not bool:
-            raise ValueError("return_token_ids capability must be a boolean")
         if any(
             not isinstance(key, str) or not key
             for key in self.chat_template_kwargs
@@ -241,7 +237,6 @@ _OVERRIDE_KEYS = frozenset(
         "parallel_tool_calls",
         "allow_chat_template_kwargs",
         "strict_tools",
-        "return_token_ids",
     }
 )
 
@@ -357,7 +352,6 @@ def resolve_openai_capabilities(
             base.chat_template_kwargs | allow_chat_template_kwargs
         ),
         prompt_kinds=base.prompt_kinds | allow_prompt_kinds,
-        return_token_ids=overrides.get("return_token_ids", base.return_token_ids),
     )
 
 

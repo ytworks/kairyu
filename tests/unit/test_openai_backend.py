@@ -2,7 +2,6 @@ import asyncio
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 
 import httpx
 import pytest
@@ -22,8 +21,6 @@ from kairyu.engine.openai_capabilities import (
     known_openai_upstreams,
 )
 from kairyu.engine.prompt import (
-    ChatMessage,
-    ChatPrompt,
     MultimodalItem,
     MultimodalMessage,
     MultimodalMessagePart,
@@ -31,8 +28,6 @@ from kairyu.engine.prompt import (
     PromptInput,
     TemplatedPrompt,
     TokensPrompt,
-    prompt_from_wire,
-    prompt_to_wire,
 )
 from kairyu.engine.vision import ImageInputPolicy
 from kairyu.orchestration.replica import ReplicaPool
@@ -153,14 +148,6 @@ def _multimodal_prompt(image_url: str = _RED_PNG_DATA_URL) -> MultimodalPrompt:
                 ),
             ),
         ),
-    )
-
-
-def _chat_image_prompt(image_url: str = _RED_PNG_DATA_URL) -> ChatPrompt:
-    source = _multimodal_prompt(image_url)
-    return ChatPrompt(
-        [ChatMessage(message.role, message.content) for message in source.messages],
-        source.items,
     )
 
 
@@ -339,7 +326,6 @@ async def test_generate_maps_openai_response(monkeypatch):
     result = await backend.generate(_request("say hello"))
     assert result.completions[0].text == "hello from api"
     assert result.completions[0].finish_reason == "stop"
-    assert result.completions[0].token_ids_exact is False
     assert captured["url"].endswith("/v1/chat/completions")
     assert captured["auth"] == "Bearer sk-test"
     assert captured["body"]["model"] == "gpt-x"
@@ -1683,7 +1669,7 @@ def test_resolved_capability_policy_is_deeply_immutable():
     )
     assert isinstance(backend.capabilities.sampling_fields, frozenset)
     assert isinstance(backend.capabilities.extra_args, frozenset)
-    assert isinstance(backend.capabilities.prompt_kinds, frozenset)
+    assert backend.capabilities.prompt_kinds == frozenset({"text"})
 
 
 def test_adapter_rejects_a_capability_contract_it_cannot_execute():
@@ -1693,7 +1679,7 @@ def test_adapter_rejects_a_capability_contract_it_cannot_execute():
         prompt_kinds={"text", "tokens"},
     )
 
-    with pytest.raises(ValueError, match="text.*multimodal"):
+    with pytest.raises(ValueError, match="text and multimodal"):
         OpenAICompatBackend(
             base_url="https://api.example.com/v1",
             model="m",
@@ -1701,8 +1687,7 @@ def test_adapter_rejects_a_capability_contract_it_cannot_execute():
         )
 
 
-@pytest.mark.parametrize("native_chat", [False, True])
-async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage(native_chat):
+async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage():
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1741,7 +1726,7 @@ async def test_multimodal_chat_forwards_roles_part_order_and_exact_usage(native_
         },
     )
     request = _request(
-        _chat_image_prompt() if native_chat else _multimodal_prompt(),
+        _multimodal_prompt(),
         chat_template_kwargs={"enable_thinking": False},
     )
 
@@ -2049,8 +2034,7 @@ async def test_replica_prepares_each_instance_but_validates_shared_image_once(
         await pool.shutdown()
 
 
-@pytest.mark.parametrize("native_chat", [False, True])
-async def test_multimodal_remote_url_is_400_before_http_client_or_transport(native_chat):
+async def test_multimodal_remote_url_is_400_before_http_client_or_transport():
     transport_calls: list[httpx.Request] = []
     backend = OpenAICompatBackend(
         base_url="http://vlm:8000/v1",
@@ -2069,11 +2053,7 @@ async def test_multimodal_remote_url_is_400_before_http_client_or_transport(nati
 
     with pytest.raises(UpstreamClientError, match="remote and local") as exc_info:
         await backend.generate(
-            _request(
-                (_chat_image_prompt if native_chat else _multimodal_prompt)(
-                    "https://example.test/image.png"
-                )
-            )
+            _request(_multimodal_prompt("https://example.test/image.png"))
         )
 
     assert exc_info.value.status_code == 400
@@ -2082,31 +2062,19 @@ async def test_multimodal_remote_url_is_400_before_http_client_or_transport(nati
     assert backend._client is None
 
 
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("native_chat", [False, True])
-async def test_upstream_rendered_prompt_requires_reported_usage(stream, native_chat):
+async def test_multimodal_unary_response_must_report_processed_prompt_usage():
     backend = OpenAICompatBackend(
         base_url="http://vlm:8000/v1",
         model="vlm",
         api_key_env=None,
-        transport=_sse_chunks_transport({"choices": [{
-            "index": 0, "delta": {"content": "ok"}, "finish_reason": "stop",
-        }]}) if stream else _ok_transport({}),
+        transport=_ok_transport({}),
         upstream="vllm",
         capabilities={"allow_prompt_kinds": ["multimodal"]},
         image_input_policy={"max_images": 1},
     )
 
-    prompt = (
-        ChatPrompt([ChatMessage("user", "original turn")]) if native_chat else _multimodal_prompt()
-    )
-    with pytest.raises(RuntimeError, match="omitted .*prompt usage"):
-        if stream:
-            async for result in backend.stream(_request(prompt)):
-                assert not result.finished
-        else:
-            await backend.generate(_request(prompt))
-    await backend.shutdown()
+    with pytest.raises(RuntimeError, match="omitted exact processed prompt usage"):
+        await backend.generate(_request(_multimodal_prompt()))
 
 
 async def test_stream_rejects_unsupported_intent_before_client_or_transport():
@@ -2201,8 +2169,7 @@ def _chunked_sse_transport(*chunks: bytes) -> httpx.MockTransport:
     )
 
 
-@pytest.mark.parametrize("native_chat", [False, True])
-async def test_multimodal_stream_requires_and_returns_exact_final_usage(monkeypatch, native_chat):
+async def test_multimodal_stream_requires_and_returns_exact_final_usage(monkeypatch):
     captured: dict = {}
     validation_calls = 0
     original_validate = ImageInputPolicy.validate_prompt
@@ -2239,7 +2206,7 @@ async def test_multimodal_stream_requires_and_returns_exact_final_usage(monkeypa
         image_input_policy={"max_images": 1},
     )
 
-    request = _request(_chat_image_prompt() if native_chat else _multimodal_prompt())
+    request = _request(_multimodal_prompt())
     await backend.prepare_request(request)
     results = [result async for result in backend.stream(request)]
 
@@ -3209,233 +3176,6 @@ async def test_text_chat_forwards_allowlisted_template_kwargs():
     assert captured["body"]["messages"] == [{"role": "user", "content": "route me"}]
     assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": False}
     assert result.text == "QWEN"
-
-
-@pytest.mark.parametrize("stream", [False, True])
-async def test_native_chat_transcript_and_continuation_reach_upstream_once(stream):
-    calls = [{"id": "call_7", "type": "function", "function": {
-        "name": "lookup", "arguments": '{ "key": "a\\nb" }',
-    }}]
-    source = ChatPrompt([
-        ChatMessage("system", "Retain constraints."),
-        ChatMessage("developer", "Keep IDs exact."),
-        ChatMessage("user", (MultimodalMessagePart("text", text="lookup a\nb"),)),
-        ChatMessage("assistant", None, reasoning_content="need evidence", tool_calls=calls),
-        ChatMessage("tool", "found", tool_call_id="call_7", name="lookup"),
-        ChatMessage("user", "Use that result."),
-    ])
-    prompt = prompt_from_wire(prompt_to_wire(source))
-    expected_messages = [
-        {"role": "system", "content": "Retain constraints."},
-        {"role": "developer", "content": "Keep IDs exact."},
-        {"role": "user", "content": [{"type": "text", "text": "lookup a\nb"}]},
-        {
-            "role": "assistant",
-            "content": None,
-            "reasoning_content": "need evidence",
-            "tool_calls": [{
-                "id": "call_7", "type": "function",
-                "function": {"name": "lookup", "arguments": '{ "key": "a\\nb" }'},
-            }],
-        },
-        {"role": "tool", "content": "found", "tool_call_id": "call_7", "name": "lookup"},
-        {"role": "user", "content": "Use that result."},
-    ]
-    captured = {}
-
-    def upstream(request):
-        captured["body"] = json.loads(request.content)
-        message = {"role": "assistant", "content": "hello from api"}
-        usage = {"prompt_tokens": 25, "completion_tokens": 3}
-        response = {"choices": [{
-            "index": 0, "delta" if stream else "message": message, "finish_reason": "stop",
-        }], "usage": usage}
-        if stream:
-            return httpx.Response(200, text=f"data: {json.dumps(response)}\n\ndata: [DONE]\n\n")
-        return httpx.Response(200, json=response)
-
-    backend = OpenAICompatBackend(
-        base_url="http://vllm:8000/v1", model="m", api_key_env=None, upstream="vllm",
-        transport=httpx.MockTransport(upstream),
-        capabilities={"allow_chat_template_kwargs": ["enable_thinking"]},
-    )
-    tool = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}
-    request = replace(
-        _request(prompt), tools=(tool,), tool_choice="auto", reasoning_effort="high",
-        chat_template_kwargs={"enable_thinking": True}, assistant_prefill="answer starts",
-    )
-    bound = backend.admission_upper_bound(request)
-    assert bound.tokens > len("found") + 64
-    assert bound.refundable_on_exact_usage
-    await backend.prepare_request(request)
-    calls[0]["function"]["arguments"] = "mutated after preparation"
-    if stream:
-        results = [result async for result in backend.stream(request)]
-        assert results[-1].finished
-    else:
-        assert (await backend.generate(request)).text == "hello from api"
-    assert captured["body"]["messages"] == expected_messages + [
-        {"role": "assistant", "content": "answer starts"},
-    ]
-    assert captured["body"]["tools"] == [tool]
-    assert captured["body"]["tool_choice"] == "auto"
-    assert captured["body"]["reasoning_effort"] == "high"
-    assert captured["body"]["chat_template_kwargs"] == {"enable_thinking": True}
-    assert captured["body"]["continue_final_message"] is True
-    assert captured["body"]["add_generation_prompt"] is False
-    await backend.shutdown()
-
-
-async def test_native_chat_cannot_bypass_backend_image_capability():
-    backend = OpenAICompatBackend(
-        base_url="http://text-only:8000/v1", model="m", api_key_env=None,
-        upstream="vllm", transport=_ok_transport({}),
-    )
-    with pytest.raises(UpstreamClientError, match="does not support media"):
-        await backend.generate(_request(_chat_image_prompt()))
-    assert backend._client is None
-
-
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("best_of", [None, 4])
-async def test_exact_choice_token_ids_preserve_native_candidates_and_hidden_tokens(stream, best_of):
-    captured = {}
-    tool_call = {"index": 0, "function": {"name": "lookup", "arguments": '{"x":1}'}}
-    usage = {"prompt_tokens": 5, "completion_tokens": 6 if best_of is None else 9}
-    choices = [
-        {"index": 0, "message": {"content": "left"}, "token_ids": [21, 22],
-         "finish_reason": "stop"},
-        {"index": 1, "message": {"content": None, "reasoning": "inspect",
-         "tool_calls": [tool_call]}, "token_ids": [31, 32, 33, 34],
-         "finish_reason": "tool_calls"},
-    ]
-    chunks = [
-        {"choices": [{"index": index, "delta": {"role": "assistant", "content": ""}}]}
-        for index in range(2)
-    ] + [
-        {"choices": [{"index": 1, "delta": {"reasoning": "inspect"}, "token_ids": [31]}]},
-        {"choices": [{"index": 1, "delta": {}, "token_ids": [32]}]},
-        {"choices": [{"index": 0, "delta": {"content": "left"},
-                      "token_ids": [21, 22], "finish_reason": "stop"}]},
-        {"choices": [{"index": 1, "delta": {"tool_calls": [tool_call]},
-                      "token_ids": [33, 34], "finish_reason": "tool_calls"}]},
-        {"choices": [], "usage": usage},
-    ]
-
-    def handler(request):
-        captured["body"] = json.loads(request.content)
-        if stream:
-            return httpx.Response(200, content="".join(
-                f"data: {json.dumps(chunk)}\n\n" for chunk in chunks
-            ) + "data: [DONE]\n\n", headers={"content-type": "text/event-stream"})
-        return httpx.Response(200, json={"choices": choices, "usage": usage})
-
-    backend = OpenAICompatBackend(
-        base_url="http://replica:8000/v1", model="m", api_key_env=None,
-        transport=httpx.MockTransport(handler),
-        upstream="vllm" if best_of is None else "generic",
-        capabilities={"return_token_ids": True, **(
-            {"allow_sampling_fields": ["best_of"]} if best_of else {}
-        )},
-    )
-    request = _request(sampling_params=SamplingParams(n=2, best_of=best_of, seed=17, max_tokens=16))
-    if stream:
-        results = [result async for result in backend.stream(request)]
-        # ID-only parser chunks remain observable, with immutable snapshots.
-        assert results[0].completions[1].token_ids == (31,)
-        assert results[1].completions[1].token_ids == (31, 32)
-        result = results[-1]
-    else:
-        result = await backend.generate(request)
-    assert [(choice.index, choice.token_ids) for choice in result.completions] == [
-        (0, (21, 22)), (1, (31, 32, 33, 34)),
-    ]
-    assert all(choice.token_ids_exact for choice in result.completions)
-    assert result.completions[0].text == "left"
-    assert result.completions[1].reasoning_content == "inspect"
-    assert '"name":"lookup"' in result.completions[1].text
-    assert result.usage.completion_tokens == usage["completion_tokens"]
-    body = captured["body"]
-    assert (body["return_token_ids"], body["n"], body["seed"], body["max_tokens"]) == (
-        True, 2, 17, 16,
-    )
-    assert body.get("best_of") == best_of
-    assert backend.admission_upper_bound(request).refundable_on_exact_usage is False
-    await backend.shutdown()
-
-
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("failure", ["missing", "malformed", "missing_choice", "usage"])
-async def test_exact_choice_token_ids_fail_closed_on_invalid_upstream_contract(stream, failure):
-    choice = {"index": 0, "token_ids": [91], "finish_reason": "stop"}
-    if failure == "missing":
-        choice.pop("token_ids")
-    elif failure == "malformed":
-        choice["token_ids"] = [True]
-    usage = {"prompt_tokens": 5, "completion_tokens": 2 if failure == "usage" else 1}
-    if stream:
-        choice["delta"] = {}  # Even invisible parser/control chunks require IDs.
-        transport = _sse_chunks_transport({"choices": [choice]}, {"choices": [], "usage": usage})
-    else:
-        choice["message"] = {"content": "answer"}
-        transport = httpx.MockTransport(lambda request: httpx.Response(
-            200, json={"choices": [choice], "usage": usage},
-        ))
-    backend = OpenAICompatBackend(
-        base_url="http://replica:8000/v1", model="m", api_key_env=None,
-        transport=transport, upstream="vllm", capabilities={"return_token_ids": True},
-    )
-    request = _request(sampling_params=SamplingParams(n=2 if failure == "missing_choice" else 1))
-    results = []
-    with pytest.raises(RuntimeError, match="token-ID upstream"):
-        if stream:
-            async for result in backend.stream(request):
-                results.append(result)
-        else:
-            await backend.generate(request)
-    assert not any(result.finished for result in results)
-    await backend.shutdown()
-
-
-@pytest.mark.parametrize("cancel", [False, True])
-async def test_exact_choice_token_ids_preserve_partial_work_and_close_incomplete_stream(cancel):
-    closed = asyncio.Event()
-    blocked = asyncio.Event()
-
-    class PartialStream(httpx.AsyncByteStream):
-        async def __aiter__(self):
-            yield b'data: {"choices":[{"index":0,"delta":{},"token_ids":[71,72]}]}\n\n'
-            if cancel:
-                blocked.set()
-                await asyncio.Event().wait()
-
-        async def aclose(self):
-            closed.set()
-
-    backend = OpenAICompatBackend(
-        base_url="http://replica:8000/v1", model="m", api_key_env=None, upstream="vllm",
-        capabilities={"return_token_ids": True},
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=PartialStream())),
-    )
-    stream = backend.stream(_request())
-    partial = await anext(stream)
-    assert partial.completions[0].text == ""
-    assert partial.completions[0].token_ids == (71, 72)
-    assert partial.completions[0].token_ids_exact
-    assert partial.usage is None and not partial.finished
-    if cancel:
-        task = asyncio.create_task(anext(stream))
-        await blocked.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    else:
-        with pytest.raises(RuntimeError, match="before all choices finished"):
-            await anext(stream)
-    assert closed.is_set()
-    assert partial.completions[0].token_ids == (71, 72)
-    await stream.aclose()
-    await backend.shutdown()
 
 
 def test_template_kwargs_rejected_on_pre_rendered_prompt():

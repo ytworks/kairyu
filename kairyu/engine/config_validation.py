@@ -215,11 +215,10 @@ def _validate_openai(options: Mapping[str, object]) -> None:
     unsupported_prompt_kinds = capabilities.prompt_kinds - {
         "text",
         "multimodal",
-        "chat",
     }
     if unsupported_prompt_kinds:
         raise ValueError(
-            "openai backend currently supports only text, chat and multimodal "
+            "openai backend currently supports only text and multimodal "
             "prompt kinds"
         )
     image_input_policy = options.get("image_input_policy")

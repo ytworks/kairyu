@@ -77,7 +77,7 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 - Orchestration (Conductor/MoA) with streaming, usage accounting, trace v2; assistant history round-trips typed `reasoning_content` while assistant-only LiteLLM provider objects and nullable legacy function calls are ignored before rendering and other extras remain fail-closed; MoA keeps the original response contract distinct from untrusted candidate drafts, with configured completion delimiters and the multi-stage boundary withholding private synthesis reasoning; prefix-aware replica placement obeys the configured queue-depth overload valve; Codex CLI and IDE tool-calling work end-to-end, including AUTO models over /v1/responses (#530)
 - Fleet: 3-gateway HA with PostgreSQL BatchStore, KV-aware prefix routing, DRAM KV tiering, Helm chart + kind CI drill
 - Checkout-only eval tooling retains explicit Core, Quantization, Structured Output, and Long Context suites with hash-chained quality history, config A/B comparisons, and quantization sweeps; Kairyu correctness and performance gates are owned by `verification/`, not evals
-- V41C is a new `examples/qwen3.8-deepseek-v4.1-8gpu/` implementation candidate. The existing V4 ensemble, V4.1 standalone example and legacy operational tests are restored exactly to main (9417a6ea). Native conversation, independent budgets, exact choice provenance, required dependencies and all-choice audits are implemented; exact rendered capacity fitting and scoped shell operations are being integrated. GPU numerical evidence is retained under the new example; full-model deployment/live gates await concrete downtime approval. No existing-example performance evidence validates this candidate.
+- The tiered RTX PRO example (DTO-D13, 2026-08-22) puts a bounded Qwen non-thinking route judge in front of five profiles — four single-call direct routes (Qwen non-thinking, Qwen thinking-medium, DeepSeek non-thinking on the re-added `tier2-direct` pool, DeepSeek thinking at the L3 effort; official per-mode sampling fixed on the final unit, vendor-official caps 131072/393216) and the ensemble — selecting per request with fallback to the ensemble; the L2 DSL now has N named `profiles` + a judge with spec-defined `choices`, final-unit sampling overrides (caps min()'d with the caller), and route-aware serving gates. The ensemble (`primary`) profile is the dual-track policy-ensemble L2 DAG (DTO-D1..D12, amended by DTO-D14) over four Qwen3.8 TP1 vLLM workers (no MTP pending c16/c32 evidence) + the measured DeepSeek TP4/EP4 DSpark worker: a Qwen head streams the public opening from t=0 (semantic-TTFT gate ≤2× DeepSeek-direct, inherited); one thinking DeepSeek call writes 4 maximally different policies fanned out to 4 policy-bound Qwen answers in parallel while thinking DeepSeek critically refines a quick Qwen draft; thinking DeepSeek `synthesis` weighs the 5 candidates as peers and writes one better answer, and an inline Qwen thinking-medium (DTO-D14) `audit` (PASS/FAIL, ≤2 refinements, last attempt published on exhaustion) gates the streamed remainder (DTO-D10); a Qwen `image_description` stage runs on image requests only and feeds the text-only DeepSeek roles (DTO-D11); DeepSeek budgets halved to 8192/32768/65536 with a 65536 ceiling and Chat UI default for the Terminal-Bench 900 s turn envelope (DTO-D12). The sandbox executor stays deployed but unreferenced. Last green verify.sh runs 20260825T161729Z (coding) and 20260825T173343Z (generic) on the DTO-D8..D14 served config: coding TTFT rows all not_applicable (the judge routes every coding request to the ungated qwen_think_medium route), generic route-aware stage validation green. Composed L1 workers remain vLLM-backed until the native full-checkpoint gate closes
 - Replica-pool scale-out examples (FN-D9, 2026-09-01): Qwen3.8 TP1 x 8 and DeepSeek TP4+EP4 x 2 behind one public model each; `verify.sh serving` proves the even per-replica split from the pool placement log and `verify.sh tool-calling` proves OpenAI tool calls on every replica (see their MEASUREMENTS.md); two vision replica examples (FN-D9 amendment 2026-09-04: DeepSeek-V4-Flash-Vision-Exp TP4+EP4 x 2, Qwen3.8-Flash-Next-FP8 TP4 x 2 on a shared upstream-main SM120 overlay image, Chat UI reasoning-effort dropdown, `verify.sh vision`) are GPU-verified (2026-09-04: pins locked, serving/tool-calling/vision gates PASS, MEASUREMENTS.md written); the Qwen example serves without the recipe's MTP k=3 because prefix caching + MTP corrupts batched output on this vLLM revision (vllm#53912)
 - DeepSeek V4.1 Flash single-replica example (FN-D9 amendment, 2026-09-11) is GPU-verified on TP8/EP8 SM120 with the V4 ReplicaPool/API/UI structure and official thinking-high default; bounded L1 comparisons select DSpark 5, 16K batching and NCCL. The 320-request matrix, reasoning/tool/vision/cancellation, normal restart and retrieval through 1,039,909 prompt tokens pass; exact evidence and limitations are in its `MEASUREMENTS.md`.
 - Process-split backend (`kairyu-proc`) with delta wire, TP group attestation, graceful lifecycle
@@ -85,7 +85,6 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 
 ### Open items / blockers
 
-- V41C six-plus-two critical ensemble: the native example DAG, independent private budgets, terminal errors, native AUTO and per-choice verification/token provenance are implemented. Required-stage completion and explicit choice step budgets are implemented; exact capacity and real GPU gates remain in progress; the original floating-reference FAIL is retained while quantized arithmetic explains the discrepancy (`docs/design/v41-critical-ensemble.md`).
 - G2 A6 performance gap vs vLLM is the open hard gate; full TP4/8 HTTP matrix deferred until closed
 - Issue #333 verdict: process-split is not the A6 cause (`no_material_reduction`, ratio 0.92 vs ≤0.90 line)
 - Issue #318 verdict: depth beyond the two-step admission horizon is not an A6 fix (`no_measured_benefit_depth_gt_2`)
@@ -103,42 +102,84 @@ NVLink-HBM (H100-class) formal gates still need hardware. Evidence lives in
 Newest first; only the most recent entries are kept here (see the size budget
 in `.claude/rules/progress-log.md`).
 
-### 2026-09-14 — [amendment] V41C: restore existing examples and use a new example
-- What: restore both existing V4/V4.1 examples and the legacy operational tests exactly to main, pushed as 9417a6ea. Separate configuration/evidence into new `qwen3.8-deepseek-v4.1-8gpu`; runtime corrections use its own source-bound patch and Dockerfile. No new example Python files.
-- Why: the owner explicitly excluded changes to existing examples; selecting the legacy example as the implementation target was incorrect. Earlier deletion-count and modified-example statements are superseded; original feature tests remain necessary and restored.
-- Refs: PR #601; scope correction in `docs/design/v41-critical-ensemble.md`; updated implementation plan.
+### 2026-09-11 — [progress] V4.1 L1 selection and final GPU gates complete
+- What: select TP8/EP8, DSpark 5, 16K batching and NCCL; the 320-request matrix, default/explicit reasoning, tools, images, cancellation, normal restart and four long-context retrieval smokes pass. Best measured aggregate throughput is 326.82 tok/s at c32; near-1M retrieval completes in 203.02 s.
+- Why: DSpark improves c1 throughput 1.91×; EP-off exhausts KV memory at the same limits, PCIe IPC stalls during autotuning, and 8K batching shows no throughput gain. Keep unmeasured alternatives and broad quality claims outside this evidence.
+- Refs: PR #597; FN-D9 V4.1 amendment; example `MEASUREMENTS.md` records exact configuration, run IDs, hashes and limitations.
 
-### 2026-09-13 — [progress] V41C: implement the actual example and required-stage execution
-- What: configure the native six-plus-two topology and complete DeepSeek Requirement/review/audit DAG. Add opt-in required dependencies, explicit per-choice step allowance, and reasoning-plus-continuation public accounting. Harness requires real-judge primary execution and completed paired baselines; old template/topology tests decrease 39→23.
-- Why: missing private work must not become a successful incomplete answer, and public MAX must include continued reasoning. Preserve optional best-so-far and all four Qwen candidates. Runtime startup remains pending concrete downtime approval after automatic review rejected the prepared replacement.
-- Refs: PR #601; V41C-D9; existing example README/MEASUREMENTS; original floating FAIL and new arithmetic 16/16 PASS evidence.
+### 2026-09-11 — [progress] V4.1 full-model API gates pass on TP8
+- What: the SM120 overlay starts all eight GPUs, captures graphs and serves default/low/high/max reasoning, tools, images and cancellation; all initial API gates pass. UI effort selection uses the existing top-level L3 field. Performance selection and final context/restart gates remain pending.
+- Why: the experimental off toggle used template kwargs rejected by the unchanged legacy L3; retaining V4's effort vocabulary keeps the requested L2/L3 structure.
+- Refs: PR #597; example `MEASUREMENTS.md` initial runs `20260911T032048Z` through `20260911T032052Z`.
 
-### 2026-09-13 — [progress] V41C: native AUTO, exact choice provenance and all-choice audit
-- What: preserve validated native conversation through ordinary AUTO role derivation; expose private response-contract inheritance and an effort floor. Ingest actual upstream per-choice IDs and apply bounded verification/continuation to every native choice. Combined contract validation passes 465 tests.
-- Why: flattening changes system/tool semantics; aggregate usage cannot measure a selectively repaired choice; n>1 must not bypass its configured verifier. All example prompts and workflow policy remain in YAML.
-- Refs: PR #601; V41C-D6, D7, D8 in `docs/design/v41-critical-ensemble.md`.
+### 2026-09-11 — [amendment] V4.1 indexer requires 64-token blocks and MXFP4 on SM120
+- What: correct the preceding 128-token manager-block candidate to 64/BLHNC, with SWA=64, C1=64, C2=32. Enable the existing MXFP4 indexer only for V4.1 on SM120. All 16 sparse-attention and four real indexer writer/prefill/decode numerical cases pass; full-model serving remains pending.
+- Why: DeepGEMM rejects C1 pages of 128 and SM120 FP8 C2 pages of 32; its MXFP4 path supports both required sizes. The indexer oracle independently unpacks actual Q/K bytes (max error 2.4e-7), and CPU guards retain rejection for unverified model/device combinations.
+- Refs: PR #597; FN-D9 V4.1 amendment; example `MEASUREMENTS.md`, `check_sm120_pages.py`, `check_sm120_indexer.py`. Supersedes the block-size choice in the preceding SM120 cache-compatibility entry.
 
-### 2026-09-13 — [progress] V41C: retain failed six-GPU numerical preflight
-- What: main-pinned TP2/DP3/EP6 preparation stopped on one numerical-reference outlier. A same-fixture eight-head slice is bit-exact to the 32-head slice; both retain FAIL. Original services are healthy. Native non-thinking and explicit 50/75/100 budgets pass CPU rendering checks using existing settings.
-- Why: source feasibility and successful service restoration cannot substitute for candidate startup or GPU correctness; preserve exact failed evidence and distinguish a reference discrepancy from a head-shape defect.
-- Refs: PR #601; V41C-D5; existing ensemble `MEASUREMENTS.md` and `measurements/20260913T134938Z-v41-preflight/`.
+### 2026-09-11 — [progress] V4.1 SM120 cache compatibility
+- What: pin an example-local L1 overlay with 64-token SWA pages and C1 128-token dual-cache prefill instantiations; use manager blocks 128/BLHNC and disable unsupported adaptive verification. All 16 packed-cache GPU numerical cases pass at upstream DSV4 tolerances; full-model serving and tuning remain pending.
+- Why: the official V4.1 image's SWA pages and indexer layout assumptions fail startup on SM120 before serving. Source-anchored adaptations retain the existing kernel arithmetic and keep L2/L3 unchanged.
+- Refs: PR #597; `examples/deepseek-v4.1-flash-8gpu/{patch_runtime.py,check_sm120_pages.py,MEASUREMENTS.md}`; FN-D9 V4.1 amendment.
 
-### 2026-09-13 — [progress] V41C: preserve native chat at the backend boundary
-- What: add immutable ChatPrompt/ChatMessage and native OpenAI wire support for conversation, reasoning, tool history and ordered media. Reuse existing media lifecycle; unsupported engines reject explicitly. Missing-usage failures retain reserved charges and the original error. Related validation passes 545 tests.
-- Why: text flattening and the existing media-only carrier cannot preserve an ordinary assistant/tool conversation; AUTO derivation and exact capacity accounting remain separate work.
-- Refs: PR #601; V41C-D4 and validation record in `docs/design/v41-critical-ensemble.md`.
+### 2026-09-11 — [amendment] FN-D9: V4.1 Flash on one eight-GPU replica
+- What: add a separate V4.1 example with the existing V4 vision ReplicaPool/API/UI path; default thinking is the official high (75). Pin the checkpoint manifest and isolate runtime encoder alignment. Fixed-token measurements distinguish model output from visible content; completed-answer gates stay separate. CPU contracts pass; GPU selection is pending.
+- Why: the owner revised the initial two-replica request to one TP8 replica; the initial vLLM encoder maps high differently from the checkpoint, and content-only timing mismeasures all-reasoning output.
+- Refs: FN-D9 amendment in `docs/design/frontier-native-runtime.md`; `examples/deepseek-v4.1-flash-8gpu/`; implementation plan `2026-09-11-deepseek-v41-flash-example.md`.
 
-### 2026-09-13 — [progress] V41C: separate configured private generation budgets
-- What: Conductor and MoA use their configured internal ceiling independently of public completion MAX. Final intent and the no-private-ceiling fallback remain unchanged. Three small-public-MAX regressions fail before the fix; combined related validation passes 588 tests.
-- Why: a short requested public answer must not truncate planning, proposals or verification; resource reservations must reflect the actual configured private work.
-- Refs: PR #601; V41C-D2 and validation record in `docs/design/v41-critical-ensemble.md`.
+### 2026-09-04 — [amendment] FN-D9: vision examples GPU-verified; Qwen drops MTP k=3
+- What: both vision replica examples pinned (tree SHA, image ID `b47e2210`) and all gates
+  PASS — DeepSeek c64 689 tok/s, Qwen c32 548 tok/s, placement 32/32 at every row ≥c8,
+  tool-calling 6/6, vision 2/2. `qwen3.8-flash-next-dp2-8gpu` now serves without the
+  recipe's `--speculative-config mtp k=3` and with `--kv-cache-memory` pinned (a cold
+  torch.compile cache made vLLM's start-up profile shrink replica 0's KV cache to 741K
+  tokens vs 3.45M); `verify.sh vision` requires the answer to name the probe colour.
+- Why: with prefix caching + MTP, `vllm@27a94d1c` corrupts batched answers on the hybrid
+  GDN checkpoint (`ductduct…`; 13/274 at 2-12 concurrent, 0/1,508 with either off,
+  63.8% with `--no-async-scheduling`; upstream vllm#53912). Prefix caching is what
+  Kairyu's prefix-aware placement and multi-turn traffic use, so MTP is the one dropped.
+- Refs: FN-D9 amendment in `docs/design/frontier-native-runtime.md`; `examples/*/MEASUREMENTS.md`; supersedes the "MTP k=3" wording in the 2026-09-04 FN-D9 entry below
 
-### 2026-09-13 — [progress] V41C: terminal AUTO errors retain their cause
-- What: preserve selected-final/verifier failures through Conductor and unary/SSE APIs; safe upstream 400/422 remain validation errors, including after a committed head. Internal draft text cannot leak as a failed final stream's fallback. Related tests pass; capacity prevention and GPU gates remain pending.
-- Why: a known upstream rejection must not become an unrelated empty-output 502 or successful head-only response; retain partial public output and known usage while preserving optional-role best-so-far policy.
-- Refs: PR #601; issue #599; V41C-D3 in `docs/design/v41-critical-ensemble.md`.
+### 2026-09-04 — [amendment] FN-D9: two vision replica-pool examples
+- What: `examples/deepseek-v4-flash-vision-exp-dp2-8gpu` (TP4+EP4 × 2, official recipe
+  + SM120 marlin, 1M ctx) and `examples/qwen3.8-flash-next-dp2-8gpu` (TP4 × 2, official
+  rtx_pro_6000_4x FP8 layout, MTP k=3, 256K ctx): one public text+image model each,
+  no-login Chat UI with a reasoning-effort dropdown in each model's official vocabulary,
+  `verify.sh vision` gate, shared upstream-main `27a94d1c` + FlashInfer `60b49158`
+  SM120 overlay image with a fail-closed image-ID pin.
+- Why: both checkpoints need upstream `main` (official tags predate the support PRs;
+  FlashInfer 0.6.18 breaks SM120 sparse-MLA on the first image); Qwen's template
+  rejects L3-normalized efforts, so an example-local alias restores them.
+- Refs: FN-D9 amendment 2026-09-04 (docs/design/frontier-native-runtime.md); tests/unit/test_replica_examplectl.py; GPU evidence pending
 
-### 2026-09-13 — [design] V41C: six-plus-two critical ensemble implementation
-- What: accept four Qwen candidates on two replicas plus an independent V4.1 candidate, DeepSeek requirements/review/reconstruction/audit, and incremental draft implementation from main. Admission records cover private-budget separation and terminal error propagation; remaining contracts and GPU gates are open.
-- Why: preserve full input, reasoning budgets and required stages while replacing the legacy V4 topology without restoring closed example-specific infrastructure.
-- Refs: `docs/design/v41-critical-ensemble.md`; approved plan `2026-09-13-v41-six-gpu-critical-ensemble.md`; issues/PRs #595, #598, #599, #600.
+### 2026-09-02 — [amendment] FN-D9: replica examples must serve OpenAI tool calls
+- What: DP2 DeepSeek drops the Kairyu-rendered /completions passthrough (forwards
+  no tools; DSML parse is whole-block only) for the Qwen-style legacy path: vLLM
+  renders with the checkpoint's deepseek_v4 encoder + `--tool-call-parser
+  deepseek_v4`, Kairyu forwards tools to /chat/completions and normalizes. Both
+  examples gain a fail-closed readiness tool probe + `verify.sh tool-calling`
+  and non-thinking default kwargs (Qwen gate caught empty `content` on plain chat).
+- Why: PR #584 review — SWE-bench Pro got `tool_calls: null` every turn (22/22
+  RepeatedFormatError). GPU-verified: both tool gates 6/6, both matrices
+  re-pinned, SWE-bench Pro smoke 3/3 (kairyu-bench `20260902T010540Z-3bf671e8`).
+- Refs: PR #584; FN-D9 amendment; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
+
+### 2026-09-02 — [amendment] FN-D9: replica placement gates reject material skew
+- What: both replica-pool examples now limit a replica to 1.25× the even share.
+  Behavior tests reject the 8-way `16,16,16,8,2,2,2,2` and 2-way `63,1`
+  skews while the retained exact-even distributions pass. The verification-only
+  config change does not require a GPU rerun.
+- Why: the former 2× bound admitted materially skewed distributions as passing.
+- Refs: PR #585; FN-D9; examples/{qwen3.8-27b-dp8-8gpu,deepseek-v4-flash-0731-dp2-8gpu}/
+
+### 2026-09-01 — [amendment] FN-D9: two replica-pool 8-GPU examples (no orchestration)
+- What: `examples/qwen3.8-27b-dp8-8gpu` (Qwen3.8 TP1 × 8) and
+  `examples/deepseek-v4-flash-0731-dp2-8gpu` (DeepSeek TP4+EP4 × 2) expose one
+  public model each; L2 is only the `ReplicaPool` (`prefix_index: true`,
+  `queue_depth_threshold: 0`) and `verify.sh serving` gates the per-replica
+  split from `placement_log_path`. Same run/verify UX; no product code changed.
+- Why: a plain scale-out serving path (one API over N identical L1 replicas)
+  next to the orchestrated tiered example. GPU-verified 2026-09-01: gates green,
+  exact 8x8 / 32x2 splits; Qwen 313.7 tok/s at c8 (8.0x c1), DeepSeek 471 tok/s
+  at c32 (1.95x one replica) — MEASUREMENTS.md runs 20260901T133331Z / 20260901T140112Z.
+- Refs: FN-D9 (docs/design/frontier-native-runtime.md); tests/unit/test_replica_examplectl.py

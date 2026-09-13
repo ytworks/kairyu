@@ -1088,15 +1088,14 @@ async def test_truncated_image_is_rejected_before_stream_or_token_reservation(st
     assert app.state.tenant_limiter.reservation_snapshot()["default"] == 0
 
 
-@pytest.mark.parametrize("status", [400, 422, 401])
-async def test_upstream_4xx_keeps_safe_validation_classification(status):
+async def test_unexpected_upstream_4xx_is_sanitized_and_not_forwarded():
     backend = OpenAICompatBackend(
         base_url="http://internal-vlm.secret:8000/v1",
         model="upstream-vlm",
         api_key_env=None,
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
-                status,
+                400,
                 text="SUPER_SECRET upstream diagnostic",
             )
         ),
@@ -1113,13 +1112,12 @@ async def test_upstream_4xx_keeps_safe_validation_classification(status):
             },
         )
 
-    validation_error = status in {400, 422}
-    assert response.status_code == (status if validation_error else 502)
+    assert response.status_code == 502
     payload = response.json()["error"]
     assert payload == {
         "message": "upstream backend rejected the request",
-        "type": "invalid_request_error" if validation_error else "upstream_error",
-        "code": "invalid_request" if validation_error else "backend_error",
+        "type": "upstream_error",
+        "code": "backend_error",
     }
     assert "SUPER_SECRET" not in response.text
     assert "internal-vlm" not in response.text

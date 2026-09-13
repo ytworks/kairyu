@@ -967,7 +967,7 @@ async function assertTieredReasoningUi() {
 		'tier1',
 		'tier2',
 		'qwen3.8-27b',
-		process.env.EXPECTED_TIERED_REASONING_MODEL ?? 'deepseek-v4-flash-0731-thinking'
+		'deepseek-v4-flash-0731-thinking'
 	]) {
 		invariant(
 			separation.reasoning.includes(identity),

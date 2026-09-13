@@ -10,7 +10,7 @@ factory for origin-local dynamic replicas; real SSE streaming (cumulative
 partials, MockBackend semantics); optional auth (``api_key_env=None`` for
 keyless node-to-node replicas); and token-count passthrough (synthetic ids
 carrying ``usage.completion_tokens`` / the streamed-delta count, mirroring
-MockBackend's count-only ids, unless exact per-choice IDs are explicitly enabled).
+MockBackend's count-only ids).
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import os
 import re
 import threading
 import weakref
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -46,7 +46,6 @@ from kairyu.engine.openai_capabilities import (
     resolve_openai_capabilities,
 )
 from kairyu.engine.prompt import (
-    ChatPrompt,
     MultimodalPrompt,
     TemplatedPrompt,
     TextPrompt,
@@ -62,12 +61,6 @@ from kairyu.sampling_params import (
     resolve_parallel_tool_calls,
 )
 from kairyu.sse import iter_sse_data
-
-
-def _has_media(prompt: object) -> bool:
-    return isinstance(prompt, MultimodalPrompt) or (
-        isinstance(prompt, ChatPrompt) and bool(prompt.items)
-    )
 
 
 def _raise_for_status(base_url: str, status_code: int, body: str) -> None:
@@ -576,13 +569,6 @@ def _validated_request_payload(
         capabilities,
         validate_json=validate_json,
     )
-    if capabilities.return_token_ids:
-        if payload.get("include_reasoning") is False:
-            raise _client_error(
-                capabilities.upstream,
-                "cannot return exact token IDs with include_reasoning=false",
-            )
-        payload["return_token_ids"] = True
     parallel_tool_calls = resolve_parallel_tool_calls(
         request.parallel_tool_calls,
         request.sampling_params.extra_args,
@@ -709,11 +695,10 @@ class OpenAICompatBackend:
         unsupported_prompt_kinds = self._capabilities.prompt_kinds - {
             "text",
             "multimodal",
-            "chat",
         }
         if unsupported_prompt_kinds:
             raise ValueError(
-                "OpenAICompatBackend currently implements text, native chat and multimodal "
+                "OpenAICompatBackend currently implements text and multimodal "
                 "chat prompts; "
                 "unsupported configured prompt kinds: "
                 f"{sorted(unsupported_prompt_kinds)}"
@@ -876,15 +861,10 @@ class OpenAICompatBackend:
                 "does not support assistant_prefill (a vLLM chat-template "
                 "continuation of the final assistant message)",
             )
-        if _has_media(request.prompt):
-            if "multimodal" not in self._capabilities.prompt_kinds:
-                raise _client_error(
-                    self._capabilities.upstream,
-                    "does not support media in native chat prompts",
-                )
-            if isinstance(request.prompt, MultimodalPrompt) and (
-                type(request.prompt.base) is not str
-                and not isinstance(request.prompt.base, TextPrompt)
+        if isinstance(request.prompt, MultimodalPrompt):
+            if type(request.prompt.base) is not str and not isinstance(
+                request.prompt.base,
+                TextPrompt,
             ):
                 raise _client_error(
                     self._capabilities.upstream,
@@ -932,7 +912,7 @@ class OpenAICompatBackend:
     def admission_upper_bound(self, request: GenerationRequest) -> AdmissionUpperBound:
         """Reserve a configured processor ceiling, never media-byte heuristics."""
 
-        if not _has_media(request.prompt):
+        if not isinstance(request.prompt, MultimodalPrompt):
             return default_admission_upper_bound(
                 request,
                 fallback_output_tokens=self.max_model_len,
@@ -1202,7 +1182,7 @@ class OpenAICompatBackend:
             return
         shared = self._peek_shared_prepared_payload(request)
         if shared is not None:
-            if _has_media(request.prompt):
+            if isinstance(request.prompt, MultimodalPrompt):
                 await self._prepare_image_urls(request)
             self._retain_prepared_payload(request, shared)
             return
@@ -1264,7 +1244,7 @@ class OpenAICompatBackend:
         payload = self._take_prepared_payload(request)
         if payload is None:
             raise RuntimeError("prepared OpenAI request payload was lost before dispatch")
-        if _has_media(request.prompt):
+        if isinstance(request.prompt, MultimodalPrompt):
             self._take_prepared_image_urls(request)
         if not stream:
             return payload
@@ -1279,7 +1259,7 @@ class OpenAICompatBackend:
         request: GenerationRequest,
     ) -> tuple[str, ...] | None:
         prompt = request.prompt
-        if not _has_media(prompt):
+        if not isinstance(prompt, MultimodalPrompt):
             return None
         assert self._image_input_policy is not None
         try:
@@ -1407,7 +1387,7 @@ class OpenAICompatBackend:
         self,
         request: GenerationRequest,
     ) -> tuple[str, ...] | None:
-        if not _has_media(request.prompt):
+        if not isinstance(request.prompt, MultimodalPrompt):
             return None
         await self._prepare_image_urls(request)
         image_urls = self._take_prepared_image_urls(request)
@@ -1429,27 +1409,19 @@ class OpenAICompatBackend:
     ) -> dict:
         prompt = request.prompt
         use_completions = self._uses_vllm_completions(request)
-        if isinstance(prompt, (MultimodalPrompt, ChatPrompt)):
-            if _has_media(prompt) and image_urls is None:
+        if isinstance(prompt, MultimodalPrompt):
+            if image_urls is None:
                 raise RuntimeError(
                     "multimodal payload requires fully validated image data"
                 )
             messages: list[dict[str, object]] = []
             for message in prompt.messages:
-                native = (
-                    message.to_wire()
-                    if isinstance(prompt, ChatPrompt)
-                    else {"role": message.role}
-                )
-                if not isinstance(message.content, tuple):
-                    messages.append(native)
-                    continue
                 content: list[dict[str, object]] = []
                 for part in message.content:
                     if part.type == "text":
                         content.append({"type": "text", "text": part.text})
                         continue
-                    assert part.item_index is not None and image_urls is not None
+                    assert part.item_index is not None
                     image_url: dict[str, object] = {
                         "url": image_urls[part.item_index],
                     }
@@ -1461,7 +1433,7 @@ class OpenAICompatBackend:
                             "image_url": image_url,
                         }
                     )
-                messages.append({**native, "content": content})
+                messages.append({"role": message.role, "content": content})
         else:
             text = prompt_text(prompt)
             assert text is not None
@@ -1547,7 +1519,7 @@ class OpenAICompatBackend:
     async def _build_wire_payload(self, request: GenerationRequest) -> bytes:
         validated = await run_prompt_work(self._dispatch_preflight, request)
         image_urls = None
-        if _has_media(request.prompt):
+        if isinstance(request.prompt, MultimodalPrompt):
             await self._prepare_image_urls(request)
             image_urls = self._peek_prepared_image_urls(request)
             if image_urls is None:
@@ -1577,55 +1549,17 @@ class OpenAICompatBackend:
         }
 
     @staticmethod
-    def _require_rendered_prompt_usage(
+    def _require_exact_multimodal_usage(
         request: GenerationRequest,
         usage: GenerationUsage | None,
     ) -> None:
-        if _has_media(request.prompt) and (
+        if isinstance(request.prompt, MultimodalPrompt) and (
             usage is None or usage.prompt_tokens < 1
         ):
             raise RuntimeError(
                 "multimodal OpenAI-compatible upstream omitted exact processed "
                 "prompt usage"
             )
-        if isinstance(request.prompt, ChatPrompt) and (
-            usage is None or usage.prompt_tokens < 1
-        ):
-            raise RuntimeError(
-                "native chat OpenAI-compatible upstream omitted rendered prompt usage"
-            )
-
-    @staticmethod
-    def _choice_index(choice: Mapping[str, object], n: int) -> int:
-        index = choice.get("index")
-        if type(index) is not int or not 0 <= index < n:
-            raise RuntimeError("token-ID upstream returned an invalid choice index")
-        return index
-
-    @staticmethod
-    def _choice_token_ids(choice: Mapping[str, object]) -> tuple[int, ...]:
-        values = choice.get("token_ids")
-        if type(values) is not list or any(
-            type(value) is not int or value < 0 for value in values
-        ):
-            raise RuntimeError("token-ID upstream omitted or malformed choice token_ids")
-        return tuple(values)
-
-    @staticmethod
-    def _validate_choice_token_counts(
-        request: GenerationRequest,
-        token_ids: Mapping[int, Sequence[int]],
-        usage: GenerationUsage | None,
-    ) -> None:
-        if set(token_ids) != set(range(request.sampling_params.n)):
-            raise RuntimeError("token-ID upstream omitted a requested choice")
-        # best_of may charge work from candidates absent from the response.
-        # Its aggregate usage remains untouched, as does its reservation.
-        if usage is not None and request.sampling_params.best_of in (
-            None, request.sampling_params.n
-        ):
-            if sum(len(values) for values in token_ids.values()) != usage.completion_tokens:
-                raise RuntimeError("token-ID upstream completion usage disagrees with token_ids")
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         payload = await self._payload_for_dispatch(
@@ -1647,23 +1581,11 @@ class OpenAICompatBackend:
         completion_tokens = (data.get("usage") or {}).get("completion_tokens")
         token_ids: tuple[int, ...] = (
             tuple(range(completion_tokens))
-            if (
-                not self._capabilities.return_token_ids
-                and completion_tokens is not None
-                and len(choices) == 1
-            )
+            if completion_tokens is not None and len(choices) == 1
             else ()
         )
         completions_list = []
-        choice_token_ids: dict[int, tuple[int, ...]] = {}
         for i, choice in enumerate(choices):
-            index = choice.get("index", i)
-            if self._capabilities.return_token_ids:
-                index = self._choice_index(choice, request.sampling_params.n)
-                if index in choice_token_ids:
-                    raise RuntimeError("token-ID upstream repeated a choice index")
-                token_ids = self._choice_token_ids(choice)
-                choice_token_ids[index] = token_ids
             raw_content = (choice.get("logprobs") or {}).get("content")
             logprob_content = (
                 None if raw_content is None else tuple(_token_logprob(item) for item in raw_content)
@@ -1683,11 +1605,10 @@ class OpenAICompatBackend:
                 reasoning_content = _upstream_reasoning(choice.get("message"))
             completions_list.append(
                 CompletionOutput(
-                    index=index,
+                    index=choice.get("index", i),
                     text=text,
                     reasoning_content=reasoning_content,
                     token_ids=token_ids,
-                    token_ids_exact=self._capabilities.return_token_ids,
                     cumulative_logprob=(
                         None
                         if logprob_content is None
@@ -1701,9 +1622,7 @@ class OpenAICompatBackend:
         if not completions:
             raise RuntimeError(f"backend {self._base_url} returned no choices: {data}")
         usage = _usage_from(data.get("usage"))
-        if self._capabilities.return_token_ids:
-            self._validate_choice_token_counts(request, choice_token_ids, usage)
-        self._require_rendered_prompt_usage(request, usage)
+        self._require_exact_multimodal_usage(request, usage)
         stage_metrics = (
             _stage_metrics_from_trace(
                 data["kairyu_trace_v2"],
@@ -1735,7 +1654,6 @@ class OpenAICompatBackend:
         reasoning_parts: dict[int, list[str]] | None = None,
         reasoning_lengths: dict[int, int] | None = None,
         reasoning_deltas: dict[int, str] | None = None,
-        token_ids: dict[int, list[int]] | None = None,
     ) -> GenerationResult:
         reasoning_parts = reasoning_parts or {}
         reasoning_lengths = reasoning_lengths or {}
@@ -1748,12 +1666,7 @@ class OpenAICompatBackend:
                     if finished
                     else _lazy_text(text_parts.get(index, []))
                 ),
-                token_ids=(
-                    tuple(token_ids.get(index, ()))
-                    if token_ids is not None
-                    else (tuple(range(deltas_seen.get(index, 0))) if finished else ())
-                ),
-                token_ids_exact=token_ids is not None,
+                token_ids=(tuple(range(deltas_seen.get(index, 0))) if finished else ()),
                 finish_reason=finish.get(index, "stop") if finished else None,
                 cumulative_logprob=(
                     sum(item.logprob for item in logprobs[index]) if index in logprobs else None
@@ -1815,10 +1728,6 @@ class OpenAICompatBackend:
             done_seen = False
             completion_reasoning: dict[int, _CompletionReasoningParser] = {}
             streamed_tool_calls: dict[int, dict[int, dict[str, list[str]]]] = {}
-            choice_token_ids: dict[int, list[int]] | None = (
-                {} if self._capabilities.return_token_ids else None
-            )
-            role_chunks_seen: set[int] = set()
             async for data_str in iter_sse_data(response):
                 data_str = data_str.strip()
                 if data_str == _SSE_DONE:
@@ -1846,7 +1755,6 @@ class OpenAICompatBackend:
                                 stage_metrics=stage_metrics,
                                 reasoning_parts=reasoning_parts,
                                 reasoning_lengths=reasoning_lengths,
-                                token_ids=choice_token_ids,
                             )
                         raise RuntimeError(
                             "Kairyu upstream reported an error after its stage trace"
@@ -1878,36 +1786,11 @@ class OpenAICompatBackend:
                     trace_seen = True
                 if chunk.get("usage"):  # final usage chunk has empty choices
                     usage = _usage_from(chunk["usage"])
-                changed = choice_token_ids is not None and bool(chunk.get("usage"))
+                changed = False
                 text_deltas: dict[int, str] = {}
                 reasoning_deltas: dict[int, str] = {}
                 for choice in chunk.get("choices", []):
                     index = choice.get("index", 0)
-                    if choice_token_ids is not None:
-                        index = self._choice_index(choice, request.sampling_params.n)
-                        if index in finish:
-                            raise RuntimeError("token-ID upstream continued a finished choice")
-                        delta = choice.get("delta") or {}
-                        role_only = (
-                            not use_completions
-                            and index not in role_chunks_seen
-                            and index not in choice_token_ids
-                            and isinstance(delta, Mapping)
-                            and isinstance(delta.get("role"), str)
-                            and set(delta) <= {"role", "content"}
-                            and delta.get("content") in (None, "")
-                            and not choice.get("finish_reason")
-                            and not choice.get("logprobs")
-                        )
-                        if role_only and choice.get("token_ids") is None:
-                            # vLLM's initial role envelope precedes generated
-                            # tokens and legitimately carries no output IDs.
-                            role_chunks_seen.add(index)
-                        else:
-                            ids = self._choice_token_ids(choice)
-                            choice_token_ids.setdefault(index, []).extend(ids)
-                            # Parser control tokens may have no visible delta.
-                            changed = True
                     text_parts.setdefault(index, [])
                     text_lengths.setdefault(index, 0)
                     delta = choice.get("delta") or {}
@@ -1999,8 +1882,6 @@ class OpenAICompatBackend:
                         reasoning_parts=reasoning_parts,
                         reasoning_lengths=reasoning_lengths,
                         reasoning_deltas=reasoning_deltas,
-                        token_ids=choice_token_ids,
-                        usage=usage if choice_token_ids is not None else None,
                     )
             if streamed_tool_calls:
                 text_deltas = {}
@@ -2026,19 +1907,14 @@ class OpenAICompatBackend:
                         finished=False,
                         reasoning_parts=reasoning_parts,
                         reasoning_lengths=reasoning_lengths,
-                        token_ids=choice_token_ids,
                     )
             if trace_seen and not done_seen:
                 raise RuntimeError("Kairyu upstream stage trace omitted SSE [DONE]")
-            if choice_token_ids is not None:
-                if not done_seen or set(finish) != set(range(request.sampling_params.n)):
-                    raise RuntimeError("token-ID upstream stream ended before all choices finished")
-                self._validate_choice_token_counts(request, choice_token_ids, usage)
         for parser in completion_reasoning.values():
             parser.require_finished()
         if not text_parts and not finish:
             raise RuntimeError(f"backend {self._base_url} streamed no choices")
-        self._require_rendered_prompt_usage(request, usage)
+        self._require_exact_multimodal_usage(request, usage)
         yield self._partial(
             request,
             text_parts,
@@ -2052,7 +1928,6 @@ class OpenAICompatBackend:
             stage_metrics=stage_metrics,
             reasoning_parts=reasoning_parts,
             reasoning_lengths=reasoning_lengths,
-            token_ids=choice_token_ids,
         )
 
     async def _shutdown_impl(self) -> None:

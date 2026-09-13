@@ -81,9 +81,6 @@ class CompletionOutput:
     reasoning_content: str | None = None
     reasoning_delta: str | None = None
     reasoning_offset: int | None = None
-    # Native producers return real vocabulary IDs. Adapters with historical
-    # count-only or guessed IDs must distinguish those from exact metadata.
-    token_ids_exact: bool = True
 
     def delta_after(self, offset: int) -> tuple[str, int]:
         """Return the next stream delta and its cumulative end offset.

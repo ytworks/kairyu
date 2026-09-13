@@ -61,8 +61,7 @@ def test_parallel_tool_fields_preserve_existing_public_positional_abi():
     assert request.trace_requested is True
     assert request.parallel_tool_calls is None
 
-    # Preserve the original positional slots while permitting appended options.
-    assert list(inspect.signature(Conductor).parameters)[14:22] == [
+    assert list(inspect.signature(Conductor).parameters)[-8:] == [
         "final_parallel_tool_calls",
         "final_tool_call_protocol",
         "expose_intermediate_outputs",
@@ -336,27 +335,20 @@ async def test_conductor_keeps_legacy_parallel_intent_only_on_final_role():
     )
 
 
-@pytest.mark.parametrize("private_tokens", [8, 64])
-@pytest.mark.parametrize("stream", [False, True])
-async def test_orchestrator_private_token_policy_caps_only_internal_roles(private_tokens, stream):
+async def test_orchestrator_private_token_policy_caps_only_internal_roles():
     backend = IntentBackend()
     orchestrator = Orchestrator(
         {"tier1": backend, "tier2": backend},
-        sampling_params=SamplingParams(max_tokens=private_tokens),
+        sampling_params=SamplingParams(max_tokens=8),
     )
 
-    if stream:
-        events = await orchestrator.run_chat(_call(COMPLEX), stream=True)
-        _ = [event async for event in events]
-    else:
-        await orchestrator.run(_call(COMPLEX))
+    await orchestrator.run(_call(COMPLEX))
 
     final = next(request for request in backend.requests if "[synthesizer]" in request.prompt)
     internal = [request for request in backend.requests if request is not final]
     assert final.sampling_params.max_tokens == 17
-    assert internal
-    assert all(request.sampling_params.max_tokens == private_tokens for request in internal)
-    assert orchestrator.describe_routing()["internal_max_tokens"] == private_tokens
+    assert all(request.sampling_params.max_tokens == 8 for request in internal)
+    assert orchestrator.describe_routing()["internal_max_tokens"] == 8
 
 
 async def test_moa_preserves_seeded_proposals_and_complete_synthesis_intent():
@@ -364,7 +356,6 @@ async def test_moa_preserves_seeded_proposals_and_complete_synthesis_intent():
     orchestrator = Orchestrator(
         {"tier1": backend, "tier2": backend},
         moa_samples=3,
-        sampling_params=SamplingParams(max_tokens=64),
     )
 
     result = await orchestrator.run(_call(COMPLEX))
@@ -378,7 +369,6 @@ async def test_moa_preserves_seeded_proposals_and_complete_synthesis_intent():
     )
     assert [request.sampling_params.seed for request in proposals] == [41, 42, 43]
     assert all(request.sampling_params.n == 1 for request in proposals)
-    assert all(request.sampling_params.max_tokens == 64 for request in proposals)
     assert all(request.sampling_params.logprobs is None for request in proposals)
     assert all(request.sampling_params.extra_args == {} for request in proposals)
     assert synthesis.sampling_params == _call(COMPLEX).sampling_params

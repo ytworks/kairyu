@@ -26,7 +26,6 @@ import re
 import statistics
 import sys
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -115,10 +114,6 @@ class TraceStageMetrics:
     cached_tokens: int | None = None
     proposals: int | None = None
     execution_status: str | None = None
-    choice_index: int | None = None
-    verification_pass: bool | None = None
-    verification_inconclusive: bool | None = None
-    refinement_exhausted: bool | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -140,10 +135,6 @@ class TraceStageMetrics:
             "cached_tokens": self.cached_tokens,
             "proposals": self.proposals,
             "execution_status": self.execution_status,
-            "choice_index": self.choice_index,
-            "verification_pass": self.verification_pass,
-            "verification_inconclusive": self.verification_inconclusive,
-            "refinement_exhausted": self.refinement_exhausted,
         }
 
 
@@ -160,8 +151,6 @@ class RequestMetrics:
     trace_status: str = "not_requested"
     trace_version: str | None = None
     trace_stages: tuple[TraceStageMetrics, ...] = ()
-    stream_complete: bool = False
-    finish_reasons: tuple[str, ...] = ()
 
     @property
     def tpot_s(self) -> float:
@@ -381,19 +370,6 @@ def _parse_trace(
             raise ValueError("event timestamps are outside the trace envelope")
 
         input_tokens, output_tokens, cached_tokens = _trace_usage(event)
-        detail = event.get("detail") or {}
-        choice_index = detail.get("choice_index") if isinstance(detail, dict) else None
-        if choice_index is not None and (
-            type(choice_index) is not int or not 0 <= choice_index <= _MAX_STAGE_OCCURRENCES
-        ):
-            raise ValueError("trace choice_index must be a bounded non-negative integer")
-        verdict = {}
-        if kind == "verification" and isinstance(detail, dict):
-            for key in ("pass", "inconclusive", "refinement_exhausted"):
-                value = detail.get(key)
-                if value is not None and type(value) is not bool:
-                    raise ValueError(f"verification trace {key} must be boolean")
-                verdict[key] = value
         proposals = None
         execution_status = None
         if node == "moa" and role == "moa" and kind == "synthesis" and status == "success":
@@ -439,10 +415,6 @@ def _parse_trace(
                 cached_tokens=cached_tokens,
                 proposals=proposals,
                 execution_status=execution_status,
-                choice_index=choice_index,
-                verification_pass=verdict.get("pass"),
-                verification_inconclusive=verdict.get("inconclusive"),
-                refinement_exhausted=verdict.get("refinement_exhausted"),
             )
         )
     return _TRACE_VERSION, tuple(stages)
@@ -479,15 +451,11 @@ async def run_one(
     request_usage: bool = True,
     *,
     temperature: float | None = None,
-    top_p: float | None = None,
-    reasoning_effort: str | None = None,
-    n: int = 1,
     seed: int | None = None,
     min_tokens: int | None = None,
     ignore_eos: bool = False,
     request_trace: bool = False,
     capture_response: bool = False,
-    on_chunk: Callable[[dict], None] | None = None,
 ) -> RequestMetrics:
     body = {
         "model": model,
@@ -497,12 +465,6 @@ async def run_one(
     }
     if temperature is not None:
         body["temperature"] = temperature
-    if top_p is not None:
-        body["top_p"] = top_p
-    if reasoning_effort is not None:
-        body["reasoning_effort"] = reasoning_effort
-    if n != 1:
-        body["n"] = n
     if seed is not None:
         body["seed"] = seed
     if min_tokens is not None:
@@ -521,8 +483,6 @@ async def run_one(
     json_event_count = 0
     done_count = 0
     trace_protocol_invalid = False
-    stream_protocol_invalid = False
-    finish_reasons: dict[int, str] = {}
     response_parts: list[str] = []
     # Clients use the shared canonical API root (ending in /v1). Keep the
     # request relative so URL joining cannot produce /v1/v1.
@@ -541,15 +501,11 @@ async def run_one(
                 max_tokens,
                 request_usage=False,
                 temperature=temperature,
-                top_p=top_p,
-                reasoning_effort=reasoning_effort,
-                n=n,
                 seed=seed,
                 min_tokens=min_tokens,
                 ignore_eos=ignore_eos,
                 request_trace=request_trace,
                 capture_response=capture_response,
-                on_chunk=on_chunk,
             )
         response.raise_for_status()
         async for line in response.aiter_lines():
@@ -557,15 +513,11 @@ async def run_one(
                 continue
             data = line[len(_SSE_PREFIX):]
             if data == "[DONE]":
-                done_count += 1
-                if done_count != 1:
-                    stream_protocol_invalid = True
                 if request_trace:
+                    done_count += 1
                     if done_count != 1:
                         trace_protocol_invalid = True
                 continue
-            if done_count:
-                stream_protocol_invalid = True
             if request_trace:
                 if done_count:
                     trace_protocol_invalid = True
@@ -575,20 +527,6 @@ async def run_one(
                 error = chunk["error"] if isinstance(chunk["error"], dict) else {}
                 label = error.get("code") or error.get("type") or "unknown"
                 raise RuntimeError(f"target stream failed ({label})")
-            if on_chunk is not None:
-                on_chunk(chunk)
-            for choice in chunk.get("choices", []):
-                index = choice.get("index")
-                reason = choice.get("finish_reason")
-                if index in finish_reasons and (choice.get("delta") or {}):
-                    stream_protocol_invalid = True
-                if reason is not None:
-                    if type(index) is not int or index < 0 or type(reason) is not str:
-                        stream_protocol_invalid = True
-                    elif index in finish_reasons:
-                        stream_protocol_invalid = True
-                    else:
-                        finish_reasons[index] = reason
             if request_trace:
                 chunk_id = chunk.get("id")
                 if isinstance(chunk_id, str) and chunk_id:
@@ -670,14 +608,6 @@ async def run_one(
         trace_status=trace_status,
         trace_version=trace_version,
         trace_stages=trace_stages,
-        # A terminal reason without [DONE], a missing choice or a duplicate
-        # terminal cannot prove a completed response.
-        stream_complete=(
-            done_count == 1
-            and not stream_protocol_invalid
-            and set(finish_reasons) == set(range(n))
-        ),
-        finish_reasons=tuple(finish_reasons[index] for index in sorted(finish_reasons)),
     )
 
 
@@ -757,7 +687,6 @@ def build_run_config(args: argparse.Namespace) -> dict:
         "concurrency": args.concurrency,
         "max_tokens": args.max_tokens,
         "temperature": args.temperature,
-        "top_p": getattr(args, "top_p", None),
         "seed": args.seed,
         "min_tokens": args.min_tokens,
         "ignore_eos": args.ignore_eos,
@@ -828,14 +757,6 @@ def _validate_run_args(args: argparse.Namespace) -> None:
         or float(temperature) < 0.0
     ):
         raise ValueError("--temperature must be finite and non-negative")
-    top_p = getattr(args, "top_p", None)
-    if top_p is not None and (
-        isinstance(top_p, bool)
-        or not isinstance(top_p, (int, float))
-        or not math.isfinite(float(top_p))
-        or not 0.0 < float(top_p) <= 1.0
-    ):
-        raise ValueError("--top-p must be finite and in (0, 1]")
     min_tokens = args.min_tokens
     if min_tokens is not None and (
         type(min_tokens) is not int
@@ -1071,8 +992,6 @@ def summarize_results(
             "tpot_ms": metric.tpot_s * 1e3,
             "output_chunks": metric.output_chunks,
             "completion_tokens": metric.completion_tokens,
-            "stream_complete": metric.stream_complete,
-            "finish_reasons": list(metric.finish_reasons),
             **(
                 {"public_completion_tokens": metric.public_completion_tokens}
                 if metric.public_completion_tokens is not None
@@ -1193,7 +1112,6 @@ async def run_benchmark(args: argparse.Namespace) -> None:
                     prompt,
                     args.max_tokens,
                     temperature=args.temperature,
-                    top_p=getattr(args, "top_p", None),
                     seed=args.seed,
                     min_tokens=args.min_tokens,
                     ignore_eos=args.ignore_eos,
@@ -1362,10 +1280,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Explicit sampling temperature (omitted by default)",
-    )
-    parser.add_argument(
-        "--top-p", type=float, default=None,
-        help="Explicit nucleus sampling probability (omitted by default)",
     )
     parser.add_argument(
         "--seed",
