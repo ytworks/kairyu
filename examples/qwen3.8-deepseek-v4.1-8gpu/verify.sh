@@ -1,10 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Run the example's measured verifications with the repository interpreter.
-set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-NVME_ROOT="${NVME_STORAGE_ROOT:-/mnt/nvme/kairyu}"
-mkdir -p "$NVME_ROOT/bench-tmp"
-export TMPDIR="$NVME_ROOT/bench-tmp"
-export PATH="$REPO_ROOT/.venv/bin:$PATH"
-exec "$REPO_ROOT/.venv/bin/python" "$SCRIPT_DIR/verification.py" "$@"
+set -eu
+here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+venv_bin="$here/../../.venv/bin"
+nvme_root="${NVME_STORAGE_ROOT:-/mnt/nvme/kairyu}"
+bench_tmp="$nvme_root/model-volumes/qwen3.8-deepseek-v4.1-8gpu/bench-tmp"
+mkdir -p "$bench_tmp"
+PATH="$venv_bin:$PATH"
+TMPDIR="$bench_tmp"
+export PATH
+export TMPDIR
+exec "$venv_bin/python" "$here/verification.py" "$@"
